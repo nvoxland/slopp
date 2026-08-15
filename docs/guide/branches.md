@@ -1,8 +1,14 @@
 # Branches and merging
 
-A branch is an O(1) snapshot of the store with a name and a line id, persisted
-as its own mini journal under `.slopp/branches/<name>/`. Making one is cheap
-enough to use for a risky experiment you expect to throw away.
+A branch is a **named line** in the store: a pointer to a point in the history,
+with its own view of the code. Creating one costs a row and a copy of the
+current view — never a copy of the history — so it is cheap enough to use for a
+risky experiment you expect to throw away.
+
+Every branch lives in the one `.slopp/store.db`. They share their history
+rather than copying it, which is why main's log is a *prefix* of a branch made
+from it, and why two agents on one store see each other's branches without
+either of them touching a file.
 
 ```clj
 branch_create {name "queue-per-tenant"}   ;; creates and switches, O(1)

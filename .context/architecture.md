@@ -34,9 +34,14 @@
   oracle: behavior questions answered by observation (eval, tracing).
   Refresh is the fast path; restart is the always-correct backstop; reds are
   cross-checked only when staleness is plausible (D5.1).
-- **Branches are lines; images belong to lines** (m3/m4): a branch is an
-  O(1) store snapshot with a name + uuid line-id, persisted as its own mini
-  journal under `.slopp/branches/<name>/`; checkout is per-SERVER state.
+- **Branches are lines; images belong to lines** (m3/m4): a branch is a NAMED
+  LINE — a row in the one journal pointing at a head delta, with its own
+  materialization in `elements(line, ns, pos)` and its own history reachable
+  through `deltas.parent`. It used to be a separate db under
+  `.slopp/branches/<name>/` holding a whole snapshot of the store, because
+  `elements` could hold one view per file and the write CAS ran on the global
+  journal head; both went in 2026-08-15's line work, and the file was the last
+  thing making a branch expensive. Checkout is per-SERVER state.
   Switching parks the line's image intact (adopt on return; idle-reaped).
   `branch_merge`/`merge_from` = delta-log replay with causal delivery
   (`:applied`/`:id-map`/`:merged-from`, scoped per source) — different-form

@@ -3636,3 +3636,61 @@ addresses rather than asserts, with no second hand-coercion.
 that worked before still works, and the widening can only turn a refusal into
 a hit or — if two rows collide once spelling-normalized — into the ambiguity
 refusal, which names the count and asks for another entry.
+
+### D-lines (2026-08-15) — one file, many lines; a branch is a NAMED one
+
+**Settled by the user**, as the substrate for agent threads: *"I don't think we
+want branches to be separate files. And neither should threads. We want a
+single file which all the agents work against and which holds all the history
+across all the branches and threads"*, and *"the single tree of history should
+be tracking all the splits and joins."*
+
+A **line** is a pointer to a head delta, in a `lines` table. A named line is a
+BRANCH; an anonymous one is an agent's THREAD. One row shape, because they are
+one thing — a thread is a branch nobody named, and separate tables would mean
+every question about history had to be asked twice.
+
+A branch used to BE a db file under `.slopp/branches/<name>/` with the whole
+store snapshotted into it. Four separate facts forced that, and the line work
+removed each one:
+
+| What forced a file | What replaced it |
+|---|---|
+| the write CAS read the GLOBAL journal head | `UPDATE lines SET head=? WHERE id=? AND head IS ?` — per line |
+| `elements` was keyed `(ns, pos)` — one view per file | keyed `(line, ns, pos)` — one view per line |
+| `:parent` lived inside the pr-str'd payload, so the DAG was unreachable from SQL | `deltas.parent` is a column, and the column wins on read |
+| a branch's identity was a `meta` row, i.e. a fact only its own store could state | `lines.id`, stated by the journal about all of them |
+
+**What this buys, beyond tidiness.** Lines SHARE history instead of copying it,
+so main's log is a genuine PREFIX of a branch made from it; a split costs one
+`INSERT … SELECT` over the form rows rather than a snapshot of the journal; two
+servers see each other's branches without either touching the filesystem; and
+the git projection folds a LINE's ancestry, so work that has not landed is
+structurally unreachable from a branch's projection rather than filtered out of
+it.
+
+**Two things are load-bearing and easy to get wrong.**
+
+1. `write-snapshot!`'s DELETE must carry `AND line = ?`. Without it a write does
+   not return a wrong answer — it ERASES another line's namespace, and what is
+   left looks exactly like a write that never happened.
+2. A line's `:deltas` must be its ancestry. `try-commit!` takes its CAS head
+   from `(last (store/deltas base))`, so a store value carrying another line's
+   deltas yields a head that can never match again: a line nobody can write to.
+
+**And one consequence nobody predicted.** The id counter belongs to the FILE
+(`deltas.id` is UNIQUE journal-wide) while the value minting from it belongs to
+one line, so two lines counting from the same place mint the same id. This was
+unreachable while a branch was a separate file, and the equivalent case for two
+servers on ONE line had always been covered by the CAS serializing them — which
+is precisely the serialization per-line CAS removes on purpose. **The
+protection was a side effect of the thing the feature deliberately removed.**
+Answered by `db/next-id-floor` plus two raisers (`line-view` on adoption,
+`refresh-cache!` unconditionally) and `duplicate-delta-id?`, which makes the
+residual race a `false` from `append!` rather than a throw — kept as narrow as
+`writer-collision?`, naming one constraint on one column.
+
+**No legacy handling ships** (user: *"Keep it clean, we don't want 'legacy
+management' code"*). The `(ns,pos)` → `(line,ns,pos)` migration is idempotent
+DDL inside `db/open!` and runs at most once per store; there is no second read
+path. The two real stores were handled by hand.

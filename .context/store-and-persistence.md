@@ -88,21 +88,69 @@
 
 ## Persistence (`slopp.store.db`, decision C7)
 
-- SQLite at `<dir>/.slopp/store.db`, WAL mode. Tables:
-  - `deltas(seq, id UNIQUE, op, ns, payload)` — append-only log; everything
-    except id/op/ns lives in the EDN `payload` column (exact-reconstruction
-    rule: `(merge {:id :op :ns} (edn/read-string payload)) = original`).
-  - `elements(ns, pos, kind, form_id, name, source)` — materialized current
-    state; `source` is the CST's canonical serialization (re-parsed on load;
-    must reparse to exactly ONE node — asserted).
-  - `meta(k,v)` — `next-id`.
+- SQLite at `<dir>/.slopp/store.db`, WAL mode. **ONE file holds every line** —
+  see *Lines* below. Tables:
+  - `deltas(seq, id UNIQUE, op, ns, parent, payload)` — append-only log;
+    everything except id/op/ns/parent lives in the EDN `payload` column
+    (exact-reconstruction rule:
+    `(merge {:id :op :ns} (edn/read-string payload)) = original`).
+    `parent` is a COLUMN as well as a payload key, and the column wins on
+    read — it was payload-only until 2026-08-15, which made the DAG
+    unreachable from SQL and is why a second line had to be a separate FILE.
+  - `elements(line, ns, pos, kind, form_id, name, source, comment)` —
+    materialized current state, PER LINE; `source` is the CST's canonical
+    serialization (re-parsed on load; must reparse to exactly ONE node —
+    asserted).
+  - `lines(id, name, kind, head, base, parent, agent, created_at, used_at,
+    status)` — a line is a POINTER to a head delta. A named line is a
+    BRANCH; an anonymous one is an agent's THREAD. One row shape, because
+    they are one thing.
+  - `meta(k,v)` — `next-id`, git pins, saved remotes.
 - `persist!` = ONE transaction: delta row + full element rows of the touched
   namespace(s) (multi-ns arity for cross-ns ops like rename) + counter.
   Namespaces are small; full-ns row rewrite keeps write-through trivially
   correct.
-- `load-store` reconstructs the entire in-memory store (returns nil if empty).
-  `api/open! {:dir ...}` loads it AND replays every namespace into a fresh
-  image.
+- `load-store conn line-id` reconstructs the in-memory store for ONE LINE
+  (returns nil if empty). `external/open! {:slopp.ops/dir ...}` loads the
+  trunk's AND replays every namespace into a fresh image.
+
+### Lines (2026-08-15) — one file, many views
+
+A **line** is a pointer to a head delta. Branches and threads are the same
+row with a different `kind`. Four things follow, and each replaced a reason a
+branch used to need its own db file:
+
+- **The write CAS is on the LINE**, not the journal head:
+  `UPDATE lines SET head=?, used_at=? WHERE id=? AND head IS ?` — the check
+  and the advance in ONE statement, `IS` not `=` so a new line's first write
+  (NULL on both sides) matches. Two writers on two lines never contend; two
+  on ONE line still do, which is correct — that is the rebase path.
+- **`elements` is keyed `(line, ns, pos)`**, so every open line keeps its own
+  materialization. `write-snapshot!`'s DELETE carries `AND line = ?`; without
+  it, one line's write does not return a wrong answer, it ERASES another
+  line's namespace and the result looks like a write that never happened.
+- **A line's `:deltas` is its ANCESTRY**, walked from its head through the
+  `parent` column (23,719 deltas in 69 ms — the walk is not the cost;
+  EDN-parsing them is). Not tidiness: `try-commit!` takes its CAS head from
+  `(last (store/deltas base))`, so a store value carrying another line's
+  deltas yields a head that can never match — a line nobody can write to.
+- **A split copies the MATERIALIZATION, never the history** — one
+  `INSERT … SELECT` over the form rows (~2,481 here) against 23,719 deltas to
+  fold. Pinning is what keeps that valid: the base never moves under the new
+  line.
+
+**The id counter belongs to the FILE, not the line**, and this is the sharp
+edge. Ids are minted from a store VALUE (`store/gen-id` counts `:next-id`)
+while `deltas.id` is UNIQUE across the whole journal, so two lines counting
+from the same place mint the same id. Unreachable while a branch was a
+separate file; per-line CAS then removed the serialization that had covered
+the equivalent case for two servers on one line. **The protection was a side
+effect of the thing the feature deliberately removed.** Three answers, all
+present: `db/next-id-floor` reads the file's counter, `line-view` and
+`refresh-cache!` raise a value's counter to it, and `duplicate-delta-id?`
+makes the residual race a `false` from `append!` (refresh, rebase) rather
+than a throw — as narrow as `writer-collision?`, naming one constraint on
+one column.
 - **The two halves cost two orders of magnitude apart, and it decides designs.**
   Measured 2026-08-15 on slopp's own store (2678 elements / 4.3 MB, 23,464
   deltas): `db/load-elements` — the elements→`:namespaces` read, split out so
@@ -357,8 +405,10 @@ on the journal head still matching the commit's base. On head-moved (or
 SQLITE_BUSY) the writer refreshes its cached store from the db
 (`api/refresh-cache!`, advance-only) and rebases. The in-memory store is a
 cache of the journal, never ahead of it; there is NO async persist queue —
-the append is the persist. `db/persist!` remains only for whole-store
-snapshots (branch creation). This is the substrate for multi-process
+the append is the persist. `db/persist!` remains for unconditional writes
+that have no line to race on (test fixtures, an import) — it no longer
+snapshots a branch, because a branch no longer copies anything. This is the
+substrate for multi-process
 servers sharing one store dir (m5b/c): SQLite WAL serializes writers across
 processes, and the same append-CAS protocol arbitrates them.
 
