@@ -64,14 +64,14 @@
       (is (nil? (rid {:headers {}}))))))
 
 (deftest capabilities-values-parse-into-auth-config
-  (let [values {"web.auth.providers" "bearer,proxy-header"
-                "web.auth.bearer.tokens.ci" "{:secret \"env:CI\" :groups [\"ci\"]}"
-                "web.auth.static.users.alice" "{:password-hash \"abc\" :groups [\"admin\"]}"
-                "web.auth.proxy.trusted" "10.0.0.1,10.0.0.2"
-                "web.auth.proxy.user-header" "x-forwarded-user"
-                "web.auth.proxy.groups-header" "x-forwarded-groups"
-                "web.auth.groups.admin.members" "alice,bob"
-                "web.port" "7357"}
+  (let [values {"http.auth.providers" "bearer,proxy-header"
+                "http.auth.bearer.tokens.ci" "{:secret \"env:CI\" :groups [\"ci\"]}"
+                "http.auth.static.users.alice" "{:password-hash \"abc\" :groups [\"admin\"]}"
+                "http.auth.proxy.trusted" "10.0.0.1,10.0.0.2"
+                "http.auth.proxy.user-header" "x-forwarded-user"
+                "http.auth.proxy.groups-header" "x-forwarded-groups"
+                "http.auth.groups.admin.members" "alice,bob"
+                "http.port" "7357"}
         cfg (auth/config-from-values values)]
     (testing "the provider list parses in declared order"
       (is (= [:bearer :proxy-header] (:auth/providers cfg))))
@@ -91,7 +91,7 @@
     (testing "group membership collects"
       (is (= #{"alice" "bob"} (get-in cfg [:auth/groups "admin"]))))
     (testing "non-auth keys are ignored"
-      (is (nil? (:web.port cfg))))
+      (is (nil? (:http.port cfg))))
     (testing "the retired spellings are not read — no backwards compatibility"
       (is (= {} (auth/config-from-values
                  {"auth.providers" "bearer"
@@ -141,7 +141,7 @@
 
 (deftest proxy-header-lookup-is-case-insensitive
   ;; review W7: adapters lowercase all request header names, but an operator
-  ;; naturally configures `web.auth.proxy.user-header = X-Forwarded-User`, stored
+  ;; naturally configures `http.auth.proxy.user-header = X-Forwarded-User`, stored
   ;; verbatim — so the lookup missed the lowercased key and the trusted-proxy
   ;; provider was silently non-functional (fails closed, but broken).
   (let [config {:auth/providers [:proxy-header]
@@ -177,7 +177,7 @@
     (is (not (auth/verify-password "x" nil)))))
 
 (deftest oidc-requires-a-configured-audience
-  ;; review W2: when web.auth.oidc.audience was unset, verify-jwt accepted ANY
+  ;; review W2: when http.auth.oidc.audience was unset, verify-jwt accepted ANY
   ;; validly-signed unexpired token from the issuer — incl. one minted for a
   ;; different client (confused-deputy / cross-audience replay). Audience
   ;; validation is mandatory for a resource server: unset → deny; set → the

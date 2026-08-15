@@ -69,7 +69,7 @@
   "Assemble the dispatch context from `{:web/namespaces [ns-syms]
   :web/routes [extra rows — static mounts, programmatic routes]
   :web/perform-ctx <passed to every performer>
-  :web/max-body-bytes <request-body cap, default 1 MiB — the web.max-body-bytes
+  :web/max-body-bytes <request-body cap, default 1 MiB — the http.max-body-bytes
   capability an app threads in>
   :web/auth-config <the provider config identity resolves through>}`: the
   route table and both performer vocabularies derive from the namespaces'
@@ -129,7 +129,7 @@
 
   **The diagnosis only, never the next step.** What to do about a taken port
   is not the framework's to say: slopp's dev server knows the answer is
-  `web.port`, an operator running a built jar set the port some other way,
+  `http.port`, an operator running a built jar set the port some other way,
   and inventing advice for them would be a confident wrong sentence. So this
   writes the half every caller shares and each caller appends its own.
 

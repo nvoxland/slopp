@@ -260,18 +260,18 @@
     (try
       (ops/ingest! sess 'cb.core seed)
       (branch/branch! sess "feature")
-      (ops/config-file! sess "capabilities" :key "web.port" :value "9090"
+      (ops/config-file! sess "capabilities" :key "http.port" :value "9090"
                         :prompt "branch sets a port")
       (branch/branch-switch! sess "main")
-      (ops/config-file! sess "capabilities" :key "web.enabled" :value "true"
+      (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
                         :prompt "main enables http")
       (testing "the merge COMMITS (no permanent 'store changed during merge')"
         (let [r (branch/branch-merge! sess "feature")]
           (is (nil? (:error r)) (pr-str r))
           (is (nil? (:conflict r)) (pr-str r))))
       (testing "both keys survive the durable round trip"
-        (is (= "9090" (:value (ops/config-file! sess "capabilities" :key "web.port"))))
-        (is (= "true" (:value (ops/config-file! sess "capabilities" :key "web.enabled")))))
+        (is (= "9090" (:value (ops/config-file! sess "capabilities" :key "http.port"))))
+        (is (= "true" (:value (ops/config-file! sess "capabilities" :key "http.enabled")))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-branch-is-a-line-in-the-one-file

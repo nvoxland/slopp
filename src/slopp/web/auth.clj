@@ -141,7 +141,7 @@
   file). Entry values are EDN, read with the SAFE reader; unparseable
   entries are skipped rather than thrown.
 
-  Keys are the `web.auth.*` family (`slopp.project.capabilities/registry` is
+  Keys are the `http.auth.*` family (`slopp.project.capabilities/registry` is
   where they are declared and typed). A per-provider name is the tail AFTER
   the prefix, taken from the prefix itself — the counted offset it replaces
   was the same defect as matching by one spelling and trimming by another's
@@ -155,35 +155,35 @@
      (fn [cfg k v]
        (let [k (str k)]
          (cond
-           (= k "web.auth.providers")
+           (= k "http.auth.providers")
            (assoc cfg :auth/providers (mapv keyword (csv v)))
 
-           (tail "web.auth.bearer.tokens." k)
-           (assoc-in cfg [:auth/bearer (tail "web.auth.bearer.tokens." k)] (edn* v))
+           (tail "http.auth.bearer.tokens." k)
+           (assoc-in cfg [:auth/bearer (tail "http.auth.bearer.tokens." k)] (edn* v))
 
-           (tail "web.auth.static.users." k)
-           (assoc-in cfg [:auth/static (tail "web.auth.static.users." k)] (edn* v))
+           (tail "http.auth.static.users." k)
+           (assoc-in cfg [:auth/static (tail "http.auth.static.users." k)] (edn* v))
 
-           (= k "web.auth.proxy.trusted")
+           (= k "http.auth.proxy.trusted")
            (assoc-in cfg [:auth/proxy :trusted] (set (csv v)))
 
-           (= k "web.auth.proxy.user-header")
+           (= k "http.auth.proxy.user-header")
            (assoc-in cfg [:auth/proxy :user-header] (str v))
 
-           (= k "web.auth.proxy.groups-header")
+           (= k "http.auth.proxy.groups-header")
            (assoc-in cfg [:auth/proxy :groups-header] (str v))
 
-           (= k "web.auth.oidc.issuer")
+           (= k "http.auth.oidc.issuer")
            (assoc-in cfg [:auth/oidc :issuer] (str v))
 
-           (= k "web.auth.oidc.audience")
+           (= k "http.auth.oidc.audience")
            (assoc-in cfg [:auth/oidc :audience] (str v))
 
-           (= k "web.auth.oidc.groups-claim")
+           (= k "http.auth.oidc.groups-claim")
            (assoc-in cfg [:auth/oidc :groups-claim] (str v))
 
            :else
-           (if-let [[_ g] (re-matches #"web\.auth\.groups\.([^.]+)\.members" k)]
+           (if-let [[_ g] (re-matches #"http\.auth\.groups\.([^.]+)\.members" k)]
              (assoc-in cfg [:auth/groups g] (set (csv v)))
              cfg))))
      {}

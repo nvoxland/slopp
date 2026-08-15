@@ -6,7 +6,7 @@
 
   The SPA fallback is here too, and it is the case that needs saying out loud:
   serving deep links under a declared prefix must not swallow a genuine 404.
-  That is the same behavioural change `web-spa-consequences` states at the
+  That is the same behavioural change `http-spa-consequences` states at the
   done point — the rule tells the author once, and this holds the code to it."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.web.routes :as routes] [slopp.web.router :as router]))

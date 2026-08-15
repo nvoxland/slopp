@@ -1201,21 +1201,62 @@
       (let [rep (edn/read-string (call! sess "query_capabilities" {}))
             row (fn [rep k] (some #(when (= k (:key %)) %) (:settings rep)))]
         (testing "an untouched store reports every setting at its default"
-          (is (false? (:effective (row rep "web.enabled"))) (pr-str (row rep "web.enabled")))
-          ;; a key that HAS a default demonstrates the claim; web.port declares
+          (is (false? (:effective (row rep "http.enabled"))) (pr-str (row rep "http.enabled")))
+          ;; a key that HAS a default demonstrates the claim; http.port declares
       ;; none any more, so it would only demonstrate nil
-      (is (= 1048576 (:effective (row rep "web.max-body-bytes"))))
-      (is (nil? (:effective (row rep "web.port"))))
-          (is (not (:set (row rep "web.port"))))
-          (is (some #(= "web.static.*" (:key %)) (:patterns rep))))
+      (is (= 1048576 (:effective (row rep "http.max-body-bytes"))))
+      (is (nil? (:effective (row rep "http.port"))))
+          (is (not (:set (row rep "http.port"))))
+          (is (some #(= "http.static.*" (:key %)) (:patterns rep))))
         (testing "a config_file set is reflected as effective + set"
-          (call! sess "config_file" {:path "capabilities" :key "web.port" :value "7357"
+          (call! sess "config_file" {:path "capabilities" :key "http.port" :value "7357"
                                      :prompt "port for the wire test"})
           (let [rep (edn/read-string (call! sess "query_capabilities" {}))
-                port (row rep "web.port")]
+                port (row rep "http.port")]
             (is (= 7357 (:effective port)) (pr-str port))
             (is (true? (:set port)))
             (is (= "7357" (:value port))))))
+      (testing "the FEATURE view says what opting in would arm"
+        ;; the half of the bargain that was invisible: the settings said what
+        ;; could be configured, and nothing said which rules would start
+        ;; refusing writes. A reader deciding whether to turn `http` on could
+        ;; not see the ten gates that come with it.
+        ;;
+        ;; ONE call, and the config write above it is load-bearing rather than
+        ;; scene-setting: `told!` returns an :unchanged stub for an identical
+        ;; re-read within the same ask, so a second query_capabilities over an
+        ;; unmoved store answers with no payload at all. That is the mechanism
+        ;; working — and it is exactly how this test first failed, reporting
+        ;; :capabilities nil while the view itself was correct.
+        (call! sess "config_file" {:path "capabilities" :key "cli.enabled" :value "true"
+                                   :prompt "a shell needs nothing beneath it"})
+        (let [rep    (edn/read-string (call! sess "query_capabilities" {}))
+              cap    (fn [c] (some #(when (= c (:capability %)) %) (:capabilities rep)))
+              http   (cap "http")
+              slopp* (cap "slopp")]
+          (is (seq (:capabilities rep)) (pr-str (keys rep)))
+          (is (false? (:enabled http)) (pr-str http))
+          (is (true? (:enabled (cap "cli"))) "the write above is reflected")
+          (is (= [] (:requires http)) "how a server is launched is packaging")
+          (is (= ["rest" "webapp"] (sort (:required-by http)))
+              (str "both siblings stand on http, and neither on the other: "
+                   (pr-str (:required-by http))))
+          (testing "and it names the rules, at both grains"
+            ;; guard the guard: an empty :arms satisfies any weaker assertion
+            ;; here, and an empty join is exactly what a broken
+            ;; namespace-to-capability derivation produces.
+            (is (seq (:arms http)) (pr-str http))
+            (is (some #(= 'http-auth-refusal (:rule %)) (:arms http))
+                (str "the write gate an unsecured route trips: " (pr-str (:arms http))))
+            (is (some #(= :http-public-mutation (:rule %)) (:arms http))
+                (str "and a done-grain advisory, so both registries are joined: "
+                     (pr-str (:arms http))))
+            (is (= #{:form :done} (set (map :grain (:arms http))))))
+          (testing "an owner that is not an opt-in has no bargain to state"
+            (is (:reserved slopp*))
+            (is (nil? (:arms slopp*)))
+            (is (nil? (:enabled slopp*))
+                "there is no switch, so reporting one would invite throwing it"))))
       (testing "the tool is advertised read-only"
         (is (contains? tools/read-only-tools "query_capabilities")))
       (finally (ops/close! sess)))))
@@ -1255,9 +1296,9 @@
       (testing "disabled: empty with the opt-in teaching"
         (let [rep (edn/read-string (call! sess "query_routes" {}))]
           (is (false? (:enabled rep)) (pr-str rep))
-          (is (re-find #"web.enabled" (str (:note rep))))))
+          (is (re-find #"http.enabled" (str (:note rep))))))
       (testing "enabled: the declared route reports with its policy"
-        (call! sess "config_file" {:path "capabilities" :key "web.enabled" :value "true"
+        (call! sess "config_file" {:path "capabilities" :key "http.enabled" :value "true"
                                    :prompt "opt in"})
         (call! sess "edit_add_form"
                {:ns "wr.api"
@@ -1850,7 +1891,7 @@
   ;; would look like anything except a dev server nobody asked for.
   (let [web  (first (store/record-config-put (store/empty-store)
                                              "capabilities" :manifest
-                                             "web.enabled" "true"))
+                                             "http.enabled" "true"))
         plain (atom {:store (store/empty-store) :dir "/tmp/slopp-no-such-dir"})]
     (testing "a store that serves no HTTP starts nothing"
       (is (nil? (mcp/start-app! plain)))
@@ -1899,7 +1940,7 @@
   (let [put  (fn [st k v] (first (store/record-config-put st "capabilities"
                                                           :manifest k v)))
         off  (-> (store/empty-store)
-                 (put "web.enabled" "true")
+                 (put "http.enabled" "true")
                  (store/ingest 'slopp.api.reads
                                (str "(ns slopp.api.reads)\n\n"
                                     "(defn ^{:web/method :get :web/path \"/api/x\"\n"
@@ -1937,7 +1978,7 @@
   ;; living in separate calls.
   (testing "a failed re-serve is news, and carries the reason"
     (let [n (#'mcp/app-note-for {:serving? false
-                                 :reason "port 7999 is already in use — free it, or set web.port to another"})]
+                                 :reason "port 7999 is already in use — free it, or set http.port to another"})]
       (is (some? n))
       (is (str/includes? n "port 7999 is already in use") n)
       (is (str/includes? n "DOWN") (str "the state has to be unmissable: " n))))
@@ -1951,7 +1992,7 @@
     ;; the reader to skim the line that matters.
     (is (nil? (#'mcp/app-note-for
                {:serving? false :stopped true
-                :reason "web.enabled is false for this store — the managed app server was stopped"})))))
+                :reason "http.enabled is false for this store — the managed app server was stopped"})))))
 
 (deftest ^:external
   ^{:correspondence "mcp.tools/tools (advertised at initialize) vs the dispatch keys in slopp.mcp — related by nothing but a string literal; an advertised tool with no handler answers \"unknown tool: X\" naming X itself"}

@@ -1,4 +1,4 @@
-(ns slopp.rules.web
+(ns slopp.rules.http
   "What the store can SAY about its own web surface, derived from the forms.
 
   `slopp.web` is the framework an app runs on and knows nothing about stores.
@@ -20,7 +20,7 @@
   keep those apart, and each distinction was added because collapsing it made a
   report state something false. Prefer adding a category over widening one."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.web :as edit.web] [rewrite-clj.parser :as p] [slopp.index.refs :as refs]))
+            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [rewrite-clj.parser :as p] [slopp.index.refs :as refs]))
 
 (defn endpoints
   "Every declared endpoint in the store — a `:web/path` form's route row:
@@ -53,14 +53,14 @@
            :web/spa   (:web/spa meta)
            :schema?   (contains? meta :web/response)
            :effectful? (boolean (:web/effectful meta))})
-        (edit.web/web-endpoint-rows store)))
+        (edit.http/web-endpoint-rows store)))
 
 (defn performers
   "The app-defined performer vocabulary for `marker-key` (`:web/effect` or
   `:web/read`): {kind → performer qsym}. Delegates to the SAME derivation
   the undeclared-effect gate checks (`modules/web-performers`)."
   [store marker-key]
-  (edit.web/web-performers store marker-key))
+  (edit.http/web-performers store marker-key))
 
 (def ^:private url-attrs
   "Hiccup tag → the attributes that name a URL ON THAT ELEMENT, per HTML.
@@ -75,7 +75,7 @@
    `:src` was missing until 2026-07-25, and the omission was not academic:
    slopp's OWN reviewer UI carried `[:script {:src \"/assets/cljs/main.js\"}]`
    in the shell of every page, served by nothing, 404ing on every request
-   since the wave that added it — and `web-dangling-route-refs`, the gate
+   since the wave that added it — and `http-dangling-route-refs`, the gate
    built to fail `done` on exactly that, could not see it. A fetched URL is
    as dangling as a clicked one; the browser just fails more quietly."
   {:a #{:href} :link #{:href} :area #{:href} :base #{:href}
@@ -154,7 +154,7 @@
   destructuring `:web/deps`, and whether anything claims to build it — so
   \"this store takes `:web/deps` and declares no builder\" refuses at the WRITE
   rather than 500ing in a browser. That gate is
-  `slopp.edit.web/web-undeclared-context`, and it is why this is a marker;
+  `slopp.edit.web/http-undeclared-context`, and it is why this is a marker;
   a capability is a string in config, checkable for resolvability at boot,
   which is later and weaker, and it splits the declaration from the thing
   declared.
@@ -173,7 +173,7 @@
   silently is how an app ends up running on deps it did not mean, and the
   failure would surface as a missing key three layers away."
   [store]
-  (let [found (edit.web/web-context-builders store)]
+  (let [found (edit.http/web-context-builders store)]
     (when (seq found)
       (when (next found)
         (throw (ex-info (str "a store declares exactly ONE ^{:web/context true}"
@@ -219,13 +219,13 @@
        vec))
 
 (defn ^:export static-mounts
-  "This store's `web.static.*` mounts as `{url-prefix manifest-prefix}`.
+  "This store's `http.static.*` mounts as `{url-prefix manifest-prefix}`.
 
   The key's tail is the URL prefix and the value a files-manifest path
-  prefix, so `web.static./assets = public` serves `public/logo.png` at
-  `/assets/logo.png`. Feeds `slopp.web.static/mount-routes`, which pairs it
+  prefix, so `http.static./assets = public` serves `public/logo.png` at
+  `/assets/logo.png`. Feeds `slopp.http.static/mount-routes`, which pairs it
   with a reader — [[store-reader]] for a live store, and
-  `slopp.web.static/file-or-resource-reader` for the managed dev server,
+  `slopp.http.static/file-or-resource-reader` for the managed dev server,
   whose child image has no store and reads materialized bytes instead.
 
   **Trailing slashes are trimmed on both sides, and that is not cosmetic.**
@@ -240,8 +240,8 @@
   [store]
   (into {}
         (for [[k v] (get-in store [:config "capabilities" :values])
-              :when (re-matches #"web\.static\..+" (str k))]
-          [(str/replace (subs (str k) (count "web.static.")) #"/$" "")
+              :when (re-matches #"http\.static\..+" (str k))]
+          [(str/replace (subs (str k) (count "http.static.")) #"/$" "")
            (str/replace (str v) #"/$" "")])))
 
 (defn store-reader
@@ -268,18 +268,18 @@
         {:content (or content (get-blob sha))
          :content-type content-type}))))
 
-(defn web-public-mutation-check
+(defn http-public-mutation-check
   "Done-advisory (D-web): a CHANGED endpoint whose policy is :public and
    which declares `:web/effects` kinds — a publicly-writable surface should
    be a decision someone made, not an omission. Fires per form with the
-   declared kinds; inert until the store opts into HTTP (web.enabled).
+   declared kinds; inert until the store opts into HTTP (http.enabled).
    v1 reads the DECLARATION; a public endpoint mutating without declaring
-   is web-unsafe-get's (GET) or the effects-vocabulary's territory."
+   is http-unsafe-get's (GET) or the effects-vocabulary's territory."
   [_session st* changed]
-  (when (= "true" (get-in st* [:config "capabilities" :values "web.enabled"]))
+  (when (capabilities/enabled? st* "http")
     (vec (keep (fn [fid]
                  (when-let [e (store/form-by-id st* fid)]
-                   (let [m (edit.web/web-name-meta e)]
+                   (let [m (edit.http/web-name-meta e)]
                      (when (and (:web/path m)
                                 (= :public (:web/auth m))
                                 (seq (:web/effects m)))
@@ -288,7 +288,7 @@
                         :web/effects (vec (:web/effects m))}))))
                changed))))
 
-(defn web-stale-client-check
+(defn http-stale-client-check
   "Done-advisory (D-web-contracts part 2): the generated typed client
    (generate_client) is STALE — an endpoint or its :web/request/:web/response
    changed since the client was last generated. Fires only once a client has been
@@ -297,13 +297,13 @@
    signature and clears it."
   [_session store _changed]
   (let [recorded (get-in store [:config "client" :values "generated-sig"])]
-    (when (and recorded (not= recorded (edit.web/client-signature store)))
-      [{:web-stale-client true
+    (when (and recorded (not= recorded (edit.http/client-signature store)))
+      [{:http-stale-client true
         :teach (str "the generated typed client is out of date — an endpoint or its"
                     " :web/request/:web/response changed since generate_client last"
                     " ran. Re-run generate_client to re-derive the wrappers.")}])))
 
-(defn web-inline-schema-dup-check
+(defn http-inline-schema-dup-check
   "Done-advisory (D-web-contracts part 2): 2+ endpoints declare the SAME
    structured inline :web/request/:web/response schema — the DRY nudge toward the
    paved road. A shared shape should be a named .cljc schema VAR so server and
@@ -311,7 +311,7 @@
    structured (vector) inline schemas count — a bare keyword like :map is too
    trivial to extract. Fires once per duplicated shape."
   [_session store _changed]
-  (let [inlines (for [{:keys [ns name meta]} (edit.web/web-endpoint-rows store)
+  (let [inlines (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
                       k     [:web/request :web/response]
                       :let  [v (get meta k)]
                       :when (vector? v)]
@@ -329,7 +329,7 @@
                    " the server and the generated client validate against ONE"
                    " definition and a change lands once.")})))
 
-(defn web-spa-consequences-check
+(defn http-spa-consequences-check
   "Done-advisory: an endpoint gained `:web/spa` this episode — state what that
    changed, once.
 
@@ -378,7 +378,7 @@
   "The `:cljs` namespaces `ns-sym`'s require closure reaches, sorted — empty
   when a JVM can load the whole closure.
 
-  ONE producer on purpose: the `web-page-reach` done-advisory, the full_check
+  ONE producer on purpose: the `http-page-reach` done-advisory, the full_check
   sweep, and `module_platform`'s stranded-page report all answer from here,
   because a rule that refuses at one surface and a report that lists at
   another must agree, and they only can if they are one derivation."
@@ -402,17 +402,17 @@
   [st]
   (vec (for [n     (keys (:namespaces st))
              f     (store/forms st n)
-             :when (and (:name f) (:web/page (edit.web/web-name-meta f)))
+             :when (and (:name f) (:web/page (edit.http/web-name-meta f)))
              :let  [cljs (page-cljs-reach st n)]
              :when (seq cljs)]
          {:page (symbol (str n) (str (:name f))) :cljs cljs})))
 
-(defn web-page-reach-check
+(defn http-page-reach-check
   "Done-advisory (D-web): a `^:web/page` entry whose namespace CLOSURE reaches
   a `:cljs` namespace. Reports `{:form :cljs [namespaces]}`; inert until the
   store opts into HTTP.
 
-  **The write gate is the shallow half.** `web-page-unreachable` refuses an
+  **The write gate is the shallow half.** `http-page-unreachable` refuses an
   entry marked in a `:cljs` namespace, which catches the entry itself and
   nothing it calls. An entry sitting in `:cljc` and reaching a `:cljs` view
   passes the gate and fails the tool — and that is where a real app lands,
@@ -434,10 +434,10 @@
   usually fine; the finding is which dependency stranded it, and that is what
   a reader has to move or split."
   [_session st* changed]
-  (when (= "true" (get-in st* [:config "capabilities" :values "web.enabled"]))
+  (when (capabilities/enabled? st* "http")
     (vec (keep (fn [fid]
                  (when-let [e (store/form-by-id st* fid)]
-                   (when (:web/page (edit.web/web-name-meta e))
+                   (when (:web/page (edit.http/web-name-meta e))
                      (let [own  (store/ns-of-form-id st* fid)
                            cljs (page-cljs-reach st* own)]
                        (when (seq cljs)
@@ -545,7 +545,7 @@
   [store]
   (let [resolve-sym (schema-resolver store)]
     (vec
-     (for [{:keys [ns name meta]} (edit.web/web-endpoint-rows store)
+     (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
            k     [:web/request :web/response]
            :let  [schema (get meta k)
                   from   [ns name]
@@ -554,7 +554,7 @@
            :when (seq fields)]
        {:endpoint (symbol (str ns) (str name)) :schema k :fields fields}))))
 
-(defn web-undocumented-contract-check
+(defn http-undocumented-contract-check
   "Advisory: a published endpoint's request/response schema has fields that
    say nothing about what they ARE. A type is a shape, not a term of the
    contract — nothing in `:total :int` tells a caller the number counts hits
@@ -663,7 +663,7 @@
   [store]
   (let [resolve-sym (schema-resolver store)]
     (vec
-     (for [{:keys [ns name meta]} (edit.web/web-endpoint-rows store)
+     (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
            k     [:web/request :web/response]
            :let  [schema (get meta k)
                   fields (when schema
@@ -672,7 +672,7 @@
            :when (seq fields)]
        {:endpoint (symbol (str ns) (str name)) :schema k :fields fields}))))
 
-(defn web-unconstrained-contract-check
+(defn http-unconstrained-contract-check
   "Advisory: a published endpoint declares a field that constrains nothing —
    a bare `:map`, which accepts any map, or `:any`, which accepts anything.
 
@@ -708,7 +708,7 @@
   [_session store _changed]
   (let [rows    (unconstrained-contract-fields store)
         loose   (set (map :endpoint rows))
-        marked  (for [{:keys [ns name meta]} (edit.web/web-endpoint-rows store)
+        marked  (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
                       :when (:web/unconstrained-ok meta)]
                   (symbol (str ns) (str name)))
         marked? (set marked)]
@@ -877,7 +877,7 @@
      (assoc ref :form (symbol (str nsx) (str (:name e)))))))
 
 (defn ^:export routes-report
-  "The `query_routes` payload. `web.enabled` false → `{:enabled false
+  "The `query_routes` payload. `http.enabled` false → `{:enabled false
   :routes [] :note …}` — a store that never opted into HTTP has no web
   surface and no web rules (the adoption story). Enabled → every endpoint
   row (`endpoints`), each carrying `:rendered-by` (the forms whose
@@ -885,10 +885,10 @@
   prefix refs through the path pattern) when any do, plus the derived
   performer vocabularies (`:effect-kinds` / `:read-kinds`)."
   [store]
-  (if-not (capabilities/effective store "web.enabled")
+  (if-not (capabilities/effective store "http.enabled")
     {:enabled false :routes []
-     :note (str "web.enabled is false — config_file {path \"capabilities\" "
-                "key \"web.enabled\" value \"true\"} opts this store into HTTP")}
+     :note (str "http.enabled is false — config_file {path \"capabilities\" "
+                "key \"http.enabled\" value \"true\"} opts this store into HTTP")}
     (let [refs    (ui-route-refs store)
           renders (fn [row]
                     (->> refs
@@ -907,7 +907,7 @@
 (defn dangling-route-refs
   "`ui-route-refs` joined against what the store actually serves: declared
   endpoints (through the router's matcher, so parameterized paths match),
-  `web.static.*` mounts (an :exact path must map to a file that EXISTS on
+  `http.static.*` mounts (an :exact path must map to a file that EXISTS on
   the manifest), and route/mount prefixes for :prefix refs. Returns
   `{:dangling [ref …] :unresolved [ref …]}` — dynamic refs are NAMED, never
   counted clean."
@@ -919,7 +919,7 @@
         ;; and every asset link in the app would read as dangling
         mounts (into {}
                      (keep (fn [[k v]]
-                             (when-let [[_ m] (re-matches #"web\.static\.(.+)" (str k))]
+                             (when-let [[_ m] (re-matches #"http\.static\.(.+)" (str k))]
                                [m (str/replace (str v) #"/+$" "")])))
                      (get-in store [:config "capabilities" :values]))
         static-file? (fn [path]
@@ -953,11 +953,11 @@
     {:dangling   (vec (remove served? (remove #(= :unresolved (:kind %)) refs)))
      :unresolved (filterv #(= :unresolved (:kind %)) refs)}))
 
-(defn web-dangling-route-refs-check
+(defn http-dangling-route-refs-check
   "Done-advisory (D-web-html): rendered links/forms targeting a path no
    declared route or static mount serves — the UI nil-pun: it ships and
    404s. Fires STORE-WIDE, like dead surface, because deleting a route
-   dangles an UNCHANGED form's link. Inert until web.enabled. The
+   dangles an UNCHANGED form's link. Inert until http.enabled. The
    `^{:web/external-path \\\"why\\\"}` marker on the rendering form discharges.
 
    Dynamic (`:unresolved`) refs ride along as `:severity :info` findings:
@@ -965,7 +965,7 @@
    — the only way to keep them from flipping an `:error` rule red — which
    hid the one part of this check a human has to judge."
   [_session st* _changed]
-  (when (= "true" (get-in st* [:config "capabilities" :values "web.enabled"]))
+  (when (capabilities/enabled? st* "http")
     (let [{:keys [dangling unresolved]} (dangling-route-refs st*)]
       (vec (concat dangling
                    (map #(assoc % :severity :info) unresolved))))))

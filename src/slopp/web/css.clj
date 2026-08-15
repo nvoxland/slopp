@@ -21,7 +21,7 @@
     valid-looking CSS.
 
   For raw or vendored CSS, don't fight the refusals: serve a static `.css`
-  asset (`slopp.web.static`), which is the supported route for text this
+  asset (`slopp.http.static`), which is the supported route for text this
   namespace deliberately will not vouch for."
   (:require [garden.core :as garden]))
 
@@ -85,7 +85,7 @@
   text/css. :web/raw true — the adapters write the body verbatim. opts may
   carry :status and extra :headers; Content-Type stays ours. Serve it from
   a :get endpoint; a page's [:link {:href …}] to that path is then covered
-  by the web-dangling-route-refs advisory like any other link."
+  by the http-dangling-route-refs advisory like any other link."
   ([rules] (css-response rules nil))
   ([rules {:keys [status headers]}]
    {:status  (or status 200)

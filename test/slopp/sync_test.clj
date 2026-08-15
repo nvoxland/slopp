@@ -640,7 +640,7 @@
       ;; A changes a CAPABILITY after B's clone, so the projected file differs
       ;; between the merge base and the tip — which is what puts it in the
       ;; pull's changed set at all.
-      (let [c (ops/config-file! sa "capabilities" :key "web.enabled" :value "true"
+      (let [c (ops/config-file! sa "capabilities" :key "http.enabled" :value "true"
                                 :prompt "this project serves HTTP" :agent "alice")]
         (is (nil? (:error c)) (str "fixture: the capability must land: " (pr-str c))))
       (external/commit-point! sa "v2" :agent "alice")

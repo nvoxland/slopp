@@ -44,39 +44,39 @@
                 " worklist. A deliberate HOUSE rule, stricter than Clojure practice,"
                 " which defaults to unqualified keys: the argument for bare keys assumes"
                 " context disambiguates, and an agent reads one form")}
-   {:rule :web-auth-refusal :grain :form
-    :escape "declare :web/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let web.auth.default-policy govern"
-    :teach "an endpoint (:web/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until web.enabled)"}
-   {:rule :web-route-collision :grain :form
+   {:rule :http-auth-refusal :grain :form
+    :escape "declare :web/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let http.auth.default-policy govern"
+    :teach "an endpoint (:web/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until http.enabled)"}
+   {:rule :http-route-collision :grain :form
     :escape "change the path or method, or extend the existing handler (query_routes lists every claim)"
-    :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until web.enabled)"}
-   {:rule :web-page-unreachable :grain :form
+    :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until http.enabled)"}
+   {:rule :http-page-unreachable :grain :form
     :escape "move the entry — and the routing, derive and view code it reaches — to a :jvm or :cljc namespace, passing the browser-shaped parts in (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
-    :teach "a ^:web/page entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until web.enabled)"}
-   {:rule :web-undeclared-effect :grain :form
+    :teach "a ^:web/page entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until http.enabled)"}
+   {:rule :http-undeclared-effect :grain :form
     :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_routes lists the vocabulary)"
-    :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until web.enabled)"}
-{:rule :web-undeclared-context :grain :form
-    :escape "declare ONE zero-arg builder ((defn ^{:web/context true} app-context [] {…})) — an app that runs its own serve! should mark the builder it already has and call it, since two definitions of one store's context agree until one gains a key. Dial it down (config_file {path \"rules\" key \"web-undeclared-context\" value \"advisory\"}) for a context that genuinely cannot be built without arguments"
-    :teach "an endpoint reading :web/deps needs a store that declares where those deps come from — otherwise the map arrives nil, which 500s or, worse, answers 200 with an empty body, and generate_client consumes the empty one as a success (inert until web.enabled)"}
-   {:rule :web-unsafe-get :grain :form
+    :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}
+{:rule :http-undeclared-context :grain :form
+    :escape "declare ONE zero-arg builder ((defn ^{:web/context true} app-context [] {…})) — an app that runs its own serve! should mark the builder it already has and call it, since two definitions of one store's context agree until one gains a key. Dial it down (config_file {path \"rules\" key \"http-undeclared-context\" value \"advisory\"}) for a context that genuinely cannot be built without arguments"
+    :teach "an endpoint reading :web/deps needs a store that declares where those deps come from — otherwise the map arrives nil, which 500s or, worse, answers 200 with an empty body, and generate_client consumes the empty one as a success (inert until http.enabled)"}
+   {:rule :http-unsafe-get :grain :form
     :escape "make it :post/:put/:delete, drop the declared effects, or return the change as data from a non-safe endpoint"
-    :teach "a :get/:head endpoint must be SAFE — it may neither declare :web/effects kinds nor reach a mutation (inert until web.enabled)"}
-   {:rule :web-unknown-group :grain :form
-    :escape "config_file {path \"capabilities\" key \"web.auth.groups.<name>.members\" value \"…\"} defines the group, or fix the name in :web/auth"
-    :teach "an endpoint's [:group …] policy may only name groups the capabilities config defines — a typo'd group silently denies forever, the authz nil-pun (inert until web.enabled)"}
-   {:rule :web-react-attrs :grain :form
-    :escape "spell it as HTML (:class, :for), replace handlers with a link/form targeting an endpoint, or dial it down (config_file {path \"rules\" key \"web-react-attrs\" value \"advisory\"}) for a map that is genuinely not an element"
-    :teach "a literal hiccup element carries a React attribute name (:className, :htmlFor, :onClick…) — browsers silently ignore unknown attributes, so it ships and does nothing (inert until web.enabled)"}
-   {:rule :web-endpoint-schema :grain :form
-    :escape "add :web/response (and :web/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"web-endpoint-schema\" value \"advisory\"})"
-    :teach "a :web/path endpoint must declare :web/response (and :web/request on a :post/:put/:patch body method) — its contract, shared .cljc so the client validates against the SAME schema (D-web-contracts; inert until web.enabled)"}
-   {:rule :web-public-mutation :grain :done
+    :teach "a :get/:head endpoint must be SAFE — it may neither declare :web/effects kinds nor reach a mutation (inert until http.enabled)"}
+   {:rule :http-unknown-group :grain :form
+    :escape "config_file {path \"capabilities\" key \"http.auth.groups.<name>.members\" value \"…\"} defines the group, or fix the name in :web/auth"
+    :teach "an endpoint's [:group …] policy may only name groups the capabilities config defines — a typo'd group silently denies forever, the authz nil-pun (inert until http.enabled)"}
+   {:rule :http-react-attrs :grain :form
+    :escape "spell it as HTML (:class, :for), replace handlers with a link/form targeting an endpoint, or dial it down (config_file {path \"rules\" key \"http-react-attrs\" value \"advisory\"}) for a map that is genuinely not an element"
+    :teach "a literal hiccup element carries a React attribute name (:className, :htmlFor, :onClick…) — browsers silently ignore unknown attributes, so it ships and does nothing (inert until http.enabled)"}
+   {:rule :http-endpoint-schema :grain :form
+    :escape "add :web/response (and :web/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"http-endpoint-schema\" value \"advisory\"})"
+    :teach "a :web/path endpoint must declare :web/response (and :web/request on a :post/:put/:patch body method) — its contract, shared .cljc so the client validates against the SAME schema (D-web-contracts; inert until http.enabled)"}
+   {:rule :http-public-mutation :grain :done
     :escape "tighten :web/auth, or accept it — a deliberately public write surface (signup, webhook) is legitimate and this asks per changed form"
-    :teach "a changed :public endpoint declares :web/effects kinds — a publicly writable surface should be a decision, not an omission (inert until web.enabled)"}
-   {:rule :web-dangling-route-refs :grain :done
+    :teach "a changed :public endpoint declares :web/effects kinds — a publicly writable surface should be a decision, not an omission (inert until http.enabled)"}
+   {:rule :http-dangling-route-refs :grain :done
     :escape "fix the path, add the endpoint or static asset, or mark the RENDERING form — ^{:web/external-path \"why\"} when something OUTSIDE this store serves it, ^{:web/client-path \"why\"} when the literal is THIS app's own client-router key that the render prefixes before it reaches the DOM (an SPA screen). Pick by which is true: the crossings inventory reports them as different exits, and external-path on an app path files a false statement in the one report that says what is unchecked"
-    :teach "a rendered link/form targets a path no declared route or static mount serves — the UI nil-pun: it ships and 404s. Dynamic paths ride along as :info findings: reported, never status-flipping (inert until web.enabled)"}
+    :teach "a rendered link/form targets a path no declared route or static mount serves — the UI nil-pun: it ships and 404s. Dynamic paths ride along as :info findings: reported, never status-flipping (inert until http.enabled)"}
    {:rule :schema-drift :grain :done
     :escape "fix the schema or the impl so they agree"
     :teach "a written :=> schema disagrees with its live impl (generative mg/check)"}
@@ -148,7 +148,7 @@
                 " that predicate measured 4-5 false positives out of 5; a"
                 " defmethod's dispatch value at index 2 cannot shift and is not"
                 " flagged")}
-   {:rule :web-spa-consequences :grain :done
+   {:rule :http-spa-consequences :grain :done
     :escape "nothing to discharge — it states a consequence once, for the episode that declared the prefix"
     :teach (str "an endpoint gained :web/spa this episode: every path under the"
                 " declared prefix now answers 200 instead of 404, and NOT-FOUND"
@@ -178,19 +178,19 @@
    {:rule :direct-http :grain :done
     :escape "call slopp.web.client/request, taking it as a PARAMETER so callers can pass client/fake-requester — or ^{:adapter \"http — why\"} on the name if this form IS the adapter (it polices itself; the value's first word names the port, so a \"postgres\" adapter is ignored rather than called stale)"
     :teach "a form reaches the network itself — a java.net.http.HttpClient, or a slurp of an http(s):// literal. Raw reaching belongs in a declared ADAPTER; everything else goes through the port and inherits its fake and its contract suite. TESTS ARE NOT EXEMPT: calling the port from a test still makes a REAL call, so an exemption would buy nothing and would carve out the one place this boilerplate breeds. Scoped to HTTP because a gate may only demand a port that EXISTS — slopp ships one for HTTP and none for files or subprocesses"}
-   {:rule :web-generated-ns :grain :form
-    :escape "regenerate via generate_client after changing the ENDPOINT (its :web/request/:web/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"web-generated-ns\" value \"advisory\"})"
+   {:rule :http-generated-ns :grain :form
+    :escape "regenerate via generate_client after changing the ENDPOINT (its :web/request/:web/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"http-generated-ns\" value \"advisory\"})"
     :teach "a ^:generated form is generate_client's output and must not be hand-edited — regeneration rewrites the whole client namespace, so a hand edit is lost on the next generate (D-web-contracts part 2)"}
-   {:rule :web-page-reach :grain :done
+   {:rule :http-page-reach :grain :done
     :escape "move the view/derive code the entry reaches into a :jvm or :cljc namespace and pass the browser-shaped parts IN (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
-    :teach "a ^:web/page entry REACHES a :cljs namespace, so no JVM can open the app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. web-page-unreachable refuses the ENTRY's own shape at the write; this is the reach. At done it sees only pages you CHANGED — the dependency-flip case (some other namespace declared :cljs, no write to the entry) is reported by module_platform itself at the declaration (:stranded-pages) and re-graded by the full_check sweep (inert until web.enabled)"}
-   {:rule :web-stale-client :grain :done
+    :teach "a ^:web/page entry REACHES a :cljs namespace, so no JVM can open the app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. http-page-unreachable refuses the ENTRY's own shape at the write; this is the reach. At done it sees only pages you CHANGED — the dependency-flip case (some other namespace declared :cljs, no write to the entry) is reported by module_platform itself at the declaration (:stranded-pages) and re-graded by the full_check sweep (inert until http.enabled)"}
+   {:rule :http-stale-client :grain :done
     :escape "run generate_client to re-derive the client from the current endpoints, or accept the drift"
     :teach "the generated typed client is stale — an endpoint's contract changed since generate_client last ran (D-web-contracts part 2)"}
-   {:rule :web-inline-schema-dup :grain :done
+   {:rule :http-inline-schema-dup :grain :done
     :escape "extract the shared inline schema to a named .cljc var both endpoints reference, or accept the duplication"
     :teach "2+ endpoints declare the same inline request/response schema — a shared shape belongs in one named .cljc schema so the server and the generated client agree (D-web-contracts part 2)"}
-   {:rule :web-unconstrained-contract :grain :done
+   {:rule :http-unconstrained-contract :grain :done
     :escape "name the entries — [:map [:kind :string] [:text :string]]. If the endpoint genuinely CANNOT constrain — a proxy forwarding another service's bytes — say so with ^{:web/unconstrained-ok \"why\"}, which discharges it and is itself reported as stale once the contract does constrain. Saying :any is HONEST and does not discharge: it is the reported state, not the way out"
     :teach (str "a published endpoint declares a field that constrains nothing"
                 " — a bare :map, which accepts any map, or :any, which accepts"
@@ -203,7 +203,7 @@
                 " weeks. Both are reported and they are not the same offence:"
                 " :any ADMITS it says nothing, a bare :map looks like a type"
                 " while saying the same thing")}
-   {:rule :web-undocumented-contract :grain :done
+   {:rule :http-undocumented-contract :grain :done
     :escape "add :doc (or :description) to the entry's property map — [:total {:doc \"hits before the limit is applied\"} :int] — or accept it; this is advisory and never blocks"
     :teach (str "a published endpoint's :web/request/:web/response schema has"
                 " fields that say nothing about what they ARE. A type is a"

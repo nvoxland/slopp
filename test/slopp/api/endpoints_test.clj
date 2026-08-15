@@ -829,7 +829,7 @@
                                             :uri "/api/source/src.demo/nope"})))))))
 
 (deftest every-key-a-response-SENDS-is-a-key-its-contract-DECLARES
-  ;; The half `web-unconstrained-contract` cannot see. That rule finds a schema
+  ;; The half `http-unconstrained-contract` cannot see. That rule finds a schema
   ;; POSITION that constrains nothing (`[:sequential :map]`, `:any`). This is
   ;; the other direction: a fully-typed `[:map …]` that simply omits entries the
   ;; handler is really sending. `m/validate` passes an OPEN map, so those keys

@@ -1212,7 +1212,7 @@ client-deps (merge (:client-deps st) (:client provided))
                               ;; :none is judged AFTER red, never before it. An
                               ;; error-grade finding that fires on a DELTA rather
                               ;; than on code — tier-governance,
-                              ;; web-dangling-route-refs — can be the only thing
+                              ;; http-dangling-route-refs — can be the only thing
                               ;; that happened in an episode, and while :none came
                               ;; first it swallowed exactly those.
                               (and (nil? summary) (nil? iso) (zero? lint-errors)) :none

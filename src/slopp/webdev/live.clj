@@ -4,7 +4,7 @@
 
   An app should not have to hold a `serve!` call, a namespace list, or a port
   to be reachable while it is being written. Everything needed is already in
-  the store — `web.enabled` says it is a web project, the endpoint and
+  the store — `http.enabled` says it is a web project, the endpoint and
   performer surface says what to serve, the capability registry says where.
   This namespace turns those into a launch, and keeps it current.
 
@@ -27,7 +27,7 @@
   incomplete, and reloading a browser into a red half-written state trains
   the author to ignore it."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.rules.web :as rules.web] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.web :as slopp.web]))
+            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.web :as slopp.web]))
 
 (defn ^:export self-served?
   "Whether the calling process ALREADY serves everything `store` would —
@@ -52,7 +52,7 @@
   exempt every non-web project for a reason that has nothing to do with
   them — the emptiness guard, in the position where it actually bites."
   [store already-served]
-  (let [nses (set (rules.web/serving-namespaces store))]
+  (let [nses (set (rules.http/serving-namespaces store))]
     (boolean (and (seq nses)
                   (every? (set already-served) nses)))))
 
@@ -60,7 +60,7 @@
   "Whether slopp should run this store's app server while someone works on
   it — `already-served` being what the calling process has mounted itself.
 
-  Two questions, and only one of them is the project's. `web.enabled` says
+  Two questions, and only one of them is the project's. `http.enabled` says
   the project SERVES HTTP — that is what makes the web rules and
   `query_routes` exist, and production reads it. The second used to be the
   `dev.server` capability and is now [[self-served?]], computed: a store
@@ -79,7 +79,7 @@
   store serve, and where\", which production asks too, and a dev-only
   exemption in it would be an answer to a question it was not asked."
   [store already-served]
-  (boolean (and (capabilities/effective store "web.enabled")
+  (boolean (and (capabilities/effective store "http.enabled")
                 (not (self-served? store already-served)))))
 
 (defn derived-port
@@ -97,7 +97,7 @@
   its derived one is taken, because \"nobody needs to know this number; the
   address a human remembers is the hub's\". Nobody remembers an address for
   the app: a developer types it into a browser and keeps the tab. So a taken
-  port is REPORTED (`start!` says so, and `web.port` is the fix, named in
+  port is REPORTED (`start!` says so, and `http.port` is the fix, named in
   the message) rather than answered with a url that moves each time.
 
   The realistic collision is with our OWN previous server, which `refresh!`
@@ -122,7 +122,7 @@
   `:namespaces` is DERIVED (`web/serving-namespaces`) — the app never hands
   over a list it can get wrong.
 
-  `:port` prefers an explicitly SET `web.port` and otherwise DERIVES. The
+  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES. The
   registry default of 8080 stands for production, where a known number is the
   point; a dev session wants collision-freedom instead, because two projects
   on one machine both taking the default is not a rare case — it is the
@@ -136,28 +136,28 @@
   different grains, and an unlabelled plan is a stand-in for whichever the
   reader assumed."
   [store dir]
-  (if-not (capabilities/effective store "web.enabled")
+  (if-not (capabilities/effective store "http.enabled")
     {:enabled? false
-     :reason (str "web.enabled is false — config_file {path \"capabilities\" "
-                  "key \"web.enabled\" value \"true\"} opts this store into web")}
+     :reason (str "http.enabled is false — config_file {path \"capabilities\" "
+                  "key \"http.enabled\" value \"true\"} opts this store into web")}
     {:enabled?   true
      :mode       :dev
-     :namespaces (rules.web/serving-namespaces store)
-     :host       (capabilities/effective store "web.host")
-     :port       (if (capabilities/stored? store "web.port")
-                   (capabilities/effective store "web.port")
+     :namespaces (rules.http/serving-namespaces store)
+     :host       (capabilities/effective store "http.host")
+     :port       (if (capabilities/stored? store "http.port")
+                   (capabilities/effective store "http.port")
                    (derived-port dir))
-     :adapter    (capabilities/effective store "web.adapter")
+     :adapter    (capabilities/effective store "http.adapter")
      ;; what the app NEEDS, not only where it answers. Dropping these is what
      ;; made a managed server 500 on any app that took slopp's own advice to
      ;; receive its dependencies as :web/deps.
-     :max-body-bytes  (capabilities/effective store "web.max-body-bytes")
-     :context-builder (rules.web/context-builder store)
+     :max-body-bytes  (capabilities/effective store "http.max-body-bytes")
+     :context-builder (rules.http/context-builder store)
      ;; the app's own assets. A UI's stylesheet and cljs bundle ARE the
      ;; product, so a managed server that 404s them is not a lesser version
      ;; of the app — it is an unusable one, and the project it happened to
      ;; switched the managed server off rather than reading it as a bug.
-     :static          (rules.web/static-mounts store)}))
+     :static          (rules.http/static-mounts store)}))
 
 (defn load-order
   "The store namespaces to load into the app image, dependencies first.
@@ -178,8 +178,8 @@
   which, so this asks the store rather than requiring an answer — and its
   absence is a fact, not an error."
   [store]
-  (let [builder (rules.web/context-builder store)
-        seeds   (cond-> (set (rules.web/serving-namespaces store))
+  (let [builder (rules.http/context-builder store)
+        seeds   (cond-> (set (rules.http/serving-namespaces store))
                   (contains? (:namespaces store) 'slopp.web) (conj 'slopp.web)
                   ;; the context builder is NOT part of the served surface —
                   ;; it declares no route and performs no kind — so nothing
@@ -409,7 +409,7 @@
 
   **The diagnosis is the framework's, the next step is this caller's.** Only
   what to DO about a taken port differs between listeners, and only this one
-  can say `web.port` — `slopp.web` also serves operators who set the port some
+  can say `http.port` — `slopp.web` also serves operators who set the port some
   other way, and the UI listener's answer is a different number entirely. So
   `framework/bind-diagnosis` writes the shared half and each caller appends
   its own, rather than three listeners each recognising the failure and
@@ -425,7 +425,7 @@
   image, which is why the recogniser takes both representations."
   [port raw]
   (if-let [d (slopp.web/bind-diagnosis port raw)]
-    (str d " — free it, or set web.port to another")
+    (str d " — free it, or set http.port to another")
     (str "the app image would not serve on port " port ": " raw)))
 
 (defn- serve-in!

@@ -11,8 +11,8 @@
   Three properties this namespace owns, each of which exists because the
   static gates cannot see far enough:
 
-  - **Effects are BOUNDED by the route's declaration.** `web-unsafe-get` and
-    `web-undeclared-effect` read a handler BODY; a handler that computes its
+  - **Effects are BOUNDED by the route's declaration.** `http-unsafe-get` and
+    `http-undeclared-effect` read a handler BODY; a handler that computes its
     effects defeats them. So the dispatcher refuses an undeclared kind before
     running any of them, and validates every kind before the first one — a
     typo must not leave a partial write.
@@ -33,7 +33,7 @@
   "Does `identity` ({:web/sub … :web/groups #{…}} or nil) satisfy `policy`?
   The :web/auth grammar: :public | :authenticated | [:group \"g\"] |
   [:any p…] | [:all p…]. A nil policy DENIES — runtime default-deny,
-  matching the web-auth-refusal write gate. An EMPTY composite ([:all] /
+  matching the http-auth-refusal write gate. An EMPTY composite ([:all] /
   [:any] with no sub-policies) also DENIES: a conjunction over nothing is
   vacuously true, so [:all] would otherwise authorize everyone (review W1).
   Pure set logic; no macro."
@@ -87,8 +87,8 @@
   the request → the
   response's :web/effects interpreted through the app's effect performers,
   BOUNDED by the route's declared :web/effects (a handler cannot emit a kind
-  its route did not declare — the runtime half of web-unsafe-get /
-  web-undeclared-effect, which see only the static handler body; review W4).
+  its route did not declare — the runtime half of http-unsafe-get /
+  http-undeclared-effect, which see only the static handler body; review W4).
   Every failure is response DATA — an ex-info carrying :web/status maps to
   it and surfaces its message plus ONLY a :web/public allowlist; any other
   exception is a GENERIC 500 with the detail logged server-side, never in

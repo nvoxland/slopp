@@ -110,15 +110,15 @@
   ;;
   ;; The obvious stronger fix — route every read through a declared accessor, so
   ;; the readers become a derivable population — is REFUTED by measurement and
-  ;; must not be re-attempted without reading this: `web.auth/config-from-values`
+  ;; must not be re-attempted without reading this: `http.auth/config-from-values`
   ;; is a `reduce-kv` over the WHOLE values map by design, because one parser
   ;; serves both slopp's serving (store values) and a built app (the rendered
   ;; capabilities file). EIGHT of the keys are read that way. A per-key accessor
   ;; would break the built-app path or need a fake lookup existing only to
   ;; satisfy a check.
   ;;
-  ;; Matching is by BASE for a pattern key (`web.auth.static.*` → the literal
-  ;; prefix `web.auth.static.` the parser actually spells), which is why a
+  ;; Matching is by BASE for a pattern key (`http.auth.static.*` → the literal
+  ;; prefix `http.auth.static.` the parser actually spells), which is why a
   ;; family read by prefix is correctly seen. It lives here rather than beside
   ;; the registry because `project.capabilities` requires only `clojure.string`,
   ;; and a store-wide check there costs a slopp edge out of a low-layer module.
@@ -136,7 +136,7 @@
       (is (< 100 (count prod)) "the production forms this scans"))
     (testing "the detector bites — an empty orphan list must not be its only mode"
       (is (not (mentions "web.nosuch.invented.key")))
-      (is (mentions "web.port") "and a key that IS mentioned is seen"))
+      (is (mentions "http.port") "and a key that IS mentioned is seen"))
     (testing "every declared capability is mentioned by some production form"
       (is (= [] orphans)
           (str "declared and mentioned nowhere in production code: "

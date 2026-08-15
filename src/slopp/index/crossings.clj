@@ -43,7 +43,7 @@
     :leaves     "a form's name metadata"
     :to         "the served route table, and from there HTTP"
     :markers    #{:web/path :web/method}
-    :checked-by "web-dangling-route-refs ties every literal :href/:src to a
+    :checked-by "http-dangling-route-refs ties every literal :href/:src to a
                  route; query_routes reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running
                  process, not from the store, so a route can outlive its
@@ -64,8 +64,8 @@
     :leaves     "an endpoint's contract"
     :to         "generated ClojureScript nobody hand-edits"
     :markers    #{:generated}
-    :checked-by "the web-stale-client advisory when a contract drifts from
-                 the last generation; the web-generated-ns gate refuses hand
+    :checked-by "the http-stale-client advisory when a contract drifts from
+                 the last generation; the http-generated-ns gate refuses hand
                  edits"
     :blind      "generation is EXPLICIT, so between a contract change and the
                  next generate_client the two disagree by design"}
@@ -105,9 +105,9 @@
     :to         "slopp.web.screen's driver, which opens it on a JVM and
                  presses things"
     :markers    #{:web/page}
-    :checked-by "web-page-unreachable refuses an entry that is not a public
+    :checked-by "http-page-unreachable refuses an entry that is not a public
                  zero-arity defn (def, defmethod, private, no [] arity), one
-                 in a :cljs namespace, and a SECOND entry; the web-page-reach
+                 in a :cljs namespace, and a SECOND entry; the http-page-reach
                  advisory re-grades a CHANGED page's closure at done;
                  module_platform reports the pages a :cljs declaration
                  strands; screen/open refuses a page whose :state is not an
@@ -126,7 +126,7 @@
     :markers    #{:web/external-path}
     :checked-by nil
     :blind      "the DECLARATION is the whole check: it stops
-                 web-dangling-route-refs asking, and nothing confirms the
+                 http-dangling-route-refs asking, and nothing confirms the
                  foreign server serves that path or still does. This is the
                  crossing that is honest about being one"}
 
@@ -163,12 +163,16 @@
                    in-process assembly. The map it returns reaches handlers as
                    :web/deps and performers as their first argument, all inside
                    the image; nothing leaves through this key"
-   :web/unconstrained-ok "waives web-unconstrained-contract for an endpoint that
+   :web/unconstrained-ok "waives http-unconstrained-contract for an endpoint that
                    genuinely cannot constrain its shape — a statement ABOUT a
                    declaration, not a declaration of its own, so nothing
                    crosses through it"
    :rule/applies-to "the rule registry describing itself to itself"
-   :rule/severity   "the rule registry describing itself to itself"})
+   :rule/severity   "the rule registry describing itself to itself"
+   :rule/capability "the rule registry describing itself to itself: whether a
+                   gate is armed by the store's CAPABILITY config or by a
+                   marker on the form. Read only by edit.gates/gate-capability
+                   deciding whether to run a gate, so nothing crosses"})
 
 (defn ^:export unclassified-markers
   "Markers slopp's own surfaces produce that neither `kinds` nor
@@ -210,7 +214,8 @@
                         :web/read :web/effect :web/effectful :web/request
                         :web/response :web/client :web/context
                         :web/spa :web/external-path :web/client-path
-                        :malli/schema :rule/applies-to :rule/severity])))))
+                        :malli/schema :rule/applies-to :rule/severity
+                        :rule/capability])))))
 
 (defn ^:export store-crossings
   "The store's boundary exits: which crossing kinds it actually has, which of

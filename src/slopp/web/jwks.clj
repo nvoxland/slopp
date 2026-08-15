@@ -2,7 +2,7 @@
   "The OIDC key-fetch ADAPTER: the two HTTP GETs that turn an issuer URL into
   its JWK set.
 
-  It exists as its own namespace because `slopp.web.auth` is otherwise POLICY
+  It exists as its own namespace because `slopp.http.auth` is otherwise POLICY
   and should be able to say so. Everything there takes what it needs as data —
   `verify-jwt` receives `:jwks`, `now` and `getenv` arrive as injected seams,
   the tests pass static keys — and this one form left the process, while the

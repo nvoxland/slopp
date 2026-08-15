@@ -98,7 +98,7 @@
   ;; review W4: run-effects! validated only against the app-wide performer
   ;; set, never the ROUTE's declared :web/effects — so a handler could emit
   ;; any kind a performer provides, incl. a write from a route that declared
-  ;; none (or a :get that web-unsafe-get "proved" safe). The static gate
+  ;; none (or a :get that http-unsafe-get "proved" safe). The static gate
   ;; sees only what it can read in the handler body; the runtime must bound
   ;; effects to the route's declaration.
   (let [performed (atom [])
@@ -146,7 +146,7 @@
 (deftest bounded-body-caps-the-request-read
   ;; review W8: both adapters slurp the whole body unbounded (JDK → heap/OOM
   ;; DoS; http-kit falls back to its own default), and the configured
-  ;; web.max-body-bytes was read by nothing. The shared bounded reader caps
+  ;; http.max-body-bytes was read by nothing. The shared bounded reader caps
   ;; it and signals overflow so the adapter can answer 413.
   (let [in (fn [s] (java.io.ByteArrayInputStream. (.getBytes (str s) "UTF-8")))]
     (testing "a body within the cap reads through"

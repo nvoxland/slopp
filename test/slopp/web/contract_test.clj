@@ -139,7 +139,7 @@
   ;; and this one did not.
   ;;
   ;; It is cheaper than either, because `:web/auth` is already REQUIRED — the
-  ;; `web-auth-refusal` gate refuses an endpoint that declares none. So unlike
+  ;; `http-auth-refusal` gate refuses an endpoint that declares none. So unlike
   ;; `:request`, this key can never be nil-because-unknown, and a consumer
   ;; never has to tell "public" from "nobody said".
   (let [doc     (contract/contract-document ['slopp.web.contract-test])

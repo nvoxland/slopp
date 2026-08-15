@@ -37,7 +37,7 @@
             [slopp.edit :as edit]
             [slopp.index.refs :as refs]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.web :as rules.web] [slopp.read.graph :as graph]))
+            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog]))
 
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
@@ -370,16 +370,49 @@
    the stored `capabilities` config — per setting the default, the EFFECTIVE
    value, and (when set) the raw stored string; wildcard families ride as
    `:patterns`. Set one with `config_file {path \"capabilities\" key <k> value
-   <v>}` — capability writes validate against the registry at write time."
+   <v>}` — capability writes validate against the registry at write time.
+
+   `:capabilities` is the FEATURE view of the same facts: per capability, what
+   it requires, what requires it, whether it is on, and — the part a reader
+   cannot get anywhere else — **the rules opting in would ARM**. A capability
+   is a bargain, and half of it was invisible: the settings said what could be
+   configured and nothing said what would start refusing writes.
+
+   **The join lives HERE rather than in the registry**, and that is a layering
+   fact rather than a preference. `slopp.project.capabilities` loads in the
+   boot JVM on kernel deps and must not reach the gate or advisory registries;
+   this namespace already reads both. So the pure registry stays pure, and the
+   one place that can see all three sides does the joining."
   [session]
-  (capabilities/report (:store @session)))
+  (let [store (:store @session)
+        armed (fn [c]
+                (vec (sort-by (comp str :rule)
+                              (concat
+                               (for [v gates/per-form-write-gates
+                                     :when (= c (gates/gate-capability v))]
+                                 {:rule (:name (meta v)) :grain :form})
+                               (for [r catalog/rule-catalog
+                                     :when (and (= :done (:grain r))
+                                                (str/starts-with? (name (:rule r)) (str c "-")))]
+                                 {:rule (:rule r) :grain :done})))))]
+    (assoc (capabilities/report store)
+           :capabilities
+           (vec (for [{:keys [capability requires reserved always-on doc]}
+                      capabilities/capability-catalog]
+                  (cond-> {:capability capability :doc doc}
+                    reserved  (assoc :reserved true)
+                    always-on (assoc :always-on true)
+                    requires  (assoc :enabled (capabilities/enabled? store capability)
+                                     :requires (vec requires)
+                                     :required-by (vec (sort (capabilities/dependents capability)))
+                                     :arms (armed capability))))))))
 
 (defn ^:export query-routes
-  "The store's declared web surface: `web.enabled`, every endpoint row
+  "The store's declared web surface: `http.enabled`, every endpoint row
    (method, path, auth policy, handler, declared `:web/effects`/`:web/reads`,
    schema presence, the `^:web/effectful` escape), and the derived
    effect/read vocabularies — the SAME derivations the web write gates
    enforce, so what this shows is what the gates guaranteed. Disabled →
    `{:enabled false}` with the opt-in teaching."
   [session]
-  (rules.web/routes-report (:store @session)))
+  (rules.http/routes-report (:store @session)))

@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.web.client :as web.client] [slopp.edit.web :as edit.web]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.web.client :as web.client] [slopp.edit.http :as edit.http]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -255,7 +255,7 @@
                     :request  req
                     :response resp})))))
    {:wrappers [] :problems []}
-   (edit.web/web-endpoint-rows store)))
+   (edit.http/web-endpoint-rows store)))
 
 (defn ^:private schema-form
   "The cljs code for a resolved schema ref: the fully-qualified var symbol (a
@@ -417,10 +417,10 @@
          (str/join "\n\n" (map render-wrapper wrappers)))))
 
 (defn- served-by-a-mount?
-  "Whether any `web.static.*` mount would serve `path`.
+  "Whether any `http.static.*` mount would serve `path`.
 
   A mount key's tail is the URL prefix and its value a files-manifest path
-  prefix (`web.static./js = public/cljs` serves `public/cljs/main.js` at
+  prefix (`http.static./js = public/cljs` serves `public/cljs/main.js` at
   `/js/main.js`), so the question is just whether some mount's value is a
   prefix of the written path.
 
@@ -434,7 +434,7 @@
   [store path]
   (boolean
    (some (fn [[k v]]
-           (and (re-matches #"web\.static\..+" (str k))
+           (and (re-matches #"http\.static\..+" (str k))
                 (str/starts-with? (str path) (str v))))
          (get-in store [:config "capabilities" :values]))))
 
@@ -665,7 +665,7 @@
                                                    prior))
                     ;; A bundle nothing serves is the failure this just had: slopp's own sat
                     ;; in the manifest for two waves while every page 404'd on it,
-                    ;; because serving it needs an web.static.* mount and nothing
+                    ;; because serving it needs an http.static.* mount and nothing
                     ;; said so. Serving it IS one line — the gap was
                     ;; discoverability, so the tool that wrote the file names the
                     ;; line, and goes quiet once a mount covers the path.
@@ -679,9 +679,9 @@
                       (assoc :serve-with
                              (let [dir (or (second (re-matches #"(.*)/[^/]+" output))
                                            output)]
-                               (str "no web.static mount serves " output
+                               (str "no http.static mount serves " output
                                     " — config_file {path \"capabilities\" key"
-                                    " \"web.static./js\" value \"" dir "\"} mounts it"
+                                    " \"http.static./js\" value \"" dir "\"} mounts it"
                                     " at /js/. (An endpoint that reads the file"
                                     " serves it too; this checked mounts only.)")))))))))
           (finally
@@ -908,7 +908,7 @@
              ;; record the contract fingerprint so the done-advisory can detect
              ;; endpoint drift and nudge a regenerate (the "explicit" safety net)
              (first (store/record-config-put s2 "client" :manifest "generated-sig"
-                                             (edit.web/client-signature st0)))))
+                                             (edit.http/client-signature st0)))))
          [target])
         (let [recompiled (maybe-recompile-client! session target)
               others     (other-generated-clients (:store @session) target)]

@@ -22,9 +22,9 @@
   (:require [clojure.string :as str]
             [slopp.edit.modules :as edit.modules]
             [slopp.edit.tiers :as tiers]
-            [slopp.edit.web :as edit.web]
+            [slopp.edit.http :as edit.http]
             [slopp.store :as store]
-            [slopp.store.render :as store.render]))
+            [slopp.store.render :as store.render] [slopp.project.capabilities :as capabilities]))
 
 (defn ^:export rule-severity
   "The effective severity of rule `rule-key` for this store: a per-store OVERRIDE
@@ -51,11 +51,16 @@
   the stale fns, the composed-def trap — and so the reference graph sees them.
   Register a new per-form write gate HERE, not at the N write sites. Each gate's
   per-store `rule-severity` (`:off` skips it) is consulted by `gate-refusal`.
-  The web-* gates (D-web) are additionally inert until the store opts into
-  HTTP (`web-enabled?`)."
-  [#'edit.modules/module-refusal #'tiers/tier-refusal #'edit.modules/schema-refusal #'edit.modules/namespaced-keys-refusal #'edit.web/web-generated-ns
-   #'edit.web/web-auth-refusal #'edit.web/web-endpoint-schema #'edit.web/web-route-collision #'edit.web/web-page-unreachable #'edit.web/web-undeclared-effect #'edit.web/web-undeclared-context
-   #'edit.web/web-unsafe-get #'edit.web/web-unknown-group #'edit.web/web-react-attrs])
+  A gate implemented under a CAPABILITY's name (`slopp.edit.http`, …) is
+  additionally inert until the store declares that capability — `gate-capability`
+  derives which, and `gate-check` skips it. That guard used to be a
+  `(when (web-enabled? candidate) …)` wrapper inside each of the nine http
+  gates, which is a rule every gate author had to know and nothing reminded
+  them of; forgetting it fired an HTTP rule on a project that never asked for
+  HTTP."
+  [#'edit.modules/module-refusal #'tiers/tier-refusal #'edit.modules/schema-refusal #'edit.modules/namespaced-keys-refusal #'edit.http/http-generated-ns
+   #'edit.http/http-auth-refusal #'edit.http/http-endpoint-schema #'edit.http/http-route-collision #'edit.http/http-page-unreachable #'edit.http/http-undeclared-effect #'edit.http/http-undeclared-context
+   #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs])
 
 (defn ^:export write-gate-namespaces
   "`{rule-key defining-ns-sym}` for the registered per-form write gates — where
@@ -105,6 +110,51 @@
                          (:rule/severity (meta g) :refuse)]))
         per-form-write-gates))
 
+(defn ^:export gate-capability
+  "The capability that owns write gate `gate` — the opt-in a store must declare
+  before this gate runs at all — or nil for a gate that applies to every
+  project.
+
+  DERIVED from the implementing namespace's last segment: a gate defined in
+  `slopp.edit.http` belongs to `http`, and there is no second field to keep in
+  step with it. Same move as `capabilities/owners` reading a key's first
+  segment, and as `a-rule-owned-by-an-app-type-is-named-for-it` reading a
+  rule's; moving a gate is the only way to change who owns it.
+
+  Only a capability with `:requires` qualifies — `slopp` and `app` are owners
+  rather than opt-ins, so a namespace ending `.app` could not gate anything
+  even if one existed.
+
+  **The key this feeds is ASSEMBLED, not spelled.** `gate-check` asks
+  `capabilities/enabled?` for the name returned here, which reads
+  `<capability>.enabled` — so `cli.enabled`, `http.enabled`, `rest.enabled` and
+  `webapp.enabled` are all consulted through this one call site and none of them
+  appears as a literal anywhere. Worth saying because a scan for literal key
+  spellings cannot see it, and because three of those four have no gates yet:
+  `http` is the only capability whose rules exist today, so the others resolve
+  here, consult a switch, and find nothing to arm. That is the
+  declared-ahead-of-built state wave 1 leaves on purpose, not a dead registry
+  row.
+
+  **`^{:rule/capability :any}` opts a gate OUT**, and the case is narrow enough
+  to name: a gate armed by a MARKER on the form rather than by the store's
+  configuration. `http-generated-ns` refuses hand-edits to `^:generated`
+  output, and a store holding generated code has generated code whether or not
+  it currently serves HTTP — so deriving its gating from the namespace it
+  happens to live in silenced it, and a generated form became editable. Found
+  by `webdev.cljs-test/generate-client-writes-a-protected-cljs-namespace` after
+  the derivation landed.
+
+  The marker is deliberately explicit rather than inferred. There is no
+  property of a gate that distinguishes marker-armed from config-armed —
+  both are `(candidate ns-sym form-name)` fns in the same registry — so the
+  author says which, once, where the gate is defined."
+  [gate]
+  (when-not (= :any (:rule/capability (meta gate)))
+    (let [seg (last (str/split (str (ns-name (:ns (meta gate)))) #"\."))
+          c   (capabilities/capability seg)]
+      (when (:requires c) (:capability c)))))
+
 (defn ^:export gate-check
   "Run every per-form write gate over the CANDIDATE store ONCE, bucketed by each
    gate's effective per-store `rule-severity`: returns `{:refuse <first
@@ -140,7 +190,9 @@
                                    (store.render/test-ns? ns-sym))
                               (not (rule-applies-to-platform?
                                     (:rule/platform (meta gate) :everywhere)
-                                    platform)))]
+                                    platform))
+                              (when-let [c (gate-capability gate)]
+                                (not (capabilities/enabled? candidate c))))]
                 (if (or (= :off sev) skip?)
                   acc
                   (if-let [t (gate candidate ns-sym form-name)]

@@ -366,7 +366,7 @@
   ;; crossed an nREPL wire. So the recognizer takes either, and the sentence
   ;; is written once. What each caller adds is its own NEXT STEP, which is
   ;; the part that legitimately differs: only the dev server knows the
-  ;; failure is fixable with `web.port`.
+  ;; failure is fixable with `http.port`.
   (testing "a Throwable carrying a BindException anywhere in its cause chain"
     (is (= "port 8080 is already in use"
            (slopp.web/bind-diagnosis 8080 (java.net.BindException. "Address already in use"))))

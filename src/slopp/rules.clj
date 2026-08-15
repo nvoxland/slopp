@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.web :as rules.web] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -792,7 +792,7 @@
    usable.** Measured on slopp's store the day this landed: 1001 regex
    literals, 110 carrying a dotted name. Reporting every one that does not
    resolve gives 119 findings of which 2 are real — fixtures name `mv.core`,
-   libraries name `clojure.set`, config keys name `web.static`, assets name
+   libraries name `clojure.set`, config keys name `http.static`, assets name
    `logo.png`, and a pattern spanning a whitespace class yields `assertions.s`.
    Requiring the root segment to be one this store owns takes 119 to 3, with no
    exemption list, and all three were bugs.
@@ -951,7 +951,7 @@
    ;; the single biggest behavioural consequence available in one piece of
    ;; metadata, and nothing said it: declaring :web/spa turns every path under
    ;; the prefix from 404 into 200 and moves not-found into the client.
-   {:key :web-spa-consequences :severity :advisory :applies-to :production :check #'rules.web/web-spa-consequences-check
+   {:key :http-spa-consequences :severity :advisory :applies-to :production :check #'rules.http/http-spa-consequences-check
     :sweep (str "states a consequence ONCE, for the episode that declared the"
                 " prefix — there is nobody to tell about a declaration that"
                 " predates the sweep")
@@ -1078,32 +1078,32 @@
                         " rules-test/tracked-file-drift-reports-a-second-copy-that-moved")}
    ;; a publicly-writable endpoint should be a decision, not an omission —
    ;; the question grade, like shell-widening: only the author knows
-   {:key :web-public-mutation :severity :advisory :applies-to :production :check #'rules.web/web-public-mutation-check
+   {:key :http-public-mutation :severity :advisory :applies-to :production :check #'rules.http/http-public-mutation-check
     :sweep true
-    :selftest-note "gated on the store's web.enabled capability, which a source-only fixture cannot carry — covered by rules-test/public-mutation-asks-at-done"}
-   {:key :web-dangling-route-refs :severity :error :applies-to :production :check #'rules.web/web-dangling-route-refs-check
+    :selftest-note "gated on the store's http.enabled capability, which a source-only fixture cannot carry — covered by rules-test/public-mutation-asks-at-done"}
+   {:key :http-dangling-route-refs :severity :error :applies-to :production :check #'rules.http/http-dangling-route-refs-check
     ;; already store-wide by construction — deleting a route dangles an
     ;; UNCHANGED form's link, which is this same friction one rule over
     :sweep true
-    :selftest-note "gated on the store's web.enabled capability, which a source-only fixture cannot carry — covered by web-test/done-surfaces-dangling-route-refs"}
-   {:key :web-page-reach :severity :advisory :applies-to :production :check #'rules.web/web-page-reach-check
+    :selftest-note "gated on the store's http.enabled capability, which a source-only fixture cannot carry — covered by web-test/done-surfaces-dangling-route-refs"}
+   {:key :http-page-reach :severity :advisory :applies-to :production :check #'rules.http/http-page-reach-check
     ;; the sweep is where this one EARNS its keep: an entry stranded by a
     ;; platform declaration on some OTHER namespace is invisible to every
     ;; episode-scoped done there will ever be, because no write to the entry
     ;; ever happens
     :sweep true
-    :selftest-note (str "needs BOTH the store's web.enabled capability and a"
+    :selftest-note (str "needs BOTH the store's http.enabled capability and a"
                         " :module-platform declaration, neither of which a"
                         " source-only fixture can carry — covered by"
                         " rules.web-test/a-page-reaching-cljs-cannot-be-opened-"
                         "and-done-says-so, which controls on both setup steps")
     :teach "a ^:web/page entry reaches a :cljs namespace, so no JVM can open this app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. The write gate sees only the ENTRY's namespace; this is the reach, and it can break when a namespace the entry never mentions is declared :cljs. Move the view/derive code it reaches to :jvm or :cljc and pass the browser-shaped parts in"}
-   {:key :web-stale-client :severity :advisory :applies-to :production :check #'rules.web/web-stale-client-check
+   {:key :http-stale-client :severity :advisory :applies-to :production :check #'rules.http/http-stale-client-check
     :sweep true
     :selftest-note (str "needs a recorded client/generated-sig config (a source-only"
                         " fixture cannot carry one) — covered by rules-test/"
-                        "web-stale-client-advisory-fires-on-endpoint-drift")}
-   {:key :web-inline-schema-dup :severity :advisory :applies-to :production :check #'rules.web/web-inline-schema-dup-check
+                        "http-stale-client-advisory-fires-on-endpoint-drift")}
+   {:key :http-inline-schema-dup :severity :advisory :applies-to :production :check #'rules.http/http-inline-schema-dup-check
     :sweep true
     :fires-on (str "(ns ds.api)\n"
                    "(defn ^{:web/method :post :web/path \"/a\" :web/request [:map [:x :int]]"
@@ -1116,8 +1116,8 @@
    ;; built to catch exactly this — passes over it forever. slopp-ui ranked
    ;; this ABOVE the prose rule they had asked for the day before, which is the
    ;; kind of correction worth taking at face value.
-   {:key :web-unconstrained-contract :severity :advisory :applies-to :production
-    :check #'rules.web/web-unconstrained-contract-check
+   {:key :http-unconstrained-contract :severity :advisory :applies-to :production
+    :check #'rules.http/http-unconstrained-contract-check
     :sweep true
     :fires-on (str "(ns dv.api)\n"
                    "(defn ^{:web/method :get :web/path \"/v\" :web/auth :public"
@@ -1127,8 +1127,8 @@
    ;; slopp's own 9-endpoint document is `{:optional true}` and nothing else.
    ;; The sweep is the whole point — these endpoints are STABLE, so no episode
    ;; changes them and no episode-scoped pass can ever reach them.
-   {:key :web-undocumented-contract :severity :advisory :applies-to :production
-    :check #'rules.web/web-undocumented-contract-check
+   {:key :http-undocumented-contract :severity :advisory :applies-to :production
+    :check #'rules.http/http-undocumented-contract-check
     :sweep true
     :fires-on (str "(ns du.api)\n"
                    "(defn ^{:web/method :get :web/path \"/t\" :web/auth :public"
@@ -1246,7 +1246,7 @@
    never status-flipping. Without it an `:error` rule was all-or-nothing, so a
    rule with both a hard failure and a genuinely informational observation had to
    drop the latter out of its findings to keep it from flipping — invisible at
-   done, which is where it was worth seeing (`web-dangling-route-refs` and its
+   done, which is where it was worth seeing (`http-dangling-route-refs` and its
    dynamic refs). An ungraded finding — including a non-map one — flips, so the
    grade is opt-in and silence still means failure.
 

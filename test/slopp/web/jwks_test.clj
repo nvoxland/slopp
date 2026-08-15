@@ -8,7 +8,7 @@
   stood up locally in a few lines — which is what makes it cheap here and is
   not true of every adapter — some reach a world no fake can stand in for.
 
-  Neighbours: `slopp.web.auth-test` covers the POLICY these keys feed, using
+  Neighbours: `slopp.http.auth-test` covers the POLICY these keys feed, using
   static keys and never a network."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.web.jwks :as jwks]

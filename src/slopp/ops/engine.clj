@@ -12,7 +12,7 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.web :as rules.web] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.edit.web :as edit.web]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.edit.http :as edit.http]))
 
 (def ^{:export "slopp.concurrency"} ^:dynamic *pre-commit-hook*
   "Test seam (item 4): invoked between an op's hot-load and its commit CAS to
@@ -73,7 +73,7 @@
     (when (and (seq files)
                (not-any? web? nses)
                (or (some (fn [n] (some web? (store/ns-require-libs store n))) nses)
-                   (some (fn [n] (some #(:web/page (edit.web/web-name-meta %))
+                   (some (fn [n] (some #(:web/page (edit.http/web-name-meta %))
                                        (store/forms store n)))
                          nses)))
       files)))
@@ -922,7 +922,7 @@
                         (when res
                           (vec (sort (distinct (concat res declared))))))
         via-routes (fn []
-                     (when-let [hits (get (rules.web/endpoint-test-refs (:store @session))
+                     (when-let [hits (get (rules.http/endpoint-test-refs (:store @session))
                                           qform)]
                        (vec (sort hits))))]
     (with-declared

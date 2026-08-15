@@ -17,7 +17,7 @@
   Mostly `^:external`: a done-advisory's input is an episode, which needs a
   real session with a real baseline and real verification deltas behind it."
   (:require [clojure.test :refer [deftest testing is]]
-            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.web :as edit.web] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.web :as rules.web] [slopp.store.fields :as fields] [rewrite-clj.parser :as p]))
+            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p]))
 
 (deftest done-advisory-registry-and-severity
   (testing "the registry carries every done-time advisory with a key, severity, and check"
@@ -420,18 +420,18 @@
                  "(defn ^{:web/method :get :web/path \"/ping\" :web/auth :public} ping \"P.\" [req] req)\n")
         s0  (store/ingest (store/empty-store) 'pm.api src)
         on  (first (store/record-config-put s0 "capabilities" :manifest
-                                            "web.enabled" "true"))
+                                            "http.enabled" "true"))
         ids (mapv :id (store/forms on 'pm.api))
-        f   (fn [st] (rules.web/web-public-mutation-check nil st ids))]
+        f   (fn [st] (rules.http/http-public-mutation-check nil st ids))]
     (testing "a public endpoint declaring effect kinds fires, naming the kinds"
       (let [r (f on)]
         (is (= 1 (count r)) (pr-str r))
         (is (= 'pm.api/signup (:form (first r))))
         (is (= [:user/insert] (:web/effects (first r))))))
-    (testing "inert until web.enabled"
+    (testing "inert until http.enabled"
       (is (empty? (f s0))))))
 
-(deftest web-stale-client-advisory-fires-on-endpoint-drift
+(deftest http-stale-client-advisory-fires-on-endpoint-drift
   ;; the "explicit + advisory" regeneration decision's safety net: once a client
   ;; has been generated (a client/generated-sig is on record), a later contract
   ;; change makes the done-advisory nudge generate_client. It never nags a store
@@ -441,20 +441,20 @@
                                         (str "(ns st.api)\n\n"
                                              "(defn ^{:web/method :post :web/path \"/o\""
                                              " :web/request st.c/a :web/response " resp "} make [r] r)\n"))))
-        old-sig (edit.web/client-signature (mk "st.c/a"))]
+        old-sig (edit.http/client-signature (mk "st.c/a"))]
     (testing "a recorded sig that no longer matches the current endpoints fires the advisory"
       (let [drifted (first (store/record-config-put (mk "st.c/b") "client" :manifest
                                                     "generated-sig" old-sig))]
-        (is (seq (rules.web/web-stale-client-check nil drifted nil)))))
+        (is (seq (rules.http/http-stale-client-check nil drifted nil)))))
     (testing "a matching sig is quiet"
       (let [fresh-store (mk "st.c/b")
             fresh (first (store/record-config-put fresh-store "client" :manifest
-                                                  "generated-sig" (edit.web/client-signature fresh-store)))]
-        (is (empty? (rules.web/web-stale-client-check nil fresh nil)))))
+                                                  "generated-sig" (edit.http/client-signature fresh-store)))]
+        (is (empty? (rules.http/http-stale-client-check nil fresh nil)))))
     (testing "never generated (no recorded sig) → never nags"
-      (is (empty? (rules.web/web-stale-client-check nil (mk "st.c/a") nil))))))
+      (is (empty? (rules.http/http-stale-client-check nil (mk "st.c/a") nil))))))
 
-(deftest web-inline-schema-dup-advisory-nudges-extraction
+(deftest http-inline-schema-dup-advisory-nudges-extraction
   ;; the DRY paved-road nudge (D-web-contracts part 2): 2+ endpoints declaring
   ;; the SAME structured inline schema should extract it to a named .cljc var.
   (testing "two endpoints sharing an identical inline schema fire the advisory"
@@ -465,7 +465,7 @@
                                     " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
                                     "(defn ^{:web/method :post :web/path \"/b\""
                                     " :web/request [:map [:x :int]] :web/response :map} b [r] r)\n")))
-          findings (rules.web/web-inline-schema-dup-check nil st nil)]
+          findings (rules.http/http-inline-schema-dup-check nil st nil)]
       (is (seq findings))
       (is (some #(re-find #"named .cljc" (:teach %)) findings))))
   (testing "distinct inline schemas do not fire; a shared bare keyword is too trivial to nag"
@@ -476,7 +476,7 @@
                                     " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
                                     "(defn ^{:web/method :post :web/path \"/b\""
                                     " :web/request [:map [:y :string]] :web/response :map} b [r] r)\n")))]
-      (is (empty? (rules.web/web-inline-schema-dup-check nil st nil))))))
+      (is (empty? (rules.http/http-inline-schema-dup-check nil st nil))))))
 
 (deftest catalog-severity-is-derived-not-restated
   (testing "no catalog row carries its own :severity — the registries own that fact"
@@ -521,8 +521,8 @@
                  "  [:div [:a {:href \"/nowhere\"} \"bad\"]\n"
                  "        [:a {:href (:uri req)} \"dyn\"]])\n")
         s (store/ingest (store/empty-store) 'shop.ui src)
-        s (first (store/record-config-put s "capabilities" :manifest "web.enabled" "true"))
-        found (rules.web/web-dangling-route-refs-check nil s nil)
+        s (first (store/record-config-put s "capabilities" :manifest "http.enabled" "true"))
+        found (rules.http/http-dangling-route-refs-check nil s nil)
         by-sev (group-by :severity found)]
     (testing "the dangling ref is a status-affecting finding, as before"
       (is (= ["/nowhere"] (mapv :path (get by-sev nil)))))
@@ -530,10 +530,10 @@
       (is (= '[shop.ui/todos-page] (mapv :form (get by-sev :info)))))
     (testing "an :info-only result does not flip done red"
       (is (false? (rules/status-affecting-fired?
-                   s {:web-dangling-route-refs (get by-sev :info)}))))
+                   s {:http-dangling-route-refs (get by-sev :info)}))))
     (testing "the dangling ref still does"
       (is (true? (rules/status-affecting-fired?
-                  s {:web-dangling-route-refs found}))))))
+                  s {:http-dangling-route-refs found}))))))
 
 (deftest tracked-file-drift-reports-a-second-copy-that-moved
   (let [dir (str (System/getProperty "java.io.tmpdir")
@@ -905,7 +905,7 @@
   ;; literals, 110 carrying a dotted name. A rule reporting every dotted name
   ;; that does not resolve produced 119 findings of which 2 were real —
   ;; fixtures name `mv.core`, libraries name `clojure.set`, config keys name
-  ;; `web.static`, assets name `logo.png`, and a pattern spanning `\s+` yields
+  ;; `http.static`, assets name `logo.png`, and a pattern spanning `\s+` yields
   ;; `assertions.s`. Restricting to names whose ROOT SEGMENT this store owns
   ;; took 119 to 3, and all three were bugs.
   ;;
@@ -1016,8 +1016,8 @@
                                         " :web/auth :public} page \"P.\" [req]\n"
                                         "  " body ")\n"))]
                (first (store/record-config-put s "capabilities" :manifest
-                                               "web.enabled" "true"))))
-        check (fn [body] (rules.web/web-dangling-route-refs-check nil (mk body) nil))]
+                                               "http.enabled" "true"))))
+        check (fn [body] (rules.http/http-dangling-route-refs-check nil (mk body) nil))]
 
     (testing "a literal prefix that DOES match a declared route is checked and clean"
       (let [found (check "(let [to (str \"/p/\" (:slug req) \"/\")] [:a {:href to} \"go\"])")]

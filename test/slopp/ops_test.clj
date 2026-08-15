@@ -900,31 +900,31 @@
           (is (re-find #"web\.prot" (str (:error r))) (pr-str r))
           (is (re-find #"query_capabilities" (str (:error r))) (pr-str r))))
       (testing "a bad value is refused with the type teaching"
-        (let [r (ops/config-file! sess "capabilities" :key "web.port" :value "banana"
+        (let [r (ops/config-file! sess "capabilities" :key "http.port" :value "banana"
                                   :prompt "bad port")]
           (is (re-find #"integer" (str (:error r))) (pr-str r))
-          (is (nil? (get-in (:store @sess) [:config "capabilities" :values "web.port"]))
+          (is (nil? (get-in (:store @sess) [:config "capabilities" :values "http.port"]))
               "the refused value never landed")))
       (testing "a good value lands and takes effect"
-        (let [r (ops/config-file! sess "capabilities" :key "web.port" :value "7357"
+        (let [r (ops/config-file! sess "capabilities" :key "http.port" :value "7357"
                                   :prompt "real port")]
           (is (nil? (:error r)) (pr-str r))
-          (is (= 7357 (capabilities/effective (:store @sess) "web.port")))))
+          (is (= 7357 (capabilities/effective (:store @sess) "http.port")))))
       (testing "a wildcard-governed key is known, not alien"
-        (let [r (ops/config-file! sess "capabilities" :key "web.auth.groups.admin.members" :value "alice,bob"
+        (let [r (ops/config-file! sess "capabilities" :key "http.auth.groups.admin.members" :value "alice,bob"
                                   :prompt "a group")]
           (is (nil? (:error r)) (pr-str r))
-          (is (= #{"alice" "bob"} (capabilities/effective (:store @sess) "web.auth.groups.admin.members")))))
+          (is (= #{"alice" "bob"} (capabilities/effective (:store @sess) "http.auth.groups.admin.members")))))
       (testing "a key under an undeclared owner is refused like any unknown key"
         (let [r (ops/config-file! sess "capabilities" :key "groups.admin.members" :value "alice"
                                   :prompt "the retired spelling")]
           (is (re-find #"is not a capability" (str (:error r))) (pr-str r))))
       (testing "unset returns to the default"
-        (ops/config-file! sess "capabilities" :key "web.port" :unset true
+        (ops/config-file! sess "capabilities" :key "http.port" :unset true
                           :prompt "back to default")
-        ;; web.port's declared default is nil now — serve! owns the 8080 and the
+        ;; http.port's declared default is nil now — serve! owns the 8080 and the
       ;; dev server derives, so "returns to the default" means returns to unset
-      (is (nil? (capabilities/effective (:store @sess) "web.port"))))
+      (is (nil? (capabilities/effective (:store @sess) "http.port"))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external config-writes-say-whether-anything-validated-them
@@ -935,7 +935,7 @@
   (let [sess (external/open!)]
     (try
       (testing "a capabilities write was checked against the registry"
-        (let [r (ops/config-file! sess "capabilities" :key "web.port" :value "7357"
+        (let [r (ops/config-file! sess "capabilities" :key "http.port" :value "7357"
                                   :prompt "real port")]
           (is (= [:registry] (:verified r)) (pr-str r))
           (is (= [] (:unverified r)) (pr-str r))))
@@ -1050,7 +1050,7 @@
 
 (deftest ^:external full-check-says-which-whole-store-reads-it-RAN
   ;; From slopp-ui, who hit it verifying two regrades on a fresh jar and needed
-  ;; DIFFERENT evidence for each. `web-dangling-route-refs` appears in the
+  ;; DIFFERENT evidence for each. `http-dangling-route-refs` appears in the
   ;; rule sweep's `:swept` list, which distinguishes *ran and found nothing*
   ;; from *did not run*. `alias-drift` has no such list, so they had to build a
   ;; control by hand: introduce a deliberate non-canonical alias, watch it
@@ -1086,4 +1086,55 @@
           (is (every? #(and (number? %) (pos? %)) (vals c))
               (str "a read that examined nothing is not a clean read: "
                    (pr-str c)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external enabling-a-capability-enables-what-it-requires
+  ;; A capability graph is only half a mechanism if it merely reads.
+  ;; `:requires` has to MOVE the config, or every project meets the same
+  ;; puzzle: turning on `webapp` looks like it worked and then nothing serves,
+  ;; because `http` — which a browser app cannot function without — was never
+  ;; set.
+  ;;
+  ;; Both directions, and the second is the one easy to skip: if a prerequisite
+  ;; can be turned off underneath a dependent, the config reaches a state the
+  ;; catalog says is impossible, and the consequence surfaces somewhere else
+  ;; entirely.
+  (let [sess (external/open!)]
+    (try
+      (testing "enabling a capability writes its prerequisites and NAMES them"
+        (let [r (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                                  :prompt "opt into a browser app")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (true? (capabilities/enabled? (:store @sess) "webapp")))
+          (is (true? (capabilities/enabled? (:store @sess) "http"))
+              "webapp requires http — a browser app has to be served")
+          (is (= ["http.enabled"] (:implied r))
+              (str "the implied writes are REPORTED, not silent: a config change"
+                   " nobody was told about is one nobody can undo. Got: " (pr-str r)))))
+      (testing "and NOT what it merely tends to be used with"
+        ;; the whole reason the graph is not a chain. rest is a COMPANION of
+        ;; webapp, not a parent, so opting into a browser app must not arm the
+        ;; contract gates of an API this project may not even have.
+        (is (false? (capabilities/enabled? (:store @sess) "rest")))
+        (is (false? (capabilities/enabled? (:store @sess) "cli"))))
+      (testing "turning off a prerequisite something still stands on REFUSES"
+        (let [r (ops/config-file! sess "capabilities" :key "http.enabled" :value "false"
+                                  :prompt "try to pull the floor out")]
+          (is (:error r) (pr-str r))
+          (is (re-find #"webapp" (str (:error r)))
+              "the refusal names what is standing on it, so the fix reads off it")
+          (is (true? (capabilities/enabled? (:store @sess) "http"))
+              "and the refusal did not half-land")))
+      (testing "turning off the dependent first, then the prerequisite, works"
+        (is (nil? (:error (ops/config-file! sess "capabilities" :key "webapp.enabled"
+                                            :value "false" :prompt "drop the browser app"))))
+        (is (nil? (:error (ops/config-file! sess "capabilities" :key "http.enabled"
+                                            :value "false" :prompt "and then the server"))))
+        (is (false? (capabilities/enabled? (:store @sess) "http"))))
+      (testing "an enable that implies nothing says nothing"
+        ;; absence means none, the way the module manifest's :debt does — an
+        ;; empty :implied on every write would train the reader to skip the key.
+        (let [r (ops/config-file! sess "capabilities" :key "cli.enabled" :value "true"
+                                  :prompt "a command-line shell needs nothing beneath it")]
+          (is (nil? (:implied r)) (pr-str r))))
       (finally (ops/close! sess)))))

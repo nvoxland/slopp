@@ -840,7 +840,7 @@
 
   **Opting out is an ACTION, not the absence of one.** The first cut gated on
   `managed?` and returned, which stops RE-SERVING and never stops SERVING —
-  so after `web.enabled false` the old image kept answering and
+  so after `http.enabled false` the old image kept answering and
   `session_brief` kept advertising its url, while the config said no managed
   server existed. Found by slopp-ui, who checked the surface against the
   config rather than against the page.
@@ -882,7 +882,7 @@
                    (str "this session already serves this store's surface — the"
                         " managed app server was stopped, because a second one"
                         " would serve a staler copy of the same pages")
-                   (str "web.enabled is false for this store — the managed app"
+                   (str "http.enabled is false for this store — the managed app"
                         " server was stopped"))}))))
 
 (def ^:private thread-hint-every

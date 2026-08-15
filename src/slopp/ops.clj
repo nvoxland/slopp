@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.web :as rules.web]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.http :as rules.http]))
 
 (defn reap-idle-images!
   "Stop parked branch images idle past the session TTL (the session's reaper
@@ -2895,28 +2895,53 @@ recompiled (engine/after-write! session ns-sym)]
 
       (and key (some? value))
       (if-let [refusal (when (= "capabilities" (str path))
-                         (capabilities/config-refusal (str key) (str value)))]
+                         (or (capabilities/config-refusal (str key) (str value))
+                             (capabilities/disable-refusal (:store @session)
+                                                           (str key) (str value))))]
         {:error refusal}
-        (let [fmt (or (some-> format clojure.core/keyword)
-                      (:format entry) :manifest)]
-          (engine/commit-appended! session
-                            #(first (store/record-config-put % path fmt key value
-                                                             :prompt prompt
-                                                             :agent agent))
-                            [])
+        (let [fmt     (or (some-> format clojure.core/keyword)
+                          (:format entry) :manifest)
+              caps?   (= "capabilities" (str path))
+              ;; the prerequisites this write turns on WITH it, computed
+              ;; against the PRE-write store so the report names only what
+              ;; actually changed rather than restating the graph
+              implied (when caps?
+                        (seq (capabilities/implied-puts (:store @session)
+                                                        (str key) (str value))))]
+          (engine/commit-appended!
+           session
+           (fn [st]
+             (reduce (fn [s k*]
+                       (first (store/record-config-put s path fmt k* "true"
+                                                       :prompt (str "implied by " key "=" value)
+                                                       :agent agent)))
+                     (first (store/record-config-put st path fmt key value
+                                                     :prompt prompt
+                                                     :agent agent))
+                     implied))
+           [])
           ;; `capabilities` is the ONLY path with a registry behind it. Every
           ;; other path records the key and value as given, so a caller
           ;; cannot tell a checked write from an unchecked one unless the
           ;; result says which happened (D-surface-honesty).
-          (let [caps? (= "capabilities" (str path))]
-            (cond-> {:path (str path) :key (str key) :value (str value) :format fmt
-                     :verified (if caps? [:registry] [])
-                     :unverified (if caps? [] [:schema])}
-              (not caps?)
-              (assoc :note (str "recorded as given — no registry governs the "
-                                path " config, so neither the key nor the value"
-                                " was validated. Only `capabilities` writes are"
-                                " checked (query_capabilities lists them)."))))))
+          (cond-> {:path (str path) :key (str key) :value (str value) :format fmt
+                   :verified (if caps? [:registry] [])
+                   :unverified (if caps? [] [:schema])}
+            (not caps?)
+            (assoc :note (str "recorded as given — no registry governs the "
+                              path " config, so neither the key nor the value"
+                              " was validated. Only `capabilities` writes are"
+                              " checked (query_capabilities lists them)."))
+
+            ;; ABSENT when nothing was implied, the way the module manifest's
+            ;; :debt is: an empty vector on every write would train the reader
+            ;; to skip a key that has to be read when it IS there.
+            implied
+            (assoc :implied (vec implied)
+                   :implied-note (str "set with it, because " key
+                                      " requires them — a capability turned on"
+                                      " without its prerequisites looks enabled"
+                                      " and does nothing")))))
 
       key
       (if-let [v (get-in entry [:values (str key)])]
@@ -3455,7 +3480,7 @@ recompiled (engine/after-write! session ns-sym)]
       ;; after it, the diff compares the new store to itself and the report
       ;; is empty forever (caught in review of this very change).
       (let [already  (when (= :cljs platform)
-                       (set (map :page (rules.web/stranded-pages (:store @session)))))
+                       (set (map :page (rules.http/stranded-pages (:store @session)))))
             st'      (engine/commit-appended!
                       session
                       #(first (store/record-module-platform % module platform
@@ -3469,7 +3494,7 @@ recompiled (engine/after-write! session ns-sym)]
             ;; whole external tier went red on it in one theme
             stranded (when (= :cljs platform)
                        (seq (filter #(not (contains? already (:page %)))
-                                    (rules.web/stranded-pages st'))))]
+                                    (rules.http/stranded-pages st'))))]
         ;; This verb checks NOTHING about the code — it records a routing fact.
         ;; Whether a :cljc/:cljs namespace actually compiles for its declared
         ;; platform is compile_client's answer, and it can arrive much later.
