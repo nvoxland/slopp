@@ -184,6 +184,29 @@ Losing the CAS is a RETRY, not a failure: another agent landed between the
 reconcile and the advance, which is the ordinary shape of a shared branch.
 Bounded, so a branch under continuous landing says so rather than spinning.
 
+**Adoption is where the model becomes the default** (2026-08-15).
+`engine/session-line` resolves the session's thread and caches it, so every
+write, cache refresh and materialization below resolves through one answer and
+the thread is not a mode the rest of the system knows about.
+
+It resolves LAZILY for the MCP server and EAGERLY everywhere else, and the
+split is about when an identity is settled. An explicit `:slopp.ops/agent-id`
+or `SLOPP_AGENT` is known at open, so `open!` adopts there and loads the store
+from the thread — which means the image boots from the code the session will
+actually work on. The MCP server's identity arrives on the first prompt
+instead, so it adopts lazily and `engine/adopt-line!` resynchronizes when
+`absorb-pending-intent!` learns the harness session id.
+
+**That resync exists for the half that does not heal itself.** A session that
+resumes a thread holding un-landed work loaded its store AND its image from the
+branch. The store heals on its own — the write CAS fails, the cache refreshes,
+the write lands — and the image does not, which would leave verification
+grading the branch's code against the thread's store: a wrong verdict rather
+than a slow one. So `adopt-line!` reboots the image, gated on the one question
+that separates the cases: does the thread's head match what the session holds?
+A freshly minted thread sits exactly on the branch head, so the ordinary path
+costs two SELECTs and no reboot.
+
 The land REPORTS whether it reconciled (`:rebased`), and that is not decoration
 — a fast-forward and a rebase are the same green from outside, and the agent
 whose work was just replayed onto somebody else's is the one who most needs to

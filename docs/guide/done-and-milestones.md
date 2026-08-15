@@ -26,6 +26,30 @@ What it runs, over everything the episode touched:
 Findings are recorded on the episode boundary delta and resurfaced in the next
 session's brief, so nothing quietly evaporates when a session ends.
 
+## `done` is also what makes your work visible
+
+Every session writes to a private line of its own — a **thread** — and a green
+`done` *lands* that thread onto the branch. So a branch only ever contains work
+that some verdict stood behind, and until you say done, nobody else sees yours:
+not another agent on the same branch, not `commit_point`, not a running server.
+
+A red `done` lands nothing. Your thread survives, still holding the work that
+is not finished yet, and you fix it and call done again.
+
+If somebody else landed while you were working, your thread is rebased onto
+theirs — once, at your own done, so every conflict arrives together at a moment
+you chose rather than one at a time while you are trying to finish. The result
+says which happened:
+
+```clj
+{:land {:landed "main" :head "d1042" :rebased {:merged 3}}}
+```
+
+A conflicting or red rebase lands nothing and leaves your thread open.
+
+`session_brief` reports what is outstanding as `:thread {:on "main" :unlanded
+7}`. Nothing here is a mode to turn on: it is where your writes already go.
+
 **`done` reports, it does not refuse.** It records the boundary honestly and
 tells you "not done yet", so a finding you cannot fix right now never
 deadlocks you. What refuses is `commit_point`, and a red `done` stands until

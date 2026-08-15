@@ -3694,3 +3694,50 @@ residual race a `false` from `append!` rather than a throw — kept as narrow as
 management' code"*). The `(ns,pos)` → `(line,ns,pos)` migration is idempotent
 DDL inside `db/open!` and runs at most once per store; there is no second read
 path. The two real stores were handled by hand.
+
+### D-threads (2026-08-15, user decision) — every agent works in an anonymous line, and `done` is what lands it
+
+*"Independent threads for agents to automatically be working in until they hit
+'done' … basically like an unnamed/anonymous branch that is automatically
+managed for the agent between 'done' calls so that only done things show in the
+actual branches."*
+
+A THREAD is a line with no name and an `agent`. Every session adopts one — no
+option, no tool — and its writes go there until a green `done` lands them onto
+the branch. A branch therefore only ever contains work some verdict stood
+behind.
+
+**Adopt-or-create, keyed by `(agent, branch)`.** Nothing is remembered between
+sessions: a returning agent asks the same question and gets the same row, which
+is what makes un-landed work survive a process restart. A landed or abandoned
+thread is never re-entered — its meaning is settled.
+
+**Pinned, and rebasing exactly once.** A thread forks at the branch's head as it
+stands and stays there; when the branch has moved by the time it lands, the
+branch is merged INTO the thread first, through the same pipeline
+`branch_merge` uses. The view and the verdict are stable while work is in
+progress, and every conflict arrives together, at a moment the agent chose. A
+conflicting or red rebase lands NOTHING and leaves the thread open.
+
+**The order inside the landing was forced, and it is the part worth
+remembering.** `kernel.boot/store-sources` reads the trunk, so once a session
+writes to a thread its edits stop reaching the running host until they land —
+and `done` is host code. Landing adoption before the land existed would have
+stranded the edit that adds the land on a thread nothing could move: the fix
+for the wedge unreachable from inside it. So the land shipped first, complete
+and inert (a session's line was still a branch, so it no-opped), and the
+adoption flip was the last write. Same shape as the phase-2 migration hazard,
+one layer up.
+
+**What is NOT an agent gets no thread of its own to hide in.** A clone lands
+what it ingested, because a project whose `main` is empty is not a clone of
+anything — the next serve would decide the store was still empty and import
+again. A milestone lands its marker, because a milestone naming work the branch
+does not contain is unreadable. A turn marker is written on the agent's line
+rather than the branch, because it is part of that agent's episode and the
+session that it describes reads its own thread.
+
+**Two servers share a line by sharing an identity.** Per-line CAS still
+serializes writers on one thread — that is the rebase path — so an orchestrator
+running two processes for one agent gets exactly the contention behaviour that
+existed before threads, and two different agents get isolation instead.

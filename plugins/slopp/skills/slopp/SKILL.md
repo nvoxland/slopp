@@ -78,7 +78,12 @@ measurably bleed tokens.
    failing test FIRST, then implement. An `:untested` flag? `draft_test
    {ns name code}` drafts a deftest from OBSERVED calls.
 5. **Say `done {label}` at EVERY point you think you're finished with
-   something — not once at the end.** Finished a unit of work and about to
+   something — not once at the end.** It is also what makes your work
+   VISIBLE: you write in a private thread of your own, and a green `done`
+   LANDS that thread onto the branch. Until then nobody else sees it — not
+   another agent on the same branch, not `commit_point`, not the running
+   server. A red `done` lands nothing and your thread survives, holding the
+   work that is not finished yet. Finished a unit of work and about to
    start the next? That's a done point. Call it, read the findings, and
    find out whether you were actually done before you move on. Multiple
    `done`s per session is the normal shape, not an exception: each one is
@@ -232,6 +237,37 @@ measurably bleed tokens.
 7. **Close ONCE.** Exactly ONE `commit_point {description}` at the end
    (it runs `done` and gates on that verdict — it has no checks of its own)
    unless the user asks for more.
+
+### You write in a thread; `done` lands it
+
+Every session works in its own private line — a THREAD — and a branch only
+ever contains work that reached a green `done`. Nothing about this is a mode
+you turn on or a tool you call; it is where your writes already go.
+
+`session_brief` names it: `:thread {:on "main" :unlanded 7}` means seven
+writes are yours alone. What follows from that is worth having straight,
+because each part surprises somebody:
+
+- **Another agent on the same branch cannot see your work, and you cannot
+  see theirs**, until whoever finishes first calls `done`. That is the
+  point: you both forked from the same place and neither of you is reading
+  the other's half-finished code.
+- **When you land second, your work is rebased onto theirs**, once, at your
+  own `done` — so every conflict arrives together at a moment you chose,
+  instead of arriving one at a time while you are trying to finish. The
+  result says so (`:land {:landed "main" :rebased {:merged n}}`). If the
+  rebase conflicts or goes red, NOTHING lands and your thread is still
+  there: fix it and call `done` again.
+- **A running server serves the branch**, so if slopp is hosting your app or
+  reloading its own code, that process keeps running the last landed state
+  until your `done` moves it. Your verification image is a different thing
+  and always holds your thread's code — which is why your tests are right
+  about your work while the server is still right about the branch.
+- **`commit_point` lands too**, so a milestone always names a branch that
+  contains what it milestones.
+- **Your thread survives the process.** Come back with the same agent
+  identity and you resume the same thread, un-landed work and all. Come back
+  as somebody else and you correctly see only what has landed.
 
 ## Choosing the write tool
 

@@ -1,7 +1,13 @@
 # Branches and merging
 
 A branch is a **named line** in the store: a pointer to a point in the history,
-with its own view of the code. Creating one costs a row and a copy of the
+with its own view of the code. A **thread** is the same row with no name: the
+private line every session writes to, landed onto its branch by a green `done`
+— see [Done points and milestones](done-and-milestones.md). So a branch is
+where finished work accumulates, and everything below describes lines you name
+on purpose.
+
+Creating one costs a row and a copy of the
 current view — never a copy of the history — so it is cheap enough to use for a
 risky experiment you expect to throw away.
 

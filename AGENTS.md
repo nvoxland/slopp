@@ -157,6 +157,16 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   `.context/roadmap.md`. This split is load-bearing — filing findings in the
   decision log once grew it to 47% non-decisions, which is how a settled
   decision becomes hard to find and easy to contradict.
+- **Your writes go to a THREAD, and `done` lands it** (2026-08-15). Every
+  session works in a private line; a branch only ever contains work that
+  reached a green done. `session_brief` says how much is un-landed. Two
+  consequences bite HERE specifically, because slopp hosts itself: the
+  `--live` host reloads from the trunk, so **your edits to slopp's own tool
+  code do not reach the running server until you `done`** — the verification
+  image always has them, which is why tests stay right about your work while
+  the server is still right about main. And if a `done` is red, nothing
+  lands; the thread keeps the work, so iterate and done again rather than
+  reaching for the db. Reasoning: `.context/decisions.md` § `D-threads`.
 - **Red/green TDD, always.** Tests first, watch them fail, then implement —
   through the edit tools (per-write verification reports the red/green).
   **Call `done` at every point you think you're finished with something,
