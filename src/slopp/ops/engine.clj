@@ -341,8 +341,8 @@
           (:db s)))))
 
 ^:reads (defn ^:export session-branch-line
-  "The BRANCH line this session's work belongs to — its id, or nil for an
-  ephemeral session.
+  "The BRANCH line this session's work belongs to — its id, or nil for a
+  session that has neither a journal nor a branch identity yet.
 
   Distinct from [[session-line]], which is where writes GO. They are the same
   line until a session adopts a thread, and the land is the first caller that
@@ -352,29 +352,44 @@
   name is what a checkout changes and a stored id would be a second copy of
   the same fact. The trunk falls out without a special case — a store whose
   `main` row does not exist yet has it minted here, which is the same lazy
-  resolution [[session-line]] does and for the same reason."
+  resolution [[session-line]] does and for the same reason.
+
+  An EPHEMERAL session takes its line as-is. It has no journal, so it has no
+  threads either, and its line is its branch by construction — `branch!`
+  mints a bare id there precisely so a nameless branch still has an identity."
   [session]
-  (when-let [conn (:db @session)]
+  (if-let [conn (:db @session)]
     (or (db/line-id-by-name conn (:branch @session))
-        (db/trunk-line-id! conn))))
+        (db/trunk-line-id! conn))
+    (:line @session)))
 
 ^:reads (defn ^:export session-line
-  "The LINE this session reads and writes — its id, or nil for an ephemeral
-  session, which has no journal for a line to point into.
+  "The LINE this session reads and writes — its own THREAD, or nil for an
+  ephemeral session, which has no journal for a line to point into.
 
-  `:line` is set only once a session has moved OFF the trunk, so nil means
-  \"this db's trunk\" rather than \"no line\". That is not a default hiding in a
-  function: it is resolved LAZILY on purpose, because a session can acquire
-  its store after opening — `ensure-db!` materializes one on the first durable
-  write — and an id read eagerly at open would name a store that did not exist
-  yet, then keep naming it after one appeared.
+  A session's writes are private until `done` lands them, and this is where
+  that becomes true: everything below — the write CAS, the cache refresh, the
+  materialization — resolves through here, so the thread is not a mode the
+  rest of the system has to know about. It is simply which line the answer
+  names.
 
-  Every write and every cache refresh asks this, so the session, its journal
-  suffix and its materialization can never disagree about which line they are
-  talking about."
+  ADOPT-OR-CREATE, keyed by (agent, branch). The db owns that decision
+  (`db/adopt-thread!`), and the result is cached on the session so the row is
+  touched once per session rather than once per call.
+
+  Resolved LAZILY, and it matters twice over. A session can acquire its store
+  after opening — `ensure-db!` materializes one on the first durable write —
+  so an id read eagerly at open would name a store that did not exist yet.
+  And a session's IDENTITY can arrive after opening too: the harness session
+  id comes in on the first prompt, so adopting before then would key the
+  thread to a placeholder."
   [session]
   (or (:line @session)
-      (when-let [conn (:db @session)] (db/trunk-line-id! conn))))
+      (when-let [conn (:db @session)]
+        (let [id (db/adopt-thread! conn (session-branch-line session)
+                                   (:agent-id @session))]
+          (swap! session assoc :line id)
+          id))))
 
 (defn try-commit!
   "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
@@ -1439,3 +1454,33 @@
     (into {} (for [n scope]
                [n (sha256 (str/join "|" (cons deps (map #(get per-ns % "?")
                                                         (sort (store/ns-closure store n))))))]))))
+
+(defn ^:export adopt-line!
+  "Put the session on its thread for the current branch, resynchronizing the
+  store and the image when that thread already holds work. Returns the line
+  id, or nil for an ephemeral session.
+
+  Called when a session's IDENTITY becomes known — the harness session id
+  arrives on the first prompt, after the session is already open — and
+  therefore after the store and image were loaded from the branch. If the
+  agent left un-landed work in a thread last time, both are loaded from the
+  wrong line, and only the store would heal on its own: the write CAS fails,
+  the cache refreshes, and the write lands. The IMAGE would not, and a
+  verification run against the branch's code while the store holds the
+  thread's is a wrong verdict rather than a slow one.
+
+  So the reboot is gated on the one question that distinguishes the two
+  cases: does the thread's head match what the session is holding? A freshly
+  minted thread sits exactly on the branch head, which is what the session
+  loaded, so the ordinary path costs two SELECTs and no reboot. Only a
+  genuine resume pays for an image."
+  [session]
+  (when-let [conn (:db @session)]
+    (let [line (db/adopt-thread! conn (session-branch-line session)
+                                 (:agent-id @session))]
+      (swap! session assoc :line line)
+      (when (not= (db/line-head conn line)
+                  (:id (last (store/deltas (:store @session)))))
+        (swap! session assoc :store (db/load-store conn line))
+        (when (:image @session) (fresh-image! session)))
+      line)))

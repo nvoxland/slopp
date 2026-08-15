@@ -18,7 +18,7 @@
             [slopp.ops :as ops]
             [slopp.kernel.boot :as boot]
             [slopp.store.db :as db]
-            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.kernel.parity :as parity] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge]))
+            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.kernel.parity :as parity] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge] [slopp.ops.branch :as branch]))
 
 (defn path-ns
   "`src/foo/bar_baz.clj` → `foo.bar-baz`; nil for anything that is not a
@@ -837,7 +837,14 @@
                                          (not= "deps.edn" path))]
                         (ops/file-put! sess path text :agent agent
                                        :prompt (str "clone: file from " url)))
-                      (db/set-meta! conn "git-base-sha" tip))
+                      (db/set-meta! conn "git-base-sha" tip)
+                      ;; A clone establishes the PROJECT, so it lands on the
+                      ;; branch. Everything above went through the ordinary
+                      ;; verified write path, which means it went to this
+                      ;; session's thread — and a store whose main is empty is
+                      ;; not a clone of anything: the next serve would decide
+                      ;; the store was still empty and import all over again.
+                      (branch/land-thread! sess))
                     ;; ACCOUNT for what was left behind. `:namespaces` counts what the clone
                     ;; decided to take, so on its own a lossy import announces success
                     ;; with a smaller number and nothing downstream can tell — which is

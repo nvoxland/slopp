@@ -101,10 +101,16 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external branches-survive-restart-of-a-durable-session
+  ;; The same AGENT reopens, which is what a restart is: the harness session
+  ;; id outlives the process. That makes this test say something stronger than
+  ;; it used to — the work below is never landed, so what survives the restart
+  ;; is an open THREAD, resumed by adoption, with its store and image both
+  ;; loaded from it rather than from the branch.
   (let [dir (str (System/getProperty "java.io.tmpdir")
-                 "/slopp-br-" (System/nanoTime))]
+                 "/slopp-br-" (System/nanoTime))
+        me  "br-restart"]
     (try
-      (let [sess (external/open! {:slopp.ops/dir dir})]
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id me})]
         (try
           (ops/ingest! sess 'br.core seed)
           (branch/branch! sess "feature")
@@ -114,12 +120,13 @@
                              "(deftest f-t (is (= 11 (f 1))))")
           (branch/branch-switch! sess "main")
           (finally (ops/close! sess))))
-      (let [sess (external/open! {:slopp.ops/dir dir})]
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id me})]
         (try
           (testing "the branch is still there after reopen"
             (is (some #(= "feature" (:name %))
                       (:branches (branch/query-branches sess)))))
-          (testing "switching to it restores its content and image"
+          (testing "switching to it restores its content and image — from the THREAD,
+                    since none of this was ever landed"
             (branch/branch-switch! sess "feature")
             (is (= [11] (ops/query-eval sess "(br.core/f 1)"))))
           (finally (ops/close! sess))))
@@ -278,15 +285,22 @@
   ;; their history rather than copying it, so main's log is a PREFIX of the
   ;; branch's — a snapshot would have produced two independent logs of equal
   ;; length, which is the shape this replaces.
+  ;;
+  ;; Each land is what puts work on a branch AT ALL: a session writes to its
+  ;; own thread, so without them both lines would be empty and every claim
+  ;; below would be about a store nobody wrote to.
   (let [dir (str (System/getProperty "java.io.tmpdir")
                  "/slopp-brline-" (System/nanoTime))]
     (try
-      (let [sess (external/open! {:slopp.ops/dir dir})]
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "brline"})]
         (try
           (ops/ingest! sess 'br.core seed)
+          (is (= "main" (:landed (branch/land-thread! sess))) "fixture: the seed reached main")
           (branch/branch! sess "feature")
           (ops/edit-replace! sess 'br.core 'f "(defn f [x] (+ x 10))"
                              :prompt "feature work")
+          (is (= "feature" (:landed (branch/land-thread! sess)))
+              "fixture: the feature work reached the feature branch")
           (finally (ops/close! sess))))
 
       (testing "no per-branch db file is written"
@@ -295,13 +309,18 @@
       (let [conn (db/open! dir)]
         (try
           (let [ls    (db/lines conn)
+                by-id (into {} (map (juxt :id identity)) ls)
                 feat  (first (filter #(= "feature" (:name %)) ls))
                 trunk (first (filter #(= "main" (:name %)) ls))]
             (testing "the branch is a row in the ONE store, forked from main"
               (is (some? feat) (pr-str (mapv :name ls)))
               (is (= "branch" (:kind feat)))
-              (is (= (:id trunk) (:parent feat))
-                  "and it records WHICH line it split from"))
+              (testing "and it records WHICH line it split from — the agent's THREAD on
+                        main, because a branch is created from the line you are on and
+                        that is where any un-landed work would be"
+                (let [from (by-id (:parent feat))]
+                  (is (= "thread" (:kind from)) (pr-str from))
+                  (is (= (:id trunk) (:parent from))))))
 
             (testing "each line holds its own view of the same namespace"
               (is (re-find #"\(\+ x 10\)"

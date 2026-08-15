@@ -146,7 +146,9 @@
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-modules-adopt"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
-        sess (external/open! {:slopp.ops/dir dir})]
+        ;; one agent across the reopen — the store is "populated" only for a
+        ;; session that can see the writes, and adoption is keyed by agent
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
     ;; land cross-module reality with the gate bypassed (what a bulk import
     ;; does) — manifest stays {}, journal has no :module-edge deltas
     (try
@@ -158,7 +160,7 @@
       (is (= {} (edit.modules/modules-manifest (:store @sess))))
       (finally (ops/close! sess)))
     ;; reopen: empty manifest + populated + no edge delta ever = adopt
-    (let [sess2 (external/open! {:slopp.ops/dir dir})]
+    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
       (try
         (is (= {"kb.app" #{"ka.core"}}
                (edit.modules/modules-manifest (:store @sess2))))

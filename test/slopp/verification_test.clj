@@ -154,13 +154,15 @@
   (let [dir (str (java.nio.file.Files/createTempDirectory
                   "slopp-trace"
                   (make-array java.nio.file.attribute.FileAttribute 0)))
-        s1  (external/open! {:slopp.ops/dir dir})]
+        ;; one agent across both sessions — the trace belongs to the agent's line,
+        ;; and a second identity would open a thread that has never run a test
+        s1  (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "trace"})]
     (try
       (ops/ingest! s1 'vdemo target)
       (ops/test-run! s1 'vdemo)
       (is (seq (:test-map @s1)))
       (finally (ops/close! s1)))
-    (let [s2 (external/open! {:slopp.ops/dir dir})]
+    (let [s2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "trace"})]
       (try
         (testing "a fresh session on the same store starts with the trace warm (Q3)"
           (is (= #{'vdemo/add} (get (:test-map @s2) 'vdemo/add-t))

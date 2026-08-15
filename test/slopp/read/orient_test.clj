@@ -85,7 +85,9 @@
   ;; this-session-only and every existing test would still pass.
   (let [dir (str (java.nio.file.Files/createTempDirectory
                   "slopp-obs-reopen" (make-array java.nio.file.attribute.FileAttribute 0)))]
-    (let [sess (external/open! {:slopp.ops/dir dir})]
+    (let [;; the same agent reopens — "the next session" means the same worker
+          ;; coming back, and a session's writes live on its own line
+          sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "obs"})]
       (try
         (ops/ingest! sess 'ob2.core
                      "(ns ob2.core)\n(defn scale \"Half it.\" [c r] (long (* c r)))\n")
@@ -93,7 +95,7 @@
                                    (ops/query-observe sess 'ob2.core 'scale
                                                       "(ob2.core/scale 100 0.5)"))
         (finally (ops/close! sess))))
-    (let [sess2 (external/open! {:slopp.ops/dir dir})]
+    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "obs"})]
       (try
         (let [c (orient/form-card sess2 'ob2.core 'scale)]
           (is (vector? (:examples c))

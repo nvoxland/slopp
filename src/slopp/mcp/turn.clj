@@ -16,21 +16,38 @@
             [slopp.store.db :as db]
             [slopp.store :as store]))
 
-^:unsafe (defn- append-marker! [dir kind agent intent]
-  ;; {:create? false}: the hooks fire this in whatever dir the session
-  ;; happens to be in. A marker is provenance ABOUT a store — where there
-  ;; is none, it is a no-op, never an adoption.
+^:unsafe (defn- append-marker!
+  "Append a turn marker to `dir`'s journal, on the AGENT's own line.
+
+  A marker is part of that agent's episode — `episode-boundary` finds an
+  agent's last `:done` by walking the log the session is holding — so writing
+  it to the branch would put it where the session it describes cannot see it.
+  The agent's thread is adopted the same way a session adopts one, which is
+  what makes the two agree.
+
+  It assumes the agent is on MAIN, because a hook fires with a directory and
+  a name and no notion of a checkout. A marker for an agent working on a
+  branch therefore lands on its main thread; that is a misfiled note rather
+  than lost work, and it is strictly better than the branch, where no session
+  on a thread would ever read it.
+
+  `{:create? false}`: the hooks fire this in whatever dir the session happens
+  to be in. A marker is provenance ABOUT a store — where there is none, it is
+  a no-op, never an adoption."
+  [dir kind agent intent]
   (if-let [conn (db/open! dir {:create? false})]
     (try
-      (loop [n 0]
-        (let [st (or (db/load-store conn (slopp.store.db/trunk-line-id! conn)) (store/empty-store))
-              [st' _] (store/record-turn st kind :agent agent :intent intent)
-              head (:id (last (store/deltas st)))]
-          (if (db/append! conn st' (drop (count (store/deltas st)) (store/deltas st')) [] (db/trunk-line-id! conn) head)
-            (println "turn" (name kind) "recorded for" agent)
-            (if (< n 10)
-              (recur (inc n))
-              (binding [*out* *err*] (println "contention — giving up"))))))
+      (let [line (db/adopt-thread! conn (db/trunk-line-id! conn) agent)]
+        (loop [n 0]
+          (let [st (or (db/load-store conn line) (store/empty-store))
+                [st' _] (store/record-turn st kind :agent agent :intent intent)
+                head (:id (last (store/deltas st)))]
+            (if (db/append! conn st' (drop (count (store/deltas st)) (store/deltas st'))
+                            [] line head)
+              (println "turn" (name kind) "recorded for" agent)
+              (if (< n 10)
+                (recur (inc n))
+                (binding [*out* *err*] (println "contention — giving up")))))))
       (finally (.close ^java.sql.Connection conn)))
     (binding [*out* *err*]
       (println "no slopp store at" dir "— turn" (name kind) "not recorded"))))

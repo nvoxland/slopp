@@ -277,10 +277,13 @@
   ;; is awaited on first use. Modelled as the real concurrent scenario: a
   ;; second session opens async onto a first session's live store.
   (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-async-" (System/nanoTime))
-        s1  (external/open! {:slopp.ops/dir dir})]
+        ;; both sessions are the same agent: the claim is about WHEN the second
+        ;; one can read, not about what it is allowed to see
+        s1  (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "async"})]
     (try
       (ops/ingest! s1 'async.core "(ns async.core)\n(defn twice [x] (* 2 x))\n")
-      (let [s (external/open! {:slopp.ops/dir dir :slopp.ops/async-image? true})]
+      (let [s (external/open! {:slopp.ops/dir dir :slopp.ops/async-image? true
+                              :slopp.ops/agent-id "async"})]
         (try
           (testing "async mode arms a ready-promise; the store reads immediately"
             (is (some? (:image-ready @s)) "async mode set a ready-promise")

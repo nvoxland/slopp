@@ -15,14 +15,21 @@
 (deftest ^:external two-servers-one-store
   (let [dir (str (System/getProperty "java.io.tmpdir")
                  "/slopp-m5b-" (System/nanoTime))
-        s1  (external/open! {:slopp.ops/dir dir})]
+        ;; ONE agent id across both servers, deliberately. This test is about two
+        ;; PROCESSES writing the same line — the stale-but-different-form
+        ;; rebase, the same-form race — and a session's line is now its
+        ;; thread, which is keyed by agent. Two ids would give them two lines
+        ;; and every contention assertion below would pass by never meeting.
+        ;; An orchestrator running two processes for one agent (SLOPP_AGENT)
+        ;; is exactly this shape.
+        s1  (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "m5b"})]
     (try
       (ops/ingest! s1 'tp.core
                    (str "(ns tp.core (:require [clojure.test :refer [deftest is]]))\n"
                         "(defn f [x] (inc x))\n"
                         "(defn h [x] (dec x))\n"
                         "(deftest f-t (is (= 2 (f 1))))\n"))
-      (let [s2 (external/open! {:slopp.ops/dir dir})]           ; second server, same dir
+      (let [s2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "m5b"})]           ; second server, same dir
         (try
           (testing "server 2 opens onto server 1's work"
             (is (= [2] (ops/query-eval s2 "(tp.core/f 1)"))))
@@ -76,7 +83,12 @@
 (deftest ^:external private-checkouts-shared-branch-storage        ; m5c
   (let [dir (str (System/getProperty "java.io.tmpdir")
                  "/slopp-m5c-" (System/nanoTime))
-        s1  (external/open! {:slopp.ops/dir dir})]
+        ;; one agent id across both servers — see two-servers-one-store. What is
+        ;; private here is the CHECKOUT (which branch each server is on), and
+        ;; that is per-session state; the storage is shared, which is the
+        ;; claim. Two ids would make the work private too, and every
+        ;; assertion about seeing each other would be about nothing.
+        s1  (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "m5c"})]
     (try
       (ops/ingest! s1 'pc.core
                    (str "(ns pc.core)\n(defn f [x] (inc x))\n"))
@@ -84,7 +96,7 @@
       (branch/branch! s1 "feature")
       (ops/edit-replace! s1 'pc.core 'f "(defn f [x] (+ x 50))"
                          :prompt "feature work" :agent "server-1")
-      (let [s2 (external/open! {:slopp.ops/dir dir})]          ; server 2: own checkout (main)
+      (let [s2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "m5c"})]          ; server 2: own checkout (main)
         (try
           (testing "checkouts are per-server: s2 is on main, unaffected"
             (is (= "main" (:current (branch/query-branches s2))))

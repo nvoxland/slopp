@@ -3091,6 +3091,28 @@ recompiled (engine/after-write! session ns-sym)]
         ;; restart, covers import as well as adoption, and cannot disagree
         ;; with the module graph — one `module-layers`, one answer.
         cycles   (vec (:cycles (store/module-layers (:modules st))))
+;; the line this session WRITES to, when it is a private one. Read from
+        ;; the session rather than resolved, deliberately: resolving ADOPTS,
+        ;; and orientation must not be the thing that creates a workspace.
+        ;; The count is measured from the thread's own base, which is the one
+        ;; delta guaranteed to be in its log however far the branch has moved.
+        thread   (when-let [conn (:db @session)]
+                   (when-let [row (and (:line @session)
+                                       (first (filter #(= (:line @session) (:id %))
+                                                      (db/lines conn))))]
+                     (when (= "thread" (:kind row))
+                       (let [ds (store/deltas st)
+                             n  (if-let [b (:base row)]
+                                  (max 0 (dec (- (count ds)
+                                                 (count (take-while #(not= b (:id %)) ds)))))
+                                  (count ds))]
+                         (cond-> {:on (:branch @session) :unlanded n}
+                           (pos? n)
+                           (assoc :note
+                                  (str n " write(s) are private to this thread. A green"
+                                       " done lands them on " (:branch @session)
+                                       "; nothing outside this session — the running"
+                                       " host included — can see them until it does.")))))))
         intent   (:last-intent @session)
         stop     #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
                    "tell" "every" "should" "their" "them" "than" "then" "they"
@@ -3141,6 +3163,7 @@ recompiled (engine/after-write! session ns-sym)]
                   " one-time debt: move what crosses, then module_dep"
                   " {from … to … remove true}."))
       host       (assoc :host host)
+      thread     (assoc :thread thread)
       ;; the reviewer UI, when the server brought one up. It is for a HUMAN,
       ;; and its only other announcement is a line on the server's stderr —
       ;; which most clients never show anyone. Hand the url over when asked

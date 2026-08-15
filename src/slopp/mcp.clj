@@ -9,7 +9,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine]))
 
 (def ^:private protocol-version "2024-11-05")
 
@@ -308,7 +308,15 @@
                          (catch Exception _ nil))
                     {:prompt raw})]
             (when (and sid (not (:env-agent? @session)))
-              (swap! session assoc :agent-id sid))
+              (swap! session assoc :agent-id sid)
+              ;; identity settled → the session takes THIS agent's thread.
+              ;; It is the first moment it can: the session opened before the
+              ;; harness id existed, so its store and image were loaded from
+              ;; the branch. If this agent left un-landed work last time, both
+              ;; came from the wrong line — and only the store heals on its
+              ;; own, which would leave verification grading the branch's code
+              ;; against the thread's store.
+              (engine/adopt-line! session))
             (when-not (str/blank? (or prompt ""))
               ;; a new ask is a new READER, potentially: /clear and automatic
               ;; compaction both land here and neither is visible any other
@@ -1360,7 +1368,16 @@
   file:line coordinate, so emitting frames replaced the real diagnostic with a
   guard exception."
   [dir tool arguments]
-  (let [session (external/open! {:slopp.ops/dir (str dir)})]
+  (let [session (external/open!
+                 (cond-> {:slopp.ops/dir (str dir)}
+                   ;; a one-shot names its agent in the call, and that name is
+                   ;; the SESSION's identity, not merely the delta's. Turns are
+                   ;; durable across processes and so is the LINE one was opened
+                   ;; on — a fresh identity per process would open a fresh
+                   ;; thread per call, and the turn would be unfindable by the
+                   ;; very write it was opened for.
+                   (:agent arguments)
+                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
     (swap! session assoc :require-turns? true)
     (try
       (try (call-tool! session {:name tool :arguments arguments})

@@ -281,7 +281,17 @@
                                (update :lines dissoc nm)    ; claim → active
                                (update :lines assoc (:branch s)
                                        {:store (:store s) :id cur})
-                               (assoc :branch nm :line id))))
+                               (assoc :branch nm
+                                      ;; a branch is somewhere to land, not
+                                      ;; somewhere to write: the session takes
+                                      ;; a thread ON the new branch, the same
+                                      ;; way it holds one on main. An ephemeral
+                                      ;; session has no journal to hold threads
+                                      ;; in, so its line is the branch itself.
+                                      :line (if conn
+                                              (db/adopt-thread!
+                                               conn id (:agent-id @session))
+                                              id)))))
                   {:branch nm :from branch :id id}))))))))
 
 (defn ^:export branch-switch!
@@ -295,15 +305,28 @@
   What moves is the session's LINE, not its connection. There is one db, so a
   checkout is now purely a question of which line this session reads and
   writes; `data-version` is deliberately not touched, because a switch cannot
-  change the version of a connection it did not change."
+  change the version of a connection it did not change.
+
+  The line it moves to is the session's THREAD on that branch, not the branch
+  itself — every branch gets the same isolation main has. The store has to
+  come from the same place: a parked store describes the line it was parked
+  FROM, and re-adoption hands that line back while the thread is still open,
+  so the ordinary switch reuses everything. A thread that has been landed, or
+  one another process advanced, is a different line, and its store is read
+  rather than assumed."
   [session nm]
   (let [nm (str nm)]
     (if (= nm (:branch @session))
       {:switched nm :note "already on it"}
       (if-let [target (line-view session nm)]
-        (let [adopted (:image target)
-              booted  (when-not adopted
-                        (boot-line-image! session (:store target)))]
+        (let [conn    (:db @session)
+              thread  (when conn
+                        (db/adopt-thread! conn (db/line-id-by-name conn nm)
+                                          (:agent-id @session)))
+              same?   (or (nil? conn) (= thread (:id target)))
+              store   (if same? (:store target) (db/load-store conn thread))
+              adopted (when same? (:image target))
+              booted  (when-not adopted (boot-line-image! session store))]
           (if (:error booted)
             booted
             (do (swap! session
@@ -316,8 +339,8 @@
                                       :last-used (System/currentTimeMillis)})
                              (update :lines dissoc nm)
                              (assoc :branch nm
-                                    :line (:id target)
-                                    :store (:store target)
+                                    :line (or thread (:id target))
+                                    :store store
                                     :image (or adopted (:image booted))
                                     :test-map {}))))
                 (cond-> {:switched nm}
@@ -388,8 +411,14 @@
                     (:image line) (assoc :image :parked)))]
     {:current  branch
      :branches (vec (concat
-                     [(assoc (info branch store {:id (engine/session-line session)})
-                             :image :live)]
+                     [(let [bid (engine/session-branch-line session)]
+                        ;; the BRANCH's id and head, not the session's. Those
+                        ;; are the same line until a thread is adopted, and
+                        ;; after that reporting the session's would print a
+                        ;; private line's identity under a branch's name — and
+                        ;; a head containing work the branch does not have.
+                        (cond-> (assoc (info branch store {:id bid}) :image :live)
+                          conn (assoc :head (db/line-head conn bid))))]
                      (for [[nm line] (sort-by key lines) :when (map? line)]
                        (info nm (:store line) line))
                      (for [nm (sort (remove (set (conj (keys lines) branch))

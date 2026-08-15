@@ -42,6 +42,11 @@
                             "(defn g [x] (f x))\n"
                             "(deftest f-t (is (= 2 (f 1))))\n")
                        :agent "founder")
+          ;; landed, because step 2 copies the DIRECTORY: what a fork inherits
+          ;; is the project, and un-landed work in somebody's thread is not
+          ;; the project yet
+          (is (= "main" (:landed (branch/land-thread! sess)))
+              "fixture: the mainline project reached main before it was forked")
           (finally (ops/close! sess))))
       ;; 2. fork = copy the project dir
       (clojure.java.shell/sh "cp" "-r" a-dir b-dir)
@@ -54,6 +59,11 @@
                          "(defn h [x] (* 10 (g x)))" :agent "forker")
           (ops/add-form! sess 'fm.core
                          "(deftest h-t (is (= 30 (h 1))))" :agent "forker")
+          ;; the fork's work has to be ON the fork before the mainline can
+          ;; merge it: a merge reads the other project's BRANCH, which is the
+          ;; only thing a second repo has any business seeing
+          (is (= "main" (:landed (branch/land-thread! sess)))
+              "fixture: the fork's divergence reached the fork's main")
           (finally (ops/close! sess))))
       ;; 4. meanwhile mainline diverges on a DIFFERENT form
       (let [sess (external/open! {:slopp.ops/dir a-dir})]

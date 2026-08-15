@@ -26,23 +26,34 @@
 (deftest ^:external landing-carries-a-threads-work-onto-its-branch
   ;; The whole point of a thread stated as an observation: the branch renders
   ;; the OLD source while the thread holds the new one, and the land is what
-  ;; changes that. Both halves matter — a land that worked against a branch
-  ;; which could already see the work would prove nothing about isolation.
+  ;; changes that.
+  ;;
+  ;; The seed is landed through a done rather than written straight to main,
+  ;; and that is not ceremony — nothing can write straight to main any more.
+  ;; It is also what makes the assertion below mean something: main renders
+  ;; `(inc x)`, so "the branch cannot see the edit" is a contrast rather than
+  ;; a statement about an empty store.
   (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-land-" (System/nanoTime))]
     (try
-      (let [sess (external/open! {:slopp.ops/dir dir})]
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
         (try
-          (ops/ingest! sess 'th.core seed)
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          ;; landed directly rather than through a done: the fixture is establishing
+          ;; a starting state on main, not claiming a verdict about it. A done
+          ;; here would run the dead-surface gate over a one-function namespace
+          ;; and go red on it, which says nothing about anything below.
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-1"})]
+        (try
           (let [conn   (:db @sess)
                 trunk  (db/trunk-line-id! conn)
-                thread (db/adopt-thread! conn trunk "agent-1")]
-            ;; 4b does this on the session's behalf. Until it does, the test
-            ;; puts the session on its thread by hand — which is exactly the
-            ;; state the land has to handle, and doing it here is what keeps
-            ;; the land buildable while the default is still off.
-            (swap! sess assoc :line thread)
+                thread (engine/session-line sess)]
+            (is (not= trunk thread) "fixture: the session adopted a thread of its own")
             (ops/edit-replace! sess 'th.core 'f "(defn f [x] (+ x 10))"
-                               :prompt "thread work")
+                               :prompt "thread work" :agent "agent-1")
 
             (testing "the branch cannot see un-landed work"
               (is (re-find #"\(inc x\)"
@@ -71,28 +82,35 @@
   ;; done finds the branch somewhere it was not, and rebases ONCE, at its own
   ;; done, with every consequence arriving together.
   ;;
+  ;; Two sessions with different agent ids is the whole setup — each takes its
+  ;; own thread at open, because that is what an agent id IS here.
+  ;;
   ;; The assertion that matters is the one about the OTHER agent's work: a
   ;; land implemented as "point the branch at my head" would pass every
   ;; assertion about the lander and silently discard everything that landed
   ;; while it worked.
   (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-rebase-" (System/nanoTime))]
     (try
-      (let [setup (external/open! {:slopp.ops/dir dir})]
-        (ops/ingest! setup 'th.core seed)
-        (ops/close! setup))
-      (let [a (external/open! {:slopp.ops/dir dir})
-            b (external/open! {:slopp.ops/dir dir})]
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          ;; landed directly, not through a done — see the note in
+          ;; landing-carries-a-threads-work-onto-its-branch
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
         (try
           (let [conn  (:db @a)
-                trunk (db/trunk-line-id! conn)
-                ta    (db/adopt-thread! conn trunk "agent-a")
-                tb    (db/adopt-thread! conn trunk "agent-b")]
-            (is (not= ta tb) "fixture: two agents, two threads")
-            (swap! a assoc :line ta)
-            (swap! b assoc :line tb)
+                trunk (db/trunk-line-id! conn)]
+            (is (not= (engine/session-line a) (engine/session-line b))
+                "fixture: two agents, two threads")
 
-            (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))" :prompt "a works")
-            (ops/ingest! b 'th.other "(ns th.other)\n\n(defn g [] :from-b)\n")
+            (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))"
+                               :prompt "a works" :agent "agent-a")
+            (ops/ingest! b 'th.other "(ns th.other)\n\n(defn g [] :from-b)\n" :agent "agent-b")
 
             (testing "B lands first — a plain fast-forward, nothing to reconcile"
               (let [r (branch/land-thread! b)]
@@ -127,14 +145,23 @@
   ;; that out.
   (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-done-" (System/nanoTime))]
     (try
-      (let [sess (external/open! {:slopp.ops/dir dir})]
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
         (try
-          (let [me     (:agent-id @sess)
-                _      (ops/ingest! sess 'th.core seed :agent me)
-                conn   (:db @sess)
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          ;; landed directly, not through a done — see the note in
+          ;; landing-carries-a-threads-work-onto-its-branch. Doubly so here:
+          ;; the done under test is the one below, and a fixture that also
+          ;; dones would put the interesting verdict second.
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [me   "agent-1"
+            sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id me})]
+        (try
+          (let [conn   (:db @sess)
                 trunk  (db/trunk-line-id! conn)
-                thread (db/adopt-thread! conn trunk me)]
-            (swap! sess assoc :line thread)
+                thread (engine/session-line sess)]
             (ops/ingest! sess 'th.core-test
                          (str "(ns th.core-test\n"
                               "  (:require [clojure.test :refer [deftest is]]\n"

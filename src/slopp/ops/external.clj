@@ -718,17 +718,35 @@ client-deps (merge (:client-deps st) (:client provided))
   ([] (open! {}))
   ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image?]}]
    (let [conn    (when dir (db/open! dir {:create? false}))
+         ;; ONE identity, minted once. `session-identity` generates a fresh
+         ;; random id per call, so computing it twice would key this session's
+         ;; THREAD to one id and its deltas to another.
+         me      (or agent-id (engine/session-identity))
+         ;; Adopt EAGERLY only when the identity is already settled — an
+         ;; explicit id, or SLOPP_AGENT. The MCP server's identity arrives on
+         ;; the first prompt instead, so adopting here would mint a thread
+         ;; keyed to a placeholder and orphan it a moment later; that session
+         ;; adopts lazily and resynchronizes through `engine/adopt-line!`.
+         stable? (boolean (or agent-id (not-empty (System/getenv "SLOPP_AGENT"))))
          session (atom {:db conn :dir dir :branch "main" :lines {}})]
      (try
-       (let [store (or (some-> conn (db/load-store (db/trunk-line-id! conn))) (store/empty-store))
+       (let [line  (when (and conn stable?)
+                     (db/adopt-thread! conn (db/trunk-line-id! conn) me))
+             ;; loaded from the session's OWN line, so the image below boots
+             ;; the code this session is going to work on rather than the
+             ;; branch's — which are the same until a thread holds un-landed
+             ;; work, and silently different afterwards
+             store (or (some-> conn (db/load-store (or line (db/trunk-line-id! conn))))
+                       (store/empty-store))
              ttl   (or branch-image-ttl-ms 600000)]
          ;; SYNC phase: the store value + everything reads need, no image
          (swap! session assoc
                 :store store
+                :line line
                 :data-version (some-> conn db/data-version)
                 :test-map (or (engine/load-trace conn store) {})
                 :observed (engine/load-observations conn)
-                :agent-id (or agent-id (engine/session-identity))
+                :agent-id me
                 :env-agent? (boolean (not-empty (System/getenv "SLOPP_AGENT")))
                 :branch-image-ttl-ms ttl
                 :warm-spare? (boolean warm-spare?))
@@ -747,12 +765,12 @@ client-deps (merge (:client-deps st) (:client provided))
          ;; which arms the ready-promise await-image! blocks on
          (if async-image?
            (do (swap! session assoc :image-ready (promise))
-               (doto (Thread. ^Runnable #(boot-image! session store conn agent-id ttl)
+               (doto (Thread. ^Runnable #(boot-image! session store conn me ttl)
                               "slopp-image-boot")
                  (.setDaemon true)
                  (.start))
                session)
-           (boot-image! session store conn agent-id ttl)))
+           (boot-image! session store conn me ttl)))
        (catch Throwable t
          (ops/close! session)
          (throw t))))))
@@ -1626,6 +1644,18 @@ client-deps (merge (:client-deps st) (:client provided))
                        (vreset! v d)
                        st2))
                    [])
+                  ;; the marker is a statement about the BRANCH, so it has to reach one.
+                  ;; done landed the work a moment ago and left this session on a
+                  ;; FRESH thread, which is exactly where the marker delta just
+                  ;; went — so without this a milestone records itself onto a line
+                  ;; nobody will ever read, and the projection folds a branch whose
+                  ;; last delta is the one before the milestone.
+                  ;;
+                  ;; Unconditional, `:force` included. Forcing is an explicit
+                  ;; request to record a red state as a milestone, and a milestone
+                  ;; naming work the branch does not contain is not honest, it is
+                  ;; unreadable.
+                  (branch/land-thread! session)
                   (merge {:commit (:id @v) :target target :status status
                           :description description}
                          result-extra)))]

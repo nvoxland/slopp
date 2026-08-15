@@ -53,14 +53,19 @@
         target (str "(ns demo\n  (:require [clojure.test :refer [deftest is]]))\n"
                     "(defn add [x y] (+ x y))\n"
                     "(deftest t (is (= 6 (add 2 3))))\n")
-        sess (external/open! {:slopp.ops/dir dir})]
+        ;; the SAME agent id across the restart, because that is what a restart
+        ;; is: the process goes, the agent does not. Without it the second
+        ;; session is a different agent, takes its own thread, and correctly
+        ;; sees only what was landed — which is nothing, since this test
+        ;; never calls done.
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "restart"})]
     (try
       (ops/ingest! sess 'demo target)
       (ops/edit-replace! sess 'demo 'add "(defn add [x y] (+ x y 1))" :prompt "off-by-one")
       (ops/test-run! sess 'demo)
       (finally (ops/close! sess)))
     ;; process "restarts": a brand-new session over the same dir
-    (let [sess2 (external/open! {:slopp.ops/dir dir})]
+    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "restart"})]
       (try
         (testing "source is reconstructed from the db"
           (is (re-find #"\(\+ x y 1\)" (query/query-source sess2 'demo))))
@@ -98,7 +103,10 @@
   ;; which is what the slopp-setup skill has always promised.
   (let [dir  (temp-dir)
         sdir (io/file dir ".slopp")
-        sess (external/open! {:slopp.ops/dir dir})]
+        ;; one agent across both sessions: the durability claim is about the
+        ;; STORE, and a second identity would read a line this write never
+        ;; reached rather than an empty disk
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "storeless"})]
     (try
       (testing "opening a session on a storeless dir writes nothing to disk"
         (is (not (.exists sdir))
@@ -108,7 +116,7 @@
         (is (.exists (io/file sdir "store.db"))))
       (finally (ops/close! sess)))
     (testing "and that write is durable — a fresh session reads it back"
-      (let [sess2 (external/open! {:slopp.ops/dir dir})]
+      (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "storeless"})]
         (try
           (is (re-find #"\(\+ x y\)" (query/query-source sess2 'demo)))
           (finally (ops/close! sess2)))))))
