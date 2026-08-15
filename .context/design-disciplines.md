@@ -2305,3 +2305,19 @@ not evidence about that, because you ran it somewhere else.
 through NO channel — nothing on their jar read the column, `slopp.store.db` was
 unavailable, and raw `sqlite3` is blocked by a hook. When a consumer has no
 channel at all, the check is a HUMAN action and saying so is part of sending it.
+
+**The migration-script corollary** (slopp-ui, 2026-08-16). Their backfill script
+carried a verification that was broken — SQLite refuses `ORDER BY … LIMIT` in
+the anchor of a compound SELECT — and it cost nothing, because `set -e` put the
+failure BEFORE the UPDATE instead of after it. They were explicit that this was
+habit rather than judgement: *"the habit was doing work I was not."*
+
+So: **order a migration script so a broken check fails before the write.** The
+reason is not defensive coding, it is the same asymmetry as above — the author
+of a check is the person least able to notice it is broken, because they wrote
+it against the state they already understand. Put the unverified thing first and
+its failure is free; put it after the mutation and it is a repair.
+
+Both halves of that exchange are worth keeping together, because they happened
+in messages ABOUT how checks fail: mine was unrunnable by its reader, theirs was
+untested by its author.

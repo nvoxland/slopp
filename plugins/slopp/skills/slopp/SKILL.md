@@ -269,7 +269,13 @@ because each part surprises somebody:
   contains what it milestones.
 - **Your thread survives the process.** Come back with the same agent
   identity and you resume the same thread, un-landed work and all. Come back
-  as somebody else and you correctly see only what has landed.
+  as somebody else and you correctly see only what has landed. What persists
+  is the IDENTITY, not the id: landing settles one thread and opens another,
+  so the id changes every time and nothing should be keyed on it.
+- **`:unlanded` counts WORK, not deltas.** A verification or a done boundary
+  is a delta on your thread and not something anyone would call pending, so
+  they do not count. It is the same set `query_changes` reports on, which is
+  what lets the two be compared.
 
 **Gone down a wrong path and want to start over?** `thread_drop` with no
 argument abandons your own thread and puts you back where the branch is, with
