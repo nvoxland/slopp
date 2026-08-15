@@ -162,6 +162,34 @@ worth stating: a session that is orienting and reading has written nothing, so
 a clock that moved only on writes reports a thread idle for exactly as long as
 somebody is thinking in it.
 
+**The land is one transaction and two cases** (2026-08-15).
+`db/land-thread!` advances the branch's head, replaces the branch's `elements`
+from the thread's, and settles the thread `landed` — all three or none, because
+a head that moved without its view following is a line that renders source its
+own journal disagrees with. The copy DELETEs first: `(line, ns, pos)` says
+nothing about which write a row came from, so a thread that REWROTE a namespace
+would otherwise leave the branch's older rows beside the newer ones.
+
+`ops.branch/land-thread!` is the loop above it, and the two cases compose:
+
+- **The branch has not moved** — a pure fast-forward, and nothing is
+  re-verified, because the content is byte-identical to what `done` just
+  graded.
+- **The branch moved** — merge the branch INTO the thread first, through the
+  same pipeline `branch_merge` uses. The thread's head then has the branch's
+  head in its ancestry, so the rest is the fast-forward case. Conflicts or a
+  red rebase land NOTHING and leave the thread open holding the merged state.
+
+Losing the CAS is a RETRY, not a failure: another agent landed between the
+reconcile and the advance, which is the ordinary shape of a shared branch.
+Bounded, so a branch under continuous landing says so rather than spinning.
+
+The land REPORTS whether it reconciled (`:rebased`), and that is not decoration
+— a fast-forward and a rebase are the same green from outside, and the agent
+whose work was just replayed onto somebody else's is the one who most needs to
+know which happened. It is also what lets the test tell the two paths apart:
+without it, a land that never merged passes every assertion about the lander.
+
 **The id counter belongs to the FILE, not the line**, and this is the sharp
 edge. Ids are minted from a store VALUE (`store/gen-id` counts `:next-id`)
 while `deltas.id` is UNIQUE across the whole journal, so two lines counting
