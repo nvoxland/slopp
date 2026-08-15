@@ -111,6 +111,15 @@
              (jdbc/execute-one! conn ["DELETE FROM lines WHERE id = ?" line-id]))
             0)))
 
+^:reads (defn ^:export line-id-by-name
+  "The id of the line named `nm`, or nil if nothing answers to that name.
+
+  Only a BRANCH can be returned: a thread is the anonymous case, so it has no
+  name to be found by. That is the property that makes this safe to use as
+  \"which line does this session's work land on\"."
+  [conn nm]
+  (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = ?" nm])))
+
 ^:reads (defn ^:export trunk-line-id!
   "The trunk line's id, minting the row when a store predates the lines table.
 
@@ -120,7 +129,7 @@
 
   The bang is the mint; reading an existing store's trunk is a plain read."
   [conn]
-  (or (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = 'main'"]))
+  (or (line-id-by-name conn "main")
       (create-line! conn
                     {:name "main" :kind "branch"
                      :base (one-col (jdbc/execute-one!
@@ -767,6 +776,53 @@
                         :base   (line-head conn branch-line-id)
                         :parent branch-line-id
                         :agent  agent})))
+
+(defn ^:export land-thread!
+  "Move `branch-line-id` onto `thread-line-id`'s head, iff the branch is still
+  at `expected-branch-head`. Returns true on commit; false = somebody else
+  landed first, and the caller reconciles and retries.
+
+  Three facts, ONE transaction, because they are not independently useful. The
+  branch's head advances; its `elements` are replaced by the thread's; the
+  thread is settled `landed` so it is never handed back to its agent. A head
+  that moved without its view following is not a partial success — it is a
+  line that renders source its own journal disagrees with, which reads as a
+  corrupt store rather than as an interrupted write.
+
+  The copy DELETEs first. The branch's rows are its whole view, and a thread
+  that rewrote a namespace the branch already had would otherwise leave the
+  branch's older rows in place beside the newer ones — under a primary key
+  that permits it, since `(line, ns, pos)` says nothing about which write a
+  row came from.
+
+  Nothing is appended and nothing is verified. A fast-forward land carries
+  content that is byte-identical to what the caller just graded, so re-running
+  the suite here would grade the same store twice; when the branch HAS moved,
+  reconciling is the caller's job and it happens before this is called.
+
+  The CAS is the same shape as `append!`'s and for the same reason — check and
+  advance in one statement, `IS` rather than `=` so a branch with no writes yet
+  matches on NULL."
+  [conn thread-line-id branch-line-id expected-branch-head]
+  (jdbc/with-transaction [tx conn]
+    (let [now   (System/currentTimeMillis)
+          head  (line-head tx thread-line-id)
+          moved (:next.jdbc/update-count
+                 (jdbc/execute-one!
+                  tx ["UPDATE lines SET head = ?, used_at = ?
+                       WHERE id = ? AND head IS ?"
+                      head now branch-line-id expected-branch-head]))]
+      (if-not (pos? (or moved 0))
+        false
+        (do (jdbc/execute! tx ["DELETE FROM elements WHERE line = ?" branch-line-id])
+            (jdbc/execute! tx ["INSERT INTO elements
+                                  (line,ns,pos,kind,form_id,name,source,comment)
+                                SELECT ?, ns, pos, kind, form_id, name, source, comment
+                                FROM elements WHERE line = ?"
+                               branch-line-id thread-line-id])
+            (jdbc/execute! tx ["UPDATE lines SET status = 'landed', used_at = ?
+                                WHERE id = ?" now thread-line-id])
+            true)))))
 
 ^:reads (defn ^:export ancestry
   "The delta ids reaching `head`, OLDEST first — one line's whole history.

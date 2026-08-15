@@ -340,6 +340,24 @@
             (.close ^java.sql.Connection conn))
           (:db s)))))
 
+^:reads (defn ^:export session-branch-line
+  "The BRANCH line this session's work belongs to — its id, or nil for an
+  ephemeral session.
+
+  Distinct from [[session-line]], which is where writes GO. They are the same
+  line until a session adopts a thread, and the land is the first caller that
+  needs them apart: it moves one onto the other.
+
+  Resolved from the branch NAME rather than kept in the session, because the
+  name is what a checkout changes and a stored id would be a second copy of
+  the same fact. The trunk falls out without a special case — a store whose
+  `main` row does not exist yet has it minted here, which is the same lazy
+  resolution [[session-line]] does and for the same reason."
+  [session]
+  (when-let [conn (:db @session)]
+    (or (db/line-id-by-name conn (:branch @session))
+        (db/trunk-line-id! conn))))
+
 ^:reads (defn ^:export session-line
   "The LINE this session reads and writes — its id, or nil for an ephemeral
   session, which has no journal for a line to point into.

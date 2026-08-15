@@ -395,3 +395,83 @@
                      (for [nm (sort (remove (set (conj (keys lines) branch))
                                             (keys by-name)))]
                        {:name nm :id (:id (by-name nm))})))}))
+
+(defn ^:export land-thread!
+  "Land the session's thread onto its branch, and put the session on a fresh
+  thread forked at the new head. nil when there is nothing to land — an
+  ephemeral session, a session that is not on a thread, or a thread nobody
+  has written to.
+
+  Two cases that compose into one loop:
+
+  - **The branch has not moved** (its head is still the thread's fork point).
+    A pure fast-forward: `db/land-thread!` advances the head, replaces the
+    branch's view and settles the thread, all in one transaction. Nothing is
+    merged and NOTHING IS RE-VERIFIED, because the content is byte-identical
+    to what the caller just graded.
+  - **The branch moved** — somebody else landed while this thread worked. The
+    branch is merged INTO the thread first, through the same pipeline a
+    `branch_merge` uses, which replays, hot-loads, commits and re-verifies the
+    namespaces it touched. The thread's head then has the branch's head in its
+    ancestry, so the second half is the fast-forward case. Conflicts or a red
+    rebase land NOTHING and leave the thread open holding the merged state:
+    the agent resolves and calls done again.
+
+  Losing the CAS is a RETRY, not a failure — another agent landed between the
+  reconcile and the advance, which is the ordinary shape of a shared branch
+  rather than an error. Bounded, because a branch under continuous landing
+  should say so rather than spin.
+
+  A thread whose head still equals the branch's is not landed and not settled.
+  Otherwise every done with nothing written would burn a thread and mint
+  another, and `used_at` would stop meaning what it says."
+  [session]
+  (let [conn (:db @session)
+        line (engine/session-line session)
+        row  (when conn (first (filter #(= line (:id %)) (db/lines conn))))]
+    (when (= "thread" (:kind row))
+      (let [branch-id (engine/session-branch-line session)
+            branch-nm (:branch @session)]
+        (loop [reconciled nil, tries 0, rebase nil]
+          (let [bh (db/line-head conn branch-id)
+                th (db/line-head conn line)]
+            (cond
+              (= th bh)
+              nil
+
+              (< 3 tries)
+              {:landed false
+               :reason (str branch-nm " moved under every attempt to land — it is"
+                            " being written continuously; call done again")}
+
+              (or (= bh (:base row)) (= bh reconciled))
+              (if (db/land-thread! conn line branch-id bh)
+                (let [fresh (db/adopt-thread! conn branch-id (:agent-id @session))]
+                  (swap! session assoc :line fresh)
+                  (cond-> {:landed branch-nm :head th :thread fresh}
+                    rebase (assoc :rebased rebase)))
+                (recur reconciled (inc tries) rebase))
+
+              :else
+              (let [m (merge-into-session! session (db/load-store conn branch-id)
+                                           (str "branch:" branch-nm "#" branch-id))]
+                (cond
+                  (:error m)
+                  {:landed false :reason (:error m)}
+
+                  (:conflict m)
+                  (recur reconciled (inc tries) rebase)
+
+                  (seq (:conflicts m))
+                  {:landed false :conflicts (:conflicts m)
+                   :reason (str branch-nm " moved while you worked, and rebasing onto"
+                                " it conflicts — resolve, then call done again")}
+
+                  (or (pos? (:fail (:test m) 0)) (pos? (:error (:test m) 0)))
+                  {:landed false :test (:test m)
+                   :reason (str branch-nm " moved while you worked, and your work is"
+                                " red against it — fix, then call done again")}
+
+                  :else
+                  (recur bh (inc tries)
+                         (merge rebase (select-keys m [:merged :new-nses :merge-delta]))))))))))))

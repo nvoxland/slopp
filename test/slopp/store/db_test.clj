@@ -818,3 +818,49 @@
         (is (= id (db/adopt-thread! conn trunk "agent-1")) "fixture: the same thread, re-adopted")
         (is (< 1 (used)) "adoption is a use"))
       (finally (.close conn)))))
+
+(deftest ^:external landing-a-thread-moves-the-branch-and-its-view-together
+  ;; The land is three facts that must not come apart: the branch's head
+  ;; advances, its `elements` follow, and the thread is settled so it is never
+  ;; re-entered. A head that moved without its view following is not a partial
+  ;; success — it is a line that renders source its journal disagrees with,
+  ;; which reads as a corrupt store rather than as an interrupted write.
+  ;;
+  ;; The thread REWRITES a namespace the branch already has, not merely adds
+  ;; one. A copy that inserts without deleting first leaves the branch's old
+  ;; rows in place, and every assertion about the namespace the thread ADDED
+  ;; would still pass.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [row-of (fn [id] (first (filter #(= id (:id %)) (db/lines conn))))
+            s1     (store/ingest (store/empty-store) 'ld.one "(ns ld.one)\n\n(def a 1)\n")
+            trunk  (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['ld.one] trunk nil)))
+        (let [h1     (db/line-head conn trunk)
+              thread (db/adopt-thread! conn trunk "agent-1")
+              s2     (-> s1
+                         (store/ingest 'ld.two "(ns ld.two)\n\n(def b 2)\n")
+                         (store/ingest 'ld.one "(ns ld.one)\n\n(def a 99)\n"))
+              new2   (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
+          (is (true? (db/append! conn s2 new2 ['ld.two 'ld.one] thread h1)))
+          (is (nil? (get-in (db/load-store conn trunk) [:namespaces 'ld.two]))
+              "before the land, the branch cannot see the thread's work")
+
+          (let [t1 (db/line-head conn thread)]
+            (testing "a stale expectation lands nothing at all"
+              (is (false? (db/land-thread! conn thread trunk "d-not-the-branch-head")))
+              (is (= h1 (db/line-head conn trunk)) "the branch did not move")
+              (is (= "open" (:status (row-of thread))) "and the thread was not settled"))
+
+            (is (true? (db/land-thread! conn thread trunk h1)))
+            (is (= t1 (db/line-head conn trunk)) "the branch points at the thread's head")
+            (is (= #{'ld.one 'ld.two} (set (keys (:namespaces (db/load-store conn trunk)))))
+                "and its view followed")
+            (is (= (store.render/render-ns s2 'ld.one)
+                   (store.render/render-ns (db/load-store conn trunk) 'ld.one))
+                "including a namespace the thread REWROTE — the copy replaces, never merges")
+            (is (= "landed" (:status (row-of thread))))
+            (testing "and a landed thread is not handed back to its agent"
+              (is (not= thread (db/adopt-thread! conn trunk "agent-1")))))))
+      (finally (.close conn)))))

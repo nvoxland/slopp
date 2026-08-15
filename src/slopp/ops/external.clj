@@ -14,7 +14,7 @@
   reach passes on a population of zero, which is indistinguishable from
   passing on the truth."
   (:require [clojure.java.shell :as sh]
-            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot]))
+            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch]))
 
 ^:reads (defn ^:export git-config-value
   "`git config <k>` as git would resolve it in `dir` (local then global), or
@@ -1264,7 +1264,22 @@ client-deps (merge (:client-deps st) (:client provided))
                                       st2))
                                   [])
                 (swap! session assoc :done @v)
-                @v))]
+                @v))
+;; THE LAND. A branch only ever contains done work, so this is the one
+        ;; place work leaves an agent's thread — rebasing onto whatever landed
+        ;; while it worked, then advancing the branch under CAS. nil when the
+        ;; session is not on a thread or nothing was written to it.
+        ;;
+        ;; AFTER the boundary delta on purpose: the done itself is part of the
+        ;; episode, so it lands with the work it grades rather than being
+        ;; stranded on a line nobody will read again.
+        ;;
+        ;; A RED done lands nothing and the thread survives, holding the work
+        ;; that is not finished yet. That is the whole bargain — the verdict
+        ;; is what decides, so a branch cannot come to contain something no
+        ;; verdict ever stood behind.
+        land (when-not (= :red (:test-status findings))
+               (branch/land-thread! session))]
     ;; the STANDING verdict, verbatim, when nothing was written — carrying its
     ;; :note, so a caller cannot read an inherited verdict as a fresh one
     (if standing standing (cond-> {:done cid
@@ -1277,7 +1292,8 @@ client-deps (merge (:client-deps st) (:client provided))
                                   :forms (vec (sort (distinct (keep :form carried))))})
       summary             (assoc :test summary)
       (seq pruned-reqs)   (assoc :pruned-requires pruned-reqs)
-      (:status iso)       (assoc :external iso)))))
+      (:status iso)       (assoc :external iso)
+      land                (assoc :land land)))))
 
 (defn ^:export full-check!
   "The WHOLE-STORE check, on demand: kondo over every namespace, the
