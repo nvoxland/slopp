@@ -560,6 +560,20 @@ fixture you thought you built is one namespace.
   (is (nil? (:alias (:left-behind r)))))   ; ← meaningless without the line above
 ```
 
+**A fixture carries a BRANCH to make it reachable, and one instance is the
+right number.** Adding a second instance of a branch the fixture already covers
+buys nothing and costs representativeness — but the sharp half is the other
+direction: **removing the last one is something you do by accident while
+improving the fixture.** Give an undocumented endpoint its real docstring, give
+every form a second callee, and the branch that existed for the no-doc case or
+the one-callee case stops being reachable — every test of it still passes, for
+the wrong reason, and nothing says so.
+
+So before you tidy a fixture, ask what each oddity in it is CARRYING. If the
+answer is "a branch", the oddity is the test. Where it is not obvious from the
+fixture itself, say so where the fixture lives rather than where the branch is
+implemented.
+
 Assert the fixture, not your intention for it: something that counts what the
 setup actually produced, before anything is read off it.
 

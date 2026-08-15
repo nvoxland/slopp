@@ -647,6 +647,43 @@ one cause**, and here the discriminator cost nothing — the lint LIST names its
 forms while the count only says "2". A count invites the story; the list ends
 it.
 
+### Sharpening (2026-08-15, from slopp-ui): a fixture carries a BRANCH, and improving it is how you remove one
+
+Core 1 already reaches the fixture — a setup step that failed builds an empty
+population, and an empty population satisfies every absence assertion below it.
+This is the same idea with the arrow reversed, and it is the harder half
+because the act that breaks it looks like maintenance.
+
+slopp-ui's statement, taken verbatim because it is better than my paraphrase:
+
+> A fixture carries a branch to make it reachable. Adding a second instance of
+> the same branch costs representativeness and buys nothing — and removing the
+> last one is a thing you can do by accident while improving something else.
+
+They nearly did it: giving four fixture endpoints their real docstrings would
+have left NO endpoint without one, retiring the older-jar fallback branch for
+documents with no `:doc` — one commit after building the `—` placeholder that
+branch exists to render. What stopped it was a docstring on the producer saying
+the omission was deliberate.
+
+The same wave gave them the other direction, and the pair is the reason to
+record it: every form in every fixture had ONE callee, so `spine`'s reordering
+had nothing to reorder, and a whole route arity, a swap control and an `N of M`
+count were invisible **together**. One extra callee row reached all three — and
+immediately exposed a shipped spacing bug whose rule was written three lines
+above the defect and applied to the neighbouring span.
+
+**So a fixture's oddities are load-bearing until shown otherwise, and the
+showing belongs where the fixture lives.** "Every case looks the same here" is
+not tidiness, it is a population of one shape. Before normalising a fixture, ask
+what each irregularity is CARRYING; where the answer is not obvious from the
+fixture itself, write it beside the fixture rather than beside the branch —
+the person deleting it will be reading the former.
+
+Shipped in `plugins/slopp/skills/slopp/SKILL.md` beside the fixture control it
+extends: it is a rule anyone writing tests against any store hits, not a fact
+about this repo.
+
 ### Sharpening (2026-08-06): the conflation moves UP, into the vocabulary a check reports in
 
 Every statement of Core 1 so far points at a check's RESULT: an empty list that
