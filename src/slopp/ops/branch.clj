@@ -22,7 +22,7 @@
             [slopp.edit :as edit]
             [slopp.image :as image]
             [slopp.image.repl :as repl]
-            [slopp.store :as store] [slopp.store.merge :as merge] [clojure.string :as str] [slopp.read.modules :as read.modules]))
+            [slopp.store :as store] [slopp.store.merge :as merge] [clojure.string :as str] [slopp.read.modules :as read.modules] [slopp.read.history :as history]))
 
 (defn merge-into-session!
   "Shared merge pipeline (m2 forks + m3 branches): replay `theirs` onto the
@@ -567,7 +567,8 @@
        :threads (mapv (fn [t]
                         (cond-> {:id       (:id t)
                                  :agent    (:agent t)
-                                 :unlanded (db/unlanded-count conn (:id t))
+                                 :unlanded (db/unlanded-count conn (:id t)
+                                                              history/content-ops)
                                  :idle-ms  (- now (or (:used-at t) now))}
                           (= (:id t) mine) (assoc :mine true)))
                       (db/open-threads conn branch))})
@@ -623,7 +624,7 @@
         {:error (str "thread " id " is already " (:status row))}
 
         :else
-        (let [n (db/unlanded-count conn id)]
+        (let [n (db/unlanded-count conn id history/content-ops)]
           (db/abandon-thread! conn id)
           (if (= id (:line @session))
             (do (swap! session dissoc :line)

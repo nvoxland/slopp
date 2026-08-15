@@ -824,33 +824,60 @@
                                 WHERE id = ?" now thread-line-id])
             true)))))
 
-^:reads (defn ^:export unlanded-count
-  "How many deltas `line-id` has written since it forked — its head walked
+^:reads (defn ^:export
+  ^{:breaking-ok
+    (str "the 2-arity is REMOVED rather than defaulted. It counted DELTAS, and "
+         "a delta count is wrong for every reader this has: a verification or a "
+         "done boundary is work to the journal and nothing to a person. Leaving "
+         "it as a default would keep the wrong answer reachable under the same "
+         "name, one day after the right one existed.")}
+  unlanded-count
+  "How many of `ops` `line-id` has written since it forked — its head walked
   back to its own base, exclusive.
 
-  The obvious spelling is two ancestry walks subtracted, and on a store with
-  23k deltas that is two full journal traversals to answer a question about
-  the last five. This one STOPS at the base: the recursive term refuses to
-  expand past it, so the walk is proportional to the line's own work.
+  **Counts WORK, not deltas**, and the caller says which ops are work. Reported
+  by slopp-ui from this field's first hour: a `full_check` with no source
+  written left the count reading 2, because a verification records deltas. True
+  of the journal and wrong for every reader — a number that is non-zero when
+  nothing is pending is the badge nobody reads, and then the once it means
+  something nobody looks.
 
-  `IS NOT` rather than `<>` because a line with no base is a real case — the
-  first line of a store forks from nothing — and `<>` against NULL is NULL,
-  which would end the recursion immediately and report every such line as
-  having written zero."
-  [conn line-id]
-  (or (one-col
-       (jdbc/execute-one!
-        conn [(str "WITH RECURSIVE anc(id, parent) AS (
-                      SELECT id, parent FROM deltas WHERE id = ?
-                      UNION ALL
-                      SELECT deltas.id, deltas.parent FROM deltas
-                        JOIN anc ON deltas.id = anc.parent
-                       WHERE anc.id IS NOT ?)
-                    SELECT COUNT(*) FROM anc WHERE id IS NOT ?")
-              (line-head conn line-id)
-              (one-col (jdbc/execute-one! conn ["SELECT base FROM lines WHERE id = ?" line-id]))
-              (one-col (jdbc/execute-one! conn ["SELECT base FROM lines WHERE id = ?" line-id]))]))
-      0))
+  What settles it is sharper than noise, though. `api.model/timeline` already
+  filters its `:working` set by the same `content-ops`, and the two numbers are
+  meant to be read TOGETHER — written-not-landed beside landed-not-milestoned.
+  One filtered and one not makes the pair incoherent.
+
+  The op set is a PARAMETER because it is policy: which ops constitute a change
+  is `read.history`'s answer, and a copy of it down here would be a second list
+  that has to agree with the first. An empty set is answered without a query —
+  `IN ()` is not valid SQL, and 'no ops count' has an obvious answer anyway.
+
+  The walk STOPS at the base rather than subtracting two ancestries, so it is
+  proportional to the line's own work instead of to the journal. `IS NOT`
+  rather than `<>` because a line with no base is a real case — the first line
+  of a store forks from nothing — and `<>` against NULL is NULL, which would
+  end the recursion immediately and report every such line as having written
+  zero."
+  [conn line-id ops]
+  (if (empty? ops)
+    0
+    (let [base  (one-col (jdbc/execute-one!
+                          conn ["SELECT base FROM lines WHERE id = ?" line-id]))
+          names (mapv name ops)
+          holes (apply str (interpose "," (repeat (count names) "?")))]
+      (or (one-col
+           (jdbc/execute-one!
+            conn (into [(str "WITH RECURSIVE anc(id, parent, op) AS (
+                                SELECT id, parent, op FROM deltas WHERE id = ?
+                                UNION ALL
+                                SELECT deltas.id, deltas.parent, deltas.op FROM deltas
+                                  JOIN anc ON deltas.id = anc.parent
+                                 WHERE anc.id IS NOT ?)
+                              SELECT COUNT(*) FROM anc
+                               WHERE id IS NOT ? AND op IN (" holes ")")
+                        (line-head conn line-id) base base]
+                       names)))
+          0))))
 
 (defn ^:export abandon-thread!
   "Settle `thread-line-id` as `abandoned` and drop its materialization.

@@ -926,7 +926,7 @@
   (when-not (#{"done" "commit_point"} tool)
     (when-let [conn (:db @session)]
       (when-let [line (:line @session)]
-        (let [n               (db/unlanded-count conn line)
+        (let [n               (db/unlanded-count conn line history/content-ops)
               [seen-l seen-n] (::thread-hint-seen @session)
               prev            (if (= seen-l line) seen-n 0)
               [said-l said-n] (::thread-hint-at @session)

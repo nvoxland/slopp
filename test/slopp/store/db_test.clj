@@ -893,10 +893,11 @@
           (is (true? (db/append! conn s2 new2 ['ab.two] thread h1)))
 
           (testing "the count is what makes a listing actionable"
-            (is (= (count new2) (db/unlanded-count conn thread))
-                "deltas written since the fork, not the whole journal")
+            (is (= (count new2) (db/unlanded-count conn thread history/content-ops))
+                "work written since the fork, not the whole journal")
             (is (zero? (db/unlanded-count conn
-                                          (db/adopt-thread! conn trunk "agent-idle")))
+                                          (db/adopt-thread! conn trunk "agent-idle")
+                                          history/content-ops))
                 "a line still sitting on its own base has written nothing —
                  without this the count could be reporting journal length"))
 
@@ -910,6 +911,48 @@
 
           (testing "its view is gone and its history is not"
             (is (empty? (:namespaces (db/load-store conn thread))))
-            (is (= (count new2) (db/unlanded-count conn thread))
+            (is (= (count new2) (db/unlanded-count conn thread history/content-ops))
                 "the deltas it wrote are still walkable from its head"))))
+      (finally (.close conn)))))
+
+(deftest ^:external unlanded-counts-work-not-bookkeeping
+  ;; Reported by slopp-ui from `:unlanded`'s first hour: a `full_check` with no
+  ;; source written left the count reading 2. Correct as a delta count, and
+  ;; wrong for every reader of it — a number that is non-zero when nothing is
+  ;; pending is the badge nobody reads, and then the once it matters nobody
+  ;; looks.
+  ;;
+  ;; What decides it is not noise, though. `api.model/timeline` already filters
+  ;; `:working` by `content-ops`, and the two numbers are designed to be read
+  ;; TOGETHER — written-not-landed beside landed-not-milestoned. One filtered
+  ;; and one not makes the pair incoherent, so the caller passes the same set
+  ;; and the store stays ignorant of what "content" means, which is policy.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)
+        ops  history/content-ops]
+    (try
+      (let [trunk  (db/trunk-line-id! conn)
+            thread (db/adopt-thread! conn trunk "agent-1")
+            base   (db/line-head conn thread)
+            sa     (store/ingest (store/empty-store) 'uc.one "(ns uc.one)\n\n(def a 1)\n")
+            [sb _] (store/record-done sa "a boundary" :agent "agent-1")]
+        (is (true? (db/append! conn sb (store/deltas sb) ['uc.one] thread base)))
+
+        (testing "fixture: the thread really holds both kinds"
+          (is (= 2 (count (store/deltas sb))) (pr-str (mapv :op (store/deltas sb))))
+          (is (= #{:ingest :done} (set (map :op (store/deltas sb))))))
+
+        (is (= 1 (db/unlanded-count conn thread ops))
+            "the ingest counts and the done boundary does not")
+
+        (testing "and a thread holding ONLY bookkeeping has nothing unlanded"
+          (let [t2     (db/adopt-thread! conn trunk "agent-2")
+                b2     (db/line-head conn t2)
+                [sc _] (store/record-done (store/empty-store) "nothing but a verdict"
+                                          :agent "agent-2")]
+            (is (true? (db/append! conn sc (store/deltas sc) [] t2 b2)))
+            (is (pos? (count (store/deltas sc))) "fixture: it really wrote something")
+            (is (zero? (db/unlanded-count conn t2 ops))
+                "a thread nobody wrote code in reads as empty, which is what a
+                 reader and a reaper both need it to say"))))
       (finally (.close conn)))))

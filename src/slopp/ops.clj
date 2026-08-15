@@ -3101,15 +3101,17 @@ recompiled (engine/after-write! session ns-sym)]
                                        (first (filter #(= (:line @session) (:id %))
                                                       (db/lines conn))))]
                      (when (= "thread" (:kind row))
-                       (let [ds (store/deltas st)
-                             n  (if-let [b (:base row)]
-                                  (max 0 (dec (- (count ds)
-                                                 (count (take-while #(not= b (:id %)) ds)))))
-                                  (count ds))]
+                       ;; ONE producer for this number, shared with thread_list and
+                       ;; the write hint. It used to be re-derived here by counting
+                       ;; the store's deltas past the base, which was a second
+                       ;; derivation of the same question AND the same defect: it
+                       ;; counted verification records, so a check with nothing
+                       ;; written left it non-zero.
+                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
                          (cond-> {:on (:branch @session) :unlanded n}
                            (pos? n)
                            (assoc :note
-                                  (str n " write(s) are private to this thread. A green"
+                                  (str n " change(s) are private to this thread. A green"
                                        " done lands them on " (:branch @session)
                                        "; nothing outside this session — the running"
                                        " host included — can see them until it does.")))))))
