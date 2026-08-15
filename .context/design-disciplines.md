@@ -2264,3 +2264,44 @@ that is right there. Settled as `D-where-addresses` in `decisions.md`: a
 The general form is worth carrying past this instance: **when a mechanism's
 job is to NAME something, `=` is a proxy for it** (Core 9), and the proxy's
 failure is silent in exactly the direction that reads as absence.
+
+### Core 10, one rung further out — a check you hand a CONSUMER has to run on THEIR classpath
+
+Named 2026-08-15 by slopp-ui, who could not run a verification I sent.
+
+The threads epic needed slopp-ui to confirm a `deltas.parent` backfill, so I
+sent the check with the outside-witness property I wanted: walk the parent
+LINKS rather than seq order, so it never sees the UPDATE's own logic. Good
+check. It opened with `(slopp.store.db/open! …)`.
+
+```
+;=> Syntax error (ClassNotFoundException): slopp.store.db
+```
+
+**`slopp.store.db` is not on a consumer's classpath and must never be.** The
+slim jar publishes `slopp.web.*` and `slopp.lang`; a consuming project never
+opens a store. So the verification required the one namespace that project is
+defined by not having — *"a verification written from inside, for a consumer
+that is defined by being outside."*
+
+This is Core 10's failure at a boundary rather than in a sentence. The remedy
+was not wrong and not unclear; it was **unrunnable by its reader**, which fails
+the same way an incorrect remedy does and is harder to spot because it works
+perfectly when you test it — you test it from inside.
+
+Their substitute keeps the property and drops the dependency: pure SQL, a
+recursive walk over `parent` links, no slopp namespaces at all. And they added
+the half I had left out — **run it BEFORE as well as after**, because a
+pass-after on its own cannot distinguish *"the backfill worked"* from *"there
+was never a hole"*, and only one of those is evidence. Core 1, arriving from
+the migration direction.
+
+**The rule.** Any check you hand another party must be expressible in what THEY
+have. Before sending one, ask which of its symbols exist on the reader's
+classpath rather than on yours — and notice that "I ran it and it passed" is
+not evidence about that, because you ran it somewhere else.
+
+**And the second-order tell:** in that project an agent could observe the defect
+through NO channel — nothing on their jar read the column, `slopp.store.db` was
+unavailable, and raw `sqlite3` is blocked by a hook. When a consumer has no
+channel at all, the check is a HUMAN action and saying so is part of sending it.
