@@ -139,6 +139,29 @@ branch used to need its own db file:
   fold. Pinning is what keeps that valid: the base never moves under the new
   line.
 
+**A thread is adopted, not remembered** (2026-08-15). `db/adopt-thread!` is a
+SELECT with a create fallback keyed by `(agent, branch)`, so a returning agent
+asks the same question and gets the same row — nothing has to be persisted
+between sessions beyond the `lines` table itself. Three properties, each of
+which a test discriminates rather than merely exercises:
+
+- **It forks at the branch's HEAD and then pins there.** A thread opened after
+  the branch moved starts from where the branch is NOW; a thread already open
+  does NOT move when re-adopted. Rebasing once, at its own done, is what keeps
+  a thread's view stable and its verdict meaningful mid-work.
+- **Only an `open` row is adopted.** A landed thread's writes are already on
+  the branch and an abandoned one was discarded deliberately; re-entering
+  either resurrects a line whose meaning is settled.
+- **`kind` is what separates a thread from a branch in a listing, not
+  `parent`.** A named branch forked from this one carries the same `parent` as
+  every thread on it, so `db/open-threads` filtering on the fork alone would
+  report a branch as somebody's private workspace.
+
+Adoption touches `used_at`, which is the store layer's business for a reason
+worth stating: a session that is orienting and reading has written nothing, so
+a clock that moved only on writes reports a thread idle for exactly as long as
+somebody is thinking in it.
+
 **The id counter belongs to the FILE, not the line**, and this is the sharp
 edge. Ids are minted from a store VALUE (`store/gen-id` counts `:next-id`)
 while `deltas.id` is UNIQUE across the whole journal, so two lines counting
