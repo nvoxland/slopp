@@ -189,6 +189,17 @@ X-Slopp-Main: slopp.kernel.boot/-main
         (let [r (ops/file-get sess "NOTES.md")]
           (is (= "plain\n" (:content r)))
           (is (nil? (:encoding r)))))
+      (testing "the listing's byte count is bytes for BOTH shapes"
+        ;; The breakage class the authored/derived split predicted, from the
+        ;; other side: a text entry IS its content and a binary one is a
+        ;; content-address MAP, so a reader that treats every entry as text
+        ;; does not fail — it answers. Counting the map gave 3, the number of
+        ;; KEYS, reported under a docstring promising byte-count.
+        (let [f (:files (ops/files-list sess))]
+          (is (= 6 (get f "NOTES.md")) "text: the content's own length")
+          (is (= (count png) (get f "public/i.png"))
+              (str "binary: the recorded byte count, not the size of the entry map: "
+                   (pr-str f)))))
       (testing "build! materializes the asset as real bytes"
         (ops/ingest! sess 'bf.core "(ns bf.core)\n(defn ^:unused-ok f [x] x)\n")
         (let [dir (str (java.nio.file.Files/createTempDirectory

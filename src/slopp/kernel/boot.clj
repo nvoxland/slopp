@@ -518,8 +518,10 @@
   tree; both load the namespaces they run. Loading them HERE bought nothing and
   charged somebody else: `store-sources` filters rows by kind and not by name,
   so every library a store's tests require became a dependency of the process
-  SERVING that store's app — for slopp's own jar, ~1.5 MB of malli in every
-  download, justified by a comment that named deleted namespaces twice.
+  SERVING that store's app. For slopp's own jar that was malli and its closure
+  — 336 KB across 8 jars, MEASURED as the difference between the two dependency
+  closures rather than taken from the filing, which said 1.5 MB — justified by
+  a comment that named deleted namespaces twice, three weeks apart.
 
   A test is the `-test` SUFFIX, which is the only marker the system has for
   non-production code (roles move instruments to their own directory instead).

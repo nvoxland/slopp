@@ -2789,11 +2789,18 @@ recompiled (engine/after-write! session ns-sym)]
         {:removed (str path)})))
 
 ^:reads (defn files-list
-  "The files manifest: {path byte-count} (content via the git projection or
-  a build)."
+  "The files manifest: {path byte-count} (content via `file_get`, the git
+  projection, or a build).
+
+  The two entry SHAPES answer the size question differently and only one of
+  them fails loudly. A text entry IS its content, so counting it is its
+  length; a binary entry is a content-address map that records `:bytes`, and
+  counting THAT returns the number of keys — a 7-byte asset listed as 3,
+  under this docstring. Derived artifacts are a separate manifest and are not
+  listed here; `store_health` counts those."
   [session]
   {:files (into (sorted-map)
-                (map (fn [[p t]] [p (count t)]))
+                (map (fn [[p e]] [p (if (map? e) (:bytes e) (count e))]))
                 (:files (:store @session)))})
 
 (defn set-comment!

@@ -321,3 +321,47 @@
       (testing "a different fingerprint is a different row, not a correction"
         (is (= "ccccccc" (#'slopp.git/record-sha! conn "d1" "fp2" "ccccccc" "main")))
         (is (= "bbbbbbb" (#'slopp.git/record-sha! conn "d1" "fp1" "bbbbbbb" "main")))))))
+
+(deftest ^:external the-store-can-render-its-own-merge-base-without-git
+  ;; Import exists so an external tool's edits come back as ordinary tracked
+  ;; form edits, and NOTHING about that story requires the external tool to
+  ;; have used git — it requires a tree of files and a base to diff against.
+  ;; The base is the hard half: git hands you a merge-base commit, and a
+  ;; directory hands you nothing.
+  ;;
+  ;; The store already knows. Folding the journal to the last milestone is
+  ;; what `project-journal!` does on every projection, and the tree it renders
+  ;; there IS "the state this directory was exported from" in the common case.
+  ;;
+  ;; What has to hold is that the two agree EXACTLY. A base that differs from
+  ;; the projection by so much as a generated deps.edn would make every import
+  ;; report phantom changes on paths nobody touched — and the two derivations
+  ;; would drift silently, which is how the mirror and build! once produced
+  ;; different jars from one store.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'mb.core "(ns mb.core)\n\n(defn ^:unused-ok f [] 1)")
+      (ops/ingest! sess 'mb.core-test
+                   (str "(ns mb.core-test (:require [clojure.test :refer [deftest is]]))\n\n"
+                        "(deftest t (is (= 1 (mb.core/f))))"))
+      (external/commit-point! sess "v1" :agent "alice")
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [tip  (git/ensure-projected! ctx)
+                sha  (get-in tip [:refs "main"])
+                from-git (git/tree-at (:slopp.git/repo ctx) sha)
+                from-store (git/milestone-tree
+                            (:store @sess)
+                            #(db/get-blob (:slopp.git/map-conn ctx) %))]
+            (is (some? sha))
+            (is (seq from-git) "positive control: the projection produced a tree")
+            (is (contains? from-git "src/mb/core.clj"))
+            (is (contains? from-git "test/mb/core_test.clj")
+                "and the layout is the projection's, tests included")
+            (is (= from-git from-store)
+                "the store's own fold reproduces the projected tree exactly"))
+          (finally (git/close-ctx! ctx))))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir)))))

@@ -506,6 +506,12 @@
                              (catch Exception e {:error (ex-message e)})))]
                 (cond-> m p (assoc :absorbed p)))
               {:error "git_pull needs a durable session (a store dir)"})))
+   "import_dir"
+   (fn [session a _sym]
+     (text! (if (:dir @session)
+              (try (sync/import-dir! session (:dir a) :agent (:agent a))
+                   (catch Exception e {:error (ex-message e)}))
+              {:error "import_dir needs a durable session (a store dir)"})))
    "git_conflicts"
    (fn [session _a _sym]
      (text! (if-let [dir (:dir @session)]

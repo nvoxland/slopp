@@ -581,6 +581,11 @@
     :inputSchema {:type "object"
                   :properties {:url {:type "string"} :token {:type "string"}
                                :branches {:type "array" :items {:type "string"}}}}}
+   {:name "import_dir"
+    :description "Absorb a DIRECTORY of files into this store as ordinary tracked form edits — 3-way against your last milestone, same conflict handling and same done gate as git_pull, with NO git anywhere. For a zip, a scratch tree, or another tool's output. Paths the exported base never carried and that are not namespaces are left alone and noted."
+    :inputSchema {:type "object"
+                  :properties {:dir {:type "string"}}
+                  :required ["dir"]}}
    {:name "git_conflicts"
     :description "Unresolved pull conflicts, with the raw remote content to merge from."
     :inputSchema {:type "object" :properties {}}}
@@ -752,6 +757,8 @@ READ RESULTS: {:ok true ...} terse green · :failures = why (expected/actual)
 SHARE:   git_push {url?} (milestones -> a normal git remote; url saved once)
          git_pull (3-way absorb: remote wins where you're clean; both-touched =
          conflict, yours stays live, push blocked until git_resolve {path})
+         import_dir {dir} (same absorb from a DIRECTORY — a zip, a scratch
+         tree, another tool's output; no git involved on either side)
          config {key value?} (user.name/user.email = milestone author identity)
 FINISH:  done {label} (tidies, lints, marks the unit boundary)
          commit_point {description} <- MILESTONE: green-gated, the grain a

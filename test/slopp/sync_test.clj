@@ -4,6 +4,7 @@
   again — the clone's chain grafts onto the remote history, so the second
   push is a plain fast-forward. This is the whole collaboration story."
   (:require [clojure.java.io :as io]
+            [clojure.java.shell]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
@@ -796,3 +797,70 @@
           (is (not (:aligned (sync/alignment dir "." "slopp/main"
                                              [(assoc latest :commit "d99999999")]))))))
       (finally (ops/close! s)))))
+
+(deftest ^:external an-import-works-from-a-directory-with-no-git-anywhere
+  ;; "We also need this import to work from files not in git. We don't want to
+  ;; be relying on git, just have it work with git." (user, 2026-08-14)
+  ;;
+  ;; Everything import actually DOES was already git-free: `store.merge` is
+  ;; three strings in and one out, and the appliers take plain {path content}
+  ;; maps. Only the doorway was git — `pull!` produced its trees with
+  ;; `tree-at` and its base with `merge-base`. A directory supplies the tree by
+  ;; walking; the BASE is the half git was really providing, and the store's
+  ;; own last milestone is it.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-dirimport" (make-array java.nio.file.attribute.FileAttribute 0)))
+        out  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-dirimport-out" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'di.core "(ns di.core)\n\n(defn ^:unused-ok f [] 1)")
+      (external/commit-point! sess "v1" :agent "alice")
+
+      (testing "neither side is a git repo — this is the whole point"
+        (is (not (.exists (io/file dir ".git"))))
+        (is (not (.exists (io/file out ".git")))))
+
+      ;; export the way any tool would get one: materialize the store
+      (external/build! sess out)
+      (let [f (io/file out "src/di/core.clj")]
+        (is (.exists f) "positive control: the export produced the file to edit")
+        ;; somebody else edits it, and adds a namespace slopp has never seen
+        (spit f "(ns di.core)\n\n(defn ^:unused-ok f [] 42)\n")
+        (spit (io/file out "src/di/extra.clj")
+              "(ns di.extra)\n\n(defn ^:unused-ok g [] :new)\n"))
+
+      (testing "the edits come back as ordinary tracked form edits"
+        (let [r (sync/import-dir! sess out :agent "outside-tool")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (empty? (:conflicts r)) (pr-str r))
+          (is (some? (:marker r)) "and the episode closed with a milestone")
+          (is (re-find #"42" (query/query-source sess 'di.core))
+              "the changed body landed")
+          (is (re-find #":new" (query/query-source sess 'di.extra))
+              "and so did the namespace the store had never seen")))
+
+      (testing "a second import of the same directory changes nothing"
+        ;; the base is the last milestone, which the first import just moved —
+        ;; so the diff is empty, which is what makes this re-runnable
+        (let [r (sync/import-dir! sess out :agent "outside-tool")]
+          (is (empty? (:pulled r)) (pr-str r))))
+
+      (testing "what an export never put there is left alone, and SAID"
+        ;; a directory carries things a projection never wrote — editor
+        ;; droppings, build output, another tool's scratch. Absorbing them
+        ;; writes a second copy of facts the store already holds, which is the
+        ;; exact bug a pull had with the config it had itself projected.
+        (spit (io/file out ".DS_Store") "junk")
+        (.mkdirs (io/file out "node_modules"))
+        (spit (io/file out "node_modules/whatever.txt") "not mine")
+        (let [r (sync/import-dir! sess out :agent "outside-tool")]
+          (is (empty? (:pulled r)) (pr-str r))
+          (is (some #(re-find #"left\s+alone" %) (:notes r))
+              (str "silently dropping them would be the same mistake: " (pr-str r)))
+          (is (nil? (get (:files (:store @sess)) ".DS_Store"))
+              "and it is genuinely not in the store")))
+      (finally
+        (ops/close! sess)
+        (clojure.java.shell/sh "rm" "-rf" dir)
+        (clojure.java.shell/sh "rm" "-rf" out)))))

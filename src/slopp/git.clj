@@ -262,6 +262,56 @@
               :else (throw (ex-info (str "git ref update failed: " res)
                                     {:ref ref-name :result res})))))))))
 
+^:reads (defn source-tree
+  "{path source} for every namespace in `store`, at the paths the projection
+  roots them under — production `src/`, tests `test/`, instruments
+  `instruments/`, cljs `cljs-src/`, the same layout `build!` writes.
+
+  PATHS, not namespace names, and only a folded store can answer: platform and
+  role are both properties of the store as it stood. Extracted from
+  `project-journal!` so that a caller needing this tree WITHOUT a repo — a
+  directory import computing its merge base — cannot resolve paths a second
+  way. Two derivations of one layout is how the mirror and `build!` once
+  produced different jars from the same store."
+  [store]
+  (into (sorted-map)
+        (map (fn [n] [(store.render/source-path n
+                                                (store/platform-for store n)
+                                                (store/role-for store n))
+                      (store.render/render-ns store n)]))
+        (keys (:namespaces store))))
+
+^:reads (defn ^:export milestone-tree
+  "{path content} for the tree the store's LAST milestone projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when the
+  store has no milestones yet.
+
+  This is the merge BASE for an import that did not come through git. Export
+  is one-way; import is the narrow case where an external tool changed an
+  export and the change should come back as ordinary tracked form edits, and
+  nothing about that requires the other tool to have used git — it requires a
+  tree of files and a base to diff against. Git supplies a merge-base commit;
+  a directory supplies nothing, and this is the answer the store already had.
+
+  It shares `source-tree` and `commit-paths` with `project-journal!` rather
+  than recomputing them, and that is the whole correctness argument: a base
+  differing from the projection by so much as the generated `deps.edn` would
+  report phantom changes on paths nobody touched, on every import, forever.
+
+  A marker normally targets the delta immediately before it; a retroactive
+  `commit_point {:target …}` names an earlier one, and the fold stops there."
+  [store blob-of]
+  (let [ds     (store/deltas store)
+        marker (last (filter #(= :commit (:op %)) ds))]
+    (when marker
+      (let [upto (or (:target marker) (:id marker))
+            st   (reduce (fn [st d]
+                           (let [st' (or (store/replay-delta st d) st)]
+                             (if (= (:id d) upto) (reduced st') st')))
+                         (store/empty-store) ds)]
+        (commit-paths (source-tree st) (:deps marker) (:files marker)
+                      (:config marker) blob-of)))))
+
 ;; ---------------------------------------------------------------------------
 ;; projection
 (defn project-journal!
@@ -313,13 +363,10 @@
         ;; this milestone, which is the only point where a namespace's platform
         ;; and role are both known — and the projection has to root them the
         ;; way build! does, because CI jars a checkout of this tree.
-        tree-of  (fn [st]
-                   (into (sorted-map)
-                         (map (fn [n] [(store.render/source-path n
-                                                           (store/platform-for st n)
-                                                           (store/role-for st n))
-                                       (store.render/render-ns st n)]))
-                         (keys (:namespaces st))))]
+        ;; `source-tree`, aliased locally: the fold holds the store as it stood
+        ;; at this milestone, which is the only point where a namespace's
+        ;; platform and role are both known.
+        tree-of  source-tree]
     (:parent
      (reduce
       (fn [{:keys [parent store held]} d]

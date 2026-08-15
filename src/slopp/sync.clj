@@ -361,17 +361,25 @@
                             " marked hunks, file_put the result, then"
                             " git_resolve:\n" conflict))))))))
 
-(defn- apply-pull!
-  "The pull body once fetch/merge-base decided there IS something to absorb:
-  diff tree(merge-base)→tree(tip), deps first, then namespaces in the remote
-  tree's dependency order, then the `:git-sha` chain marker (the remote tip
-  becomes a chain node, so our next milestone parents on it and pushes stay
-  fast-forward). Conflicts land in quarantine (push blocks until resolved)."
-  [session ctx url mb tip agent]
-  (let [repo    (:slopp.git/repo ctx)
-        conn    (:db @session)
-        treeM   (git/tree-at repo mb)
-        treeT   (git/tree-at repo tip)
+(defn- apply-trees!
+  "Absorb the difference between two trees into the live session: diff
+  `treeM`→`treeT` (both plain {path content}), deps first, then namespaces in
+  the incoming tree's dependency order, then close the episode with a
+  milestone. Conflicts land in quarantine (push blocks until resolved).
+
+  `opts`: `:agent`, `:origin` (what the quarantined copy came FROM — a commit
+  sha for a pull, a directory for an import), `:label` (the milestone
+  description), `:extra` (extra marker fields — a pull chains `:git-sha`), and
+  `:retry` (the verb to name when the done gate refuses).
+
+  **This is the whole of import, and none of it is git.** `store.merge` is
+  three strings in and one out, `apply-ns!`/`apply-deps!`/`apply-files!` take
+  plain maps, and the gate below is the ordinary one. A pull is one caller —
+  it produces its two trees with `git/tree-at` — and a directory is another,
+  which is the point: git became a CONSUMER of import rather than its
+  definition."
+  [session treeM treeT {:keys [agent origin label extra retry]}]
+  (let [conn    (:db @session)
         changed (into []
                       (comp (distinct)
                             (filter #(not= (get treeM %) (get treeT %))))
@@ -380,7 +388,7 @@
         conflict! (fn [path ns-sym reason]
                     (db/quarantine-put! conn {:path path :ns ns-sym
                                               :source (get treeT path)
-                                              :sha tip :reason reason})
+                                              :sha origin :reason reason})
                     (vswap! results update :conflicts conj
                             {:path path :reason reason}))
         applied!  (fn [n] (vswap! results update :applied conj n))
@@ -407,14 +415,10 @@
     ;; MILESTONE, because that is what a push projects and nothing downstream
     ;; re-judges it — `push!` refuses unresolved conflicts and a checked-out
     ;; branch, and does not look at status at all.
-    (let [m   (external/commit-point! session
-                                      (str "pull " (subs tip 0 8) " from " url)
-                                      :agent agent
-                                      :extra {:git-sha tip})
+    (let [m   (external/commit-point! session label :agent agent :extra extra)
           out {:pulled    (:applied @results)
                :conflicts (:conflicts @results)
-               :notes     (:notes @results)
-               :base      tip}]
+               :notes     (:notes @results)}]
       (if (= :red (:status m))
         (assoc out
                :status   :red
@@ -426,10 +430,31 @@
                     " the done gate REFUSED them, so no milestone was recorded"
                     " and the import is not closed. " (:error m)
                     " Fix them here the way you would fix your own work, then"
-                    " run git_pull again: the diff is already applied so it"
+                    " run " retry " again: the diff is already applied so it"
                     " re-applies nothing, and the milestone it mints then"
-                    " carries the chain marker this one could not."))
+                    " carries the marker this one could not."))
         (assoc out :marker (:commit m))))))
+
+(defn- apply-pull!
+  "The pull body once fetch/merge-base decided there IS something to absorb:
+  produce the two trees from git and hand them to `apply-trees!`. The remote
+  tip becomes a `:git-sha` chain node, so our next milestone parents on it and
+  pushes stay fast-forward.
+
+  This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
+  and a label. Everything import actually does is below it and touches no
+  repository."
+  [session ctx url mb tip agent]
+  (let [repo (:slopp.git/repo ctx)]
+    (assoc (apply-trees! session
+                         (git/tree-at repo mb)
+                         (git/tree-at repo tip)
+                         {:agent  agent
+                          :origin tip
+                          :label  (str "pull " (subs tip 0 8) " from " url)
+                          :extra  {:git-sha tip}
+                          :retry  "git_pull"})
+           :base tip)))
 
 (defn pull!
   "Absorb the remote's changes since the last common point into the LIVE
@@ -845,6 +870,70 @@
           {:error (str "clone failed: " (ex-message e))})
         (finally (.close repo))))))
 
+(defn import-dir!
+  "Absorb a DIRECTORY of files into the live session as ordinary tracked form
+  edits — three-way against the store's last milestone, through the same
+  appliers and the same `done` gate a `git_pull` faces. **No git anywhere**:
+  not in the source directory, not in the store.
+
+  For the case export was always for — an agent handed a zip, a scratch tree,
+  or another tool's output, which otherwise has no path into a store except
+  re-ingesting namespaces by hand, losing both the three-way merge and the
+  gate. `git_pull` is now one CALLER of this machinery rather than its
+  definition.
+
+  The BASE is the store's own last milestone (`git/milestone-tree`), which is
+  \"the state this directory was exported from\" in the common case and the
+  conservative answer otherwise: work the store did since that milestone is
+  ours-only and survives, where taking the CURRENT rendering as the base would
+  make a stale directory silently revert it.
+
+  Only paths the base already carries, or that resolve to a namespace, are
+  read. A directory contains things an export never put there — editor
+  droppings, build output, a `.git` — and absorbing them would write a second
+  copy of facts the store holds semantically. Skipped paths are NOTED rather
+  than silently dropped.
+
+  Returns {:pulled [nses] :conflicts [...] :notes [...] :marker id} |
+  {:error msg}."
+  [session dir & {:keys [agent]}]
+  (let [root (io/file (str dir))]
+    (if-not (.isDirectory root)
+      {:error (str dir " is not a directory")}
+      (let [base (git/milestone-tree
+                  (:store @session)
+                  #(db/get-blob (:db @session) %))]
+        (if (nil? base)
+          {:error (str "nothing to import ONTO — this store has no milestones,"
+                       " so there is no base to merge against. commit_point"
+                       " first, or use clone/import for a fresh store.")}
+          (let [files    (filter #(.isFile ^java.io.File %) (file-seq root))
+                rel      (fn [^java.io.File f]
+                           (str/replace (.toString (.relativize (.toPath root)
+                                                                (.toPath f)))
+                                        java.io.File/separator "/"))
+                keep?    (fn [p] (and (not (str/starts-with? p ".git/"))
+                                      (not (str/starts-with? p ".slopp/"))
+                                      (or (contains? base p) (path-ns p))))
+                [in out] (reduce (fn [[in out] f]
+                                   (let [p (rel f)]
+                                     (if (keep? p)
+                                       [(assoc in p (slurp f)) out]
+                                       [in (conj out p)])))
+                                 [(sorted-map) []] files)
+                r        (apply-trees! session base in
+                                       {:agent  agent
+                                        :origin (.getAbsolutePath root)
+                                        :label  (str "import " (.getAbsolutePath root))
+                                        :retry  "import_dir"})]
+            (cond-> r
+              (seq out)
+              (update :notes (fnil conj [])
+                      (str (count out) " path(s) in the directory are neither in"
+                           " the exported base nor a namespace, and were left"
+                           " alone: " (str/join ", " (take 5 (sort out)))
+                           (when (> (count out) 5) " …"))))))))))
+
 (defn import!
   "THE onboarding command: inside a git checkout (main checked out, the
   human's files on disk), build `.slopp/store.db` from the repo's slopp
@@ -881,11 +970,21 @@
     (catch Exception _ nil)))
 
 (defn -main
-  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"
+  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"
   [& [cmd a b c]]
-  (let [r (case cmd
+  (let [usage (str "usage: clone <url> <dir> | import <dir>"
+                   " | import-dir <store-dir> <from-dir> | push <dir> [url]"
+                   " | pull <dir> | test <dir>"
+                   " | kernel <file-copy> <store-copy> [accepted,names]")
+        r (case cmd
             "clone"  (clone! a b)
             "import" (import! (or a "."))
+            ;; the git-free doorway, from a shell: the tool that PRODUCED the
+            ;; directory is often a script, and it should not have to make a
+            ;; repo to hand its work back
+            "import-dir" (let [sess (external/open! {:slopp.ops/dir a})]
+                           (try (import-dir! sess b)
+                                (finally (ops/close! sess))))
             "push"   (push! a :url b)
             "pull"   (let [sess (external/open! {:slopp.ops/dir a})]
                        (try (pull! sess)
@@ -903,7 +1002,7 @@
             "kernel" (parity/kernel-parity
                       (slurp a) (slurp b)
                       (into #{} (map symbol) (remove str/blank? (str/split (or c "") #","))))
-            {:error "usage: clone <url> <dir> | import <dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"})]
+            {:error usage})]
     (println (pr-str r))
     (shutdown-agents)
     (when (or (:error r) (false? (:ok r)) (= :red (:status r))) (System/exit 1))))
