@@ -23,8 +23,7 @@
   Ordering: journal marker → git objects (content-addressed, idempotent) →
   git_map row (INSERT OR IGNORE + read-back) → ref update (CAS);
   `ensure-projected!` rebuilds the whole thing from the journal on demand."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [next.jdbc :as jdbc]
             [slopp.build :as build]
             [slopp.store.db :as db]
@@ -399,15 +398,18 @@
       dv))))
 
 (defn- branch-journals
-  "[[name dir]] for every on-disk branch that has a store.db — checked
-  BEFORE db/open!, which would otherwise create one."
-  [dir]
-  (let [root (io/file dir ".slopp" "branches")]
-    (when (.isDirectory root)
-      (for [^java.io.File f (.listFiles root)
-            :when (and (.isDirectory f)
-                       (.exists (io/file f ".slopp" "store.db")))]
-        [(.getName f) (str f)]))))
+  "[[name line-id]] for every NAMED line other than main — the branches a
+  projection advertises.
+
+  This used to list `.slopp/branches/` and open each branch's own store.db.
+  A branch is a row in the ONE journal now, so this reads the connection the
+  caller already holds: no directory to scan, nothing to open, and a branch
+  another process created is projected without either of them touching a
+  file."
+  [conn]
+  (for [l (db/lines conn)
+        :when (and (:name l) (not= "main" (:name l)))]
+    [(:name l) (:id l)]))
 
 (defn ensure-projected!
   "Bring the bare repo up to date with the journals — main + every on-disk
@@ -422,7 +424,7 @@
 
   `ctx` is an OPAQUE handle from `open-ctx!` — see `close-ctx!`."
   [ctx]
-  (let [dir              (:slopp.git/dir ctx)
+  (let [
         map-conn         (:slopp.git/map-conn ctx)
         ^Repository repo (:slopp.git/repo ctx)]
     (locking (:slopp.git/lock ctx)
@@ -440,11 +442,11 @@
                  (catch Exception _ nil))))
         (let [main-tip (project-journal! ctx "main" main-ds :base base)
               refs     (into {"main" main-tip}
-                             (map (fn [[nm bdir]]
-                                    [nm (with-open [conn (db/open! bdir)]
-                                          (project-journal! ctx nm (db/deltas-after conn (slopp.store.db/trunk-line-id! conn) 0)
-                                                            :base base))]))
-                             (branch-journals dir))]
+                             (map (fn [[nm line-id]]
+                                    [nm (project-journal!
+                                         ctx nm (db/deltas-after map-conn line-id 0)
+                                         :base base)]))
+                             (branch-journals map-conn))]
           (doseq [[nm sha] refs :when sha]
             (set-branch-ref! repo nm sha))
           {:refs refs})))))

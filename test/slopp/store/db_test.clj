@@ -624,3 +624,50 @@
               (is (= log-a (vec (db/ancestry conn (last log-a))))
                   "the fold and the walk are one answer, not two")))))
       (finally (.close conn)))))
+
+(deftest ^:external a-duplicate-delta-id-is-a-lost-race-not-a-fault
+  ;; Ids are minted from a store VALUE and `deltas.id` is UNIQUE across the
+  ;; whole journal, so two lines counting from the same place mint the same id.
+  ;; Per-line CAS deliberately stopped serializing lines against each other —
+  ;; that is the feature — and this is its residue. It is a lost race by every
+  ;; property that matters: another writer took the id, and the loser has to
+  ;; refresh and rebase, which is the path that already exists.
+  ;;
+  ;; It must not be swallowed as a generic SQL fault. `append!` surfaces every
+  ;; other SQLException on purpose, because returning false for a bad statement
+  ;; once told an agent "commit contention" for what was really a broken query.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [s0    (store/ingest (store/empty-store) 'dup.base "(ns dup.base)\n\n(def z 0)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s0 (store/deltas s0) ['dup.base] trunk nil)))
+
+        (let [head  (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
+              other (db/create-line! conn {:kind "thread" :base head
+                                           :parent trunk :agent "agent-2"})
+              ;; both lines count from the SAME store value, which is the
+              ;; collision by construction rather than by timing
+              sa    (store/ingest s0 'dup.one "(ns dup.one)\n\n(def a 1)\n")
+              sb    (store/ingest s0 'dup.two "(ns dup.two)\n\n(def b 2)\n")
+              na    (vec (drop (count (store/deltas s0)) (store/deltas sa)))
+              nb    (vec (drop (count (store/deltas s0)) (store/deltas sb)))]
+          (is (= (mapv :id na) (mapv :id nb))
+              "fixture: the two lines really did mint the same delta id")
+          (is (true? (db/append! conn sa na ['dup.one] trunk head)))
+
+          (testing "the second line loses the race rather than throwing"
+            (is (false? (db/append! conn sb nb ['dup.two] other head))))
+
+          (testing "and the loser left nothing behind — the whole write rolled back"
+            (is (nil? (get-in (db/load-store conn other) [:namespaces 'dup.two])))
+            (is (= head (:head (first (filter #(= other (:id %)) (db/lines conn)))))
+                "its head did not move, so the rebase has somewhere to stand"))
+
+          (testing "and rebasing past the file's counter lands"
+            (let [sb2 (store/ingest (assoc s0 :next-id (db/next-id-floor conn))
+                                    'dup.two "(ns dup.two)\n\n(def b 2)\n")
+                  nb2 (vec (drop (count (store/deltas s0)) (store/deltas sb2)))]
+              (is (not= (mapv :id nb) (mapv :id nb2)) "fixture: fresh ids this time")
+              (is (true? (db/append! conn sb2 nb2 ['dup.two] other head)))))))
+      (finally (.close conn)))))

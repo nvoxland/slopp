@@ -96,6 +96,21 @@
                             FROM elements WHERE line = ?" id parent]))
     id))
 
+(defn ^:export delete-line!
+  "Drop a line: its row and its materialized `elements` rows. Returns true if
+  a line was there to drop.
+
+  **The DELTAS stay.** They become unreachable from any head, which is what
+  history means here — a line is a pointer, and dropping the pointer is not
+  the same as claiming the work never happened. It also makes dropping cheap
+  and safe to do casually, which is the whole point of an anonymous line that
+  gets abandoned when an agent stops."
+  [conn line-id]
+  (jdbc/execute! conn ["DELETE FROM elements WHERE line = ?" line-id])
+  (pos? (or (:next.jdbc/update-count
+             (jdbc/execute-one! conn ["DELETE FROM lines WHERE id = ?" line-id]))
+            0)))
+
 ^:reads (defn ^:export trunk-line-id!
   "The trunk line's id, minting the row when a store predates the lines table.
 
@@ -284,12 +299,6 @@
          ;; would leave the value and the walk disagreeing on exactly the rows
          ;; that were wrong, which is worse than either being wrong alone.
          (when-let [p (:deltas/parent row)] {:parent p})))
-
-(defn ^:export set-line-id!
-  "Stamp this store db with its line identity (branch creation)."
-  [conn line-id]
-  (jdbc/execute! conn ["INSERT INTO meta (k,v) VALUES ('line-id', ?)
-                        ON CONFLICT(k) DO UPDATE SET v = excluded.v" line-id]))
 
 ^:reads (defn ^:export deps
   "The store's external-dependency manifest, read straight from meta — for
@@ -507,8 +516,7 @@
                                                 ORDER BY seq")
                                         (line-head conn line-id)]))
       :next-id    next-id
-      :line-id    (:meta/v (jdbc/execute-one!
-                            conn ["SELECT v FROM meta WHERE k = 'line-id'"]))
+      
       ;; NOT loaded at open. :blobs is a partial cache by design — file-content
       ;; documents the miss and the db fallback owns it, and put-blobs! is
       ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
@@ -527,6 +535,23 @@
   config the journal doesn't track (e.g. `git-remote`, `git-base-sha`)."
   [conn k]
   (:meta/v (jdbc/execute-one! conn ["SELECT v FROM meta WHERE k = ?" k])))
+
+^:reads (defn ^:export next-id-floor
+  "The id counter the FILE has reached, or nil for a store with no history.
+
+  Ids are minted from the store VALUE (`store/gen-id` counts `:next-id`), and
+  `deltas.id` is UNIQUE across the whole journal — so the counter is a
+  property of the FILE while the value holding it belongs to one line. Any
+  value that stopped counting re-mints ids another line has already used, and
+  that is not a lost race: it throws.
+
+  This was unreachable while a branch was a separate db file, because two
+  lines could not share a UNIQUE index. It became reachable the moment they
+  shared a journal, and the protection that used to cover the equivalent case
+  — two SERVERS on one line, serialized by the write CAS — is exactly what
+  per-line CAS deliberately removed between lines."
+  [conn]
+  (some-> (get-meta conn "next-id") Long/parseLong))
 
 ^:reads (defn ^:export meta-with-prefix
   "Every meta row whose key starts with `prefix`, as `{k v}`. The k/v
@@ -635,6 +660,27 @@
   [^java.sql.SQLException e]
   (let [m (.toLowerCase (str (.getMessage e)))]
     (or (.contains m "busy") (.contains m "locked"))))
+
+(defn duplicate-delta-id?
+  "Is this SQLException the UNIQUE violation on `deltas.id` — another writer
+  having already taken an id this one minted?
+
+  A lost race by every property that matters, and the same cure: refresh, pick
+  up the file's counter, rebase. Ids come from a store VALUE while the UNIQUE
+  index spans the whole journal, so two lines counting from the same place mint
+  the same id. That could not happen while a branch was a separate file, and
+  per-line CAS removed the serialization that covered the equivalent case for
+  two servers on ONE line — so this is the residue of the feature, not a defect
+  behind it.
+
+  Deliberately as narrow as `writer-collision?`, and for the same reason: it
+  names ONE constraint on ONE column. Widening it to constraint violations
+  generally would hand back `false` for a real defect, and the caller would
+  retry it twelve times and report contention."
+  [^java.sql.SQLException e]
+  (let [m (.toLowerCase (str (.getMessage e)))]
+    (and (.contains m "unique constraint failed")
+         (.contains m "deltas.id"))))
 
 (defn- row->line
   "A `lines` row as a value. next.jdbc qualifies plain columns by their table,
@@ -760,7 +806,7 @@
     ;; must SURFACE: swallowing it returned false, the caller retried, and the
     ;; agent was told "commit contention" for what was really a bad statement.
     (catch java.sql.SQLException e
-      (if (writer-collision? e) false (throw e)))))
+      (if (or (writer-collision? e) (duplicate-delta-id? e)) false (throw e)))))
 
 (defn ^:export persist!
   "Write one mutation atomically: the delta, then the full snapshot tail

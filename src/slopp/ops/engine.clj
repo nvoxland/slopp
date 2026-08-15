@@ -340,6 +340,24 @@
             (.close ^java.sql.Connection conn))
           (:db s)))))
 
+^:reads (defn ^:export session-line
+  "The LINE this session reads and writes — its id, or nil for an ephemeral
+  session, which has no journal for a line to point into.
+
+  `:line` is set only once a session has moved OFF the trunk, so nil means
+  \"this db's trunk\" rather than \"no line\". That is not a default hiding in a
+  function: it is resolved LAZILY on purpose, because a session can acquire
+  its store after opening — `ensure-db!` materializes one on the first durable
+  write — and an id read eagerly at open would name a store that did not exist
+  yet, then keep naming it after one appeared.
+
+  Every write and every cache refresh asks this, so the session, its journal
+  suffix and its materialization can never disagree about which line they are
+  talking about."
+  [session]
+  (or (:line @session)
+      (when-let [conn (:db @session)] (db/trunk-line-id! conn))))
+
 (defn try-commit!
   "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
   inversion): the new deltas + the full element rows of `nses` land in ONE
@@ -350,7 +368,8 @@
   rebases, or surfaces contention."
   [session base st' nses]
   (if-let [conn (ensure-db! session)]
-    (if (db/append! conn st' (drop (count (store/deltas base)) (store/deltas st')) (vec nses) (db/trunk-line-id! conn) (:id (last (store/deltas base))))
+    (if (db/append! conn st' (drop (count (store/deltas base)) (store/deltas st')) (vec nses)
+                (session-line session) (:id (last (store/deltas base))))
       (do (swap! session
                  (fn [s]
                    (if (< (count (store/deltas (:store s)))
@@ -394,7 +413,7 @@
   that is not a hypothetical."
   [session]
   (when-let [conn (:db @session)]
-    (let [line   (db/trunk-line-id! conn)
+    (let [line   (session-line session)
           local  (:store @session)
           suffix (db/deltas-after conn line (count (store/deltas local)))
           digest (db/elements-digest conn line)]
@@ -417,7 +436,15 @@
         ;; were just read from the db, so accepting them is not a regression
         (when (not= digest (:elements-digest @session))
           (swap! session update :store assoc :namespaces (db/load-elements conn line))))
-      (swap! session assoc :elements-digest digest))))
+      (swap! session assoc :elements-digest digest)
+      ;; …and the id counter, which belongs to the FILE rather than to this
+      ;; line. Another line's write advances it without appearing in this
+      ;; line's suffix, so nothing above would notice — and the next id minted
+      ;; here would collide on the UNIQUE deltas.id. Unconditional on purpose:
+      ;; a commit that lost this race retries through here, and a floor applied
+      ;; only when the suffix moved would leave it retrying forever.
+      (when-let [floor (db/next-id-floor conn)]
+        (swap! session update-in [:store :next-id] max floor)))))
 
 (defn persist-trace!
   "Q3: the trace map survives the session — written to store meta so the NEXT

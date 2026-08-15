@@ -4,7 +4,7 @@
   semantics; merging down to main rides the m2 causal-delivery engine."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
-            [slopp.ops :as ops] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store]))
+            [slopp.ops :as ops] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [slopp.store.db :as db] [slopp.store.render :as store.render]))
 
 (def seed
   (str "(ns br.core (:require [clojure.test :refer [deftest is]]))\n"
@@ -266,3 +266,59 @@
         (is (= "9090" (:value (ops/config-file! sess "capabilities" :key "web.port"))))
         (is (= "true" (:value (ops/config-file! sess "capabilities" :key "web.enabled")))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-branch-is-a-line-in-the-one-file
+  ;; A branch used to BE a separate db under .slopp/branches/<name>, with the
+  ;; whole store snapshotted into it — because `elements` could hold one view
+  ;; per file and the write CAS ran on the global journal head. Both of those
+  ;; are gone, so a branch is what it always meant: a NAME for a line, and a
+  ;; line is a pointer to a head in the one journal.
+  ;;
+  ;; What that buys is the point of the assertions below. The two lines share
+  ;; their history rather than copying it, so main's log is a PREFIX of the
+  ;; branch's — a snapshot would have produced two independent logs of equal
+  ;; length, which is the shape this replaces.
+  (let [dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-brline-" (System/nanoTime))]
+    (try
+      (let [sess (external/open! {:slopp.ops/dir dir})]
+        (try
+          (ops/ingest! sess 'br.core seed)
+          (branch/branch! sess "feature")
+          (ops/edit-replace! sess 'br.core 'f "(defn f [x] (+ x 10))"
+                             :prompt "feature work")
+          (finally (ops/close! sess))))
+
+      (testing "no per-branch db file is written"
+        (is (not (.exists (java.io.File. (str dir "/.slopp/branches"))))))
+
+      (let [conn (db/open! dir)]
+        (try
+          (let [ls    (db/lines conn)
+                feat  (first (filter #(= "feature" (:name %)) ls))
+                trunk (first (filter #(= "main" (:name %)) ls))]
+            (testing "the branch is a row in the ONE store, forked from main"
+              (is (some? feat) (pr-str (mapv :name ls)))
+              (is (= "branch" (:kind feat)))
+              (is (= (:id trunk) (:parent feat))
+                  "and it records WHICH line it split from"))
+
+            (testing "each line holds its own view of the same namespace"
+              (is (re-find #"\(\+ x 10\)"
+                           (store.render/render-ns (db/load-store conn (:id feat)) 'br.core))
+                  "the branch has the feature work")
+              (is (re-find #"\(inc x\)"
+                           (store.render/render-ns (db/load-store conn (:id trunk)) 'br.core))
+                  "and main still has what it had"))
+
+            (testing "and they SHARE history rather than copying it"
+              (let [log-f (db/ancestry conn (:head feat))
+                    log-m (db/ancestry conn (:head trunk))]
+                (is (seq log-m) "fixture: main has history to share")
+                (is (< (count log-m) (count log-f))
+                    "the branch moved past main, so a prefix is a real claim here")
+                (is (= log-m (subvec log-f 0 (count log-m)))
+                    "main's log is a PREFIX of the branch's — a snapshot would have
+                     produced two independent logs instead"))))
+          (finally (.close conn))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
