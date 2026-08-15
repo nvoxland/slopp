@@ -129,9 +129,15 @@
                            " agent response: " leak " (agents address by name +"
                            " snippet, never file:line — anchor it)")
                       {:leak leak}))))
-  (let [x       (cond
-                  (and *hint* (map? x) (nil? (:hint x))) (assoc x :hint *hint*)
-                  (and *hint* (string? x)) (str x "\n\n[hint] " *hint*)
+  (let [;; FORCED, because one of the two hint sources can only be computed
+        ;; AFTER the tool ran: a write's hint counts what is now un-landed, and
+        ;; `*hint*` is bound before the call. A delay lets that one be decided
+        ;; here, at render time, and memoizes so a second render cannot make it
+        ;; speak twice. A plain string or nil passes through `force` unchanged.
+        h       (force *hint*)
+        x       (cond
+                  (and h (map? x) (nil? (:hint x))) (assoc x :hint h)
+                  (and h (string? x)) (str x "\n\n[hint] " h)
                   :else x)
         full    (if (string? x) x (pr-str x))
         slimmed (let [t (trim-failure-strings x)]
@@ -879,6 +885,63 @@
                    (str "web.enabled is false for this store — the managed app"
                         " server was stopped"))}))))
 
+(def ^:private thread-hint-every
+  "Un-landed changes between reminders that this session's work is private.
+
+  Small enough that a long episode hears it more than once, large enough that
+  an ordinary task — orient, read, a handful of writes, done — hears it
+  exactly once: on the write that made the work private in the first place."
+  25)
+
+(defn thread-hint!
+  "One line saying this session's work is still private, or nil.
+
+  `session_brief` names the thread and nothing else does, so between orienting
+  and `done` the fact that nobody can see your work is true and unstated —
+  and a long episode, where it matters most, is exactly where the brief has
+  scrolled out of context.
+
+  Fires when the un-landed count MOVES: on the change that makes the work
+  private, then every [[thread-hint-every]] changes after. Both halves are the
+  anti-noise design — a reminder on every call is one a reader learns to skip,
+  and one that never repeats is one a long session loses. Counting CHANGES
+  rather than calls means it speaks in proportion to what is at stake instead
+  of to how chatty the session is.
+
+  **Whether a call wrote is asked of the journal, not of a list of tool
+  names.** The first cut gated on `tools/write-tools` — a 17-entry set that
+  does not contain `edit_subform`, the commonest write in the system — so the
+  reminder never fired at all. A derived test cannot fall out of step with the
+  thing it describes, and a read gets its silence for the honest reason:
+  nothing became invisible.
+
+  `done` and `commit_point` stay quiet by name, and that exclusion is about
+  noise rather than detection: a red `done` genuinely does leave everything
+  private, and it says so itself, in the verdict the agent is already reading.
+
+  Keyed to the LINE as well as the count, so a land resets both halves — the
+  fresh thread starts at zero and the next reminder is a real one rather than
+  a leftover measured against a line that no longer exists."
+  [session tool]
+  (when-not (#{"done" "commit_point"} tool)
+    (when-let [conn (:db @session)]
+      (when-let [line (:line @session)]
+        (let [n               (db/unlanded-count conn line)
+              [seen-l seen-n] (::thread-hint-seen @session)
+              prev            (if (= seen-l line) seen-n 0)
+              [said-l said-n] (::thread-hint-at @session)
+              base            (if (= said-l line) said-n 0)]
+          (swap! session assoc ::thread-hint-seen [line n])
+          (when (and (< prev n)
+                     (or (not (::thread-hint-said? @session))
+                         (<= (+ base thread-hint-every) n)))
+            (swap! session assoc ::thread-hint-said? true ::thread-hint-at [line n])
+            (str n (if (= 1 n) " change is" " changes are")
+                 " on your thread and nobody else can see "
+                 (if (= 1 n) "it" "them")
+                 " — not another agent on this branch, not the git projection,"
+                 " not the running server. A green done lands them.")))))))
+
 (defn- call-tool! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
   ;; but the image may still be warming on a background thread. Oracle and
@@ -1432,9 +1495,14 @@
     ;; and it had no producer at all: measured over one real session, 78% of
     ;; the wall clock was invisible. turn_end folds the ring onto its delta.
     (let [t0 (System/currentTimeMillis)
-          r  (binding [*hint* (smells/track-hint! session
-                                                  (:name params)
-                                                  (:arguments params))
+          r  (binding [;; A smell is once-per-session and rarer, so it speaks first. The
+                       ;; thread reminder is DEFERRED rather than computed here: it
+                       ;; counts what the call is about to make un-landed, which does
+                       ;; not exist yet. `text!` forces it.
+                       *hint* (or (smells/track-hint! session
+                                                      (:name params)
+                                                      (:arguments params))
+                                  (delay (thread-hint! session (:name params))))
                        *spool-session* session]
                (try (call-tool! session params)
                     (catch Exception e

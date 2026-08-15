@@ -440,11 +440,18 @@
     to what the caller just graded.
   - **The branch moved** — somebody else landed while this thread worked. The
     branch is merged INTO the thread first, through the same pipeline a
-    `branch_merge` uses, which replays, hot-loads, commits and re-verifies the
-    namespaces it touched. The thread's head then has the branch's head in its
+    `branch_merge` uses, and then the WHOLE in-image suite is re-run against
+    the merged state. The thread's head then has the branch's head in its
     ancestry, so the second half is the fast-forward case. Conflicts or a red
     rebase land NOTHING and leave the thread open holding the merged state:
     the agent resolves and calls done again.
+
+  The re-run is the whole suite and not the merge's own scope, and the
+  difference is the point. The merge verifies the namespaces it CARRIED; the
+  test that breaks is normally in the namespace that CALLS them, which the
+  merge never names. Verifying only what arrived reports green about a branch
+  where nothing passes — the one failure here that a verdict would hide rather
+  than show.
 
   Losing the CAS is a RETRY, not a failure — another agent landed between the
   reconcile and the advance, which is the ordinary shape of a shared branch
@@ -482,7 +489,18 @@
                 (recur reconciled (inc tries) rebase))
 
               :else
-              (let [m (merge-into-session! session (db/load-store conn branch-id)
+              (let [;; The id counter belongs to the FILE, and this session stopped
+                    ;; counting when the other agent started. The merge is about
+                    ;; to mint deltas from a value that predates theirs, and
+                    ;; `deltas.id` is UNIQUE across the journal — so without this
+                    ;; every rebase onto somebody else's work loses its own commit
+                    ;; as a duplicate id, retries with the same stale counter, and
+                    ;; reports the bound as "the branch is being written
+                    ;; continuously". Refreshing raises the floor. It is the hazard
+                    ;; per-line CAS created, arriving at the one path whose whole
+                    ;; job is to cross lines.
+                    _ (engine/refresh-cache! session)
+                    m (merge-into-session! session (db/load-store conn branch-id)
                                            (str "branch:" branch-nm "#" branch-id))]
                 (cond
                   (:error m)
@@ -496,14 +514,35 @@
                    :reason (str branch-nm " moved while you worked, and rebasing onto"
                                 " it conflicts — resolve, then call done again")}
 
-                  (or (pos? (:fail (:test m) 0)) (pos? (:error (:test m) 0)))
-                  {:landed false :test (:test m)
-                   :reason (str branch-nm " moved while you worked, and your work is"
-                                " red against it — fix, then call done again")}
-
+                  ;; RE-EARN the verdict over the WHOLE suite, not just what the merge
+                  ;; carried. The two are almost never the same set, and the
+                  ;; difference IS the failure: your code calls theirs, so THEIR
+                  ;; namespace is what merged and YOURS is what breaks — a
+                  ;; merge-scoped check runs their tests, which pass, and reports
+                  ;; green about a branch where nothing does. `done`'s verdict was
+                  ;; earned against the code this thread forked from, and that is no
+                  ;; longer what the branch holds.
+                  ;;
+                  ;; In-image scope, said plainly rather than left to be discovered:
+                  ;; this is the suite `done` runs, re-run against the merged state.
+                  ;; The impacted ^:external slice is NOT repeated — done already ran
+                  ;; it, and doubling the most expensive part of a done every time
+                  ;; somebody else lands first would make a busy branch cost more to
+                  ;; join than to work on.
                   :else
-                  (recur bh (inc tries)
-                         (merge rebase (select-keys m [:merged :new-nses :merge-delta]))))))))))))
+                  (let [st'  (:store @session)
+                        dead (set (map :ns (:image-load-failures @session)))
+                        nses (vec (sort (remove dead (keys (:namespaces st')))))
+                        s    (engine/run-verification! session nses nil)]
+                    (if (or (pos? (:fail s 0)) (pos? (:error s 0)))
+                      {:landed false :test s
+                       :reason (str branch-nm " moved while you worked, and your work"
+                                    " is red against it — the rebase is IN your"
+                                    " thread, so fix it there and call done again")}
+                      (recur bh (inc tries)
+                             (assoc (merge rebase
+                                           (select-keys m [:merged :new-nses :merge-delta]))
+                                    :test s)))))))))))))
 
 ^:reads (defn ^:export thread-list
   "The live threads on this session's branch — who holds one, how much they
@@ -535,10 +574,20 @@
     {:threads [] :note "an ephemeral session has no journal, so it holds no threads"}))
 
 (defn ^:export thread-drop!
-  "Abandon thread `id` on this session's branch: its view is reclaimed, its
-  status is settled, and its deltas stay walkable.
+  "Abandon a thread on this session's branch: its view is reclaimed, its
+  status is settled, and its deltas stay walkable. No `id` means YOUR OWN —
+  the start-over case, which is the usual reason to be here.
 
-  Dropping your OWN thread is allowed and is the interesting case, because it
+  This is NOT `undo` or `episode_revert`, and the difference is a guarantee
+  worth choosing between. Those are forward-only: they append revert deltas,
+  so the work stays in your line's history and stays findable. This appends
+  nothing — the line is settled and its work becomes unreachable from any
+  branch head. Same intent, different promise. And this one is not bounded by
+  an episode: a thread holds everything since the last thing that LANDED, so
+  it covers several red done points, which is exactly when \"start me over\"
+  gets asked.
+
+  Dropping your OWN thread is the interesting case, because it
   is not finished until the session stops showing the work: `adopt-line!`
   puts it on a fresh thread and reloads both the store and the image from it.
   Without that the store would go on rendering code no line holds, which is a
@@ -551,7 +600,12 @@
   the wrong thing\"."
   [session id]
   (if-let [conn (:db @session)]
-    (let [branch (engine/session-branch-line session)
+    (let [;; No id means YOUR thread. "I have gone the wrong way, start me over"
+          ;; is the common reason to reach for this, and making it cost a
+          ;; thread_list call plus a copied UUID puts the friction exactly
+          ;; where somebody is already frustrated.
+          id     (or id (engine/session-line session))
+          branch (engine/session-branch-line session)
           row    (first (filter #(= id (:id %)) (db/lines conn)))]
       (cond
         (nil? row)

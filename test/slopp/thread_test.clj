@@ -243,10 +243,13 @@
                   "and yours is still on it — the control, since an empty listing
                    would satisfy the assertion above")))
 
-          (testing "and dropping your OWN takes the work off your store"
+          (testing "and dropping your OWN — no id needed — takes the work off your store"
             (let [mine (engine/session-line a)
-                  r    (branch/thread-drop! a mine)]
-              (is (= mine (:dropped r)) (pr-str r))
+                  ;; nil id means MINE. The start-over case must not require a
+                  ;; thread_list round trip to name the thing you are sitting in.
+                  r    (branch/thread-drop! a nil)]
+              (is (= mine (:dropped r)) (str "no argument dropped the thread you are on: "
+                                             (pr-str r)))
               (is (not= mine (:thread r)) "you are on a fresh thread")
               (is (= (:thread r) (engine/session-line a)))
               (is (re-find #"\(inc x\)" (store.render/render-ns (:store @a) 'th.core))
@@ -255,5 +258,62 @@
           (testing "a branch is not a thread, and the refusal says which it is"
             (let [r (branch/thread-drop! a (db/trunk-line-id! (:db @a)))]
               (is (re-find #"branch" (:error r)) (pr-str r))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-rebase-re-earns-the-whole-verdict-not-just-the-merged-namespaces
+  ;; The failure this rules out is the one the design called invisible if got
+  ;; wrong: a green that describes a state which never existed on the branch.
+  ;;
+  ;; A's work is green against the code A forked from. B changes that code and
+  ;; lands. When A lands, the rebase brings B's change in — and the test that
+  ;; breaks is in A's OWN namespace, which the merge never touches. Verifying
+  ;; only what the merge carried would report green and advance the branch to a
+  ;; state where nothing passes.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-reearn-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          ;; A builds on f as it stands, and is green about it
+          (ops/module-dep! a "th.dep" "th.core" :prompt "fixture edge" :agent "agent-a")
+          (is (pos? (:forms (ops/ingest! a 'th.dep
+                                         (str "(ns th.dep\n"
+                                              "  (:require [clojure.test :refer [deftest is]]\n"
+                                              "            [th.core :as c]))\n\n"
+                                              "(defn g [x] (c/f x))\n\n"
+                                              "(deftest g-t (is (= 2 (g 1))))\n")
+                                         :agent "agent-a")))
+              "fixture: A's namespace really landed in A's thread")
+
+          ;; B changes f underneath, in a namespace A's test does not live in
+          (ops/edit-replace! b 'th.core 'f "(defn f [x] (+ x 10))"
+                             :prompt "b changes the meaning of f" :agent "agent-b")
+          (is (= "main" (:landed (branch/land-thread! b))) "fixture: B landed first")
+
+          (testing "A's land rebases, finds its own test red against B's change, and refuses"
+            (let [r (branch/land-thread! a)]
+              (is (false? (:landed r)) (pr-str r))
+              (is (pos? (+ (:fail (:test r) 0) (:error (:test r) 0))) (pr-str r))))
+
+          (testing "so the branch still holds only what was verified"
+            (let [conn (:db @a)
+                  main (db/load-store conn (db/trunk-line-id! conn))]
+              (is (re-find #"\(\+ x 10\)" (store.render/render-ns main 'th.core))
+                  "B's landed work is there")
+              (is (nil? (get-in main [:namespaces 'th.dep]))
+                  "and A's is not — it never earned a verdict against B's code")))
+
+          (testing "and A's thread survives, holding the rebased state to fix"
+            (is (some? (get-in (:store @a) [:namespaces 'th.dep])))
+            (is (re-find #"\(\+ x 10\)" (store.render/render-ns (:store @a) 'th.core))
+                "the rebase DID happen — A is looking at B's change, which is what
+                 makes the red actionable rather than mysterious"))
           (finally (ops/close! a) (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

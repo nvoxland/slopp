@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.web.client :as web.client] [slopp.read.history :as history]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.web.client :as web.client] [slopp.read.history :as history] [slopp.ops.branch :as branch]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -2118,3 +2118,54 @@
           (is (re-find (re-pattern root) r)
               (str "including the tip that is about to become unreachable: " r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-write-says-when-your-work-is-still-private
+  ;; The gap threads left: `session_brief` names your thread, and nothing else
+  ;; does — so between orienting and done, the fact that nobody can see your
+  ;; work is true and unstated. A long episode is exactly where that matters
+  ;; and exactly where the brief has scrolled away.
+  ;;
+  ;; The shape has to earn its noise: once when it BECOMES true, then only as
+  ;; the stake grows, and never for a call that changed nothing.
+  ;;
+  ;; Every check below has a REAL write in front of it. The first version of
+  ;; this test asked twice in a row with nothing in between, so "the second
+  ;; write stays quiet" was really "no second write happened" — a true
+  ;; assertion about nothing, and it would have stayed green against a rule
+  ;; that fires on every single write.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-hint-" (System/nanoTime))]
+    (try
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "hinted"})
+            add! (fn [i] (ops/add-form! sess 'hi.core
+                                        (str "(defn ^:unused-ok g" i " [] " i ")")
+                                        :agent "hinted"))]
+        (try
+          (ops/ingest! sess 'hi.core "(ns hi.core)\n(defn ^:unused-ok f [] 1)\n"
+                       :agent "hinted")
+
+          (testing "the write that makes the work private says so"
+            (let [h (mcp/thread-hint! sess "edit_add_form")]
+              (is (string? h) "a hint fired")
+              (is (re-find #"done" h) "and it names the way out")))
+
+          (testing "the next write does not — one line per stake, not per call"
+            (add! 0)
+            (is (nil? (mcp/thread-hint! sess "edit_add_form"))))
+
+          (testing "and a READ stays quiet for the honest reason: nothing changed"
+            (is (nil? (mcp/thread-hint! sess "query_source"))))
+
+          (testing "it returns as the stake grows"
+            (dotimes [i 30] (add! (inc i)))
+            (let [h (mcp/thread-hint! sess "edit_add_form")]
+              (is (string? h) "a long episode is reminded again")
+              (is (re-find #"\d" h) "and it says how much is riding on it")))
+
+          (testing "a landed thread has nothing to say"
+            (is (= "main" (:landed (branch/land-thread! sess))))
+            (add! 99)
+            (is (nil? (mcp/thread-hint! sess "edit_add_form"))
+                "the count restarted with the fresh thread, so the next reminder
+                 is a real one rather than a leftover"))
+          (finally (ops/close! sess))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
