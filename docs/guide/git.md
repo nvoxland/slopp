@@ -57,6 +57,13 @@ git_resolve {path}
   one unit coarser.
 - **`git_clone`** rebuilds a fileless store from a remote and grafts onto the
   remote's history so later pushes fast-forward.
+- **`import_dir {dir}`** does what `git_pull` does, from a **directory**, with
+  no git on either side. Same form-granular 3-way merge, same conflicts, same
+  `done` gate. The base is your last milestone -- which is "the state this
+  directory was exported from" in the common case, and the conservative answer
+  otherwise: work you did since that milestone is yours-only and survives.
+  Paths the export never carried, and that are not namespaces, are left alone
+  and noted. Git is a *caller* of import here, not a requirement for it.
 - **`query_git`** and **`query_commits`** show the projection state and prove
   store/git alignment -- by asking the branch head which milestone it is. Every
   projected commit carries a `Slopp-Commit:` trailer naming the milestone it

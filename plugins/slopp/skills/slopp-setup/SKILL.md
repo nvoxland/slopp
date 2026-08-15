@@ -84,6 +84,10 @@ slopp owns exactly ONE branch — store config `git-branch`, default `"slopp"`.
   merge; same-form divergence is quarantined, listed by `git_conflicts`,
   resolved with `git_resolve` + a normal edit.
 - `git_clone {url, dir}` rebuilds a fileless store from a published repo.
+- `import_dir {dir}` absorbs a DIRECTORY the same way, with no git on either
+  side — a zip, a scratch tree, another tool's output. Same 3-way merge, same
+  conflict handling, same `done` gate; the base is your last milestone. Git is
+  a *caller* of import, not a requirement for it.
 - Humans own `main` (and everything else) with regular git; merge
   `slopp ↔ main` yourself when you want code to cross the boundary.
 - Milestone authorship: `config {key: "user.name"|"user.email", value}`

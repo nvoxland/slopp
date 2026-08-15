@@ -288,6 +288,7 @@ a ghost that every register view has to carry.
 | `git_push {url? branches?}` | Publish slopp history to the remote. Fast-forward only. |
 | `git_pull` | Fetch and absorb remote history by a form-granular 3-way merge. |
 | `git_clone {url dir}` | Clone a remote into a fileless store. |
+| `import_dir {dir}` | Absorb a directory of files the same way `git_pull` absorbs a remote — 3-way against your last milestone, no git anywhere. |
 | `git_conflicts` | Unresolved pull conflicts, with the raw remote content. |
 | `git_resolve {path?}` | Mark a conflict resolved. Unblocks `git_push`. |
 

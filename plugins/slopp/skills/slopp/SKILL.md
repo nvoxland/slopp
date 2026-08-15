@@ -1760,6 +1760,6 @@ edit_move_forms module_extract edit_move edit_revert undo episode_revert cleanup
 branch_create branch_switch
 branch_merge branch_delete merge_from · deps_add deps_remove deps_list
 deps_pure · module_dep module_purity module_role · file_put file_remove file_list file_get
-file_history · config config_file · git_push git_clone git_pull git_conflicts git_resolve ·
+file_history · config config_file · git_push git_clone git_pull git_conflicts git_resolve import_dir ·
 test_run draft_test done full_check commit_point restart build help ·
 ui_serve compile_client generate_client js_dep store_health
