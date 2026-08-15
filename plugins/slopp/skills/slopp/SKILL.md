@@ -1808,7 +1808,7 @@ edit_replace_form edit_delete_form edit_subform edit_comment
 edit_rename change_signature rename_sweep edit_requalify edit_extract
 edit_move_forms module_extract edit_move edit_revert undo episode_revert cleanup ·
 branch_create branch_switch
-branch_merge branch_delete merge_from · deps_add deps_remove deps_list
+branch_merge branch_delete thread_list thread_drop merge_from · deps_add deps_remove deps_list
 deps_pure · module_dep module_purity module_role · file_put file_remove file_list file_get
 file_history · config config_file · git_push git_clone git_pull git_conflicts git_resolve import_dir ·
 test_run draft_test done full_check commit_point restart build help ·

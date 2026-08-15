@@ -270,10 +270,17 @@ from declaring the permissive value: `:external`, `:jvm` and `:product` are
 claims, absence is no claim. A declaration whose namespace was renamed away is
 a ghost that every register view has to carry.
 
-## Branches
+## Branches and threads
+
+A **thread** is the private line your session writes to; a green `done` lands it
+on the branch. You never create one — see
+[Done points and milestones](../guide/done-and-milestones.md). These two verbs
+exist for the leftovers: work somebody started and nobody finished.
 
 | Tool | What it does |
 |---|---|
+| `thread_list` | Live threads on this branch — `:agent`, `:unlanded`, `:idle-ms`, `:mine` on your own. Across all agents. |
+| `thread_drop {id}` | Abandon a thread: its view is reclaimed, its deltas stay walkable. Dropping your own puts you on a fresh one. |
 | `branch_create {name}` | Snapshot the current state and switch to it. |
 | `branch_switch {name}` | Check out another branch; the live image follows. |
 | `branch_merge {name}` | Merge a branch into the current line. The branch survives. |
