@@ -709,6 +709,65 @@
   (mapv row->line
         (jdbc/execute! conn ["SELECT * FROM lines ORDER BY used_at DESC"])))
 
+^:reads (defn ^:export open-threads
+  "Every open thread on `branch-line-id`, most-recently-used first.
+
+  Across ALL agents, deliberately: the question this answers is \"who is
+  working here, and what has been sitting untouched\", and an agent-scoped
+  version could only ever say yes about itself. `used_at` is the age, so an
+  idle thread is a row near the end of this list rather than a separate
+  concept.
+
+  `kind` does the real filtering, not `parent`. A named branch forked from
+  this one carries the same `parent`, so a listing keyed on the fork alone
+  would report a branch as somebody's private workspace."
+  [conn branch-line-id]
+  (mapv row->line
+        (jdbc/execute! conn ["SELECT * FROM lines
+                               WHERE kind = 'thread' AND parent = ? AND status = 'open'
+                             ORDER BY used_at DESC" branch-line-id])))
+
+(defn ^:export adopt-thread!
+  "The thread `agent` is working in on `branch-line-id`, minting one at the
+  branch's HEAD when the agent has none open here.
+
+  Adopt-or-create, keyed by (agent, branch), because that pair is what a
+  private workspace IS. Two agents on one branch must not share a line — that
+  is the isolation the model exists for — and one agent on two branches must
+  not either, or switching branches would drag un-done work across with it.
+  The key is also why nothing needs remembering between sessions: a returning
+  agent asks the same question and gets the same row back.
+
+  It forks at the branch's HEAD, not at the agent's last one, so a thread
+  opened after the branch moved starts from what the branch says NOW. That
+  point is then PINNED for the thread's whole life — the base never moves
+  underneath it, which is what keeps its view stable and its verdict
+  meaningful while work is in progress.
+
+  Only an `open` row is adopted. A landed thread's writes are already on the
+  branch and an abandoned one was discarded deliberately, so re-entering
+  either would resurrect a line whose meaning is settled; the agent gets a
+  fresh one instead.
+
+  Adoption TOUCHES `used_at`. A thread being worked in is current whether or
+  not this session has written to it yet, and `used_at` is the only thing
+  that can say so — a thread that only ever moved on writes would look idle
+  for exactly as long as someone was reading in it."
+  [conn branch-line-id agent]
+  (if-let [id (one-col (jdbc/execute-one!
+                        conn ["SELECT id FROM lines
+                                 WHERE kind = 'thread' AND parent = ? AND agent = ?
+                                   AND status = 'open'
+                               ORDER BY used_at DESC LIMIT 1"
+                              branch-line-id agent]))]
+    (do (jdbc/execute! conn ["UPDATE lines SET used_at = ? WHERE id = ?"
+                             (System/currentTimeMillis) id])
+        id)
+    (create-line! conn {:kind   "thread"
+                        :base   (line-head conn branch-line-id)
+                        :parent branch-line-id
+                        :agent  agent})))
+
 ^:reads (defn ^:export ancestry
   "The delta ids reaching `head`, OLDEST first — one line's whole history.
 

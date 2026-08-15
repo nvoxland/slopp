@@ -671,3 +671,150 @@
               (is (not= (mapv :id nb) (mapv :id nb2)) "fixture: fresh ids this time")
               (is (true? (db/append! conn sb2 nb2 ['dup.two] other head)))))))
       (finally (.close conn)))))
+
+(deftest ^:external an-agent-gets-one-thread-per-branch-and-finds-it-again
+  ;; Adoption is keyed by (agent, branch), and every clause of that key is
+  ;; load-bearing. "An agent gets a thread" would pass for a system with ONE
+  ;; global thread, so the assertions that carry weight are the ones that
+  ;; DISCRIMINATE: two agents on one branch must not share a line, and one
+  ;; agent on two branches must not either — the second is what decides
+  ;; whether switching branches drags your un-done work across with you.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            side  (db/create-line! conn {:name "side" :kind "branch"
+                                         :base (db/line-head conn trunk)
+                                         :parent trunk})
+            a1    (db/adopt-thread! conn trunk "agent-1")
+            a2    (db/adopt-thread! conn trunk "agent-1")
+            b1    (db/adopt-thread! conn trunk "agent-2")
+            a-oth (db/adopt-thread! conn side "agent-1")]
+        (is (= a1 a2) "the same agent on the same branch re-adopts its own thread")
+        (is (not= a1 b1) "a second agent on the same branch gets its own")
+        (is (not= a1 a-oth) "the same agent on another branch gets another thread")
+
+        (testing "and the row says what it is"
+          (let [row (first (filter #(= a1 (:id %)) (db/lines conn)))]
+            (is (= "thread" (:kind row)))
+            (is (nil? (:name row)) "a thread is the anonymous case")
+            (is (= trunk (:parent row)) "its branch is its parent LINE")
+            (is (= "agent-1" (:agent row)))
+            (is (= "open" (:status row))))))
+      (finally (.close conn)))))
+
+(deftest ^:external a-settled-thread-is-never-re-entered
+  ;; A landed thread's writes are already on the branch and an abandoned one
+  ;; was discarded deliberately, so both have a settled meaning. Re-adopting
+  ;; either resurrects a line whose story is over — and in the landed case
+  ;; stages the same deltas to land a second time.
+  ;;
+  ;; The status is set with SQL rather than through a verb because nothing
+  ;; sets it yet: landing belongs to `done` and abandoning to the drop verb,
+  ;; both later. This is the db test, so the schema is within its remit.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)]
+        (doseq [settled ["landed" "abandoned"]]
+          (let [agent  (str "agent-" settled)
+                opened (db/adopt-thread! conn trunk agent)
+                row-of (fn [id] (first (filter #(= id (:id %)) (db/lines conn))))]
+            (is (= opened (db/adopt-thread! conn trunk agent))
+                "fixture: an OPEN thread IS re-adopted, so the contrast below is the status")
+            (jdbc/execute! conn ["UPDATE lines SET status = ? WHERE id = ?" settled opened])
+            (let [after (db/adopt-thread! conn trunk agent)]
+              (is (not= opened after) (str "a " settled " thread is not re-entered"))
+              (is (= "open" (:status (row-of after))) "the replacement is open")
+              (is (= settled (:status (row-of opened)))
+                  "and the settled row is untouched — nothing was reopened")))))
+      (finally (.close conn)))))
+
+(deftest ^:external a-thread-forks-at-the-branch-head-and-then-stays-pinned
+  ;; Two claims that only look alike. A thread opened after the branch moved
+  ;; must start from where the branch is NOW — otherwise a returning agent
+  ;; begins behind work that has already landed. And a thread already open
+  ;; must NOT move when it is re-adopted: it is pinned at its fork point for
+  ;; its whole life, rebasing exactly once, at its own done. That is what
+  ;; keeps its view stable and its verdict meaningful mid-work, and it is why
+  ;; every conflict arrives together at the end instead of arriving one at a
+  ;; time under an agent that is trying to finish.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [row-of (fn [id] (first (filter #(= id (:id %)) (db/lines conn))))
+            s1     (store/ingest (store/empty-store) 'th.one "(ns th.one)\n\n(def a 1)\n")
+            trunk  (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['th.one] trunk nil)))
+        (let [h1    (db/line-head conn trunk)
+              early (db/adopt-thread! conn trunk "agent-early")
+              s2    (store/ingest s1 'th.two "(ns th.two)\n\n(def b 2)\n")
+              new2  (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
+          (is (= h1 (:base (row-of early))) "a thread forks at the branch head")
+          (is (true? (db/append! conn s2 new2 ['th.two] trunk h1)))
+
+          (let [h2   (db/line-head conn trunk)
+                late (db/adopt-thread! conn trunk "agent-late")]
+            (is (not= h1 h2) "fixture: the branch really moved")
+            (is (= h2 (:base (row-of late)))
+                "a thread opened later starts from where the branch is NOW")
+            (is (= #{'th.one 'th.two} (set (keys (:namespaces (db/load-store conn late)))))
+                "so it reads the work that landed before it existed"))
+
+          (testing "and re-adoption does not rebase — the pin holds"
+            (is (= early (db/adopt-thread! conn trunk "agent-early")))
+            (is (= h1 (:base (row-of early))) "its base did not follow the branch")
+            (is (= #{'th.one} (set (keys (:namespaces (db/load-store conn early)))))
+                "and neither did its view"))))
+      (finally (.close conn)))))
+
+(deftest ^:external open-threads-are-this-branchs-live-lines-most-recent-first
+  ;; The listing a human or a GC reads to answer "who is working here, and
+  ;; what has been sitting untouched". Every exclusion below is a row the
+  ;; fixture really contains — a landed thread, another branch's thread, and
+  ;; a named BRANCH forked from this one, which shares the `parent` column
+  ;; with every thread and is separated only by `kind`.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk  (db/trunk-line-id! conn)
+            side   (db/create-line! conn {:name "side" :kind "branch"
+                                          :base (db/line-head conn trunk)
+                                          :parent trunk})
+            t-one  (db/adopt-thread! conn trunk "agent-1")
+            t-two  (db/adopt-thread! conn trunk "agent-2")
+            landed (db/adopt-thread! conn trunk "agent-3")
+            other  (db/adopt-thread! conn side "agent-1")]
+        (jdbc/execute! conn ["UPDATE lines SET status = 'landed' WHERE id = ?" landed])
+        ;; A millisecond-resolution clock cannot separate four rows minted in
+        ;; one breath, so the order is STATED rather than raced for.
+        (jdbc/execute! conn ["UPDATE lines SET used_at = 100 WHERE id = ?" t-one])
+        (jdbc/execute! conn ["UPDATE lines SET used_at = 200 WHERE id = ?" t-two])
+        (let [open (db/open-threads conn trunk)
+              ids  (set (map :id open))]
+          (is (= [t-two t-one] (mapv :id open))
+              "this branch's open threads, most recently used first")
+          (is (= ["agent-2" "agent-1"] (mapv :agent open))
+              "each row says whose it is — what makes an idle one attributable")
+          (is (not (ids landed)) "a landed thread is not live")
+          (is (not (ids other)) "another branch's thread is not on this branch")
+          (is (not (ids side)) "and a branch forked from here is not a thread")))
+      (finally (.close conn)))))
+
+(deftest ^:external adopting-a-thread-marks-it-current
+  ;; `used_at` is the only thing that can say a thread is being worked in, and
+  ;; a session that is orienting and reading has not written anything yet. A
+  ;; clock that moved only on writes would report a thread idle for exactly as
+  ;; long as somebody was thinking in it — which is when reaping it costs the
+  ;; most.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            id    (db/adopt-thread! conn trunk "agent-1")
+            used  (fn [] (:used-at (first (filter #(= id (:id %)) (db/lines conn)))))]
+        (jdbc/execute! conn ["UPDATE lines SET used_at = 1 WHERE id = ?" id])
+        (is (= 1 (used)) "fixture: the clock really was set back")
+        (is (= id (db/adopt-thread! conn trunk "agent-1")) "fixture: the same thread, re-adopted")
+        (is (< 1 (used)) "adoption is a use"))
+      (finally (.close conn)))))
