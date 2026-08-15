@@ -504,3 +504,78 @@
                   :else
                   (recur bh (inc tries)
                          (merge rebase (select-keys m [:merged :new-nses :merge-delta]))))))))))))
+
+^:reads (defn ^:export thread-list
+  "The live threads on this session's branch — who holds one, how much they
+  have written since forking, and how long it has been since anybody touched
+  it. The session's own is marked `:mine`.
+
+  Across ALL agents on purpose. The question a listing answers is \"is there
+  work here nobody is going to finish\", and an idle thread is by definition
+  somebody else's — an agent-scoped version could only ever say yes about
+  itself.
+
+  `:idle-ms` is age, not a verdict. Nothing reaps a thread automatically: a
+  line holding un-landed work is the one thing in this system that no rule
+  should be allowed to throw away on a timer, so the drop stays a decision
+  somebody makes."
+  [session]
+  (if-let [conn (:db @session)]
+    (let [branch (engine/session-branch-line session)
+          mine   (:line @session)
+          now    (System/currentTimeMillis)]
+      {:branch  (:branch @session)
+       :threads (mapv (fn [t]
+                        (cond-> {:id       (:id t)
+                                 :agent    (:agent t)
+                                 :unlanded (db/unlanded-count conn (:id t))
+                                 :idle-ms  (- now (or (:used-at t) now))}
+                          (= (:id t) mine) (assoc :mine true)))
+                      (db/open-threads conn branch))})
+    {:threads [] :note "an ephemeral session has no journal, so it holds no threads"}))
+
+(defn ^:export thread-drop!
+  "Abandon thread `id` on this session's branch: its view is reclaimed, its
+  status is settled, and its deltas stay walkable.
+
+  Dropping your OWN thread is allowed and is the interesting case, because it
+  is not finished until the session stops showing the work: `adopt-line!`
+  puts it on a fresh thread and reloads both the store and the image from it.
+  Without that the store would go on rendering code no line holds, which is a
+  worse state than the one being cleaned up.
+
+  Every refusal names what the id actually IS. A branch reached through here
+  is the likeliest mistake and it has its own verb; an already-settled thread
+  is not an error worth stopping for, but saying which settlement it got is
+  the difference between \"already gone\" and \"landed, and you are looking for
+  the wrong thing\"."
+  [session id]
+  (if-let [conn (:db @session)]
+    (let [branch (engine/session-branch-line session)
+          row    (first (filter #(= id (:id %)) (db/lines conn)))]
+      (cond
+        (nil? row)
+        {:error (str "no line " id " in this store — thread_list shows what is here")}
+
+        (not= "thread" (:kind row))
+        {:error (str id " is the branch \"" (:name row) "\", not a thread"
+                     " — branch_delete removes a branch")}
+
+        (not= branch (:parent row))
+        {:error (str "thread " id " is not on " (:branch @session)
+                     " — switch to its branch to drop it")}
+
+        (not= "open" (:status row))
+        {:error (str "thread " id " is already " (:status row))}
+
+        :else
+        (let [n (db/unlanded-count conn id)]
+          (db/abandon-thread! conn id)
+          (if (= id (:line @session))
+            (do (swap! session dissoc :line)
+                {:dropped id :unlanded n :thread (engine/adopt-line! session)
+                 :note (str "that was YOUR thread — you are on a fresh one, and those "
+                            n " write(s) are off your store and image."
+                            " The deltas are still in the journal")})
+            {:dropped id :unlanded n :agent (:agent row)}))))
+    {:error "an ephemeral session has no threads to drop"}))

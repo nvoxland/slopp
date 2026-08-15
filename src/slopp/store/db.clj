@@ -824,6 +824,54 @@
                                 WHERE id = ?" now thread-line-id])
             true)))))
 
+^:reads (defn ^:export unlanded-count
+  "How many deltas `line-id` has written since it forked — its head walked
+  back to its own base, exclusive.
+
+  The obvious spelling is two ancestry walks subtracted, and on a store with
+  23k deltas that is two full journal traversals to answer a question about
+  the last five. This one STOPS at the base: the recursive term refuses to
+  expand past it, so the walk is proportional to the line's own work.
+
+  `IS NOT` rather than `<>` because a line with no base is a real case — the
+  first line of a store forks from nothing — and `<>` against NULL is NULL,
+  which would end the recursion immediately and report every such line as
+  having written zero."
+  [conn line-id]
+  (or (one-col
+       (jdbc/execute-one!
+        conn [(str "WITH RECURSIVE anc(id, parent) AS (
+                      SELECT id, parent FROM deltas WHERE id = ?
+                      UNION ALL
+                      SELECT deltas.id, deltas.parent FROM deltas
+                        JOIN anc ON deltas.id = anc.parent
+                       WHERE anc.id IS NOT ?)
+                    SELECT COUNT(*) FROM anc WHERE id IS NOT ?")
+              (line-head conn line-id)
+              (one-col (jdbc/execute-one! conn ["SELECT base FROM lines WHERE id = ?" line-id]))
+              (one-col (jdbc/execute-one! conn ["SELECT base FROM lines WHERE id = ?" line-id]))]))
+      0))
+
+(defn ^:export abandon-thread!
+  "Settle `thread-line-id` as `abandoned` and drop its materialization.
+
+  The `elements` rows are the space — a thread's view is a full copy of its
+  branch's, thousands of rows on a real store — and they are also the only
+  part that is pure derivation, so dropping them costs nothing that cannot be
+  recomputed from the journal.
+
+  The DELTAS stay, and the row stays. A drop says \"nobody is going to finish
+  this\", not \"this never happened\": the work is still walkable from the
+  line's head by anyone who goes looking, which is the difference between
+  abandoning a line and rewriting history."
+  [conn thread-line-id]
+  (jdbc/with-transaction [tx conn]
+    (jdbc/execute! tx ["DELETE FROM elements WHERE line = ?" thread-line-id])
+    (jdbc/execute! tx ["UPDATE lines SET status = 'abandoned', used_at = ?
+                        WHERE id = ?"
+                       (System/currentTimeMillis) thread-line-id])
+    true))
+
 ^:reads (defn ^:export ancestry
   "The delta ids reaching `head`, OLDEST first — one line's whole history.
 

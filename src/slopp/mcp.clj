@@ -396,6 +396,12 @@
    "branch_delete"
    (fn [session a _sym]
      (text! (branch/branch-delete! session (:name a))))
+   "thread_list"
+   (fn [session _a _sym]
+     (text! (branch/thread-list session)))
+   "thread_drop"
+   (fn [session a _sym]
+     (text! (branch/thread-drop! session (:id a))))
    "query_branches"
    (fn [session _a _sym]
      (text! (branch/query-branches session)))

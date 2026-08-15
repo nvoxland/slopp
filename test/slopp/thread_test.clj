@@ -192,3 +192,68 @@
                     "and the session is on a fresh thread"))))
           (finally (ops/close! sess))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external thread-list-sees-every-agent-and-a-drop-takes-the-work-with-it
+  ;; The listing exists to answer "is there work here nobody is going to
+  ;; finish", so it has to see across agents — an agent-scoped version could
+  ;; only ever say yes about itself.
+  ;;
+  ;; Dropping your OWN thread is the case worth pinning. Settling the row is
+  ;; the easy half; the session has to stop SHOWING the work too, or the store
+  ;; goes on rendering code that no line holds — a worse state than the one
+  ;; being cleaned up.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-drop-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))" :prompt "a" :agent "agent-a")
+          (ops/edit-replace! b 'th.core 'f "(defn f [x] (+ x 20))" :prompt "b" :agent "agent-b")
+
+          (testing "the listing carries every agent, and marks which one is yours"
+            (let [l  (branch/thread-list a)
+                  by (into {} (map (juxt :agent identity)) (:threads l))]
+              (is (= "main" (:branch l)))
+              (is (= #{"setup" "agent-a" "agent-b"} (set (keys by))))
+              (is (true? (:mine (by "agent-a"))))
+              (is (nil? (:mine (by "agent-b")))
+                  "and does NOT mark somebody else's — the flag is the whole point")
+              (is (every? pos? (map :unlanded [(by "agent-a") (by "agent-b")]))
+                  "each writer has written since it forked")
+              (is (zero? (:unlanded (by "setup")))
+                  "and the session that LANDED left an empty thread behind: a land
+                   settles one line and adopts another, so zero-unlanded is the
+                   ordinary resting state rather than a leak")))
+
+          (testing "dropping somebody else's leaves yours where it was"
+            (let [bid (engine/session-line b)
+                  r   (branch/thread-drop! a bid)]
+              (is (= bid (:dropped r)) (pr-str r))
+              (is (= "agent-b" (:agent r)))
+              (is (not (contains? (set (mapv :id (:threads (branch/thread-list a)))) bid))
+                  "B's thread is off the live listing")
+              (is (contains? (set (mapv :id (:threads (branch/thread-list a))))
+                             (engine/session-line a))
+                  "and yours is still on it — the control, since an empty listing
+                   would satisfy the assertion above")))
+
+          (testing "and dropping your OWN takes the work off your store"
+            (let [mine (engine/session-line a)
+                  r    (branch/thread-drop! a mine)]
+              (is (= mine (:dropped r)) (pr-str r))
+              (is (not= mine (:thread r)) "you are on a fresh thread")
+              (is (= (:thread r) (engine/session-line a)))
+              (is (re-find #"\(inc x\)" (store.render/render-ns (:store @a) 'th.core))
+                  "the session renders the branch again, not the work it just dropped")))
+
+          (testing "a branch is not a thread, and the refusal says which it is"
+            (let [r (branch/thread-drop! a (db/trunk-line-id! (:db @a)))]
+              (is (re-find #"branch" (:error r)) (pr-str r))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

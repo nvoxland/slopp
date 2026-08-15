@@ -872,3 +872,44 @@
             (testing "and a landed thread is not handed back to its agent"
               (is (not= thread (db/adopt-thread! conn trunk "agent-1")))))))
       (finally (.close conn)))))
+
+(deftest ^:external an-abandoned-thread-keeps-its-history-and-loses-its-view
+  ;; What a drop actually costs and what it deliberately does not. The
+  ;; materialization goes — that is the space, ~2,700 rows per thread on a
+  ;; store this size — and the DELTAS stay, so the work is still findable by
+  ;; anyone who goes looking. Nothing in this system deletes history; a drop
+  ;; says "nobody is going to finish this", not "this never happened".
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [row-of (fn [id] (first (filter #(= id (:id %)) (db/lines conn))))
+            s1     (store/ingest (store/empty-store) 'ab.one "(ns ab.one)\n\n(def a 1)\n")
+            trunk  (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['ab.one] trunk nil)))
+        (let [h1     (db/line-head conn trunk)
+              thread (db/adopt-thread! conn trunk "agent-1")
+              s2     (store/ingest s1 'ab.two "(ns ab.two)\n\n(def b 2)\n")
+              new2   (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
+          (is (true? (db/append! conn s2 new2 ['ab.two] thread h1)))
+
+          (testing "the count is what makes a listing actionable"
+            (is (= (count new2) (db/unlanded-count conn thread))
+                "deltas written since the fork, not the whole journal")
+            (is (zero? (db/unlanded-count conn
+                                          (db/adopt-thread! conn trunk "agent-idle")))
+                "a line still sitting on its own base has written nothing —
+                 without this the count could be reporting journal length"))
+
+          (db/abandon-thread! conn thread)
+
+          (testing "it is settled, and never adopted again"
+            (is (= "abandoned" (:status (row-of thread))))
+            (is (not= thread (db/adopt-thread! conn trunk "agent-1")))
+            (is (not (contains? (set (map :id (db/open-threads conn trunk))) thread))
+                "and it is off the live listing"))
+
+          (testing "its view is gone and its history is not"
+            (is (empty? (:namespaces (db/load-store conn thread))))
+            (is (= (count new2) (db/unlanded-count conn thread))
+                "the deltas it wrote are still walkable from its head"))))
+      (finally (.close conn)))))

@@ -365,3 +365,37 @@
       (finally
         (ops/close! sess)
         (rm-rf! dir)))))
+
+(deftest ^:external un-landed-work-never-reaches-the-projection
+  ;; The isolation claim at its outermost edge. Everything else about threads
+  ;; can be observed inside the store; this is the one place the answer leaves
+  ;; the process entirely — a git mirror somebody else clones. The projection
+  ;; folds the BRANCH's line, so a thread's deltas are not merely unpublished,
+  ;; they are unreachable from the fold.
+  ;;
+  ;; The positive half is what makes the negative half a claim: the same file
+  ;; is read for both, so ":un-landed is absent" is a contrast with ":landed is
+  ;; present" rather than a statement about a path the projection never wrote.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "proj"})]
+    (try
+      (is (pos? (:forms (ops/ingest! sess 'up.core
+                                     "(ns up.core)\n(defn ^:unused-ok f [] :landed)\n"))))
+      (let [r (external/commit-point! sess "v1" :agent "proj")]
+        (is (nil? (:error r)) (pr-str r)))
+
+      (ops/edit-replace! sess 'up.core 'f "(defn ^:unused-ok f [] :un-landed)"
+                         :prompt "written, not finished" :agent "proj")
+      (is (pos? (:unlanded (:thread (ops/session-brief sess)) 0))
+          "fixture: there really is work sitting in the thread")
+
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [tip (get-in (git/ensure-projected! ctx) [:refs "main"])
+                src (blob-text (:slopp.git/repo ctx) tip "src/up/core.clj")]
+            (is (re-find #":landed" src)
+                "the projection carries what the milestone landed")
+            (is (nil? (re-find #":un-landed" src))
+                "and nothing that is still in the thread"))
+          (finally (git/close-ctx! ctx))))
+      (finally (ops/close! sess)))))

@@ -550,6 +550,13 @@
     :description "Delete a branch (never the one you are on)."
     :inputSchema {:type "object" :properties {:name {:type "string"}}
                   :required ["name"]}}
+   {:name "thread_list"
+    :description "The live THREADS on this branch — the private lines agents write to before a green done lands them. Each row: :agent, :unlanded (deltas written since it forked), :idle-ms, and :mine on your own. Across all agents on purpose: the question this answers is whether there is work here nobody is going to finish, and an idle thread is by definition somebody else's. Nothing reaps a thread on a timer; a drop is a decision somebody makes."
+    :inputSchema {:type "object" :properties {}}}
+   {:name "thread_drop"
+    :description "Abandon a thread on this branch: its view is reclaimed and its status settled, while its DELTAS stay walkable — a drop says nobody is going to finish this, not that it never happened. Dropping your OWN is allowed and puts you on a fresh thread with the work off your store and image. Get ids from thread_list."
+    :inputSchema {:type "object" :properties {:id {:type "string"}}
+                  :required ["id"]}}
    {:name "merge_from"
     :description "Merge a diverged COPY of this project (absolute dir). Same-form divergence = :conflicts, ours kept."
     :inputSchema {:type "object"
