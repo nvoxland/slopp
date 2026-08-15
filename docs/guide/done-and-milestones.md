@@ -50,6 +50,19 @@ A conflicting or red rebase lands nothing and leaves your thread open.
 `session_brief` reports what is outstanding as `:thread {:on "main" :unlanded
 7}`. Nothing here is a mode to turn on: it is where your writes already go.
 
+If the rebase brings in somebody else's change, the **whole** in-image suite is
+re-run against the merged state before anything lands — not just the namespaces
+the merge carried. Those are rarely the same set: your code calls theirs, so
+theirs is what merged and yours is what breaks, and a merge-scoped check would
+report green about a branch where nothing passes.
+
+To throw a thread away — you went down a wrong path and want to be back where
+the branch is — `thread_drop` with no argument. That is a different act from
+`undo` and `episode_revert`, which revert *forward* (the work stays in your
+history) and are bounded by the last done point. A thread holds everything
+since the last thing that **landed**, which after a red done or two is more
+than one episode.
+
 **`done` reports, it does not refuse.** It records the boundary honestly and
 tells you "not done yet", so a finding you cannot fix right now never
 deadlocks you. What refuses is `commit_point`, and a red `done` stands until

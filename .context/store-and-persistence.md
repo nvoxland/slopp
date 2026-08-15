@@ -139,6 +139,25 @@ branch used to need its own db file:
   fold. Pinning is what keeps that valid: the base never moves under the new
   line.
 
+**Writes say when the work is still private** (`mcp/thread-hint!`, user ask
+2026-08-15). `session_brief` names the thread and nothing else did, so between
+orienting and `done` the fact was true and unstated — worst in a long episode,
+which is exactly where the brief has scrolled out of context. It fires on the
+change that makes the work private, then every 25 un-landed changes, riding the
+existing `*hint*` channel.
+
+Two things it got right only on the second try, both worth keeping:
+
+- **Whether a call WROTE is asked of the journal, not of a list of tool
+  names.** The first cut gated on `tools/write-tools` — a curated 17-entry set
+  that contains `edit_replace_form` and not `edit_subform`. So it fired for
+  some writes and not others, which is worse than never firing: it looks like
+  it works. The count moving IS the write, and a derived test cannot fall out
+  of step with the thing it describes.
+- **`*hint*` is bound BEFORE the call and this hint depends on what the call
+  did**, so it is bound as a DELAY and `text!` forces it. Memoization makes a
+  second render unable to make it speak twice.
+
 **A thread is adopted, not remembered** (2026-08-15). `db/adopt-thread!` is a
 SELECT with a create fallback keyed by `(agent, branch)`, so a returning agent
 asks the same question and gets the same row — nothing has to be persisted
@@ -176,9 +195,27 @@ would otherwise leave the branch's older rows beside the newer ones.
   re-verified, because the content is byte-identical to what `done` just
   graded.
 - **The branch moved** — merge the branch INTO the thread first, through the
-  same pipeline `branch_merge` uses. The thread's head then has the branch's
+  same pipeline `branch_merge` uses, then **re-earn the whole in-image
+  verdict** against the merged state. The thread's head then has the branch's
   head in its ancestry, so the rest is the fast-forward case. Conflicts or a
   red rebase land NOTHING and leave the thread open holding the merged state.
+
+  **The re-run is the whole suite and not the merge's own scope, and that
+  difference is the whole point.** The merge verifies the namespaces it
+  CARRIED; the test that breaks is normally in the namespace that CALLS them,
+  which the merge never names. Shipped narrow first and caught by a test
+  written for a different question: A's namespace called B's, B landed a
+  behaviour change, the merge re-verified B's namespace (green — B tested it),
+  and the land advanced main to a state where A's test failed. A verdict that
+  hides its own failure, which is the one shape here worth paying for.
+
+  **A rebase must refresh before it merges.** Ids are minted from the store
+  VALUE, and this session stopped counting when the other agent started — so
+  the merge mints deltas the branch already used, `append!` returns false as a
+  lost race, and the loop retries with the same stale counter until it hits its
+  bound and reports CONTENTION. Same phase-3b hazard, arriving at the one path
+  whose whole job is to cross lines; `refresh-cache!` raises the floor
+  unconditionally, which is why it is the fix.
 
 Losing the CAS is a RETRY, not a failure: another agent landed between the
 reconcile and the advance, which is the ordinary shape of a shared branch.

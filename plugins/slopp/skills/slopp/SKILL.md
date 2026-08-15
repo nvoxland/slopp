@@ -245,7 +245,9 @@ ever contains work that reached a green `done`. Nothing about this is a mode
 you turn on or a tool you call; it is where your writes already go.
 
 `session_brief` names it: `:thread {:on "main" :unlanded 7}` means seven
-writes are yours alone. What follows from that is worth having straight,
+writes are yours alone. Writes carry a `:hint` saying the same thing — once
+when the work first becomes private, then every 25 un-landed changes, so a
+long episode is reminded without every call repeating it. What follows from that is worth having straight,
 because each part surprises somebody:
 
 - **Another agent on the same branch cannot see your work, and you cannot
@@ -268,6 +270,23 @@ because each part surprises somebody:
 - **Your thread survives the process.** Come back with the same agent
   identity and you resume the same thread, un-landed work and all. Come back
   as somebody else and you correctly see only what has landed.
+
+**Gone down a wrong path and want to start over?** `thread_drop` with no
+argument abandons your own thread and puts you back where the branch is, with
+the work off your store and your image. Three verbs overlap here and they
+differ in ways worth knowing before you pick:
+
+| | scope | what happens to the work |
+|---|---|---|
+| `undo` | the last write, or back to a point | reverted forward — still in your history |
+| `episode_revert` | since your last `done` | reverted forward — still in your history |
+| `thread_drop` | everything since the last thing that **landed** | the line is settled; unreachable from any branch head |
+
+The scope column is the one that decides it. A `done` that went red landed
+nothing, so a thread can hold several episodes — and "I have been going the
+wrong way for a while" is exactly the case `episode_revert` is too small for.
+Nothing is deleted in any of the three: a dropped thread's deltas stay
+walkable, they just stop being on anybody's way forward.
 
 ## Choosing the write tool
 

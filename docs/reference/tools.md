@@ -280,7 +280,7 @@ exist for the leftovers: work somebody started and nobody finished.
 | Tool | What it does |
 |---|---|
 | `thread_list` | Live threads on this branch — `:agent`, `:unlanded`, `:idle-ms`, `:mine` on your own. Across all agents. |
-| `thread_drop {id}` | Abandon a thread: its view is reclaimed, its deltas stay walkable. Dropping your own puts you on a fresh one. |
+| `thread_drop {id?}` | **Start over.** No argument abandons your own thread and puts you back where the branch is, work off your store and image. `{id}` from `thread_list` drops somebody else's. Deltas stay walkable. |
 | `branch_create {name}` | Snapshot the current state and switch to it. |
 | `branch_switch {name}` | Check out another branch; the live image follows. |
 | `branch_merge {name}` | Merge a branch into the current line. The branch survives. |
