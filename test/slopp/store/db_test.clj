@@ -345,3 +345,46 @@
                 does not touch what was observed"
         (is (= {:tier :external :status :green :ran 7 :failures []} (:result d))))
       (.close conn2))))
+
+(deftest ^:external the-journal-is-a-walkable-dag
+  ;; The DAG has always been in the data: every delta carries :parent, the
+  ;; writer's head at write time. It was unreachable from SQL because :parent
+  ;; sat inside the pr-str'd payload — so no query could walk a history, and
+  ;; there was no way to name a second line at all. That is why a branch had
+  ;; to be a whole separate db file with a full journal copy.
+  ;;
+  ;; This lifts :parent to a column and names the trunk in a `lines` table.
+  ;; Nothing behaves differently yet; the point is only that a line's history
+  ;; becomes walkable, which everything after this rests on.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [s  (-> (store/empty-store)
+                   (store/ingest 'dag.one "(ns dag.one)\n\n(defn f [x] (inc x))\n")
+                   (store/ingest 'dag.two "(ns dag.two)\n\n(def z 1)\n")
+                   (store/ingest 'dag.three "(ns dag.three)\n\n(def q 2)\n"))
+            ds (store/deltas s)]
+        ;; a one-delta log satisfies every assertion below by accident — the
+        ;; walk, the order and the head all collapse to the same single id
+        (is (< 2 (count ds)) "fixture must produce a CHAIN")
+        (is (true? (db/append! conn s ds ['dag.one 'dag.two 'dag.three] nil)))
+
+        (testing "the trunk is a line, and it points at the journal head"
+          (let [ls (db/lines conn)]
+            (is (= 1 (count ls)))
+            (is (= "main" (:name (first ls))))
+            (is (= "branch" (:kind (first ls))))
+            (is (= (:id (last ds)) (:head (first ls))))))
+
+        (testing "every delta but the root records its parent as a column"
+          (let [rows (jdbc/execute! conn ["SELECT id, parent FROM deltas ORDER BY seq"])]
+            (is (= (count ds) (count rows)))
+            (is (nil? (:deltas/parent (first rows))) "the root has no parent")
+            (is (every? some? (map :deltas/parent (rest rows))))))
+
+        (testing "walking the trunk's ancestry reproduces the log EXACTLY"
+          ;; the ORDER, not the count: a walk that returns the right NUMBER of
+          ;; ids while mis-linking two of them is precisely the defect this
+          ;; guards, and a count assertion is green for it
+          (is (= (mapv :id ds) (db/ancestry conn (:id (last ds)))))))
+      (finally (.close conn)))))

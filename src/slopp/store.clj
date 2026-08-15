@@ -1583,7 +1583,15 @@
           (-> store
               (assoc-in [:namespaces ns-sym :elements] elements)
               (update :deltas conj
-                      (cond-> {:id did :parent nil :op :ingest :ns ns-sym
+                      (cond-> {:id did
+                               ;; NOT nil. This hardcoded a ROOT, and a log has
+                               ;; exactly one (d0). Every :ingest delta — one per
+                               ;; namespace ever created — cut the chain where
+                               ;; that namespace was born, so any walk back
+                               ;; through it stopped there. `store` is still
+                               ;; pre-append here, so its last delta IS the parent.
+                               :parent (:id (last (:deltas store)))
+                               :op :ingest :ns ns-sym
                                :at (now-ms)
                                :form-ids (into [] (keep :id) elements)
                                ;; per-version content (C3/C4): history must be

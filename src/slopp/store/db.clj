@@ -86,6 +86,33 @@
          ;; whole table, so it is left where it is rather than paid for at every
          ;; open. `git/project-journal!` derives the tree by folding the log.
          (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_ns ON deltas(ns)"])
+;; :parent has been on every delta since the beginning — the writer's head at
+         ;; write time — but it lived inside the pr-str'd payload, where no query
+         ;; could reach it. So the log was walkable only by loading all of it, and
+         ;; a second line had to be a whole separate db FILE with its own copy of
+         ;; the journal. As a column it is an index away from being a real DAG.
+         ;; ALTER rather than an inline column so a fresh store and an existing one
+         ;; take exactly one path; SQLite has no ADD COLUMN IF NOT EXISTS, so the
+         ;; throw IS the no-op (same idiom as elements.comment above).
+         (try (jdbc/execute! conn ["ALTER TABLE deltas ADD COLUMN parent TEXT"])
+              (catch java.sql.SQLException _ nil))
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_parent ON deltas(parent)"])
+         ;; A LINE is a pointer to a head delta. A named line is a branch; an
+         ;; anonymous one (name NULL) is an agent's thread. They are the same row
+         ;; because they are the same thing — a thread is a branch nobody named.
+         ;; `base` is the delta the line split from, which is what makes a split
+         ;; findable from either side.
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS lines (
+                              id         TEXT PRIMARY KEY,
+                              name       TEXT UNIQUE,
+                              kind       TEXT NOT NULL,
+                              head       TEXT,
+                              base       TEXT,
+                              parent     TEXT,
+                              agent      TEXT,
+                              created_at INTEGER NOT NULL,
+                              used_at    INTEGER NOT NULL,
+                              status     TEXT NOT NULL)"])
          (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS elements (
                               ns      TEXT NOT NULL,
                               pos     INTEGER NOT NULL,
@@ -152,7 +179,15 @@
   (merge {:id (:deltas/id row)
           :op (keyword (:deltas/op row))
           :ns (symbol (:deltas/ns row))}
-         (edn/read-string (:deltas/payload row))))
+         (edn/read-string (:deltas/payload row))
+         ;; the COLUMN wins over the payload's copy, and the order of this
+         ;; merge is the whole point. 240 :ingest deltas were written with
+         ;; :parent nil in their payload — a root each, in a log with one root.
+         ;; The column is the repaired one, so reading it last means the
+         ;; in-memory delta says what a traversal would find. Payload-first
+         ;; would leave the value and the walk disagreeing on exactly the rows
+         ;; that were wrong, which is worse than either being wrong alone.
+         (when-let [p (:deltas/parent row)] {:parent p})))
 
 (defn ^:export set-line-id!
   "Stamp this store db with its line identity (branch creation)."
@@ -413,6 +448,80 @@
   (let [m (.toLowerCase (str (.getMessage e)))]
     (or (.contains m "busy") (.contains m "locked"))))
 
+(defn- row->line
+  "A `lines` row as a value. next.jdbc qualifies plain columns by their table,
+  so the keys are normalized once here instead of at every reader."
+  [row]
+  (let [r (into {} (map (fn [[k v]] [(keyword (name k)) v])) row)]
+    {:id         (:id r)
+     :name       (:name r)
+     :kind       (:kind r)
+     :head       (:head r)
+     :base       (:base r)
+     :parent     (:parent r)
+     :agent      (:agent r)
+     :created-at (:created_at r)
+     :used-at    (:used_at r)
+     :status     (:status r)}))
+
+^:reads (defn ^:export lines
+  "Every line in this store, most-recently-used first.
+
+  A LINE is a pointer to a head delta. A named line is a BRANCH; an anonymous
+  one (name NULL) is an agent's THREAD. One row shape, because they are one
+  thing — a thread is a branch nobody named, and giving them separate tables
+  would mean every question about history had to be asked twice."
+  [conn]
+  (mapv row->line
+        (jdbc/execute! conn ["SELECT * FROM lines ORDER BY used_at DESC"])))
+
+^:reads (defn ^:export ancestry
+  "The delta ids reaching `head`, OLDEST first — one line's whole history.
+
+  Walks the `parent` column recursively, so it costs the LINE's length rather
+  than the journal's. That is the whole reason parent became a column: the
+  same question used to be answerable only by loading every delta and folding
+  it, which is why a second line had to be a separate db file.
+
+  [] for a nil head — a line that exists but has never been written to."
+  [conn head]
+  (if-not head
+    []
+    (vec
+     (reverse
+      (map (fn [row]
+             ;; the query selects exactly ONE column, so the row has exactly
+             ;; one entry — read it positionally. next.jdbc's qualification of
+             ;; a CTE's columns is not the same as a table's, and guessing it
+             ;; wrong failed the way an empty result does. (`rseq` was the
+             ;; other half of that: it returns NIL on an empty vector, so a
+             ;; wrong key and no rows produced an identical silent [].)
+             (val (first row)))
+           (jdbc/execute! conn
+                          ["WITH RECURSIVE anc(id, parent) AS (
+                              SELECT id, parent FROM deltas WHERE id = ?
+                              UNION ALL
+                              SELECT d.id, d.parent FROM deltas d
+                                JOIN anc ON d.id = anc.parent)
+                            SELECT id FROM anc" head]))))))
+
+(defn- advance-trunk!
+  "Keep the trunk line's head in step with the journal head.
+
+  Deliberately a FOLLOWER for now: the write CAS still runs on the global
+  journal head (`append!`), and moving it onto this row is the next step. Both
+  at once would hide a CAS defect behind a behaviour change, and a CAS defect
+  here is not a wrong answer — it is every agent's write failing whenever any
+  other agent writes anywhere in the file."
+  [tx head]
+  (let [now (System/currentTimeMillis)]
+    (jdbc/execute! tx ["INSERT INTO lines
+                          (id,name,kind,head,base,parent,agent,created_at,used_at,status)
+                        VALUES (?,'main','branch',?,NULL,NULL,NULL,?,?,'open')
+                        ON CONFLICT(name) DO UPDATE SET head    = excluded.head,
+                                                        used_at = excluded.used_at"
+                       (str (java.util.UUID/randomUUID)) head now now])))
+
 (defn ^:export append!
   "Phase-a storage inversion: conditionally append `new-deltas` (+ the full
   snapshot tail via write-snapshot!) in ONE transaction, iff the journal head
@@ -429,10 +538,15 @@
         (when (not= head expected-head)
           (throw (ex-info "journal head moved" {::head-moved true})))
         (doseq [d new-deltas]
-          (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, payload)
-                              VALUES (?,?,?,?)"
-                             (:id d) (name (:op d)) (str (:ns d))
+          ;; :parent stays in the payload too — the column is a denormalization
+          ;; for traversal, so row->delta and every reader below it are
+          ;; untouched. That is what makes this phase behaviour-free.
+          (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, parent, payload)
+                              VALUES (?,?,?,?,?)"
+                             (:id d) (name (:op d)) (str (:ns d)) (:parent d)
                              (pr-str (dissoc d :id :op :ns))]))
+        (when-let [head (:id (last new-deltas))]
+          (advance-trunk! tx head))
         (write-snapshot! tx store nses)
         true))
     (catch clojure.lang.ExceptionInfo e
@@ -452,9 +566,12 @@
   ([conn store delta] (persist! conn store delta [(:ns delta)]))
   ([conn store delta nses]
    (jdbc/with-transaction [tx conn]
-     (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, payload) VALUES (?,?,?,?)"
+     (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, parent, payload)
+                        VALUES (?,?,?,?,?)"
                         (:id delta) (name (:op delta)) (str (:ns delta))
+                        (:parent delta)
                         (pr-str (dissoc delta :id :op :ns))])
+     (when-let [head (:id delta)] (advance-trunk! tx head))
      (write-snapshot! tx store nses))
    nil))
 
