@@ -427,7 +427,7 @@
         ^Repository repo (:slopp.git/repo ctx)]
     (locking (:slopp.git/lock ctx)
       (let [base     (db/get-meta map-conn "git-base-sha")
-            main-ds  (db/deltas-after map-conn 0)
+            main-ds  (db/deltas-after map-conn (slopp.store.db/trunk-line-id! map-conn) 0)
             need     (cond-> (into [] (keep :git-sha) main-ds) base (conj base))
             missing? (fn [sha] (not (.has (.getObjectDatabase repo)
                                           (ObjectId/fromString sha))))]
@@ -442,7 +442,7 @@
               refs     (into {"main" main-tip}
                              (map (fn [[nm bdir]]
                                     [nm (with-open [conn (db/open! bdir)]
-                                          (project-journal! ctx nm (db/deltas-after conn 0)
+                                          (project-journal! ctx nm (db/deltas-after conn (slopp.store.db/trunk-line-id! conn) 0)
                                                             :base base))]))
                              (branch-journals dir))]
           (doseq [[nm sha] refs :when sha]

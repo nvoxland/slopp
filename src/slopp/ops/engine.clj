@@ -396,7 +396,7 @@
   (when-let [conn (:db @session)]
     (let [line   (db/trunk-line-id! conn)
           local  (:store @session)
-          suffix (db/deltas-after conn (count (store/deltas local)))
+          suffix (db/deltas-after conn line (count (store/deltas local)))
           digest (db/elements-digest conn line)]
       (if (seq suffix)
         (let [incr  (reduce (fn [st d]

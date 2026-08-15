@@ -74,7 +74,7 @@
             conn (db/open! dir)]
         (try
           (db/persist! conn st2 d)
-          (is (= d (first (db/deltas-after conn 0))))
+          (is (= d (first (db/deltas-after conn (slopp.store.db/trunk-line-id! conn) 0))))
           (finally (.close conn) (rm-rf! dir)))))))
 
 (deftest ^:external a-milestone-carries-no-tree

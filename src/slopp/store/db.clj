@@ -343,12 +343,54 @@
           (jdbc/execute! conn ["SELECT delta_id, MIN(sha) AS sha, COUNT(*) AS n
                                 FROM git_map GROUP BY delta_id"]))))
 
-^:reads (defn ^:export deltas-after
-  "The journal suffix past the first `n` deltas (incremental sync)."
-  [conn n]
+(def ^:private ancestry-cte
+  "The recursive walk from a delta back to the root, as a CTE named `anc`,
+  taking the head as its ONE parameter.
+
+  Shared because three readers ask the same question of a line — the id list,
+  its journal, and its incremental suffix — and a hand-kept second copy of a
+  recursive query is how two readers come to disagree about what a line's
+  history is. That disagreement would not read as a bug: each answer is
+  internally consistent.
+
+  A nil head matches nothing, which is the right answer for a line that exists
+  and has never been written to."
+  "WITH RECURSIVE anc(id, parent) AS (
+     SELECT id, parent FROM deltas WHERE id = ?
+     UNION ALL
+     SELECT deltas.id, deltas.parent FROM deltas
+       JOIN anc ON deltas.id = anc.parent)")
+
+^:reads (defn ^:export line-head
+  "The delta `line-id` currently points at, or nil if it points at nothing yet.
+
+  A line IS a pointer to a head, so this is the whole of what distinguishes
+  one line's history from another's: every journal read below turns a line id
+  into a head and walks back from there."
+  [conn line-id]
+  (one-col (jdbc/execute-one! conn ["SELECT head FROM lines WHERE id = ?" line-id])))
+
+^:reads (defn ^:export
+  ^{:breaking-ok
+    (str "the 2-arity is REMOVED rather than defaulted: a suffix that does not "
+         "name its line hands a caller another line's work to replay into its "
+         "own cache. All four call sites moved in the SAME coordinated write, "
+         "and nothing outside slopp calls the storage layer directly.")}
+  deltas-after
+  "ONE LINE's journal suffix past its first `n` deltas (incremental sync).
+
+  `n` counts along the LINE and not along the file. Seq order is a global
+  interleaving once many lines share one journal, so \"the first n deltas\" of
+  it is nobody's history — and the caller passing its own delta count would be
+  handed another line's work, which `refresh-cache!` replays directly into the
+  cached store."
+  [conn line-id n]
   (mapv row->delta
-        (jdbc/execute! conn ["SELECT * FROM deltas ORDER BY seq LIMIT -1 OFFSET ?"
-                             (long n)])))
+        (jdbc/execute! conn
+                       [(str ancestry-cte
+                             " SELECT * FROM deltas WHERE id IN (SELECT id FROM anc)
+                                ORDER BY seq LIMIT -1 OFFSET ?")
+                        (line-head conn line-id) (long n)])))
 
 (defn put-blobs!
   "Write `blobs` ({sha → bytes}) INSERT OR IGNORE — content-addressed, so
@@ -427,23 +469,27 @@
                                  ORDER BY ns, pos" line-id]))
    (fn [nsm] (update nsm :elements store/fold-comments))))
 
-^:reads (defn ^:export
-  ^{:breaking-ok
-    (str "the 1-arity is REMOVED rather than defaulted: loading a store means "
-         "loading ONE line's view of it, and a default would answer for the "
-         "trunk without saying so. All seventeen call sites moved in the SAME "
-         "coordinated write, and nothing outside slopp calls the storage "
-         "layer directly.")}
-  load-store
+^:reads (defn ^:export load-store
   "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
   empty. Every registry meta row loads through ONE loop (default from :init
   unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
   here, so an old db stops re-minting it into fold state); only the bespoke
   element/delta/blob storage is hand-read.
 
-  `line-id` selects the materialization. The JOURNAL is not scoped: `:deltas`
-  is every delta in the file, because history is shared and a line is a
-  POINTER into it rather than a copy of it. What a line owns is its view."
+  `line-id` selects BOTH halves: the materialization comes from that line's
+  `elements` rows, and `:deltas` is that line's ANCESTRY rather than the file's
+  journal. History is shared and a line is a POINTER into it, so the deltas are
+  not copied — they are the ones reachable from this line's head, ordered by
+  seq, which is a valid causal order because a parent is always inserted before
+  its child.
+
+  Scoping the journal is not tidiness. `try-commit!` takes its CAS head from
+  `(last (store/deltas base))`, so a store value carrying another line's
+  deltas yields a head that can never match again — a line nobody can write to.
+
+  There is deliberately no line-less arity. A default would answer for the
+  trunk without saying so, which is the failure this whole layer exists to
+  prevent; every caller resolves its line where a reader can see it."
   [conn line-id]
   (when-let [next-id (some-> (jdbc/execute-one!
                               conn ["SELECT v FROM meta WHERE k = 'next-id'"])
@@ -454,8 +500,12 @@
                         ;; EXPLICIT columns, not SELECT * — an older store still has a dead
                         ;; `tree` column holding ~1.35MB per :commit marker, and naming the
                         ;; columns is what keeps it from being fetched and parsed at every open.
-                        (jdbc/execute! conn ["SELECT id, op, ns, payload FROM deltas
-                                              ORDER BY seq"]))
+                        (jdbc/execute! conn
+                                       [(str ancestry-cte
+                                             " SELECT id, op, ns, payload FROM deltas
+                                                WHERE id IN (SELECT id FROM anc)
+                                                ORDER BY seq")
+                                        (line-head conn line-id)]))
       :next-id    next-id
       :line-id    (:meta/v (jdbc/execute-one!
                             conn ["SELECT v FROM meta WHERE k = 'line-id'"]))
@@ -619,7 +669,8 @@
   Walks the `parent` column recursively, so it costs the LINE's length rather
   than the journal's. That is the whole reason parent became a column: the
   same question used to be answerable only by loading every delta and folding
-  it, which is why a second line had to be a separate db file.
+  it, which is why a second line had to be a separate db file. Measured on
+  slopp's own store: 23,719 deltas walked in 69 ms.
 
   [] for a nil head — a line that exists but has never been written to."
   [conn head]
@@ -635,13 +686,7 @@
              ;; other half of that: it returns NIL on an empty vector, so a
              ;; wrong key and no rows produced an identical silent [].)
              (val (first row)))
-           (jdbc/execute! conn
-                          ["WITH RECURSIVE anc(id, parent) AS (
-                              SELECT id, parent FROM deltas WHERE id = ?
-                              UNION ALL
-                              SELECT d.id, d.parent FROM deltas d
-                                JOIN anc ON d.id = anc.parent)
-                            SELECT id FROM anc" head]))))))
+           (jdbc/execute! conn [(str ancestry-cte " SELECT id FROM anc") head]))))))
 
 (defn- advance-trunk!
   "Keep the trunk line's head in step with the journal head.

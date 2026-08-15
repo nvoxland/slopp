@@ -561,3 +561,66 @@
                                             WHERE type='table' AND name='elements_unlined'"]))
               "the scratch table is dropped, so re-opening is a no-op rather than a second copy"))
         (finally (.close conn))))))
+
+(deftest ^:external a-lines-journal-is-its-ancestry-not-the-file
+  ;; Phase 2 scoped the materialization; the journal was still read whole,
+  ;; which holds exactly while one line is written to. `try-commit!` takes its
+  ;; CAS head from the store VALUE — `(:id (last (store/deltas base)))` — so a
+  ;; line whose log carries another line's deltas does not get a wrong answer,
+  ;; it gets a head that can never match again and a line nobody can write to.
+  ;;
+  ;; The discriminating fact is the ORDER, not the count: line B's delta is
+  ;; appended before line A's and therefore has a LOWER seq while being no part
+  ;; of A's history. Two lines whose logs merely differ in length would agree
+  ;; with an unscoped read for as long as one stayed a prefix of the other.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [sa    (store/ingest (store/empty-store) 'aj.trunk "(ns aj.trunk)\n\n(def a 1)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn sa (store/deltas sa) ['aj.trunk] trunk nil)))
+
+        (let [head-a (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
+              other  (db/create-line! conn {:kind "thread" :base head-a
+                                            :parent trunk :agent "agent-2"})
+              ;; B's work, appended to the file FIRST — lower seq, and descended
+              ;; from head-a rather than from anything A writes next
+              sb     (store/ingest sa 'aj.thread "(ns aj.thread)\n\n(def b 2)\n")
+              newb   (vec (drop (count (store/deltas sa)) (store/deltas sb)))
+              _      (is (true? (db/append! conn sb newb ['aj.thread] other head-a)))
+              ;; A forks from the same base, and `:next-id` is drawn forward
+              ;; from B on purpose: the id counter is GLOBAL while the line is
+              ;; not, so two lines minting from their own copy of it collide on
+              ;; the UNIQUE deltas.id. That is real and it is 3b's to answer —
+              ;; here it would only stop this test reaching its subject.
+              sa2    (store/ingest (assoc sa :next-id (:next-id sb))
+                                   'aj.later "(ns aj.later)\n\n(def c 3)\n")
+              newa   (vec (drop (count (store/deltas sa)) (store/deltas sa2)))]
+          (is (true? (db/append! conn sa2 newa ['aj.later] trunk head-a)))
+
+          (let [log-a (mapv :id (store/deltas (db/load-store conn trunk)))
+                log-b (mapv :id (store/deltas (db/load-store conn other)))
+                b-own (mapv :id newb)
+                a-own (mapv :id newa)]
+            (is (= 1 (count a-own)) "fixture: one new delta per line")
+            (is (= 1 (count b-own)))
+            (is (not= (first a-own) (first b-own)) "fixture: distinct ids, not a collision")
+
+            (testing "each line's log carries the history they share"
+              (is (every? (set log-a) (map :id (store/deltas sa))))
+              (is (every? (set log-b) (map :id (store/deltas sa)))))
+
+            (testing "and neither line carries the other's work, whatever its seq"
+              (is (not-any? (set log-a) b-own)
+                  "line B's delta was written FIRST and must still be absent from A")
+              (is (not-any? (set log-b) a-own)))
+
+            (testing "the head each line would CAS against is its own last delta"
+              (is (= (last a-own) (last log-a)))
+              (is (= (last b-own) (last log-b))))
+
+            (testing "and the shared history is neither duplicated nor reordered"
+              (is (= (count log-a) (count (distinct log-a))))
+              (is (= log-a (vec (db/ancestry conn (last log-a))))
+                  "the fold and the walk are one answer, not two")))))
+      (finally (.close conn)))))
