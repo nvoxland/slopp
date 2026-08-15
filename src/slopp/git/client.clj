@@ -18,12 +18,17 @@
     fetched before projecting — a push that succeeds while leaving the remote
     unable to resolve its own history is worse than a refusal.
 
+  A refusal is a VALUE and not only a sentence: it carries `:divergence`,
+  because the status alone cannot say whether the destination moved under you
+  or this process minted a different history, and the objects that separate
+  those die with the in-memory projection.
+
   `ctx` is an opaque handle from `git/open-ctx!`; the JGit repo inside it is
   shared with the projection, which is why it outlives any one operation."
   (:require [clojure.java.io :as io]
             [slopp.store.db :as db]
             [slopp.git :as git])
-  (:import [org.eclipse.jgit.lib NullProgressMonitor ObjectId Repository] [org.eclipse.jgit.transport PushResult RefSpec RemoteRefUpdate Transport URIish UsernamePasswordCredentialsProvider]))
+  (:import [org.eclipse.jgit.lib NullProgressMonitor ObjectId Ref Repository] [org.eclipse.jgit.transport PushResult RefSpec RemoteRefUpdate Transport URIish UsernamePasswordCredentialsProvider]))
 
 ^:reads (defn ^:export remote-credentials
   "CredentialsProvider for token auth against an https remote (GitHub PAT /
@@ -95,6 +100,26 @@
                 " projection both land here")
            " — the remote branch has history this store doesn't build on (pull first)"))))
 
+(defn- diagnose-refusal!
+  "The divergence behind a refused push — `git/divergence` over objects this
+  repo can actually read.
+
+  It FETCHES first, and that is the point: the objects that explain a
+  non-fast-forward are the destination's, an in-memory projection mints only
+  its own, and by the time anyone asks the process is gone. One fetch on a
+  path that is already failing buys the difference between a status string and
+  a cause. The bang is that fetch — remote-tracking refs land in `repo`.
+
+  Every failure degrades. A diagnosis that throws would replace the refusal it
+  exists to describe, which is strictly worse than the opaque refusal — so a
+  dead remote leaves `:unreadable`, and a broken diagnosis leaves nil."
+  [^Repository repo url projected mirror {:keys [token branch timeout]}]
+  (try
+    (try (fetch-remote! repo url :token token :branch branch :timeout timeout)
+         (catch Exception _ nil))
+    (git/divergence repo projected mirror)
+    (catch Exception _ nil)))
+
 (defn ^:export push-to-remote!
   "Push the projection to an external git remote `url` (filesystem path or
   http(s)). `:branch` = the LOCAL projection line (default \"main\", the
@@ -103,7 +128,12 @@
   humans keep main. Projects first; a cloned store fetches the remote's
   objects so its grafted chain is complete. Fast-forward only — a diverged
   remote is an honest :error, never a force. Returns
-  {:pushed sha :status s :remote-branch b} | {:error msg}.
+  {:pushed sha :status s :remote-branch b} | {:error msg :divergence d}.
+
+  `:divergence` rides beside a refusal rather than inside its sentence: the
+  status alone cannot tell \"the destination moved under you\" from \"this
+  process minted a different history\", and the objects that separate them die
+  with the in-memory projection. See [[slopp.git/divergence]].
 
   `ctx` is an OPAQUE handle from `git/open-ctx!` — see `git/close-ctx!`."
   [ctx url
@@ -133,6 +163,15 @@
                 status (str (.getStatus upd))]
             (if (contains? #{"OK" "UP_TO_DATE"} status)
               {:pushed (.name tip) :status status :remote-branch rbranch}
-              {:error (push-refusal status (.getMessage upd) {:mirror? mirror? :dst dst})})))
+              (let [err {:error (push-refusal status (.getMessage upd)
+                                              {:mirror? mirror? :dst dst})}
+                    ^Ref advertised (.getAdvertisedRef res dst)
+                    adv (some-> advertised (.getObjectId) (.name))]
+                (if adv
+                  (assoc err :divergence
+                         (diagnose-refusal! repo s (.name tip) adv
+                                            {:token token :branch rbranch
+                                             :timeout timeout}))
+                  err)))))
         {:error (str "nothing to push — no " src
                      " in the projection (no milestones yet?)")}))))

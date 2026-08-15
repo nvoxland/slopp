@@ -374,25 +374,47 @@
   durable session): INCREMENTALLY when every foreign delta in the suffix
   replays (the common case — no full re-parse), falling back to a full
   load-store otherwise (:ingest/:move/unknown ops). Advance-only — the
-  cache can never regress."
+  cache can never regress.
+
+  When the suffix is EMPTY something still committed, and it is not always
+  bookkeeping: `elements` is the journal materialized, and a migration, a
+  repair script or any external process rewriting rows changes what the store
+  IS without appending a delta. Every branch here used to be gated on the
+  suffix, so such a change was invisible indefinitely — and worse than
+  invisible, since the next write re-persisted the cached shape over the
+  migrated rows. `restart` cannot help: the stale value is upstream of the
+  image.
+
+  That case is gated on `db/elements-digest` rather than on `data_version`,
+  which is too coarse to act on — it moves for git_map pins, the trace map and
+  the dep-surface cache, none of which touch a form. An unrecorded digest
+  (a session that has not refreshed yet) counts as CHANGED: absence is not
+  agreement, and one rebuild per session is the cheap side of that bet."
   [session]
   (when-let [conn (:db @session)]
     (let [local  (:store @session)
           suffix (db/deltas-after conn (count (store/deltas local)))
-          incr   (when (seq suffix)
-                   (reduce (fn [st d]
-                             (if-let [st' (store/replay-delta st d)]
-                               st'
-                               (reduced nil)))
-                           local suffix))
-          fresh  (or incr (when (seq suffix) (db/load-store conn)))]
-      (when fresh
-        (swap! session
-               (fn [s]
-                 (if (> (count (store/deltas fresh))
-                        (count (store/deltas (:store s))))
-                   (assoc s :store fresh)
-                   s)))))))
+          digest (db/elements-digest conn)]
+      (if (seq suffix)
+        (let [incr  (reduce (fn [st d]
+                              (if-let [st' (store/replay-delta st d)]
+                                st'
+                                (reduced nil)))
+                            local suffix)
+              fresh (or incr (db/load-store conn))]
+          (when fresh
+            (swap! session
+                   (fn [s]
+                     (if (> (count (store/deltas fresh))
+                            (count (store/deltas (:store s))))
+                       (assoc s :store fresh)
+                       s)))))
+        ;; the journal did not move, so the delta-count advance test cannot
+        ;; decide this one — the rows themselves are the evidence, and they
+        ;; were just read from the db, so accepting them is not a regression
+        (when (not= digest (:elements-digest @session))
+          (swap! session update :store assoc :namespaces (db/load-elements conn))))
+      (swap! session assoc :elements-digest digest))))
 
 (defn persist-trace!
   "Q3: the trace map survives the session — written to store meta so the NEXT

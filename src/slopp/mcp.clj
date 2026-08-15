@@ -1249,8 +1249,11 @@
                                                       (catch Exception e
                                                         {:error (ex-message e)}))]
                                         (assoc r :published
-                                               (select-keys p [:pushed :branch
-                                                               :error :status]))
+                                               (select-keys p [:pushed :branch :error :status
+                                                               ;; the diagnosis, or a refusal here says
+                                                               ;; REJECTED_NONFASTFORWARD and stops —
+                                                               ;; which cost a full investigation once
+                                                               :divergence]))
                                         r)
                                       r)))
       "test_run" (text!

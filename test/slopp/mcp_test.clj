@@ -2084,3 +2084,37 @@
     (is (not (contains? tools/image-free-tools "query_eval"))
         "the oracle tools eval IN the image, which is the whole distinction")
     (is (not (contains? tools/image-free-tools "edit_add_form")))))
+
+(deftest ^:external a-refused-auto-publish-carries-its-diagnosis
+  ;; The publish inside commit_point is the AUTOMATIC one — it is where a
+  ;; refusal is met by someone who did not ask for a push and has no idea what
+  ;; a mirror is. On 2026-08-14 one of these cost a full investigation because
+  ;; the report said REJECTED_NONFASTFORWARD and stopped. The diagnosis exists
+  ;; now; this pins that it survives the trip to the caller, which is the half
+  ;; that is easy to lose — the report is assembled with select-keys.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-pubdiag" (make-array java.nio.file.attribute.FileAttribute 0)))
+        _    (sh/sh "git" "init" dir)
+        _    (sh/sh "git" "-C" dir "-c" "user.name=t" "-c" "user.email=t@t"
+                    "commit" "--allow-empty" "-m" "root")
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
+      (call! sess "commit_point" {:description "first"})
+      ;; someone else's history under the mirror ref: the checkout's own root
+      ;; commit, which the projection never minted and does not build on
+      (let [root (clojure.string/trim
+                  (:out (sh/sh "git" "-C" dir "rev-parse" "HEAD")))]
+        (sh/sh "git" "-C" dir "branch" "-f" "slopp/main" root)
+        (call! sess "ns_create" {:ns "pub.two" :source "(ns pub.two)\n(defn ^:unused-ok g [] 2)\n"})
+        (let [r (call! sess "commit_point" {:description "second"})]
+          (is (re-find #"REJECTED_NONFASTFORWARD" r)
+              (str "the refusal itself still leads: " r))
+          (is (re-find #":divergence" r)
+              (str "and the diagnosis rides with it rather than dying in the process: " r))
+          (is (re-find #":cause :unrelated" r)
+              (str "named, not merely dumped — the mirror holds a history sharing no"
+                   " base with the projection: " r))
+          (is (re-find (re-pattern root) r)
+              (str "including the tip that is about to become unreachable: " r))))
+      (finally (ops/close! sess)))))

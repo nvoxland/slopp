@@ -10,6 +10,8 @@
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
+           [org.eclipse.jgit.lib CommitBuilder ObjectId PersonIdent]
+           [org.eclipse.jgit.revwalk RevWalk]
            [org.eclipse.jgit.storage.file FileRepositoryBuilder]))
 
 (defn- temp-dir []
@@ -152,3 +154,117 @@
       (is (clojure.string/includes? m "REJECTED_OTHER_REASON"))
       (is (clojure.string/includes? m "hook declined")
           "a status we have no sentence for must not lose the one git gave"))))
+
+(defn- remote-head
+  "{:sha :message} for `branch` in the bare repo at `dir`, or nil."
+  [dir branch]
+  (let [repo (-> (FileRepositoryBuilder.) (.setGitDir (io/file dir)) (.build))]
+    (try
+      (when-let [id (.resolve repo (str "refs/heads/" branch))]
+        (with-open [rw (RevWalk. repo)]
+          (let [c (.parseCommit rw id)]
+            {:sha (.name c) :message (.getFullMessage c)})))
+      (finally (.close repo)))))
+
+(defn- mint-rival!
+  "Force `branch` in the bare repo at `dir` onto a NEW commit — the other
+  writer a refused push has to be able to name. `:parent` (sha or nil) and
+  `:message` are the caller's; the tree is the current tip's, since what is
+  under test is the SHAPE of the history rather than its contents. Returns the
+  new sha.
+
+  A rival carrying the tip's own message is the reproduction that matters: two
+  commits stamping one milestone is what a divergent mint looks like."
+  [dir branch {:keys [parent message]}]
+  (let [repo (-> (FileRepositoryBuilder.) (.setGitDir (io/file dir)) (.build))]
+    (try
+      (with-open [rw  (RevWalk. repo)
+                  ins (.newObjectInserter repo)]
+        (let [tip (.parseCommit rw (.resolve repo (str "refs/heads/" branch)))
+              who (PersonIdent. "someone else" "else@example.com")
+              cb  (doto (CommitBuilder.)
+                    (.setTreeId (.getTree tip))
+                    (.setAuthor who) (.setCommitter who)
+                    (.setMessage message))
+              _   (when parent (.setParentId cb (ObjectId/fromString parent)))
+              sha (.insert ins cb)]
+          (.flush ins)
+          (doto (.updateRef repo (str "refs/heads/" branch))
+            (.setNewObjectId sha)
+            (.forceUpdate))
+          (.name sha)))
+      (finally (.close repo)))))
+
+(deftest ^:external a-refused-push-says-which-history-diverged
+  ;; A push refused as non-fast-forward answered REJECTED_NONFASTFORWARD and
+  ;; nothing else, and the diverged objects lived in an in-memory repo that
+  ;; dies with the process — so on 2026-08-14 deciding whether ONE refusal was
+  ;; benign cost a full investigation: fold the journal to the milestone,
+  ;; re-render 210 paths, re-mint the commit, push to a scratch mirror. The
+  ;; answer was one fact, and the refusal already had everything needed to
+  ;; state it.
+  ;;
+  ;; The two stories a refusal must tell apart:
+  ;;   - the destination moved under you (someone else wrote the ref), and
+  ;;   - this process minted a DIFFERENT history for a milestone the
+  ;;     destination already carries.
+  ;; Same status, opposite remedies.
+  (let [dir  (temp-dir)
+        bare (bare-repo! (str (temp-dir) "/remote.git"))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'gc.core seed)
+      (external/commit-point! sess "v1: f ships" :agent "alice")
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [sha1 (:pushed (git.client/push-to-remote! ctx bare))
+                _    (ops/ingest! sess 'gc.two "(ns gc.two)\n\n(defn g [] 2)")
+                _    (external/commit-point! sess "v2: g ships" :agent "alice")
+                sha2 (:pushed (git.client/push-to-remote! ctx bare))]
+            (is (string? sha1))
+            (is (string? sha2))
+
+            (testing "a rival mint of the SAME milestone is named as one"
+              ;; Same parent, same stamp, different committer: two commits
+              ;; claiming one milestone, which is what a divergent mint is.
+              (let [msg   (:message (remote-head bare "main"))
+                    rival (mint-rival! bare "main" {:parent sha1 :message msg})
+                    r     (git.client/push-to-remote! ctx bare)
+                    d     (:divergence r)]
+                (is (some? (:error r)) "still a refusal")
+                (is (= sha2 (-> d :projected :sha)))
+                (is (= rival (-> d :mirror :sha))
+                    "the destination's tip is the half that dies with the process")
+                (is (false? (:contains-mirror-tip? d))
+                    "the whole question: is the mirror tip in what we projected?")
+                (is (= sha1 (:base d)))
+                (is (= 1 (:ahead d)))
+                (is (= 1 (:behind d)))
+                (is (= (-> d :projected :milestone) (-> d :mirror :milestone))
+                    "both stamp one milestone — that is what makes it a re-mint")
+                (is (some? (-> d :projected :milestone)))
+                (is (= :remint (:cause d)))))
+
+            (testing "someone pushing ON TOP of us is a different cause"
+              (let [ahead (mint-rival! bare "main"
+                                       {:parent sha2 :message "someone else's work"})
+                    r     (git.client/push-to-remote! ctx bare)
+                    d     (:divergence r)]
+                (is (some? (:error r)))
+                (is (= ahead (-> d :mirror :sha)))
+                (is (nil? (-> d :mirror :milestone))
+                    "a commit this projection did not mint carries no stamp")
+                (is (= :mirror-ahead (:cause d))
+                    "the destination builds ON this projection — nothing was re-minted")
+                (is (= 0 (:ahead d)))
+                (is (= 1 (:behind d)))))
+
+            (testing "the sentence still leads, and the diagnosis rides beside it"
+              (let [r (git.client/push-to-remote! ctx bare)]
+                (is (clojure.string/includes? (:error r) "REJECTED_NONFASTFORWARD")
+                    "a caller that only reads :error loses nothing"))))
+          (finally (git/close-ctx! ctx))))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir)
+        (rm-rf! (io/file bare))))))

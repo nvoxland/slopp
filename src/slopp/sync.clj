@@ -523,11 +523,7 @@
                 ;; alignment against a milestone nobody asked about.
                 (when-let [latest (first commits)]
                   (let [head-sha (.name head)
-                        stamp    (try
-                                   (with-open [rw (org.eclipse.jgit.revwalk.RevWalk. repo)]
-                                     (git/stamped-milestone
-                                      (.getFullMessage (.parseCommit rw head))))
-                                   (catch Exception _ nil))
+                        stamp    (git/stamped-milestone (git/message-of repo head-sha))
                         aligned  (if stamp
                                    (= stamp (:commit latest))
                                    (= head-sha (:sha latest)))]

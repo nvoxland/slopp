@@ -5,8 +5,10 @@
   trace invalidation)."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
+            [next.jdbc :as jdbc]
             [rewrite-clj.parser]
             [slopp.store :as store]
+            [slopp.store.db :as db]
             [slopp.store.render]
             [slopp.ops :as ops] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
@@ -143,3 +145,44 @@
         (is (some? r2))
         (is (= (slopp.store.render/render-ns w2 'ir.extra)
                (slopp.store.render/render-ns r2 'ir.extra)))))))
+
+(deftest ^:external an-out-of-band-elements-change-reaches-a-running-server
+  ;; The store is the journal; `elements` is its MATERIALIZED form. A change
+  ;; to the rows that appends no delta — a one-off migration, a repair script,
+  ;; anything store_doctor-shaped — moved `data_version` while
+  ;; `deltas-after` stayed empty, and every branch of refresh-cache! was gated
+  ;; on that suffix. So the server kept its cached store indefinitely and
+  ;; re-persisted the OLD shape over the migrated rows at its next write.
+  ;; `restart` does not help: the stale value is upstream of the image.
+  (let [dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-oob-" (System/nanoTime))
+        s   (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! s 'oob.core "(ns oob.core)\n(defn ^:unused-ok f [x] (inc x))\n")
+      (ops/sync-with-journal! s)
+
+      (testing "a foreign commit that touches no elements does NOT rebuild the cache"
+        ;; The control, and it is the half that decides the design: every
+        ;; branch here would pass if the fix were \"reload whenever
+        ;; data_version moves\". Measured on this store, that reload is ~4s
+        ;; against a ~3ms check, and git_map pins, the trace map and the
+        ;; dep-surface cache all move data_version without touching a form.
+        (let [before (:store @s)]
+          (with-open [conn (db/open! dir)]
+            (db/set-meta! conn "some-out-of-band-key" "v"))
+          (ops/sync-with-journal! s)
+          (is (identical? before (:store @s))
+              "nothing about the code changed, so nothing should have been re-read")))
+
+      (testing "a direct edit to the materialized rows IS absorbed"
+        (with-open [conn (db/open! dir)]
+          (jdbc/execute! conn ["UPDATE elements SET source = ? WHERE ns = ? AND name = ?"
+                               "(defn ^:unused-ok f [x] (+ x 99))" "oob.core" "f"]))
+        (ops/sync-with-journal! s)
+        (is (re-find #"\+ x 99" (query/query-source s 'oob.core))
+            "the rows moved under the server and the journal did not")
+        (is (= 2 (count (store/deltas (:store @s))))
+            "and the journal is untouched — this was never a delta"))
+      (finally
+        (ops/close! s)
+        (clojure.java.shell/sh "rm" "-rf" dir)))))

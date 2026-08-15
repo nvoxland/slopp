@@ -436,6 +436,26 @@
                                    StandardCharsets/UTF_8)))
             m))))))
 
+(defn- ancestor?
+  "Is `sha-a` reachable from `sha-b` in `repo`? Both objects must be present —
+  ask `message-of` first when that is in doubt."
+  [^Repository repo sha-a sha-b]
+  (with-open [rw (RevWalk. repo)]
+    (.isMergedInto rw
+                   (.parseCommit rw (ObjectId/fromString sha-a))
+                   (.parseCommit rw (ObjectId/fromString sha-b)))))
+
+(defn- commits-past
+  "How many commits `from` reaches that `base` does not, in `repo`. A nil
+  `base` counts the whole reachable history — the honest answer when two
+  chains share nothing."
+  [^Repository repo from base]
+  (with-open [rw (RevWalk. repo)]
+    (.markStart rw (.parseCommit rw (ObjectId/fromString from)))
+    (when base
+      (.markUninteresting rw (.parseCommit rw (ObjectId/fromString base))))
+    (loop [n 0] (if (.next rw) (recur (inc n)) n))))
+
 ^:reads (defn merge-base
   "The merge base of two commits in `repo`, or nil when the histories are
   unrelated — standard git ancestry (pull uses it to isolate remote-only
@@ -446,6 +466,21 @@
     (.markStart rw (.parseCommit rw (ObjectId/fromString sha-a)))
     (.markStart rw (.parseCommit rw (ObjectId/fromString sha-b)))
     (some-> (.next rw) (.name))))
+
+^:reads (defn message-of
+  "The full message of commit `sha` in `repo`, or nil when the repo does not
+  have that object — which an in-memory projection routinely does not, since
+  it mints its own chain and fetches nothing it was not asked to.
+
+  nil is a real answer here rather than an error: every caller is asking a
+  commit to describe itself, and \"the object is not here\" is one of the
+  outcomes they have to handle."
+  [^Repository repo sha]
+  (when (and repo sha)
+    (let [id (ObjectId/fromString sha)]
+      (when (.has (.getObjectDatabase repo) id)
+        (with-open [rw (RevWalk. repo)]
+          (.getFullMessage (.parseCommit rw id)))))))
 
 (defn stamped-milestone
   "The milestone id a projected commit MESSAGE stamps itself with — the
@@ -463,3 +498,57 @@
   [message]
   (when message
     (second (re-find #"(?m)^Slopp-Commit:[ \t]*(\S+)[ \t]*$" message))))
+
+^:reads (defn divergence
+  "Why a fast-forward push was refused, as a VALUE with declared clauses
+  rather than a status string.
+
+  A refused push answers `REJECTED_NONFASTFORWARD` and nothing else, and the
+  objects that would explain it live in an in-memory projection that dies with
+  the process. Deciding whether ONE such refusal was benign has cost folding
+  the journal to a milestone, re-rendering every path, re-minting the commit
+  and pushing to a scratch repo to reproduce the conditions — for an answer
+  that was one fact. This is that fact, computed where the refusal happens:
+
+      {:projected {:sha … :milestone …}
+       :mirror    {:sha … :milestone …}
+       :base … :ahead n :behind n :contains-mirror-tip? bool :cause …}
+
+  `:cause` is the clause that separates the two stories one status cannot:
+
+  | cause | what happened | remedy |
+  |---|---|---|
+  | `:mirror-ahead` | the destination builds ON this projection — someone else wrote the ref, or this store is behind | pull, or re-project |
+  | `:remint` | both tips stamp the SAME milestone and are different commits: one journal, two mints | the projection is not reproducing itself — investigate before resetting |
+  | `:diverged` | a common base, neither side contains the other | decide which history wins |
+  | `:unrelated` | no common base at all | the destination is a different project's history |
+  | `:no-divergence` | this projection already contains the destination's tip, so ancestry did not cause this refusal | read the status and git's own message |
+  | `:unreadable` | the destination's objects are not in this repo, so only the tips are known | fetch and ask again |
+
+  ABSENCE IS AN ANSWER for containment and for nothing else. An ancestor is
+  reachable, so an object this repo does not have cannot be one — that much is
+  sound with no fetch. The base, the counts and the destination's own stamp all
+  need the object, which is why a caller fetches before asking and why
+  `:unreadable` exists for when it could not."
+  [^Repository repo projected mirror]
+  (let [pm (stamped-milestone (message-of repo projected))]
+    (if-let [mmsg (message-of repo mirror)]
+      (let [mm       (stamped-milestone mmsg)
+            ours?    (ancestor? repo mirror projected)
+            theirs?  (ancestor? repo projected mirror)
+            base     (merge-base repo projected mirror)]
+        {:projected {:sha projected :milestone pm}
+         :mirror    {:sha mirror    :milestone mm}
+         :base      base
+         :ahead     (commits-past repo projected base)
+         :behind    (commits-past repo mirror base)
+         :contains-mirror-tip? ours?
+         :cause     (cond ours?               :no-divergence
+                          theirs?             :mirror-ahead
+                          (nil? base)         :unrelated
+                          (and pm mm (= pm mm)) :remint
+                          :else               :diverged)})
+      {:projected {:sha projected :milestone pm}
+       :mirror    {:sha mirror}
+       :contains-mirror-tip? false
+       :cause :unreadable})))

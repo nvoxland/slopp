@@ -489,3 +489,68 @@
       (finally
         (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
           (rm! dir))))))
+
+(deftest the-boot-jvm-does-not-load-a-stores-tests
+  ;; The loader took every namespace in the store, filtering by kind rather
+  ;; than by name — so a library only the TESTS require still had to be on the
+  ;; boot classpath, and the server loaded those namespaces and never ran
+  ;; them. That cost lands on somebody else: for slopp's own jar it was ~1.5 MB
+  ;; of malli in every download, and for a user's store it is whatever their
+  ;; test-only libraries happen to be, silently promoted to runtime in the
+  ;; process SERVING their app.
+  ;;
+  ;; Nothing is lost by skipping them. This JVM never runs a test — the
+  ;; in-image tier runs in the owned image and the ^:external tier in a fresh
+  ;; JVM built from `build!`'s tree, and both load the namespaces they run.
+  (testing "the predicate: a test namespace is jvm-loadable and still not loaded here"
+    (is (true? (boot/jvm-loadable? {} 'app.core-test))
+        "it IS loadable — this is not a platform question")
+    (is (true? (boot/boot-loads? {} 'app.core)))
+    (is (false? (boot/boot-loads? {} 'app.core-test)))
+    (is (false? (boot/boot-loads? {} 'app.core.thing-test)))
+    (is (false? (boot/boot-loads? {'app.client :cljs} 'app.client.view))
+        "and it still answers the platform question it composes with")
+    (is (true? (boot/boot-loads? {} 'app.testing))
+        "only the -test SUFFIX, so a namespace merely about testing loads"))
+
+  (testing "end to end: a test namespace requiring a lib nobody has costs nothing"
+    (let [dir  (str (java.nio.file.Files/createTempDirectory
+                     "slopp-boot-tests"
+                     (make-array java.nio.file.attribute.FileAttribute 0)))
+          _    (.mkdirs (java.io.File. (str dir "/.slopp")))
+          conn (jdbc/get-connection
+                (jdbc/get-datasource
+                 {:dbtype "sqlite" :dbname (str dir "/.slopp/store.db")}))
+          row! (fn [ns- pos form-id nm src]
+                 (jdbc/execute! conn ["INSERT INTO elements
+                                       (ns,pos,kind,form_id,name,source,comment)
+                                       VALUES (?,?,'form',?,?,?,NULL)"
+                                      ns- pos form-id nm src]))]
+      (try
+        (jdbc/execute! conn ["CREATE TABLE elements (ns TEXT, pos INTEGER,
+                              kind TEXT, form_id TEXT, name TEXT, source TEXT,
+                              comment TEXT)"])
+        (jdbc/execute! conn ["CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)"])
+        (row! "bkt.core" 0 "f1" "bkt.core" "(ns bkt.core)")
+        (row! "bkt.core" 1 "f2" "answer" "(defn answer [] 42)")
+        (row! "bkt.core-test" 0 "f3" "bkt.core-test"
+              "(ns bkt.core-test (:require [nobody.has.this.library :as x]))")
+        (.close conn)
+        (let [before (deref boot/host-loaded)
+              loaded (boot/load-store! dir)]
+          (try
+            (is (empty? (:load-failures (meta loaded)))
+                "the unloadable test namespace was never reached")
+            (is (contains? (ns-interns (find-ns 'bkt.core)) 'answer)
+                "and the production namespace loaded, so this is not a vacuous pass")
+            (is (nil? (find-ns 'bkt.core-test)))
+            ;; the OTHER half of one predicate: a namespace excluded from
+            ;; loading and included in the staleness comparison reads as
+            ;; permanently behind, and the host record is what a verdict cites
+            ;; when it calls itself suspect
+            (is (= '[] (:stale (deref boot/host-loaded)))
+                "and it is not reported stale for not having been loaded")
+            (finally (reset! boot/host-loaded before))))
+        (finally
+          (remove-ns 'bkt.core)
+          (remove-ns 'bkt.core-test))))))

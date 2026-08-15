@@ -234,6 +234,43 @@
   (some-> (jdbc/execute-one! conn ["SELECT bytes FROM blobs WHERE sha = ?" (str sha)])
           :blobs/bytes))
 
+^:reads (defn ^:export elements-digest
+  "A cheap CHANGE DETECTOR over the materialized `elements` rows — counts and
+  sizes, deliberately NOT a checksum. A same-length substitution slips past
+  it, and that is the accepted floor for something on the path of every
+  foreign commit.
+
+  It exists because `data_version` answers a different question than anyone
+  wants. SQLite moves it when ANY other connection commits, and in ordinary
+  multi-server operation that is routinely something with no bearing on the
+  code: a `git_map` pin from a projection, the trace map, the dep-surface
+  cache, a saved remote. Measured on slopp's own store — ~3 ms here, ~410 ms
+  to rebuild the namespaces, ~4 s for a full `load-store`. Reloading on every
+  bump would make two idle servers re-read each other's bookkeeping forever."
+  [conn]
+  (jdbc/execute-one!
+   conn ["SELECT COUNT(*) n, COUNT(DISTINCT ns) nss, SUM(pos) p,
+                 SUM(LENGTH(source)) src, SUM(LENGTH(COALESCE(comment,''))) cmt
+          FROM elements"]))
+
+^:reads (defn ^:export load-elements
+  "The `:namespaces` map, rebuilt from the materialized `elements` rows.
+
+  Split out of `load-store` because it is the half a foreign write can
+  invalidate ALONE: `elements` is the journal materialized, and a migration or
+  repair that rewrites rows without appending a delta leaves the journal
+  correct and this stale. Measured on slopp's own store (2678 rows): ~410 ms
+  here against ~4 s for `load-store`, whose cost is parsing 23k delta
+  payloads — none of which changed in that case."
+  [conn]
+  (update-vals
+   (reduce (fn [m row]
+             (update-in m [(symbol (:elements/ns row)) :elements]
+                        (fnil conj []) (row->element row)))
+           {}
+           (jdbc/execute! conn ["SELECT * FROM elements ORDER BY ns, pos"]))
+   (fn [nsm] (update nsm :elements store/fold-comments))))
+
 ^:reads (defn ^:export load-store
   "Reconstruct the full in-memory store from the db, or nil if empty. Every
   registry meta row loads through ONE loop (default from :init unless
@@ -245,13 +282,7 @@
                               conn ["SELECT v FROM meta WHERE k = 'next-id'"])
                              :meta/v Long/parseLong)]
     (into
-     {:namespaces (update-vals
-                          (reduce (fn [m row]
-                                    (update-in m [(symbol (:elements/ns row)) :elements]
-                                               (fnil conj []) (row->element row)))
-                                  {}
-                                  (jdbc/execute! conn ["SELECT * FROM elements ORDER BY ns, pos"]))
-                          (fn [nsm] (update nsm :elements store/fold-comments)))
+     {:namespaces (load-elements conn)
       :deltas     (mapv row->delta
                         ;; EXPLICIT columns, not SELECT * — an older store still has a dead
       ;; `tree` column holding ~1.35MB per :commit marker, and naming the
