@@ -176,7 +176,7 @@
     (or (get lines nm)
         (when (and dir (.exists (io/file (line-dir dir nm) ".slopp" "store.db")))
           (let [c (db/open! (line-dir dir nm))]
-            {:store (db/load-store c) :conn c})))))
+            {:store (db/load-store c (slopp.store.db/trunk-line-id! c)) :conn c})))))
 
 (defn boot-line-image!
   "A fresh image loaded with `store` (consumes the warm spare when ready).
@@ -216,7 +216,7 @@
 
       :else
       (let [conn   (db/open! (str f))
-            theirs (try (db/load-store conn)
+            theirs (try (db/load-store conn (slopp.store.db/trunk-line-id! conn))
                         (finally (.close ^java.sql.Connection conn)))]
         (merge-into-session! session theirs (str other-dir))))))
 

@@ -37,7 +37,7 @@
         (db/persist! conn s (last (store/deltas s)))
         (.close conn)
         (let [conn2  (db/open! dir)
-              loaded (db/load-store conn2)]
+              loaded (db/load-store conn2 (slopp.store.db/trunk-line-id! conn2))]
           ;; against the STORE's render, not the raw source: spacing is normalized
           ;; at ingest now, so comparing to `src` would be testing the
           ;; renderer's retired byte-exact contract rather than persistence
@@ -87,7 +87,7 @@
       (db/persist! conn s1 d1)
       (.close conn)
       (let [conn2  (db/open! dir)
-            loaded (db/load-store conn2)]
+            loaded (db/load-store conn2 (slopp.store.db/trunk-line-id! conn2))]
         (is (= {"app.core" :pure} (:module-tiers loaded)))
         (.close conn2)))))
 
@@ -126,7 +126,7 @@
                            (pr-str {"app.core" :pure "app.shell" :effects})])
       (.close conn)
       (let [conn2  (db/open! dir)
-            loaded (db/load-store conn2)]
+            loaded (db/load-store conn2 (slopp.store.db/trunk-line-id! conn2))]
         (is (= {"app.core" :pure "app.shell" :external} (:module-tiers loaded)))
         (.close conn2)))))
 
@@ -147,7 +147,7 @@
         sha  (get-in s1 [:files "public/logo.png" :sha])]
     (try
       (is (true? (db/append! conn s1 [] [] (db/trunk-line-id! conn) nil)))
-      (let [loaded (db/load-store conn)]
+      (let [loaded (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
         (testing "the manifest entry loads, the BYTES do not"
           (is (contains? (:files loaded) "public/logo.png"))
           (is (empty? (:blobs loaded))))
@@ -227,7 +227,7 @@
                                    ";; --- section divider ---\n;; second line")]
     (try
       (db/persist! conn st' d)
-      (let [back (db/load-store conn)
+      (let [back (db/load-store conn (slopp.store.db/trunk-line-id! conn))
             f-el (first (filter #(= 'f (:name %))
                                 (get-in back [:namespaces 'cmt.core :elements])))]
         (testing "the comment comes back attached to its form"
@@ -256,7 +256,7 @@
         st   (store/ingest (store/empty-store) 'fc.core src)]
     (try
       (db/persist! conn st (last (store/deltas st)))
-      (let [back  (db/load-store conn)
+      (let [back  (db/load-store conn (slopp.store.db/trunk-line-id! conn))
             elems (get-in back [:namespaces 'fc.core :elements])
             f-el  (first (filter #(= 'f (:name %)) elems))]
         (testing "the comment is now owned by the form below it"
@@ -270,7 +270,7 @@
                  (store.render/render-ns back 'fc.core))))
         (testing "it is idempotent — loading again changes nothing"
           (is (= (store.render/render-ns back 'fc.core)
-                 (store.render/render-ns (db/load-store conn) 'fc.core)))))
+                 (store.render/render-ns (db/load-store conn (slopp.store.db/trunk-line-id! conn)) 'fc.core)))))
       (finally (.close conn)))))
 
 (deftest ^:external a-new-store-dir-ignores-itself
@@ -328,7 +328,7 @@
     (db/persist! conn s1 (last (:deltas s1)))
     (.close conn)
     (let [conn2 (db/open! dir)
-          d     (last (:deltas (db/load-store conn2)))]
+          d     (last (:deltas (db/load-store conn2 (slopp.store.db/trunk-line-id! conn2))))]
       (testing "the scope survives as a VECTOR of namespace symbols"
         (is (= '[a.one-test a.two-test a.three-test] (:scope d)) (pr-str d)))
       (testing "so a reader can ask about ONE namespace without parsing a symbol"
@@ -429,3 +429,135 @@
               (is (false? (db/append! conn s4 new4 ['ln.four] trunk head1))
                   "head1 is stale for the trunk now — this is the rebase path")))))
       (finally (.close conn)))))
+
+(deftest ^:external two-lines-materialize-one-namespace-independently
+  ;; `elements` is the journal MATERIALIZED — it is why opening a store costs
+  ;; ~410ms instead of folding 23,560 deltas — and it was keyed (ns, pos), so
+  ;; one file could hold exactly ONE view. That is the last remaining reason a
+  ;; branch had to BE a separate db file.
+  ;;
+  ;; A line-scoped read that returns the right rows BECAUSE only one line
+  ;; exists proves nothing, so the control is two lines carrying DIFFERENT
+  ;; source at the same (ns, pos), each reading back its own. The final block
+  ;; is the one that matters most: `write-snapshot!` DELETEs a namespace's rows
+  ;; before it re-inserts them, and a DELETE that forgets its line predicate is
+  ;; not a wrong answer — it is one agent's write erasing another agent's
+  ;; namespace, which looks exactly like work that was never written.
+  ;;
+  ;; Every `load-store` below MUST name its line as a local. Resolving the
+  ;; trunk at each call reads the same and asserts nothing.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [sa    (store/ingest (store/empty-store) 'lv.view "(ns lv.view)\n\n(def v :a)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn sa (store/deltas sa) ['lv.view] trunk nil)))
+
+        (let [head-a (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
+              other  (db/create-line! conn {:kind "thread" :base head-a :agent "agent-2"})
+              ;; re-ingesting the SAME namespace: same (ns, pos), different
+              ;; source, and ids that continue sa's counter rather than
+              ;; colliding with it in the UNIQUE deltas.id
+              sb     (store/ingest sa 'lv.view "(ns lv.view)\n\n(def v :b)\n")
+              newb   (vec (drop (count (store/deltas sa)) (store/deltas sb)))]
+          (is (not= (store.render/render-ns sa 'lv.view)
+                    (store.render/render-ns sb 'lv.view))
+              "fixture: the two views must actually differ, or every pair below agrees for free")
+          (is (not= trunk other) "fixture: two lines, not one read twice")
+          (is (true? (db/append! conn sb newb ['lv.view] other head-a)))
+
+          (testing "each line reads back ITS OWN materialization of the same namespace"
+            (is (= (store.render/render-ns sa 'lv.view)
+                   (store.render/render-ns (db/load-store conn trunk) 'lv.view)))
+            (is (= (store.render/render-ns sb 'lv.view)
+                   (store.render/render-ns (db/load-store conn other) 'lv.view))))
+
+          (testing "and a write on one line leaves the other's rows for that namespace intact"
+            (let [head-b (:head (first (filter #(= other (:id %)) (db/lines conn))))
+                  sc     (store/ingest sb 'lv.only "(ns lv.only)\n\n(def w 9)\n")
+                  newc   (vec (drop (count (store/deltas sb)) (store/deltas sc)))]
+              (is (true? (db/append! conn sc newc ['lv.only] other head-b)))
+              (is (= (store.render/render-ns sa 'lv.view)
+                     (store.render/render-ns (db/load-store conn trunk) 'lv.view))
+                  "the DELETE is line-scoped, so line B's write cannot erase line A's rows")
+              (is (nil? (get-in (db/load-store conn trunk) [:namespaces 'lv.only]))
+                  "and a namespace born on line B is not visible from line A")))))
+      (finally (.close conn)))))
+
+(deftest ^:external a-split-copies-the-materialization-not-the-journal
+  ;; A line that has written nothing must READ exactly as the line it split
+  ;; from. Getting there by folding its ancestry would cost the whole journal
+  ;; every time — 23,560 deltas on this store against ~2,481 form rows — so a
+  ;; split copies the MATERIALIZATION instead, one INSERT … SELECT. That is the
+  ;; economy of the whole model, and pinning is what keeps it correct: the base
+  ;; never moves under the new line, so the copy stays valid for its life.
+  ;;
+  ;; The copy is keyed on the parent LINE, not on `:base`: `:base` names a
+  ;; delta, and a delta cannot say whose view of it to duplicate.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [sa    (store/ingest (store/empty-store) 'sp.one "(ns sp.one)\n\n(def a 1)\n")
+            sa    (store/ingest sa 'sp.two "(ns sp.two)\n\n(def b 2)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn sa (store/deltas sa) ['sp.one 'sp.two] trunk nil)))
+
+        (let [head-a (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
+              forked (db/create-line! conn {:kind "thread" :base head-a
+                                            :parent trunk :agent "agent-2"})
+              loaded (db/load-store conn forked)]
+          (testing "the fork reads as its parent did, having written nothing"
+            (is (= (store.render/render-ns sa 'sp.one)
+                   (store.render/render-ns loaded 'sp.one)))
+            (is (= (store.render/render-ns sa 'sp.two)
+                   (store.render/render-ns loaded 'sp.two)))
+            (is (= #{'sp.one 'sp.two} (set (keys (:namespaces loaded))))
+                "every namespace, not merely the one that was asked for"))
+
+          (testing "and a line with NO parent copies nothing — a fork is the only inheritance"
+            ;; the discriminating half: if `create-line!` copied from the trunk
+            ;; unconditionally, the assertion above would hold for a line that
+            ;; forked from nowhere, and the copy would be a global default
+            ;; rather than a split.
+            (let [orphan (db/create-line! conn {:kind "thread" :base head-a :agent "agent-3"})]
+              (is (empty? (:namespaces (db/load-store conn orphan))))))))
+      (finally (.close conn)))))
+
+(deftest ^:external an-unlined-store-migrates-its-materialization-to-the-trunk
+  ;; The one path in this phase that NO fresh store exercises: `elements` keyed
+  ;; (ns, pos), with no line at all. Every other test here opens a store that
+  ;; was born line-scoped, so the migration would be graded by nothing — and
+  ;; the only two stores that actually run it are the two real ones, where a
+  ;; lost row is lost work rather than a red test.
+  ;;
+  ;; SQLite can neither add nor drop a PRIMARY KEY in place, so this is a table
+  ;; COPY rather than an ALTER, and a copy is exactly the operation that drops
+  ;; a column quietly.
+  (let [dir (temp-dir)
+        _   (.mkdirs (io/file dir ".slopp"))
+        raw (jdbc/get-connection
+             (jdbc/get-datasource
+              {:dbtype "sqlite" :dbname (str (io/file dir ".slopp" "store.db"))}))]
+    (jdbc/execute! raw ["CREATE TABLE elements (ns TEXT NOT NULL, pos INTEGER NOT NULL,
+                          kind TEXT NOT NULL, form_id TEXT, name TEXT,
+                          source TEXT NOT NULL, comment TEXT,
+                          PRIMARY KEY (ns, pos))"])
+    (jdbc/execute! raw ["INSERT INTO elements (ns,pos,kind,form_id,name,source,comment)
+                         VALUES ('un.core',0,'form','f1','un.core','(ns un.core)',NULL),
+                                ('un.core',1,'form','f2','a','(def a 1)',';; why a')"])
+    (.close raw)
+    (let [conn (db/open! dir)]
+      (try
+        (let [trunk (db/trunk-line-id! conn)
+              rows  (jdbc/execute! conn ["SELECT line, ns, pos, source, comment
+                                          FROM elements ORDER BY pos"])]
+          (is (= 2 (count rows)) "both rows came across")
+          (is (= #{trunk} (set (map :elements/line rows)))
+              "backfilled to the trunk — the only line those rows could have belonged to")
+          (is (= ["(ns un.core)" "(def a 1)"] (mapv :elements/source rows)))
+          (is (= ";; why a" (:elements/comment (second rows)))
+              "and the comment came with them, which a hand-written column list is how you lose")
+          (is (empty? (jdbc/execute! conn ["SELECT name FROM sqlite_master
+                                            WHERE type='table' AND name='elements_unlined'"]))
+              "the scratch table is dropped, so re-opening is a no-op rather than a second copy"))
+        (finally (.close conn))))))

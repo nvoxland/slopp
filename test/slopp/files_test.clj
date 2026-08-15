@@ -148,7 +148,7 @@ X-Slopp-Main: slopp.kernel.boot/-main
                                        :encoding "base64" :content-type "image/png")]
     (db/persist! conn s1 d1)
     (testing "load-store restores the ENTRY; the bytes stay in the table, not memory"
-      (let [st (db/load-store conn)]
+      (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
         (is (= (:sha d1) (get-in st [:files "public/a.png" :sha])))
         (let [{:keys [content content-type]} (store/file-content st "public/a.png")]
           (is (= "image/png" content-type))

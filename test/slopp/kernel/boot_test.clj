@@ -181,6 +181,11 @@
   ;; The sep rows in this fixture are the point: a store mid-migration still
   ;; has them, and a kernel that reads them produces different source than the
   ;; server it is booting.
+  ;;
+  ;; The SECOND line is the other point. `elements` now holds every open line's
+  ;; view at once, and a booting JVM must read the trunk — it serves requests,
+  ;; and un-landed work on an agent's thread has no business in it. With rows
+  ;; on one line only, the scoping would be right for free.
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-boot-render"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
@@ -188,20 +193,25 @@
         conn (jdbc/get-connection
               (jdbc/get-datasource
                {:dbtype "sqlite" :dbname (str dir "/.slopp/store.db")}))
-        row! (fn [pos kind form-id nm src cmt]
+        row! (fn [line pos kind form-id nm src cmt]
                (jdbc/execute! conn ["INSERT INTO elements
-                                     (ns,pos,kind,form_id,name,source,comment)
-                                     VALUES ('bk.core',?,?,?,?,?,?)"
-                                    pos kind form-id nm src cmt]))]
+                                     (line,ns,pos,kind,form_id,name,source,comment)
+                                     VALUES (?,'bk.core',?,?,?,?,?,?)"
+                                    line pos kind form-id nm src cmt]))]
     (try
-      (jdbc/execute! conn ["CREATE TABLE elements (ns TEXT, pos INTEGER,
+      (jdbc/execute! conn ["CREATE TABLE elements (line TEXT, ns TEXT, pos INTEGER,
                             kind TEXT, form_id TEXT, name TEXT, source TEXT,
                             comment TEXT)"])
-      (row! 0 "form" "f1" "bk.core" "(ns bk.core)" nil)
-      (row! 1 "sep" nil nil "\n" nil)
-      (row! 2 "form" "f2" "f" "(defn f [] 1)" ";; why this exists")
-      (row! 3 "sep" nil nil "\n" nil)
-      (row! 4 "form" "f3" "g" "(defn g [] (f))" nil)
+      (jdbc/execute! conn ["CREATE TABLE lines (id TEXT, name TEXT)"])
+      (jdbc/execute! conn ["INSERT INTO lines (id,name) VALUES ('trunk','main'),
+                                                                ('thread',NULL)"])
+      (row! "trunk" 0 "form" "f1" "bk.core" "(ns bk.core)" nil)
+      (row! "trunk" 1 "sep" nil nil "\n" nil)
+      (row! "trunk" 2 "form" "f2" "f" "(defn f [] 1)" ";; why this exists")
+      (row! "trunk" 3 "sep" nil nil "\n" nil)
+      (row! "trunk" 4 "form" "f3" "g" "(defn g [] (f))" nil)
+      ;; an agent's un-landed edit of the same form, on its own line
+      (row! "thread" 2 "form" "f2" "f" "(defn f [] :NOT-DONE)" nil)
       (testing "one blank line between forms, the comment above its own form"
         (is (= {'bk.core (str "(ns bk.core)\n\n"
                               ";; why this exists\n(defn f [] 1)\n\n"
@@ -523,13 +533,15 @@
                  {:dbtype "sqlite" :dbname (str dir "/.slopp/store.db")}))
           row! (fn [ns- pos form-id nm src]
                  (jdbc/execute! conn ["INSERT INTO elements
-                                       (ns,pos,kind,form_id,name,source,comment)
-                                       VALUES (?,?,'form',?,?,?,NULL)"
+                                       (line,ns,pos,kind,form_id,name,source,comment)
+                                       VALUES ('trunk',?,?,'form',?,?,?,NULL)"
                                       ns- pos form-id nm src]))]
       (try
-        (jdbc/execute! conn ["CREATE TABLE elements (ns TEXT, pos INTEGER,
+        (jdbc/execute! conn ["CREATE TABLE elements (line TEXT, ns TEXT, pos INTEGER,
                               kind TEXT, form_id TEXT, name TEXT, source TEXT,
                               comment TEXT)"])
+        (jdbc/execute! conn ["CREATE TABLE lines (id TEXT, name TEXT)"])
+        (jdbc/execute! conn ["INSERT INTO lines (id,name) VALUES ('trunk','main')"])
         (jdbc/execute! conn ["CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)"])
         (row! "bkt.core" 0 "f1" "bkt.core" "(ns bkt.core)")
         (row! "bkt.core" 1 "f2" "answer" "(defn answer [] 42)")

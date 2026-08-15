@@ -51,6 +51,87 @@
         (spit f store-dir-gitignore)))
     (catch java.io.IOException _ nil)))
 
+(defn- one-col
+  "The single selected column of a single-row query, whatever next.jdbc
+  qualified it with. A CTE's columns are not qualified the way a table's are,
+  and guessing wrong produces the same value as no rows at all — which is one
+  debugging round already spent."
+  [row]
+  (when row (val (first row))))
+
+(defn ^:export create-line!
+  "Mint a line and return its id.
+
+  `:kind` is \"branch\" or \"thread\" — a thread is the anonymous case and has
+  no `:nm`. `:base` is the delta it SPLITS FROM, and the head starts there: a
+  line that has written nothing sits exactly where its base sat, with nothing
+  copied out of the JOURNAL. That is the whole economy of the model — a split
+  costs a row.
+
+  `:parent` is the parent LINE's id (a thread's branch), not a delta, and it
+  is where the new line inherits its VIEW from. `elements` is materialized per
+  line, so the fork copies the parent's rows in one INSERT … SELECT — ~2,481
+  form rows here against 23,560 deltas to fold for the same answer. Pinning is
+  what keeps the copy valid for the line's whole life: the base never moves
+  under it, so the view can never go stale beneath its own writes.
+
+  The copy follows `:parent` rather than `:base` because a delta cannot say
+  whose view of it to duplicate. A line with no parent starts EMPTY — correct
+  for a store's first line, wrong for a fork, so a fork must name its parent.
+
+  The row lands BEFORE the copy on purpose: interrupted between them leaves a
+  line with an empty view, which reads as unwritten. The other order would
+  leave rows belonging to a line that does not exist."
+  [conn {:keys [kind base parent agent] nm :name}]
+  (let [id  (str (java.util.UUID/randomUUID))
+        now (System/currentTimeMillis)]
+    (jdbc/execute! conn ["INSERT INTO lines
+                            (id,name,kind,head,base,parent,agent,created_at,used_at,status)
+                          VALUES (?,?,?,?,?,?,?,?,?,'open')"
+                         id nm (or kind "thread") base base parent agent now now])
+    (when parent
+      (jdbc/execute! conn ["INSERT INTO elements
+                              (line,ns,pos,kind,form_id,name,source,comment)
+                            SELECT ?, ns, pos, kind, form_id, name, source, comment
+                            FROM elements WHERE line = ?" id parent]))
+    id))
+
+^:reads (defn ^:export trunk-line-id!
+  "The trunk line's id, minting the row when a store predates the lines table.
+
+  A store written before lines existed has all its history and no line naming
+  it, so the row is created with its base at the CURRENT journal head — the
+  whole log is behind the trunk immediately, with nothing moved or copied.
+
+  The bang is the mint; reading an existing store's trunk is a plain read."
+  [conn]
+  (or (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = 'main'"]))
+      (create-line! conn
+                    {:name "main" :kind "branch"
+                     :base (one-col (jdbc/execute-one!
+                                     conn ["SELECT id FROM deltas ORDER BY seq DESC LIMIT 1"]))})))
+
+(def ^:private elements-ddl
+  "The `elements` schema, in ONE place because the migration in `open!` builds
+  the same table a second time.
+
+  `elements` is the journal MATERIALIZED — it is why opening a store costs
+  ~410ms instead of folding 23,560 deltas. Keyed (ns, pos) it could hold
+  exactly ONE view per file, which is the last reason a branch had to BE a
+  separate db file. Keyed (line, ns, pos) it holds every open line's view at
+  once, and a split costs one INSERT … SELECT over the form rows instead of a
+  fold of the whole log."
+  "CREATE TABLE IF NOT EXISTS elements (
+     line    TEXT NOT NULL,
+     ns      TEXT NOT NULL,
+     pos     INTEGER NOT NULL,
+     kind    TEXT NOT NULL,
+     form_id TEXT,
+     name    TEXT,
+     source  TEXT NOT NULL,
+     comment TEXT,
+     PRIMARY KEY (line, ns, pos))")
+
 (defn ^:export open!
   "Open (creating if needed) the store db under `dir`; returns the connection.
 
@@ -113,20 +194,35 @@
                               created_at INTEGER NOT NULL,
                               used_at    INTEGER NOT NULL,
                               status     TEXT NOT NULL)"])
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS elements (
-                              ns      TEXT NOT NULL,
-                              pos     INTEGER NOT NULL,
-                              kind    TEXT NOT NULL,
-                              form_id TEXT,
-                              name    TEXT,
-                              source  TEXT NOT NULL,
-                              comment TEXT,
-                              PRIMARY KEY (ns, pos))"])
+         (jdbc/execute! conn [elements-ddl])
          ;; a form OWNS the comment rendered above it (whitespace-is-rendering).
          ;; Same story as `tree` above: SQLite has no ADD COLUMN IF NOT EXISTS,
          ;; so adding it to an existing store throws and that is the no-op.
          (try (jdbc/execute! conn ["ALTER TABLE elements ADD COLUMN comment TEXT"])
-              (catch java.sql.SQLException _ nil))
+     (catch java.sql.SQLException _ nil))
+;; …and `line` is the one column that idiom cannot add: it belongs to the
+         ;; PRIMARY KEY, and SQLite can neither add nor drop a key in place. So an
+         ;; existing table is COPIED into the new shape with every row backfilled
+         ;; to the trunk — the only line those rows could ever have belonged to.
+         ;; It runs at most once per store, and afterwards a reader with no line
+         ;; predicate still sees exactly what it saw before, which is what lets
+         ;; the readers move one at a time instead of in lockstep with the schema.
+         ;;
+         ;; In a transaction because the half-done state is indistinguishable
+         ;; from the finished one: a crash between the rename and the copy leaves
+         ;; an empty `elements` that already HAS a line column, so the probe
+         ;; below would skip it forever and the rows would be gone.
+         (when (try (jdbc/execute! conn ["SELECT line FROM elements LIMIT 0"]) false
+                    (catch java.sql.SQLException _ true))
+           (jdbc/with-transaction [tx conn]
+             (let [trunk (trunk-line-id! tx)]
+               (jdbc/execute! tx ["ALTER TABLE elements RENAME TO elements_unlined"])
+               (jdbc/execute! tx [elements-ddl])
+               (jdbc/execute! tx ["INSERT INTO elements
+                                     (line,ns,pos,kind,form_id,name,source,comment)
+                                   SELECT ?, ns, pos, kind, form_id, name, source, comment
+                                   FROM elements_unlined" trunk])
+               (jdbc/execute! tx ["DROP TABLE elements_unlined"]))))
          ;; content-addressed dependency analysis (P4-deps M4/M6), keyed by
          ;; "lib@version" — a surface/native verdict is a pure fn of the coord
          (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS dep_surface (
@@ -269,11 +365,18 @@
   (some-> (jdbc/execute-one! conn ["SELECT bytes FROM blobs WHERE sha = ?" (str sha)])
           :blobs/bytes))
 
-^:reads (defn ^:export elements-digest
-  "A cheap CHANGE DETECTOR over the materialized `elements` rows — counts and
-  sizes, deliberately NOT a checksum. A same-length substitution slips past
-  it, and that is the accepted floor for something on the path of every
-  foreign commit.
+^:reads (defn ^:export
+  ^{:breaking-ok
+    (str "the 1-arity is REMOVED rather than defaulted: an unscoped digest "
+         "moves whenever ANY line is written, so it would answer data_version's "
+         "question again — the very thing it was built to stop doing. Its one "
+         "call site moved in the SAME coordinated write, and nothing outside "
+         "slopp calls the storage layer directly.")}
+  elements-digest
+  "A cheap CHANGE DETECTOR over ONE LINE's materialized `elements` rows —
+  counts and sizes, deliberately NOT a checksum. A same-length substitution
+  slips past it, and that is the accepted floor for something on the path of
+  every foreign commit.
 
   It exists because `data_version` answers a different question than anyone
   wants. SQLite moves it when ANY other connection commits, and in ordinary
@@ -281,47 +384,76 @@
   code: a `git_map` pin from a projection, the trace map, the dep-surface
   cache, a saved remote. Measured on slopp's own store — ~3 ms here, ~410 ms
   to rebuild the namespaces, ~4 s for a full `load-store`. Reloading on every
-  bump would make two idle servers re-read each other's bookkeeping forever."
-  [conn]
+  bump would make two idle servers re-read each other's bookkeeping forever.
+
+  `line-id` is the same argument one level in. Once many lines share a file,
+  an unscoped aggregate moves whenever ANY line is written, so every agent
+  would rebuild its namespaces on every other agent's edit — the digest would
+  answer `data_version`'s question again, having been built to stop doing so."
+  [conn line-id]
   (jdbc/execute-one!
    conn ["SELECT COUNT(*) n, COUNT(DISTINCT ns) nss, SUM(pos) p,
                  SUM(LENGTH(source)) src, SUM(LENGTH(COALESCE(comment,''))) cmt
-          FROM elements"]))
+          FROM elements WHERE line = ?" line-id]))
 
-^:reads (defn ^:export load-elements
-  "The `:namespaces` map, rebuilt from the materialized `elements` rows.
+^:reads (defn ^:export
+  ^{:breaking-ok
+    (str "the 1-arity is REMOVED rather than defaulted: a read that does not "
+         "name its line silently answers for the trunk, which is how an agent "
+         "would be shown the branch instead of its own thread and never know. "
+         "Both call sites moved in the SAME coordinated write, and nothing "
+         "outside slopp calls the storage layer directly.")}
+  load-elements
+  "The `:namespaces` map for ONE LINE, rebuilt from its materialized
+  `elements` rows.
 
   Split out of `load-store` because it is the half a foreign write can
   invalidate ALONE: `elements` is the journal materialized, and a migration or
   repair that rewrites rows without appending a delta leaves the journal
   correct and this stale. Measured on slopp's own store (2678 rows): ~410 ms
   here against ~4 s for `load-store`, whose cost is parsing 23k delta
-  payloads — none of which changed in that case."
-  [conn]
+  payloads — none of which changed in that case.
+
+  `line-id` is what lets many lines share one file: every open line keeps its
+  own materialization, and a read that omitted the predicate would fold every
+  agent's private work into one incoherent namespace map."
+  [conn line-id]
   (update-vals
    (reduce (fn [m row]
              (update-in m [(symbol (:elements/ns row)) :elements]
                         (fnil conj []) (row->element row)))
            {}
-           (jdbc/execute! conn ["SELECT * FROM elements ORDER BY ns, pos"]))
+           (jdbc/execute! conn ["SELECT * FROM elements WHERE line = ?
+                                 ORDER BY ns, pos" line-id]))
    (fn [nsm] (update nsm :elements store/fold-comments))))
 
-^:reads (defn ^:export load-store
-  "Reconstruct the full in-memory store from the db, or nil if empty. Every
-  registry meta row loads through ONE loop (default from :init unless
-  :absent-nil?, :normalize applied — retired vocabulary canonicalizes here,
-  so an old db stops re-minting it into fold state); only the bespoke
-  element/delta/blob storage is hand-read."
-  [conn]
+^:reads (defn ^:export
+  ^{:breaking-ok
+    (str "the 1-arity is REMOVED rather than defaulted: loading a store means "
+         "loading ONE line's view of it, and a default would answer for the "
+         "trunk without saying so. All seventeen call sites moved in the SAME "
+         "coordinated write, and nothing outside slopp calls the storage "
+         "layer directly.")}
+  load-store
+  "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
+  empty. Every registry meta row loads through ONE loop (default from :init
+  unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
+  here, so an old db stops re-minting it into fold state); only the bespoke
+  element/delta/blob storage is hand-read.
+
+  `line-id` selects the materialization. The JOURNAL is not scoped: `:deltas`
+  is every delta in the file, because history is shared and a line is a
+  POINTER into it rather than a copy of it. What a line owns is its view."
+  [conn line-id]
   (when-let [next-id (some-> (jdbc/execute-one!
                               conn ["SELECT v FROM meta WHERE k = 'next-id'"])
                              :meta/v Long/parseLong)]
     (into
-     {:namespaces (load-elements conn)
+     {:namespaces (load-elements conn line-id)
       :deltas     (mapv row->delta
                         ;; EXPLICIT columns, not SELECT * — an older store still has a dead
-      ;; `tree` column holding ~1.35MB per :commit marker, and naming the
-      ;; columns is what keeps it from being fetched and parsed at every open.
+                        ;; `tree` column holding ~1.35MB per :commit marker, and naming the
+                        ;; columns is what keeps it from being fetched and parsed at every open.
                         (jdbc/execute! conn ["SELECT id, op, ns, payload FROM deltas
                                               ORDER BY seq"]))
       :next-id    next-id
@@ -402,22 +534,28 @@
   nil)
 
 (defn- write-snapshot!
-  "The shared tail of persist!/append!: the touched namespaces' full element
-  rows, the id counter, every registry meta row, and the blob table — ONE
-  loop over slopp.store.fields/meta-fields, so a new fold-field persists by
+  "The shared tail of persist!/append!: ONE LINE's element rows for the touched
+  namespaces, the id counter, every registry meta row, and the blob table —
+  ONE loop over slopp.store.fields/meta-fields, so a new fold-field persists by
   registration instead of by editing two near-identical transactions (the
   copy-paste this replaces silently lost any field a hand missed in ONE of
-  them — surviving tests, vanishing on the live server's restart)."
-  [tx store nses]
+  them — surviving tests, vanishing on the live server's restart).
+
+  `line-id` scopes both statements, and the DELETE is the one that matters.
+  `elements` holds every open line's view of the store at once, so a delete
+  naming only the namespace is not a wrong answer — it erases another agent's
+  work, and what is left looks exactly like a write that never happened."
+  [tx store nses line-id]
   (doseq [ns-sym nses]
     ;; delete ALWAYS: a ns absent from the store (renamed away) must have
     ;; its rows purged, not linger for the next reopen
-    (jdbc/execute! tx ["DELETE FROM elements WHERE ns = ?" (str ns-sym)])
+    (jdbc/execute! tx ["DELETE FROM elements WHERE line = ? AND ns = ?"
+                       line-id (str ns-sym)])
     (doseq [[pos e] (map-indexed vector
                                  (get-in store [:namespaces ns-sym :elements]))]
-      (jdbc/execute! tx ["INSERT INTO elements (ns,pos,kind,form_id,name,source,comment)
-                          VALUES (?,?,?,?,?,?,?)"
-                         (str ns-sym) pos (name (:kind e)) (:id e)
+      (jdbc/execute! tx ["INSERT INTO elements (line,ns,pos,kind,form_id,name,source,comment)
+                          VALUES (?,?,?,?,?,?,?,?)"
+                         line-id (str ns-sym) pos (name (:kind e)) (:id e)
                          (some-> (:name e) str) (n/string (:node e))
                          (:comment e)])))
   (jdbc/execute! tx ["INSERT INTO meta (k,v) VALUES ('next-id', ?)
@@ -522,55 +660,7 @@
                                                         used_at = excluded.used_at"
                        (str (java.util.UUID/randomUUID)) head now now])))
 
-(defn- one-col
-  "The single selected column of a single-row query, whatever next.jdbc
-  qualified it with. A CTE's columns are not qualified the way a table's are,
-  and guessing wrong produces the same value as no rows at all — which is one
-  debugging round already spent."
-  [row]
-  (when row (val (first row))))
-
-(defn ^:export create-line!
-  "Mint a line and return its id.
-
-  `:kind` is \"branch\" or \"thread\" — a thread is the anonymous case and has
-  no `:nm`. `:base` is the delta it SPLITS FROM, and the head starts there:
-  a line that has written nothing reads exactly as its base did, with nothing
-  copied. That is the whole economy of the model — a split costs a row.
-
-  `:parent` is the parent LINE's id (a thread's branch), not a delta."
-  [conn {:keys [kind base parent agent] nm :name}]
-  (let [id  (str (java.util.UUID/randomUUID))
-        now (System/currentTimeMillis)]
-    (jdbc/execute! conn ["INSERT INTO lines
-                            (id,name,kind,head,base,parent,agent,created_at,used_at,status)
-                          VALUES (?,?,?,?,?,?,?,?,?,'open')"
-                         id nm (or kind "thread") base base parent agent now now])
-    id))
-
-^:reads (defn ^:export trunk-line-id!
-  "The trunk line's id, minting the row when a store predates the lines table.
-
-  A store written before lines existed has all its history and no line naming
-  it, so the row is created with its base at the CURRENT journal head — the
-  whole log is behind the trunk immediately, with nothing moved or copied.
-
-  The bang is the mint; reading an existing store's trunk is a plain read."
-  [conn]
-  (or (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = 'main'"]))
-      (create-line! conn
-                    {:name "main" :kind "branch"
-                     :base (one-col (jdbc/execute-one!
-                                     conn ["SELECT id FROM deltas ORDER BY seq DESC LIMIT 1"]))})))
-
-(defn ^:export
-  ^{:breaking-ok
-    (str "the 5-arity is REMOVED on purpose: it could not name the line it "
-         "wrote to, which is precisely how a thread's work would land silently "
-         "on main. All six call sites moved in the SAME coordinated write "
-         "(change_signature), and nothing outside slopp calls the storage layer "
-         "directly — consumers drive the tools, not append!.")}
-  append!
+(defn ^:export append!
   "Conditionally append `new-deltas` (+ the full snapshot tail via
   write-snapshot!) in ONE transaction, iff `line-id`'s head still equals
   `expected-head` (nil for a line with no writes yet). Returns true on commit;
@@ -617,7 +707,7 @@
                               VALUES (?,?,?,?,?)"
                              (:id d) (name (:op d)) (str (:ns d)) (:parent d)
                              (pr-str (dissoc d :id :op :ns))]))
-        (write-snapshot! tx store nses)
+        (write-snapshot! tx store nses line-id)
         true))
     (catch clojure.lang.ExceptionInfo e
       (if (::head-moved (ex-data e)) false (throw e)))
@@ -642,7 +732,7 @@
                         (:parent delta)
                         (pr-str (dissoc delta :id :op :ns))])
      (when-let [head (:id delta)] (advance-trunk! tx head))
-     (write-snapshot! tx store nses))
+     (write-snapshot! tx store nses (trunk-line-id! tx)))
    nil))
 
 ^:reads (defn ^:export journal-stats
@@ -659,7 +749,13 @@
 
   The snapshot is gone (the projection derives each tree from the log), so
   there is no longer a `:tree-bytes` figure. The habit it taught is the point:
-  when a delta starts carrying something big, count it here first."
+  when a delta starts carrying something big, count it here first.
+
+  `:elements` counts EVERY line, deliberately. A store's materialization is no
+  longer one view: each open line keeps its own, so an abandoned thread costs
+  a full copy of the form rows and this is the number that shows it. Per-line
+  attribution belongs with the thread listing, not here — what this answers is
+  what the FILE carries."
           [conn]
           (let [rows (jdbc/execute!
                       conn ["SELECT op,

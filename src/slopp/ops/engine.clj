@@ -386,19 +386,25 @@
   which is too coarse to act on — it moves for git_map pins, the trace map and
   the dep-surface cache, none of which touch a form. An unrecorded digest
   (a session that has not refreshed yet) counts as CHANGED: absence is not
-  agreement, and one rebuild per session is the cheap side of that bet."
+  agreement, and one rebuild per session is the cheap side of that bet.
+
+  The LINE is resolved once and shared by all three reads. Digesting one line
+  and rebuilding from another would advance the cache from a view it never
+  graded — and once a session sits on its own thread rather than the trunk,
+  that is not a hypothetical."
   [session]
   (when-let [conn (:db @session)]
-    (let [local  (:store @session)
+    (let [line   (db/trunk-line-id! conn)
+          local  (:store @session)
           suffix (db/deltas-after conn (count (store/deltas local)))
-          digest (db/elements-digest conn)]
+          digest (db/elements-digest conn line)]
       (if (seq suffix)
         (let [incr  (reduce (fn [st d]
                               (if-let [st' (store/replay-delta st d)]
                                 st'
                                 (reduced nil)))
                             local suffix)
-              fresh (or incr (db/load-store conn))]
+              fresh (or incr (db/load-store conn line))]
           (when fresh
             (swap! session
                    (fn [s]
@@ -410,7 +416,7 @@
         ;; decide this one — the rows themselves are the evidence, and they
         ;; were just read from the db, so accepting them is not a regression
         (when (not= digest (:elements-digest @session))
-          (swap! session update :store assoc :namespaces (db/load-elements conn))))
+          (swap! session update :store assoc :namespaces (db/load-elements conn line))))
       (swap! session assoc :elements-digest digest))))
 
 (defn persist-trace!

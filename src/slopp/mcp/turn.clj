@@ -23,7 +23,7 @@
   (if-let [conn (db/open! dir {:create? false})]
     (try
       (loop [n 0]
-        (let [st (or (db/load-store conn) (store/empty-store))
+        (let [st (or (db/load-store conn (slopp.store.db/trunk-line-id! conn)) (store/empty-store))
               [st' _] (store/record-turn st kind :agent agent :intent intent)
               head (:id (last (store/deltas st)))]
           (if (db/append! conn st' (drop (count (store/deltas st)) (store/deltas st')) [] (db/trunk-line-id! conn) head)

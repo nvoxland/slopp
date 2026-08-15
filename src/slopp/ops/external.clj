@@ -1628,7 +1628,7 @@ client-deps (merge (:client-deps st) (:client provided))
    (let [conn    (when dir (db/open! dir {:create? false}))
          session (atom {:db conn :dir dir :branch "main" :lines {}})]
      (try
-       (let [store (or (some-> conn db/load-store) (store/empty-store))
+       (let [store (or (some-> conn (db/load-store (db/trunk-line-id! conn))) (store/empty-store))
              ttl   (or branch-image-ttl-ms 600000)]
          ;; SYNC phase: the store value + everything reads need, no image
          (swap! session assoc

@@ -90,7 +90,7 @@
         (db/persist! conn s d)
         (testing "the manifest survives persist + a fresh load-store"
           (is (= {'a/lib {:mvn/version "1.0"}} (db/deps conn)))
-          (is (= {'a/lib {:mvn/version "1.0"}} (:deps (db/load-store conn))))))
+          (is (= {'a/lib {:mvn/version "1.0"}} (:deps (db/load-store conn (slopp.store.db/trunk-line-id! conn)))))))
       (finally (.close conn)))))
 
 ;; ---------------------------------------------------------------------------

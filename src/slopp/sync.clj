@@ -121,7 +121,7 @@
   a fresh dir; clone/import must treat it as fresh, not refuse it."
   [dir]
   (with-open [conn (db/open! dir)]
-    (let [st (db/load-store conn)]
+    (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
       (and (empty? (:namespaces st))
            (empty? (:deltas st))
            (empty? (:files st))))))
