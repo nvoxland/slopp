@@ -26,9 +26,7 @@
         (let [st (or (db/load-store conn) (store/empty-store))
               [st' _] (store/record-turn st kind :agent agent :intent intent)
               head (:id (last (store/deltas st)))]
-          (if (db/append! conn st'
-                          (drop (count (store/deltas st)) (store/deltas st'))
-                          [] head)
+          (if (db/append! conn st' (drop (count (store/deltas st)) (store/deltas st')) [] (db/trunk-line-id! conn) head)
             (println "turn" (name kind) "recorded for" agent)
             (if (< n 10)
               (recur (inc n))

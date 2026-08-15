@@ -146,13 +146,13 @@
                                       :encoding "base64" :content-type "image/png")
         sha  (get-in s1 [:files "public/logo.png" :sha])]
     (try
-      (is (true? (db/append! conn s1 [] [] nil)))
+      (is (true? (db/append! conn s1 [] [] (db/trunk-line-id! conn) nil)))
       (let [loaded (db/load-store conn)]
         (testing "the manifest entry loads, the BYTES do not"
           (is (contains? (:files loaded) "public/logo.png"))
           (is (empty? (:blobs loaded))))
         (testing "and a later write cannot prune what was never loaded"
-          (is (true? (db/append! conn loaded [] [] nil)))
+          (is (true? (db/append! conn loaded [] [] (db/trunk-line-id! conn) nil)))
           (is (java.util.Arrays/equals png ^bytes (db/get-blob conn sha)))))
       (testing "the bytes are still there, on demand"
         (is (java.util.Arrays/equals png ^bytes (db/get-blob conn sha))))
@@ -173,12 +173,9 @@
     (try
       (testing "a constraint violation throws rather than masquerading as contention"
         (is (thrown? java.sql.SQLException
-                     (db/append! conn (store/empty-store)
-                                 [{:id nil :op :add :ns 'x.core}] [] nil))))
+                     (db/append! conn (store/empty-store) [{:id nil :op :add :ns 'x.core}] [] (db/trunk-line-id! conn) nil))))
       (testing "a genuine writer collision is still a retryable false"
-        (is (false? (db/append! conn (store/empty-store)
-                                [{:id "d1" :op :add :ns 'x.core}] []
-                                "a-head-that-never-existed"))))
+        (is (false? (db/append! conn (store/empty-store) [{:id "d1" :op :add :ns 'x.core}] [] (db/trunk-line-id! conn) "a-head-that-never-existed"))))
       (finally (.close conn)))))
 
 (deftest journal-stats-reports-what-the-store-carries
@@ -199,12 +196,10 @@
         st   (store/ingest (store/empty-store) 'sh.core
                            "(ns sh.core)\n\n(defn f \"F.\" [x] x)\n")]
     (try
-      (is (true? (db/append! conn st
-                             [{:id "d1" :op :ingest :ns 'sh.core :prompt "seed"
+      (is (true? (db/append! conn st [{:id "d1" :op :ingest :ns 'sh.core :prompt "seed"
                                :sources {"f1" "(ns sh.core)"}}
                               {:id "d2" :op :commit :ns '*session* :target "d1"
-                               :description (apply str (repeat 400 "m"))}]
-                             ['sh.core] nil)))
+                               :description (apply str (repeat 400 "m"))}] ['sh.core] (db/trunk-line-id! conn) nil)))
       (let [s (db/journal-stats conn)]
         (testing "the journal is measured"
           (is (= 2 (get-in s [:deltas :n])))
@@ -367,7 +362,7 @@
         ;; a one-delta log satisfies every assertion below by accident — the
         ;; walk, the order and the head all collapse to the same single id
         (is (< 2 (count ds)) "fixture must produce a CHAIN")
-        (is (true? (db/append! conn s ds ['dag.one 'dag.two 'dag.three] nil)))
+        (is (true? (db/append! conn s ds ['dag.one 'dag.two 'dag.three] (db/trunk-line-id! conn) nil)))
 
         (testing "the trunk is a line, and it points at the journal head"
           (let [ls (db/lines conn)]
@@ -387,4 +382,50 @@
           ;; ids while mis-linking two of them is precisely the defect this
           ;; guards, and a count assertion is green for it
           (is (= (mapv :id ds) (db/ancestry conn (:id (last ds)))))))
+      (finally (.close conn)))))
+
+(deftest ^:external a-write-contends-only-with-its-own-line
+  ;; The CAS read the GLOBAL journal head — `SELECT id FROM deltas ORDER BY seq
+  ;; DESC LIMIT 1`. That is correct exactly while one line owns a file, which
+  ;; is why branches had to BE separate files. Once many lines share one
+  ;; journal it is not a wrong answer, it is a dead system: every agent's write
+  ;; fails whenever ANY other agent writes anywhere in the file.
+  ;;
+  ;; So the CAS moves onto the line. Two writers on two lines never contend;
+  ;; two writers on ONE line still do, and that is correct — it is the existing
+  ;; rebase path, and it is what the last case below pins.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [s1    (store/ingest (store/empty-store) 'ln.one "(ns ln.one)\n\n(def a 1)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['ln.one] trunk nil)))
+
+        (let [head1 (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
+              other (db/create-line! conn {:kind "thread" :base head1 :agent "agent-2"})
+              s2    (store/ingest s1 'ln.two "(ns ln.two)\n\n(def b 2)\n")
+              new2  (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
+          (is (= head1 (:id (last (store/deltas s1)))) "fixture: the trunk head is the last delta")
+          (is (seq new2) "fixture: the second line must actually have work")
+
+          (testing "a line writes at ITS OWN head"
+            ;; `other` forked at head1 and writes there. Under a global-head CAS
+            ;; this passes anyway — head1 IS the journal head at this moment —
+            ;; so it is setup, not evidence. The next block is the evidence.
+            (is (true? (db/append! conn s2 new2 ['ln.two] other head1))))
+
+          (testing "and the trunk still writes at ITS head, which the other line moved past"
+            ;; THE discriminating case. The journal head is now `other`'s delta,
+            ;; so a global-head CAS refuses this write — while the trunk's own
+            ;; head never moved and there is nothing for it to rebase onto.
+            (let [s3   (store/ingest s2 'ln.three "(ns ln.three)\n\n(def c 3)\n")
+                  new3 (vec (drop (count (store/deltas s2)) (store/deltas s3)))]
+              (is (true? (db/append! conn s3 new3 ['ln.three] trunk head1))
+                  "the trunk's head did not move, so its write must land")))
+
+          (testing "a stale head on the SAME line still loses, as it must"
+            (let [s4   (store/ingest s2 'ln.four "(ns ln.four)\n\n(def d 4)\n")
+                  new4 (vec (drop (count (store/deltas s2)) (store/deltas s4)))]
+              (is (false? (db/append! conn s4 new4 ['ln.four] trunk head1))
+                  "head1 is stale for the trunk now — this is the rebase path")))))
       (finally (.close conn)))))

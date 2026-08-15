@@ -350,10 +350,7 @@
   rebases, or surfaces contention."
   [session base st' nses]
   (if-let [conn (ensure-db! session)]
-    (if (db/append! conn st'
-                    (drop (count (store/deltas base)) (store/deltas st'))
-                    (vec nses)
-                    (:id (last (store/deltas base))))
+    (if (db/append! conn st' (drop (count (store/deltas base)) (store/deltas st')) (vec nses) (db/trunk-line-id! conn) (:id (last (store/deltas base))))
       (do (swap! session
                  (fn [s]
                    (if (< (count (store/deltas (:store s)))

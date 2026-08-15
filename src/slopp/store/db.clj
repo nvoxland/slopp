@@ -522,31 +522,101 @@
                                                         used_at = excluded.used_at"
                        (str (java.util.UUID/randomUUID)) head now now])))
 
-(defn ^:export append!
-  "Phase-a storage inversion: conditionally append `new-deltas` (+ the full
-  snapshot tail via write-snapshot!) in ONE transaction, iff the journal head
-  still equals `expected-head` (nil for an empty log). Returns true on
-  commit; false if the head moved or the db was busy — the caller refreshes
-  its cache and rebases. SQLite (WAL) serializes writers across threads AND
-  processes, which is what makes the shared-storage multi-server split
-  possible."
-  [conn store new-deltas nses expected-head]
+(defn- one-col
+  "The single selected column of a single-row query, whatever next.jdbc
+  qualified it with. A CTE's columns are not qualified the way a table's are,
+  and guessing wrong produces the same value as no rows at all — which is one
+  debugging round already spent."
+  [row]
+  (when row (val (first row))))
+
+(defn ^:export create-line!
+  "Mint a line and return its id.
+
+  `:kind` is \"branch\" or \"thread\" — a thread is the anonymous case and has
+  no `:nm`. `:base` is the delta it SPLITS FROM, and the head starts there:
+  a line that has written nothing reads exactly as its base did, with nothing
+  copied. That is the whole economy of the model — a split costs a row.
+
+  `:parent` is the parent LINE's id (a thread's branch), not a delta."
+  [conn {:keys [kind base parent agent] nm :name}]
+  (let [id  (str (java.util.UUID/randomUUID))
+        now (System/currentTimeMillis)]
+    (jdbc/execute! conn ["INSERT INTO lines
+                            (id,name,kind,head,base,parent,agent,created_at,used_at,status)
+                          VALUES (?,?,?,?,?,?,?,?,?,'open')"
+                         id nm (or kind "thread") base base parent agent now now])
+    id))
+
+^:reads (defn ^:export trunk-line-id!
+  "The trunk line's id, minting the row when a store predates the lines table.
+
+  A store written before lines existed has all its history and no line naming
+  it, so the row is created with its base at the CURRENT journal head — the
+  whole log is behind the trunk immediately, with nothing moved or copied.
+
+  The bang is the mint; reading an existing store's trunk is a plain read."
+  [conn]
+  (or (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = 'main'"]))
+      (create-line! conn
+                    {:name "main" :kind "branch"
+                     :base (one-col (jdbc/execute-one!
+                                     conn ["SELECT id FROM deltas ORDER BY seq DESC LIMIT 1"]))})))
+
+(defn ^:export
+  ^{:breaking-ok
+    (str "the 5-arity is REMOVED on purpose: it could not name the line it "
+         "wrote to, which is precisely how a thread's work would land silently "
+         "on main. All six call sites moved in the SAME coordinated write "
+         "(change_signature), and nothing outside slopp calls the storage layer "
+         "directly — consumers drive the tools, not append!.")}
+  append!
+  "Conditionally append `new-deltas` (+ the full snapshot tail via
+  write-snapshot!) in ONE transaction, iff `line-id`'s head still equals
+  `expected-head` (nil for a line with no writes yet). Returns true on commit;
+  false = the head moved, and the caller refreshes its cache and rebases.
+
+  The CAS is on the LINE, not the journal. It used to read the global journal
+  head — correct exactly while one line owned a file, which is why a branch had
+  to BE a separate file. Once many lines share one journal a global head is not
+  a wrong answer but a dead system: every agent's write fails whenever ANY
+  other agent writes anywhere in it. Two writers on two lines now never
+  contend; two on ONE line still do, which is correct — that is the rebase
+  path, and it is what makes concurrent agents on a shared branch work rather
+  than merely coexist.
+
+  The conditional UPDATE is BOTH the check and the advance in one statement,
+  so no window exists between testing the head and moving it. SQLite (WAL)
+  serializes writers across threads AND processes, which is what makes the
+  shared-storage multi-server split possible.
+
+  `line-id` is REQUIRED and deliberately has no default. A write that does not
+  say which line it is on is exactly how a thread's work would silently land on
+  main; the caller resolves the trunk where a reader can see it."
+  [conn store new-deltas nses line-id expected-head]
   (try
     (jdbc/with-transaction [tx conn]
-      (let [head (:deltas/id (jdbc/execute-one!
-                              tx ["SELECT id FROM deltas ORDER BY seq DESC LIMIT 1"]))]
-        (when (not= head expected-head)
-          (throw (ex-info "journal head moved" {::head-moved true})))
+      ;; an append with nothing new still VERIFIES the head (a caller that
+      ;; raced and lost must hear so), it just leaves it where it is
+      (let [new-head (if (seq new-deltas) (:id (last new-deltas)) expected-head)
+            moved    (:next.jdbc/update-count
+                      (jdbc/execute-one!
+                       tx ["UPDATE lines SET head = ?, used_at = ?
+                            WHERE id = ? AND head IS ?"
+                           new-head (System/currentTimeMillis) line-id expected-head]))]
+        ;; `IS` rather than `=` so a first write (both sides NULL) matches;
+        ;; `=` is never true against NULL and would refuse every new line's
+        ;; first write forever
+        (when-not (pos? (or moved 0))
+          (throw (ex-info "line head moved" {::head-moved true})))
         (doseq [d new-deltas]
           ;; :parent stays in the payload too — the column is a denormalization
           ;; for traversal, so row->delta and every reader below it are
-          ;; untouched. That is what makes this phase behaviour-free.
+          ;; untouched.
           (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, parent, payload)
                               VALUES (?,?,?,?,?)"
                              (:id d) (name (:op d)) (str (:ns d)) (:parent d)
                              (pr-str (dissoc d :id :op :ns))]))
-        (when-let [head (:id (last new-deltas))]
-          (advance-trunk! tx head))
         (write-snapshot! tx store nses)
         true))
     (catch clojure.lang.ExceptionInfo e
