@@ -43,11 +43,11 @@
         conn))))
 
 ^:reads (defn store-sources
-          "{ns-sym source} for every namespace in the store db — the store's own
-  rendering, reproduced without any slopp code. Forms joined by ONE BLANK
-  LINE, a form's `comment` directly above it, one trailing newline. `sep` rows
-  are IGNORED, so a store mid-migration boots exactly what a migrated one
-  does.
+          "{ns-sym source} for every namespace on the store db's TRUNK — the
+  store's own rendering, reproduced without any slopp code. Forms joined by
+  ONE BLANK LINE, a form's `comment` directly above it, one trailing newline.
+  `sep` rows are IGNORED, so a store mid-migration boots exactly what a
+  migrated one does.
 
   This used to CONCATENATE every row in `pos` order, which was byte-exact for
   as long as the rows carried the whitespace themselves. Once the renderer
@@ -57,28 +57,50 @@
   So this is a fourth implementation of one rule, and it cannot call the other
   three — the kernel's whole property is that it loads a store with no slopp
   code available, which is why the module gate refuses it `slopp.store`.
-  `SELECT *` rather than named columns for the same reason it reads no schema
-  version: a store predating the `comment` column must still boot.
+  `SELECT e.*` rather than named columns for the same reason it reads no
+  schema version: a store predating the `comment` column must still boot.
+
+  It reads the trunk and not the caller's line because a booting JVM SERVES —
+  it answers requests, and un-landed work on somebody's open thread has no
+  business in it. There is no option here on purpose: a served process that
+  could be pointed at a private line is a way to ship un-done code.
 
   A schema-less db (brand-new dir) is an EMPTY store — the served program's
-  own open creates the schema."
+  own open creates the schema. A store whose `elements` predates line scoping
+  is a different thing and says so: it is not empty, it is unreadable by this
+  jar, and the tools that would migrate it are the ones failing to start."
           [conn]
           (if (empty? (jdbc/execute! conn ["SELECT name FROM sqlite_master
                                     WHERE type='table' AND name='elements'"]))
             {}
-            (into {}
-                  (map (fn [[ns-sym rows]]
-                         [ns-sym (str (str/join
-                                       "\n\n"
-                                       (map (fn [r]
-                                              (if-let [c (:elements/comment r)]
-                                                (str c "\n" (:elements/source r))
-                                                (:elements/source r)))
-                                            rows))
-                                      "\n")]))
-                  (->> (jdbc/execute! conn ["SELECT * FROM elements ORDER BY ns, pos"])
-                       (filter #(= "form" (:elements/kind %)))
-                       (group-by #(symbol (:elements/ns %)))))))
+            (do
+              (try
+                (jdbc/execute! conn ["SELECT line FROM elements LIMIT 0"])
+                (catch java.sql.SQLException _
+                  (throw (ex-info
+                          (str "this store's `elements` predates line-scoped storage and "
+                               "cannot be booted by this build. Migrate it first: copy "
+                               "`elements` into a table keyed (line, ns, pos) with every "
+                               "row's line set to the id of the `lines` row named 'main', "
+                               "then restart. Migrating AFTER taking a jar that requires "
+                               "the new shape is the one ordering that has no in-band fix.")
+                          {}))))
+              (into {}
+                    (map (fn [[ns-sym rows]]
+                           [ns-sym (str (str/join
+                                         "\n\n"
+                                         (map (fn [r]
+                                                (if-let [c (:elements/comment r)]
+                                                  (str c "\n" (:elements/source r))
+                                                  (:elements/source r)))
+                                              rows))
+                                        "\n")]))
+                    (->> (jdbc/execute! conn ["SELECT e.* FROM elements e
+                                               JOIN lines l ON l.id = e.line
+                                               WHERE l.name = 'main'
+                                               ORDER BY e.ns, e.pos"])
+                         (filter #(= "form" (:elements/kind %)))
+                         (group-by #(symbol (:elements/ns %))))))))
 
 ;; --- dependency order (internal requires only) ---
 (defn- internal-requires
