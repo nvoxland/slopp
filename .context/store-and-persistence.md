@@ -103,6 +103,15 @@
 - `load-store` reconstructs the entire in-memory store (returns nil if empty).
   `api/open! {:dir ...}` loads it AND replays every namespace into a fresh
   image.
+- **The two halves cost two orders of magnitude apart, and it decides designs.**
+  Measured 2026-08-15 on slopp's own store (2678 elements / 4.3 MB, 23,464
+  deltas): `db/load-elements` — the elements→`:namespaces` read, split out so
+  `load-store` and a cache refresh share one producer — is **~410 ms**, while
+  the whole `load-store` is **~4 s**. The difference is EDN-parsing 23k delta
+  payloads; raw SQL reads are 9 ms and ~150 ms. So "just reload the store" is
+  never a cheap fallback, and anything on a per-tool-call path needs a gate.
+  `db/elements-digest` is that gate at ~3 ms — counts and sizes, explicitly
+  not a checksum.
 - **The `ns` column holds ONE namespace, and it will not tell you otherwise**
   (2026-08-08). It is written `(str (:ns d))` and read back `(symbol …)`, and
   every consumer reads it as one namespace — `replay-delta`, `merge-logs`,
@@ -352,3 +361,23 @@ the append is the persist. `db/persist!` remains only for whole-store
 snapshots (branch creation). This is the substrate for multi-process
 servers sharing one store dir (m5b/c): SQLite WAL serializes writers across
 processes, and the same append-CAS protocol arbitrates them.
+
+**`data_version` is a foreign-COMMIT detector, not a foreign-CODE-CHANGE
+detector, and the gap between those is where a stale cache lived** (closed
+2026-08-15). SQLite moves it when any other connection commits, and in ordinary
+operation that is routinely bookkeeping with no bearing on a form: a `git_map`
+pin from a projection, the trace map, the dep-surface cache, a saved remote.
+`persist-trace!` runs inside `sync-with-journal!` itself, so two idle servers
+would have re-read each other's bookkeeping forever if a bump alone triggered a
+reload.
+
+So `refresh-cache!` reads the JOURNAL suffix first — but every branch used to
+be gated on it, which made a change to the materialized `elements` with no
+delta append (a migration, a repair, any external process) invisible
+indefinitely, and worse: the next write re-persisted the cached shape over the
+migrated rows. `restart` cannot help — the stale value is upstream of the
+image. The suffix-empty branch now compares `db/elements-digest` and rebuilds
+`:namespaces` alone when it moved. **An unrecorded digest counts as changed** —
+absence is not agreement, so a session's first foreign bump rebuilds once,
+which is what removes the need to seed the digest at `open!`, `branch!` and
+`branch-switch!` all three.

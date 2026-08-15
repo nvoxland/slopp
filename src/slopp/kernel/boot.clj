@@ -509,6 +509,32 @@
   (let [s @host-loaded]
     (when (:armed? s) (:stale s))))
 
+(defn boot-loads?
+  "Whether the boot JVM loads `ns-sym` from the store at all: JVM-loadable
+  (`jvm-loadable?`) and not a TEST.
+
+  Tests are skipped because this JVM never runs one. The in-image tier runs in
+  the owned image and the `^:external` tier in a fresh JVM built from `build!`'s
+  tree; both load the namespaces they run. Loading them HERE bought nothing and
+  charged somebody else: `store-sources` filters rows by kind and not by name,
+  so every library a store's tests require became a dependency of the process
+  SERVING that store's app. For slopp's own jar that was malli and its closure
+  — 336 KB across 8 jars, MEASURED as the difference between the two dependency
+  closures rather than taken from the filing, which said 1.5 MB — justified by
+  a comment that named deleted namespaces twice, three weeks apart.
+
+  A test is the `-test` SUFFIX, which is the only marker the system has for
+  non-production code (roles move instruments to their own directory instead).
+  A store using some other convention — `myapp.test.core` — is not covered, and
+  that is the honest limit of a name-based rule.
+
+  It is ONE predicate because the load loop and `measure-host!` must agree
+  about the population: a namespace excluded from loading but included in the
+  staleness comparison reads as permanently behind."
+  [platforms ns-sym]
+  (and (jvm-loadable? platforms ns-sym)
+       (not (str/ends-with? (str ns-sym) "-test"))))
+
 ^:unsafe (defn load-store!
   "Load every JVM-LOADABLE namespace of the store at `dir` into the CURRENT JVM,
   dependency order: load-string each rendered source + a *loaded-libs* stamp.
@@ -551,14 +577,14 @@
             platforms (store-platforms conn)
             failed    (volatile! [])]
         (doseq [ns-sym (dependency-order sources)
-                :when  (jvm-loadable? platforms ns-sym)]
+                :when  (boot-loads? platforms ns-sym)]
           (try
             (load-string (get sources ns-sym))
             (stamp-loaded! ns-sym)
             (record-loaded! ns-sym (get sources ns-sym))
             (catch Throwable t
               (vswap! failed conj {:ns ns-sym :why (str (.getMessage t))}))))
-        (measure-host! (into {} (filter #(jvm-loadable? platforms (key %))) sources))
+        (measure-host! (into {} (filter #(boot-loads? platforms (key %))) sources))
         (when (seq @failed)
           (log! "slopp.kernel.boot:" (count @failed)
                 "namespace(s) did NOT load —" (str/join ", " (map :ns @failed))
@@ -752,7 +778,7 @@
                   [dv prev]
                   (let [now       (store-sources conn)
                         platforms (store-platforms conn)
-                        changed (filter #(and (jvm-loadable? platforms %)
+                        changed (filter #(and (boot-loads? platforms %)
                                               (not= (get prev %) (get now %)))
                                         (dependency-order now))
                         failed  (reduce (fn [failed ns-sym]
@@ -769,7 +795,7 @@
                     (when (seq loaded)
                       (log! "live-reloaded: " (str/join " " loaded)))
                     (measure-host!
-                     (into {} (filter #(jvm-loadable? platforms (key %))) now))
+                     (into {} (filter #(boot-loads? platforms (key %))) now))
                     ;; keep the currency record honest: a failed ns stays
                     ;; listed until a later poll reloads it (it also holds
                     ;; the version baseline back, below)

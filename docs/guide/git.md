@@ -42,6 +42,13 @@ git_resolve {path}
   Fast-forward only, never force. A fileless store (no `.git`) publishes its
   projection directly. Pushing onto a branch your working tree has checked out
   is refused -- the ref would move under you.
+
+    A refusal is a value, not a status string. `:divergence` names both tips,
+    the base they share, how far each is past it, and a `:cause` --
+    `:mirror-ahead` (the destination builds on your projection; someone else
+    wrote the ref) reads nothing like `:remint` (both tips stamp the *same*
+    milestone and are different commits, so a projection is not reproducing
+    itself). Git gives both the same status and they have opposite remedies.
 - **`git_pull`** fetches the remote's mirrors down and absorbs remote history
   by a 3-way merge **at form granularity**. The remote wins where your store is
   clean; anything both sides touched becomes a conflict. Your version stays
