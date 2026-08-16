@@ -1232,13 +1232,30 @@ response declare, its handler, and whether it is `:published` (an HTML page opts
 out with `:web/client false`, and that exclusion is a field rather than an
 omission, so "opted out" and "forgot a schema" do not look alike).
 
-!!! note "Params are not validated yet"
+### `:web/request` is what the CALLER SENDS, wherever it travels
 
-    A GET's `:web/request` describes its path and query params — the generated
-    client reads it as the wrapper's argument list — and the boundary judges
-    `:web/request` only on `:post`/`:put`/`:patch`, where it is a body. So
-    `?depth=banana` against a declared `[:depth :int]` still reaches your
-    handler as a string. Validate it yourself for now.
+One schema covers the path segments, the query string and the body. A GET sends
+a query string for the same reason a POST sends a body, and the generated client
+reads the method to decide which carrier each key takes.
+
+Each carrier is decoded by what its own wire can express, and the asymmetry is
+the security posture rather than a detail:
+
+| carrier | `[:qty :int]` given `"7"` | why |
+|---|---|---|
+| query / path | decoded to `7` | a URL segment is always text — there is no other way to carry a number |
+| JSON body | **refused** | JSON carries real numbers, so a string is a client error, and repairing it would publish a contract you do not actually require |
+
+Decoded **in place**: your handler reads `:path-params`, `:query-params` and
+`:body` where it always did and finds them typed. `?depth=banana` against a
+declared `[:depth :int]` is a 400 before your handler runs.
+
+!!! note "Typed params are a property of the capability being ON"
+
+    The decoding happens when the boundary runs, so a handler receives typed
+    params with `rest` enabled and text without it. Writing handlers against the
+    typed shape commits you to the capability — turning it off then changes
+    behaviour, not just checking.
 
 ## Web applications (D-web)
 

@@ -113,10 +113,33 @@ gives the schemas exactly.
 wrapper over one would be nonsense. It is a field rather than an omission so
 that "excluded on purpose" and "forgot to declare a schema" do not look alike.
 
-!!! warning "Params are not validated yet"
+## `:web/request` is what the caller sends
 
-    A GET's `:web/request` describes its path and query params, and the
-    generated client reads it as the wrapper's argument list — but the boundary
-    judges `:web/request` only on `:post`/`:put`/`:patch`, where it is a body.
-    So `?depth=banana` against a declared `[:depth :int]` still reaches your
-    handler as the string. Validate it yourself until this closes.
+One schema covers every carrier. A GET sends a query string for the same reason
+a POST sends a body, and the generated client reads the method to decide which
+one each key takes.
+
+Each is decoded by what its own wire can express:
+
+| carrier | `[:qty :int]` given `"7"` | why |
+|---|---|---|
+| path segment | decoded to `7` | a URL has no way to carry a number |
+| query parameter | decoded to `7` | same |
+| JSON body | **refused** | JSON carries real numbers, so a string is a client error — repairing it would publish a contract you do not require |
+
+Decoded **in place**, so your handler reads `:path-params`, `:query-params` and
+`:body` where it always did and finds them typed:
+
+```clojure
+;; GET /api/form/f1?depth=2  against  [:map [:id :string] [:depth {:optional true} :int]]
+(:depth (:query-params req))   ;; => 2, an int. You parse nothing.
+```
+
+`?depth=banana` is a 400 before your handler runs.
+
+!!! note "Typed params are a property of the capability being on"
+
+    The decoding happens when the boundary runs, so a handler receives typed
+    params with `rest` enabled and text without it. Writing handlers against the
+    typed shape commits you to the capability — turning it off is then a
+    behaviour change, not only a loss of checking.
