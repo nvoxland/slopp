@@ -214,23 +214,44 @@
             "and the explain does NOT reach the client — same rule the
              dispatcher already follows for an unexpected exception")))
 
-    (testing "a GET's :web/request describes its PARAMS and is not judged as a body"
-      ;; slopp's own API taught this by 400ing on four endpoints the first time
-      ;; the boundary was pointed at it. `/api/ns/:ns` declares
-      ;; [:map [:ns :string]] for its PATH SEGMENT — the generated client reads
-      ;; it as the wrapper's argument list — and a GET carries no body, so
-      ;; judging that schema against nil refuses every correct request.
+    (testing "a GET's :web/request describes its PARAMS, and they are judged too"
+      ;; slopp's own API taught the first half by 400ing on four endpoints:
+      ;; `/api/ns/:ns` declares [:map [:ns :string]] for its PATH SEGMENT, so
+      ;; judging that schema against a nil body refuses every correct request.
       ;;
-      ;; Params are untrusted input and are NOT covered; that gap is filed
-      ;; rather than closed, because the server and the generated client must
-      ;; not answer differently about what :web/request means.
-      (let [g (assoc row :method :get :web/request [:map [:ns :string]]
-                     :handler (fn [_] {:status 200 :body {:got {}}}))
-            r (dispatch/handle! (assoc rest-ctx :web/routes [g])
-                                {:request-method :get :uri "/api/x"})]
-        (is (= 200 (:status r))
-            (str "a GET declaring :web/request must not be refused for having "
-                 "no body: " (pr-str r)))))
+      ;; The stopgap was to judge only body methods, which left path segments
+      ;; and query strings — untrusted input, in every link — checked by
+      ;; nobody. `:web/request` means what the caller SENDS, so the params are
+      ;; the contract and are judged with everything else.
+      (reset! ran 0)
+      ;; a REAL path segment: `router/match` derives :path-params from the
+      ;; pattern and overwrites anything a fixture assoc'd onto the row, so
+      ;; handing the dispatcher params it did not extract itself would be
+      ;; testing a shape the router never produces.
+      (let [g (assoc row :method :get :path "/api/:ns"
+                     :web/request [:map [:ns :string] [:depth {:optional true} :int]]
+                     :web/response [:map [:got :map]]
+                     :handler (fn [req] (swap! ran inc)
+                                {:status 200 :body {:got {:d (:depth (:query-params req))}}}))
+            ctx' (assoc rest-ctx :web/routes [g])]
+        (testing "a declared param that arrived is DECODED for the handler"
+          ;; the payoff: a query string can only carry text, so [:depth :int]
+          ;; is honoured by decoding rather than repaired — and the handler
+          ;; parses nothing
+          (let [r (dispatch/handle! ctx' {:request-method :get :uri "/api/app.core"
+                                          :query-string "depth=2"})]
+            (is (= 200 (:status r)) (pr-str r))
+            (is (= 2 (:d (:got (:body r))))
+                "a query parameter declared :int reaches the handler an int")))
+
+        (testing "and one that violates its type is refused before the handler"
+          (reset! ran 0)
+          (let [r (dispatch/handle! ctx' {:request-method :get :uri "/api/app.core"
+                                          :query-string "depth=banana"})]
+            (is (= 400 (:status r)) (pr-str r))
+            (is (zero? @ran)
+                "?depth=banana against a declared :int used to reach the handler
+                 as a string — that is the gap this closes")))))
 
     (testing "an ERROR response is not judged against the success contract"
       ;; :web/response describes the 200 body. A 404's {:error …} does not

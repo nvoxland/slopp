@@ -53,30 +53,28 @@
     :leaves     "a declared request/response contract"
     :to         "JSON, and a browser that never sees Clojure data"
     :markers    #{:web/request :web/response}
-    :checked-by "the boundary honours it at runtime once `rest.enabled`:
-                 `slopp.rest.contract/decode-request` decodes an incoming body
-                 to the declared types and REFUSES what does not fit with a 400,
-                 before the declared reads and before the handler; and
-                 `check-response` judges the response on what the client
-                 actually RECEIVES — a real serialize/parse, because a keyword
-                 that arrives as a string satisfies a :string contract the
-                 in-image value fails, and a set that arrives as an array fails
-                 one the in-image value passes. `slopp.rest/call` drives an
-                 endpoint through the same path in process, so a test sees the
-                 consumer's view without a socket"
-    :blind      "PARAMS. A path segment and a query string are untrusted input
-                 too, and `:web/request` on a GET describes exactly those — the
-                 generated client reads it as the wrapper's argument list — but
-                 the boundary judges it only on :post/:put/:patch, where it is
-                 a body. So `?depth=banana` against a declared [:depth :int]
-                 still reaches the handler as a string. Filed:
-                 params-are-untrusted-input-and-nothing-validates-them.
+    :checked-by "the boundary honours it at runtime once `rest.enabled`.
+                 `slopp.rest.contract/decode-request` judges EVERYTHING the
+                 caller sent — path segments, query string and body against one
+                 schema, each decoded by what its own wire can express — and
+                 refuses with a 400 before the declared reads and before the
+                 handler. `check-response` judges the answer on what the client
+                 actually RECEIVES, via a real serialize/parse, because a
+                 keyword that arrives as a string satisfies a :string contract
+                 the in-image value fails and a set that arrives as an array
+                 fails one it passes. `slopp.rest/call` drives the same path in
+                 process, so a test sees the consumer's view without a socket"
+    :blind      "it is CONDITIONAL on the capability. A store with `rest.enabled`
+                 false declares contracts that nothing honours — which is the
+                 state this whole framework was in until 2026-08-15, when this
+                 row claimed the dispatcher validated and it never had.
 
-                 And all of it is conditional on the capability: a store with
-                 `rest.enabled` false declares contracts that nothing honours,
-                 which is the state this whole framework was in until
-                 2026-08-15 — the row claimed the dispatcher validated and it
-                 never had."}
+                 A consequence worth knowing rather than a gap: because the
+                 decoding happens only when the boundary runs, a handler
+                 receives TYPED params with rest on and text with it off. An
+                 app that writes handlers against the typed shape has committed
+                 to the capability, and turning it off is then a behaviour
+                 change rather than only a loss of checking."}
 
    {:kind       :generated/client
     :leaves     "an endpoint's contract"

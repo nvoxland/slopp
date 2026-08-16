@@ -67,42 +67,31 @@
           (apply (get performers kind) perform-ctx args))
         nil)))
 
-(defn- decoded-body
-  "The request body as the handler should receive it — `{:value v}`, or
-  `{:error <teaching string>}` when it violates the endpoint's declared
-  `:web/request`.
+(defn- decoded-input
+  "Everything the caller SENT, as the handler should receive it —
+  `{:value {:path-params … :query-params … :body …}}` with each carrier decoded
+  to the declared types, or `{:error <teaching string>}` when the whole of it
+  violates the endpoint's `:web/request`.
 
-  THREE conditions, and each is load-bearing in a different direction.
+  TWO conditions, and both are the capability model: the endpoint must have
+  declared a contract, and the CONTEXT must carry a validator for it. An app
+  serving HTML declares neither, supplies neither, and takes exactly the path it
+  always did. The validator arrives as a FUNCTION rather than being called by
+  name, which is what keeps malli out of this framework — `slopp.rest` requires
+  it and `slopp.web.*` does not, so an app is never made to carry a validation
+  library because a capability it did not enable needs one.
 
-  The endpoint must have declared a contract, and the CONTEXT must carry a
-  validator for it. An app serving HTML declares neither, supplies neither, and
-  takes exactly the path it always did. The validator arrives as a FUNCTION
-  rather than being called by name, which is what keeps malli out of this
-  framework — `slopp.rest` requires it and `slopp.web.*` does not, so an app is
-  never made to carry a validation library because a capability it did not
-  enable needs one.
-
-  **And the method must be one that HAS a body**, which slopp's own API is what
-  taught. `:web/request` is documented as required on `:post`/`:put`/`:patch` —
-  but a GET may declare one too, and when it does it describes the PATH AND
-  QUERY PARAMS rather than a body: `/api/ns/:ns` declares `[:map [:ns :string]]`
-  for its path segment, and the generated client reads it as the wrapper's
-  argument list. Validating that against a nil body 400s every correct request,
-  which is what the first version of this did to four of slopp's own endpoints
-  the moment it was pointed at them.
-
-  So this honours the documented meaning and no more. **Params are untrusted
-  input too and are NOT covered here** — a real gap, filed rather than closed,
-  because covering it means deciding what `:web/request` means for the
-  generated client as well, and the server and the client must not answer that
-  differently."
-  [ctx row req]
-  (if-let [f (and row
-                  (contains? #{:post :put :patch} (:method row))
-                  (:web/request row)
-                  (:rest/decode-request ctx))]
-    (f (:web/request row) (:body req))
-    {:value (:body req)}))
+  **Every carrier, not just the body.** `:web/request` describes what the caller
+  SENDS, and the generated client reads the method to decide where each key
+  travels — so a path segment and a query parameter are as much the contract as
+  a body is, and just as untrusted. An earlier cut judged the body alone, which
+  left `?depth=banana` against a declared `[:depth :int]` reaching the handler
+  as a string."
+  [ctx row req path-params query-params]
+  (let [sent {:path-params path-params :query-params query-params :body (:body req)}]
+    (if-let [f (and row (:web/request row) (:rest/decode-request ctx))]
+      (f (:web/request row) sent)
+      {:value sent})))
 
 (defn- response-violation
   "A teaching string when `resp` breaks the endpoint's own `:web/response`, else
@@ -129,7 +118,8 @@
   Order is the guarantee: IDENTITY (resolved through :web/auth-config when
   the request carries none — a pre-resolved :web/identity is respected) →
   ROUTE (404) → POLICY (401 unauthenticated / 403 unauthorized — the
-  handler is unreachable un-checked) → declared :web/reads fetched via the
+  handler is unreachable un-checked) → the declared CONTRACT (400, and only
+  when the context carries a validator) → declared :web/reads fetched via the
   app's read performers → the handler, with :path-params, :query-params
   (parsed from :query-string once, here, so no app writes its own
   splitter — and a declared read's path addresses it the same way, so
@@ -151,9 +141,16 @@
                      (auth/resolve-identity (:web/auth-config ctx) req)))
         row (router/match (:web/routes ctx)
                           (:request-method req) (:uri req))
-        ;; decided ONCE, before the cond, so the refusal branch and the
-        ;; handler branch cannot disagree about what the body is
-        body (decoded-body ctx row req)]
+        ;; the params are derived HERE rather than inside the handler branch,
+        ;; because they are part of the CONTRACT and so must exist before it is
+        ;; judged. :query-string is parsed once, so no app writes its own
+        ;; splitter and a declared read addresses a query param exactly as it
+        ;; addresses a path param.
+        pp   (:path-params row)
+        qp   (router/query-params (:query-string req))
+        ;; decided ONCE, before the cond, so the refusal branch and the handler
+        ;; branch cannot disagree about what the caller sent
+        sent (decoded-input ctx row req pp qp)]
     (cond
       (nil? row)
       {:status 404 :body {:error "no route"}}
@@ -171,21 +168,18 @@
       ;; The explain is the CLIENT's own data described back to them, so it
       ;; travels — unlike a response violation, which is the server's fault and
       ;; says nothing.
-      (:error body)
-      {:status 400 :body {:error (:error body)}}
+      (:error sent)
+      {:status 400 :body {:error (:error sent)}}
 
       :else
-      (let [req' (assoc req :path-params (:path-params row)
-                        ;; parsed ONCE here, so no app writes its own
-                        ;; splitter over the :query-string the adapters carry
-                        :query-params (router/query-params (:query-string req))
+      (let [;; DECODED IN PLACE: a handler reads :path-params, :query-params and
+            ;; :body where it always did and finds them typed — a path segment
+            ;; declared :int arrives an int. With no contract and no validator
+            ;; these are exactly what they always were.
+            req' (assoc req :path-params (:path-params (:value sent))
+                        :query-params (:query-params (:value sent))
                         :web/deps (:web/perform-ctx ctx)
-                        ;; the DECODED body: what the wire could not carry —
-                        ;; a keyword, a date, a uuid — arrives as the author
-                        ;; declared it, so the handler parses nothing. With no
-                        ;; contract and no validator this is the body it
-                        ;; always got.
-                        :body (:value body))
+                        :body (:body (:value sent)))
             fetch (fn [[alias [kind path]]]
                     (if-let [f (get (:web/read-performers ctx) kind)]
                       [alias (f (:web/perform-ctx ctx) (get-in req' path))]

@@ -25,40 +25,63 @@
             [cheshire.core :as json]))
 
 (defn ^:export decode-request
-  "Decode `value` to the types `schema` declares, then judge it —
-  `{:value v}` or `{:error <teaching string>}`.
+  "Decode everything the caller SENT to the types `schema` declares, then judge
+  the whole of it — `{:value {:path-params … :query-params … :body …}}` with
+  each carrier decoded in place, or `{:error <teaching string>}`.
 
-  **Decoding is not a nicety, it is the difference between a contract that can
-  be honoured and one that always fails.** A request arrives as JSON and path
-  and query params arrive as text, so a contract saying `[:map [:id :int]]`
-  describes a value the wire cannot carry: `\"7\"` is what shows up. A boundary
-  that only VALIDATED would refuse every correct request against every typed
-  contract, which is why nothing here validated before this existed.
+  **`:web/request` describes what the caller sends, not where it travels.** The
+  codebase said so before a boundary existed to act on it — `api.contracts/form-request`:
+  *\"a GET sends a query string for the same reason a POST sends a body\"* — and
+  the generated client reads the METHOD to decide which carrier each key takes.
+  One schema, three possible carriers, judged as one map.
 
-  So the schema is read in both directions: `malli.transform`'s
-  json-transformer decodes what the wire can express into what the author
-  declared, and only then is the result judged. The handler receives typed
-  data having written no parsing — that is the whole of what this capability
-  gives an author, and it is also why the parsing cannot be re-implemented per
-  endpoint and get it slightly different each time.
+  An earlier cut judged the BODY alone and scoped itself to `:post`/`:put`/`:patch`,
+  because a params schema tested against a nil body 400s every correct GET. That
+  was the right stopgap and the wrong contract: it left path segments and query
+  strings — untrusted input, in every link and every crawler's history —
+  checked by nobody.
 
-  **A refusal is a VALUE, never a throw.** The caller is a dispatcher holding
-  an open request: it needs something to put in a 400 body, and an exception
-  there becomes a 500 about the server for a fault that is the client's.
+  **Each carrier is decoded by what its WIRE can express**, which is why this
+  cannot be one transformer:
 
-  **A nil schema passes the value through UNTOUCHED.** A `:get` declares no
-  `:web/request` and has no body; that is an absence, not a violation, and
-  decoding against a schema nobody wrote would be inventing one. Same
-  distinction `:cli/args [:catn]` draws on the other side — \"takes nothing\"
-  and \"never said\" are different statements."
-  [schema value]
+  - path and query params are ALWAYS text, so `[:id :int]` against `\"7\"` is
+    the contract being honoured, not repaired — a query string has no other way
+    to carry a number;
+  - a JSON body carries real numbers and booleans, so `\"7\"` there is a client
+    error, and coercing it would publish a contract the server does not require.
+
+  Decoded IN PLACE rather than into a new key: a handler goes on reading
+  `:path-params` and `:body` where it always did and finds them typed. A second
+  home for the same values would be a second thing to teach and a second thing
+  to disagree.
+
+  The merge is what gets validated, so a key the contract requires and no
+  carrier sent is refused once, naming the key rather than the carrier — the
+  caller does not know which of the three we expected it in either.
+
+  A nil schema passes every carrier through untouched: absence is not a
+  violation, and decoding against a schema nobody wrote would be inventing one.
+
+  **A refusal is a VALUE, never a throw.** The caller is a dispatcher holding an
+  open request: it needs something to put in a 400 body, and an exception there
+  becomes a 500 about the server for a fault that is the client's."
+  [schema {:keys [path-params query-params body]}]
   (if (nil? schema)
-    {:value value}
-    (let [decoded (m/decode schema value mt/json-transformer)]
-      (if (m/validate schema decoded)
-        {:value decoded}
+    {:value {:path-params path-params :query-params query-params :body body}}
+    (let [text (fn [m] (when m (m/decode schema m mt/string-transformer)))
+          json (fn [m] (when m (m/decode schema m mt/json-transformer)))
+          p    (text path-params)
+          q    (text query-params)
+          b    (json body)
+          ;; path LAST: it was extracted from the URL the router matched, so it
+          ;; is the carrier we are surest about. Overlap should not arise — a
+          ;; key travels one way for a given endpoint — but a rule beats a
+          ;; coincidence.
+          merged (merge q b p)]
+      (if (m/validate schema merged)
+        {:value {:path-params p :query-params q :body b}}
         {:error (str "request does not match the declared contract: "
-                     (pr-str (me/humanize (m/explain schema decoded))))}))))
+                     (pr-str (me/humanize (m/explain schema merged))))}))))
 
 (defn ^:export check-response
   "nil when `value` HONOURS `schema` for the consumer, else a teaching string.
