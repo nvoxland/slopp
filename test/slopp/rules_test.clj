@@ -1090,6 +1090,22 @@
       (is (nil? (capabilities/rule-owner :key-typos)))
       (is (nil? (capabilities/rule-owner :schema-drift))))
 
+    (testing "and the report says what these two lists do NOT cover"
+      ;; slopp-ui counted http's rules against this report while http was
+      ;; ENABLED: 8 done-grain rules all accounted for, and 9 form-grain gates
+      ;; absent from both lists. They read that absence as evidence that a
+      ;; disabled capability's rules vanish — a one-armed comparison whose
+      ;; control was four lines up in the same output.
+      ;;
+      ;; The report was not wrong; it was silent about its own SCOPE. A reader
+      ;; counting rules has no way to learn these lists are done-grain only,
+      ;; because nothing in them says so.
+      (let [n (str (:note (rules/sweep-plan bare)))]
+        (is (re-find #"(?i)form" n) n)
+        (is (re-find #"query_capabilities" n)
+            (str "and it names where the other grain IS listed, or the reader is"
+                 " told what this is not without being told where to look: " n))))
+
     (testing "and every advisory is still in exactly one of the two lists"
       ;; the invariant the whole report rests on
       (let [plan (rules/sweep-plan bare)

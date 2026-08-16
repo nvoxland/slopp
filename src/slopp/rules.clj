@@ -1219,7 +1219,17 @@
                                  (not (off-cap e))))
         swept       (filterv runs? done-advisories)
         kept        (set (map :key swept))]
-    {:swept     (mapv :key swept)
+    {;; what these two lists do NOT cover, said in band. A reader counted
+     ;; http's rules against this report while http was ENABLED and found 9
+     ;; form-grain gates absent from both lists — then read that absence as
+     ;; evidence about a DISABLED capability, which it is not. The report was
+     ;; silent about its own scope, and a list that does not say what it
+     ;; excludes invites exactly that inference.
+     :note      (str "done-grain advisories only. FORM-grain write gates run at"
+                     " the write and are never swept, so they appear in neither"
+                     " list whether or not their capability is enabled —"
+                     " query_capabilities lists them per capability under :arms")
+     :swept     (mapv :key swept)
      :not-swept (into []
                       (comp (remove #(kept (:key %)))
                             (map (fn [{:keys [key sweep] :as e}]
