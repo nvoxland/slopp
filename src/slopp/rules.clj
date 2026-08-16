@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rest]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -1098,12 +1098,12 @@
                         " rules.web-test/a-page-reaching-cljs-cannot-be-opened-"
                         "and-done-says-so, which controls on both setup steps")
     :teach "a ^:web/page entry reaches a :cljs namespace, so no JVM can open this app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. The write gate sees only the ENTRY's namespace; this is the reach, and it can break when a namespace the entry never mentions is declared :cljs. Move the view/derive code it reaches to :jvm or :cljc and pass the browser-shaped parts in"}
-   {:key :rest-stale-client :severity :advisory :applies-to :production :check #'rest/rest-stale-client-check
+   {:key :rest-stale-client :severity :advisory :applies-to :production :check #'rules.rest/rest-stale-client-check
     :sweep true
     :selftest-note (str "needs a recorded client/generated-sig config (a source-only"
                         " fixture cannot carry one) — covered by rules-test/"
                         "rest-stale-client-advisory-fires-on-endpoint-drift")}
-   {:key :rest-inline-schema-dup :severity :advisory :applies-to :production :check #'rest/rest-inline-schema-dup-check
+   {:key :rest-inline-schema-dup :severity :advisory :applies-to :production :check #'rules.rest/rest-inline-schema-dup-check
     :sweep true
     :fires-on (str "(ns ds.api)\n"
                    "(defn ^{:web/method :post :web/path \"/a\" :web/request [:map [:x :int]]"
@@ -1117,7 +1117,7 @@
    ;; this ABOVE the prose rule they had asked for the day before, which is the
    ;; kind of correction worth taking at face value.
    {:key :rest-unconstrained-contract :severity :advisory :applies-to :production
-    :check #'rest/rest-unconstrained-contract-check
+    :check #'rules.rest/rest-unconstrained-contract-check
     :sweep true
     :fires-on (str "(ns dv.api)\n"
                    "(defn ^{:web/method :get :web/path \"/v\" :web/auth :public"
@@ -1128,7 +1128,7 @@
    ;; The sweep is the whole point — these endpoints are STABLE, so no episode
    ;; changes them and no episode-scoped pass can ever reach them.
    {:key :rest-undocumented-contract :severity :advisory :applies-to :production
-    :check #'rest/rest-undocumented-contract-check
+    :check #'rules.rest/rest-undocumented-contract-check
     :sweep true
     :fires-on (str "(ns du.api)\n"
                    "(defn ^{:web/method :get :web/path \"/t\" :web/auth :public"

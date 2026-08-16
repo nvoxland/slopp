@@ -1345,3 +1345,114 @@
                                   :prompt "a command-line shell needs nothing beneath it")]
           (is (nil? (:implied r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-built-rest-app-ENFORCES-its-contract-outside-slopp-entirely
+  ;; The third of these, and each one exists because SHAPE assertions cannot
+  ;; make the claim: the web one because vendored source failed inside itself on
+  ;; a missing garden, the cli one because a generated entry can be present and
+  ;; do nothing. This one because a boundary that is not reachable in a
+  ;; consumer's tree is a boundary that protects slopp and nobody else.
+  ;;
+  ;; What is NOT re-proved here: the socket. That is the adapter's job and
+  ;; `a-built-web-app-RUNS-outside-slopp-entirely` covers it. The claim this
+  ;; makes is the one only rest can make — the vendored family loads, malli
+  ;; resolves from the generated deps.edn, and a body that breaks its contract
+  ;; is REFUSED by code running in a tree that has never heard of slopp.
+  (let [src-of  (fn [p] (some-> (io/resource p) slurp))
+        subtree (fn [top dir-name]
+                  (let [f   (io/file (.toURI (io/resource top)))
+                        dir (io/file (.getParentFile f) dir-name)
+                        n   (inc (count (.getPath dir)))]
+                    (into {top (slurp f)}
+                          (for [x (file-seq dir)
+                                :when (and (.isFile x) (.endsWith (.getName x) ".clj"))]
+                            [(str (subs top 0 (- (count top) 4)) "/" (subs (.getPath x) n))
+                             (slurp x)]))))
+        http-fs (subtree "slopp/web.clj" "web")
+        rest-fs (subtree "slopp/rest.clj" "rest")
+        common  {"slopp/lang.cljc"  (src-of "slopp/lang.cljc")
+                 "slopp/cache.clj"  (src-of "slopp/cache.clj")}
+        files   {"_" common "http" http-fs "rest" rest-fs}
+        deps    '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
+                  "rest" {metosin/malli {:mvn/version "0.20.1"}}
+                  "http" {cheshire/cheshire {:mvn/version "5.13.0"}
+                          hiccup/hiccup     {:mvn/version "2.0.0"}
+                          garden/garden     {:mvn/version "1.3.10"}
+                          http-kit/http-kit {:mvn/version "2.8.0"}}}]
+    ;; guard the guard: an empty family vendors nothing and every assertion
+    ;; below would pass or fail for the wrong reason
+    (is (contains? rest-fs "slopp/rest/contract.clj") (pr-str (keys rest-fs)))
+    (is (contains? http-fs "slopp/web/dispatch.clj") (pr-str (keys http-fs)))
+    (is (every? some? (vals common)))
+
+    (with-redefs [boot/framework-files (constantly files)
+                  boot/framework-deps  (constantly deps)]
+      (let [sess (external/open!)
+            dir  (str (Files/createTempDirectory "slopp-rest-runs"
+                                                 (make-array FileAttribute 0)))
+            ;; the probe an author would write: assemble the app's own context,
+            ;; attach the boundary, and call an endpoint with a bad body
+            probe (str "(require 'slopp.web 'slopp.rest 'shop.api)\n"
+                       "(let [ctx (slopp.rest/validating\n"
+                       "            (slopp.web/context {:web/namespaces '[shop.api]}))\n"
+                       "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
+                       "                                :body {:sku 42}})]\n"
+                       "  (println :STATUS (:status r)))")]
+        (try
+          ;; into the store VALUE: this session's image booted on an empty store
+          ;; and vendored nothing, so a hot-loaded require of slopp.rest would
+          ;; fail. build! reads the store, which is what is under test.
+          (swap! sess update :store store/ingest 'shop.api
+                 (str "(ns shop.api)\n\n"
+                      "(defn ^{:web/method :post :web/path \"/api/orders\"\n"
+                      "        :web/auth :public\n"
+                      "        :web/request [:map [:sku :string]]\n"
+                      "        :web/response [:map [:id :int]]}\n"
+                      "  create! \"Place an order.\" [req] {:status 200 :body {:id 1}})\n"))
+          ;; through the real write, not a hand-built map: a config entry carries a
+          ;; :format its serializer needs, and assoc-in'ing the values alone
+          ;; produces a store that cannot be materialized. The code above has to
+          ;; bypass the image (it requires a framework this image cannot load);
+          ;; a config write has no such problem.
+          (ops/config-file! sess "capabilities" :key "rest.enabled" :value "true"
+                            :prompt "publish a typed API")
+          (is (nil? (:error (external/build! sess dir))))
+
+          (testing "the rest family is IN the tree and its dep is DECLARED"
+            (is (.exists (io/file dir "src" "slopp" "rest" "contract.clj")))
+            (let [d (edn/read-string (slurp (io/file dir "deps.edn")))]
+              (is (contains? (:deps d) 'metosin/malli)
+                  (str "slopp.rest.contract requires malli: " (pr-str (:deps d))))))
+
+          (testing "and the boundary REFUSES a bad body in a JVM that never heard of slopp"
+            (let [r (clojure.java.shell/sh "clojure" "-M" "-e" probe :dir dir)]
+              (is (zero? (:exit r))
+                  (str "the vendored rest framework must load.\nout: " (:out r)
+                       "\nerr: " (:err r)))
+              (is (str/includes? (:out r) ":STATUS 400")
+                  (str "a body declaring :sku 42 against [:sku :string] must be"
+                       " refused THERE, not only here.\nout: " (:out r)
+                       "\nerr: " (:err r)))))
+
+          (testing "negative control: without the framework's deps the same tree fails"
+            ;; a green run above proves nothing unless the red one is reachable
+            (let [dir2 (str (Files/createTempDirectory
+                             "slopp-rest-nodeps" (make-array FileAttribute 0)))]
+              (try
+                (with-redefs [boot/framework-deps (constantly nil)]
+                  (external/build! sess dir2))
+                (let [r (clojure.java.shell/sh
+                         "clojure" "-M" "-e" "(require 'slopp.rest)" :dir dir2)]
+                  (is (not (zero? (:exit r)))
+                      "vendored rest source with no deps declared must NOT load")
+                  (is (str/includes? (:err r) "malli")
+                      (str "and it must fail on the framework's own require: "
+                           (:err r))))
+                (finally
+                  (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                            (.delete f))]
+                    (rm! (io/file dir2)))))))
+          (finally
+            (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+              (rm! (io/file dir)))
+            (ops/close! sess)))))))

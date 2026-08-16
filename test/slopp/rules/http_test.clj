@@ -14,7 +14,7 @@
   discovers."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.web-test :as slopp.web-test] [clojure.string :as str] [slopp.rules.rest :as rest]))
+            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.web-test :as slopp.web-test] [clojure.string :as str] [slopp.rules.rest :as rules.rest]))
 
 (deftest routes-derive-from-stored-nodes
   (let [src (str "(ns shop.api)\n\n"
@@ -862,7 +862,7 @@
         (is (= [] (vec (rules.http/undocumented-contract-fields ok))))))
     (testing "the finding teaches the fix as a literal form, and says which
               spelling it wants"
-      (let [f (first (rest/rest-undocumented-contract-check nil s nil))]
+      (let [f (first (rules.rest/rest-undocumented-contract-check nil s nil))]
         (is (re-find #":doc" (:teach f)) (pr-str f))
         (is (re-find #"\[:rows \{:doc" (:teach f)) (pr-str f))))))
 
@@ -927,7 +927,7 @@
 
     (testing "the finding teaches what a bare :map costs, in the words that
               matter: it is not a type, and the validator believes it"
-      (let [f (first (rest/rest-unconstrained-contract-check nil s nil))]
+      (let [f (first (rules.rest/rest-unconstrained-contract-check nil s nil))]
         (is (re-find #"validat" (:teach f)) (pr-str f))))))
 
 (deftest an-endpoint-that-cannot-constrain-can-say-so-and-the-marker-polices-itself
@@ -956,14 +956,14 @@
         stale (mk " :web/unconstrained-ok \"no longer true\"" "[:map [:id :string]]")]
 
     (testing "without the marker it still fires — the finding is TRUE"
-      (is (seq (rest/rest-unconstrained-contract-check nil plain nil))))
+      (is (seq (rules.rest/rest-unconstrained-contract-check nil plain nil))))
 
     (testing "the marker discharges it"
-      (is (empty? (rest/rest-unconstrained-contract-check nil proxy nil))))
+      (is (empty? (rules.rest/rest-unconstrained-contract-check nil proxy nil))))
 
     (testing "and it polices itself — a marker on a schema that DOES constrain
               is reported, so this cannot quietly become a mute button"
-      (let [f (rest/rest-unconstrained-contract-check nil stale nil)]
+      (let [f (rules.rest/rest-unconstrained-contract-check nil stale nil)]
         (is (= 1 (count f)) (pr-str f))
         (is (:stale-marker (first f)) (pr-str f))
         (is (re-find #"unconstrained-ok" (str (:teach (first f)))) (pr-str f))))))

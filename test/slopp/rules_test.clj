@@ -17,7 +17,7 @@
   Mostly `^:external`: a done-advisory's input is an episode, which needs a
   real session with a real baseline and real verification deltas behind it."
   (:require [clojure.test :refer [deftest testing is]]
-            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rest]))
+            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rules.rest]))
 
 (deftest done-advisory-registry-and-severity
   (testing "the registry carries every done-time advisory with a key, severity, and check"
@@ -445,14 +445,14 @@
     (testing "a recorded sig that no longer matches the current endpoints fires the advisory"
       (let [drifted (first (store/record-config-put (mk "st.c/b") "client" :manifest
                                                     "generated-sig" old-sig))]
-        (is (seq (rest/rest-stale-client-check nil drifted nil)))))
+        (is (seq (rules.rest/rest-stale-client-check nil drifted nil)))))
     (testing "a matching sig is quiet"
       (let [fresh-store (mk "st.c/b")
             fresh (first (store/record-config-put fresh-store "client" :manifest
                                                   "generated-sig" (edit.http/client-signature fresh-store)))]
-        (is (empty? (rest/rest-stale-client-check nil fresh nil)))))
+        (is (empty? (rules.rest/rest-stale-client-check nil fresh nil)))))
     (testing "never generated (no recorded sig) → never nags"
-      (is (empty? (rest/rest-stale-client-check nil (mk "st.c/a") nil))))))
+      (is (empty? (rules.rest/rest-stale-client-check nil (mk "st.c/a") nil))))))
 
 (deftest rest-inline-schema-dup-advisory-nudges-extraction
   ;; the DRY paved-road nudge (D-web-contracts part 2): 2+ endpoints declaring
@@ -465,7 +465,7 @@
                                     " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
                                     "(defn ^{:web/method :post :web/path \"/b\""
                                     " :web/request [:map [:x :int]] :web/response :map} b [r] r)\n")))
-          findings (rest/rest-inline-schema-dup-check nil st nil)]
+          findings (rules.rest/rest-inline-schema-dup-check nil st nil)]
       (is (seq findings))
       (is (some #(re-find #"named .cljc" (:teach %)) findings))))
   (testing "distinct inline schemas do not fire; a shared bare keyword is too trivial to nag"
@@ -476,7 +476,7 @@
                                     " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
                                     "(defn ^{:web/method :post :web/path \"/b\""
                                     " :web/request [:map [:y :string]] :web/response :map} b [r] r)\n")))]
-      (is (empty? (rest/rest-inline-schema-dup-check nil st nil))))))
+      (is (empty? (rules.rest/rest-inline-schema-dup-check nil st nil))))))
 
 (deftest catalog-severity-is-derived-not-restated
   (testing "no catalog row carries its own :severity — the registries own that fact"

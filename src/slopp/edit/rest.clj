@@ -21,7 +21,7 @@
   contract this gate insists exists — declared and honoured being different
   claims is the whole reason both halves are needed."
   (:require [clojure.string :as str]
-            [slopp.edit.http :as http]
+            [slopp.edit.http :as edit.http]
             [slopp.store :as store]))
 
 (defn ^:export ^{:rule/applies-to :production} rest-endpoint-schema
@@ -36,7 +36,7 @@
   on `:web/auth` before this. Returns a teaching string, or nil when clean."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (http/web-name-meta e)]
+    (let [m (edit.http/web-name-meta e)]
       (when (:web/path m)
         (let [body?   (contains? #{:post :put :patch} (:web/method m))
               missing (cond-> []

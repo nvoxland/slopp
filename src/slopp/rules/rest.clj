@@ -19,7 +19,7 @@
   and this reads what the store DECLARES without running anything."
   (:require [slopp.edit.http :as edit.http]
             [slopp.project.capabilities :as capabilities]
-            [slopp.cli.spec :as spec] [clojure.string :as str] [slopp.rules.http :as http]))
+            [slopp.cli.spec :as spec] [clojure.string :as str] [slopp.rules.http :as rules.http]))
 
 (defn ^:export contracts-report
   "The `rest` section of `query_surface`: one row per endpoint that declares a
@@ -111,8 +111,7 @@
                    " the server and the generated client validate against ONE"
                    " definition and a change lands once.")})))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
-  rest-undocumented-contract-check
+(defn rest-undocumented-contract-check
   "Advisory: a published endpoint's request/response schema has fields that
    say nothing about what they ARE. A type is a shape, not a term of the
    contract — nothing in `:total :int` tells a caller the number counts hits
@@ -126,7 +125,7 @@
    is stable, and a check whose population is the episode's CHANGED forms
    cannot see something that has stopped changing."
   [_session store _changed]
-  (for [{:keys [endpoint schema fields]} (http/undocumented-contract-fields store)
+  (for [{:keys [endpoint schema fields]} (rules.http/undocumented-contract-fields store)
         :let [shown (take 6 fields)
               path-str (fn [p] (str/join " → " (map str p)))]]
     {:endpoint endpoint
@@ -148,8 +147,7 @@
                  " docstring this is a VALUE, so a multi-line literal ships its"
                  " own source indentation to every consumer that renders it.")}))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
-  rest-unconstrained-contract-check
+(defn rest-unconstrained-contract-check
   "Advisory: a published endpoint declares a field that constrains nothing —
    a bare `:map`, which accepts any map, or `:any`, which accepts anything.
 
@@ -183,7 +181,7 @@
    is still settling. Whole-store, because a published contract is stable and
    nothing episode-scoped will look at it again."
   [_session store _changed]
-  (let [rows    (http/unconstrained-contract-fields store)
+  (let [rows    (rules.http/unconstrained-contract-fields store)
         loose   (set (map :endpoint rows))
         marked  (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
                       :when (:web/unconstrained-ok meta)]

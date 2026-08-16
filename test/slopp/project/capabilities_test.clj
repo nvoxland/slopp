@@ -407,7 +407,15 @@
     ;; GENERATED entry never requires slopp.cli at all, so for cli this is the
     ;; only usage signal there is.
     (is (= [:cli/command] (:entry-markers (capabilities/capability "cli"))))
-    (is (some #{:web/page} (:entry-markers (capabilities/capability "http")))))
+    (is (some #{:web/page} (:entry-markers (capabilities/capability "http"))))
+    ;; and :web/path, which was MISSING until a rest app was built. :web/page
+    ;; covers the app slopp OPENS on its behalf; it misses the app slopp
+    ;; SERVES. An endpoint's serve! call is generated, so a store can declare a
+    ;; whole API, never name slopp.web, and have the framework vendor nothing
+    ;; into its built tree — which is exactly what happened the first time a
+    ;; tree was built from endpoints alone.
+    (is (some #{:web/path} (:entry-markers (capabilities/capability "http")))
+        "declaring an endpoint IS using the http framework"))
   (testing "rest ships a family too, and its markers are the CONTRACT"
     ;; A rest app never requires slopp.rest either: slopp assembles the context
     ;; and attaches the validators, so the app's own code names none of it.
