@@ -2486,3 +2486,48 @@ added.
 Same shape as `db/unlanded-count`, `views/screens` and `capabilities/rule-owner`
 one step on: those made two READERS agree by giving them one producer, and this
 makes the producer's whole answer survive the trip to the reader.
+
+### Sharpening (2026-08-16): a CITATION cannot be checked, because resolving is not its job
+
+Two docstrings in `slopp.cli` named neighbours that did not exist —
+`cli-contract`, a suite it claimed was running, and `slopp.clidev`, a dev
+driver that never existed. Both were found by reading, so the obvious next
+question was whether a rule could find the rest. It cannot, and the reason
+generalizes past citations.
+
+A scan for backticked `slopp.*` names no namespace answers to returned 58, cut
+to 32 by the one refinement that is clearly right (a name no namespace EQUALS
+and none EXTENDS — `slopp.api` is a family, and naming a family is legitimate).
+Eighteen of the 32 were genuine broken pointers. The remainder were not, and
+they are the interesting half:
+
+- `covering-test-nses` cites `slopp.git-test` **to say it does not exist**:
+  "`slopp.git` is covered by `slopp.git-projection-test`, not `slopp.git-test`".
+  A checker firing there is arguing with the sentence.
+- `tier-governance-check` cites `slopp.mine`, `start!` cites
+  `slopp.review.registry`, `api.server` cites `slopp.api.port` — records of
+  what a thing USED to be. Rewriting those forward invents a past, which is the
+  same failure a broad `rename_sweep` has from the other direction.
+- `start-heartbeat!` cites `slopp.hub.port`, which is a **config key**. Nothing
+  syntactic separates the namespace vocabulary from the config one.
+
+**The discriminator is not "does this name resolve" but "is this a POINTER or a
+RECORD", and that is authorial intent.** A pointer is a promise the reader can
+follow; a record is a claim about history, and a deliberate negative is a claim
+that the name is absent. All three are the same characters.
+
+Two things follow:
+
+- **Do not build the check.** The idea filed first — grade only names matching
+  a retired spelling from the vocabulary config — is actively backwards: the
+  retired spellings are exactly what the legitimate historical mentions
+  contain, so it would flag the correct ones and miss the invented one.
+- **Record the residue count.** After the sweep, 13 hits remain and every one
+  is correct. That number is the artifact a rule would have been: a future scan
+  starting above it has found something new, and one starting at it has not.
+
+The neighbouring lesson is the one with teeth. **A suite that is CITED but not
+written is worse than one that is absent**, because the citation is what stops
+the next reader asking for it — and `cli-contract` paid for itself the day it
+was finally built, catching a flush the fake half is structurally unable to
+fail.
