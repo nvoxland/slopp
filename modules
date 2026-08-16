@@ -40,6 +40,7 @@ slopp.project: slopp.index slopp.store
 slopp.read: slopp.edit slopp.index slopp.project slopp.rules slopp.store slopp.ops (test)
 slopp.realias: slopp.edit (test) slopp.ops (test) slopp.store (test)
 slopp.rename: slopp.read slopp.store slopp.ops (test)
+slopp.rest: slopp.web
 slopp.rules: slopp.cli slopp.edit slopp.image slopp.index slopp.project slopp.store slopp.web slopp.ops (test) slopp.read (test)
 slopp.store: slopp.cache slopp.ops (test) slopp.read (test)
 slopp.subform: slopp.read slopp.ops (test)
@@ -52,5 +53,5 @@ slopp.trace: slopp.ops (test)
 slopp.unsafe: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.verification: slopp.image slopp.kernel slopp.read slopp.store slopp.ops (test)
 slopp.warm-spare: slopp.ops (test)
-slopp.web: slopp.lang
+slopp.web: slopp.lang slopp.rest (test)
 slopp.webdev: slopp.build slopp.edit slopp.image slopp.ops slopp.project slopp.rules slopp.store slopp.web slopp.kernel (test) slopp.read (test)

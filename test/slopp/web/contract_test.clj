@@ -7,7 +7,7 @@
   to exist. A test namespace whose subject is `from-namespaces` traversal needs
   to own its route set."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.contract :as contract]))
+            [slopp.web.contract :as web.contract]))
 
 (defn ^{:web/method :get :web/path "/c/things" :web/auth :public
         :web/response [:map [:things [:sequential :string]]]}
@@ -54,7 +54,7 @@
   {:status 200 :body {:secret "s"}})
 
 (deftest a-contract-publishes-the-typed-surface-and-nothing-else
-  (let [doc     (contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
 
     (testing "the document names its own version, so a consumer can refuse one it doesn't know"
@@ -99,7 +99,7 @@
   ;; :doc, because the prose already exists. Every handler here opens with
   ;; `GET <path> — what it is`; it was written for the API's reader and it
   ;; stopped at the process boundary, because a docstring is not a value.
-  (let [doc     (contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))
         things  (by-addr [:get "/c/things"])]
 
@@ -142,7 +142,7 @@
   ;; `http-auth-refusal` gate refuses an endpoint that declares none. So unlike
   ;; `:request`, this key can never be nil-because-unknown, and a consumer
   ;; never has to tell "public" from "nobody said".
-  (let [doc     (contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
     (testing ":public travels as itself"
       (is (= :public (:auth (by-addr [:get "/c/things"])))))

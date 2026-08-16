@@ -73,13 +73,22 @@
           :let   [m (meta v)]
           :when  (:web/path m)]
       {:spa (:web/spa m)
-       :row {:handler   v
-             :method    (:web/method m)
-             :path      (str (:web/path m))
-             :auth      (:web/auth m)
-             :web/effects (:web/effects m)
-             :web/reads   (:web/reads m)
-             :effectful? (boolean (:web/effectful m))}}))))
+       ;; the CONTRACT rides the row when the endpoint declared one. The
+       ;; dispatcher holds a row at request time and nothing else, so a
+       ;; schema that is not here cannot be honoured — which is exactly why
+       ;; the wire crossing was unchecked until `rest` existed. `cond->`
+       ;; rather than plain keys: an endpoint that declares no contract must
+       ;; carry no key, because nil-because-absent and nil-because-broken
+       ;; would otherwise be the same row.
+       :row (cond-> {:handler   v
+                     :method    (:web/method m)
+                     :path      (str (:web/path m))
+                     :auth      (:web/auth m)
+                     :web/effects (:web/effects m)
+                     :web/reads   (:web/reads m)
+                     :effectful? (boolean (:web/effectful m))}
+              (:web/request m)  (assoc :web/request (:web/request m))
+              (:web/response m) (assoc :web/response (:web/response m)))}))))
 
 (defn ^:export performers-from-namespaces
   "The performer vocabulary off loaded var metadata: {kind → the var,

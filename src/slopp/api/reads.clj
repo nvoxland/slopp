@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.web.contract :as contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.web.contract :as web.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
 
 (defn ^{:web/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -87,7 +87,7 @@
   that list would invert the dependency (slopp.api.server already requires this
   namespace). It is data on the way in, like every other dep."
   [ctx _]
-  (contract/contract-document (:served-namespaces ctx)))
+  (web.contract/contract-document (:served-namespaces ctx)))
 
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the

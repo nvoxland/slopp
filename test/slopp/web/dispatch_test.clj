@@ -12,7 +12,7 @@
   does — including one that throws a bare exception leaking a filesystem path,
   because masking that is the thing being asserted."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.dispatch :as dispatch]))
+            [slopp.web.dispatch :as dispatch] [slopp.rest.contract :as rest.contract]))
 
 (deftest dispatch-runs-the-whole-pipeline-portlessly
   (let [performed (atom [])
@@ -159,3 +159,65 @@
       (is (nil? (:body (dispatch/bounded-body-string nil 1024)))))
     (testing "exactly-at-cap is allowed"
       (is (= "12345" (:body (dispatch/bounded-body-string (in "12345") 5)))))))
+
+(deftest a-contract-on-the-CONTEXT-is-what-makes-the-boundary-real
+  ;; The contract was declared, gate-enforced at write time, published to
+  ;; consumers and used to generate typed clients — and honoured by nothing.
+  ;; An untrusted body reached the handler unchecked. This is where that stops.
+  ;;
+  ;; The validators arrive as FUNCTIONS ON THE CONTEXT, exactly as
+  ;; :web/read-performers does, and that is not a style choice: it is what
+  ;; keeps malli out of the http framework. An app serving HTML must not start
+  ;; carrying a validation library because a DIFFERENT capability needs one, so
+  ;; `slopp.rest` requires malli and `slopp.web.*` still does not. The module
+  ;; edge this test needs is declared TEST-ONLY for that reason.
+  (let [ran (atom 0)
+        row {:handler (fn [req] (swap! ran inc) {:status 200 :body {:got (:body req)}})
+             :method :post :path "/api/x" :auth :public
+             :web/request [:map [:sku :string]]
+             :web/response [:map [:got :map]]}
+        base {:web/routes [row]}
+        rest-ctx (assoc base
+                        :rest/decode-request rest.contract/decode-request
+                        :rest/check-response rest.contract/check-response)
+        post (fn [body] {:request-method :post :uri "/api/x" :body body})]
+
+    (testing "with no validators on the context nothing changes"
+      ;; every http-only app is this case, and it must cost exactly nothing
+      (reset! ran 0)
+      (let [r (dispatch/handle! base (post {:sku 42}))]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= 1 @ran) "the handler ran, as it always has")))
+
+    (testing "a body that violates the declared contract is REFUSED"
+      (reset! ran 0)
+      (let [r (dispatch/handle! rest-ctx (post {:sku 42}))]
+        (is (= 400 (:status r)) (pr-str r))
+        (is (zero? @ran)
+            "and the handler never ran — work on unvalidated input is the thing
+             a boundary exists to prevent, so the refusal comes BEFORE it")))
+
+    (testing "a body that matches reaches the handler DECODED"
+      (reset! ran 0)
+      (let [r (dispatch/handle! rest-ctx (post {:sku "abc"}))]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= 1 @ran))))
+
+    (testing "a handler that breaks its OWN response contract is a 500"
+      ;; the client was generated from that schema, so a violating response
+      ;; breaks the consumer anyway — failing at the source beats failing
+      ;; obscurely at the far end
+      (let [bad (assoc row :handler (fn [_] {:status 200 :body {:got "not-a-map"}}))
+            r   (dispatch/handle! (assoc rest-ctx :web/routes [bad]) (post {:sku "abc"}))]
+        (is (= 500 (:status r)) (pr-str r))
+        (is (not (re-find #"not-a-map" (pr-str (:body r))))
+            "and the explain does NOT reach the client — same rule the
+             dispatcher already follows for an unexpected exception")))
+
+    (testing "an ERROR response is not judged against the success contract"
+      ;; :web/response describes the 200 body. A 404's {:error …} does not
+      ;; match it and must not be turned into a 500 for failing to.
+      (let [nf (assoc row :handler (fn [_] {:status 404 :body {:error "no such sku"}}))
+            r  (dispatch/handle! (assoc rest-ctx :web/routes [nf]) (post {:sku "abc"}))]
+        (is (= 404 (:status r)) (pr-str r))
+        (is (= {:error "no such sku"} (:body r)))))))

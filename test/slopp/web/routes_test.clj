@@ -19,7 +19,9 @@
   {:status 200 :body (:web/reads req)})
 
 (defn ^{:web/method :post :web/path "/t/users" :web/auth :authenticated
-        :web/effects [:user/insert]}
+        :web/effects [:user/insert]
+        :web/request [:map [:name :string]]
+        :web/response [:map [:id :int]]}
   t-post
   "Test endpoint."
   [req]
@@ -35,13 +37,19 @@
   [_ctx id]
   {:user/id id})
 
+(defn ^{:web/method :get :web/path "/t/page" :web/auth :public}
+  t-html
+  "Test endpoint that serves a document and publishes no typed contract."
+  [_req]
+  {:status 200 :web/raw true :body "<h1>hi</h1>"})
+
 (defn ^{:unused-ok "the negative control for route discovery — it exists to be PASSED OVER by the scan, so having no caller is the property under test"} plain "Not an endpoint." [x] x)
 
 (deftest routes-derive-from-var-metadata
   (let [rows (routes/from-namespaces ['slopp.web.routes-test])]
     (testing "endpoint vars become rows; unmarked vars don't"
-      (is (= 2 (count rows)))
-      (is (= #{"/t/users/:id" "/t/users"} (set (map :path rows)))))
+      (is (= 3 (count rows)))
+      (is (= #{"/t/users/:id" "/t/users" "/t/page"} (set (map :path rows)))))
     (testing "the row carries the contract and the CALLABLE var"
       (let [row (first (filter #(= "/t/users/:id" (:path %)) rows))]
         (is (= :get (:method row)))
@@ -84,3 +92,27 @@
       ;; /store is a real page here; only paths BELOW it fall back
       (is (nil? (router/match rows :get "/store"))
           "no row declares /store, so it 404s rather than silently rendering the app"))))
+
+(deftest a-row-carries-the-CONTRACT-its-endpoint-declared
+  ;; The row is what the dispatcher holds at request time, and until now it
+  ;; carried the route, the policy and the effect vocabulary but NOT the
+  ;; contract — so a dispatcher could not have honoured :web/request even if it
+  ;; had tried. That absence is why the wire crossing has been unchecked since
+  ;; the day it was declared.
+  ;;
+  ;; Carried on the row rather than re-read from var metadata per request, for
+  ;; the same reason everything else here is derived once: a second reader of
+  ;; the same metadata is free to disagree with the first.
+  (let [rows (routes/from-namespaces ['slopp.web.routes-test])
+        by   (into {} (map (juxt :path identity)) rows)]
+    (testing "a typed endpoint's schemas reach the row"
+      (is (= [:map [:name :string]] (:web/request (by "/t/users"))))
+      (is (= [:map [:id :int]] (:web/response (by "/t/users")))))
+
+    (testing "an endpoint that declares neither carries neither"
+      ;; ABSENCE has to stay absence. nil is what "declared no contract" means
+      ;; to the boundary, and it is the state an HTML page is now allowed to be
+      ;; in — serving a document is http's business, and typing a JSON contract
+      ;; is rest's.
+      (is (nil? (:web/request (by "/t/page"))) (pr-str (by "/t/page")))
+      (is (nil? (:web/response (by "/t/page")))))))

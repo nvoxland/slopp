@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.web :as slopp.web] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.web.contract :as contract]))
+            [slopp.web :as slopp.web] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.web.contract :as web.contract]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -891,7 +891,7 @@
   ;; even though this is a GET with no body… without it the generated client
   ;; takes a params map that only the path reads from"). What was missing is
   ;; anything that could tell when an endpoint stopped following it.
-  (let [doc      (contract/contract-document ['slopp.api.endpoints])
+  (let [doc      (web.contract/contract-document ['slopp.api.endpoints])
         declared (fn [schema]
                    ;; entry keys of a [:map [:k …] …], however the schema was
                    ;; named — the document carries VALUES, so by the time we

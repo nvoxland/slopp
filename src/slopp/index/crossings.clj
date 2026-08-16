@@ -53,12 +53,26 @@
     :leaves     "a declared request/response contract"
     :to         "JSON, and a browser that never sees Clojure data"
     :markers    #{:web/request :web/response}
-    :checked-by "the dispatcher validates against the same schema var the
-                 client ships"
-    :blind      "an in-image test asserts on the PRE-WIRE value — a keyword
-                 sails through a [:x :string] contract and arrives as a
-                 string, so a test that does not serialize checks a shape no
-                 client receives"}
+    :checked-by nil
+    :blind      "EVERYTHING at runtime, and this row said the opposite until
+                 2026-08-15. It claimed the dispatcher validates against the
+                 same schema var the client ships. It does not: `handle!` runs
+                 identity, route, policy, reads, handler, effects, and never
+                 looks at :web/request or :web/response — the schemas are not
+                 even on the route row. No namespace in the shipped slopp.web
+                 family requires malli at all. What IS checked is that a
+                 contract was DECLARED (the endpoint-schema write gate) and
+                 that slopp's own nine endpoints match theirs (by hand, in
+                 slopp.api.endpoints-test). Declared and honoured are different
+                 claims, and an untrusted request body reaches the handler
+                 unchecked.
+
+                 Second and separate: an in-image test asserts on the PRE-WIRE
+                 value, so a keyword sails through a [:x :string] contract and
+                 arrives as a string — a test that does not serialize checks a
+                 shape no client receives. slopp.web.client/fake-requester says
+                 the same thing about itself and sends the author to a real
+                 server."}
 
    {:kind       :generated/client
     :leaves     "an endpoint's contract"

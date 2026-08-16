@@ -67,7 +67,40 @@
           (apply (get performers kind) perform-ctx args))
         nil)))
 
-(defn ^{:teach "the response :body comes back as Clojure DATA — the ADAPTER serializes. An in-image test validating a wire contract must round-trip through JSON first, or a keyword passes a [:x :string] schema here and arrives as a string."}
+(defn- decoded-body
+  "The request body as the handler should receive it — `{:value v}`, or
+  `{:error <teaching string>}` when it violates the endpoint's declared
+  `:web/request`.
+
+  TWO conditions, and both are the capability model: the endpoint must have
+  declared a contract, and the CONTEXT must carry a validator for it. An app
+  serving HTML declares neither, supplies neither, and takes exactly the path
+  it always did.
+
+  The validator arrives as a FUNCTION rather than being called by name here,
+  which is what keeps malli out of this framework — `slopp.rest` requires it
+  and `slopp.web.*` does not, so an app is never made to carry a validation
+  library because a capability it did not enable needs one."
+  [ctx row req]
+  (if-let [f (and row (:web/request row) (:rest/decode-request ctx))]
+    (f (:web/request row) (:body req))
+    {:value (:body req)}))
+
+(defn- response-violation
+  "A teaching string when `resp` breaks the endpoint's own `:web/response`, else
+  nil.
+
+  **Only a SUCCESS body is judged against it.** `:web/response` describes what
+  a 200 carries; a 404's `{:error …}` does not match it and must not become a
+  500 for failing to. Getting that wrong would make every deliberate error
+  response look like a server fault, which is the opposite of the point."
+  [ctx row resp]
+  (when-let [f (and row (:web/response row) (:rest/check-response ctx))]
+    (when (<= 200 (:status resp 200) 299)
+      (f (:web/response row) (:body resp)))))
+
+(defn ^:export
+  ^{:teach "the response :body comes back as Clojure DATA — the ADAPTER serializes, so this is NOT what a client receives. slopp.rest/call drives this same pipeline through the real encoding both ways and hands back the client's view; reach for that rather than round-tripping by hand."}
   handle!
   "The whole request pipeline, callable in-process — request map in,
   response map out; the socket is an adapter's concern. `ctx`:
@@ -99,7 +132,10 @@
               (assoc req :web/identity
                      (auth/resolve-identity (:web/auth-config ctx) req)))
         row (router/match (:web/routes ctx)
-                          (:request-method req) (:uri req))]
+                          (:request-method req) (:uri req))
+        ;; decided ONCE, before the cond, so the refusal branch and the
+        ;; handler branch cannot disagree about what the body is
+        body (decoded-body ctx row req)]
     (cond
       (nil? row)
       {:status 404 :body {:error "no route"}}
@@ -109,18 +145,46 @@
         {:status 403 :body {:error "forbidden"}}
         {:status 401 :body {:error "unauthenticated"}})
 
+      ;; THE CONTRACT, and its position in this cond is the point: after
+      ;; policy, BEFORE the declared reads and before the handler. A refusal
+      ;; that arrives later has already done work on unvalidated input, which
+      ;; is the thing a boundary exists to prevent.
+      ;;
+      ;; The explain is the CLIENT's own data described back to them, so it
+      ;; travels — unlike a response violation, which is the server's fault and
+      ;; says nothing.
+      (:error body)
+      {:status 400 :body {:error (:error body)}}
+
       :else
       (let [req' (assoc req :path-params (:path-params row)
                         ;; parsed ONCE here, so no app writes its own
                         ;; splitter over the :query-string the adapters carry
                         :query-params (router/query-params (:query-string req))
-                        :web/deps (:web/perform-ctx ctx))
+                        :web/deps (:web/perform-ctx ctx)
+                        ;; the DECODED body: what the wire could not carry —
+                        ;; a keyword, a date, a uuid — arrives as the author
+                        ;; declared it, so the handler parses nothing. With no
+                        ;; contract and no validator this is the body it
+                        ;; always got.
+                        :body (:value body))
             fetch (fn [[alias [kind path]]]
                     (if-let [f (get (:web/read-performers ctx) kind)]
                       [alias (f (:web/perform-ctx ctx) (get-in req' path))]
                       (throw (ex-info (str "no performer for read kind " kind)
                                       {:web/read kind}))))
             declared (set (:web/effects row))
+            ;; the response contract is judged between the handler and the
+            ;; return, so a violation never reaches the adapter. The explain
+            ;; goes to the LOG and not the body: a response that breaks its own
+            ;; contract is the server's fault, and the same rule already
+            ;; governs an unexpected exception two branches down.
+            check (fn [r] (if-let [err (response-violation ctx row r)]
+                            (do (.println System/err
+                                          (str "slopp.web: response contract violated at "
+                                               (:method row) " " (:path row) " — " err))
+                                {:status 500 :body {:error "internal server error"}})
+                            r))
             resp (try
                    (let [reads (when-let [decl (:web/reads row)]
                                  (into {} (map fetch) decl))
@@ -144,9 +208,9 @@
                                            (:web/effect-performers ctx)
                                            (:web/perform-ctx ctx) effects)]
                              {:status 500 :body err})
-                           resp)
+                           (check resp))
 
-                       :else resp))
+                       :else (check resp)))
                    (catch Exception e
                      (let [data (ex-data e)]
                        (if-let [status (:web/status data)]

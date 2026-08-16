@@ -30,7 +30,19 @@
             by (into {} (map (juxt :kind identity)) (:crossings r))]
         (is (contains? by :http/route))
         (is (contains? by :wire/json))
-        (is (string? (:checked-by (by :wire/json))))))
+        ;; NOT `(string? (:checked-by …))`, which is what this asserted until
+        ;; 2026-08-15 — and it passed for a year against a string claiming the
+        ;; dispatcher validates every request and response against the schema
+        ;; the client ships. It does not, and never did: `handle!` never reads
+        ;; :web/request or :web/response, and no namespace in the shipped
+        ;; slopp.web family requires malli at all.
+        ;;
+        ;; So the test asserted the field was FILLED IN rather than that it was
+        ;; TRUE, which is the only thing a test over prose can check — and it
+        ;; is why the wrong answer survived. Assert the shape here and let the
+        ;; unchecked block below carry the claim that can be wrong.
+        (is (contains? (by :wire/json) :checked-by)
+            "the field is present whatever its value; nil is an answer here")))
     (testing "an exit with NO checker is reported, not omitted"
       ;; the whole point — an absent checker and an absent crossing look
       ;; identical unless one of them is written down
@@ -39,7 +51,14 @@
         (is (contains? un :spa/client-routing)
             "declaring :web/spa turns every path under a prefix into a 200 and
              moves not-found into the client, and nothing checks the client
-             agrees — that is a hole, and it has to read as one")))
+             agrees — that is a hole, and it has to read as one")
+        (is (contains? un :wire/json)
+            "a declared request/response contract is enforced at WRITE time and
+             honoured at runtime by nothing — the dispatcher never validates
+             against it, so an untrusted body reaches the handler unchecked.
+             This row read as CHECKED for a year. It is the hole the rest
+             capability exists to close, and until it does it has to read as
+             one")))
     (testing "a marker NO kind claims is a finding — this is what stops it rotting"
       ;; the failure mode of any inventory: someone adds an exit and the list
       ;; silently does not describe the system any more
