@@ -6,7 +6,7 @@
   wiring on a JVM. A test that needed a bundle would prove the opposite."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.webapp :as webapp]
-            [slopp.web.screen :as web.screen]))
+            [slopp.web.screen :as web.screen] [clojure.string :as str]))
 
 (deftest a-DYNAMIC-page-can-be-READ-without-a-browser-or-a-compile
   ;; The standing constraint on this whole wave, asserted rather than described:
@@ -21,36 +21,37 @@
   ;; THIRD hand-written wiring beside the browser entry and the headless driver,
   ;; with nothing comparing the three. Four of the five keys are mechanical, so
   ;; slopp derives them and the adapter stops existing.
-  (let [state (atom {})
-        asked (atom [])
-        app   (webapp/wiring
-               {:webapp/state  state
-                ;; a TABLE, so this app's screens are a value anything can list.
-                ;; The `:id` capture comes from the PATTERN now rather than from
-                ;; a hand-written case, which is the difference between routing
-                ;; an app can describe and routing only it can perform
-                :webapp/routes [["/things"     :things]
-                                ["/things/:id" :thing]]
-                :webapp/view   (fn [s] [:main
-                                        [:h1 "Catalogue"]
-                                        (case (:screen s)
-                                          ;; the four-state reader, not (if (:data s) …) —
-                                          ;; which is the nil-pun this framework removes
-                                          :things (case (webapp/load-status s :main)
-                                                    :ready [:ul (for [t (webapp/load-value s :main)]
-                                                                  [:li (:name t)])]
-                                                    :failed [:p "Could not load"]
-                                                    [:p "Loading…"])
-                                          :thing  [:p (str "Thing " (:id (:params s)))]
-                                          [:p "Nowhere"])])
-                ;; the app's own data source. In a browser this is the generated
-                ;; typed client; here it answers from memory, which is exactly
-                ;; the seam that makes the loop drivable at all
-                :webapp/fetch  (fn [screen params ok _err]
-                                 (swap! asked conj [screen params])
-                                 (ok (when (= :things screen)
-                                       [{:name "Anvil"} {:name "Rope"}])))})
-        s     (web.screen/open! (webapp/driver app))]
+  ;;
+  ;; The fifth is `:view`, and it is derived now too: a row names the screen fn,
+  ;; so there is no `(case (:screen s) …)` and no keyword agreeing in three
+  ;; places.
+  (let [state  (atom {})
+        asked  (atom [])
+        ;; screens are ordinary pure functions of state, which is what makes
+        ;; every one of them assertable without a browser
+        things (fn [s] (case (webapp/load-status s :main)
+                         ;; the four-state reader, not (if (:data s) …) — which
+                         ;; is the nil-pun this framework removes
+                         :ready  [:ul (for [t (webapp/load-value s :main)]
+                                        [:li (:name t)])]
+                         :failed [:p "Could not load"]
+                         [:p "Loading…"]))
+        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        app    (webapp/wiring
+                {:webapp/state     state
+                 :webapp/routes    [["/things"     things]
+                                    ["/things/:id" thing]]
+                 :webapp/chrome    (fn [_s inner] [:main [:h1 "Catalogue"] inner])
+                 :webapp/not-found (fn [_s] [:p "Nowhere"])
+                 ;; the app's own data source. In a browser this is the generated
+                 ;; typed client; here it answers from memory, which is exactly
+                 ;; the seam that makes the loop drivable at all
+                 :webapp/fetch     (fn [screen params ok _err]
+                                     (swap! asked conj [(if (= screen things) :things :thing)
+                                                        params])
+                                     (ok (when (= screen things)
+                                           [{:name "Anvil"} {:name "Rope"}])))})
+        s      (web.screen/open! (webapp/driver app))]
 
     (testing "the derived driver is the shape the fake browser accepts"
       ;; if this drifts, every assertion below fails in a way that looks like
@@ -104,10 +105,10 @@
   ;;   supersession     — a token minted per request, checked on arrival
   (let [state   (atom {})
         pending (atom nil)
+        thing   (fn [_s] [:p "thing"])
         app     (webapp/wiring
                  {:webapp/state  state
-                  :webapp/routes [["/thing" :thing]]
-                  :webapp/view   (fn [_] [:p "x"])
+                  :webapp/routes [["/thing" thing]]
                   ;; hold the callback so the LOADING moment is observable —
                   ;; a fetch that answers synchronously never has one
                   :webapp/fetch  (fn [_screen _params ok _err] (reset! pending ok))})]
@@ -137,8 +138,7 @@
       (let [err (atom nil)
             app2 (webapp/wiring
                   {:webapp/state  state
-                   :webapp/routes [["/thing" :thing] ["/other" :thing]]
-                   :webapp/view   (fn [_] [:p "x"])
+                   :webapp/routes [["/thing" thing] ["/other" thing]]
                    :webapp/fetch  (fn [_s _p _ok e] (reset! err e))})]
         (webapp/navigate! app2 "/thing" false)
         (@err "no")
@@ -162,17 +162,18 @@
   ;;
   ;; **MEASURED rather than reasoned**, by breaking the subject: moving the
   ;; counter inside `:loads` — the map `arrive` empties — makes both
-  ;; navigations mint token 1, and `:data-from-a` lands on screen `:b` with
+  ;; navigations mint token 1, and `:data-from-a` lands on screen `b` with
   ;; the load marked `:ready`. The other two tests in this namespace stay
   ;; green through that break, so this is the only cover for the placement.
-  (let [state   (atom {})
-        pending (atom [])
-        app     (webapp/wiring
-                 {:webapp/state  state
-                  :webapp/routes [["/a" :a] ["/b" :b]]
-                  :webapp/view   (fn [_] [:p "x"])
-                  :webapp/fetch  (fn [screen _params ok _err]
-                                   (swap! pending conj [screen ok]))})]
+  (let [state    (atom {})
+        pending  (atom [])
+        screen-a (fn [_s] [:p "a"])
+        screen-b (fn [_s] [:p "b"])
+        app      (webapp/wiring
+                  {:webapp/state  state
+                   :webapp/routes [["/a" screen-a] ["/b" screen-b]]
+                   :webapp/fetch  (fn [screen _params ok _err]
+                                    (swap! pending conj [screen ok]))})]
 
     (webapp/navigate! app "/a" false)
     (webapp/navigate! app "/b" false)
@@ -180,8 +181,8 @@
     (testing "POSITIVE CONTROL: the second navigation really emptied and re-minted"
       ;; without this the collision cannot arise and every assertion below
       ;; passes vacuously — which is the exact defect this test exists about
-      (is (= 2 (count @pending)) (pr-str (mapv first @pending)))
-      (is (= :b (:screen @state)) (pr-str @state))
+      (is (= 2 (count @pending)) (pr-str (count @pending)))
+      (is (= screen-b (:screen @state)) (pr-str (:path @state)))
       (is (= :loading (webapp/load-status @state :main)) (pr-str @state)))
 
     (testing "the FIRST screen's answer arrives late and is dropped"
@@ -222,8 +223,7 @@
         calls (atom [])
         app   (webapp/wiring
                {:webapp/state   state
-                :webapp/routes  [["/" :home]]
-                :webapp/view    (fn [_] [:p "x"])
+                :webapp/routes  [["/" (fn [_s] [:p "home"])]]
                 :webapp/act     (fn [s action value]
                                   (assoc s :last [action value]))
                 :webapp/actions {:thing/rename {:effectful? false}
@@ -261,7 +261,6 @@
       (let [bare (webapp/wiring
                   {:webapp/state   (atom {})
                    :webapp/routes  []
-                   :webapp/view    (fn [_] [:p "x"])
                    :webapp/act     (fn [s _ _] s)
                    :webapp/actions {:thing/delete {:effectful? true}}})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"request-for"
@@ -286,8 +285,8 @@
   (let [state (atom {})
         app   (webapp/wiring
                {:webapp/state       state
-                :webapp/routes      [["/" :home] ["/other" :other]]
-                :webapp/view        (fn [_] [:p "x"])
+                :webapp/routes      [["/" (fn [_s] [:p "home"])] ["/other" (fn [_s] [:p "other"])]]
+                :webapp/chrome      (fn [_s inner] inner)
                 :webapp/act         (fn [s _ _] s)
                 :webapp/actions     {:go {:effectful? true}}
                 :webapp/request-for (fn [s _action]
@@ -350,8 +349,8 @@
              (let [state (atom {})]
                [state (webapp/wiring
                        (merge {:webapp/state  state
-                               :webapp/routes [["/a" :a] ["/b" :b]]
-                               :webapp/view   (fn [_] [:p "x"])}
+                               :webapp/routes [["/a" (fn [_s] [:p "a"])]
+                                               ["/b" (fn [_s] [:p "b"])]]}
                               extra))]))]
 
     (testing "by DEFAULT the effect entry dies with the address"
@@ -392,7 +391,6 @@
       (let [state (atom {})
             app   (webapp/wiring {:webapp/state        state
                                   :webapp/routes       []
-                                  :webapp/view         (fn [_] [:p "x"])
                                   :webapp/address-keys #{}})]
         (swap! state assoc :loads {:main {:status :ready :value [:old]}})
         (webapp/navigate! app "/search" false)
@@ -435,8 +433,9 @@
         answer (atom nil)
         app    (webapp/wiring
                 {:webapp/state         state
-                 :webapp/routes        [["/code" :code] ["/change" :change] ["/other" :other]]
-                 :webapp/view          (fn [_] [:p "x"])
+                 :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
+                                        ["/change" (fn [_s] [:p "change"])]
+                                        ["/other"  (fn [_s] [:p "other"])]]
                  :webapp/session-loads #{:modules}})
         fetch! (fn [ok err]
                  (swap! calls inc)
@@ -471,8 +470,8 @@
             cbs (atom nil)
             app2 (webapp/wiring
                   {:webapp/state         s2
-                   :webapp/routes        [["/code" :code] ["/change" :code]]
-                   :webapp/view          (fn [_] [:p "x"])
+                   :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
+                                          ["/change" (fn [_s] [:p "code"])]]
                    :webapp/session-loads #{:modules}})]
         (webapp/load! app2 :modules (fn [ok err] (swap! n inc) (reset! cbs [ok err])))
         ((second @cbs) "boom")
@@ -639,19 +638,20 @@
   (let [state     (atom {})
         pushed    (atom [])
         prevented (atom 0)
+        things    (fn [_s] [:p "things"])
+        search    (fn [s] [:p (str "search " (:q (:params s)))])
         app       (webapp/wiring
                    {:webapp/state     state
                     :webapp/base      "/p/x"
-                    :webapp/routes    [["/things" :things]
-                                       ["/search" :search]]
-                    :webapp/view      (fn [_] nil)
+                    :webapp/routes    [["/things" things]
+                                       ["/search" search]]
                     :webapp/push-url! (fn [u] (swap! pushed conj u))})
         click!    (fn [m] (webapp/click! app (merge {:webapp/button 0} m)
                                          (fn [] (swap! prevented inc))))]
 
     (testing "a click that IS ours navigates, pushes, and swallows the default"
       (click! {:webapp/href "/p/x/things"})
-      (is (= :things (:screen @state)))
+      (is (= things (:screen @state)))
       (is (= ["/p/x/things"] @pushed) "the pushed url carries the mount prefix")
       (is (= 1 @prevented) "without this the browser also loads the page"))
 
@@ -661,14 +661,14 @@
       (click! {:webapp/href "https://example.com/things"})
       (is (= 1 @prevented) "preventDefault here is a dead external link")
       (is (= 1 (count @pushed)))
-      (is (= :things (:screen @state))))
+      (is (= things (:screen @state))))
 
     (testing "the BACK button arrives as a url and must not push"
       ;; a push on a pop is the bug that makes back appear broken: each press
       ;; adds an entry, so the button walks the reader forward through their
       ;; own history and never leaves
       (webapp/navigate-url! app "/p/x/search" "" false)
-      (is (= :search (:screen @state)))
+      (is (= search (:screen @state)))
       (is (= 1 (count @pushed)) (pr-str @pushed)))
 
     (testing "and the url's QUERY reaches the router PARSED, not as text"
@@ -678,12 +678,12 @@
       ;; well as carrying it — so a screen receives `{:q "rate"}` rather than a
       ;; url fragment it would have to take apart itself
       (webapp/navigate-url! app "/p/x/search" "?q=rate" false)
-      (is (= :search (:screen @state)))
-      (is (= {:q "rate"} (:params @state)) (pr-str @state)))
+      (is (= search (:screen @state)))
+      (is (= {:q "rate"} (:params @state)) (pr-str (:params @state))))
 
     (testing "a url outside the mount point is not this app's to show"
       (webapp/navigate-url! app "/somewhere/else" "" false)
-      (is (= :search (:screen @state))
+      (is (= search (:screen @state))
           "routing a foreign url through the app blanks the screen it was on"))))
 
 (deftest LEAVING-the-app-is-a-third-kind-of-action-and-declared-like-the-others
@@ -705,7 +705,7 @@
                  ;; an app that routes nothing declares no rows — which is a
                  ;; table, and says so
                  :webapp/routes      []
-                 :webapp/view        (fn [_] nil)
+                 :webapp/chrome      (fn [_s inner] inner)
                  :webapp/actions     {:project/switch {:leaves? true}
                                       :thing/run      {:effectful? true}}
                  :webapp/url-for     (fn [_s action] (when (second action)
@@ -744,7 +744,6 @@
       ;; appears to work and quietly does nothing is the outcome ruled out
       (let [bare (webapp/wiring {:webapp/state   (atom {})
                                  :webapp/routes  []
-                                 :webapp/view    (fn [_] nil)
                                  :webapp/actions {:project/switch {:leaves? true}}})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #":webapp/url-for"
                               (webapp/dispatch! bare [:project/switch "b"] nil)))))))
@@ -757,14 +756,14 @@
   ;; them — so both are here rather than in the shim.
   (let [state  (atom {})
         booted (atom 0)
+        things (fn [_s] [:p "things"])
         app    (webapp/wiring
                 {:webapp/state  state
                  ;; nil, because that is what `(.getAttribute el "data-base")`
                  ;; answers for an app served at the root: the attribute is
                  ;; simply absent. The shim reads and does not interpret
                  :webapp/base   nil
-                 :webapp/routes [["/things" :things]]
-                 :webapp/view   (fn [_] nil)
+                 :webapp/routes [["/things" things]]
                  :webapp/boot   (fn [s] (swap! booted inc) (assoc s :session "abc"))})]
 
     (testing "a mount point the DOM does not carry means the ROOT"
@@ -777,18 +776,18 @@
       (is (= "abc" (:session @state))
           "arriving must not clear what boot established — a session token
            cleared on the first navigation is a page that logs itself out")
-      (is (= :things (:screen @state))))
+      (is (= things (:screen @state))))
 
     (testing "and an app that declares no boot still starts"
       ;; the default has to be a function rather than nil, or every caller —
       ;; the driver, the entry, the next one — writes the same `or`
       (let [s2 (atom {})
+            ok (fn [_s] [:p "ok"])
             a2 (webapp/wiring {:webapp/state  s2
-                               :webapp/routes [["/anything" :ok]]
-                               :webapp/view   (fn [_] nil)})]
+                               :webapp/routes [["/anything" ok]]})]
         (is (fn? (:webapp/boot a2)))
         (webapp/start! a2 "/anything" "")
-        (is (= :ok (:screen @s2)))))))
+        (is (= ok (:screen @s2)))))))
 
 (deftest a-page-with-no-MOUNT-POINT-is-refused-by-NAME
   ;; The server's template renders `<div id="app">` and the bundle mounts into
@@ -868,19 +867,20 @@
   ;; join a link to one, or compare the client's table to the server's. Every
   ;; report and gate that exists for `^{:web/path}` was impossible here for
   ;; exactly that reason, and `crossings` records the two holes it leaves.
-  (let [state (atom {})
+  (let [state  (atom {})
         pushed (atom [])
+        things (fn [_s] [:p "things"])
+        thing  (fn [s] [:p (str "thing " (:id (:params s)))])
         app   (webapp/wiring
                {:webapp/state     state
                 :webapp/base      "/p/x"
-                :webapp/routes    [["/things"     :things]
-                                   ["/things/:id" :thing]]
-                :webapp/view      (fn [_] nil)
+                :webapp/routes    [["/things"     things]
+                                   ["/things/:id" thing]]
                 :webapp/push-url! (fn [u] (swap! pushed conj u))})]
 
     (testing "navigation routes through the declared table"
       (webapp/navigate! app "/things/42" false)
-      (is (= :thing (:screen @state)))
+      (is (= thing (:screen @state)) "the row's screen fn IS the screen")
       (is (= {:id "42"} (:params @state))))
 
     (testing "a click is OURS only when the table routes it"
@@ -899,7 +899,6 @@
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"(?i)table|\[\[\"/"
            (webapp/wiring {:webapp/state  (atom {})
-                           :webapp/view   (fn [_] nil)
                            :webapp/routes (fn [p] (when (= "/x" p) {:screen :x}))}))))
 
     (testing "and the table is READABLE — which is the whole point"
@@ -907,3 +906,75 @@
       ;; link to a route, a report showing a human the map, a check comparing
       ;; this against the prefixes the server answers for
       (is (= ["/things" "/things/:id"] (mapv first (:webapp/routes app)))))))
+
+(deftest a-route-points-at-a-SCREEN-and-the-view-is-DERIVED
+  ;; What `:screen` used to be: a bare keyword that had to agree in three
+  ;; separate places — the routes fn returned it, the view cased on it, the
+  ;; fetch received it — with nothing checking any of the three. Rename one and
+  ;; the app renders a blank pane at a url that looks right.
+  ;;
+  ;; A row points at the screen FUNCTION now, so the three agreements collapse
+  ;; into one var reference the reference graph can see. There is no `:screen`
+  ;; keyword left to mistype.
+  (let [state (atom {})
+        things (fn [_s] [:ul [:li "Anvil"]])
+        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        app   (webapp/wiring
+               {:webapp/state  state
+                :webapp/routes [["/things"     things]
+                                ["/things/:id" thing]]
+                :webapp/chrome (fn [_s inner] [:main [:h1 "Catalogue"] inner])})
+        s     (web.screen/open! (webapp/driver app))]
+
+    (testing "the app declares no :webapp/view — slopp derives it"
+      (is (fn? (:webapp/view app))
+          "the driver still needs one; what changed is who writes it"))
+
+    (testing "visiting a route renders that screen INSIDE the app's chrome"
+      (web.screen/visit! s "/things")
+      (let [t (web.screen/text s)]
+        (is (re-find #"Catalogue" t) t)
+        (is (re-find #"Anvil" t) t)))
+
+    (testing "and the matched row's captures reach the screen it points at"
+      (web.screen/visit! s "/things/42")
+      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "an unrouted path renders NOT-FOUND, never a blank pane"
+      ;; the failure this closes: with routes as data slopp KNOWS nothing
+      ;; matched, so rendering nothing is a choice rather than an accident — and
+      ;; a blank pane at a plausible url is indistinguishable from a screen
+      ;; whose content is empty
+      (web.screen/visit! s "/nope")
+      (is (seq (str/trim (web.screen/text s)))
+          "an unmatched path rendered nothing at all"))
+
+    (testing "and the app can say what not-found LOOKS like"
+      (let [s2 (web.screen/open!
+                (webapp/driver
+                 (webapp/wiring
+                  {:webapp/state     (atom {})
+                   :webapp/routes    [["/things" things]]
+                   :webapp/not-found (fn [_s] [:p "Nowhere"])})))]
+        (web.screen/visit! s2 "/nope")
+        (is (re-find #"Nowhere" (web.screen/text s2)) (web.screen/text s2))))
+
+    (testing "declaring :webapp/view is REFUSED, and the message says why"
+      ;; no back-compat: a hand-written view is the thing that made `:screen` a
+      ;; keyword agreeing in three places
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)derived|chrome"
+           (webapp/wiring {:webapp/state  (atom {})
+                           :webapp/routes []
+                           :webapp/view   (fn [_] [:div])}))))
+(testing "a route pointing at a KEYWORD is refused, not silently blank"
+      ;; the trap making targets callable would otherwise introduce: a keyword
+      ;; is `ifn?`, so `[["/things" :things]]` calls cleanly and renders nil —
+      ;; a blank pane on a route that MATCHED, which not-found cannot cover
+      ;; because nothing went wrong. Same for a map, a set or a vector
+      (doseq [target [:things 'things {} #{} []]]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"(?i)screen"
+             (webapp/wiring {:webapp/state  (atom {})
+                             :webapp/routes [["/things" target]]}))
+            (str (pr-str target) " is callable and renders nothing"))))))

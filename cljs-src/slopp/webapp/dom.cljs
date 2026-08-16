@@ -102,10 +102,17 @@
   | `(.. e -target -value)` in a dispatcher | [[typed-value]] |
   | reading the mount prefix off the DOM | `data-base`, below |
 
-  **The four effect plug-ins OVERRIDE whatever the app declared**, rather than
+  **The effect plug-ins OVERRIDE whatever the app declared**, rather than
   filling in gaps. They are not the app's to supply: an app that rendered
   itself would be a second render loop, and the headless drive would exercise
   neither. `merge` in this direction is the enforcement.
+
+  **Wiring happens BEFORE the render loop is built, and the order is load-bearing
+  now.** `:webapp/view` is DERIVED — a route row names its screen fn, and
+  `wiring` composes those with the app's chrome — so the view this renders is
+  one that does not exist until the app is wired. Reading it from `declared`
+  would render whatever the app happened to put there, which since the
+  derivation landed is nothing at all.
 
   **`data-base` is how the mount prefix reaches the browser.** An app served at
   `/p/slopp2/store` cannot tell that from `/store` by looking at its own url, so
@@ -124,14 +131,15 @@
 
   Returns the wired app, so a REPL session or a browser-plugin can reach it."
   [declared]
-  (let [el   (webapp/mount-point (.getElementById js/document "app"))
-        view (:webapp/view declared)
-        app  (webapp/wiring
-              (merge declared
-                     {:webapp/base      (.getAttribute el "data-base")
-                      :webapp/render    (fn [state] (replicant/render el (view state)))
-                      :webapp/push-url! (fn [url] (.pushState js/history nil "" url))
-                      :webapp/leave!    (fn [url] (.assign js/location url))}))]
+  (let [el    (webapp/mount-point (.getElementById js/document "app"))
+        wired (webapp/wiring
+               (merge declared
+                      {:webapp/base      (.getAttribute el "data-base")
+                       :webapp/push-url! (fn [url] (.pushState js/history nil "" url))
+                       :webapp/leave!    (fn [url] (.assign js/location url))}))
+        view  (:webapp/view wired)
+        app   (assoc wired :webapp/render
+                     (fn [state] (replicant/render el (view state))))]
     (replicant/set-dispatch!
      (fn [event-data handler-data]
        (webapp/dispatch! app handler-data (typed-value event-data))))
