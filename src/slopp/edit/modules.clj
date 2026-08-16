@@ -23,7 +23,8 @@
 
   Its neighbours: `slopp.edit.gates` is the chassis that REGISTERS and
   dispatches gates (register a new one there, never at the N call sites);
-  `slopp.edit.tiers` and `slopp.edit.web` are the other two families;
+  `slopp.edit.tiers` is the other generic family, and `slopp.edit.http` /
+  `slopp.edit.cli` / `slopp.edit.rest` are the per-app-type ones;
   `slopp.index.*` derives the reference graph this reads; and `slopp.rules`
   joins these gates with the done-time advisories into the one catalog
   `query_rules` reports."

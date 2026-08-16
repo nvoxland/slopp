@@ -21,7 +21,8 @@
   "Compute (or reuse the cached) API surface for `lib`@`coord` (M4) —
   best-effort: surface analysis must never fail a deps-add. Persists to the
   durable `dep_surface` cache when the session has a db; the process-level
-  memo in `slopp.deps` covers ephemeral sessions. Returns the surface or nil."
+  memo in `slopp.index.deps` covers ephemeral sessions. Returns the surface or
+  nil."
   [session lib coord]
   (try
     (let [conn (:db @session)

@@ -21,7 +21,7 @@
     valid-looking CSS.
 
   For raw or vendored CSS, don't fight the refusals: serve a static `.css`
-  asset (`slopp.http.static`), which is the supported route for text this
+  asset (`slopp.web.static`), which is the supported route for text this
   namespace deliberately will not vouch for."
   (:require [garden.core :as garden]))
 

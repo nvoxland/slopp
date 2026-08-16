@@ -490,8 +490,8 @@
 
   A HUSK is what a move leaves behind when it carries a namespace's whole
   contents somewhere else — `slopp.web-rules-test` after the R6 rules move
-  took its tests to `slopp.rules.web-test`. It survived two days and a green
-  `full_check`, because a husk is invisible to every other check by
+  took its tests to what is today `slopp.rules.http-test`. It survived two days
+  and a green `full_check`, because a husk is invisible to every other check by
   construction: there is no form to be dead, undocumented, uncovered or
   unreachable, and `namespace-purpose` deliberately EXEMPTS an empty namespace
   since a newborn one has nothing to describe yet.

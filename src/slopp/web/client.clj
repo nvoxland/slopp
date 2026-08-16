@@ -3,11 +3,11 @@
   `slopp.web`, whose other half serves.
 
   It exists because three namespaces were each building their own
-  `java.net.http.HttpClient` (`slopp.hub`,
-  `slopp.web.jwks`, `slopp.api.cljs`), which made all three untestable for the
-  same reason and none of them testable by the same fix. The transport is
-  identical in all three; only the POLICY differs, and policy is the part worth
-  testing.
+  `java.net.http.HttpClient` (`slopp.hub`, `slopp.web.jwks`, and the client
+  compiler now called `slopp.webdev.cljs`), which made all three untestable
+  for the same reason and none of them testable by the same fix. The transport
+  is identical in all three; only the POLICY differs, and policy is the part
+  worth testing.
 
   So [[request]] holds no policy at all — an answered request returns whatever
   its status, an unanswered one throws — and each caller keeps its own reading
@@ -19,10 +19,10 @@
   socket in the `^:external` tier and the fake in-image for free. A fake that
   drifts fails the suite it shares.
 
-  This is the worked example of the pattern in
-  The reaches/is distinction: the namespace that IS the reaching
-  gets a fake; the namespaces that merely REACH the world through it get their
-  isolation by injection, and need no fake of their own."
+  **The reaches/is distinction, of which this is the worked example:** the
+  namespace that IS the reaching gets a fake; the namespaces that merely REACH
+  the world through it get their isolation by injection, and need no fake of
+  their own. That is why there are three callers here and one adapter suite."
   (:require [clojure.string :as str]))
 
 (defn ^{:malli/schema

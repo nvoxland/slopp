@@ -149,7 +149,7 @@
 
   **Why a vocabulary and not a convention.** The registry was 74% one app type
   under names that did not say so — `auth.*` and `groups.*` read as generic
-  project settings while every reader of them was `slopp.http.auth` or a `web-`
+  project settings while every reader of them was `slopp.web.auth` or a `web-`
   write gate. R6 says support for an app TYPE lives under that type's name and
   the pattern must be replicable for type #2 without renaming type #1. That
   only holds if a key OUTSIDE the declared owners is refused, which is what

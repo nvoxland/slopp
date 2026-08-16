@@ -186,7 +186,7 @@
        "    {:port (.getPort (.getAddress srv))}))\n"))
 
 (def fake-static-src
-  "A stand-in `slopp.http.static` for the app-image test, as store source.
+  "A stand-in `slopp.web.static` for the app-image test, as store source.
 
   Faked for the same reason as [[fake-web-src]] — nothing is vendored in a
   checkout — but this one has to do REAL WORK to be worth anything. The

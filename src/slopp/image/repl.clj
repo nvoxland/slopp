@@ -15,7 +15,8 @@
 (def ^:export clojure-bin
   "The clojure launcher for owned images: SLOPP_CLOJURE env override, else the
   first executable found in the usual install locations, else trust PATH.
-  Public so `slopp.deps` reuses the same launcher for classpath resolution."
+  Public so `slopp.index.deps` reuses the same launcher for classpath
+  resolution."
   (or (System/getenv "SLOPP_CLOJURE")
       (some (fn [dir]
               (let [f (io/file dir "clojure")]

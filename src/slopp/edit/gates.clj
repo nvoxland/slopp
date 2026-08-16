@@ -12,9 +12,10 @@
   `gate-refusal` is the entry point, and `rule-severity` is where a store's
   own `rules` config can dial one down. The gates themselves live by FAMILY —
   `slopp.edit.modules` (edges, visibility, and what a module surface must
-  declare), `slopp.edit.tiers` (purity and layering), `slopp.edit.web` (the
-  D-web surface). This namespace knows all three and none of them knows it,
-  which is the direction that lets a family be read without the mechanism.
+  declare), `slopp.edit.tiers` (purity and layering), and one namespace per APP
+  TYPE: `slopp.edit.http`, `slopp.edit.cli`, `slopp.edit.rest`. This namespace
+  knows them all and none of them knows it, which is the direction that lets a
+  family be read without the mechanism.
 
   Split out because holding the mechanism inside one of the families is what
   made `slopp.edit.modules` a misnomer: 45 forms under a name that described
@@ -67,7 +68,7 @@
   "`{rule-key defining-ns-sym}` for the registered per-form write gates — where
    each gate is IMPLEMENTED, which is what says who OWNS it (R6: support for an
    app TYPE lives in a namespace named for that type, so a gate defined in
-   `slopp.edit.web` is the web app type's). The done-grain sibling reads the
+   `slopp.edit.http` is the http app type's). The done-grain sibling reads the
    same fact off `rules/done-advisories`' `:check` vars.
 
    The rule KEY is the gate var's own name, which is why `write-gate-names` is

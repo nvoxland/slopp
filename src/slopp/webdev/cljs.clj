@@ -758,7 +758,7 @@
   on the client platforms — so an ordinary `:jvm` write never arrives here at
   all, and the write engine does not name this namespace (R6). This used to run
   IN the engine and reach back for `compile-client!` through
-  `store/late-ref`, because `slopp.api.cljs` requires `slopp.ops.external` →
+  `store/late-ref`, because THIS namespace requires `slopp.ops.external` →
   `slopp.ops`, so a static require would have cycled. The escape hatch was
   holding up the misplacement, not the load order: registering points the edge
   the one way that never cycles, and the call below is now ordinary.

@@ -97,8 +97,9 @@
   be a symbol. `form-docstring` exists because five callers read index 2 and
   one of them rendered a `def`'s VALUE as documentation. This one is that
   finding's twin: `(meta (second s))` was hand-rolled at FIVE sites while the
-  one guarded reader sat in `slopp.edit.web` — correct, documented, and under
-  an APP-TYPE name that generic code cannot reach without violating R6.
+  one guarded reader sat in the web app type's own gate namespace (today
+  `slopp.edit.http`) — correct, documented, and under an APP-TYPE name that
+  generic code cannot reach without violating R6.
 
   Which is the shape worth naming: not a missing check, a missing HOME. Code
   written once and correctly still grows copies if the callers who need it are

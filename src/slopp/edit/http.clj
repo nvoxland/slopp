@@ -13,13 +13,14 @@
   module fixes its layer, and these gates run inside the write pipeline. The
   same fact is why the web TOOLING could not stay under `slopp.web` either.
 
-  `slopp.rules.web` is the other consumer of these primitives —
+  `slopp.rules.http` is the other consumer of these primitives —
   `web-endpoint-rows`, `web-performers`, `web-context-builders` — and that
   sharing is the point rather than an accident: a rule that REFUSES at the
   write and a report that LISTS the surface have to agree, and they only can
-  if they are one derivation. R6: web is app type #1, not the app type, so
+  if they are one derivation. R6: http is app type #1, not the app type, so
   everything app-type-specific carries the qualifier and a second type gets
-  its own namespace without renaming this one."
+  its own namespace without renaming this one — which `cli` and `rest` have
+  since done."
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
             [slopp.index.analyze :as analyze]
@@ -29,7 +30,7 @@
 
 (defn ^:export web-name-meta
   "The metadata on a stored form's NAME symbol — THE reader for the `:web/*`
-  declaration vocabulary; `slopp.rules.web` and the web gates both consume it.
+  declaration vocabulary; `slopp.rules.http` and the web gates both consume it.
 
   Delegates to [[slopp.store/form-name-meta]], which is the same read at a
   generic address. This function was the correct one all along — no eval, D3's
@@ -46,7 +47,7 @@
 
 (defn ^:export web-endpoint-rows
   "Every `:web/path` form in `store`: `{:ns :name :form-id :meta}` rows —
-  the single route traversal; the collision gate and `slopp.rules.web` both
+  the single route traversal; the collision gate and `slopp.rules.http` both
   build on it. TEST namespaces are excluded: their endpoint-shaped forms
   are fixtures, not servable surface, and a fixture must neither report in
   query_surface nor claim a path against a production endpoint. A pure
@@ -65,7 +66,7 @@
   "The app-declared performer vocabulary for `marker-key` (`:web/effect` or
   `:web/read`): {kind → performer qsym}. slopp interprets no domain
   vocabulary of its own — the store declares it, so this registry is a pure
-  function of the forms; the undeclared-effect gate and `slopp.rules.web`
+  function of the forms; the undeclared-effect gate and `slopp.rules.http`
   both consume it."
   [store marker-key]
   (into {}
