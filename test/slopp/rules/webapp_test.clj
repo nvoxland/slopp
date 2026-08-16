@@ -12,7 +12,7 @@
   — the same defect slopp-ui measured in rest's contract advisories. A fixture
   that enables the capability is what makes the gating observable.
 
-  Neighbours: `slopp.edit.webapp-test` covers the write-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.rules.webapp :as webapp] [slopp.store :as store]))
+  Neighbours: `slopp.edit.webapp-test` covers the write-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.rules.webapp :as rules.webapp] [slopp.store :as store]))
 
 (deftest ^:external declaring-a-spa-prefix-says-what-it-changed
   ;; `:web/spa` is the biggest behavioural change available in one piece of
@@ -86,7 +86,7 @@
 
       (let [ids (fn [] (mapv :id (store/forms (:store @sess) 'demo.app)))]
         (testing "reaching only portable code is clean"
-          (is (empty? (webapp/webapp-page-reach-check sess (:store @sess) (ids)))))
+          (is (empty? (rules.webapp/webapp-page-reach-check sess (:store @sess) (ids)))))
 
         (testing "declaring the VIEWS :cljs strands the entry, and the advisory names both"
           (let [d (ops/module-platform! sess "demo.app.views" "cljs"
@@ -94,7 +94,7 @@
             (is (nil? (:error d)) (pr-str d))
             (is (= :cljs (store/platform-for (:store @sess) 'demo.app.views))
                 "the fixture is only a fixture once the platform actually says :cljs"))
-          (let [r (webapp/webapp-page-reach-check sess (:store @sess) (ids))]
+          (let [r (rules.webapp/webapp-page-reach-check sess (:store @sess) (ids))]
             (is (seq r) "the entry is now unopenable and no write to it happened")
             (is (= 'demo.app/app (:form (first r))))
             (is (some #{'demo.app.views} (:cljs (first r)))

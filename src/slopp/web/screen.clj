@@ -152,7 +152,7 @@
   ([hiccup] (of hiccup nil))
   ([hiccup opts] (str/join "\n" (lines hiccup opts))))
 
-(defn open!
+(defn ^:export open!
   "Open a headless browser over `app`. Two shapes, and an app may be both.
 
   **A server-rendered slopp.web app — its own ctx, nothing added:**
@@ -281,7 +281,7 @@
       (view @(:state app))
       document)))
 
-(defn visit!
+(defn ^:export visit!
   "Go to `path`. Returns the session.
 
   How a url resolves depends on what the app IS, and both answers are the
@@ -499,7 +499,7 @@
         (submit! session node)))
     session))
 
-(defn text
+(defn ^:export text
   "What is on the screen right now, as readable text — the whole assertion
   surface in one call.
 
