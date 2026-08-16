@@ -410,3 +410,35 @@
         (testing "the port rides as data, so a caller need not re-parse the sentence"
           (is (= port (:web/port (ex-data t))))))
       (finally (slopp.web/stop! held)))))
+
+(deftest a-context-can-be-WRAPPED-before-it-is-served
+  ;; slopp GENERATES the serve! call for a managed app — `webdev.live/serve-code`
+  ;; writes it, because a hand-written one could disagree with the plan and the
+  ;; running server would be the half that disagreed. So a capability needing to
+  ;; add something to the assembled context has no call site of its own to add
+  ;; it at.
+  ;;
+  ;; This is that seam, and it is deliberately GENERIC: a function applied to
+  ;; the context between assembly and serving. `slopp.rest/validating` is its
+  ;; first user, and `slopp.web` does not learn that rest exists — which is the
+  ;; whole reason malli is not in this framework.
+  (let [seen (atom nil)
+        wrap (fn [ctx] (reset! seen ctx) (assoc ctx :probe/wrapped true))]
+    (testing "the wrapper receives the ASSEMBLED context, not the opts"
+      ;; it has to run after `context` has derived the routes and the performer
+      ;; vocabularies, or a wrapper deciding anything from the surface would be
+      ;; deciding it from a map that does not have one yet
+      (let [srv (slopp.web/serve! {:web/namespaces ['slopp.web-test]
+                                   :web/port 0
+                                   :web/wrap-context wrap})]
+        (try
+          (is (some? (:web/routes @seen)) (pr-str (keys @seen)))
+          (is (contains? @seen :web/read-performers))
+          (finally (slopp.web/stop! srv)))))
+
+    (testing "and no wrapper leaves serving exactly as it was"
+      ;; every app enabling no such capability is this case, and it must cost
+      ;; nothing
+      (let [srv (slopp.web/serve! {:web/namespaces ['slopp.web-test] :web/port 0})]
+        (try (is (map? srv))
+             (finally (slopp.web/stop! srv)))))))

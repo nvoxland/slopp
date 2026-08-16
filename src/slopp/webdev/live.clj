@@ -157,7 +157,13 @@
      ;; product, so a managed server that 404s them is not a lesser version
      ;; of the app — it is an unusable one, and the project it happened to
      ;; switched the managed server off rather than reading it as a bug.
-     :static          (rules.http/static-mounts store)}))
+     :static          (rules.http/static-mounts store)
+     ;; whether the served app HONOURS its declared contracts. Read here rather
+     ;; than in serve-code for the same reason every other derivation is: the
+     ;; plan is what production and the dev server both answer from, and a
+     ;; switch consulted at code-generation time would be a second reader of the
+     ;; config that could disagree with this one.
+     :validate?       (capabilities/enabled? store "rest")}))
 
 (defn load-order
   "The store namespaces to load into the app image, dependencies first.
@@ -317,6 +323,16 @@
                          :web/adapter    (:adapter plan)}
                   (:max-body-bytes plan)
                   (assoc :web/max-body-bytes (:max-body-bytes plan))
+                  ;; where `rest.enabled` stops being a line in a config file.
+                  ;; The app writes no serve! call, so the capability switch has
+                  ;; to reach the GENERATED one or the boundary exists and
+                  ;; nothing ever invokes it.
+                  ;;
+                  ;; A symbol rather than the validators inline: the plan stays
+                  ;; data, and the child resolves it — which is why the require
+                  ;; below is not optional.
+                  (:validate? plan)
+                  (assoc :web/wrap-context 'slopp.rest/validating)
                   builder
                   (assoc :web/perform-ctx (list builder))
                   mounts
@@ -330,6 +346,13 @@
                    (concat
                     (when mounts
                       [(list 'require ''slopp.web.static)])
+                    ;; the child resolves slopp.rest/validating only if it
+                    ;; REQUIRED the namespace. A qualified symbol in the opts
+                    ;; would look right and throw at serve time — the same trap
+                    ;; the static mount hit, which is why both are asserted as
+                    ;; require FORMS rather than as substrings.
+                    (when (:validate? plan)
+                      [(list 'require ''slopp.rest)])
                     (when builder
                       [(list 'require (list 'quote (symbol (namespace builder))))])
                     [(list :port (list 'slopp.web/serve! opts))])))))

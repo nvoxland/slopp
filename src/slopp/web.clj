@@ -185,7 +185,16 @@
   ex-data so a caller acts on the number rather than re-parsing the sentence."
   [{:web/keys [adapter host port] :or {adapter :http-kit host "127.0.0.1" port 8080}
     :as opts}]
-  (let [ctx (context opts)]
+  (let ;; `:web/wrap-context` is a fn applied to the ASSEMBLED context, between
+        ;; assembly and serving. It exists because slopp GENERATES this call for
+        ;; a managed app (`webdev.live/serve-code`), so a capability that must
+        ;; add something to the context has no call site of its own to add it at.
+        ;;
+        ;; Generic on purpose: `slopp.rest/validating` is its first user and
+        ;; this namespace does not learn that rest exists. That is what keeps a
+        ;; validation library out of an app serving HTML — the dependency runs
+        ;; rest -> web and never back.
+        [ctx ((or (:web/wrap-context opts) identity) (context opts))]
     (try
       (case adapter
         :http-kit (assoc (httpkit/start! ctx {:host host :port port})

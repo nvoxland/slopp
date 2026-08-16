@@ -1075,6 +1075,10 @@
     (is (some #{'slopp.cli.spec} framework)
         (str "and the cli family — which had NO guard at all before this. "
              "Found: " framework))
+    (is (some #{'slopp.rest.contract} framework)
+        (str "and rest's, which joined by being added to the catalog and "
+             "nothing else — the property this derivation exists for. "
+             "Found: " framework))
     (is (empty? leaks)
         (str "a shipped framework namespace must not depend on anything outside "
              "its own family: these requires would not resolve in a user's "

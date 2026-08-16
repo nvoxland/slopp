@@ -735,3 +735,34 @@
         (let [a (:app (external/full-check! sess))]
           (is (= 0 (:behind a)) (pr-str a))))
       (finally (ops/close! sess)))))
+
+(deftest a-managed-app-VALIDATES-when-the-store-enabled-rest
+  ;; This is where `rest.enabled` stops being a line in a config file. The app
+  ;; writes no serve! call — slopp generates it — so the capability switch has
+  ;; to reach the generated code or the boundary exists and nothing invokes it.
+  ;;
+  ;; The generated call names `slopp.rest/validating` rather than passing the
+  ;; validators inline, so the plan stays data and the wiring stays one symbol.
+  (let [plan {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+              :adapter :http-kit}]
+    (testing "with rest off, nothing about validation is generated"
+      ;; the http-only case, and it must be untouched — an app with no typed
+      ;; API must not acquire a validation library or a wrapper
+      (let [code (live/serve-code plan)]
+        (is (not (str/includes? code "wrap-context")) code)
+        (is (not (str/includes? code "slopp.rest")) code)))
+
+    (testing "with rest on, the context is wrapped and the namespace required"
+      (let [code (live/serve-code (assoc plan :validate? true))]
+        ;; NOT ":web/wrap-context …" — the opts print as a namespaced map
+        ;; (#:web{…}), so the qualifier is on the map and the key reads bare.
+        ;; Matching the spelling that is actually emitted rather than the one
+        ;; the source is written in.
+        (is (str/includes? code "wrap-context slopp.rest/validating")
+            (str "the seam is what carries it: " code))
+        ;; asserting the require FORM, not the substring — the qualified symbol
+        ;; alone would pass while the child had the symbol and not the
+        ;; namespace, which is the exact bug the static-mount test records
+        (is (str/includes? code "(require (quote slopp.rest))")
+            (str "the child resolves slopp.rest/validating only if it required it: "
+                 code))))))

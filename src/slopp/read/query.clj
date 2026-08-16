@@ -37,7 +37,7 @@
             [slopp.edit :as edit]
             [slopp.index.refs :as refs]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli]))
+            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli] [slopp.rules.rest :as rules.rest]))
 
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
@@ -437,8 +437,10 @@
   (let [store (:store @session)
         http  (rules.http/routes-report store)
         cli   (rules.cli/commands-report store)
+        rest  (rules.rest/contracts-report store)
         m     (cond-> {}
                 (seq cli) (assoc :cli cli)
+                (seq rest) (assoc :rest rest)
                 (:enabled http)
                 (assoc :http (:routes http)
                        ;; ALWAYS present when http is, empty map included. A

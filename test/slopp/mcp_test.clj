@@ -1380,6 +1380,21 @@
           (is (= {"/assets" "public"} (:http/static rep))
               (str "a declared mount is surface: " (pr-str rep)))))
 
+      (testing "enabling rest adds the TYPED surface beside the routes"
+        ;; three sections now, and the shape of the answer is still what says
+        ;; what kind of application this is
+        (call! sess "config_file" {:path "capabilities" :key "rest.enabled" :value "true"
+                                   :prompt "publish a typed API"})
+        (let [rep (edn/read-string (call! sess "query_surface" {}))
+              row (first (:rest rep))]
+          (is (seq (:cli rep)) (str "and the earlier sections survive: " (pr-str rep)))
+          (is (seq (:http rep)))
+          (is (= :contract (:kind row)) (pr-str rep))
+          (is (= "/api/ping" (:path row)))
+          (is (= 'wr.api/ping (:handler row)))
+          (is (true? (:published row))
+              "an endpoint with no :web/client false is part of the published API")))
+
       (testing "the tool is advertised read-only"
         (is (contains? tools/read-only-tools "query_surface")))
       (finally (ops/close! sess)))))

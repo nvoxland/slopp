@@ -408,10 +408,19 @@
     ;; only usage signal there is.
     (is (= [:cli/command] (:entry-markers (capabilities/capability "cli"))))
     (is (some #{:web/page} (:entry-markers (capabilities/capability "http")))))
+  (testing "rest ships a family too, and its markers are the CONTRACT"
+    ;; A rest app never requires slopp.rest either: slopp assembles the context
+    ;; and attaches the validators, so the app's own code names none of it.
+    ;; Declaring a contract is therefore the only usage signal there is — the
+    ;; same lesson cli taught with its generated entry, arriving a second time.
+    (is (= "slopp.rest" (:ns-prefix (capabilities/capability "rest"))))
+    (is (= [:web/request :web/response]
+           (:entry-markers (capabilities/capability "rest")))
+        "both, because a GET-only API declares no :web/request and still has a
+         typed response to honour"))
   (testing "a capability that ships nothing yet says so by omission"
-    ;; rest and webapp have no framework namespaces of their own, and an empty
-    ;; vector would read as "a family with no files" rather than "no family"
-    (is (nil? (:ns-prefix (capabilities/capability "rest"))))
+    ;; webapp has no framework namespaces of its own, and an empty vector would
+    ;; read as "a family with no files" rather than "no family"
     (is (nil? (:ns-prefix (capabilities/capability "webapp")))))
   (testing "owners that are not opt-ins ship nothing at all"
     (is (nil? (:ns-prefix (capabilities/capability "app"))))
@@ -419,4 +428,9 @@
   (testing "shipping-families is the derived list every reader consumes"
     ;; one derivation, so vendoring and the leak guard cannot disagree about
     ;; what the framework IS
-    (is (= {"cli" "slopp.cli" "http" "slopp.web"} (capabilities/shipping-families)))))
+    ;; the EXACT map, deliberately: it is what stops a family being declared in
+    ;; the catalog while silently reaching none of its three readers. rest
+    ;; joined it by being added to the table and nothing else — which is the
+    ;; property this catalog was restructured for.
+    (is (= {"cli" "slopp.cli" "http" "slopp.web" "rest" "slopp.rest"}
+           (capabilities/shipping-families)))))
