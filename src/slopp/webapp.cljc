@@ -25,78 +25,34 @@
 
 (defn- arrive
   "The state transition a navigation IS: `path` and its route in, everything the
-  previous screen loaded out.
+  previous screen knew out.
 
-  Pure, and separate from [[navigate!]] for the reason every decision in this
-  codebase is separate from its performance — what a navigation MEANS is
-  assertable without an atom, a plug-in or a clock.
+  Pure, and separate from [[navigate!]] for the reason every decision here is
+  separate from its performance — what a navigation MEANS is assertable without
+  an atom, a plug-in or a clock.
 
-  **`:loads` is bumped rather than cleared**, and that is the freshness token.
-  A navigation that supersedes a slow one must make the slow one's answer
-  unwanted, and an answer arriving for a token nobody is waiting on is dropped
-  rather than written over the new screen. Clearing would let the old answer
-  match the new screen's empty token and land."
+  **`:loads` is EMPTIED, not bumped**, and the difference is a property rather
+  than a spelling. Emptying makes every load `:absent` — nothing has been
+  requested for this screen yet, which is the true statement — and
+  [[begin-load]] then moves it to `:loading`. A token bumped in place never
+  passes through `:absent`, so the four-state model quietly becomes three and a
+  view can no longer tell an unasked load from one that answered nil.
+
+  Caught by slopp-ui reading the first draft, which merged emptying and token
+  minting into one counter. They answer different questions: what is KNOWN
+  about this screen, and whether an answer in flight is still wanted.
+
+  `:data` and `:error` go too. Leaving the previous screen's answers on display
+  under the new url is the SPA failure where the page and the address bar
+  disagree — a moment of loading is honest, a stale screen is not."
   [state path route]
-  (-> state
-      (assoc :path   path
-             :screen (:screen route)
-             :params (:params route)
-             :data   nil
-             :error  nil)
-      (update-in [:loads :main] (fnil inc 0))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/state :any]
-                          [:webapp/base {:optional true} :string]
-                          [:webapp/routes :any]
-                          [:webapp/fetch :any]
-                          [:webapp/render :any]
-                          [:webapp/push-url! :any]
-                          [:webapp/derive {:optional true} :any]]
-                    :string :boolean]
-                   :any]}
-  navigate!
-  "Move `app` to `path`, performing every effect through the app's own plug-ins.
-
-  Nothing here touches a browser, and that is the entire point: `:webapp/render`
-  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
-  a test, so \"following this link pushes that url, asks for that endpoint, and
-  shows loading until it answers\" is an ordinary in-image assertion — including
-  the slow-response race, which in a real browser is a heisenbug you reproduce
-  by throttling the network.
-
-  **`:webapp/fetch` takes CALLBACKS rather than returning a promise, and the
-  reason travels with the decision because it reads as arbitrary style
-  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
-  only run in a browser would put the whole headless exercise back where it
-  started, which is the one outcome this capability exists to prevent. An app
-  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
-  is for.
-
-  **`:webapp/derive` is inside the freshness guard, not inside the fetch.** The
-  two read as equivalent and are not: the fetch runs before anything knows
-  whether the answer is still wanted, so deriving there pays for every abandoned
-  load. An expensive value computed FROM a response — a layout, a parse — is
-  guarded by the same check as the write it accompanies."
-  [{:webapp/keys [state base routes fetch render push-url! derive]} path push?]
-  (when push? (push-url! (str base path)))
-  (swap! state arrive path (routes path))
-  (render @state)
-  (when (:screen @state)
-    (let [{:keys [screen params]} @state
-          token  (get-in @state [:loads :main])
-          fresh? (fn [] (= token (get-in @state [:loads :main])))]
-      (fetch screen params
-             (fn [value]
-               (when (fresh?)
-                 (swap! state assoc :data (if derive (derive screen value) value))
-                 (render @state)))
-             (fn [message]
-               (when (fresh?)
-                 (swap! state assoc :error message)
-                 (render @state)))))))
+  (assoc state
+         :path   path
+         :screen (:screen route)
+         :params (:params route)
+         :data   nil
+         :error  nil
+         :loads  {}))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
@@ -166,21 +122,6 @@
             :webapp/push-url! (fn [_url] nil)}
            app)))
 
-(defn- navigate-for!
-  "The driver's `:navigate`, partial'd over `app`.
-
-  A named var rather than a closure inside [[driver]], and the reason is the
-  `!`-naming rule rather than taste: a constructor that builds mutating
-  closures INLINE computes as effectful itself, so the gate would demand
-  `driver!` — a name asserting that calling it does something, when calling it
-  only assembles a map. Naming the behaviours puts the `!` where the mutation
-  actually is and leaves the assembler honest.
-
-  Returns the state AFTER the move, because that is what `screen` re-renders."
-  [app _state path]
-  (navigate! app path false)
-  @(:webapp/state app))
-
 (defn- dispatch-for!
   "The driver's `:dispatch`, partial'd over `app` — see [[navigate-for!]] for
   why it is a named var rather than a closure.
@@ -200,6 +141,95 @@
                            " which is the one failure a headless drive exists to"
                            " catch")
                       {:webapp/missing-key :webapp/act :action action})))))
+
+(defn- begin-load
+  "Mark `key` as in flight, minting the token that decides whether its answer is
+  still wanted.
+
+  The token is a monotonic `:load-seq` kept OUTSIDE `:loads`, because
+  [[arrive]] empties `:loads` on every navigation and a token drawn from a
+  cleared map would restart — which would let a slow answer from the previous
+  screen match the new screen's first request and land on it. That is the exact
+  failure the token exists to prevent, reintroduced by where the number is
+  stored."
+  [state key]
+  (let [n (inc (get state :load-seq 0))]
+    (-> state
+        (assoc :load-seq n)
+        (assoc-in [:loads key] {:status :loading :token n}))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/state :any]
+                          [:webapp/base {:optional true} :string]
+                          [:webapp/routes :any]
+                          [:webapp/fetch :any]
+                          [:webapp/render :any]
+                          [:webapp/push-url! :any]
+                          [:webapp/derive {:optional true} :any]]
+                    :string :boolean]
+                   :any]}
+  navigate!
+  "Move `app` to `path`, performing every effect through the app's own plug-ins.
+
+  Nothing here touches a browser, and that is the entire point: `:webapp/render`
+  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
+  a test, so \"following this link pushes that url, asks for that endpoint, and
+  shows loading until it answers\" is an ordinary in-image assertion — including
+  the slow-response race, which in a real browser is a heisenbug you reproduce
+  by throttling the network.
+
+  **`:webapp/fetch` takes CALLBACKS rather than returning a promise, and the
+  reason travels with the decision because it reads as arbitrary style
+  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
+  only run in a browser would put the whole headless exercise back where it
+  started, which is the one outcome this capability exists to prevent. An app
+  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
+  is for.
+
+  **`:webapp/derive` is inside the freshness guard, not inside the fetch.** The
+  two read as equivalent and are not: the fetch runs before anything knows
+  whether the answer is still wanted, so deriving there pays for every abandoned
+  load. An expensive value computed FROM a response — a layout, a parse — is
+  guarded by the same check as the write it accompanies."
+  [{:webapp/keys [state base routes fetch render push-url! derive]} path push?]
+  (when push? (push-url! (str base path)))
+  (swap! state arrive path (routes path))
+  (render @state)
+  (when (:screen @state)
+    (let [{:keys [screen params]} @state
+          _      (swap! state begin-load :main)
+          token  (get-in @state [:loads :main :token])
+          fresh? (fn [] (= token (get-in @state [:loads :main :token])))]
+      (fetch screen params
+             (fn [value]
+               (when (fresh?)
+                 (swap! state #(-> %
+                                   (assoc :data (if derive (derive screen value) value))
+                                   (assoc-in [:loads :main :status] :ready)))
+                 (render @state)))
+             (fn [message]
+               (when (fresh?)
+                 (swap! state #(-> %
+                                   (assoc :error message)
+                                   (assoc-in [:loads :main :status] :failed)))
+                 (render @state)))))))
+
+(defn- navigate-for!
+  "The driver's `:navigate`, partial'd over `app`.
+
+  A named var rather than a closure inside [[driver]], and the reason is the
+  `!`-naming rule rather than taste: a constructor that builds mutating
+  closures INLINE computes as effectful itself, so the gate would demand
+  `driver!` — a name asserting that calling it does something, when calling it
+  only assembles a map. Naming the behaviours puts the `!` where the mutation
+  actually is and leaves the assembler honest.
+
+  Returns the state AFTER the move, because that is what `screen` re-renders."
+  [app _state path]
+  (navigate! app path false)
+  @(:webapp/state app))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -246,3 +276,23 @@
      :navigate (partial navigate-for! app)
      :dispatch (partial dispatch-for! app)
      :boot     (or boot identity)}))
+
+(defn ^:export load-status
+  "What is KNOWN about load `key` on this screen: `:absent`, `:loading`,
+  `:ready` or `:failed`.
+
+  **Four states, because three of them are routinely collapsed into nil and
+  each collapse is a lie a reader believes.** `:absent` is nothing has been
+  requested; `:loading` is asked and unanswered; `:ready` is answered, and
+  answered with NIL or an empty list is still answered; `:failed` is asked and
+  refused.
+
+  A view written as `(if (:data s) …)` reads all four as two, and the two it
+  produces are wrong in the direction that matters: an empty screen that says
+  \"no results\" when nobody has asked yet, and a spinner that never stops
+  because the answer was legitimately nothing.
+
+  This is the reader a `:webapp/view` uses instead of testing `:data`, and it is
+  the reason [[arrive]] empties rather than bumps."
+  [state key]
+  (get-in state [:loads key :status] :absent))

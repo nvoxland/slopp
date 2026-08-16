@@ -74,3 +74,64 @@
     (testing "an unrouted path is the app's own nowhere, not an exception"
       (web.screen/visit! s "/nope")
       (is (re-find #"Nowhere" (web.screen/text s)) (web.screen/text s)))))
+
+(deftest a-load-that-has-not-been-ASKED-is-not-a-load-that-answered-NIL
+  ;; slopp-ui caught this on the first read, and half their diagnosis applied.
+  ;; I claimed `arrive` bumps rather than clears; they read that as losing
+  ;; display honesty. It does not — `arrive` clears `:data`, so the previous
+  ;; screen's answers never show under the new url.
+  ;;
+  ;; **What it did lose is the four-state load model**, and that is the real
+  ;; defect. A token COUNTER answers "is this answer still wanted" and nothing
+  ;; else, so `:absent` — nothing has been requested for this screen yet — was
+  ;; never representable. A view could only ask `(if (:data s) …)`, which reads
+  ;; an unasked load and a load that answered NIL as the same thing. That is
+  ;; the nil-pun the model exists to remove, in the framework that exists to
+  ;; remove nil-puns.
+  ;;
+  ;; Three concerns, three mechanisms, and I had merged two:
+  ;;   display honesty  — clearing the previous screen's data
+  ;;   what is KNOWN    — :absent -> :loading -> :ready | :failed
+  ;;   supersession     — a token minted per request, checked on arrival
+  (let [state   (atom {})
+        pending (atom nil)
+        app     (webapp/wiring
+                 {:webapp/state  state
+                  :webapp/routes (fn [p] (when (= "/thing" p) {:screen :thing :params {}}))
+                  :webapp/view   (fn [_] [:p "x"])
+                  ;; hold the callback so the LOADING moment is observable —
+                  ;; a fetch that answers synchronously never has one
+                  :webapp/fetch  (fn [_screen _params ok _err] (reset! pending ok))})]
+
+    (testing "before anything is asked, the load is ABSENT"
+      (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
+
+    (testing "while the request is out it is LOADING — a moment the reader can see"
+      (webapp/navigate! app "/thing" false)
+      (is (= :loading (webapp/load-status @state :main)) (pr-str @state)))
+
+    (testing "an answer of NIL is READY, and that is the whole point"
+      ;; :ready-with-nil and :absent are different statements about the world:
+      ;; "this screen has no things" versus "nobody has asked yet"
+      (@pending nil)
+      (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
+      (is (nil? (:data @state)) (pr-str @state)))
+
+    (testing "navigating away makes it ABSENT again, not stale-READY"
+      ;; the true statement about the new screen: nothing has been requested
+      ;; for it. Leaving it :ready would say the new screen had answered
+      (webapp/navigate! app "/nowhere" false)
+      (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
+
+    (testing "and a failure is FAILED, distinct from both"
+      (webapp/navigate! app "/thing" false)
+      (let [err (atom nil)
+            app2 (webapp/wiring
+                  {:webapp/state  state
+                   :webapp/routes (fn [_] {:screen :thing :params {}})
+                   :webapp/view   (fn [_] [:p "x"])
+                   :webapp/fetch  (fn [_s _p _ok e] (reset! err e))})]
+        (webapp/navigate! app2 "/thing" false)
+        (@err "no")
+        (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
+        (is (= "no" (:error @state)) (pr-str @state))))))
