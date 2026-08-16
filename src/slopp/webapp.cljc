@@ -354,6 +354,22 @@
   used on several screens. Declaring the key in `:webapp/session-loads` keeps
   its entry across [[arrive]]; everything else about it is identical.
 
+  **The MACHINERY travels and the SCOPE does not**, which matters to anyone
+  adopting this incrementally. This function reads two keys — `:webapp/state`
+  and `:webapp/render` — so it works against a hand-built map from an app that
+  has never called [[wiring]]. `:webapp/session-loads` does not travel with it:
+  the guarantee is honoured by [[arrive]], so **an app that navigates with its
+  own code gets no scope guarantee from declaring it**, and a load survives or
+  dies by whatever that code does to `:loads`.
+
+  Reported by the app it was written for, which read the sentence above three
+  times without noticing it named a function they do not call. The sentence was
+  exact; what it lacked was its own precondition, and a guarantee stated where
+  it is IMPLEMENTED reads as unconditional at the point it is CONSUMED. Adopting
+  `load!` alone is safe and useful; adopting `session-loads` alone is a fix that
+  appears to work and then quietly does not, which is worse than the bug it
+  replaces.
+
   **This exists because the alternative was measured, in the only real webapp
   built on slopp.** Their module nav is fetched once and read on every Code
   screen. Because loads were emptied on every navigation they kept it outside

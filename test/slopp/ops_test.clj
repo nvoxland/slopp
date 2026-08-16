@@ -1679,3 +1679,42 @@
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
         (is (= [:web/client-routes] (:entry-markers row))
             (str "and :web/page is NOT among them, deliberately: " (pr-str row)))))))
+
+(deftest the-vendored-tree-tracks-the-STORE-not-the-process-start
+  ;; A consumer's notes said, in bold, "the tree is materialized from the jar at
+  ;; PROCESS START" — and then they enabled `webapp` mid-session and found
+  ;; `slopp/webapp.cljc` in a tree that supposedly could not contain it. They
+  ;; reported it as impossible, correctly, because the model they had been given
+  ;; made it so.
+  ;;
+  ;; Two axes, and the sentence conflated them:
+  ;;
+  ;;   WHICH families   re-derived from the STORE at every image launch
+  ;;   WHAT IS in one   read from THIS PROCESS's jar, frozen until restart
+  ;;
+  ;; So a slopp fix needs a rebuild and a restart, and a capability you just
+  ;; turned on does not. Half of their sentence was load-bearing and true; the
+  ;; other half sent them looking for a bug.
+  (let [files {"_"      {"slopp/lang.cljc" "(ns slopp.lang)"}
+               "webapp" {"slopp/webapp.cljc" "(ns slopp.webapp)"}
+               "cli"    {"slopp/cli.clj" "(ns slopp.cli)"}}
+        before (store/ingest (store/empty-store) 'shop.core
+                             "(ns shop.core)\n\n(defn total \"T.\" [x] x)\n")]
+
+    (testing "a store using no family is vendored nothing"
+      (is (nil? (engine/framework-injection before files))))
+
+    (testing "the SAME store, after gaining a client-routed document, is vendored webapp"
+      ;; nothing about the process changed — only the store did
+      (let [after (store/ingest before 'shop.ui
+                                (str "(ns shop.ui)\n\n"
+                                     "(defn ^{:web/method :get :web/path \"/\"\n"
+                                     "        :web/client-routes [\"/things\"]}\n"
+                                     "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n"))
+            got   (engine/framework-injection after files)]
+        (is (contains? got "slopp/webapp.cljc")
+            (str "the decision is a function of the store, so it answers"
+                 " differently the moment the store does: " (pr-str (keys got))))
+        (is (contains? got "slopp/lang.cljc") "the common family rides along")
+        (is (not (contains? got "slopp/cli.clj"))
+            "and a family this store does not use is still withheld")))))

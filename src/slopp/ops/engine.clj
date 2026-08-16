@@ -184,16 +184,34 @@
       (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
       (:deps store))))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was copied from the forms this replaced, and every caller is inside slopp.api.*. Created and un-exported inside one unreleased wave, so there is no downstream to tell."}
-  framework-dir!
+(defn framework-dir!
   "The dir to launch an image for `store` in — one per session, created and
   filled on demand — or nil when that store needs no framework.
 
   The DECISION is per-store (branch lines each have their own); the DIR is per
   session, because the framework is slopp's own and every image it launches
-  needs the same bytes. Cached under `:framework-dir`; the vendor call is
-  idempotent file writes, so a store that GAINS web code mid-session gets it on
-  its next image rather than never."
+  needs the same bytes. Cached under `:framework-dir`.
+
+  **Two axes, and conflating them is the documented failure.** WHICH families a
+  store gets is re-derived HERE, on every image launch, from the current store —
+  so a store that gains web code (or enables a capability, or renames the marker
+  `used-families` keys on) has it on its NEXT image rather than never. WHAT IS
+  IN a family comes from `boot/framework-files`, which reads this process's own
+  jar resources, and is frozen until the process restarts. A slopp fix needs a
+  rebuild and a restart; a capability just turned on does not.
+
+  A consumer's own notes said the tree is materialized from the jar at process
+  start, which is half right and produced a wrong prediction: they enabled
+  `webapp` mid-session, found `slopp/webapp.cljc` in a tree that supposedly
+  could not contain it, and had no model that explained it.
+
+  **The vendor call only WRITES, never removes**, so within a session the tree is
+  the UNION of every family the store has used at any point in it — and a fresh
+  session re-derives from scratch. A family that stops being used therefore keeps
+  resolving until the session ends. That asymmetry is deliberate rather than an
+  oversight: removal would break the store this whole mechanism protects, the one
+  mid-migration whose requires outlive its config and which must still boot to be
+  repairable."
   [session store]
   (when (framework-injection store (boot/framework-files))
     (let [dir (or (:framework-dir @session)
