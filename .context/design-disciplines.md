@@ -2359,3 +2359,44 @@ SHAPE when we only needed its POSITION.
 This is Core 9 seen from a new angle: a character class is a PROXY for "an
 identifier", it reports in the real thing's voice, and its silent narrowing is
 worst exactly where the population matters most.
+
+### Sharpening (2026-08-16): the ONE-ARMED COMPARISON — a silence with one cause is a silence with many
+
+slopp-ui's name, and their self-correction, which is the version worth keeping
+because they committed the error in the message where they named it again.
+
+They observed: `cli` is DISABLED, and its three rules appear in neither the
+sweep's `:swept` nor its `:not-swept`. They concluded the disabling caused the
+absence, and reported that a disabled capability's rules vanish silently.
+
+The control was four lines up in the same report. `http` is ENABLED, and its
+NINE form-grain gates are also absent from both lists. The absence is about
+GRAIN — the sweep covers done-grain advisories only — and has nothing to do with
+enablement at all.
+
+> an observation with one arm cannot distinguish its cause from any other cause
+> that produces the same silence
+
+That is the whole rule, and it applies wherever a check reports by NOT saying
+something. The rest of this document is full of the same shape from the other
+side — a count that reports on the population it counted, a check computed over
+a proxy, a derived population that shrank. This is the reader's-side version:
+**when the evidence is an absence, the second arm is not optional, because
+absence is the one observation every cause produces identically.**
+
+Two things follow, and the second is the actionable one:
+
+- **Before concluding from a silence, find the case that should SPEAK.** If the
+  hypothesis is "X causes this to be missing", the control is a not-X that is
+  present. Here it was one query away and already on screen.
+- **A report that does not say what it EXCLUDES invites the inference.** The
+  sweep was not wrong; it was silent about its own scope, and a reader counting
+  rules against it had no way to learn the lists were done-grain only. Fixed by
+  saying so in band (`sweep-plan`'s `:note`), which is cheaper than expecting
+  every reader to supply the control.
+
+The productive half is worth recording too: the wrong evidence prompted a check
+of WHICH rules actually stop, and that check found a real defect neither party
+had — four rules listed under a capability's `:arms` that ran regardless of the
+switch. A mis-read report that causes someone to go and measure is not the same
+as a report nobody reads.
