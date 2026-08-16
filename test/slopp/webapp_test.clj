@@ -29,13 +29,11 @@
         asked  (atom [])
         ;; screens are ordinary pure functions of state, which is what makes
         ;; every one of them assertable without a browser
-        things (fn [s] (case (webapp/load-status s :main)
-                         ;; the four-state reader, not (if (:data s) …) — which
-                         ;; is the nil-pun this framework removes
-                         :ready  [:ul (for [t (webapp/load-value s :main)]
-                                        [:li (:name t)])]
-                         :failed [:p "Could not load"]
-                         [:p "Loading…"]))
+        ;; a screen is only called when its data is READY, so it never writes
+        ;; the three-way case on load-status — the framework renders those
+        ;; states and chrome places them. What is left is the screen itself
+        things (fn [s] [:ul (for [t (webapp/load-value s :main)]
+                              [:li (:name t)])])
         thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
         app    (webapp/wiring
                 {:webapp/state     state
@@ -1038,3 +1036,78 @@
                                       base routes))
               (str "render and click disagree under base " (pr-str base)
                    " — href was " (pr-str href))))))))
+
+(deftest the-framework-defaults-the-CONTENT-of-a-load-state-and-chrome-keeps-the-PLACEMENT
+  ;; Every screen was going to repeat the same three-way case:
+  ;;
+  ;;   (case (load-status s :main) :ready … :failed … [:p "loading…"])
+  ;;
+  ;; which is the keyword-agreeing-in-three-places problem again, one level in.
+  ;;
+  ;; **The asymmetry that decides who renders it is STRUCTURAL, not aesthetic.**
+  ;; My first answer was "slopp owns what is true, the app owns what is seen" —
+  ;; and slopp-ui pointed out that it does not survive `not-found`, which is
+  ;; equally presentation and which slopp already defaults. The line did not
+  ;; separate the cases it was invoked for.
+  ;;
+  ;; Theirs does: `not-found` replaces the WHOLE page, so the framework can
+  ;; render it — there is nothing else on screen to be wrong about. `loading`
+  ;; and `failed` replace one PANE while the rest of the app stays up: their app
+  ;; renders the nav rail while main says loading, because a reader who
+  ;; navigated with the module list should still see it. So a framework
+  ;; rendering those has to know WHERE they go, and placement is layout, which
+  ;; is the one thing this capability does not take.
+  ;;
+  ;; Hence: the framework supplies the CONTENT as `inner`, chrome decides WHERE.
+  (let [state  (atom {})
+        pending (atom nil)
+        things (fn [_s] [:p "THE SCREEN"])
+        app    (webapp/wiring
+                {:webapp/state  state
+                 :webapp/routes [["/things" things]]
+                 :webapp/chrome (fn [_s inner] [:main [:nav "RAIL"] inner])
+                 :webapp/fetch  (fn [_screen _params ok _err] (reset! pending ok))})
+        text   (fn [] (pr-str ((:webapp/view app) @state)))]
+
+    (webapp/navigate! app "/things" false)
+
+    (testing "while loading, the framework renders the state and chrome places it"
+      (is (re-find #"(?i)loading" (text)) (text))
+      (is (re-find #"RAIL" (text))
+          "the rest of the app stays up — that is the whole reason chrome places it")
+      (is (not (re-find #"THE SCREEN" (text)))
+          "a screen must not render against data that has not arrived"))
+
+    (testing "inner is NEVER nil, which is the nil-pun this would otherwise be"
+      ;; slopp-ui's constraint, and it is the rule `load-value` already states:
+      ;; a nil chrome has to test is the same pun in the one value every app
+      ;; handles. Chrome asks `load-status` if it wants the distinction
+      (let [seen (atom ::none)
+            a2   (webapp/wiring
+                  {:webapp/state  (atom {})
+                   :webapp/routes [["/things" things]]
+                   :webapp/chrome (fn [_s inner] (reset! seen inner) [:main inner])
+                   :webapp/fetch  (fn [_s _p _ok _e] nil)})]
+        ((:webapp/view a2) {})
+        (is (some? @seen) "chrome received nil and would have to test it")))
+
+    (testing "when it arrives the screen renders"
+      (@pending [:anvil])
+      (is (re-find #"THE SCREEN" (text)) (text)))
+
+    (testing "a FAILED load renders the failure, not the screen"
+      (webapp/navigate! app "/things" false)
+      (is (re-find #"(?i)loading" (text)) (text)))
+
+    (testing "and an app that wants different COPY declares it"
+      ;; the middle tier: same placement, its own words. Same shape as
+      ;; :webapp/not-found, which is what makes this one story rather than two
+      (let [s2 (atom {})
+            a2 (webapp/wiring
+                {:webapp/state   s2
+                 :webapp/routes  [["/things" things]]
+                 :webapp/loading (fn [_s] [:p "Fetching your things"])
+                 :webapp/fetch   (fn [_s _p _ok _e] nil)})]
+        (webapp/navigate! a2 "/things" false)
+        (is (re-find #"Fetching your things" (pr-str ((:webapp/view a2) @s2)))
+            (pr-str ((:webapp/view a2) @s2)))))))

@@ -810,28 +810,48 @@
   at a url that looks right. A row naming the screen's var collapses all three
   into one reference the graph can see, and there is no keyword left to mistype.
 
-  **`:webapp/not-found` is a screen like any other**, and it has a default
-  because slopp now KNOWS when nothing matched. Rendering nothing there would be
-  the failure this capability keeps naming: a blank pane at a plausible url is
-  indistinguishable from a screen whose content is empty. The default is
-  deliberately plain and obviously the framework's, so an app that has not
-  thought about it gets something honest rather than something pretty.
+  **A screen is only called when its data is READY**, and the other three states
+  are rendered by the framework: `:webapp/not-found` when no row matched,
+  `:webapp/loading` while the `:main` load is out, `:webapp/failed` when it
+  failed. That removes from every screen the same three-way `case` on
+  `load-status` — the keyword-agreeing-in-three-places problem one level in.
 
-  **Chrome wraps, and takes the state as well as the inner hiccup.** A nav bar
-  needs to know which screen is current and what the session loaded; passing
-  only the inner tree would make an app reach for the atom it was handed. It is
-  also where a CROSS-SCREEN concern belongs — the load-status check every screen
-  would otherwise repeat is one decision about what a reader sees, and chrome is
-  the one place that sees every screen.
+  **Who renders a state, and who PLACES it, are different questions**, and the
+  line between them is structural rather than aesthetic. The first answer here
+  was \"slopp owns what is true, the app owns what is seen\", which slopp-ui
+  showed does not survive its own precedent: what `not-found` looks like is
+  presentation too, and slopp defaults that.
+
+  The asymmetry that does hold: **`not-found` replaces the WHOLE page**, so the
+  framework can render it outright — there is nothing else on screen to be wrong
+  about. **`loading` and `failed` replace one PANE while the rest of the app
+  stays up** — a reader who navigated with a module list should still see it
+  while the main pane loads. So rendering those requires knowing WHERE they go,
+  placement is layout, and layout is the one thing this capability does not
+  take. Hence: the framework supplies the CONTENT as `inner`, and chrome decides
+  where it sits.
+
+  **`inner` is never nil.** A nil chrome has to test is the nil-pun again, in
+  the one value every app handles; chrome asks `load-status` if it wants the
+  distinction, which is the rule [[load-value]] already states.
+
+  **Chrome takes the state as well as the inner hiccup**, so a nav bar can know
+  which screen is current and what the session loaded without reaching for the
+  atom it was handed.
 
   **[[prefix-links]] runs LAST, over the finished tree**, so a view writes client
   route keys and never the mount point. One producer: what this adds is exactly
   what [[click-target]] strips, which is why the two are tested against each
   other rather than separately."
-  [{:webapp/keys [chrome not-found base routes]}]
+  [{:webapp/keys [chrome not-found loading failed base routes]}]
   (fn [state]
     (let [screen (:screen state)
-          inner  (if screen (screen state) (not-found state))]
+          inner  (if screen
+                   (case (load-status state :main)
+                     :ready  (screen state)
+                     :failed (failed state)
+                     (loading state))
+                   (not-found state))]
       (prefix-links base routes (chrome state inner)))))
 
 (defn ^:export
@@ -864,10 +884,17 @@
 
   Optional, defaulted here so no caller has to nil-check a plug-in:
   `:webapp/chrome` (`(fn [state inner] hiccup)`, the layout around a screen;
-  identity by default), `:webapp/not-found` (`(fn [state] hiccup)` for a path no
-  row matches — defaulted rather than left blank, because slopp KNOWS nothing
-  matched and a blank pane at a plausible url is the failure this capability
-  keeps naming), `:webapp/base` (mount prefix, `\"\"`), `:webapp/fetch` (a
+  identity by default).
+
+  Three STATE SCREENS, all `(fn [state] hiccup)` and all defaulted, for the
+  three moments a screen cannot render against: `:webapp/not-found` (no row
+  matched), `:webapp/loading` (the `:main` load is out) and `:webapp/failed` (it
+  failed). Defaulted rather than left blank because slopp knows which state it
+  is in, and a blank pane is indistinguishable from a screen whose content is
+  empty. Declaring one replaces the copy; deciding WHERE it sits is chrome's,
+  and [[derived-view]] says why that line falls there.
+
+  Also optional: `:webapp/base` (mount prefix, `\"\"`), `:webapp/fetch` (a
   screen's data; answers nil when a screen needs none), `:webapp/render` and
   `:webapp/push-url!` (no-ops headless, `js/…` in a page), plus
   `:webapp/derive`, `:webapp/call`, `:webapp/act`, `:webapp/actions`,
@@ -897,7 +924,7 @@
   which is `:clj` and can ask — one platform down, where the answer exists."
   [app]
   (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/chrome
-                  :webapp/not-found
+                  :webapp/not-found :webapp/loading :webapp/failed
                   :webapp/fetch :webapp/render :webapp/push-url! :webapp/derive
                   :webapp/call :webapp/request-for :webapp/act :webapp/actions
                   :webapp/address-keys :webapp/session-loads :webapp/boot
@@ -978,10 +1005,21 @@
             ;; Deliberately plain and obviously the framework's: an app that has
             ;; not thought about it gets something honest, not something pretty
             :webapp/not-found    (fn [state]
-                                   [:main
+                                   [:div
                                     [:h1 "Not found"]
                                     [:p (str "No screen is routed to "
                                              (pr-str (:path state)) ".")]])
+            ;; the CONTENT of the two states a screen cannot render against.
+            ;; Defaulted for `not-found`'s reason and placed by chrome for a
+            ;; reason `not-found` does not have — see [[derived-view]]. Plain and
+            ;; obviously the framework's: the one real app wrote almost exactly
+            ;; these by hand, which is the evidence that defaulting them is not
+            ;; picking somebody's spinner
+            :webapp/loading      (fn [_state] [:p [:small "Loading…"]])
+            :webapp/failed       (fn [state]
+                                   [:div
+                                    [:h1 "Could not load"]
+                                    [:p (str (:error (:main (:loads state))))]])
                 ;; a headless drive cannot LEAVE — there is no page to hand back
                 ;; to — so the default is the no-op `push-url!` gets, and a test
                 ;; that cares about the switcher supplies a recorder
