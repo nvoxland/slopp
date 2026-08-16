@@ -694,16 +694,29 @@ client-deps (merge (:client-deps st) (:client provided))
   ([] (built-store "."))
   ([dir]
    (let [root  (io/file dir)
+         ;; `.cljs` too, and it is the reason this line has a comment. A `:cljs`
+         ;; namespace invisible here is invisible to EVERY whole-store guard
+         ;; standing on this seam, and each one then reports clean on a
+         ;; population that silently excludes browser code — the failure this
+         ;; function was written to end, recurring inside it one extension wide.
+         ;; Found by a guard that asserts its own population before it asserts
+         ;; anything else, on the run that should have gone green.
          clj?  #(and (.isFile ^java.io.File %)
-                     (re-find #"\.cljc?$" (.getName ^java.io.File %)))
-         srcs  (for [sub ["src" "test"]
+                     (re-find #"\.clj[cs]?$" (.getName ^java.io.File %)))
+         srcs  (for [sub ;; `cljs-src` is the third root, and the one that was missing.
+                      ;; `build!` renders a `:cljs` namespace there rather than
+                      ;; under `src/`, off the JVM classpath by design — so
+                      ;; browser code was invisible to every whole-store guard
+                      ;; standing on this seam, and each reported clean on a
+                      ;; population that quietly excluded it
+                      ["src" "test" "cljs-src" "cljs-test"]
                      :let [d (io/file root sub)]
                      :when (.isDirectory ^java.io.File d)
                      f (file-seq d)
                      :when (clj? f)]
                  [(->> (.relativize (.toPath (io/file root sub)) (.toPath ^java.io.File f))
                        str
-                       (#(str/replace % #"\.cljc?$" ""))
+                       (#(str/replace % #"\.clj[cs]?$" ""))
                        (#(str/replace % #"/" "."))
                        (#(str/replace % #"_" "-"))
                        symbol)

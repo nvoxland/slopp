@@ -19,7 +19,7 @@
             [clojure.string :as str]
             [slopp.store :as store]
             [slopp.index.refs :as refs]
-            [slopp.ops.external :as external] [slopp.project.capabilities :as capabilities]))
+            [slopp.ops.external :as external] [slopp.project.capabilities :as capabilities] [rewrite-clj.node :as n]))
 
 (deftest ^:external
   ^{:correspondence "the public WRITE verbs in the operation surface vs what the MCP wire dispatches — a verb nobody can reach is surface an agent is told about and cannot use"}
@@ -193,3 +193,97 @@
           (str (count rows) " form(s) cite a helper doc the reader will not have"
                " — state the reasoning inline instead: "
                (pr-str (mapv :form (take 8 rows))))))))
+
+(deftest ^:external the-browser-SHIM-cannot-branch-and-so-cannot-decide
+  ;; slopp has no ClojureScript test runner — no node, no doo, no karma — so a
+  ;; `:cljs` namespace's only verification is that it compiled. slopp-ui's two
+  ;; worst bugs both lived in exactly such a namespace, and this capability
+  ;; exists to end that condition rather than relocate it into slopp.
+  ;;
+  ;; A `:cljs` namespace is not merely untested, it is outside the LOOP: every
+  ;; edit costs a compile to learn anything, which is the slow path this whole
+  ;; project exists to avoid.
+  ;;
+  ;; So the shim is allowed interop and nothing else. **If it cannot branch, it
+  ;; cannot decide** — every judgement a browser app makes is then in
+  ;; `slopp.webapp`, `:cljc`, driven headlessly by an ordinary test. That is a
+  ;; real checkable property standing in for the tests that cannot exist.
+  ;;
+  ;; **It is a PROXY and this is the place to say so.** It proves this code
+  ;; makes no decisions; it says nothing about whether the interop is correct. A
+  ;; typo in a property name compiles and fails in a browser, and nothing here
+  ;; will catch it. Read as coverage it would be worse than absent.
+  (let [st        (external/built-store)
+        branching '#{if if-not when when-not cond condp case
+                     when-let if-let when-some if-some when-first
+                     cond-> cond->> some-> some->> or and}
+        ;; sexprs rather than TEXT, deliberately: every docstring in the shim
+        ;; discusses the branch it is not allowed to write — `click-data`'s says
+        ;; a `when-let` here would move the judgement into the unverifiable
+        ;; namespace — and a text scan would report the explanation as the crime
+        branches  (fn [sx]
+                    (vec (distinct (for [v (tree-seq coll? seq sx)
+                                         :when (and (seq? v) (symbol? (first v))
+                                                    (branching (first v)))]
+                                     (first v)))))
+        scan      (fn [ns-sym]
+                    (vec (for [f (store/forms st ns-sym)
+                               :let [sx (try (n/sexpr (:node f)) (catch Exception _ nil))
+                                     hits (branches sx)]
+                               :when (seq hits)]
+                           {:form (symbol (str ns-sym) (str (:name f))) :branches hits})))]
+
+    (testing "there is a shim to scan"
+      (is (<= 3 (count (store/forms st 'slopp.webapp.dom)))
+          "no forms means this check has been passing on nothing"))
+
+    (testing "the detector bites"
+      (is (= '[when] (branches '(defn f [x] (when x 1)))))
+      (is (= '[or] (branches '(defn f [x] (str (or x ""))))))
+      (is (= [] (branches '(defn f [x] {:a (.getAttribute x "href")}))))
+      (is (= [] (branches '(defn f [] "a docstring naming when-let and cond")))
+          "prose about a branch is not a branch"))
+
+    (testing "and it bites on the SAME SCAN over the namespace beside it"
+      ;; the positive control, and without it a clean answer above is
+      ;; indistinguishable from a scan that never reached any source.
+      ;; `slopp.webapp` is nothing but decisions — it should be thick with these
+      (is (<= 5 (count (scan 'slopp.webapp)))
+          "the :cljc half decides, so a scan finding nothing there is broken"))
+
+    (testing "the shim itself branches nowhere"
+      (let [hits (scan 'slopp.webapp.dom)]
+        (is (= [] hits)
+            (str "a branch in the browser shim is a decision in the one"
+                 " namespace nothing can check — move it into slopp.webapp,"
+                 " where a JVM test drives it: " (pr-str hits)))))))
+
+(deftest ^:external the-whole-store-SEAM-can-see-browser-code
+  ;; `built-store` reconstructs the store from materialized source, and it is
+  ;; the seam every guard in this namespace stands on. Its file filter is
+  ;; `\.cljc?$` — `.clj` and `.cljc`, **not `.cljs`** — so a `:cljs` namespace
+  ;; is invisible to all of them, and each reports clean on a population that
+  ;; silently excludes it.
+  ;;
+  ;; **Fourth instance of one shape in three days**, after the family glob (a
+  ;; family shipped with zero files), the deps resolver (a refusal on a lib
+  ;; sitting in the basis) and the `goog.*` exemption. An extension check
+  ;; written when two extensions existed is a proxy for "is this source", and it
+  ;; reports on the proxy. This is the worst-behaved of the four because it
+  ;; fails SILENTLY and upward: the guard above it goes green.
+  ;;
+  ;; And it landed inside the mechanism built to end exactly this. `built-store`
+  ;; exists because a whole-store guard scanned an empty store for its entire
+  ;; life; it now has a blind spot of its own, one file extension wide. Which is
+  ;; why every check here asserts its own population first — that discipline is
+  ;; what turned this up, on the run that should have gone green.
+  (let [st (external/built-store)]
+    (testing "a .cljs namespace is in the reconstructed store, under its own name"
+      (is (contains? (:namespaces st) 'slopp.webapp.dom)
+          (str "the browser shim is missing, so every whole-store guard is"
+               " blind to it: "
+               (pr-str (sort (filter #(str/starts-with? (str %) "slopp.webapp")
+                                     (keys (:namespaces st)))))))
+      (is (nil? (get (:namespaces st) 'slopp.webapp.dom.cljs))
+          "stripping the extension has to know about .cljs too, or the ns is
+           named after its own file suffix"))))

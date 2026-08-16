@@ -571,11 +571,11 @@
   ;; path turns every typo into a blank screen at a plausible url, which is the
   ;; SPA failure that makes a site feel broken rather than missing.
   (let [routes (fn [p] (when (#{"/things" "/"} p) {:screen :ok :params {}}))
-        ;; namespaced, because the shim NAMES the three properties it reads off
-        ;; the event — what crosses into the decision is slopp's own data rather
+        ;; namespaced, because the shim NAMES the properties it reads off the
+        ;; event — what crosses into the decision is slopp's own data rather
         ;; than a browser object whose shape nobody declared
         click  (fn [m] (webapp/click-target
-                        (merge {:webapp/button 0 :webapp/modified? false}
+                        (merge {:webapp/button 0}
                                (into {} (for [[k v] m]
                                           [(keyword "webapp" (name k)) v])))
                         "/p/x" routes))]
@@ -586,8 +586,18 @@
     (testing "a MIDDLE click is not — it opens a tab, and always has"
       (is (nil? (click {:href "/p/x/things" :button 1}))))
 
-    (testing "nor a modified one — cmd/ctrl/shift/alt all mean open elsewhere"
-      (is (nil? (click {:href "/p/x/things" :modified? true}))))
+    (testing "each MODIFIER is its own reading, and the decision is here"
+      ;; The shim's alternative is `(or (.-metaKey e) (.-ctrlKey e) …)` — an
+      ;; `or` in the one namespace whose only verification is that it compiled.
+      ;; And it would be a judgement rather than an interop read: WHICH gestures
+      ;; mean "open elsewhere" is a fact about browsers and platforms, and the
+      ;; four differ (cmd on mac, ctrl elsewhere, shift a new window, alt a
+      ;; download). So the shim reads four booleans and names them, and which
+      ;; of them suppress a navigation is decided where a JVM test can read it.
+      (doseq [k [:meta? :ctrl? :shift? :alt?]]
+        (is (nil? (click {:href "/p/x/things" k true}))
+            (str k " opens a tab, a window or a download on some platform —"
+                 " hijacking it is a browser that lies about its own gestures"))))
 
     (testing "an EXTERNAL link leaves, and must"
       ;; preventDefault here is a link that looks live and does nothing
@@ -607,3 +617,187 @@
     (testing "the mount ROOT is routable like any other path"
       ;; `/p/x` is the app's `/`, and a link to it is as ordinary as any
       (is (= "/" (click {:href "/p/x"}))))))
+
+(deftest a-CLICK-and-a-BACK-BUTTON-are-decided-where-a-test-can-watch
+  ;; The two listeners a browser app registers, and neither may decide anything
+  ;; in the browser. [[click-target]] already says WHICH clicks are ours; what
+  ;; is missing is what happens next — `preventDefault` and a push — and that is
+  ;; the half that goes wrong invisibly:
+  ;;
+  ;;   preventDefault on a link that is NOT ours -> a dead link
+  ;;   no preventDefault on one that IS          -> a full page load, and the
+  ;;                                                app restarts on every click
+  ;;   a push on the BACK button                 -> back stops working, because
+  ;;                                                every pop adds an entry
+  ;;
+  ;; All three compile. All three are ordinary assertions here.
+  (let [state     (atom {})
+        pushed    (atom [])
+        prevented (atom 0)
+        app       (webapp/wiring
+                   {:webapp/state     state
+                    :webapp/base      "/p/x"
+                    :webapp/routes    (fn [p] (cond
+                                                (= "/things" p) {:screen :things :params {}}
+                                                (re-find #"^/search" p) {:screen :search
+                                                                         :params {:path p}}
+                                                :else nil))
+                    :webapp/view      (fn [_] nil)
+                    :webapp/push-url! (fn [u] (swap! pushed conj u))})
+        click!    (fn [m] (webapp/click! app (merge {:webapp/button 0} m)
+                                         (fn [] (swap! prevented inc))))]
+
+    (testing "a click that IS ours navigates, pushes, and swallows the default"
+      (click! {:webapp/href "/p/x/things"})
+      (is (= :things (:screen @state)))
+      (is (= ["/p/x/things"] @pushed) "the pushed url carries the mount prefix")
+      (is (= 1 @prevented) "without this the browser also loads the page"))
+
+    (testing "a click that is NOT ours is left entirely alone"
+      ;; the failure is a link that looks live and does nothing, and it is the
+      ;; reason `click-target` answers nil rather than the path unchanged
+      (click! {:webapp/href "https://example.com/things"})
+      (is (= 1 @prevented) "preventDefault here is a dead external link")
+      (is (= 1 (count @pushed)))
+      (is (= :things (:screen @state))))
+
+    (testing "the BACK button arrives as a url and must not push"
+      ;; a push on a pop is the bug that makes back appear broken: each press
+      ;; adds an entry, so the button walks the reader forward through their
+      ;; own history and never leaves
+      (webapp/navigate-url! app "/p/x/search" "" false)
+      (is (= :search (:screen @state)))
+      (is (= 1 (count @pushed)) (pr-str @pushed)))
+
+    (testing "and the url's QUERY reaches the router, not just its path"
+      ;; the browser keeps the two in separate properties; a handler that reads
+      ;; pathname alone routes /search?q=rate to an empty box and LOOKS right
+      (webapp/navigate-url! app "/p/x/search" "?q=rate" false)
+      (is (= "/search?q=rate" (:path (:params @state))) (pr-str @state)))
+
+    (testing "a url outside the mount point is not this app's to show"
+      (webapp/navigate-url! app "/somewhere/else" "" false)
+      (is (= :search (:screen @state))
+          "routing a foreign url through the app blanks the screen it was on"))))
+
+(deftest LEAVING-the-app-is-a-third-kind-of-action-and-declared-like-the-others
+  ;; Some controls are neither a state transition nor a request: they hand the
+  ;; page back to the browser. slopp-ui's project switcher is the real one — a
+  ;; different project is served under a different mount point, so the app it is
+  ;; running IS a different app and cannot be reached by a client route.
+  ;;
+  ;; It is a third kind rather than a special case, and it is DECLARED for the
+  ;; same reason `:effectful?` is: written by hand it becomes a condition in two
+  ;; dispatchers that have to agree, and the one in the browser is the one
+  ;; nothing can check.
+  (let [state  (atom {})
+        left   (atom [])
+        acted  (atom [])
+        called (atom [])
+        app    (webapp/wiring
+                {:webapp/state       state
+                 :webapp/routes      (constantly nil)
+                 :webapp/view        (fn [_] nil)
+                 :webapp/actions     {:project/switch {:leaves? true}
+                                      :thing/run      {:effectful? true}}
+                 :webapp/url-for     (fn [_s action] (when (second action)
+                                                       (str "/p/" (second action) "/store")))
+                 :webapp/request-for (fn [_s _action] {:path "/run"})
+                 :webapp/call        (fn [req ok _err] (swap! called conj req) (ok :done))
+                 :webapp/act         (fn [s action _v] (swap! acted conj action) s)
+                 :webapp/leave!      (fn [url] (swap! left conj url))})]
+
+    (testing "a :leaves? action goes to the leave plug-in, with the app's url"
+      (webapp/dispatch! app [:project/switch "b"] nil)
+      (is (= ["/p/b/store"] @left)))
+
+    (testing "and does NOT also transition or make a request"
+      ;; running two halves is how two dispatchers drift back apart — each does
+      ;; the half its author was thinking about
+      (is (= [] @acted))
+      (is (= [] @called)))
+
+    (testing "the other two kinds still go where they went"
+      (webapp/dispatch! app [:thing/run] nil)
+      (is (= [{:path "/run"}] @called))
+      (webapp/dispatch! app [:thing/rename] "x")
+      (is (= [[:thing/rename]] @acted))
+      (is (= 1 (count @left)) "neither of those is a leave"))
+
+    (testing "a nil url DECLINES, exactly as a nil request does"
+      ;; the pure derivation's channel for refusing: an unarmed switcher, a
+      ;; selection not yet made. Throwing here would push every app's arming
+      ;; pattern into the browser
+      (webapp/dispatch! app [:project/switch nil] nil)
+      (is (= 1 (count @left)) (pr-str @left)))
+
+    (testing "and a :leaves? action with no :webapp/url-for REFUSES"
+      ;; the same refusal `:effectful?` gets without a request: a control that
+      ;; appears to work and quietly does nothing is the outcome ruled out
+      (let [bare (webapp/wiring {:webapp/state   (atom {})
+                                 :webapp/routes  (constantly nil)
+                                 :webapp/view    (fn [_] nil)
+                                 :webapp/actions {:project/switch {:leaves? true}}})]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #":webapp/url-for"
+                              (webapp/dispatch! bare [:project/switch "b"] nil)))))))
+
+(deftest what-happens-at-PAGE-LOAD-is-two-steps-and-neither-is-the-shim's
+  ;; A browser entry does exactly two things when the bundle runs: it lets the
+  ;; app start whatever belongs to no particular screen, and it shows the url
+  ;; the reader arrived at. Both are decisions — the ORDER especially, since
+  ;; boot is where session-scoped loads begin and the first screen may read
+  ;; them — so both are here rather than in the shim.
+  (let [state  (atom {})
+        booted (atom 0)
+        app    (webapp/wiring
+                {:webapp/state  state
+                 ;; nil, because that is what `(.getAttribute el "data-base")`
+                 ;; answers for an app served at the root: the attribute is
+                 ;; simply absent. The shim reads and does not interpret
+                 :webapp/base   nil
+                 :webapp/routes (fn [p] (when (= "/things" p) {:screen :things :params {}}))
+                 :webapp/view   (fn [_] nil)
+                 :webapp/boot   (fn [s] (swap! booted inc) (assoc s :session "abc"))})]
+
+    (testing "a mount point the DOM does not carry means the ROOT"
+      (is (= "" (:webapp/base app))
+          "nil would prefix every pushed url with the string \"null\""))
+
+    (testing "boot runs once, and its writes survive the first routing"
+      (webapp/start! app "/things" "")
+      (is (= 1 @booted))
+      (is (= "abc" (:session @state))
+          "arriving must not clear what boot established — a session token
+           cleared on the first navigation is a page that logs itself out")
+      (is (= :things (:screen @state))))
+
+    (testing "and an app that declares no boot still starts"
+      ;; the default has to be a function rather than nil, or every caller —
+      ;; the driver, the entry, the next one — writes the same `or`
+      (let [s2 (atom {})
+            a2 (webapp/wiring {:webapp/state  s2
+                               :webapp/routes (constantly {:screen :ok :params {}})
+                               :webapp/view   (fn [_] nil)})]
+        (is (fn? (:webapp/boot a2)))
+        (webapp/start! a2 "/anything" "")
+        (is (= :ok (:screen @s2)))))))
+
+(deftest a-page-with-no-MOUNT-POINT-is-refused-by-NAME
+  ;; The server's template renders `<div id="app">` and the bundle mounts into
+  ;; it. When the template does not, every browser says
+  ;; `Cannot read properties of null (reading 'getAttribute')` — in a console
+  ;; nobody has open, under a blank page, naming a property rather than the
+  ;; thing that is missing.
+  ;;
+  ;; This is the constructor refusal `wiring` and `screen/open!` already make,
+  ;; one input further out, and it is checkable HERE despite being about a DOM
+  ;; node: `nil?` is not a platform question, so the element crosses into `:cljc`
+  ;; as an opaque value and the refusal is an ordinary test.
+  (testing "an absent element is named, and so is what renders it"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"id=\"app\""
+                          (webapp/mount-point nil))))
+
+  (testing "and a present one passes straight through"
+    ;; a string stands in for the element, which is the assertion: this asks
+    ;; whether there IS a node and never what it is, so anything non-nil does
+    (is (= "an element" (webapp/mount-point "an element")))))

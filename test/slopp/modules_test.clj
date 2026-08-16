@@ -2202,3 +2202,33 @@
             (str "a required namespace shipped as .cljs resolves to nothing, and"
                  " the derivation refuses on a lib that is present — which is"
                  " what a browser family's renderer will always be"))))))
+
+(deftest ^:external the-vendored-deps-derivation-knows-what-the-COMPILER-provides
+  ;; `framework-deps` skips `clojure.*` and `slopp.*` and demands a basis lib
+  ;; for everything else, refusing when it finds none. That refusal is right and
+  ;; it has a third exemption it does not know about: **`goog.*` ships inside
+  ;; the ClojureScript compiler**, not as a Maven artifact, so no jar on the
+  ;; basis contains `goog/object.cljs` and no jar ever will.
+  ;;
+  ;; A browser shim reaches for it immediately — `goog.object/getValueByKeys` is
+  ;; the nil-safe property read, and nil-safety is exactly what a shim needs so
+  ;; that it can plumb an absent DOM event across to the `:cljc` that decides.
+  ;; So the first `:cljs` namespace slopp ships would fail the build of its own
+  ;; family, on a namespace that is present in every ClojureScript compile.
+  ;;
+  ;; **Third instance of one shape in three days**, after the family glob and
+  ;; the `.cljs` resolver: a rule written when the world had one kind of member
+  ;; states itself as if it had enumerated them. `clojure.*` and `slopp.*` were
+  ;; not a list of exemptions, they were the exemptions that existed.
+  ;;
+  ;; Asserted textually because `build.clj` is a file humans own, outside the
+  ;; store — same shape as its two neighbours above, same reason. The
+  ;; behavioural proof is the webapp family's own `framework-deps.edn`.
+  (let [f (clojure.java.io/file "build.clj")]
+    (is (.exists f) "build.clj is the file this test is about")
+    (let [src (slurp f)]
+      (is (str/includes? src "(str/starts-with? s \"goog.\")")
+          (str "a :cljs namespace requiring goog.object fails the build of its"
+               " own family, and the fix is real work in a consumer's repo:"
+               " there is no lib to add, because the compiler is where it"
+               " lives")))))
