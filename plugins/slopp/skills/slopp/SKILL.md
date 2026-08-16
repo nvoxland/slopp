@@ -1628,17 +1628,17 @@ stop being the assumption once the app grows.
 #### If you go all the way: no server-rendered pages at all
 
 - **Serve ONE document** — head, an empty `<div id="app">`, nothing else —
-  and declare `:web/spa` with the prefixes your client router owns. Note the
-  prefix ROOT is not covered (`["/store"]` generates `/store/*`), so `/store`
-  itself needs its own route.
+  and declare `:web/client-routes` with the prefixes your client router owns.
+  Note the prefix ROOT is not covered (`["/store"]` generates `/store/*`), so
+  `/store` itself needs its own route.
 - **Consequence to state out loud: every path under a declared prefix now
   answers 200.** Not-found moves into the client. A bad deep link that used
   to 404 now serves the document and the client renders "not found" after its
   fetch 404s. That is correct, and it is a real change in what your status
   codes mean. `done` says it once, for the episode that adds the declaration
-  (`http-spa-consequences`) — and `full_check`'s `:crossings` keeps listing it as an
-  UNCHECKED exit, because nothing compares your client's route table to the
-  server's.
+  (`webapp-client-routes-consequences`) — and `full_check`'s `:crossings` keeps
+  listing it as an UNCHECKED exit, because nothing compares your client's route
+  table to the server's.
 - **`route-for` in `.cljc`, returning nil for unknown paths.** With server
   rendering gone this IS your routing table, so make it a pure function and
   test it in-image. Never default an unknown path to a screen — that tells

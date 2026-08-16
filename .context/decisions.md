@@ -2288,7 +2288,22 @@ namespaces (today `store/ingest` bypasses the module gate, so a `done`/
 question part 3 will surface). Program roadmap: `.context/roadmap.md` (typed API
 contracts).
 
-## D-spa (2026-07-25) — REST API plus a client-side SPA is the supported architecture
+## D-webapp (2026-07-25, RENAMED 2026-08-16) — REST API plus a client-side SPA is the supported architecture
+
+**Renamed from `D-spa`.** `spa` had become a second name for a thing that
+already had one: the capability is `webapp`, its config keys are `webapp.*`, its
+namespaces are `slopp.webapp*` and all its rules are `webapp-*` (enforced both
+directions by `rules-test/a-rule-owned-by-an-app-type-is-named-for-it`). Two
+words for one concept is the drift this log exists to prevent, and the decision
+name was the oldest of them. Swept in the same pass: `:web/spa` →
+`:web/client-routes`, the crossing kinds `:spa/*` → `:webapp/*`,
+`web.routes/spa-rows` → `client-route-rows`, and the advisory
+`webapp-spa-consequences` → `webapp-client-routes-consequences`.
+
+*SPA* survives in PROSE below, where it is the industry term for the
+architectural style rather than a name for anything slopp ships. That
+distinction is the whole rule: name our things once, and use English for
+everything else.
 
 The question the user asked behind a UI request: what shape of web application
 does slopp support as a NON-TRIVIAL app grows? Answer, a user call: **a REST
@@ -2379,7 +2394,7 @@ inspect is how a tool's limitations become a product's ceiling.
 ### Shipped so far
 
 - **SPA deep-link fallback** — a DECLARED fallback for a path prefix
-  (`:web/spa`, `slopp.web.routes/spa-rows`, ordered exact → static → fallback)
+  (`:web/client-routes`, `slopp.web.routes/client-route-rows`, ordered exact → static → fallback)
   so a refreshed client route serves the app document. Declared rather than a
   catch-all precisely so the gates still read it and a genuinely missing path
   still 404s — a fallback that swallows 404s is worse than none.
@@ -2430,7 +2445,7 @@ first is the one worth remembering:
   had not earned (D-surface-honesty).
 
 Deferred: extending client-route integrity to the client-side route table;
-`:web/spa` is built but nothing declares it, because the reviewer UI has real
+`:web/client-routes` is built but nothing declares it, because the reviewer UI has real
 server routes for every client route and is progressively enhanced rather than
 a hard SPA. Remaining frictions: `ideas/logs/spa-wave-frictions.md`.
 
@@ -2454,7 +2469,7 @@ x/y/w/h is supplied by the caller, which is why
 dagre/ELK and hands Excalidraw finished coordinates).
 
 **Rejected: mermaid.** It is a document-embedding tool: a string in, opaque SVG
-out. That forfeits the three properties D-spa is built on — views as `:cljc`
+out. That forfeits the three properties D-webapp is built on — views as `:cljc`
 pure fns `=`-testable in-image at ~0.5 ms, Replicant owning its subtree, and
 interaction as data. Hover-to-dim or click-to-select would mean mutating a
 foreign library's output DOM inside a Replicant tree.
@@ -2924,8 +2939,8 @@ project, the stylesheet, the compiled bundle — and proxying only
 - **Asset urls are absolute.** One stylesheet and one bundle for every project
   fronted, at `/css/style.css` and `/assets/cljs/main.js`, because the hub is
   always at the root. Pinned by `hub-test/the-documents-asset-urls-are-absolute-and-stay-that-way`.
-- **`:web/spa` prefixes carry the slug** — `["/p/:slug/store" "/p/:slug/change"]`.
-  `spa-rows` concatenates onto the declared prefix and the router reads the
+- **`:web/client-routes` prefixes carry the slug** — `["/p/:slug/store" "/p/:slug/change"]`.
+  `client-route-rows` concatenates onto the declared prefix and the router reads the
   capture like any other, so a per-project fallback needed no new matching
   rule. Scoped, not a root catch-all: `/p/slopp2/nonsense` still 404s.
 

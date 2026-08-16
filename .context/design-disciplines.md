@@ -399,7 +399,8 @@ order of the R6 catalog work rather than being noticed afterwards.
 
 The guard asks *is a rule implemented under an app type's namespace named for
 that type?* Run against the real catalog it named three of four violations.
-The two it could not see — `web-spa-consequences` and `web-stale-client` — were
+The two it could not see — `web-spa-consequences` (today
+`webapp-client-routes-consequences`) and `web-stale-client` — were
 web-only checks sitting in the GENERIC `slopp.rules`, so they had no app type
 to disagree with their name. **A rule with no owner is indistinguishable from
 a rule that is correctly generic**, and the guard reported accordingly.
