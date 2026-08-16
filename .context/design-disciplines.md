@@ -2321,3 +2321,41 @@ its failure is free; put it after the mutation and it is a repair.
 Both halves of that exchange are worth keeping together, because they happened
 in messages ABOUT how checks fail: mine was unrunnable by its reader, theirs was
 untested by its author.
+
+### Sharpening (2026-08-15): the REMEMBERED ALPHABET, and why its losses are not random
+
+Two instances in one week, in two different tools, on two different stores:
+
+| pattern | wrote | dropped | cost |
+|---|---|---|---|
+| mine, a migration grep | `[a-z.*<>]*` | `/` | `web.static./assets` — the mount serving the consumer's bundle |
+| slopp-ui's var scan | mangled the `!` | `!` | `open!` `visit!` `click!` `fill!` |
+
+**The name is slopp-ui's: a remembered alphabet.** A character class written
+from the members the author could call to mind, which by construction omits the
+ones they could not.
+
+The half worth keeping is their sharpening of it, because it turns a memory
+failure into a structural one:
+
+> In a codebase with naming conventions, the unusual character IS the
+> significance marker. `!` marks the effectful vars. `/` marks the
+> wildcard-family key. So a remembered alphabet is not randomly lossy — it is
+> **systematically biased against the members that carry the most meaning**,
+> because what makes a name unusual is the same thing that makes the thing
+> unusual.
+
+Neither filter dropped a random third of its population. Each dropped exactly
+the marked category: every static mount, every mutating var. That is why it
+happened twice in a week rather than twice a year, and it is why "be more
+careful with character classes" is the wrong lesson — the bias survives care.
+
+**The discipline: do not spell what you can delimit.** Both bugs vanish without
+a rule, a check or a review habit, by never enumerating an identifier alphabet
+at all — split on `=` or on whitespace and take the field, and you never have to
+know what a name may contain. Each pattern existed because we described a name's
+SHAPE when we only needed its POSITION.
+
+This is Core 9 seen from a new angle: a character class is a PROXY for "an
+identifier", it reports in the real thing's voice, and its silent narrowing is
+worst exactly where the population matters most.
