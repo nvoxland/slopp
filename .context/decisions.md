@@ -4192,3 +4192,83 @@ you are declining.
 
 Filed alongside, not fixed: the `rules` config has no registry, so a renamed
 dial and a mistyped one are the same event and both are accepted at the write.
+
+### D-capabilities, wave 3 closures (2026-08-16) — the four gaps, and two a consumer found
+
+The wave shipped with four gaps named in its own log. All four are closed, and
+the last paragraph above is superseded: **the `rules` config has a registry
+now.** `rules.catalog/config-refusal` grades a dial against every rule the
+catalog knows and refuses a near miss by shared name SEGMENTS, so
+`http-unsafe-get` and `http-unsafe-gets` stop being the same event.
+`sweep-plan` gained `:orphaned-dials` — a stored dial that governs nothing,
+with its VALUE carried, which makes it a migration instruction rather than a
+complaint. `config_file` now reports `:verified [:registry]` for two paths
+rather than one, and the docstring says so; the honest `:unverified [:schema]`
+admission on the remaining paths is what got this fixed, which is the argument
+for printing it.
+
+**A command's returned value renders a sequence of MAPS as a table.** Measured:
+a `list` command in a real tool printed 36 KB of raw EDN, one `pr-str` per row.
+The decision that a command returns DATA is right and is what makes its tests an
+`=` on a map; the gap was that the ONE shape every `list` command returns had no
+rendering. `render`'s docstring drew a line at "not a formatting library" and
+that line is still drawn, one step further out and said so: header once, aligned
+columns, a fixed truncation width because a table wider than a terminal is a
+wall again, and then nothing. No colour, no wrapping, no `--format`, no column
+selection. A command that wants more returns the string it wants — the escape
+hatch already existed and is still the honest answer for anything a table cannot
+say. The `:cli/render` hint and a slopp-owned `--format` were both considered
+and are not built.
+
+**A scaffold may require a namespace that does not exist yet.** `ns_create`
+creates it EMPTY and names it in `:also-created`. Red-first worked within a
+namespace — `add-form!` interns a throwing stub for an unimplemented var — and
+not across one, where a spec requiring an unwritten namespace failed to LOAD:
+a refusal, not a failing test, on a brand-new project where every namespace is
+the first one. An empty namespace is the namespace-grained stub, and it is a
+real store write rather than an image trick because the author is going to
+create it anyway and its EXISTENCE was never what the test was about.
+
+**The root-segment test is the entire guard and is not negotiable.** A require
+naming a LIBRARY must never conjure an empty namespace over it: the real one
+would be shadowed and every call would resolve to nothing — a worse failure than
+the refusal this replaces, and a silent one. A require sharing the new
+namespace's own root is code the author is about to write; anything else belongs
+to somebody else. `failed-namespace-load-is-not-silently-committed` kept its
+invariant and changed its fixture, with a control arm pinning the two cases
+apart, because retiring a trigger is not the same as retiring a subject.
+
+**`:went-green` is derived from the complete set of failing test NAMES, never
+from the failure blocks.** The blocks are capped for response size, so a test
+past the cap has no block, which is indistinguishable from having passed — and
+a write announced a test green while an immediate re-run showed it failing with
+the message it had before. `traced-run` now carries `:failed-tests` unbounded
+(symbols, so completeness is nearly free); when a summary carries no names and
+the detail was demonstrably capped, no green is claimed and `:reds-uncertain`
+says why. That degraded path is the state of every session between a kernel edit
+and a rebuild, because the injected runtime is read off the reading process's
+classpath. Reasoning: `.context/design-disciplines.md`, "a BOUNDED observation
+cannot carry an UNBOUNDED conclusion".
+
+**`rename_sweep` REPORTS regex literals it cannot see and does not rewrite
+them.** A pattern spells a dotted name `web\.static`, which shares no literal
+text with `web.static`; seven survived one wave and two of those survived three
+green done-points, during which one rule refused every declared auth group as
+unknown while teaching the author to configure the key it was already reading
+past. They arrive under `:left-behind` with `:via :regex`, in the preview and
+after the write. Rewriting was rejected on principle rather than on difficulty:
+a regex is an INTENT, whether a `.` in one separates or matches anything is a
+question about what the author meant, and a sweep that guessed would be wrong
+silently — in the direction where a predicate quietly matches nothing.
+
+**Two defects a consumer found, both from this wave's code.** `query_surface`
+threw on any contract that was not a map, taking nine endpoints down for a
+tenth; the schema accessor was total over malformed input and not over SHAPES,
+and now degrades to the schema's own type keyword rather than to `[]`, which
+would be a claim about the contract instead of about the report. And
+`sweep-store!` destructured two keys out of `sweep-plan`'s four, so a `:note`
+computed for a reader reached nobody — every test of that decision asserted on
+the pure plan, correctly, which is exactly how the join went unwatched. Both are
+recorded as disciplines: "a report over a POPULATION must not be hostage to one
+member" and "splitting a DECISION from its PERFORMANCE creates a join nothing
+watches".

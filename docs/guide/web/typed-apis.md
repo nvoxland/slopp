@@ -108,6 +108,12 @@ Names rather than schemas, deliberately: this is the one report that grows with
 your application rather than with your question. `query_slice` on the handler
 gives the schemas exactly.
 
+A contract that is not a map answers with its own type instead of a key list —
+`:or`, `:string` — because there is nothing to enumerate, and `[]` would be a
+claim about your contract rather than about the report. A map *inside* a
+collection is seen through: `[:sequential [:map [:id :int]]]` reports `[:id]`,
+since a list endpoint is the commonest non-map contract there is.
+
 `:published` is `false` for an endpoint that opted out with `:web/client false`
 — an HTML page is a `:web/path` form like any other, and a generated fetch
 wrapper over one would be nonsense. It is a field rather than an omission so

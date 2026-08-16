@@ -166,7 +166,8 @@
   instrumentation once (F-3c1). Instrumentation is temporary — originals are
   restored in a finally. Returns
   {:summary {:test .. :pass .. :fail .. :error .. :type :summary
-             :failures [{:test :type :message :expected :actual} ...]}  ; when red
+             :failures     [{:test :type :message :expected :actual} ...] ; capped
+             :failed-tests [qualified-test-sym ...]}                      ; complete
    :trace   {qualified-test-sym #{qualified-form-sym ...}}}
 
   The IN-IMAGE tier. Wraps its own per-var loop with `instrument!`; the
@@ -184,12 +185,20 @@
 
   Failure details are captured by rebinding clojure.test's dynamic `report`
   multimethod (F1) — without this they'd be printed to the image's stdout and
-  lost. Bounded: ≤20 entries, values truncated to 400 chars."
+  lost. Bounded: ≤20 entries, values truncated to 400 chars.
+
+  **The NAMES are not bounded, and the pair is the point.** Detail has to be
+  capped or one bad run fills a response; names are symbols and cost nothing,
+  and a reader deciding which previously-red tests went GREEN needs all of
+  them. Off a capped list alone a test past the cap looks exactly like a test
+  that passed — measured: a write announced a test green while an immediate
+  re-run showed it still failing with the message it had before the write."
   [test-ns target-nses only & [skip-integration? methods]]
   (let [test-nses (if (coll? test-ns) test-ns [test-ns]) ; F-3c1: whole project
         touched   (atom #{})
         current   (atom nil)
-        failures  (atom [])
+                failures  (atom [])
+        red-names (atom #{})
         attr      (reduce (fn [m [form-ns multi-sym dispatch form-key]]
                             (try
                               (let [v (ns-resolve form-ns multi-sym)]
@@ -219,15 +228,24 @@
                        (case (:type m)
                          :begin-test-var (reset! current (qualified (:var m)))
                          (:pass :fail :error)
-                         (do (t/inc-report-counter (:type m))
-                             (when (and (not= :pass (:type m))
-                                        (< (count @failures) 20))
-                               (swap! failures conj
-                                      {:test     @current
-                                       :type     (:type m)
-                                       :message  (some-> (:message m) str)
-                                       :expected (truncate (pr-str (:expected m)) 400)
-                                       :actual   (render-actual (:actual m))})))
+                                                  (do (t/inc-report-counter (:type m))
+                             (when (not= :pass (:type m))
+                               ;; the NAME is recorded unbounded while the
+                               ;; detail is capped. A reader deciding which
+                               ;; previously-red tests went green cannot use a
+                               ;; capped list: a test past the cap has no block,
+                               ;; which is indistinguishable from passing, and
+                               ;; announcing it green is the one direction of
+                               ;; this signal that costs anything. Names are
+                               ;; symbols, so completeness here is nearly free.
+                               (swap! red-names conj @current)
+                               (when (< (count @failures) 20)
+                                 (swap! failures conj
+                                        {:test     @current
+                                         :type     (:type m)
+                                         :message  (some-> (:message m) str)
+                                         :expected (truncate (pr-str (:expected m)) 400)
+                                         :actual   (render-actual (:actual m))}))))
                          nil))
             trace    (binding [t/*report-counters* counters
                                t/report record]
@@ -237,7 +255,8 @@
                                    (t/test-vars [tv])
                                    [(qualified tv) @touched]))))]
         {:summary (cond-> (assoc @counters :type :summary)
-                    (seq @failures) (assoc :failures @failures))
+                    (seq @failures)  (assoc :failures @failures)
+                    (seq @red-names) (assoc :failed-tests (vec (sort @red-names))))
          :trace   trace})
       (finally
         (restore! originals)))))

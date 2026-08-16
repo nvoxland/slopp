@@ -28,6 +28,17 @@ every rule with its current effective severity and how to discharge it;
 `query_rule_telemetry` shows which ones actually fire and whether findings get
 fixed or ignored.
 
+**Both halves are checked against the catalog**, so a dial that governs nothing
+is refused at the write rather than stored. That matters more than it sounds: a
+dial is set once and never re-read, so a mistyped one is silent twice — the rule
+it meant to name returns to its default, and the store goes on carrying a line
+that reads like configuration. A near miss names the rule you meant.
+
+A rule that gets RENAMED cannot be refused that way, because the dial was valid
+when it was written. Those turn up as `:orphaned-dials` in `full_check`, with
+the value carried across so the report is a migration instruction rather than a
+complaint.
+
 slopp's own store runs the catalog blocking. A rule an agent can walk past does
 not change behaviour, and a store with no legacy code has no reason to tolerate
 one. A project adopting slopp on an existing codebase is the case for dialing

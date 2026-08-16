@@ -28,7 +28,15 @@ yet is not an error; it lands as an honest red.
 ns_create {ns "invoice.total-test"
            requires ["[clojure.test :refer [deftest is]]"
                      "[invoice.total :as total]"]}
+;; {:also-created ["invoice.total"]}
+```
 
+Note what that requires: `invoice.total` **does not exist yet**. It is created
+empty and named in `:also-created`, so the spec can load and go red rather than
+failing to load — which is a refusal, not a failing test. Only requires sharing
+your own root are invented this way; a library is never conjured over.
+
+```clj
 edit_add_form {ns "invoice.total-test"
                source "(deftest line-total-applies-discount
                           (is (= 90.0 (total/line-total {:qty 1 :price 100.0 :discount 0.1}))))"
@@ -45,9 +53,9 @@ The response comes back red, with `:red-first` naming the vars it stubbed:
 
 ## 3. Implement
 
-```clj
-ns_create {ns "invoice.total"}
+The namespace is already there, empty, waiting for its first form.
 
+```clj
 edit_add_form {ns "invoice.total"
                source "(defn line-total
                          \"Extended price for one line, after its discount.\"

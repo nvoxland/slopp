@@ -50,7 +50,11 @@ Other keys you will see:
   mid-episode; catch them up in the next writes.
 - `:red-first` -- vars a new test referenced that do not exist yet, stubbed in
   the image so they fail honestly.
-- `:still-red` / `:went-green` -- which reds persisted and which cleared.
+- `:still-red` / `:went-green` -- which reds persisted and which cleared. Derived
+  from the complete list of failing test names, never from the failure blocks,
+  which are capped: a test past the cap has no block, and that is
+  indistinguishable from having passed. If a run cannot supply the names it
+  claims no greens and says so in `:reds-uncertain` rather than guessing.
 - `:staleness-healed true` -- the red was image staleness, already healed.
   `:image-healed true` -- the image was rebuilt under you.
 - `:fresh-confirmed true` -- the red survived a fresh image, so it is real.

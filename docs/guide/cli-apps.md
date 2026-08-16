@@ -61,6 +61,25 @@ code rather than exiting; the generated launcher is the only place
 Return `:cli/exit` to choose the status yourself. Without one, a return is
 success.
 
+### How the value is rendered
+
+A map prints as aligned `key value` lines. **A sequence of maps prints as a
+table** — header once, columns aligned, long cells truncated:
+
+```
+file   from  subject
+a.md   ann   the first one
+bb.md  bo    another
+```
+
+That case is here because it is the one a `list` command returns, and one
+`pr-str` per row is a wall of EDN: correct, machine-readable, unreadable.
+
+And that is the whole of it. No colour, no wrapping, no column selection, no
+`--format`. A command that wants more returns the string it wants — rendering
+is the framework's job only for as long as it is doing a better job than you
+would.
+
 `:cli/in` and `:cli/out` are on the context for the two things a return value
 cannot express: reading stdin, and reporting progress while work is still
 happening. Writing to those is fine — it is what they are for. Reaching for the

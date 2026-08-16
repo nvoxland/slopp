@@ -2400,3 +2400,89 @@ of WHICH rules actually stop, and that check found a real defect neither party
 had — four rules listed under a capability's `:arms` that ran regardless of the
 switch. A mis-read report that causes someone to go and measure is not the same
 as a report nobody reads.
+
+### Sharpening (2026-08-16): a BOUNDED observation cannot carry an UNBOUNDED conclusion
+
+Core 9 with the proxy named precisely. `traced-run` caps failure DETAIL at 20
+blocks, which is right — one bad run would otherwise fill a response.
+`shape-episode-reds!` then derived *which previously-red tests went GREEN* from
+those blocks: a test absent from the list must have passed.
+
+On a run with 26 failing assertions, six of them had no block. One of those was
+a test that had been red before and was red still, and the write announced it
+`:went-green`. Measured, then reproduced from a hand-built summary.
+
+The list was never wrong. It was a bounded sample of the failures, and the
+conclusion drawn from it — *this test is not in the failures, therefore it
+passed* — needed the complete set. **Absence in a truncated list is not
+evidence of anything**, which is the one-armed comparison one rung in: the cap
+and a pass produce the identical silence.
+
+Three things this leaves behind:
+
+- **Say what the CAP costs, at the place the cap is taken.** The runner now
+  carries `:failed-tests` — every failing name, unbounded, symbols only. Detail
+  has to be bounded; identity almost never does, and the two were being carried
+  by one structure.
+- **When the complete set is unavailable, claim nothing and say why.** A reader
+  that cannot tell the difference must not pick one. `:reds-uncertain` names the
+  cap, the counts, and the remedy; the alternative is silence, which reads as
+  "nothing went green" — a different and wrong claim.
+- **A false claim in the direction of DONE is the expensive direction.**
+  `:went-green` is the signal an agent reads to decide it has finished, and this
+  misfired only on large red runs, which is exactly when the reader most needs
+  it. Where a signal has an asymmetric cost, the degraded mode has to fail
+  toward the cheap side.
+
+### Sharpening (2026-08-16): a report over a POPULATION must not be hostage to one member
+
+`query_surface` threw on a real store the day it enabled `rest`, with
+`Don't know how to create ISeq from: malli.core$_map_schema$reify`. The
+`contracts-report` row read each schema through `(mapv first (m/children …))`,
+which reads a `:map`'s `[k props schema]` entries — and every other schema's
+children are compiled schema objects, so `first` on one throws.
+
+Nine endpoints were unreadable because a tenth answered
+`[:or [:map …] [:map …]]`.
+
+The accessor was already TOTAL over malformed input — it returned nil rather
+than throwing on something that was not a schema at all. **Totality over
+garbage is not totality over SHAPES**, and the shapes are where a real store
+differs from a fixture: every fixture in the suite declared a plain map, because
+a plain map is what you write when you are demonstrating the feature. The member
+most likely to be unusual is the one somebody reached for when the ordinary
+thing would not do.
+
+Two rules follow:
+
+- **A row is per-member; a throw is per-report.** Anything derived per row
+  inside a store-wide report needs a defined answer for every shape the store
+  can hold, or one member takes the whole population offline.
+- **Degrade to a FACT, not to an empty value.** The fix answers with the
+  schema's own type keyword (`:or`, `:string`) where there are no names to
+  list. `[]` was available and would have been worse: it reads as "a map with no
+  keys", a claim about the contract, where `:or` is a claim about the report.
+
+### Sharpening (2026-08-16): splitting a DECISION from its PERFORMANCE creates a join nothing watches
+
+`sweep-plan` is pure and returns four keys; `sweep-store!` performs it and
+destructured two of them out. `:note` and `:orphaned-dials` were computed
+correctly, tested thoroughly, and delivered to nobody. A consumer was told the
+note had landed, went to read it, and it was not there.
+
+Extracting the decision was right, and this document argues for it repeatedly —
+what a check DECIDES is worth asserting without a session, an image, or a store
+full of forms. The cost is the part that had not been written down: **the
+extraction creates a seam, and every test naturally lands on the pure side of
+it.** Each assertion about the decision passed. The reader saw none of it.
+
+The join is not covered by testing either half harder. It is covered by one
+test that crosses it, and the test has to be STRUCTURAL — *every key the plan
+decided appears in what the performer returns* — because a list of names would
+keep passing while the next key added silently failed to arrive. A key is added
+to a plan FOR a reader; the performer must not be a second place it has to be
+added.
+
+Same shape as `db/unlanded-count`, `views/screens` and `capabilities/rule-owner`
+one step on: those made two READERS agree by giving them one producer, and this
+makes the producer's whole answer survive the trip to the reader.

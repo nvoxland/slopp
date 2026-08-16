@@ -317,7 +317,7 @@ walkable, they just stop being on anybody's way forward.
 | Rename a namespace ALIAS (`[a.b :as old]` -> `:as new`) | `ns_realias {ns old new}` — the `:as` in the ns form AND every `old/sym` in that namespace's bodies, one verified write. **There is no hand route**, and that is why this is a tool rather than two edits: between the two writes the ns form and the bodies disagree about the qualifier and the namespace does not load, so the alternative is the add-both / migrate / drop dance. **Reach for it right after `ns_rename`**, which rewrites namespaces and walks straight past the `:as` — the moved code keeps being called by its old module's name, and the day that name gets REUSED the alias starts pointing at a real, different module, which is worse than one naming nothing. You do not have to spot them: the rename lists them under `:left-behind :alias`, each with the `:suggest` to pass here. Scoped to one namespace by design: an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift and there is no store-wide version. A BARE `old` is left alone — only `old/x` is the qualifier, and the same spelling is routinely a local or a parameter three tokens away. Read `:sites` (0 means the alias was unused, not that nothing happened) and `:left-behind` |
 | Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. Whole-word only, so `region-ish` survives a `region` sweep. **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
 | Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **Read `:requalified` and `:left-behind`; absence of either means checked-and-none.** `:requalified` is the half of the diff that is not a text substitution, and worth an eye for that reason alone. `:left-behind` is the half the tool DECLINED: changing the key's NAME (`:a/x` -> `:a/y`) rather than its qualifier cannot be applied to a destructuring, because the symbol is a LOCAL BINDING the body reads — so sweep the qualifier and rename the name as two steps, or finish the named forms by hand. A stranded destructuring presents as nil arriving silently rather than as an error, so the only tests that can catch one are the ones exercising the value END-TO-END — which for a session, a projection or a subprocess means `^:external`, and those are exactly the ones a write DEFERS. Do not read the write's green as coverage here |
-| Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep silently declines these), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
+| Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep cannot rewrite these and now NAMES them under `:left-behind :via :regex`, so read that list; measured at seven in one wave, two of which survived three green done-points), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
 | Extract helper / move forms to another ns | `edit_extract` / `edit_move_forms` (new OR existing target; callers everywhere rewritten; `export: true` for a deep target with outside callers). **Propose the cluster you want and let it close the set for you** — it refuses a two-way split and NAMES the forms that would leave a cycle ("the moved set calls [x y] (staying)"). Add those and retry. Guessing the seam leaves a cycle; the refusal IS the analysis. `export: true` WIDENS per var — a var already `^:export` keeps its level without the flag, so you never pass it just to restate something already true, and passing it does not silently widen the rest. Read `:export-not-landed` on the result: the move checks its own POSTCONDITION against the committed store and names the VAR, so a planned export the store did not actually get is reported rather than discovered later. **And read `:shadowed`, which is the one finding a green write does not cover** — refs INTO the target go bare, so a moved form that binds a LOCAL of that name now calls the local: it compiles, the suite passes, and the behaviour changed |
 | Regroup whole namespaces under one prefix | `module_extract {namespaces to}` — the MODULE-grain move, for a namespace that grew into its own component or a set that wants one owning prefix. Each named ns takes its subtree and `-test` sibling. **`dry-run` first, always**: going from two segments to three makes a namespace package-private, so every outside caller breaks at once, and the plan is the only place you see WHICH vars must be hoisted and WHICH CALLERS force each. The write order is the design — hoist (`^:export`), then rename, then declare the edges the moved store actually references — so no intermediate state is one the gate would refuse. Refuses a regroup that would leave a production cycle; a `-test` back-edge is not one |
 | Reorder / delete / undo | `edit_move` / `edit_delete_form` / `edit_revert`. **A delete whose form still has a caller is REFUSED**, naming every caller — the same stance `ns_delete` takes for a namespace something still requires. Only `:static` references count (a quoted symbol or a `^{:covers}` marker names a form without needing it), and a recursive function is not its own caller. To remove a caller and its callee together, delete in REVERSE DEPENDENCY ORDER — callers first, callee last, one call each; every step verifies and every intermediate state loads. Two forms that call EACH OTHER have no valid order: `edit_replace_form` one to drop the call, then delete both. `query_depends {on "ns/name"}` still answers the question BEFORE you write, and is worth asking when you are planning a removal rather than discovering its size from a refusal. Recovery for any write is `undo {deltas 1}` — but `undo` walks back only YOUR OWN writes, so a delete made under a different agent (a `--call` script, another session) answers `no writes of yours to undo` while looking straight at it; that case needs `episode_revert` |
@@ -435,9 +435,15 @@ The loop is rename → read `:module-debt` → `module_dep` what it names → ne
 rename. Do not carry the debt across several renames: the reports stay
 correct, but you lose which rename caused what. If `:cycles` fires, stop and
 `undo` rather than declaring around it.
-- `config_file` validates only the `capabilities` path (against the capability
-  registry). Every other path — `rules`, `gates`, `client` — is recorded as
-  given, key and value unchecked.
+- `config_file` validates two paths: `capabilities` against the capability
+  registry and `rules` against the rule catalog, so a dial that governs nothing
+  is refused at the write with the rule you probably meant. Every other path —
+  `gates`, `client` — is recorded as given, key and value unchecked, and the
+  result SAYS which happened (`:verified` / `:unverified`). A dial is set once
+  and never re-read, which is why an unchecked one is silent twice: the thing it
+  meant to name keeps its default, and the store carries a line that reads like
+  configuration. A dial orphaned by a later RENAME was valid when written and so
+  cannot be refused; it turns up as `:orphaned-dials` in `full_check`.
 
 **A rename tells you what it did NOT rewrite.** `ns_rename` rewrites every
 SYMBOL — including quoted ones inside data literals — and deliberately leaves
@@ -499,6 +505,10 @@ wrong makes it wrong silently. Prefer aliases spelled from the namespace.
 **Red-first is native:** a spec in a `-test` ns may reference store fns
 that don't exist yet — it lands as a REAL red (`:red-first` names the
 missing vars, stubbed in-image as failing); implement them to go green.
+It works across a NAMESPACE boundary too: `ns_create {ns "acme.core-test"
+requires ["[acme.core :as c]"]}` creates `acme.core` empty and says so in
+`:also-created`, so the spec lands red rather than failing to load. Only
+requires sharing your root are invented — a library is never conjured over.
 
 **References never hide in strings:** in-process references in data use
 `#'var` literals; late binding across a load cycle uses
@@ -683,9 +693,9 @@ something you KNOW contains the name:
 (is (= [] (vec (re-seq #"acme\.client" src))))                          ; …and it is absent HERE
 ```
 
-slopp reports this one for you, at two different moments. `ns_rename` names
-every pattern spelling the old name under `:left-behind :regex`, which is the
-earlier and more useful half — you are told at the moment the staleness is
+slopp reports this one for you, at two different moments. `ns_rename` AND
+`rename_sweep` name every pattern spelling the old name under `:left-behind`
+with `:via :regex`, which is the earlier and more useful half — you are told at the moment the staleness is
 CREATED, while you still remember what the pattern was for. Later, the
 **`stale-pattern`** advisory flags a regex naming a name in your store's OWN
 root family that is neither a namespace nor a prefix of one.
@@ -978,8 +988,14 @@ full map.
   response; a follow-up `test_run` re-derives what you already have.
   `:implicated` — which of YOUR changes each failing test exercises.
 - `:red-first` — the not-yet-written vars a new spec named (stubbed to fail
-  honestly). `:carried-errors` — stale callers a signature change left behind.
-  `:still-red` / `:went-green` — which reds persisted, which cleared.
+  honestly). `:also-created` (`ns_create`) — the not-yet-written NAMESPACES a
+  scaffold's requires named, brought into being empty.
+  `:carried-errors` — stale callers a signature change left behind.
+  `:still-red` / `:went-green` — which reds persisted, which cleared. Greens come
+  off the complete list of failing test NAMES, not off the failure blocks, which
+  are capped — a test past the cap has no block and that reads exactly like a
+  pass. `:reds-uncertain` is a run that could not supply the names saying so
+  instead of guessing; treat `:still-red` as a floor when you see it.
 - `:staleness-healed true` — the red was image staleness, already healed.
   `:image-healed true` — the image was rebuilt under you. `:fresh-confirmed
   true` (red path) — the red survived a fresh image, so it is real.
@@ -994,9 +1010,15 @@ full map.
 - `:left-behind` (ns_rename, rename_sweep, ns_realias) — occurrences no rewrite
   reaches, grouped by how each was found. Under `ns_rename` the `:alias` rows
   are the callers whose `:as` still spells the old name, each with a `:suggest`
-  to hand `ns_realias`. `:requalified` (rename_sweep) — destructurings it
-  restructured, which is the half of a keyword rename's diff that is not a text
-  substitution. Absence of either means checked-and-none, never unchecked.
+  to hand `ns_realias`. Under `rename_sweep` each row carries `:via`:
+  `:destructuring` (a `{:a/keys [x]}` whose key NAME changed) and `:regex` (a
+  pattern spelling the name with escaped dots, which shares no literal text with
+  the token). Neither is rewritten for you and the reasons differ — a symbol is a
+  local the body reads; a pattern is an INTENT, and whether a `.` in one separates
+  or matches anything is a question about what you meant. `:requalified`
+  (rename_sweep) — destructurings it restructured, which is the half of a keyword
+  rename's diff that is not a text substitution. Absence of any of them means
+  checked-and-none, never unchecked.
 - `:sites` (ns_realias) — qualified references rewritten. Zero is a real
   answer: the alias was declared and never used.
 - `:callers-unrewritten` (edit_move_forms) — the caller POPULATION beside
@@ -1126,6 +1148,12 @@ missing argument, a non-zero status — with no process and no captured text:
          ["greet" "world"])
 ;; => {:cli/exit 0 :cli/value {:greeting "hi world"} :cli/out "…" :cli/err ""}
 ```
+
+**A sequence of maps prints as a TABLE** — header once, columns aligned, cells
+truncated — because a sequence of maps is what a `list` command returns and a
+row per `pr-str` is a wall of EDN. A map prints as `key value` lines. That is
+the whole of it: no colour, no wrapping, no configuration. A command that wants
+more returns the string it wants.
 
 Choose the status yourself by returning `:cli/exit`; without one, a return is
 success. `:cli/in` and `:cli/out` are on the context for the two things a
