@@ -1621,34 +1621,51 @@
           (is (str/includes? (:err r) "launcher, not the application") (pr-str r))
           (is (str/includes? (:err r) "TWICE") (pr-str r)))))))
 
-(deftest a-store-that-declares-a-PAGE-uses-the-webapp-family
-  ;; Wave 4: `webapp` becomes a shipping family, and the entry MARKER is the
-  ;; only signal there is.
+(deftest a-store-whose-BROWSER-owns-routing-uses-the-webapp-family
+  ;; Wave 4: `webapp` ships a family, and the entry MARKER is the only usage
+  ;; signal — `used-families` reads requires and markers, and slopp mounts the
+  ;; loop so a browser app never names `slopp.webapp`. Third capability, third
+  ;; time.
   ;;
-  ;; This is the third instance of the rule the cli and rest waves each
-  ;; rediscovered: `used-families` decides what to vendor by asking whether a
-  ;; store USES a family — it requires something in it, or carries a declared
-  ;; entry marker — and the require half fails for every capability whose entry
-  ;; slopp GENERATES, because slopp writes the call so the app never names the
-  ;; namespace. A webapp declares `^:web/page` and gets its loop mounted for it;
-  ;; nothing in its source says `slopp.webapp`.
+  ;; **The marker is `:web/spa`, not `:web/page`, and the distinction is the one
+  ;; that kept `screen` in `http`.** `:web/page` declares *here is an entry a
+  ;; reader can open* — inspectability. A server-rendered HTML app marks a page
+  ;; to be LOOKED AT, and it has no browser code at all. `:web/spa` declares
+  ;; *the browser owns these paths*, which is the capability's own definition.
   ;;
-  ;; `http`'s markers were `[:web/page]` alone until a rest app was built and
-  ;; vendored NOTHING, which is how that lesson was paid for the second time.
-  (let [page (str "(ns shop.ui)\n\n"
-                  "(defn ^:web/page app \"The app.\" []\n"
-                  "  {:webapp/state (atom {}) :webapp/routes (fn [_] nil)\n"
-                  "   :webapp/view (fn [_] [:p \"hi\"])})\n")]
+  ;; Caught by slopp-ui in a pre-flight, and the blast radius was small — one
+  ;; extra `.cljc` in a tree that would not require it — while the principle was
+  ;; not, because it is `framework-injection`'s own: handing a store a family it
+  ;; never opted into lets `(require 'slopp.webapp)` succeed in a project that
+  ;; never enabled `webapp`, which is the opt-in holding in the config file and
+  ;; not at runtime.
+  ;;
+  ;; Second consequence of this marker set in two days, after `:web/path`
+  ;; turned out to be MISSING from http's. The set is the least visible
+  ;; declaration in the catalog and nothing fails when it is wrong — it just
+  ;; vendors the wrong thing.
+  (let [spa  (str "(ns shop.ui)\n\n"
+                  "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
+                  "        :web/response :string :web/spa [\"/things\"]}\n"
+                  "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n")
+        page (str "(ns shop.server)\n\n"
+                  "(defn ^:web/page app \"A server-rendered app, for a reader.\" []\n"
+                  "  {:web/routes []})\n")]
 
-    (testing "the marker alone is enough — the app never names slopp.webapp"
-      (let [st (store/ingest (store/empty-store) 'shop.ui page)]
+    (testing "declaring client-side routing IS using the browser framework"
+      (let [st (store/ingest (store/empty-store) 'shop.ui spa)]
         (is (contains? (engine/used-families st) "webapp")
-            (str "a page declaration IS using the browser framework: "
+            (pr-str (engine/used-families st)))))
+
+    (testing "but marking a page for the READER is not"
+      ;; the case that made this wrong: a server-rendered app declares a page so
+      ;; `screen` can open it, and gets no browser code for saying so
+      (let [st (store/ingest (store/empty-store) 'shop.server page)]
+        (is (not (contains? (engine/used-families st) "webapp"))
+            (str "a page is inspectability, not browser-owned routing: "
                  (pr-str (engine/used-families st))))))
 
-    (testing "and a store with no page does NOT get it"
-      ;; the control: without this, a predicate that returned every family
-      ;; would satisfy the assertion above
+    (testing "and a store with neither gets neither"
       (let [st (store/ingest (store/empty-store) 'shop.plain
                              "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")]
         (is (not (contains? (engine/used-families st) "webapp"))
@@ -1660,4 +1677,5 @@
       (let [row (first (filter #(= "webapp" (:capability %))
                                capabilities/capability-catalog))]
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
-        (is (some #{:web/page} (:entry-markers row)) (pr-str row))))))
+        (is (= [:web/spa] (:entry-markers row))
+            (str "and :web/page is NOT among them, deliberately: " (pr-str row)))))))

@@ -249,3 +249,60 @@
               r (external/build! sess dir2 :main 'calc.core/run-cli :name "other")]
           (is (= "other" (get-in r [:native :binary])) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest webapp-launcher-source-t
+  ;; A browser app's entry is GENERATED, for the same reason a cli app's is —
+  ;; and for one more that only shows up here. In a cli app the author's
+  ;; alternative to a generated launcher is a `-main` they write once. In a
+  ;; browser app the alternative is TWO wirings: the `:cljs` shell that mounts,
+  ;; and whatever the headless driver is handed. slopp-ui had both, plus an
+  ;; adapter between them, and their scars are what this generator removes.
+  ;;
+  ;; The entry stays THIN on purpose: require, mount, bootstrap. Everything
+  ;; browser-shaped — the render loop, click delegation, popstate, reading the
+  ;; mount point — belongs in `slopp.webapp/mount!`, which is slopp's `:cljs`
+  ;; code and gets slopp's tests. A fat generated entry is a second place for
+  ;; browser logic to live, in a namespace whose only verification is that it
+  ;; compiled.
+  (let [src (build/webapp-launcher-source 'shop.ui/app '[shop.ui shop.views])]
+
+    (testing "the page namespace is REQUIRED, not merely named"
+      ;; the cli lesson, one process out: a generated entry that names a
+      ;; namespace it never required calls a var that does not exist. There the
+      ;; symptom was a program with no commands; here it is a blank page, which
+      ;; is worse because it looks like a rendering bug rather than a wiring one
+      (is (re-find #"\[shop\.ui\]" src))
+      (is (re-find #"\[shop\.views\]" src))
+      (is (re-find #"\[slopp\.webapp" src)))
+
+    (testing "it calls the DECLARED page entry, by its own name"
+      (is (re-find #"shop\.ui/app" src)))
+
+    (testing "the bootstrap is a TOP-LEVEL form in the bundle"
+      ;; slopp-ui raised this before it was decided, and it is a security
+      ;; property rather than a style: `compile_client` emits a bundle whose
+      ;; top-level forms run when the <script> loads, so the document starts the
+      ;; app with NO inline JS and the page stays script-src-only. An inline
+      ;; starter would put `unsafe-inline` in the CSP of every app built on this
+      ;; capability — in a programme whose stated motivation is that agents
+      ;; should not be able to build insecure things by accident.
+      (is (re-find #"defonce" src)
+          "and defonce, so a bundle evaluated twice does not mount twice")
+      (is (not (re-find #"(?i)<script" src))
+          "the entry must not emit markup at all — the document already has it"))
+
+    (testing "it waits for the document when the document is not ready"
+      ;; a bundle in <head> runs before the mount point exists, and mounting
+      ;; into nothing is a blank page with no error
+      (is (re-find #"readyState" src))
+      (is (re-find #"DOMContentLoaded" src)))
+
+    (testing "it reads as Clojure"
+      ;; edn rather than the reader, for cli-launcher-source-t's reason: this
+      ;; asserts the text PARSES, where the reader would also resolve — a
+      ;; different claim, and one that cannot be made about namespaces this
+      ;; test never defines
+      (let [forms (edn/read-string (str "[" src "]"))]
+        (is (= 'ns (ffirst forms)))
+        (is (some #(and (seq? %) (= 'defonce (first %))) forms)
+            "a bundle whose entry is not a top-level form never runs")))))

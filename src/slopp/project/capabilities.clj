@@ -87,7 +87,7 @@
     :ns-prefix "slopp.rest" :entry-markers [:web/request :web/response]
     :doc "a typed API: request/response contracts, boundary validation, and generated clients derived from the same schemas"}
    {:capability "webapp" :requires ["http"]
-    :ns-prefix "slopp.webapp" :entry-markers [:web/page]
+    :ns-prefix "slopp.webapp" :entry-markers [:web/spa]
     :doc "an application whose BROWSER owns routing and state: client-side routes, event dispatch, and the ClojureScript build. Needs serving, so it requires http — but NOT rest: a browser app may talk to a third-party API, a socket, or to no server data at all. Not the same as serving HTML, which needs only http"}])
 
 (defn ^:export capability
