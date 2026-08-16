@@ -96,31 +96,60 @@
   trimmed history read plus a 21,676-char re-fetch, i.e. the trim cost 30k
   chars where returning the full payload would have cost 21k. A prefix of
   COMPLETE items parses, is immediately usable, and lets the follow-up be
-  narrow instead of total."
-  [x budget]
-  (let [fit (fn [items open close]
-              ;; longest prefix of whole items that fits, +2 for the delimiters
-              (loop [kept [], used (+ 2 (count open) (count close)), more (seq items)]
-                (if-let [it (first more)]
-                  (let [s (+ 1 (count (pr-str it)))]
-                    (if (> (+ used s) budget)
-                      kept
-                      (recur (conj kept it) (+ used s) (next more))))
-                  kept)))]
-    (cond
-      (and (sequential? x) (seq x))
-      (let [kept (fit x "[" "]")]
-        (when (seq kept)
-          {:body (pr-str (vec kept))
-           :note (str (count kept) " of " (count x) " shown")}))
+  narrow instead of total.
 
-      (and (map? x) (seq x))
-      (let [kept (fit (seq x) "{" "}")]
-        (when (seq kept)
-          {:body (pr-str (into {} kept))
-           :note (str (count kept) " of " (count x) " keys shown")}))
+  **A trimmed SEQUENCE says so inside the payload**, as a final
+  `{:truncated {:shown n :of m :detail id}}` element. The trailing note the
+  caller adds is read by a human and skipped by everything else: anything
+  consuming the response as DATA reads the first form and stops, so it got a
+  well-formed value with items missing and no in-band signal. Measured on
+  `query_rules` — 23k against an 8000-char gate, delivering 17 of 43 rules to
+  an agent asking what is enforced.
 
-      :else nil)))
+  slopp-ui's design, and their argument for it over my objection. A marker
+  element does poison `(map :rule …)` — with ONE nil at the end, which is more
+  visible than silently losing 26 rows. The comparison is against today, not
+  against a clean answer.
+
+  Room for the marker is RESERVED before items are kept, so announcing the trim
+  cannot be the thing that pushes the payload back over the gate.
+
+  A MAP keeps the trailing note alone: it cannot carry a marker element, and
+  its entries are not a sequence a consumer maps over, so the two shapes are
+  treated differently on purpose."
+  ([x budget] (fit-payload x budget nil))
+  ([x budget detail-id]
+   (let [fit (fn [items open close cap]
+               ;; longest prefix of whole items that fits, +2 for the delimiters
+               (loop [kept [], used (+ 2 (count open) (count close)), more (seq items)]
+                 (if-let [it (first more)]
+                   (let [s (+ 1 (count (pr-str it)))]
+                     (if (> (+ used s) cap)
+                       kept
+                       (recur (conj kept it) (+ used s) (next more))))
+                   kept)))]
+     (cond
+       (and (sequential? x) (seq x))
+       (let [total  (count x)
+             mark   (fn [n] (cond-> {:truncated {:shown n :of total}}
+                              detail-id (assoc-in [:truncated :detail] detail-id)))
+             ;; reserved up front: the marker's own characters are part of the
+             ;; fit, not an overflow added after it
+             reserve (+ 1 (count (pr-str (mark total))))
+             kept    (fit x "[" "]" (- budget reserve))]
+         (when (seq kept)
+           {:body (pr-str (if (= (count kept) total)
+                            (vec kept)
+                            (conj (vec kept) (mark (count kept)))))
+            :note (str (count kept) " of " total " shown")}))
+
+       (and (map? x) (seq x))
+       (let [kept (fit (seq x) "{" "}" budget)]
+         (when (seq kept)
+           {:body (pr-str (into {} kept))
+            :note (str (count kept) " of " (count x) " keys shown")}))
+
+       :else nil))))
 
 (defn- text! [x]
   (when @strict-boundary?
@@ -146,8 +175,12 @@
                   full
                   (if-let [sess *spool-session*]
                     (let [id  (spool! sess full)
+                          ;; the spool id travels INTO the marker, so the in-band signal is
+                          ;; actionable rather than only informative: a consumer that
+                          ;; sees :truncated can fetch the rest without parsing the
+                          ;; trailing line it was never going to read
                           fit (when (> (count slimmed) 8000)
-                                (fit-payload (trim-failure-strings x) 7800))]
+                                (fit-payload (trim-failure-strings x) 7800 id))]
                       (cond
                         ;; slimming alone got it under the gate — send it whole
                         (<= (count slimmed) 8000)

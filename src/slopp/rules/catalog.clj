@@ -9,7 +9,7 @@
 
   Being a separate, inert data def is what makes it POLICEABLE: a coverage
   test asserts that every registered rule has an entry here and vice versa, so
-  a new rule cannot ship without saying what it wants and how to satisfy it.")
+  a new rule cannot ship without saying what it wants and how to satisfy it." (:require [clojure.string :as str]))
 
 (def ^:export rule-catalog
   "The unified DECLARATIVE catalog of every D9 rule across both grains — each a
@@ -254,3 +254,64 @@
    earn."
   [declared]
   (mapv (fn [r] (assoc r :severity (get declared (:rule r)))) rule-catalog))
+
+(def ^:export rule-severities
+  "Every severity a `rules` dial may carry.
+
+  `:off` skips the rule; `:advisory` warns and proceeds; `:refuse` blocks a
+  write; `:error` fails a done point. Not every value means something at every
+  GRAIN — a write gate has no use for `:error` and reports it as `:refuse`,
+  which `rules/query-rules` documents — but all four are legal to write, and
+  refusing a legal-but-remapped value would be a second rule to learn for no
+  gain."
+  #{"off" "advisory" "error" "refuse"})
+
+(defn ^:export config-refusal
+  "The `rules` config write gate: a teaching error for a key naming no rule or a
+  value outside [[rule-severities]] — nil when the write may land.
+
+  **There was never a missing registry, only a write path not consulting one.**
+  This catalog names every rule; the severities are four words. Until this
+  existed the `rules` path recorded whatever it was given and said so honestly
+  (`:unverified [:schema]`), which meant a renamed dial and a MISTYPED dial were
+  the same event: both accepted, both governing nothing, neither reported.
+  `http-unsafe-get` and `http-unsafe-gets` were indistinguishable. Reported by
+  slopp-ui after five rules were renamed out from under any dial naming them.
+
+  A dial that silently does nothing is the nil-pun this registry exists to kill,
+  and it is worse here than elsewhere because a dial is set ONCE and never
+  re-read: the moment it stops matching, the rule returns to its default and
+  nothing in any report mentions it.
+
+  **Near misses are found by shared SEGMENTS rather than by edit distance**, and
+  that is aimed rather than lazy. The two mistakes that actually happen are a
+  typo, which differs by a character (`http-unsafe-gets` CONTAINS the real key),
+  and a rename, which keeps the tail (`http-stale-client` → `rest-stale-client`
+  shares `stale-client`). Segment overlap catches both and cannot suggest
+  something unrelated — the failure mode that matters, since a wrong suggestion
+  sends the reader to change the wrong thing and offering none beats offering a
+  stranger."
+  [k v]
+  (let [k     (str k)
+        names (map (comp name :rule) rule-catalog)]
+    (cond
+      (not (some #{k} names))
+      (let [segs  (set (str/split k #"-"))
+            close (->> names
+                       (map (fn [n] [n (count (filter segs (str/split n #"-")))]))
+                       (filter #(pos? (second %)))
+                       (sort-by (comp - second))
+                       (map first)
+                       (take 3))]
+        (str k " is not a rule, so this dial would govern nothing — and a dial"
+             " that does nothing is the worst kind, because it is set once and"
+             " never read again."
+             (when (seq close)
+               (str " Did you mean " (str/join " / " close) "?"))
+             " query_rules lists every rule with its grain and effective"
+             " severity."))
+
+      (not (rule-severities (str v)))
+      (str (str v) " is not a severity — a rules dial takes "
+           (str/join " / " (sort rule-severities))
+           ". query_rules shows what each rule is set to now."))))

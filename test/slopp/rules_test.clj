@@ -1113,3 +1113,88 @@
         (is (= (set (map :key rules/done-advisories)) both))
         (is (empty? (filter (set (:swept plan)) (map :rule (:not-swept plan))))
             "no rule appears in both")))))
+
+(deftest a-rules-dial-is-checked-against-the-catalog-that-already-knows
+  ;; slopp-ui probed this after the five contract rules were renamed, and got
+  ;; the write admitting its own blindness:
+  ;;
+  ;;   {:verified [] :unverified [:schema]
+  ;;    :note "recorded as given — no registry governs the rules config…"}
+  ;;
+  ;; Honest, and not enough. With nothing to disagree with, **a renamed dial and
+  ;; a MISTYPED dial are the same event**: both accepted, both doing nothing,
+  ;; neither reported. `http-unsafe-get` and `http-unsafe-gets` were
+  ;; indistinguishable, and a dial set once months ago silently stops governing
+  ;; the rule it names.
+  ;;
+  ;; The registry was never missing — `rule-catalog` names every rule and its
+  ;; grain. Only the write path was not asking.
+  (testing "a key naming no rule is refused, and the refusal teaches"
+    (let [e (catalog/config-refusal "http-unsafe-gets" "advisory")]
+      (is (string? e))
+      (is (re-find #"http-unsafe-get\b" e)
+          (str "a near miss is the whole point — a typo differs from the real "
+               "key by one character and the reader needs to SEE which: " e))))
+
+  (testing "and a key that no longer exists is refused the same way"
+    ;; the rename case, which is what prompted this
+    (let [e (catalog/config-refusal "http-stale-client" "advisory")]
+      (is (string? e))
+      (is (re-find #"rest-stale-client" e)
+          (str "the rule moved to rest and the dial has to follow it: " e))))
+
+  (testing "a real rule at a real severity lands"
+    (is (nil? (catalog/config-refusal "schema-drift" "advisory")))
+    (is (nil? (catalog/config-refusal "rest-stale-client" "off")))
+    (is (nil? (catalog/config-refusal "module-refusal" "refuse"))))
+
+  (testing "a value outside the vocabulary is refused, naming the vocabulary"
+    ;; :advisroy is the shape of this mistake, and it silently means "default"
+    ;; without a check
+    (let [e (catalog/config-refusal "schema-drift" "advisroy")]
+      (is (string? e))
+      (is (re-find #"advisory" e) e)
+      (is (re-find #"off" e) e)))
+
+  (testing "the catalog is the vocabulary, so a new rule is dialable by existing"
+    ;; guard the guard: a hand-kept list of valid keys would be a second place
+    ;; to add capability #4's rules, and the one nobody remembers
+    (is (every? #(nil? (catalog/config-refusal (name (:rule %)) "advisory"))
+                catalog/rule-catalog)
+        "every rule in the catalog is a legal dial")))
+
+(deftest a-dial-a-rename-orphaned-is-NAMED-with-its-value
+  ;; The write gate stops a new orphan being created, and does nothing about the
+  ;; ones already stored — which is the case that matters, because the only way
+  ;; to get one now is a RENAME, and a rename is exactly when nobody is looking
+  ;; at their dials.
+  ;;
+  ;; A dial is set once and never re-read. So an orphaned one is silent twice
+  ;; over: the rule it named returns to its default, and the store goes on
+  ;; carrying a line that reads like configuration. `capabilities` has answered
+  ;; this since wave 1 with `:orphaned`, and the answer carries the VALUE —
+  ;; which is what makes the report a migration instruction rather than a
+  ;; complaint.
+  (let [st (assoc-in (store/empty-store) [:config "rules"]
+                     {:format :manifest
+                      :values {"http-stale-client" "off"      ; renamed to rest-*
+                               "schema-drift"      "advisory"}})]
+    (testing "the orphan is named, with what it was set to"
+      (let [orph (:orphaned-dials (rules/sweep-plan st))
+            row  (first (filter #(= "http-stale-client" (:key %)) orph))]
+        (is (some? row) (pr-str orph))
+        (is (= "off" (:value row))
+            "the VALUE travels, so the report is the migration instruction —
+             re-set it on the new key and unset this one")
+        (is (re-find #"rest-stale-client" (str (:why row)))
+            (str "and the rename is named, because the reader's next question "
+                 "is where it went: " (:why row)))))
+
+    (testing "a dial that still names a rule is not an orphan"
+      (is (not-any? #(= "schema-drift" (:key %))
+                    (:orphaned-dials (rules/sweep-plan st)))))
+
+    (testing "a store with no dials reports no orphans rather than nil"
+      ;; empty and absent are the same to a reader here, but an explicit empty
+      ;; is what lets a renderer draw "none" instead of omitting the section
+      (is (= [] (:orphaned-dials (rules/sweep-plan (store/empty-store))))))))

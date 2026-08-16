@@ -1229,6 +1229,23 @@
                      " the write and are never swept, so they appear in neither"
                      " list whether or not their capability is enabled —"
                      " query_capabilities lists them per capability under :arms")
+     ;; dials naming no rule. The write gate refuses a new one, so the only
+     ;; way to hold one is a RENAME — which is exactly when nobody is looking
+     ;; at their dials. A dial is set once and never re-read, so an orphan is
+     ;; silent twice: the rule it named returns to its default, and the store
+     ;; goes on carrying a line that reads like configuration.
+     ;;
+     ;; The VALUE travels, which is what makes this a migration instruction
+     ;; rather than a complaint — the same shape `capabilities/:orphaned` has
+     ;; had since wave 1.
+     :orphaned-dials
+     (vec (for [[k v] (sort (get-in st* [:config "rules" :values]))
+                :when (catalog/config-refusal k "advisory")]
+            {:key k :value v
+             :why (str (catalog/config-refusal k "advisory")
+                       " Its dial is stored and governs nothing: set the value"
+                       " on the current key, then config_file {path \"rules\" key"
+                       " \"" k "\" unset true}.")}))
      :swept     (mapv :key swept)
      :not-swept (into []
                       (comp (remove #(kept (:key %)))

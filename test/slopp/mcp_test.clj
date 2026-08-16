@@ -1141,8 +1141,12 @@
         (is (vector? back) body)
         (is (pos? (count back)))
         (is (< (count back) 200) "it must actually drop rows")
-        (is (every? #(= #{:id :op :ns :prompt} (set (keys %))) back)
+        (is (every? #(= #{:id :op :ns :prompt} (set (keys %))) (butlast back))
             "every kept row must be WHOLE — no half-cut map")
+        (is (:truncated (last back))
+            "and the LAST element is the in-band marker, which is the only
+             thing in this payload that is not a row — a consumer reading
+             the response as data sees the trim rather than a short list")
         (is (<= (count body) 2000))
         (is (re-find #"200" (str note)) note)))
     (testing "a map payload keeps whole entries and parses back"
@@ -2333,3 +2337,62 @@
              app a project exists to serve is left behind by the very call that
              says the work is finished"))
       (finally (ops/close! sess)))))
+
+(deftest a-trimmed-SEQUENCE-says-so-inside-the-payload
+  ;; The response gate degrades rather than refusing, which is right — a big
+  ;; read is still a useful read, and `query_project` on a 200-namespace store is
+  ;; over the gate by construction. The defect was never the degrading. It was
+  ;; that the degrading announced itself only in a trailing LINE, outside the
+  ;; edn, so anything reading the response as DATA got a well-formed value with
+  ;; items missing and no in-band signal.
+  ;;
+  ;; Measured: `query_rules` is ~23k against an 8000-char gate and delivers 17 of
+  ;; 43 rules. An agent asking "what is enforced here" was answered with 40% of
+  ;; the catalog, and the only thing that said so was a line a parser skips.
+  ;;
+  ;; slopp-ui's fix, taken almost verbatim. My objection had been that a marker
+  ;; ELEMENT poisons `(map :rule …)`; their counter is the half I had not
+  ;; weighed — it poisons it with ONE nil at the end, which is more visible than
+  ;; silently losing 26 rows, and the comparison is against today rather than
+  ;; against a clean answer.
+  (let [rows (vec (for [i (range 400)]
+                    {:rule (keyword (str "r" i))
+                     :teach "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}))
+        fit  (#'mcp/fit-payload rows 2000)]
+    (testing "the body still parses, and its LAST element says what was dropped"
+      (let [parsed (edn/read-string (:body fit))
+            marker (:truncated (last parsed))]
+        (is (vector? parsed))
+        (is (some? marker)
+            (str "a consumer reading this as data has to be able to SEE the "
+                 "trim: " (pr-str (take-last 2 parsed))))
+        (is (= 400 (:of marker)))
+        (is (= (dec (count parsed)) (:shown marker))
+            "the count counts ROWS, not the marker — a marker that counted
+             itself would be off by one in the direction that hides a loss")))
+
+    (testing "and it still fits the budget it was given"
+      ;; the marker costs characters, so reserving room for it is part of the
+      ;; fit rather than an afterthought — otherwise announcing the trim is
+      ;; what pushes the payload back over the gate
+      (is (<= (count (:body fit)) 2000)
+          (str "body was " (count (:body fit)) " chars")))
+
+    (testing "the trailing note survives too, for a human skimming"
+      (is (re-find #"\d+ of \d+ shown" (str (:note fit))) (:note fit))))
+
+  (testing "a payload that FITS gains no marker"
+    ;; the guard against over-reach: a marker on every response would train the
+    ;; reader to skip it, which is exactly how the trailing line came to be
+    ;; ignored. Nothing dropped, nothing to say.
+    (let [f (#'mcp/fit-payload [{:a 1} {:b 2}] 2000)]
+      (is (= [{:a 1} {:b 2}] (edn/read-string (:body f)))
+          (str "an untrimmed payload is itself, unmarked: " (:body f)))))
+
+  (testing "a MAP payload keeps its trailing-note behaviour"
+    ;; a map cannot carry a marker element, and its keys are not a sequence a
+    ;; consumer maps over, so the shapes are treated differently on purpose
+    (let [m (into {} (for [i (range 400)] [(keyword (str "k" i)) "vvvvvvvvvvvvvvvvvvvv"]))
+          f (#'mcp/fit-payload m 2000)]
+      (is (map? (edn/read-string (:body f))))
+      (is (re-find #"keys shown" (str (:note f))) (:note f)))))

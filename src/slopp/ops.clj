@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.http :as rules.http]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog]))
 
 (defn reap-idle-images!
   "Stop parked branch images idle past the session TTL (the session's reaper
@@ -2894,20 +2894,32 @@ recompiled (engine/after-write! session ns-sym)]
             {:path (str path) :unset (str key)}))
 
       (and key (some? value))
-      (if-let [refusal (when (= "capabilities" (str path))
+      ;; TWO registries now. The `rules` one closed a real hole: with nothing
+      ;; to disagree with, a renamed dial and a MISTYPED dial were the same
+      ;; event — both accepted, both governing nothing, neither reported. The
+      ;; catalog always knew every rule; this path simply was not asking.
+      (if-let [refusal (case (str path)
+                         "capabilities"
                          (or (capabilities/config-refusal (str key) (str value))
                              (capabilities/disable-refusal (:store @session)
-                                                           (str key) (str value))))]
+                                                           (str key) (str value)))
+                         "rules"
+                         (catalog/config-refusal (str key) (str value))
+                         nil)]
         {:error refusal}
-        (let [fmt     (or (some-> format clojure.core/keyword)
-                          (:format entry) :manifest)
-              caps?   (= "capabilities" (str path))
+        (let [fmt      (or (some-> format clojure.core/keyword)
+                           (:format entry) :manifest)
+              caps?    (= "capabilities" (str path))
+              ;; whether a REGISTRY stood behind this write, which is a
+              ;; different question from which path it was — and stopped being
+              ;; the same question the moment `rules` gained one
+              checked? (contains? #{"capabilities" "rules"} (str path))
               ;; the prerequisites this write turns on WITH it, computed
               ;; against the PRE-write store so the report names only what
               ;; actually changed rather than restating the graph
-              implied (when caps?
-                        (seq (capabilities/implied-puts (:store @session)
-                                                        (str key) (str value))))]
+              implied  (when caps?
+                         (seq (capabilities/implied-puts (:store @session)
+                                                         (str key) (str value))))]
           (engine/commit-appended!
            session
            (fn [st]
@@ -2920,18 +2932,19 @@ recompiled (engine/after-write! session ns-sym)]
                                                      :agent agent))
                      implied))
            [])
-          ;; `capabilities` is the ONLY path with a registry behind it. Every
-          ;; other path records the key and value as given, so a caller
-          ;; cannot tell a checked write from an unchecked one unless the
-          ;; result says which happened (D-surface-honesty).
+          ;; A path with no registry records the key and value AS GIVEN, so a
+          ;; caller cannot tell a checked write from an unchecked one unless the
+          ;; result says which happened (D-surface-honesty). That admission is
+          ;; what made the `rules` gap findable: slopp-ui probed a bogus key and
+          ;; the note named the registry it was not using.
           (cond-> {:path (str path) :key (str key) :value (str value) :format fmt
-                   :verified (if caps? [:registry] [])
-                   :unverified (if caps? [] [:schema])}
-            (not caps?)
+                   :verified (if checked? [:registry] [])
+                   :unverified (if checked? [] [:schema])}
+            (not checked?)
             (assoc :note (str "recorded as given — no registry governs the "
                               path " config, so neither the key nor the value"
-                              " was validated. Only `capabilities` writes are"
-                              " checked (query_capabilities lists them)."))
+                              " was validated. `capabilities` (query_capabilities)"
+                              " and `rules` (query_rules) are the checked paths."))
 
             ;; ABSENT when nothing was implied, the way the module manifest's
             ;; :debt is: an empty vector on every write would train the reader
