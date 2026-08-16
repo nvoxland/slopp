@@ -88,26 +88,43 @@
 
 (defn near-duplicate-keys
   "Over the DERIVED keyword inventory, the likely-typo findings for this episode:
-   a namespaced key introduced by a CHANGED form that (a) is new to the store
-   (no UNCHANGED form uses it), (b) has a name of length >= 4 (short names are
-   noise), and (c) is exactly one Damerau edit from an ESTABLISHED same-namespace
-   key (used by >= 2 unchanged forms). Returns [{:used :suggest :seen} …] — an
-   ADVISORY (the open-map guardrail: a typo'd key silently nil-puns, the one
-   failure a slice-limited agent can't see). Being derived, it needs no history
-   or CRDT handling of its own."
+   a namespaced key introduced by a CHANGED form that (a) is used by no more
+   than ONE form in the whole store, (b) has a name of length >= 4 (short names
+   are noise), and (c) is exactly one Damerau edit from an ESTABLISHED
+   same-namespace key (used by >= 2 unchanged forms). Returns
+   [{:used :suggest :seen} …] — an ADVISORY (the open-map guardrail: a typo'd
+   key silently nil-puns, the one failure a slice-limited agent can't see).
+   Being derived, it needs no history or CRDT handling of its own.
+
+   **A key used in more than one place is VOCABULARY, and that test counts every
+   form rather than only the unchanged ones.** The candidate population used to
+   be \"keys no unchanged form uses\", which conflates \"new in this episode\" with
+   \"typed wrong\": an episode that reworks a subsystem touches every user of its
+   keys, and each one then looks brand new. Measured on slopp's own store — a
+   cli rework reported `:cli/commands`, the context key, as a typo of
+   `:cli/command`, the declaration marker, with eleven users between them and
+   both real since the capability shipped.
+
+   It is the same derived-population failure the sweep exclusion names from the
+   other side (\"a sweep in which every form is changed establishes nothing\"),
+   and it lands as a false POSITIVE rather than a vacuous green. The narrowing
+   is real and small: a slip repeated in two NEW forms now escapes. That is the
+   right side to be wrong on, because a typo is by nature a one-off — you do not
+   type the same misspelling twice — and an advisory that cries wolf on an
+   author's own vocabulary is the one that gets dialled off."
   [store changed-fids]
   (let [changed     (set changed-fids)
         inv         (keyword-inventory store)
         established (into {} (keep (fn [[kw fids]]
                                      (let [n (count (remove changed fids))]
                                        (when (pos? n) [kw n]))))
-                         inv)
+                          inv)
         changed-kws (into #{} (mapcat (fn [fid]
                                         (when-let [e (store/form-by-id store fid)]
                                           (form-keywords (:node e))))
                                       changed))]
     (vec (for [k     changed-kws
-               :when (and (not (contains? established k))
+               :when (and (< (count (get inv k)) 2)
                           (>= (count (name k)) 4))
                :let  [nbr (some (fn [[k2 c]]
                                   (when (and (= (namespace k) (namespace k2))

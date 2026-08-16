@@ -45,24 +45,24 @@
           ;; asserted on the store where `add` is the ONLY claim, or this
           ;; passes for the wrong reason the moment a duplicate exists
           (is (nil? (edit.cli/cli-command-collision one 'app.cmds 'add))))))
-    (testing "cli-direct-stdio: a command prints by RETURNING, not by printing"
-      ;; the command's answer is data and slopp renders it. A println in the
-      ;; body is a second output channel nobody renders, ordered against the
-      ;; first by accident, and invisible to a test asserting on the return.
+    (testing "cli-direct-stdio: a command writes to the INJECTED stream, not the ambient one"
+      ;; `*out*` is a different stream from the one the context carries: no
+      ;; test captures it, no driver redirects it, and the fake cannot stand in
+      ;; for it, so a println's output simply escapes. The gate is about WHICH
+      ;; stream and always was; what changed is that writing is now the
+      ;; command's job rather than a second channel beside a rendered return.
       (let [s (land on (str "(defn ^{:cli/command \"add\" :cli/doc \"A.\" :cli/args [:catn]} add \"A.\"\n"
                             "  [ctx args] (println \"hi\") args)"))]
         (is (re-find #"println" (str (edit.cli/cli-direct-stdio s 'app.cmds 'add))))
-        (is (re-find #"return" (str (edit.cli/cli-direct-stdio s 'app.cmds 'add)))
-            "and the teaching says what to do instead"))
-      (testing "System/exit too — the launcher owns the exit, a command returns :cli/exit"
+        (is (re-find #":cli/out" (str (edit.cli/cli-direct-stdio s 'app.cmds 'add)))
+            "and the teaching names the stream to use instead"))
+      (testing "System/exit too — the launcher owns the exit, a command RETURNS a status"
         (let [s (land on (str "(defn ^{:cli/command \"q\" :cli/doc \"Q.\" :cli/args [:catn]} q \"Q.\"\n"
                               "  [ctx args] (System/exit 1))"))]
           (is (re-find #"(?i)exit" (str (edit.cli/cli-direct-stdio s 'app.cmds 'q))))))
-      (testing "but writing to the INJECTED stream is exactly what it is for"
-        ;; streaming progress is the case a return value cannot express, and
-        ;; the ctx is how the capability supports it
+      (testing "and writing to the injected stream is exactly what it is for"
         (let [s (land on (str "(defn ^{:cli/command \"p\" :cli/doc \"P.\" :cli/args [:catn]} p \"P.\"\n"
-                              "  [ctx args] (.write (:cli/out ctx) \"tick\") args)"))]
+                              "  [ctx args] (.write (:cli/out ctx) \"tick\") nil)"))]
           (is (nil? (edit.cli/cli-direct-stdio s 'app.cmds 'p)))))
       (testing "and a NON-command in the same namespace may print freely"
         ;; the rule is about a command's contract, not about purity — printing

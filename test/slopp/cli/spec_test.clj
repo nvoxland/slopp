@@ -13,7 +13,7 @@
   `slopp.cli` has moved and the capability has lost the property it was built
   for."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.cli.spec :as spec] [clojure.string :as str]))
+            [slopp.cli.spec :as spec]))
 
 (deftest argv-parses-against-a-declared-spec
   ;; The whole reason a command declares its arguments as DATA rather than
@@ -118,54 +118,6 @@
       (let [bare (spec/help-text {:cli/command "ls" :cli/doc "List." :cli/args [:catn]})]
         (is (re-find #"ls" bare) bare)
         (is (not (re-find #"(?i)options" bare)) bare)))))
-
-(deftest a-list-of-ROWS-renders-as-a-table
-  ;; Dogfooding the cli capability produced this: `talk owed …` printed 36 KB of
-  ;; raw EDN — every field of every row, one line each — which is correct,
-  ;; machine-readable, and not something a person can read.
-  ;;
-  ;; The decision that a command returns DATA is right and is what makes its
-  ;; tests `=` on a map. The gap was never the decision; it was that ONE shape —
-  ;; a sequence of maps, which is what every `list` command returns — had no
-  ;; rendering beyond pr-str per row.
-  ;;
-  ;; This stays deliberately small. `render`'s docstring drew a line at "not a
-  ;; formatting library", and that line is right: no colour, no wrapping, no
-  ;; configuration. A command needing more returns the string it wants.
-  (let [rows [{:file "a.md" :from "ann" :subject "the first one"}
-              {:file "bb.md" :from "bo" :subject "another"}]
-        out  (spec/render rows)
-        [header & body] (str/split-lines out)]
-    (testing "the keys become a header, once, rather than repeating per row"
-      (is (re-find #"file" header) out)
-      (is (re-find #"from" header) out)
-      (is (re-find #"subject" header) out)
-      (is (= 2 (count body)) out))
-
-    (testing "columns line up, so a reader can scan ONE field down the page"
-      ;; the whole difference between a table and a wall: `from` starts at the
-      ;; same offset on every line
-      (is (= (str/index-of header "from") (str/index-of (first body) "ann"))
-          (str "column offsets must agree:\n" out)))
-
-    (testing "a value keeps its own text rather than being pr-str'd into quotes"
-      (is (re-find #"the first one" out) out)
-      (is (not (re-find #"\"ann\"" out))
-          (str "a string cell reads as itself — quotes are noise a reader looks "
-               "past on every row: " out))))
-
-  (testing "a long cell is TRUNCATED, because a table wider than the terminal is a wall again"
-    (let [out (spec/render [{:k (apply str (repeat 200 "x"))}])]
-      (is (< (count out) 200) out)
-      (is (re-find #"…" out) out)))
-
-  (testing "a sequence of scalars is untouched — it was never the problem"
-    (is (= "a\nb" (spec/render ["a" "b"]))))
-
-  (testing "and a single map still renders as key/value lines"
-    ;; one row is not a table; a header above a single line of values is worse
-    ;; than the pair, because the reader looks twice to read once
-    (is (= "a  1\nb  2" (spec/render {:a 1 :b 2})))))
 
 (deftest a-MISSING-positional-is-taught-the-way-a-surplus-already-is
   ;; Dogfooding produced these two sentences from ONE program, one write apart:

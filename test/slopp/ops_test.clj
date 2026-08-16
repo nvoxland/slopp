@@ -873,8 +873,10 @@
                             "(defn ^{:cli/command \"hello\"\n"
                             "        :cli/doc \"Greet someone by name.\"\n"
                             "        :cli/args [:catn [:who :string]]}\n"
-                            "  hello \"Greet.\" [_ctx args]\n"
-                            "  {:greeting (str \"hi \" (:who args))})\n"))
+                            "  hello \"Greet.\" [ctx args]\n"
+                            "  (.write ^java.io.Writer (:cli/out ctx)\n"
+                            "          (str \"hi \" (:who args) \"\\n\"))\n"
+                            "  nil)\n"))
           (is (nil? (:error (external/build! sess dir))))
 
           (testing "the cli family is IN the tree and the http family is NOT"
@@ -895,8 +897,9 @@
               (is (zero? (:exit r))
                   (str "exit " (:exit r) "\nout: " (:out r) "\nerr: " (:err r)))
               (is (str/includes? (:out r) "hi world")
-                  (str "the command's RETURNED value is what slopp renders.\nout: "
-                       (:out r) "\nerr: " (:err r)))))
+                  (str "what the command WROTE reaches a real stdout — the"
+                       " launcher flushes before System/exit, which does not"
+                       " drain it.\nout: " (:out r) "\nerr: " (:err r)))))
 
           (testing "a bare invocation LISTS what the program can do"
             ;; a usage error alone would make the reader run a second command to

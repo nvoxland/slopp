@@ -13,9 +13,12 @@
         :cli/doc "Say hello to someone."
         :cli/args [:catn [:who :string]]}
   greet
-  "The command handler: data in, data out, no stream touched."
-  [_ctx args]
-  {:greeting (str "hello " (:who args))})
+  "The command handler: writes its answer to the injected stream, returns its
+  status. Nothing here touches an ambient stream, which is what `cli-direct-stdio`
+  polices."
+  [ctx args]
+  (.write ^java.io.Writer (:cli/out ctx) (str "hello " (:who args) "\n"))
+  nil)
 
 (defn ^{:unused-ok "the NEGATIVE half of the discovery fixture — a public fn carrying no :cli/command, so the scan has something it must correctly ignore. Calling it would destroy what it is for"}
   helper

@@ -1,17 +1,23 @@
 (ns slopp.cli-test
   "Whole invocations, driven through the FAKE.
 
-  Every test here runs argv end to end — resolve, parse, call, render, exit —
-  and none of them starts a process, opens a stream or touches a temp
-  directory. That is the capability's claim, asserted rather than described: if
-  these ever need a process to run, an app's tests will need one too, and the
-  reason to opt into `cli` has gone.
+  Every test here runs argv end to end — resolve, parse, call, exit — and none
+  of them starts a process or opens a real stream. That is the capability's
+  claim, asserted rather than described: if these ever need a process to run,
+  an app's tests will need one too, and the reason to opt into `cli` has gone.
+
+  **What they assert on is TEXT**, because a command writes its answer to the
+  injected stream and returns only its status. An earlier design had it return
+  data for slopp to render, which made these `=` on a map — and that map is a
+  shape no user of the program ever sees. Same defect `slopp.rest/call` removes
+  for HTTP: asserting on the pre-wire value checks something the far side never
+  receives. For a command line, stdout IS the wire.
 
   The fake is the same shape `context` returns and goes through the same `run`,
   so what is exercised here is the code path a real invocation takes. What that
   cannot prove is that the fake's streams behave like real ones — `cli-contract`
-  is the suite that runs both, for the same reason `requester-contract` exists
-  for the HTTP port.
+  below is the suite that runs both, for the same reason `requester-contract`
+  exists for the HTTP port, and it is the one test here that touches the disk.
 
   Neighbours: `slopp.cli.spec-test` covers what a command line MEANS, with no
   invocation at all."
@@ -22,8 +28,13 @@
 (deftest a-whole-invocation-runs-without-a-process
   ;; The property the capability exists to give an app: argv in, exit code and
   ;; captured output out, with no process, no stream and no temp directory.
-  ;; Everything below is an ordinary in-image assertion, which is only possible
-  ;; because a command RETURNS DATA and slopp does the rendering.
+  ;;
+  ;; **A command WRITES its answer and returns its status.** The earlier design
+  ;; had it return DATA for slopp to render, which made a test an `=` on a map
+  ;; — and that map is a shape no user of the program ever sees. It is the same
+  ;; defect `slopp.rest/call` exists to remove for HTTP: asserting on the
+  ;; pre-wire value checks something the far side never receives. For a command
+  ;; line, stdout IS the wire.
   ;;
   ;; **One context per invocation**, and that is not tidiness. A context's
   ;; writers ACCUMULATE, exactly as a real process's stdout does — one context
@@ -31,31 +42,63 @@
   ;; refusal case below see the output of the three invocations before it, and
   ;; a fake that reset itself between runs would be a fake that lies about the
   ;; thing it stands in for.
-  (let [commands
+  (let [say (fn [ctx s] (.write ^java.io.Writer (:cli/out ctx) (str s "\n")))
+        commands
         {"add"  {:cli/command "add"
                  :cli/doc  "Add a task"
                  :cli/args [:catn [:text :string]]
                  :cli/opts [:map [:priority {:optional true :default 1}
                                   [:int {:min 1 :max 5}]]]
-                 :cli/handler (fn [_ctx args]
-                                {:added (:text args) :priority (:priority args)})}
+                 :cli/handler (fn [ctx args]
+                                (say ctx (str "added " (:text args)
+                                              " at priority " (:priority args)))
+                                nil)}
          "fail" {:cli/command "fail"
                  :cli/doc  "Always refuses"
                  :cli/args [:catn]
-                 :cli/handler (fn [_ _] {:cli/exit 3 :reason "nope"})}}
+                 :cli/handler (fn [ctx _]
+                                (.write ^java.io.Writer (:cli/err ctx) "nope\n")
+                                3)}}
         run  (fn [& argv]
                (cli/run (cli/fake-context {:cli/name "todo" :cli/commands commands})
                         (vec argv)))]
     (testing "a command is resolved by name and handed PARSED arguments"
       (let [r (run "add" "buy milk" "--priority" "4")]
         (is (= 0 (:cli/exit r)) (pr-str r))
-        (is (= {:added "buy milk" :priority 4} (:cli/value r))
-            (str "the handler's return travels as DATA — that is what makes"
-                 " this an = rather than a parse of captured text: " (pr-str r)))))
-    (testing "and the framework rendered it to the captured stream"
-      (is (re-find #"buy milk" (:cli/out (run "add" "buy milk")))))
-    (testing "a handler may set its own exit code by returning one"
-      (is (= 3 (:cli/exit (run "fail")))))
+        (is (= "added buy milk at priority 4\n" (:cli/out r))
+            (str "the assertion is on the TEXT a user would see, which is the"
+                 " whole point of the change: " (pr-str r)))))
+
+    (testing "there is no second channel carrying a pre-wire value"
+      ;; the guarantee, stated as an absence because that is what it is. Leaving
+      ;; :cli/value in place would have preserved exactly the habit this
+      ;; removes — a test asserting on a shape no user of the program sees
+      (is (not (contains? (run "add" "buy milk") :cli/value))
+          (pr-str (run "add" "buy milk"))))
+
+    (testing "the return value is the EXIT STATUS and nothing else"
+      (is (= 3 (:cli/exit (run "fail"))))
+      (is (= "nope\n" (:cli/err (run "fail")))))
+
+    (testing "nil is success, and so is any non-integer"
+      ;; a body ending in something incidental must not be read as a status,
+      ;; because only an integer can be one
+      (let [odd {"odd" {:cli/command "odd" :cli/doc "Returns junk."
+                        :cli/args [:catn]
+                        :cli/handler (fn [ctx _] (say ctx "done") {:some :map})}}]
+        (is (= 0 (:cli/exit (cli/run (cli/fake-context {:cli/commands odd}) ["odd"]))))))
+
+    (testing "and an INTEGER is a status even when it was not meant as one"
+      ;; the accepted hazard of this contract, pinned so it is a documented
+      ;; rule rather than a surprise: a command whose last expression happens
+      ;; to be a number exits with it. End on nil when the value is incidental.
+      (let [cnt {"cnt" {:cli/command "cnt" :cli/doc "Counts."
+                        :cli/args [:catn]
+                        :cli/handler (fn [ctx _] (say ctx "counting") (count [1 2 3]))}}]
+        (is (= 3 (:cli/exit (cli/run (cli/fake-context {:cli/commands cnt}) ["cnt"])))
+            "an int return is the status, full stop — there is no way to tell
+             a deliberate 3 from an incidental one, and guessing would be worse")))
+
     (testing "a REFUSED command line never reaches the handler and exits non-zero"
       (let [r (run "add" "x" "--priority" "99")]
         (is (not= 0 (:cli/exit r)) (pr-str r))
@@ -85,11 +128,13 @@
     (testing "a command reads stdin through the context, never through *in*"
       (let [echo {"echo" {:cli/command "echo" :cli/doc "Echo stdin."
                           :cli/args [:catn]
-                          :cli/handler (fn [ctx _] {:said (slurp (:cli/in ctx))})}}
+                          :cli/handler (fn [ctx _]
+                                         (say ctx (slurp (:cli/in ctx)))
+                                         nil)}}
             r    (cli/run (cli/fake-context {:cli/name "todo" :cli/commands echo
                                              :cli/stdin "from a pipe"})
                           ["echo"])]
-        (is (= {:said "from a pipe"} (:cli/value r)) (pr-str r))))))
+        (is (= "from a pipe\n" (:cli/out r)) (pr-str r))))))
 
 (deftest the-command-vocabulary-is-derived-from-markers
   ;; Adding a command is writing ONE defn. There is no list to add it to, which
@@ -119,4 +164,80 @@
       (let [r (cli/run (cli/fake-context {:cli/name "t" :cli/commands found})
                        ["greet" "ada"])]
         (is (= 0 (:cli/exit r)) (pr-str r))
-        (is (= {:greeting "hello ada"} (:cli/value r)) (pr-str r))))))
+        (is (= "hello ada\n" (:cli/out r)) (pr-str r))))))
+
+(deftest ^:external cli-contract
+  ;; The ONE suite both halves of the cli port pass — `fake-context`'s string
+  ;; writers and a context wired to real OS streams. Sibling of
+  ;; `client-test/requester-contract`, and here for the same reason: the tests
+  ;; above all drive the fake, so what they cannot prove is that the fake's
+  ;; streams behave like the streams a user has.
+  ;;
+  ;; **This suite was CITED before it existed.** `fake-context`'s docstring said
+  ;; it ran "because 'the fake is obviously exact' is what everyone believes
+  ;; about their fake" — a claim about a check nobody had written, in the
+  ;; docstring of the thing it was supposed to check. It became worth building
+  ;; the moment a command started doing its own writing: slopp used to render
+  ;; every answer through one code path, and now every app touches the stream
+  ;; directly.
+  ;;
+  ;; Flushing is the specific thing only the real half can fail. A StringWriter
+  ;; has nothing to flush, so a missing `.flush` is invisible to every test
+  ;; above and loses the answer of a real program at exit.
+  (let [tmp   (fn [suffix] (doto (java.io.File/createTempFile "clic" suffix)
+                             (.deleteOnExit)))
+        cmds  {"say" {:cli/command "say" :cli/doc "Writes both ways."
+                      :cli/args [:catn [:what :string]]
+                      :cli/handler
+                      (fn [ctx args]
+                        ;; two writes, so ORDER within a stream is observable,
+                        ;; and one to each stream so their SEPARATION is
+                        (.write ^java.io.Writer (:cli/out ctx) (str "first " (:what args) "\n"))
+                        (.write ^java.io.Writer (:cli/err ctx) "a warning\n")
+                        (.write ^java.io.Writer (:cli/out ctx) (str "then " (slurp (:cli/in ctx)) "\n"))
+                        4)}}
+        argv  ["say" "hello"]
+
+        through-the-fake
+        (let [r (cli/run (cli/fake-context {:cli/name "c" :cli/commands cmds
+                                            :cli/stdin "piped"})
+                         argv)]
+          {:exit (:cli/exit r) :out (:cli/out r) :err (:cli/err r)})
+
+        through-real-streams
+        (let [of (tmp ".out") ef (tmp ".err") inf (tmp ".in")]
+          (spit inf "piped")
+          (with-open [ow (java.io.FileWriter. of)
+                      ew (java.io.FileWriter. ef)
+                      ir (java.io.PushbackReader. (java.io.FileReader. inf))]
+            (let [r (cli/run (cli/context {:cli/name "c" :cli/commands cmds
+                                           :cli/in ir :cli/out ow :cli/err ew})
+                             argv)]
+              ;; read the files while the writers are still OPEN — closing them
+              ;; would flush, which would hide the very defect this half exists
+              ;; to catch
+              {:exit (:cli/exit r) :out (slurp of) :err (slurp ef)})))]
+
+    (testing "the two halves see the same characters, on the same streams"
+      (is (= (:out through-the-fake) (:out through-real-streams))
+          (str "fake: " (pr-str (:out through-the-fake))
+               " real: " (pr-str (:out through-real-streams))))
+      (is (= (:err through-the-fake) (:err through-real-streams))
+          (str "fake: " (pr-str (:err through-the-fake))
+               " real: " (pr-str (:err through-real-streams)))))
+
+    (testing "and the same exit status"
+      (is (= (:exit through-the-fake) (:exit through-real-streams)))
+      (is (= 4 (:exit through-real-streams)) "an integer return IS the status"))
+
+    (testing "REAL output survives without the writer being closed"
+      ;; the assertion the fake cannot make. If `run` stops flushing, this is
+      ;; the only test in the store that notices, and a real program would exit
+      ;; with its answer still sitting in a buffer.
+      (is (= "first hello\nthen piped\n" (:out through-real-streams))
+          (pr-str (:out through-real-streams))))
+
+    (testing "out and err stay SEPARATE, so piping stdout is safe"
+      (is (not (re-find #"warning" (:out through-real-streams)))
+          (pr-str (:out through-real-streams)))
+      (is (= "a warning\n" (:err through-real-streams))))))

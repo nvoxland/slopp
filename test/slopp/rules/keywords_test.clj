@@ -120,3 +120,44 @@
         (let [forms (set (map :form (:rows (graph/query-depends sess ":plain"))))]
           (is (contains? forms 'bare) (pr-str forms))))
       (finally (ops/close! sess)))))
+
+(deftest a-key-used-EVERYWHERE-is-vocabulary-even-when-the-episode-touched-it-all
+  ;; Measured on slopp's own store: an episode that reworked the cli capability
+  ;; touched every form using `:cli/commands` — the context key — and the
+  ;; advisory reported it as a typo of `:cli/command`, the declaration marker.
+  ;; Both are real, both have been real for the life of the capability, and one
+  ;; is a Damerau edit from the other.
+  ;;
+  ;; The cause is that `established` is derived from the UNCHANGED forms, so a
+  ;; thorough episode empties the population that would have vouched for the
+  ;; key. It is the same shape the rule's own sweep exclusion already names
+  ;; from the other side — "a sweep in which every form is changed establishes
+  ;; nothing and reports clean vacuously" — and here it produces a false
+  ;; POSITIVE instead of a vacuous green.
+  ;;
+  ;; **A name used in more than one place is vocabulary; a typo is a slip, and
+  ;; a slip happens once.** That is the discriminator, and it does not care
+  ;; whether the episode happened to touch the users.
+  (let [base (str "(ns app.core)\n\n"
+                  "(defn a [m] {:user/email (:x m)})\n\n"
+                  "(defn b [m] {:user/email (:y m)})\n\n"
+                  "(defn c [m] {:user/emails (:z m)})\n\n"
+                  "(defn d [m] {:user/emails (:w m)})\n\n"
+                  "(defn e [m] {:user/emails (:v m)})\n")
+        st   (store/ingest (store/empty-store) 'app.core base)
+        fid  (fn [n] (:id (store/form-named st 'app.core n)))]
+
+    (testing "an episode touching EVERY user of a plural key does not make it a typo"
+      ;; c, d and e are the only users of :user/emails, and all three changed
+      (is (empty? (keywords/near-duplicate-keys st #{(fid 'c) (fid 'd) (fid 'e)}))
+          (str "reported: " (pr-str (keywords/near-duplicate-keys
+                                     st #{(fid 'c) (fid 'd) (fid 'e)})))))
+
+    (testing "and a genuine one-off slip in the same episode is STILL caught"
+      ;; the control: without it the fix above is indistinguishable from
+      ;; switching the rule off
+      (let [typo  (store/ingest (store/empty-store) 'app.core
+                                (str base "\n(defn f [m] {:user/emial (:q m)})\n"))
+            tfid  (:id (store/form-named typo 'app.core 'f))]
+        (is (= [{:used :user/emial :suggest :user/email :seen 2}]
+               (keywords/near-duplicate-keys typo #{tfid})))))))

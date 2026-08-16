@@ -93,38 +93,41 @@
                " command (query_surface lists every claim, under :cli)."))))))
 
 (defn ^:export ^{:rule/applies-to :production} cli-direct-stdio
-  "The port gate: a command body may not print, read a line, or exit.
+  "The port gate: a command body may not print to the AMBIENT stream, read a
+  line from it, or exit.
 
-  A command's answer is what it RETURNS — slopp renders it and sets the exit
-  code. A `println` in the body is a second output channel nobody renders,
-  interleaved with the first by accident, and invisible to a test asserting on
-  the return value. `System/exit` is worse: it ends the process from inside
-  business logic, so nothing downstream — rendering, a driver, a test — ever
-  runs.
+  A command writes its answer to `(:cli/out ctx)` — the injected stream — and
+  returns its exit status. `println` writes to `*out*` instead, which is a
+  different stream that no test captures, no driver can redirect, and no fake
+  can stand in for: the output simply escapes. `System/exit` is worse, ending
+  the process from inside business logic so that nothing downstream — a driver,
+  a test, the launcher's own exit — ever runs.
 
-  **The escape is the injected stream, not a dial.** `(.write (:cli/out ctx) …)`
-  is fine and is what the context is FOR: streaming progress is the one thing a
-  return value cannot express. So this gate does not refuse writing to a
-  stream, it refuses reaching for the AMBIENT one.
+  **This gate is about WHICH stream, not about whether to write.** It was once
+  about whether to write at all: slopp rendered a returned value and a
+  `println` was a second output channel interleaved with the first by accident.
+  That design is gone — output is the command's job now — and the gate survives
+  it unchanged in behaviour and changed in reason. Writing is expected; reaching
+  past the injected stream to the ambient one is what makes an app untestable.
 
   **Scoped to command bodies, and that scope is load-bearing.** Printing is
   already classified elsewhere — `slopp.index.derive/console-leaves` blocks it
   in `:pure`, allows it in `:internal`, and deliberately does not demand a `!`
   name. This is a different axis: not \"is printing an effect\" but \"does this
-  command have two ways of answering\". A non-command in the same namespace
+  command write where its caller can see\". A non-command in the same namespace
   prints freely.
 
   Returns a teaching string, or nil when clean."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (when (:cli/command (store/form-name-meta e))
-      (let [denied {'println "return the value instead — slopp renders it"
-                    'print   "return the value instead — slopp renders it"
-                    'prn     "return the value instead — slopp renders it"
-                    'printf  "return the value instead — slopp renders it"
-                    'pr      "return the value instead — slopp renders it"
+      (let [denied {'println "(.write (:cli/out ctx) …) — the injected stream"
+                    'print   "(.write (:cli/out ctx) …) — the injected stream"
+                    'prn     "(.write (:cli/out ctx) …) — the injected stream"
+                    'printf  "(.write (:cli/out ctx) …) — the injected stream"
+                    'pr      "(.write (:cli/out ctx) …) — the injected stream"
                     'read-line "read from (:cli/in ctx), the injected stream"
-                    'System/exit "return {:cli/exit n} — the launcher owns the exit, so a driver and a test can see the code instead of dying with the process"}
+                    'System/exit "return the status instead — an integer return IS the exit code, and the launcher owns the exit, so a driver and a test can see it rather than dying with the process"}
             sx  (try (n/sexpr (:node e)) (catch Exception _ nil))
             hit (first (for [v (tree-seq coll? seq sx)
                              :when (and (seq? v) (symbol? (first v)))
@@ -133,9 +136,8 @@
                          f))]
         (when hit
           (str ns-sym "/" form-name " is a command and calls " hit
-               " — a command answers by RETURNING; slopp renders the value and"
-               " sets the exit code. A second output channel is interleaved"
-               " with the first by accident and is invisible to a test"
-               " asserting on the return. Instead: " (denied hit)
-               ". Writing to the INJECTED stream ((.write (:cli/out ctx) …)) is"
-               " fine — that is what it is for when work streams."))))))
+               " — a command writes to the stream its CONTEXT carries, not to"
+               " the ambient one. `*out*` is a different stream: no test"
+               " captures it, no driver redirects it, and the fake cannot stand"
+               " in for it, so the output escapes. Instead: " (denied hit)
+               "."))))))

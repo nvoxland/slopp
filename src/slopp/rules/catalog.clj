@@ -36,8 +36,8 @@
     :escape "rename one, or extend the existing command (query_surface lists every claim, under :cli)"
     :teach "one command name has one owner. commands-in keys by name, so a duplicate does not fail at startup — whichever namespace loads first wins and the other command is simply unreachable, which looks exactly like one nobody has tried (inert until cli.enabled)"}
    {:rule :cli-direct-stdio :grain :form
-    :escape "return the value — slopp renders it and sets the exit code — or write to the INJECTED stream, (.write (:cli/out ctx) …), which is what the context is for when work streams"
-    :teach "a command body prints, reads a line, or exits. A command answers by RETURNING; a second output channel is interleaved with the first by accident and is invisible to a test asserting on the return, and System/exit ends the process from inside business logic so nothing downstream runs. NOT a purity claim — printing is classified separately and a non-command may print freely (inert until cli.enabled)"}
+    :escape "write to the INJECTED stream, (.write (:cli/out ctx) …), read from (:cli/in ctx), and RETURN an exit status instead of calling System/exit"
+    :teach "a command body reaches for an AMBIENT stream or exits. A command writes its answer to the stream its context carries: *out* is a different stream that no test captures, no driver redirects and no fake stands in for, so the output escapes — and System/exit ends the process from inside business logic, so the launcher's own exit, a driver and a test never run. NOT a purity claim — printing is classified separately and a non-command may print freely (inert until cli.enabled)"}
    {:rule :tier-refusal :grain :form
     :escape "module_purity {module tier :internal/:external}, or move the effect into an :external namespace (:internal may mutate in-process, e.g. a memo through slopp.cache)"
     :teach "a form's effect or non-determinism exceeds its module's declared purity tier"}
