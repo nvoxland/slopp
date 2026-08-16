@@ -65,6 +65,9 @@
 {:rule :webapp-portable-handler :grain :form
     :escape "use the data form — {:on {:input [:your/action]}} — and read the value from your :webapp/act, which receives it as a scalar; or dial it down (config_file {path \"rules\" key \"webapp-portable-handler\" value \"advisory\"}) for an app whose own :cljs dispatcher normalises the event deliberately"
     :teach "a value-carrying control (input, select, textarea) may not take a FUNCTION handler — in a browser it receives a DOM event and headless it receives slopp's best-effort map, so a handler written against either passes every test and does nothing in production. A function on a button carries no value and is fine (inert until webapp.enabled)"}
+{:rule :unknown-marker :grain :done
+    :escape "fix the spelling, or move the key into your OWN namespace if it is yours — slopp reads nothing under :web/*, :webapp/*, :cli/*, :rest/*, :rule/* or :malli/* that it does not define"
+    :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :web/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
    {:rule :http-undeclared-effect :grain :form
     :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
     :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}

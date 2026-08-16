@@ -1290,3 +1290,57 @@
       (is (contains? gate-ns :http-route-collision))
       (is (contains? done-keys :http-dangling-route-refs) (pr-str (sort done-keys)))
       (is (= "http" (capabilities/rule-owner :http-auth-refusal))))))
+
+(deftest a-marker-in-slopps-OWN-namespace-that-slopp-does-not-know-is-reported
+  ;; The failure this exists for, arriving today: `:web/spa` was renamed to
+  ;; `:web/client-routes`, and a consuming store that keeps the old spelling
+  ;; carries a declaration that means NOTHING. Its app still serves, every
+  ;; in-app click still works, and only a refresh or a shared deep link 404s —
+  ;; because the catch-all rows are generated from a key nothing reads any more.
+  ;;
+  ;; **Nothing in the store could say so.** `markers/undeclared` deliberately
+  ;; excludes namespaced keys (they belong to whoever owns the namespace), and
+  ;; `crossings/unclassified-markers` asks whether SLOPP's own vocabulary is
+  ;; classified — a question about slopp's source, not about a store's forms.
+  ;; Between them a retired marker sitting on a consumer's endpoint is invisible
+  ;; to every surface there is.
+  ;;
+  ;; The one app that hit it caught it only because an unrelated positive
+  ;; control happened to read the keyword back. That is luck, and it is not
+  ;; available to the next store.
+  ;;
+  ;; **Scoped to namespaces SLOPP owns**, which is the whole precision of the
+  ;; rule: `:myapp/anything` is the app's own business and none of ours.
+  ;; Squatting `:web/*` with a key slopp does not define is the only thing
+  ;; reported, and it is always either a typo or a name that used to work.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn ^{:web/method :get :web/path \"/\" :web/spa [\"/store\"]}\n"
+                 "  doc \"The document.\" [_] {:status 200 :body \"<html>\"})\n\n"
+                 "(defn ^{:myapp/audited true} totals \"T.\" [x] x)\n")
+        st  (store/ingest (store/empty-store) 'shop.ui src)
+        ids (mapv :id (filter :name (store/forms st 'shop.ui)))
+        found (rules/unknown-marker-check nil st ids)]
+
+    (testing "the retired marker is named, and so is the form carrying it"
+      (is (= 1 (count found)) (pr-str found))
+      (is (= 'shop.ui/doc (:form (first found))) (pr-str found))
+      (is (= :web/spa (:marker (first found))) (pr-str found)))
+
+    (testing "the teaching says it is INERT, not merely unrecognised"
+      ;; "unknown marker" reads as a lint nit; "nothing reads this" is the
+      ;; actual consequence and the reason to care
+      (is (re-find #"(?i)nothing reads|no effect|inert" (str (:teach (first found))))
+          (pr-str found)))
+
+    (testing "a marker in the app's OWN namespace is not slopp's business"
+      (is (not-any? #(= :myapp/audited (:marker %)) found) (pr-str found)))
+
+    (testing "and the current spelling reports nothing"
+      (let [ok  (store/ingest (store/empty-store) 'shop.ok
+                              (str "(ns shop.ok)\n\n"
+                                   "(defn ^{:web/method :get :web/path \"/\"\n"
+                                   "        :web/client-routes [\"/store\"]}\n"
+                                   "  doc \"The document.\" [_] {:status 200 :body \"<html>\"})\n"))
+            ids (mapv :id (filter :name (store/forms ok 'shop.ok)))]
+        (is (empty? (rules/unknown-marker-check nil ok ids))
+            "every marker here is one slopp defines")))))

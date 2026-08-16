@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -850,6 +850,95 @@
                                          " same last segment")))}
                sugg (assoc :suggest sugg)))))))
 
+(defn- enabled?
+  "True when this store has not dialed advisory `e` `:off`
+  (`edit.modules/rule-severity` — the per-store override, else the registry
+  default).
+
+  Its own form because BOTH runners ask it, and a second copy of \"is this rule
+  on\" is a second answer waiting to happen: the whole-store sweep reports which
+  rules it ran, and that list has to be the same list the runner actually ran."
+  [st* {:keys [key severity]}]
+  (not= :off (gates/rule-severity st* key severity)))
+
+(defn- run-checks
+  "Run `entries`' `:check`s over `changed` and return `{:key findings}` for the
+  ones that FIRED (non-empty), each filtered through its declared `:applies-to`
+  (`in-scope`).
+
+  The whole difference between the episode run and the whole-store sweep is
+  WHICH entries and WHICH form ids; every other decision — scope filtering,
+  dropping the clean ones, the shape of the result — is here once so the two
+  cannot answer differently. Callers select their own entries (`enabled?`, plus
+  `:sweep` for the sweep), because which rules ran is something each of them
+  has to REPORT and not merely apply."
+  [session st* changed entries]
+  (into {}
+        (keep (fn [{:keys [key check applies-to]}]
+                (let [r (in-scope (or applies-to :both) (check session st* changed))]
+                  (when (seq r) [key r]))))
+        entries))
+
+(defn unknown-marker-check
+  "Done-advisory: a form carrying a marker in a namespace SLOPP owns that slopp
+  does not define. Reports `{:form :marker :teach}`.
+
+  **The declaration is inert, and that is the finding.** A marker slopp does not
+  read changes nothing, refuses nothing, and generates nothing — while looking
+  exactly like a marker that works. There is no error, no warning, and no
+  behaviour to notice missing until something downstream is quietly absent.
+
+  **Built the day a rename proved it.** `:web/spa` became `:web/client-routes`,
+  and a store keeping the old spelling serves fine, clicks fine, and 404s on
+  every refresh and every shared deep link — because the scoped catch-all rows
+  are generated from a key nothing reads any more. The one app that hit it
+  caught it because an unrelated test happened to read the keyword back. That is
+  luck, and the next store does not have it.
+
+  **Nothing else could see this.** `markers/undeclared` deliberately excludes
+  namespaced keys — they belong to whoever owns the namespace — and
+  `crossings/unclassified-markers` asks whether slopp's OWN vocabulary is
+  classified, which is a question about slopp's source rather than about a
+  store's forms. Between them, a retired marker on a consumer's endpoint was
+  invisible to every surface there is.
+
+  **Scoped to namespaces slopp owns, and that scope is the whole precision.**
+  `:myapp/audited` is the app's business and none of ours. What is reported is a
+  key SQUATTING slopp's vocabulary that slopp does not define — which is always
+  either a typo or a name that used to work.
+
+  The vocabulary comes from `crossings/known-markers`, the one derivation, so a
+  marker added to slopp cannot be reported as unknown by a list nobody updated —
+  which is the same hand-kept-list failure this rule exists to catch, one level
+  up.
+
+  **Advisory rather than a refusal, deliberately.** A store mid-migration is
+  exactly the store this fires on, and flipping it red would block the writes
+  that repair it — the wedge `ops.engine/framework-injection` describes for
+  keying vendoring on enablement. The failure here is SILENCE, so naming the
+  dead declaration is the whole fix."
+  [_session st* changed]
+  (let [owned (crossings/known-markers)
+        ours  #{"web" "webapp" "cli" "rest" "rule" "malli" "http"}]
+    (vec (for [fid   changed
+               :let  [e (store/form-by-id st* fid)]
+               :when (and e (:name e))
+               k     (keys (store/form-name-meta e))
+               :when (and (qualified-keyword? k)
+                          (contains? ours (namespace k))
+                          (not (contains? owned k)))]
+           {:form   (symbol (str (store/ns-of-form-id st* fid)) (str (:name e)))
+            :marker k
+            :teach  (str (pr-str k) " is in a namespace slopp owns and slopp"
+                         " defines no such marker — so NOTHING READS IT. It"
+                         " refuses nothing, generates nothing and changes"
+                         " nothing, while looking exactly like a marker that"
+                         " works. Usually a typo, or a name that used to work:"
+                         " :web/spa became :web/client-routes, and a store"
+                         " keeping the old spelling serves fine, clicks fine,"
+                         " and 404s on every refresh. If the key is your own,"
+                         " put it in your own namespace.")}))))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -927,6 +1016,17 @@
    {:key :marker-why :severity :advisory :applies-to :both :check #'marker-why-check
     :sweep true
     :fires-on "(ns rf.core)\n(defn ^:unused-ok spare \"S.\" [x] x)\n"}
+;; a marker in a namespace SLOPP owns that slopp does not define — a
+   ;; declaration nothing reads. The silent half of every marker rename:
+   ;; `:web/spa` became `:web/client-routes`, and a store keeping the old
+   ;; spelling serves fine, clicks fine, and 404s on every refresh, because
+   ;; the catch-all rows come from a key nothing reads any more.
+   {:key :unknown-marker :severity :advisory :applies-to :production :check #'unknown-marker-check
+    ;; the form that goes stale is never the form a rename CHANGED — the whole
+    ;; point is that it sits untouched in a consumer's store — so this rule is
+    ;; the sweep or it is nothing
+    :sweep true
+    :fires-on "(ns rf.core)\n(defn ^{:web/spa [\"/x\"]} doc \"D.\" [_] {})\n"}
 ;; the stored :name and the source's own name, which must agree. NOT
    ;; :fires-on-able: ingesting source recomputes :name, so no fixture text
    ;; can express the disagreement — which is exactly why nothing caught it.
@@ -1134,35 +1234,6 @@
                    "(defn ^{:web/method :get :web/path \"/t\" :web/auth :public"
                    " :web/response [:map [:total :int]]} t \"T.\" [r] r)\n")}
    ])
-
-(defn- enabled?
-  "True when this store has not dialed advisory `e` `:off`
-  (`edit.modules/rule-severity` — the per-store override, else the registry
-  default).
-
-  Its own form because BOTH runners ask it, and a second copy of \"is this rule
-  on\" is a second answer waiting to happen: the whole-store sweep reports which
-  rules it ran, and that list has to be the same list the runner actually ran."
-  [st* {:keys [key severity]}]
-  (not= :off (gates/rule-severity st* key severity)))
-
-(defn- run-checks
-  "Run `entries`' `:check`s over `changed` and return `{:key findings}` for the
-  ones that FIRED (non-empty), each filtered through its declared `:applies-to`
-  (`in-scope`).
-
-  The whole difference between the episode run and the whole-store sweep is
-  WHICH entries and WHICH form ids; every other decision — scope filtering,
-  dropping the clean ones, the shape of the result — is here once so the two
-  cannot answer differently. Callers select their own entries (`enabled?`, plus
-  `:sweep` for the sweep), because which rules ran is something each of them
-  has to REPORT and not merely apply."
-  [session st* changed entries]
-  (into {}
-        (keep (fn [{:keys [key check applies-to]}]
-                (let [r (in-scope (or applies-to :both) (check session st* changed))]
-                  (when (seq r) [key r]))))
-        entries))
 
 (defn run-done-advisories!
   "Run every registered done-advisory `:check` over the episode's changes —

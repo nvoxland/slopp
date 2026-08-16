@@ -210,49 +210,6 @@
                    marker on the form. Read only by edit.gates/gate-capability
                    deciding whether to run a gate, so nothing crosses"})
 
-(defn ^:export unclassified-markers
-  "Markers slopp's own surfaces produce that neither `kinds` nor
-  `internal-markers` claims — empty when the classification is total.
-
-  The guard on the guard. `store-crossings` can only report a marker as
-  unclassified if it appears in a STORE; this asks the same question of the
-  VOCABULARY, so a marker slopp defines and no store has used yet still has to
-  be decided about.
-
-  **The vocabulary below is HAND-KEPT, and that is the hole this guard cannot
-  cover.** `:web/context` shipped in neither registry and this returned empty
-  the whole time, because a marker nobody added to the list is invisible to a
-  list. It was caught by the first APP to declare a builder, whose `full_check`
-  then carried a permanent unclassified entry — the cost landing on adopters
-  rather than on the author. So the real backstop is `store-crossings` in a
-  store that USES the marker, one step later than intended and paid for by
-  someone else. When you add a `:web/*` marker, add it here in the same write;
-  nothing will remind you.
-
-  **Scope: NAMESPACED keys only, and the split from `slopp.rules.markers`
-  is deliberate rather than an oversight.** The two registries ask different
-  questions about disjoint key spaces:
-
-  - here — `:web/*`, `:malli/*`, `:rule/*`: does data pass through this key to
-    something OUTSIDE the store, and does anything check it there?
-  - there — `:unused-ok`, `:entry-point`, `:unsafe`: does this dial waive a
-    rule, and should it say why?
-
-  Merging them would report every escape dial as an unclassified crossing,
-  which is precision failure by construction. `markers/undeclared` excludes
-  namespaced keywords for the mirrored reason, so between them the store's
-  marker vocabulary is partitioned rather than double-counted — pinned by
-  `crossings-test/the-two-marker-registries-partition-the-vocabulary`."
-  []
-  (let [owned (into (set (keys internal-markers)) (mapcat :markers) kinds)]
-    (vec (sort (remove owned
-                       [:web/path :web/method :web/auth :web/reads :web/effects
-                        :web/read :web/effect :web/effectful :web/request
-                        :web/response :web/client :web/context
-                        :web/client-routes :web/external-path :web/client-path
-                        :malli/schema :rule/applies-to :rule/severity
-                        :rule/capability])))))
-
 (defn ^:export store-crossings
   "The store's boundary exits: which crossing kinds it actually has, which of
   those nothing checks, and any marker no kind claims.
@@ -331,3 +288,66 @@
         (seq unchecked)    (assoc :unchecked (mapv #(select-keys % [:kind :to :blind :at])
                                                    unchecked))
         (seq unclassified) (assoc :unclassified unclassified)))))
+
+(defn ^:export known-markers
+  "Every namespaced marker slopp gives meaning to — the union of what [[kinds]]
+  reports as crossing and what [[internal-markers]] declares stays inside.
+
+  DERIVED rather than listed, and it is the one derivation two different
+  questions ask:
+
+  - [[unclassified-markers]] asks it about SLOPP'S OWN vocabulary — is every
+    marker slopp produces accounted for by one registry or the other?
+  - `rules/unknown-marker-check` asks it about a STORE'S FORMS — is this
+    `:web/…` key on this endpoint one slopp actually reads?
+
+  Those look similar and are opposites in direction, which is exactly why they
+  must not each keep a list. A marker added to slopp and forgotten in one place
+  would be reported as unclassified by the first, or as unknown-on-a-consumer's-
+  form by the second — the same hand-kept-list failure the second rule exists to
+  catch, one level up."
+  []
+  (into (set (keys internal-markers)) (mapcat :markers) kinds))
+
+(defn ^:export unclassified-markers
+  "Markers slopp's own surfaces produce that neither `kinds` nor
+  `internal-markers` claims — empty when the classification is total.
+
+  The guard on the guard. `store-crossings` can only report a marker as
+  unclassified if it appears in a STORE; this asks the same question of the
+  VOCABULARY, so a marker slopp defines and no store has used yet still has to
+  be decided about.
+
+  **The vocabulary below is HAND-KEPT, and that is the hole this guard cannot
+  cover.** `:web/context` shipped in neither registry and this returned empty
+  the whole time, because a marker nobody added to the list is invisible to a
+  list. It was caught by the first APP to declare a builder, whose `full_check`
+  then carried a permanent unclassified entry — the cost landing on adopters
+  rather than on the author. So the real backstop is `store-crossings` in a
+  store that USES the marker, one step later than intended and paid for by
+  someone else. When you add a `:web/*` marker, add it here in the same write;
+  nothing will remind you.
+
+  **Scope: NAMESPACED keys only, and the split from `slopp.rules.markers`
+  is deliberate rather than an oversight.** The two registries ask different
+  questions about disjoint key spaces:
+
+  - here — `:web/*`, `:malli/*`, `:rule/*`: does data pass through this key to
+    something OUTSIDE the store, and does anything check it there?
+  - there — `:unused-ok`, `:entry-point`, `:unsafe`: does this dial waive a
+    rule, and should it say why?
+
+  Merging them would report every escape dial as an unclassified crossing,
+  which is precision failure by construction. `markers/undeclared` excludes
+  namespaced keywords for the mirrored reason, so between them the store's
+  marker vocabulary is partitioned rather than double-counted — pinned by
+  `crossings-test/the-two-marker-registries-partition-the-vocabulary`."
+  []
+  (let [owned (known-markers)]
+    (vec (sort (remove owned
+                       [:web/path :web/method :web/auth :web/reads :web/effects
+                        :web/read :web/effect :web/effectful :web/request
+                        :web/response :web/client :web/context
+                        :web/client-routes :web/external-path :web/client-path
+                        :malli/schema :rule/applies-to :rule/severity
+                        :rule/capability])))))
