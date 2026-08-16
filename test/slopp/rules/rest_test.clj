@@ -106,3 +106,88 @@
 
     (testing "and the ordinary map case is untouched"
       (is (= [:slug] (:request (by "/api/register")))))))
+
+(deftest a-contract-declared-by-VAR-reports-its-keys
+  ;; Reported by slopp-ui the day the report shipped: every INLINE contract
+  ;; reported exactly what it promised, and every VAR-referenced one reported
+  ;; `nil`. Five endpoints, and the split was clean along that one line.
+  ;;
+  ;; **This is worse than the throw it replaced**, by the principle stated in
+  ;; the same message that shipped it: answering `[]` would be "a claim about
+  ;; your contract rather than about the report's reach", and `nil` is the
+  ;; stronger version of that mistake — an eight-key response is
+  ;; indistinguishable from an endpoint that declares nothing.
+  ;;
+  ;; It also punishes the practice slopp itself pushes. `rest-inline-schema-dup`
+  ;; fires on the same inline schema in two endpoints and tells the author to
+  ;; share a var — and sharing the var is what made the surface go blank.
+  ;;
+  ;; **The rules were never blind**; `schema-resolver` resolves through the
+  ;; reference graph, by edge rather than by name, because slopp's own ten
+  ;; endpoints all name their schema through an alias. So the two answers to
+  ;; one question came from two producers, and only the report had no resolver.
+  (let [contracts (str "(ns shop.contracts)\n\n"
+                       "(def order [:map [:sku :string] [:qty :int]])\n\n"
+                       "(def receipt [:sequential [:map [:id :int] [:total :int]]])\n")
+        api       (str "(ns shop.api\n"
+                       "  (:require [shop.contracts :as contracts]))\n\n"
+                       "(defn ^{:web/method :post :web/path \"/api/orders\" :web/auth :public\n"
+                       "        :web/request contracts/order\n"
+                       "        :web/response contracts/receipt}\n"
+                       "  create! \"Place an order.\" [req] req)\n\n"
+                       "(defn ^{:web/method :get :web/path \"/api/health\" :web/auth :public\n"
+                       "        :web/response [:map [:ok :boolean]]}\n"
+                       "  health \"Health.\" [req] req)\n")
+        st        (-> (store/empty-store)
+                      (store/ingest 'shop.contracts contracts)
+                      (store/ingest 'shop.api api)
+                      (assoc-in [:config "capabilities" :values "rest.enabled"] "true"))
+        by        (into {} (map (juxt :path identity)) (rules.rest/contracts-report st))]
+
+    (testing "a var-referenced map reports the var's keys"
+      (is (= [:sku :qty] (:request (by "/api/orders"))) (pr-str (by "/api/orders"))))
+
+    (testing "and a var-referenced [:sequential [:map …]] reports the INNER keys"
+      ;; the case singled out as "the commonest non-map contract there is",
+      ;; and the one that reported nil on a real store
+      (is (= [:id :total] (:response (by "/api/orders"))) (pr-str (by "/api/orders"))))
+
+    (testing "the inline case is untouched — the control"
+      ;; without this the fix could resolve vars by breaking everything else
+      (is (= [:ok] (:response (by "/api/health"))) (pr-str (by "/api/health"))))))
+
+(deftest a-contract-COMPOSED-from-other-vars-resolves-all-the-way-down
+  ;; The other half of slopp-ui's finding, and the half slopp's own store
+  ;; proves. Resolving ONE level fixed five of ten endpoints here and left five
+  ;; reporting nil, because a schema var may name another:
+  ;;
+  ;;   (def namespace-list [:sequential namespace-row])
+  ;;
+  ;; `namespace-row` is still a symbol after one hop, so malli throws building
+  ;; the schema and the total accessor answers nil. Composing schemas this way
+  ;; is not an edge case — `api.contracts/namespace-list` documents it as
+  ;; deliberate: *"a schema var is an ordinary var, so this composition is a
+  ;; REAL reference edge, and changing the row shows up in its blast radius."*
+  ;;
+  ;; So the reader has to resolve to a FIXED POINT, not to one hop, and each
+  ;; hop has to resolve from where it is WRITTEN — `namespace-row` is named
+  ;; from inside `api.contracts`, not from the endpoint that started the walk.
+  (let [contracts (str "(ns shop.contracts)\n\n"
+                       "(def line [:map [:sku :string] [:qty :int]])\n\n"
+                       "(def order [:map [:id :int] [:lines [:sequential line]]])\n\n"
+                       "(def receipts [:sequential order])\n")
+        api       (str "(ns shop.api\n"
+                       "  (:require [shop.contracts :as contracts]))\n\n"
+                       "(defn ^{:web/method :get :web/path \"/api/receipts\" :web/auth :public\n"
+                       "        :web/response contracts/receipts}\n"
+                       "  all \"Every receipt.\" [req] req)\n")
+        st        (-> (store/empty-store)
+                      (store/ingest 'shop.contracts contracts)
+                      (store/ingest 'shop.api api)
+                      (assoc-in [:config "capabilities" :values "rest.enabled"] "true"))
+        row       (first (rules.rest/contracts-report st))]
+
+    (testing "two hops through vars, then a collection wrapper, still reports keys"
+      ;; receipts -> order (var) -> [:map …]; the inner `line` reference must
+      ;; also resolve or malli cannot build the map at all
+      (is (= [:id :lines] (:response row)) (pr-str row)))))

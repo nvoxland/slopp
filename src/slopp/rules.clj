@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -951,7 +951,7 @@
    ;; the single biggest behavioural consequence available in one piece of
    ;; metadata, and nothing said it: declaring :web/spa turns every path under
    ;; the prefix from 404 into 200 and moves not-found into the client.
-   {:key :http-spa-consequences :severity :advisory :applies-to :production :check #'rules.http/http-spa-consequences-check
+   {:key :webapp-spa-consequences :severity :advisory :applies-to :production :check #'rules.webapp/webapp-spa-consequences-check
     :sweep (str "states a consequence ONCE, for the episode that declared the"
                 " prefix — there is nobody to tell about a declaration that"
                 " predates the sweep")
@@ -1086,13 +1086,13 @@
     ;; UNCHANGED form's link, which is this same friction one rule over
     :sweep true
     :selftest-note "gated on the store's http.enabled capability, which a source-only fixture cannot carry — covered by web-test/done-surfaces-dangling-route-refs"}
-   {:key :http-page-reach :severity :advisory :applies-to :production :check #'rules.http/http-page-reach-check
+   {:key :webapp-page-reach :severity :advisory :applies-to :production :check #'rules.webapp/webapp-page-reach-check
     ;; the sweep is where this one EARNS its keep: an entry stranded by a
     ;; platform declaration on some OTHER namespace is invisible to every
     ;; episode-scoped done there will ever be, because no write to the entry
     ;; ever happens
     :sweep true
-    :selftest-note (str "needs BOTH the store's http.enabled capability and a"
+    :selftest-note (str "needs BOTH the store's webapp.enabled capability and a"
                         " :module-platform declaration, neither of which a"
                         " source-only fixture can carry — covered by"
                         " rules.web-test/a-page-reaching-cljs-cannot-be-opened-"

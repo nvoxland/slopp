@@ -21,61 +21,6 @@
             [slopp.project.capabilities :as capabilities]
             [slopp.cli.spec :as spec] [clojure.string :as str] [slopp.rules.http :as rules.http]))
 
-(defn ^:export contracts-report
-  "The `rest` section of `query_surface`: one row per endpoint that declares a
-  typed contract.
-
-  Empty until `rest.enabled` — the reading side of the same inertness the gates
-  have, and for the same reason: a project that publishes no typed API must not
-  be DESCRIBED as having one.
-
-  **The shape is NAMES, not schemas**, the same choice `rules.cli/commands-report`
-  makes and for a sharper reason here. A malli schema pretty-prints to several
-  lines, and this surface is already the one whose payload grows with the APP
-  rather than with the question — `query_rules` is what that looks like when it
-  goes wrong, returning 17 of its 43 rules over the response gate with the
-  truncation announced outside the payload. The names answer what an endpoint
-  is FOR (what may I send, what comes back); `query_slice` on the handler
-  answers what it accepts exactly.
-
-  Read through `slopp.cli.spec/schema-names`, a TOTAL accessor shared with the
-  cli surface, so a malformed declaration degrades to nil in both reports rather
-  than throwing in one of them. A bad schema is caught at the WRITE, where the
-  author can fix it.
-
-  **Totality has to hold across SHAPES, not only across malformed input.** A
-  field is a vector of key names when the contract describes a map — including a
-  map inside a `[:sequential …]`, which is what a list endpoint is — and the
-  schema's own TYPE keyword when there is nothing to enumerate, `:or` or
-  `:string`. Reading a non-map's children as map entries is what once threw on a
-  real store the day it enabled this capability, making nine endpoints
-  unreadable because a tenth answered `[:or [:map …] [:map …]]`.
-
-  `:published` is `:web/client false` inverted, and it is a field rather than an
-  omission because a reader asking what consumers can CALL needs the exclusion
-  visible. An HTML document is a `:web/path` form like any other and a generated
-  fetch wrapper over it would be nonsense — but \"excluded on purpose\" and
-  \"forgot to declare a schema\" must not look the same.
-
-  Rows carry `:kind :contract`, so a renderer that knows nothing about this
-  capability can draw one beside a command or an endpoint."
-  [store]
-  (if-not (capabilities/enabled? store "rest")
-    []
-    (vec (for [{:keys [ns name meta]} (sort-by #(str (:web/path (:meta %)))
-                                               (edit.http/web-endpoint-rows store))
-               :when (or (:web/request meta) (:web/response meta)
-                         (false? (:web/client meta)))]
-           (cond-> {:kind      :contract
-                    :method    (:web/method meta)
-                    :path      (str (:web/path meta))
-                    :handler   (symbol (str ns) (str name))
-                    :published (not (false? (:web/client meta)))}
-             (:web/request meta)
-             (assoc :request (spec/schema-names (:web/request meta)))
-             (:web/response meta)
-             (assoc :response (spec/schema-names (:web/response meta))))))))
-
 (defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module, as its four unexported siblings in slopp.rules.http show. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
   rest-stale-client-check
   "Done-advisory (D-web-contracts part 2): the generated typed client
@@ -242,3 +187,116 @@
                     " it: ^{:web/unconstrained-ok \"a proxy: the response is"
                     " whatever the project sent\"}. That discharges this, and"
                     " is reported as stale if the contract later constrains.")}))))
+
+(defn- resolved-schema
+  "`decl` with every schema symbol in it replaced by the form that symbol
+  names — to a FIXED POINT, not one hop.
+
+  A schema var may name another, and `api.contracts/namespace-list` documents
+  why that is deliberate rather than incidental: *\"a schema var is an ordinary
+  var, so this composition is a REAL reference edge, and changing the row shows
+  up in its blast radius.\"* Resolving one level leaves an inner symbol in the
+  form, malli refuses to build it, and the total accessor answers nil — which
+  on slopp's own store was five endpoints of ten.
+
+  `from` travels, because each hop resolves from where it is WRITTEN: an inner
+  reference inside `api.contracts` is named from there, not from the endpoint
+  whose metadata began the walk. That is the whole reason `schema-resolver`
+  returns the resolved `[ns name]` alongside the schema.
+
+  **A props map is not walked.** In `[:k {:doc \"…\"} schema]` the map holds
+  documentation, and a `:doc` string mentioning a symbol is prose. Walking it
+  would resolve words.
+
+  Two guards, both for the same shape: a schema that references itself, which
+  is legal and useful for a tree. `seen` stops a cycle and the depth bound
+  stops a chain long enough to be pathological. Either way the unresolved
+  symbol is LEFT in place, so the caller reports the name rather than nil."
+  [resolve* from decl]
+  (letfn [(walk [from decl depth seen]
+            (cond
+              (> depth 32) decl
+
+              (symbol? decl)
+              (if-let [[from' schema] (resolve* from decl)]
+                (if (contains? seen from')
+                  decl
+                  (walk from' schema (inc depth) (conj seen from')))
+                decl)
+
+              ;; a props map's values are documentation, not schemas
+              (map? decl) decl
+
+              (vector? decl) (mapv #(walk from % (inc depth) seen) decl)
+
+              :else decl))]
+    (walk from decl 0 #{})))
+
+(defn ^:export contracts-report
+  "The `rest` section of `query_surface`: one row per endpoint that declares a
+  typed contract.
+
+  Empty until `rest.enabled` — the reading side of the same inertness the gates
+  have, and for the same reason: a project that publishes no typed API must not
+  be DESCRIBED as having one.
+
+  **The shape is NAMES, not schemas**, the same choice `rules.cli/commands-report`
+  makes and for a sharper reason here. A malli schema pretty-prints to several
+  lines, and this surface is already the one whose payload grows with the APP
+  rather than with the question — `query_rules` is what that looks like when it
+  goes wrong, returning 17 of its 43 rules over the response gate with the
+  truncation announced outside the payload. The names answer what an endpoint
+  is FOR (what may I send, what comes back); `query_slice` on the handler
+  answers what it accepts exactly.
+
+  Read through `slopp.cli.spec/schema-names`, a TOTAL accessor shared with the
+  cli surface, so a malformed declaration degrades to nil in both reports rather
+  than throwing in one of them. A bad schema is caught at the WRITE, where the
+  author can fix it.
+
+  **Totality has to hold across SHAPES, not only across malformed input.** A
+  field is a vector of key names when the contract describes a map — including a
+  map inside a `[:sequential …]`, which is what a list endpoint is — and the
+  schema's own TYPE keyword when there is nothing to enumerate, `:or` or
+  `:string`. Reading a non-map's children as map entries is what once threw on a
+  real store the day it enabled this capability, making nine endpoints
+  unreadable because a tenth answered `[:or [:map …] [:map …]]`.
+
+  `:published` is `:web/client false` inverted, and it is a field rather than an
+  omission because a reader asking what consumers can CALL needs the exclusion
+  visible. An HTML document is a `:web/path` form like any other and a generated
+  fetch wrapper over it would be nonsense — but \"excluded on purpose\" and
+  \"forgot to declare a schema\" must not look the same.
+
+  Rows carry `:kind :contract`, so a renderer that knows nothing about this
+  capability can draw one beside a command or an endpoint."
+  [store]
+  (if-not (capabilities/enabled? store "rest")
+    []
+    (let [resolve* (rules.http/schema-resolver store)
+          ;; a declaration is either the schema itself or a SYMBOL naming one.
+          ;; Resolving through the same producer the contract advisories use is
+          ;; the point: two answers to one question is how this came to report
+          ;; nil for a contract the rules had already judged.
+          names    (fn [from decl]
+                     (or (spec/schema-names (resolved-schema resolve* from decl))
+                         ;; unresolvable: answer with the DECLARATION, never
+                         ;; nil. It exists and says where it lives, and a blank
+                         ;; field claims the endpoint declares nothing — the
+                         ;; stronger form of the `[]` mistake this report
+                         ;; already refuses to make.
+                         decl))]
+      (vec (for [{:keys [ns name meta]} (sort-by #(str (:web/path (:meta %)))
+                                                 (edit.http/web-endpoint-rows store))
+                 :when (or (:web/request meta) (:web/response meta)
+                           (false? (:web/client meta)))
+                 :let [from [ns name]]]
+             (cond-> {:kind      :contract
+                      :method    (:web/method meta)
+                      :path      (str (:web/path meta))
+                      :handler   (symbol (str ns) (str name))
+                      :published (not (false? (:web/client meta)))}
+               (:web/request meta)
+               (assoc :request (names from (:web/request meta)))
+               (:web/response meta)
+               (assoc :response (names from (:web/response meta)))))))))

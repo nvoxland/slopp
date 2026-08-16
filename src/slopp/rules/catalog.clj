@@ -59,7 +59,7 @@
    {:rule :http-route-collision :grain :form
     :escape "change the path or method, or extend the existing handler (query_surface lists every claim)"
     :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until http.enabled)"}
-   {:rule :http-page-unreachable :grain :form
+   {:rule :webapp-page-unreachable :grain :form
     :escape "move the entry — and the routing, derive and view code it reaches — to a :jvm or :cljc namespace, passing the browser-shaped parts in (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:web/page entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until http.enabled)"}
    {:rule :http-undeclared-effect :grain :form
@@ -157,7 +157,7 @@
                 " that predicate measured 4-5 false positives out of 5; a"
                 " defmethod's dispatch value at index 2 cannot shift and is not"
                 " flagged")}
-   {:rule :http-spa-consequences :grain :done
+   {:rule :webapp-spa-consequences :grain :done
     :escape "nothing to discharge — it states a consequence once, for the episode that declared the prefix"
     :teach (str "an endpoint gained :web/spa this episode: every path under the"
                 " declared prefix now answers 200 instead of 404, and NOT-FOUND"
@@ -190,7 +190,7 @@
    {:rule :http-generated-ns :grain :form
     :escape "regenerate via generate_client after changing the ENDPOINT (its :web/request/:web/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"http-generated-ns\" value \"advisory\"})"
     :teach "a ^:generated form is generate_client's output and must not be hand-edited — regeneration rewrites the whole client namespace, so a hand edit is lost on the next generate (D-web-contracts part 2)"}
-   {:rule :http-page-reach :grain :done
+   {:rule :webapp-page-reach :grain :done
     :escape "move the view/derive code the entry reaches into a :jvm or :cljc namespace and pass the browser-shaped parts IN (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:web/page entry REACHES a :cljs namespace, so no JVM can open the app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. http-page-unreachable refuses the ENTRY's own shape at the write; this is the reach. At done it sees only pages you CHANGED — the dependency-flip case (some other namespace declared :cljs, no write to the entry) is reported by module_platform itself at the declaration (:stranded-pages) and re-graded by the full_check sweep (inert until http.enabled)"}
    {:rule :rest-stale-client :grain :done

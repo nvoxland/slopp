@@ -20,7 +20,7 @@
   keep those apart, and each distinction was added because collapsing it made a
   report state something false. Prefer adding a category over widening one."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [rewrite-clj.parser :as p] [slopp.index.refs :as refs]))
+            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs]))
 
 (defn endpoints
   "Every declared endpoint in the store — a `:web/path` form's route row:
@@ -288,122 +288,6 @@
                         :web/effects (vec (:web/effects m))}))))
                changed))))
 
-(defn http-spa-consequences-check
-  "Done-advisory: an endpoint gained `:web/spa` this episode — state what that
-   changed, once.
-
-   Declaring a client-routed prefix is the single biggest behavioural change
-   available in one piece of metadata, and nothing said so. Before: a bad deep
-   link under the prefix was a 404, resolved and refused by the server. After:
-   the server serves the document (it cannot know the path is bad), the client
-   fetches, gets its own 404, and renders a not-found screen. **The HTTP status
-   for every path under that prefix changed from 404 to 200.**
-
-   That is correct — it is what `:web/spa` is FOR — but it is a real semantic
-   change that only surfaced here because two existing tests happened to assert
-   the old status.
-
-   Fires only for the episode that ADDED the declaration, like
-   `shell-widening`: it asks once, while the reason is still in context, and
-   cannot decay into a standing warning to scroll past. It teaches rather than
-   checks, and the boundary inventory still reports `:spa/client-routing` as an
-   UNCHECKED exit — nothing compares the client's route table to the server's,
-   and a teach is not a check."
-  [_session st* changed]
-  (let [ds       (store/deltas st*)
-        baseline (->> ds (filter #(= :done (:op %))) last :id)
-        old-srcs (when baseline (store/sources-at st* baseline))
-        spa?     (fn [form] (when (and (seq? form) (symbol? (second form)))
-                              (:web/spa (meta (second form)))))]
-    (vec (for [fid changed
-               :let [e (store/form-by-id st* fid)]
-               :when (and e (:name e))
-               :let [new (store/form-sexpr (:node e))
-                     old (some-> (get old-srcs fid) p/parse-string store/form-sexpr)
-                     ps  (spa? new)]
-               ;; only when the declaration is NEW: either the form is new, or
-               ;; its previous version did not carry one
-               :when (and ps (not (spa? old)))]
-           {:form  (symbol (str (store/ns-of-form-id st* fid)) (str (:name e)))
-            :teach (str "every path under " (pr-str ps) " now answers 200, not 404 —"
-                        " the server serves this document for any path below the"
-                        " prefix and NOT-FOUND moves into the client. Make sure the"
-                        " client renders a not-found screen for a path its own"
-                        " router does not know, or a bad deep link shows a blank"
-                        " pane at a URL that looks valid. The prefix ROOT is not"
-                        " covered by the fallback and still needs its own route")}))))
-
-(defn ^:export page-cljs-reach
-  "The `:cljs` namespaces `ns-sym`'s require closure reaches, sorted — empty
-  when a JVM can load the whole closure.
-
-  ONE producer on purpose: the `http-page-reach` done-advisory, the full_check
-  sweep, and `module_platform`'s stranded-page report all answer from here,
-  because a rule that refuses at one surface and a report that lists at
-  another must agree, and they only can if they are one derivation."
-  [st ns-sym]
-  (->> (store/ns-closure st ns-sym)
-       (filter #(= :cljs (store/platform-for st %)))
-       sort
-       vec))
-
-(defn ^:export stranded-pages
-  "Every `^:web/page` in `st` whose namespace closure reaches `:cljs`, as
-  `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
-
-  This is the whole-store face of [[page-cljs-reach]], and it exists for the
-  surface the done-advisory structurally cannot serve: declaring a namespace
-  `:cljs` strands a page WITHOUT any write to the page, so the done that
-  follows has no changed form to hang the finding on. `module_platform` is
-  the write that does the stranding, so `module_platform` is where this
-  report belongs — the reader who broke the reach is told at the moment they
-  broke it, not at the next full_check."
-  [st]
-  (vec (for [n     (keys (:namespaces st))
-             f     (store/forms st n)
-             :when (and (:name f) (:web/page (edit.http/web-name-meta f)))
-             :let  [cljs (page-cljs-reach st n)]
-             :when (seq cljs)]
-         {:page (symbol (str n) (str (:name f))) :cljs cljs})))
-
-(defn http-page-reach-check
-  "Done-advisory (D-web): a `^:web/page` entry whose namespace CLOSURE reaches
-  a `:cljs` namespace. Reports `{:form :cljs [namespaces]}`; inert until the
-  store opts into HTTP.
-
-  **The write gate is the shallow half.** `http-page-unreachable` refuses an
-  entry marked in a `:cljs` namespace, which catches the entry itself and
-  nothing it calls. An entry sitting in `:cljc` and reaching a `:cljs` view
-  passes the gate and fails the tool — and that is where a real app lands,
-  because the entry is small and the views are where the code is.
-
-  **Its FRAME, stated honestly (the review caught the prose overstating it):**
-  at `done` this sees only pages in `changed`, so the case its class exists
-  for — declaring some OTHER namespace `:cljs`, which strands an entry nobody
-  wrote to — is silent here. Two surfaces cover that case instead:
-  `module_platform` reports [[stranded-pages]] at the write that does the
-  stranding, and the `full_check` sweep re-grades every page. The advisory
-  earns its keep on the ordinary edit-the-page path; it is not the safety
-  net, and prose claiming otherwise was teaching a false comfort.
-
-  Namespace grain, because platform is declared per namespace, so a finer
-  answer would be a proxy for one slopp does not actually have.
-
-  It names the `:cljs` namespaces rather than the entry alone. The entry is
-  usually fine; the finding is which dependency stranded it, and that is what
-  a reader has to move or split."
-  [_session st* changed]
-  (when (capabilities/enabled? st* "http")
-    (vec (keep (fn [fid]
-                 (when-let [e (store/form-by-id st* fid)]
-                   (when (:web/page (edit.http/web-name-meta e))
-                     (let [own  (store/ns-of-form-id st* fid)
-                           cljs (page-cljs-reach st* own)]
-                       (when (seq cljs)
-                         {:form (symbol (str own) (str (:name e)))
-                          :cljs cljs})))))
-               changed))))
-
 (defn- schema-prose?
   "Does a malli entry's property map carry prose?
 
@@ -424,7 +308,7 @@
                                   (and (seq? v) (= 'str (first v)) (seq (rest v)))))
                       [(:doc props) (:description props)]))))
 
-(defn- schema-resolver
+(defn schema-resolver
   "`(fn [from sym] -> [from' schema])` — the schema a symbol NAMES, resolved
   through THE reference graph.
 
@@ -441,7 +325,16 @@
   nil when the symbol resolves to nothing, to more than one thing, or to a
   form that is not a `def`. Those are the cases where a finding would be a
   guess, and this rule is advisory: a missed field costs a nudge, a wrong one
-  costs trust in every other row."
+  costs trust in every other row.
+
+  **ONE producer, two readers, and it was one reader short.** The contract
+  advisories resolve through this; `rules.rest/contracts-report` did not, so
+  `query_surface` answered `nil` for every contract declared by VAR while the
+  rules judged those same contracts correctly. Measured by slopp-ui on a store
+  where three of five endpoints declare through a shared var — which is the
+  arrangement `rest-inline-schema-dup` actively tells an author to adopt. Not
+  private for that reason: a resolver only one of two readers can reach is how
+  the two came to disagree."
   [store]
   (let [edges (group-by (juxt :from-ns :from-var) (refs/refs store))]
     (fn [from sym]

@@ -1241,3 +1241,52 @@
           (is (contains? sw :findings) (pr-str (keys sw)))
           (is (pos? (:forms sw)) (pr-str sw))))
       (finally (ops/close! sess)))))
+
+(deftest the-BROWSER-rules-belong-to-webapp-not-to-http
+  ;; D-capabilities wave 4. Three rules were written when `http` was the only
+  ;; app type and everything web-shaped landed under it. They are not about
+  ;; SERVING — they are about the app that runs in the page:
+  ;;
+  ;;   page-unreachable   the ^:web/page entry slopp opens headlessly
+  ;;   page-reach         that entry's closure reaching :cljs
+  ;;   spa-consequences   what declaring :web/spa changes about every path
+  ;;
+  ;; An app that serves HTML and runs no browser app has none of these
+  ;; declarations and should not be graded on them; an app whose browser owns
+  ;; routing and state should be graded on them whether or not it happens to
+  ;; publish an API. That is what a capability IS, and `http` was carrying them
+  ;; only because it was first.
+  ;;
+  ;; Both halves of the ownership are DERIVED — `rule-owner` from the key's
+  ;; prefix, `gate-capability` from the implementing namespace — so this test
+  ;; pins the CLAIM (these three are browser rules) rather than a spelling,
+  ;; and `a-rule-owned-by-an-app-type-is-named-for-it` keeps the two
+  ;; derivations from disagreeing.
+  (let [gate-ns   (gates/write-gate-namespaces)
+        done-keys (set (map :key rules/done-advisories))]
+
+    (testing "each of the three is owned by webapp, by its name"
+      (is (= "webapp" (capabilities/rule-owner :webapp-page-unreachable)))
+      (is (= "webapp" (capabilities/rule-owner :webapp-page-reach)))
+      (is (= "webapp" (capabilities/rule-owner :webapp-spa-consequences))))
+
+    (testing "and each is REGISTERED under that name, at its own grain"
+      (is (contains? gate-ns :webapp-page-unreachable)
+          (str "the write gate must be registered: " (pr-str (sort (keys gate-ns)))))
+      (is (contains? done-keys :webapp-page-reach) (pr-str (sort done-keys)))
+      (is (contains? done-keys :webapp-spa-consequences) (pr-str (sort done-keys))))
+
+    (testing "the http-owned spellings are GONE, not merely shadowed"
+      ;; a rename that leaves the old key registered arms both, and a store
+      ;; dialling either gets half the behaviour it asked for
+      (is (not (contains? gate-ns :http-page-unreachable)) (pr-str (sort (keys gate-ns))))
+      (is (not (contains? done-keys :http-page-reach)) (pr-str (sort done-keys)))
+      (is (not (contains? done-keys :http-spa-consequences)) (pr-str (sort done-keys))))
+
+    (testing "and http keeps the SERVER half — the move must not empty it"
+      ;; guard the guard: every assertion above is satisfied by deleting the
+      ;; three rules outright, which would pass while removing the checks
+      (is (contains? gate-ns :http-auth-refusal) (pr-str (sort (keys gate-ns))))
+      (is (contains? gate-ns :http-route-collision))
+      (is (contains? done-keys :http-dangling-route-refs) (pr-str (sort done-keys)))
+      (is (= "http" (capabilities/rule-owner :http-auth-refusal))))))

@@ -121,9 +121,8 @@
     :to         "slopp.web.screen's driver, which opens it on a JVM and
                  presses things"
     :markers    #{:web/page}
-    :checked-by "http-page-unreachable refuses an entry that is not a public
-                 zero-arity defn (def, defmethod, private, no [] arity), one
-                 in a :cljs namespace, and a SECOND entry; the http-page-reach
+    :checked-by "webapp-page-unreachable refuses an entry that is not a public
+                 zero-arity defn (def, defmethod, private, no [] arity), one in a :cljs namespace, and a SECOND entry; the webapp-page-reach
                  advisory re-grades a CHANGED page's closure at done;
                  module_platform reports the pages a :cljs declaration
                  strands; screen/open refuses a page whose :state is not an

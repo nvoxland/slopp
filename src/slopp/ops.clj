@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp]))
 
 (defn reap-idle-images!
   "Stop parked branch images idle past the session TTL (the session's reaper
@@ -3496,7 +3496,7 @@ recompiled (engine/after-write! session ns-sym)]
       ;; after it, the diff compares the new store to itself and the report
       ;; is empty forever (caught in review of this very change).
       (let [already  (when (= :cljs platform)
-                       (set (map :page (rules.http/stranded-pages (:store @session)))))
+                       (set (map :page (rules.webapp/stranded-pages (:store @session)))))
             st'      (engine/commit-appended!
                       session
                       #(first (store/record-module-platform % module platform
@@ -3510,7 +3510,7 @@ recompiled (engine/after-write! session ns-sym)]
             ;; whole external tier went red on it in one theme
             stranded (when (= :cljs platform)
                        (seq (filter #(not (contains? already (:page %)))
-                                    (rules.http/stranded-pages st'))))]
+                                    (rules.webapp/stranded-pages st'))))]
         ;; This verb checks NOTHING about the code — it records a routing fact.
         ;; Whether a :cljc/:cljs namespace actually compiles for its declared
         ;; platform is compile_client's answer, and it can arrive much later.
