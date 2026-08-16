@@ -7,11 +7,12 @@ contract, and the gates that check every other write check it too.
 ## Opt in once
 
 ```clj
-config_file {path "capabilities" key "web.enabled" value "true"}
+config_file {path "capabilities" key "http.enabled" value "true"}
 ```
 
-Every web rule, and `query_routes` itself, is inert until that is true. A store
-that never opts in has no web surface and never sees a web refusal.
+Every http rule, and `query_surface`'s `:http` section, is inert until that is
+true. A store that never opts in has no web surface and never sees a web
+refusal.
 
 Capability keys are declared in a registry with a type, a default, and a doc
 line, so a typo'd key or an ill-typed value is refused at the write rather than
@@ -132,33 +133,38 @@ state.
 
 ## What the gates check
 
-All of these are inert until `web.enabled`, and every one is severity-dialable
+All of these are inert until `http.enabled`, and every one is severity-dialable
 like any other [rule](../verification.md#rules).
 
 | Rule | Refuses |
 |---|---|
-| `web-auth-refusal` | An endpoint with no `:web/auth`. Default-deny: `:public` is typed out, never implied. |
-| `web-endpoint-schema` | A missing `:web/response`, or `:web/request` on a body method. |
-| `web-route-collision` | A second owner for one method plus path. |
-| `web-undeclared-effect` | A `:web/effects` kind no marked performer provides. |
-| `web-undeclared-context` | A handler reading `:web/deps` with no `^{:web/context true}` builder in the store -- see [Running the app](running.md). |
-| `web-unsafe-get` | A `:get`/`:head` endpoint that declares effects or reaches a mutation. |
-| `web-unknown-group` | A `[:group "x"]` policy naming a group the capabilities config does not define. |
-| `web-react-attrs` | `:className`, `:onClick` and friends in hiccup -- see [HTML and CSS](html.md). |
+| `http-auth-refusal` | An endpoint with no `:web/auth`. Default-deny: `:public` is typed out, never implied. |
+| `http-endpoint-schema` | A missing `:web/response`, or `:web/request` on a body method. |
+| `http-route-collision` | A second owner for one method plus path. |
+| `http-undeclared-effect` | A `:web/effects` kind no marked performer provides. |
+| `http-undeclared-context` | A handler reading `:web/deps` with no `^{:web/context true}` builder in the store -- see [Running the app](running.md). |
+| `http-unsafe-get` | A `:get`/`:head` endpoint that declares effects or reaches a mutation. |
+| `http-unknown-group` | A `[:group "x"]` policy naming a group the capabilities config does not define. |
+| `http-react-attrs` | `:className`, `:onClick` and friends in hiccup -- see [HTML and CSS](html.md). |
 
 Two more fire at done time rather than at the write:
 
-- `web-public-mutation` (advisory) asks about a changed `:public` endpoint that
+- `http-public-mutation` (advisory) asks about a changed `:public` endpoint that
   declares effects. A public signup or webhook is legitimate; the point is that
   it should be a decision.
-- `web-dangling-route-refs` (error) fails a rendered link or form targeting a
+- `http-dangling-route-refs` (error) fails a rendered link or form targeting a
   path nothing serves. See [HTML and CSS](html.md#links-are-checked).
 
 ## Reading the surface
 
 ```clj
-query_routes {}
+query_surface {}
 ```
+
+`query_surface` answers for every capability at once — `:http` here, `:cli` for
+a command-line program. One sectioned tool rather than one per capability,
+because with separate tools an empty answer cannot tell you whether the app has
+no endpoints or you asked the wrong tool.
 
 One call returns every endpoint -- method, path, auth policy, handler, declared
 `:web/reads` and `:web/effects`, whether it carries a schema, and
@@ -171,5 +177,5 @@ writing a link.
 
 !!! note "Test namespaces are fixtures"
     Endpoint-shaped forms in a `-test` namespace are excluded from the route
-    rows. They neither report in `query_routes` nor claim a path, so a test can
+    rows. They neither report in `query_surface` nor claim a path, so a test can
     define whatever surface it needs to exercise.

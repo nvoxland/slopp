@@ -65,6 +65,8 @@ nav:
       - Working with git: guide/git.md
       - Dependencies and config: guide/deps-and-config.md
       - CLI and CI: guide/cli.md
+  - Command-line apps:
+      - Overview: guide/cli-apps.md
   - Web apps:
       - Overview: guide/web/index.md
       - Endpoints: guide/web/endpoints.md

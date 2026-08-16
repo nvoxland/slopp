@@ -67,7 +67,7 @@ way a browser parses them (lowercased, whitespace and control characters
 stripped).
 
 **No React attribute names.** `:class`, not `:className`; `:for`, not
-`:htmlFor`; no `:onClick`-style handlers. The `web-react-attrs` gate refuses
+`:htmlFor`; no `:onClick`-style handlers. The `http-react-attrs` gate refuses
 them because browsers silently ignore unknown attributes, so the mistake ships
 and does nothing.
 
@@ -80,12 +80,12 @@ component.
 
 Literal `:href`, `:src` and `:action` values are indexed. Route rows carry
 `:rendered-by` -- which forms link to them -- and at done time
-`web-dangling-route-refs` fails a link to a path no declared route or static
+`http-dangling-route-refs` fails a link to a path no declared route or static
 mount serves. The UI nil pun is that a broken link ships and 404s in front of a
 user; this catches it at the same moment as a failing test.
 
 ```clj
-query_routes {}      ; check the path before writing the link
+query_surface {}     ; check the path before writing the link
 ```
 
 `(str "/orders/" id)` checks by prefix. A fully dynamic path is reported
@@ -126,7 +126,7 @@ check ties the stylesheet endpoint to every page linking it, like any other
 route.
 
 Raw or vendored CSS is not a renderer problem: `file_put` the `.css` and serve
-it through an `web.static.*` mount. See [static
+it through an `http.static.*` mount. See [static
 assets](running.md#static-assets).
 
 ## Seeing it

@@ -232,6 +232,18 @@ that still exist; the PHRASE is what went.
 in a module named for that type, and the pattern must be replicable for type #2
 without renaming type #1. See `slopp.webdev` in the layer map above.
 
+**R6 now has a MECHANISM, and four instances rather than one (D-capabilities,
+2026-08-15).** `capabilities/capability-catalog` declares the opt-in features —
+`cli`, `http`, `rest`, `webapp` — and everything else derives from it: the
+`owners` vocabulary of legal config prefixes, which capability a write gate
+belongs to (`gates/gate-capability`, from the namespace implementing it), and
+which rules opting in would arm (`query_capabilities`). So "replicable for type
+#2" stopped being a rule to remember and became a row to add. The two guards
+that grade it — `a-rule-owned-by-an-app-type-is-named-for-it` and
+`the-generic-rules-namespace-cannot-reach-an-app-types-analysis` — derive their
+population from the catalog, so they cover a capability by its existing rather
+than by anyone listing it.
+
 ## Cross-cutting gotchas
 
 - Store namespaces have **no classpath presence**; `load-ns!` marks

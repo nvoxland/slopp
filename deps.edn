@@ -25,12 +25,27 @@
         ;; test-only lib no longer belongs: `boot-loads?` skips `-test`
         ;; namespaces, because this JVM never runs one. malli sat here for
         ;; exactly that reason and was justified by a comment naming namespaces
-        ;; that had been deleted — twice, three weeks apart. Removing it takes
+        ;; that had been deleted — twice, three weeks apart. Removing it took
         ;; 336 KB across 8 jars out of the uberjar (malli, core.rrb-vector,
         ;; tools.reader, test.check, edamame, fipp, dynaload, arrangement);
-        ;; the image gets malli from `image.repl/inherent-deps` and the
-        ;; external test tier from the store manifest, which are the two places
-        ;; that actually run code needing it.
+        ;; the image got malli from `image.repl/inherent-deps` and the external
+        ;; test tier from the store manifest, which were the two places that
+        ;; actually ran code needing it.
+        ;;
+        ;; malli is BACK (2026-08-15), and the earlier removal was right at the
+        ;; time — the premise changed rather than the reasoning being wrong.
+        ;; `slopp.cli.spec` declares command arguments in malli and SHIPS: it is
+        ;; in the vendored framework, so a consuming project gets the source and
+        ;; must be able to resolve what it requires. Two things follow, and both
+        ;; are the point rather than side effects:
+        ;;   - `build.clj`'s framework-deps derivation resolves a require by
+        ;;     asking THIS basis which jar provides it, so a lib absent here is
+        ;;     a lib a built app is never told about. It now REFUSES rather than
+        ;;     skipping, which is what turns "silently missing" into this entry.
+        ;;   - the version a consumer is handed is this one, so the framework
+        ;;     and the app it lands in cannot disagree about malli.
+        ;; The 336 KB is the cost of shipping a capability that validates.
+        metosin/malli           {:mvn/version "0.20.1"}
         http-kit/http-kit       {:mvn/version "2.8.0"}
         hiccup/hiccup           {:mvn/version "2.0.0"}
         garden/garden           {:mvn/version "1.3.10"}}

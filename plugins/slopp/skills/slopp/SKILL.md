@@ -1046,21 +1046,123 @@ full map.
   with `main` it also emits a GraalVM native-image recipe. Repo sync, uberjars,
   config files, CI: the `slopp-setup` skill.
 
+## Capabilities: what your project opts into
+
+**A slopp project declares which capabilities it wants, and gets nothing it
+does not ask for.** `query_capabilities` is the whole picture; each is off by
+default and turned on with `config_file {path "capabilities" key
+"<name>.enabled" value "true"}`.
+
+| Capability | What your app gets | Requires |
+|---|---|---|
+| `cli` | argument parsing, injected stdin/stdout/stderr, exit codes | — |
+| `http` | the HTTP server, routing, static mounts, identity + authorization | — |
+| `rest` | typed request/response contracts, validation, generated clients | `http` |
+| `webapp` | client-side routing, state, event dispatch, the ClojureScript build | `http` |
+
+A capability is a bargain, and `query_capabilities` shows both halves — the
+settings you may configure AND **the rules opting in will arm**:
+
+```
+{:capability "http" :enabled false :requires [] :required-by ["rest" "webapp"]
+ :arms [{:rule http-auth-refusal :grain :form} …
+        {:rule :http-public-mutation :grain :done}]}
+```
+
+`:grain :form` refuses at the write; `:grain :done` reports at a done point.
+Read that BEFORE you opt in — it is what tells you an unsecured route is about
+to stop being writable.
+
+**Enabling writes what it requires and NAMES it.** `webapp` has to be served,
+so it turns on `http` with it and reports `:implied ["http.enabled"]`. The
+reverse asks rather than acts: turning off something a dependent stands on
+refuses, naming what holds it up. Turning a thing on has one safe answer;
+turning it off does not, and slopp will not remove a feature you never
+mentioned.
+
+**A capability key's FIRST SEGMENT names the capability that owns it**, and
+`query_capabilities` reports it per row: `slopp.*` is the framework's and is
+RESERVED — your app can never own a key there — `app.*` is any project's, and
+the rest belong to the capability they name. So everything the HTTP server
+needs, auth included, sits under `http.`: `http.port`, `http.static.<prefix>`,
+`http.auth.providers`, `http.auth.groups.<name>.members`. A key belonging to no
+declared owner is not a capability and refuses at the write.
+
+**Some things are NOT capabilities, deliberately.** Hiccup rendering and CSS
+are always available. A capability exists to take IO away from you — it ships a
+port, the real adapter behind it, a FAKE so your tests need no socket or
+browser, and gates that refuse reaching around the port. Pure functions that
+throw on unsafe input have no IO to own and nothing to fake, so they just ship.
+
+If `query_capabilities` reports `:orphaned`, those are keys stored under names
+this slopp no longer knows — a rename you have not migrated. The rows carry the
+VALUE, so the report is the migration instruction: set the current key, then
+`config_file {path "capabilities" key <old> unset true}`.
+
+## Command-line applications (`cli`)
+
+**You write commands; slopp writes the program.** Turn it on with `config_file
+{path "capabilities" key "cli.enabled" value "true"}`, then a command is one
+`defn` carrying its whole contract in name metadata:
+
+```clojure
+(defn ^{:cli/command "greet"
+        :cli/doc     "Greet someone by name."
+        :cli/args    [:catn [:who :string]]
+        :cli/opts    [:map [:loud {:optional true} :boolean]]}
+  greet "Greet." [ctx args]
+  {:greeting (str "hi " (:who args))})
+```
+
+There is no list to register it in and no `-main` to write. `build!` generates
+the entry, over every namespace in your store that declares a command.
+
+**A command RETURNS DATA.** slopp renders the value and sets the exit code, so
+the interesting cases are ordinary in-image `=` on a map — a wrong flag, a
+missing argument, a non-zero status — with no process and no captured text:
+
+```clojure
+(cli/run (cli/fake-context {:cli/commands (cli/commands-in '[myapp.commands])})
+         ["greet" "world"])
+;; => {:cli/exit 0 :cli/value {:greeting "hi world"} :cli/out "…" :cli/err ""}
+```
+
+Choose the status yourself by returning `:cli/exit`; without one, a return is
+success. `:cli/in` and `:cli/out` are on the context for the two things a
+return value cannot express — reading stdin, and reporting progress while work
+is still happening — and writing to them is fine. Reaching for the AMBIENT
+stream is what `cli-direct-stdio` refuses.
+
+**Arguments are declared in malli**, the same language `rest` declares a
+contract in, so one shape can serve a command and an endpoint. Positionals are
+a `:catn` because argv is ordered AND named and that is the one malli schema
+which is both; options are a `:map`. `[:catn]` is how a command says it takes
+nothing — "takes none" and "never said" are different statements, and only the
+first discharges `cli-args-schema`.
+
+What you get for free, and never write: usage text generated from the same
+schemas the parser validates against; `--help` exiting 0 (a non-zero `--help`
+breaks any script that checks status); a bare invocation LISTING the commands
+rather than erroring; an unknown name naming the ones that exist; a parse
+failure writing to stderr and leaving **stdout clean**, so a caller piping the
+output gets nothing rather than half an answer.
+
+**Two settings, and the second one is a trap you cannot fall into.**
+`app.name` names the binary AND the program in its usage — one string
+deliberately, since help that teaches a command the shell does not have is
+worse than no help. And `app.main` beside `cli.enabled` is REFUSED: both
+declare an entry, and the version that used to happen silently gave you a
+launcher calling your fn directly, with none of the parsing, streams or exit
+codes you turned the capability on to get.
+
+`query_surface` reports the `:cli` section: every command, its doc, and its
+declared arguments — the same metadata the gates enforce, so the report and the
+refusals cannot disagree.
+
 ## Web applications (D-web)
 
-Opt in once: `config_file {path "capabilities" key "web.enabled" value
-"true"}` (every capability key is registry-declared — `query_capabilities`
-lists them all with types and defaults; a typo'd key or bad value refuses at
-the write). A store that never opts in has no web surface and no web rules.
-
-**A capability key's FIRST SEGMENT names who owns it**, and
-`query_capabilities` reports it per row with the vocabulary beside it:
-`slopp.*` is the framework's and is RESERVED — your app can never own a key
-there — `app.*` is any project's, and `web.*` is the web app type's. So
-everything a web project configures, auth included, sits under `web.`:
-`web.port`, `web.static.<prefix>`, `web.auth.providers`,
-`web.auth.groups.<name>.members`. A key belonging to no declared owner is not
-a capability and refuses at the write.
+Opt in once: `config_file {path "capabilities" key "http.enabled" value
+"true"}`. A store that never opts in has no web surface and no web rules.
 
 **An endpoint is one `defn` carrying its whole contract in name metadata** —
 no route table, no macro:
@@ -1076,11 +1178,11 @@ no route table, no macro:
 
 Request/response maps are RING-shaped (`:request-method` `:uri` `:body` /
 `:status` `:headers` `:body` as data); everything slopp adds is
-`:web/`-namespaced. `query_routes` lists the whole surface: every method,
+`:web/`-namespaced. `query_surface` lists the whole surface in its `:http` section: every method,
 path, policy, handler, the declared `:web/request`/`:web/response` contract,
 and the derived effect/read vocabularies.
 
-**Write gates** (all inert until `web.enabled`; dial via `rules` config):
+**Write gates** (all inert until `http.enabled`; dial via `rules` config):
 - every endpoint DECLARES `:web/auth` — `:public` is typed out, never implied
 - every endpoint TYPES its contract — `:web/response` (all) and `:web/request`
   (body methods `:post`/`:put`/`:patch`) — a `.cljc` malli schema VAR
@@ -1115,7 +1217,7 @@ this wrong because it is never asked. (It used to be a `dev.server` capability.
 The only adopter who ever set it set it to work around 404ing assets, and the
 switch then made a bug look like a preference for a week.)
 
-`web.static.*` mounts and handlers taking `:web/deps` both work — the generated
+`http.static.*` mounts and handlers taking `:web/deps` both work — the generated
 call carries the mounts and calls your context builder.
 
 **One real gap: `:web/auth-config` is not carried,** so an app using it gets a
@@ -1129,7 +1231,7 @@ performers as their first argument. Exactly one per store (a singleton, unlike
 performers, which are keyed by kind). It cannot be a performer — performers
 already RECEIVE the context, so it is upstream of that vocabulary. Writing an
 endpoint that reads `:web/deps` into a store that declares no builder is
-REFUSED (`web-undeclared-context`): nil deps either 500 or, worse, answer 200
+REFUSED (`http-undeclared-context`): nil deps either 500 or, worse, answer 200
 with an empty body, and `generate_client` consumes the empty one as a success.
 An app that runs its OWN `serve!` should mark the builder it already has and
 call it — two definitions of one store's context agree right up until one
@@ -1167,7 +1269,7 @@ Where it does apply, three things worth knowing:
   at the page instead of when someone deploys — but that signal depends on
   the page working, so it is worth nothing until the exceptions above are.
 
-`web.port` pins the address; unset, it is derived from the store dir so two
+`http.port` pins the address; unset, it is derived from the store dir so two
 projects on one machine never collide.
 
 **The runtime underneath: `slopp.web`.** `(web/serve! {:web/namespaces
@@ -1180,7 +1282,7 @@ policy, declared reads, handler, effect interpretation — portlessly. In-handle
 guards: `(web/enforce (= owner sub))` throws a 403-mapped ex-info (no bang —
 your handler stays analyzer-pure); `(web/authorized? policy identity)`
 answers booleans. Test namespaces' endpoint-shaped forms are FIXTURES —
-they neither report in query_routes nor claim paths.
+they neither report in query_surface nor claim paths.
 
 **Both halves of the URL are addressed the same way.** The dispatcher puts
 `:path-params` AND `:query-params` on the request (the query string is
@@ -1199,12 +1301,12 @@ cannot emit an undeclared kind, even one a performer provides); error bodies
 are redacted — an `ex-info` with `:web/status` surfaces its message plus only
 a `:web/public` allowlist, anything else is a generic 500 (detail logged, not
 returned); request bodies are capped (default 1 MiB — thread
-`:web/max-body-bytes` from the `web.max-body-bytes` capability into
+`:web/max-body-bytes` from the `http.max-body-bytes` capability into
 `serve!`); the static asset reader contains paths under its root. Auth: static
 passwords are salted PBKDF2 (`slopp.web.auth/hash-password` — mint one with
 `query_eval`, it is not on the `slopp.web` facade), bearer and
 password compares are constant-time, and **OIDC requires a configured
-`web.auth.oidc.audience`** — an unset audience denies every token (a resource
+`http.auth.oidc.audience`** — an unset audience denies every token (a resource
 server must not accept cross-audience tokens). Row-level authz is still yours:
 slopp does not taint-track a handler returning another tenant's rows.
 
@@ -1226,16 +1328,16 @@ The rules that matter:
 - **A vector is an element; a seq splices.** Repeat with `for`/`map`;
   never group siblings in a vector.
 - **No React names** — `:class` not `:className`, `:for` not `:htmlFor`,
-  no `:onClick`-style handlers (the `web-react-attrs` gate refuses them:
+  no `:onClick`-style handlers (the `http-react-attrs` gate refuses them:
   browsers silently ignore unknown attributes, so the mistake ships and
   does nothing).
 - **Component-per-defn.** A thin page shell composing small component fns —
   that is the merge grain, the test grain, and each component stays
   `=`-testable data.
-- **Check `query_routes` before writing a link or form path.** Literal
+- **Check `query_surface` before writing a link or form path.** Literal
   `:href`/`:action` values are INDEXED: route rows carry `:rendered-by`
   (who links here), and `done` fails on a path nothing serves
-  (`web-dangling-route-refs`). `(str "/prefix/" x)` checks by prefix; a
+  (`http-dangling-route-refs`). `(str "/prefix/" x)` checks by prefix; a
   fully dynamic path is reported `:unresolved`, never counted clean.
   Served by something outside this store? `^{:web/external-path "why"}`
   on the rendering form discharges.
@@ -1254,10 +1356,10 @@ and validates every selector/value string against block-breakout (`{ } <`
 throw — garden renders strings verbatim, so an interpolated value is an
 injection door; `;` is allowed because data URIs use it). Serve it, then
 `[:link {:rel "stylesheet" :href "/styles/app.css"}]` from `page`'s
-`:html/head` — that `:href` is a literal, so `web-dangling-route-refs`
+`:html/head` — that `:href` is a literal, so `http-dangling-route-refs`
 ties the link to the stylesheet endpoint like any other route. Raw or
 vendored CSS goes through a static `.css` asset (`file_put` + an
-`web.static.*` mount), not the renderer.
+`http.static.*` mount), not the renderer.
 
 **Client code is ClojureScript — same store, compiled to JS (D-web-cljs).**
 Browser logic is authored like everything else: forms in the store, edited by
@@ -1294,7 +1396,7 @@ Cypress/Playwright territory someday).
   `/assets/cljs/main.js`. A URL is an address that ends up in bookmarks and
   caches; `cljs` names a toolchain you might change, and nothing about
   serving JavaScript changes if you do.
-  **And a `:src` is a route reference** — `web-dangling-route-refs` checks it
+  **And a `:src` is a route reference** — `http-dangling-route-refs` checks it
   like an `:href`, so a bundle you link but never mount fails `done` instead
   of 404ing silently in a browser.
 - **slopp provisions its OWN toolchain — you never `deps_add` the compiler or
@@ -1344,7 +1446,7 @@ Cypress/Playwright territory someday).
 For anything past a few pages, the shape that keeps SCALING is **a JSON API
 with declared contracts, consumed by client-side code** — not HTML assembled
 on the server for the browser to slot in. The reason is not fashion: the API
-is an explicit, testable boundary. One call (`query_routes`) answers what the
+is an explicit, testable boundary. One call (`query_surface`) answers what the
 app can do, each endpoint is `=` on data with no mocks, and the frontend
 consumes a GENERATED contract instead of sharing the server's internals.
 Server-rendered pages and static content stay fully supported — they just
@@ -1401,7 +1503,7 @@ stop being the assumption once the app grows.
   to 404 now serves the document and the client renders "not found" after its
   fetch 404s. That is correct, and it is a real change in what your status
   codes mean. `done` says it once, for the episode that adds the declaration
-  (`web-spa-consequences`) — and `full_check`'s `:crossings` keeps listing it as an
+  (`http-spa-consequences`) — and `full_check`'s `:crossings` keeps listing it as an
   UNCHECKED exit, because nothing compares your client's route table to the
   server's.
 - **`route-for` in `.cljc`, returning nil for unknown paths.** With server
@@ -1447,18 +1549,18 @@ response IN against the SAME schema the server enforces. Call them from your
 `.cljs`: `(api/create-order! params)` returns a promise; a wrong shape throws
 before the request leaves. Rules of the road:
 - **It's EXPLICIT** — run `generate_client` after changing an endpoint (like
-  `compile_client`, not on every edit). A `web-stale-client` done-advisory nudges you
+  `compile_client`, not on every edit). A `http-stale-client` done-advisory nudges you
   when a contract drifts from the last generation; with `client`/`auto-compile`
   on, the generate also refreshes the JS bundle.
 - **NEVER hand-edit it.** Every wrapper is `^{:generated "<endpoint>"}` and the
-  `web-generated-ns` gate REFUSES edits (regenerate instead; to take manual
+  `http-generated-ns` gate REFUSES edits (regenerate instead; to take manual
   ownership, strip the marker). It's still fully inspectable — `query_source`,
   blast-radius, refs — and because the wrappers reference the schema VARS,
   "change a schema → every affected client call" falls out of the reference graph.
 - **Schemas must be `.cljc`.** A `:web/request`/`:web/response` VAR the client
   ships has to live in a `:cljc` ns (so it compiles into the bundle AND is the
   one the server validates); `generate_client` SKIPS an endpoint whose schema
-  isn't shippable and reports it in `:problems`. A `web-inline-schema-dup` advisory
+  isn't shippable and reports it in `:problems`. A `http-inline-schema-dup` advisory
   nudges a shape shared across endpoints toward a named `.cljc` var.
 - **Declare the entries, or the validator is off.** A field typed `[:sequential
   :map]` accepts any map, so the generated client's response validation — the
@@ -1466,7 +1568,7 @@ before the request leaves. Rules of the road:
   `:diff` moved from `[String]` to `[[String String]]` and nothing noticed for
   weeks. Name the entries (`[:map [:kind :string] [:text :string]]`), or declare
   `:any` if the shape genuinely is not settled — `:any` at least says so, where a
-  bare `:map` looks like a type and admits everything. `web-unconstrained-contract`
+  bare `:map` looks like a type and admits everything. `http-unconstrained-contract`
   (whole-store, advisory) lists them, and it is the PRIOR question to the one
   below: prose does not make a field real.
 - **Put each field's prose ON the field.** A type says what SHAPE a value has and
@@ -1474,7 +1576,7 @@ before the request leaves. Rules of the road:
   hits BEFORE the limit is applied. Malli entry properties are open and travel
   with the schema, so `[:total {:doc "hits before the limit is applied"} :int]`
   reaches every consumer of the published contract; a docstring on the schema var
-  does not, because a docstring is not a value. The `web-undocumented-contract`
+  does not, because a docstring is not a value. The `http-undocumented-contract`
   advisory (whole-store, never blocking) lists the fields that say nothing.
   `:description` is accepted as malli's JSON-Schema spelling. **Build a long one
   with `(str …)`** — unlike a docstring this is a value, so a multi-line literal
@@ -1679,7 +1781,7 @@ typo'd `:vew` used to render a blank page, the silent worst).
   silently). And the one that catches real apps with no write to your entry at
   all: the entry's namespace CLOSURE reaching `:cljs` — `module_platform`
   reports the pages a `:cljs` declaration strands (`:stranded-pages`) at the
-  moment of the declaration, the `web-page-reach` advisory re-grades a page
+  moment of the declaration, the `http-page-reach` advisory re-grades a page
   you EDIT, and `full_check` re-grades every page.
 - **What slopp assumes, so you can tell if you're outside it:** state is an
   atom, handlers are in the tree, the view is a pure function of state. The
@@ -1825,7 +1927,7 @@ episode. Reverting before a `commit_point` leaves the milestone history clean
 session_brief report query_slice query_depends · turn_begin turn_end ·
 query_project query_search query_source query_brief query_history
 query_changes query_eval query_store query_observe query_call query_vocabulary
-query_rules query_rule_telemetry query_capabilities query_routes
+query_rules query_rule_telemetry query_capabilities query_surface
 query_macroexpand query_branches query_commits
 query_git query_detail review_scan · ns_create
 ns_add_require ns_remove_require ns_rename ns_realias ns_delete · edit_add_form

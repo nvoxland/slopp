@@ -222,32 +222,94 @@
   (when-let [r (io/resource framework-version-path)]
     (not-empty (str/trim (slurp r)))))
 
+(defn ^:export by-capability
+  "`m` when it is a manifest keyed BY CAPABILITY, else throw naming `what` and
+  the remedy. nil and empty pass through — those mean \"no manifest\", which is
+  the ordinary state of a checkout.
+
+  The two framework manifests are GENERATED into the jar by `build.clj` and read
+  back here, so under normal use they cannot disagree: one build writes both
+  halves. Under `--live` they can. The reader hot-reloads from the store while
+  the RESOURCE stays whatever the jar was built with, which is every slopp
+  developer's loop and the only configuration where this is reachable at all.
+
+  Without this the mismatch is not a bad error, it is an unrecognisable one.
+  Measured: a host running a jar 560 deltas old met a flat pre-capability list,
+  `(fn [[cap paths]] …)` destructured a STRING into two characters, and the
+  whole session failed with \"Don't know how to create ISeq from:
+  java.lang.Character\" — a sentence naming no jar, no resource and no remedy.
+  Vendoring sits on the path of image creation, so it took `build`, `restart`,
+  the test tier and every WRITE with it, and the only available reading was
+  \"my last edit broke something\".
+
+  The deps manifest fails the other way and worse: its old shape is a map keyed
+  by lib SYMBOL, so every `(get m capability)` is nil, nothing throws, and a
+  vendored framework ships with none of its own requires declared — which is
+  the failure the deps manifest was built after in the first place.
+
+  NOT compatibility. The old shape is refused, not accepted; what changes is
+  that the refusal can be acted on."
+  [m what]
+  (if (or (nil? m) (and (coll? m) (empty? m)))
+    m
+    (if (and (map? m) (every? string? (keys m)))
+      m
+      (throw (ex-info
+              (str "this jar's " what " is not keyed by capability — it is "
+                   (if (map? m)
+                     (str "a map keyed by " (.getSimpleName (class (first (keys m)))))
+                     (.getSimpleName (class m)))
+                   ", the shape slopp used before capabilities existed. The jar"
+                   " and the code reading it are from different builds, which"
+                   " only happens under --live: rebuild the jar (materialize the"
+                   " store, then `clojure -T:build uber`) and restart the host."
+                   (when-let [h (jar-head)]
+                     (str " This jar was built from store head " h "."))
+                   " If the tools are already wedged, materialize from a CHECKOUT"
+                   " instead — `clojure -M -m slopp.kernel.boot . --call build`"
+                   " — where no META-INF is on the classpath and this reader"
+                   " answers nil.")
+              {:manifest what :found (type m)})))))
+
 (defn ^:export framework-files
-  "The framework slopp vendors into stores it serves: `{\"slopp/web.clj\" src …}`,
+  "The framework slopp vendors into stores it serves, keyed BY CAPABILITY —
+  `{\"cli\" {\"slopp/cli.clj\" src …} \"http\" {…} \"_\" {\"slopp/lang.cljc\" src}}` —
   or nil when this process cannot supply it (a checkout, a `clojure -M` run).
 
-  D-framework-injection part 2. `slopp-web` is NEVER published to a remote, so a
-  maven coord in a store's deps or a built app's `deps.edn` names something only
-  the machine that ran `slim-install` can resolve — portable in appearance and
-  not in fact. Copying the source in is what makes a built app self-contained.
+  D-framework-injection part 2. The framework is NEVER published to a remote, so
+  a maven coord in a store's deps or a built app's `deps.edn` names something
+  only the machine that built it can resolve — portable in appearance and not in
+  fact. Copying the source in is what makes a built app self-contained.
+
+  **Keyed by capability (part 3)**, so `ops.engine/framework-injection` can hand
+  a store only the families it uses. A flat list would vendor `slopp/web/**`
+  into a project that never enabled `http`, where `(require 'slopp.web)` would
+  then succeed — the capability opt-in holding in a config file and not at
+  runtime. `\"_\"` is the dialect's own helpers, which belong to the SYNTAX
+  rather than to any one capability.
 
   The LIST comes from a generated resource rather than a glob, because a jar
   cannot enumerate its own resources by prefix, and rather than a hand-written
-  vector, because that goes stale the first time a namespace joins slopp.web.
+  vector, because that goes stale the first time a namespace joins a family.
   Missing content for a listed file is skipped rather than thrown on: a partial
   vendor is a compile error at the far end, which is louder and more localised
   than a boot failure here."
   []
   (when-let [r (io/resource "META-INF/slopp/framework-files.edn")]
     (not-empty
-     (into {} (keep (fn [p]
-                      (when-let [res (io/resource p)]
-                        [p (slurp res)])))
-           (edn/read-string (slurp r))))))
+     (into {}
+           (keep (fn [[cap paths]]
+                   (when-let [m (not-empty
+                                 (into {} (keep (fn [p]
+                                                  (when-let [res (io/resource p)]
+                                                    [p (slurp res)])))
+                                       paths))]
+                     [cap m])))
+           (by-capability (edn/read-string (slurp r)) "framework-files.edn")))))
 
 (defn ^:export framework-deps
-  "What the vendored framework needs from OUTSIDE — `{lib coord}` — or nil when
-  this process cannot say.
+  "What the vendored framework needs from OUTSIDE, keyed BY CAPABILITY —
+  `{\"cli\" {lib coord} \"http\" {…}}` — or nil when this process cannot say.
 
   Vendoring `slopp/web/**` copies SOURCE and discards the pom, and the pom was
   what pulled garden, hiccup, cheshire and http-kit onto the classpath. Found
@@ -259,12 +321,18 @@
   produced the jar, so it cannot go stale the way a hand-written list would —
   and would, silently, now that the coord which used to mask it is gone.
 
-  Both consumers read it from here: `api.session` merges it into every image's
-  `-Sdeps`, and `api.external/build!` into the generated `deps.edn`. A built app
-  that got the source and not the deps fails exactly as the image did."
+  Both consumers read it from here: `ops.engine/image-deps` merges it into an
+  image's `-Sdeps`, and `ops.external/build!` into the generated `deps.edn`. A
+  built app that got the source and not the deps fails exactly as the image did.
+
+  **Keyed by capability**, and both consumers pick with
+  `ops.engine/used-families` rather than merging the whole map — otherwise a
+  web app declares malli it never loads and a cli app declares garden, so every
+  store pays for every capability in the one place a consumer reads: their own
+  dependency list."
   []
   (when-let [r (io/resource "META-INF/slopp/framework-deps.edn")]
-    (not-empty (edn/read-string (slurp r)))))
+    (not-empty (by-capability (edn/read-string (slurp r)) "framework-deps.edn"))))
 
 (defn ^:export bundled-libs
   "lib→coord for everything the host uberjar carries, or nil when this process

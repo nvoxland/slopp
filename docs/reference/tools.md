@@ -133,12 +133,12 @@ url and it uses none of this. What follows is for YOUR app behind YOUR proxy.
 
 ## Web applications
 
-Everything here is inert until `web.enabled`. See the [web apps
+Everything here is inert until `http.enabled`. See the [web apps
 guide](../guide/web/index.md).
 
 | Tool | What it does |
 |---|---|
-| `query_routes` | The declared web surface: every endpoint's method, path, auth policy and handler, `:rendered-by` (the forms whose links/forms target it), plus the derived effect/read vocabularies. Empty with teaching until `web.enabled`. |
+| `query_surface` | What this project EXPOSES, in one sectioned answer. `:cli` — every declared command, its doc and its argument schemas. `:http` — every endpoint's method, path, auth policy and handler, `:rendered-by` (the forms whose links/forms target it), plus the derived effect/read vocabularies. A section is empty until its capability is enabled, and a store with nothing enabled is told which one to turn on. One tool rather than one per capability: with separate tools an empty answer cannot distinguish "no commands here" from "wrong tool". |
 | `module_platform {module platform}` | Declare a namespace's target platform: `:jvm`, `:cljc`, or `:cljs`. Namespace path, most-specific wins. |
 | `compile_client {output?}` | Compile every `:cljc` and `:cljs` namespace to one JS bundle with the configured backend. Warnings anchor to the owning form. |
 | `generate_client {ns? from?}` | Write the typed `fetch` client as an edit-protected `:cljs` namespace — from the endpoints this store serves, or with `from` from a contract another API publishes. |

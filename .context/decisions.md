@@ -3741,3 +3741,293 @@ session that it describes reads its own thread.
 serializes writers on one thread — that is the rebase path — so an orchestrator
 running two processes for one agent gets exactly the contention behaviour that
 existed before threads, and two different agents get isolation instead.
+
+## D-capabilities (2026-08-15) — a capability is the unit a project opts into, and it is five things
+
+The user's scope call: slopp owns much more of an application's infrastructure
+than it did, and the reason is security. An agent writing its own argument
+parsing, its own click routing, its own request plumbing is writing security
+surface nobody reviews — because in a user's project, nobody does. Pull that
+into slopp's layer, where it is built once, gated, and tested against real
+sockets and real streams, and hand the consumer a pure function plus a stub.
+
+The unit of opt-in is a **capability**. Four to start: `cli`, `http`, `rest`,
+`webapp` — `web` renamed to `http`, and a browser-side layer added.
+
+### A capability is five things, and a row that cannot supply all five is a setting
+
+- a **PORT** — the abstraction application code is written against;
+- an **ADAPTER** — the real IO behind it, which is slopp's code and slopp's
+  tests rather than the consumer's;
+- a **FAKE** — shipped beside the port, so a consumer's tests need no socket,
+  no browser and no subprocess, and stay in the fast in-image tier;
+- **GATES** — refusing reaching AROUND the port, since a fake nobody has to use
+  buys nothing;
+- a **SURFACE REPORT** — one derivation with three readers: the agent, a
+  consuming tool, and the human, who does not read the code and needs a
+  rendered picture of what the application is.
+
+The first four are a pattern slopp had already proved once and could not
+generalize. `slopp.web.client/request` + `fake-requester` is the port and its
+fake; the `direct-http` rule forces callers through it; and that rule's own
+teaching says why it stopped there — *"a gate may only demand a port that
+EXISTS — slopp ships one for HTTP and none for files or subprocesses."* Each
+capability ships a port, which is what lets the gate widen.
+
+**`html` is deliberately NOT a capability**, and it is the useful negative
+example: hiccup and garden are pure functions that throw on unsafe input, so
+there is no IO to own and nothing to fake. A capability exists where there is
+IO to take away from the consumer.
+
+### The catalog is the source, and `owners` is derived from it
+
+`capabilities/capability-catalog` declares each capability and what it
+`:requires`. `owners` — the vocabulary of legal key prefixes — is computed from
+it, so a capability cannot exist without an owner segment and an owner cannot
+drift from its capability.
+
+This closes a gap worth naming: **the owner-segment rule had no decision record
+at all.** It lived only in shipped prose (`docs/reference/config.md`, the
+skill), which is to say the single most load-bearing statement about how a
+second app type arrives was written down only for users.
+
+Three keys the derivation makes possible, all `^:export` because they replace
+reaching into `[:config "capabilities" :values]`: `enabled?`, `prerequisites`,
+`dependents`.
+
+### The graph is NOT a chain, and the reason is mechanical
+
+First draft: `cli → http → rest → webapp`. Landed:
+
+```
+cli        http
+            ↙   ↘
+      webapp     rest
+```
+
+`webapp` requires `http` because a browser app must be SERVED. It does not
+require `rest`: client routing, state and event dispatch have nothing to do
+with typed contracts, and an app may talk to a third-party API, a socket, an
+API older than slopp, or to no server data at all. `cli` is nobody's parent —
+a `-main` is a PACKAGING fact, and an embedded or library-hosted server would
+carry argv parsing it never uses.
+
+Raised by slopp-ui, who argued the capabilities are unrelated in kind. True but
+soft on its own; plenty of frameworks bundle things that are merely
+usually-together. **The argument that settles it is mechanical.** `:requires`
+drives TWO things — what an enable turns on, and what a DISABLE is refused for.
+Under the chain, `rest.enabled false` would have been REFUSED on any store with
+`webapp` on, including one whose browser app talks to an API slopp does not
+serve. A relationship that is not real becomes a refusal that is, and the
+person meeting it has done nothing wrong.
+
+### Enable ACTS, disable ASKS
+
+`implied-puts` — enabling a capability writes its prerequisites in the same
+commit and REPORTS them as `:implied`. Without it every project meets the same
+puzzle once: opting into `webapp` appears to work and then nothing serves.
+
+`disable-refusal` — turning off something a dependent stands on refuses,
+naming what holds it up.
+
+The asymmetry is deliberate. Turning something ON has one safe answer, because
+a prerequisite is exactly what the capability cannot work without. Turning
+something OFF does not: silently disabling `webapp` because you disabled `http`
+would be slopp removing a feature the author never mentioned.
+
+`:implied` is ABSENT when nothing was implied, the way the module manifest's
+`:debt` is — an empty vector on every write trains the reader to skip a key
+that has to be read when it IS there.
+
+### Gate inertness is DERIVED, not written per gate
+
+Nine gates each opened with `(when (web-enabled? candidate) …)`. That is a rule
+every gate author has to know, which nothing reminds them of, and whose
+omission fires an HTTP rule on a project that never asked for HTTP — the
+adoption story breaking for projects that will never read that file.
+
+Inertness moved into dispatch. `gate-capability` derives a gate's owner from
+the namespace implementing it (`slopp.edit.http` → `http`), and `gate-check`
+skips it unless the store declares that capability — a third skip reason beside
+the two already there. All nine wrappers deleted, and `web-enabled?` with them.
+
+The seam this creates is worth stating: **a gate is a pure question about the
+FORM, and dispatch answers whether this store asked it.** Calling a gate var
+directly on an opted-out store correctly still returns its teaching.
+
+### No backwards compatibility, and `:orphaned` is why that is affordable
+
+`web.*` → `http.*` renames every key. There is no alias. `report`'s `:orphaned`
+path — built earlier, never yet exercised — names every stored key this build
+does not recognise, WITH its value, so the report is a migration instruction
+rather than a prompt to go and look. This store's own migration was done by
+reading it.
+
+### What the rename cost, recorded because it will happen again
+
+- **Five escaped-dot REGEX literals** survived the sweep: `#"web\.auth\.groups…"`,
+  `#"web\.static\..+"` twice, and two more. `rename_sweep`'s text pass cannot
+  see through `\.`, and the `stale-pattern` rule only grades patterns naming a
+  NAMESPACE, not a config key. One of them made `http-unknown-group` refuse
+  EVERY declared group as unknown while its own teaching told the author to
+  configure the key it was reading past.
+- **Sweeping a config family renamed NAMESPACES too.** `web.auth` matched
+  `slopp.web.auth`, moving a file out of the slim framework jar. Caught by
+  `the-web-framework-never-reaches-back-into-slopp` — but the `web.static`
+  instance made that same guard go GREEN, because its population is derived by
+  a `slopp.web.*` prefix and the namespace simply left the set. **A guard's
+  population shrinking silently is not a pass.**
+- **A test FIXTURE is data, not prose.** The sweep rewrote the retired
+  spellings that `orphaned-stored-keys-are-named-rather-than-dropped` used as
+  its subject, leaving it asserting that VALID keys were orphaned — the one
+  test whose whole topic is a rename, broken by a rename.
+
+### A capability whose population here is ZERO cannot be validated here
+
+Raised by slopp-ui, 2026-08-16, and it is a standing constraint rather than a
+wave-1 detail.
+
+slopp's own store has **no `:cljs` namespace at all** — `module_platform`
+declares six platforms and none of them is `:cljs`. So every future `webapp`
+rule has a population of zero on the codebase that would ship it. A green run
+here is green over an empty set, and `full_check`'s `:checked` field would say
+so if anyone read it.
+
+The same asymmetry runs the other way for the in-process end-to-end driver:
+slopp-ui's hub never opens a store by its own first rule, so ten of its eleven
+fixtures are cross-process and the driver cannot help there. They measured it —
+154 of 6887 bytes, ~2% — and told us not to measure the feature on their store.
+
+**So the two stores have opposite blind spots and for `webapp` they do not
+overlap.** slopp-ui is not a second opinion on something already exercised
+here; for that capability it is the only place it is exercised at all. The bar
+for shipping a `webapp` rule is a run THERE, reporting hits, misses and false
+positives — which is exactly how the `:cljs`-holds-choices candidate got
+corrected from "a `case` or a literal map" to "a `case`", on a measurement of
+1 true positive / 0 false against 0 / 12.
+
+Two rule-design lessons came out of that measurement and both generalise:
+
+- **A rule that fires on a tier's PURPOSE is inverted.** The `:cljs` tier
+  exists to hold browser effects, so a literal map handed to a browser API is
+  the tier SUCCEEDING. Test for the next candidate: does this fire on the thing
+  the tier is for?
+- **A rule must not demand an impossible remedy.** Some choices are correctly
+  stranded — rough.js tuning constants cannot become `:cljc` at any price — so
+  the teaching can only say *this is a decision nothing checks*, discharged by
+  a marker carrying the reason. A rule whose fix cannot be performed gets
+  dialled off, and then it protects nothing, including the cases that could
+  have moved.
+
+### Wave 2 (2026-08-15) — `cli`, and what it took to make a capability REACH a project
+
+Wave 1 built the mechanism; `cli` was the first capability built on it, and
+building a second one is what showed which parts of the mechanism only worked
+for the first.
+
+**The five things, for `cli`.** PORT `slopp.cli/run` (argv + context in, `{:cli/exit
+:cli/value :cli/out :cli/err}` out — it returns rather than exiting, so a test
+and a process see the same value). ADAPTER `slopp.cli/context` (the real process
+streams). FAKE `slopp.cli/fake-context` (writers a test reads back). GATES
+`cli-args-schema`, `cli-command-collision`, `cli-direct-stdio`. SURFACE REPORT
+the `:cli` section of `query_surface`.
+
+**One sectioned tool, not one tool per capability.** `query_routes` became
+`query_surface` with `:cli` and `:http` sections rather than gaining a sibling
+`query_commands`. With two tools, ABSENCE is ambiguous — an empty answer cannot
+distinguish "this app has no commands" from "you asked the wrong tool" — and a
+section that is present and empty says which. Discoverability points the same
+way: one tool with options beats several tools an agent has to know about.
+
+**The entry is GENERATED, and that is the capability.** A cli app declares no
+`app.main`: the author writes `^{:cli/command …}` forms and `build!` writes
+`native.main`. Three consequences, each of which broke something:
+
+- **Marker detection stopped being optional.** `framework-injection`'s second
+  condition — usage is not only requiring — existed because a `^:web/page` app
+  is opened by slopp on its behalf. A cli app is stronger: with a generated
+  entry, *nothing in the store ever requires `slopp.cli`*, so `:cli/command` is
+  the only usage signal there is.
+- **`native?` stopped being `(boolean main)`.** It is now "an entry exists".
+  The silent failure it replaced is the sharp one: a store with BOTH `app.main`
+  and `cli.enabled` got a launcher calling the author's fn directly — no
+  parsing, no injected streams, no exit code, i.e. exactly the bare `-m` the
+  capability exists to replace, handed to a store that had opted in. `build!`
+  now refuses that pair before any main-specific check, because it is a
+  contradiction in the config whether or not the named fn exists.
+- **The binary name and the usage name are ONE string.** A `cli.name` beside
+  `app.name` was planned and dropped: if the two could differ, generated help
+  would teach a command the shell does not have.
+
+**`lib-providing` REFUSES instead of skipping, and malli came back to
+`deps.edn`.** The deps derivation's stated purpose is that it cannot drift from
+what shipped; silently dropping a require it could not resolve is that purpose
+failing quietly. It would have shipped a cli framework with no malli — the
+exact `slopp.web.css`/garden failure the mechanism was built after — and the
+existing guard could not catch it, because it iterates the map the derivation
+PRODUCED and so asserts what was found, never what was missed. malli's earlier
+removal (336 KB, 8 jars) was right at the time; the premise changed when
+`slopp.cli.spec` started SHIPPING.
+
+### The manifests are per-capability, and `"_"` is not a capability
+
+`framework-files.edn` and `framework-deps.edn` became `{capability {…}}`.
+Handing every store every family would let `(require 'slopp.web)` succeed in a
+project that never enabled `http` — the opt-in holding in a config file and not
+at runtime, which is the model failing at the thing it is about. Asserted by
+running it: `ops-test/a-built-cli-app-RUNS-outside-slopp-entirely` builds a
+CLI-only tree from two declared families and checks that `slopp/web.clj` is
+absent and unloadable.
+
+`"_"` is the family every store gets. It holds `slopp.lang` (D3.1) and — found
+by the guard below — `slopp.cache`. Membership has a test: **a namespace belongs
+in `"_"` when slopp's own rules tell an author to USE it.**
+
+### A rule may only name a namespace it also ships
+
+`ideas/refusal/a-rule-naming-a-namespace-must-check-it-is-vendored.md`, opened
+by slopp-ui on 2026-07-31 and closed here. `:direct-http` tells an author to
+call `slopp.web.client/request`; that is satisfiable only because the namespace
+happens to sit under `slopp/web/`, which the vendor derivation happens to
+cover. A coincidence of naming, not a guarantee.
+
+`modules-test/no-rule-names-a-namespace-that-does-not-ship` scans every rule's
+`:teach` and `:escape` for `slopp.*` and asserts the vendored set contains it.
+**It found a live one on its first run:** `tier-refusal`'s escape names
+`slopp.cache`, the shipped skill states the every-cache-goes-through-it rule,
+and the namespace reached no consuming project at all. Fixed by shipping it —
+it has zero requires — not by editing the advice, because the advice was right.
+It also found a `:teach` citing `slopp.hub/post!` as an illustration; same
+principle as the store never citing documents that do not ship, and the lesson
+survived being stated without the name.
+
+The general shape, and it is the third instance: **does the slim published
+surface actually contain what we told people to use?** The first two were the
+framework source and its transitive deps. All three were invisible until
+something outside slopp tripped them.
+
+### Two build-time artifacts are second copies, and both drifted in one wave
+
+Recorded together because they are one class and neither is catchable by a test:
+in every context a test runs, only one of the two copies exists.
+
+- **`build.clj` has a store MIRROR.** A human owns the file on `main` and
+  `clojure -T:build uber` runs that copy; the store carries a mirror that
+  `build!` materializes, which is therefore what the EXTERNAL TEST TIER reads.
+  The whole capability rewrite landed on disk and never reached the store, so
+  the jar built from new code while every test about `build.clj` asserted
+  against old — including the guard-the-guard written precisely so "the claim
+  holds" and "I read the wrong file" could not look alike. It passed, because
+  the wrong file was the old right one. Closed by a `tracked-file-parity` CI
+  lane comparing `main:build.clj` to `slopp/main:build.clj`, byte-identical.
+- **The generated manifests are resources in the JAR.** Under `--live` the
+  reader hot-reloads from the store while the resource stays whatever the jar
+  was built with. When the shape changed, a host on a 560-delta-old jar
+  destructured a path STRING as `[cap paths]` and died with "Don't know how to
+  create ISeq from: java.lang.Character" — a sentence naming no jar, no
+  resource and no remedy, which took `build`, `restart`, the test tier and then
+  every WRITE down with it. `boot/by-capability` now refuses a shape it cannot
+  speak and names both the rebuild and the checkout escape
+  (`clojure -M -m slopp.kernel.boot . --call build`, which works precisely
+  because a checkout has no META-INF). Not compatibility: the old shape is
+  still refused.

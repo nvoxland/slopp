@@ -4,6 +4,11 @@ The plugin puts a `slopp` script on your session PATH. It runs the same release
 jar the MCP server runs, and it fetches and caches that jar (checksum-verified)
 on first use.
 
+!!! note "This is about driving slopp from a shell"
+
+    If you want to *build* a command-line program with slopp, see
+    [Command-line apps](cli-apps.md).
+
 ```sh
 slopp <dir>                             # serve MCP over stdio on a store
 slopp --call <tool> [json|edn|@file]    # one-shot tool call, no session

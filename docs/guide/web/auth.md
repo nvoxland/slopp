@@ -15,7 +15,7 @@ in, and no way to forget: an endpoint without `:web/auth` does not land.
 ```
 
 Groups named in a policy must exist in the capabilities config, or
-`web-unknown-group` refuses the write. A typo'd group silently denies forever
+`http-unknown-group` refuses the write. A typo'd group silently denies forever
 otherwise, which is the authorization version of a nil pun.
 
 Every degenerate case denies: a `nil` policy, an empty `[:any]`, and an empty
@@ -26,21 +26,21 @@ empty conjunction would otherwise have authorized everyone.
 
 A resolved identity is `{:web/sub "alice" :web/groups #{"staff"} :web/provider
 :bearer}`, or `nil` for anonymous. It arrives on the request as
-`:web/identity`. Providers are tried in the order `web.auth.providers` lists them,
+`:web/identity`. Providers are tried in the order `http.auth.providers` lists them,
 the first one to claim the request wins, and configured group membership
 augments whatever the provider asserted.
 
 ```clj
-config_file {path "capabilities" key "web.auth.providers" value "bearer,static"}
-config_file {path "capabilities" key "web.auth.groups.staff.members" value "alice,bob"}
+config_file {path "capabilities" key "http.auth.providers" value "bearer,static"}
+config_file {path "capabilities" key "http.auth.groups.staff.members" value "alice,bob"}
 ```
 
 | Provider | Config | Notes |
 |---|---|---|
-| `bearer` | `web.auth.bearer.tokens.<name>` = `{:secret "env:SHOP_TOKEN" :groups ["staff"]}` | Constant-time compare. |
-| `static` | `web.auth.static.users.<name>` = `{:password-hash "pbkdf2$..." :groups ["staff"]}` | Basic auth. Salted PBKDF2. |
-| `proxy-header` | `web.auth.proxy.trusted`, `web.auth.proxy.user-header`, `web.auth.proxy.groups-header` | Only honoured from a trusted `:remote-addr`. |
-| `oidc` | `web.auth.oidc.issuer`, `web.auth.oidc.audience`, `web.auth.oidc.groups-claim` | Resource server. |
+| `bearer` | `http.auth.bearer.tokens.<name>` = `{:secret "env:SHOP_TOKEN" :groups ["staff"]}` | Constant-time compare. |
+| `static` | `http.auth.static.users.<name>` = `{:password-hash "pbkdf2$..." :groups ["staff"]}` | Basic auth. Salted PBKDF2. |
+| `proxy-header` | `http.auth.proxy.trusted`, `http.auth.proxy.user-header`, `http.auth.proxy.groups-header` | Only honoured from a trusted `:remote-addr`. |
+| `oidc` | `http.auth.oidc.issuer`, `http.auth.oidc.audience`, `http.auth.oidc.groups-claim` | Resource server. |
 
 Secrets are `env:NAME` indirections, because the capabilities config is
 projected into git. The capabilities gate refuses a credential literal.
@@ -61,7 +61,7 @@ by `kid`, `iss`/`exp`/`aud` checked, claims mapped to an identity. The browser
 login flow stays the IdP's job or a proxy's.
 
 !!! warning "An unset audience denies every token"
-    `web.auth.oidc.audience` has no default. A resource server that accepts tokens
+    `http.auth.oidc.audience` has no default. A resource server that accepts tokens
     minted for a different audience is a confused-deputy hole, so an unset
     audience fails closed rather than skipping the check.
 
@@ -95,9 +95,9 @@ static analyzer cannot see, and each one has a test modelling the hole:
   message plus only an explicit `:web/public` allowlist. Any other exception is
   a generic 500 with the detail logged server-side, never returned.
 - **Bodies are bounded.** Both adapters read at most `:web/max-body-bytes`
-  (default 1 MiB, from the `web.max-body-bytes` capability) and answer 413.
+  (default 1 MiB, from the `http.max-body-bytes` capability) and answer 413.
 - **Static reads are contained.** Traversal is refused in the route handler
   before the reader is called, and the built-app reader re-checks that the
   canonical path stays under its root.
-- **`web.host` defaults to `127.0.0.1`.** Widening the bind address is a
+- **`http.host` defaults to `127.0.0.1`.** Widening the bind address is a
   deliberate edit.

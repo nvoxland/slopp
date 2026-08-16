@@ -62,16 +62,17 @@ query_capabilities {}
 
 | Key | Default | Meaning |
 |---|---|---|
-| `app.name` | the store directory name | Application name, at build time. |
+| `app.name` | the store directory name | Application name, at build time. For a `cli` project it is also the program's name in its own usage text — one string deliberately, since help that teaches a command the shell does not have is worse than no help. |
 | `app.version` | `0.0.0` | Carried into build artifacts. |
 | `app.main` | unset | The entry fn (`myapp.core/-main`). `build` falls back to it when given no `main` argument. |
-| `web.enabled` | `false` | Whether this project serves HTTP. The master opt-in: every web rule and `query_routes` exists only when true. |
-| `web.adapter` | `:http-kit` | `:jdk` is the zero-dependency fallback. |
-| `web.host` | `127.0.0.1` | Bind address. Widen deliberately. |
-| `web.port` | unset | The port the app's server binds. Unset means 8080 in production (`serve!` defaults it) and DERIVED from the store directory for the dev server, so two projects on one machine cannot collide. Set it to pin one address for both. |
-| `web.max-body-bytes` | `1048576` | Largest accepted request body. |
-| `web.auth.providers` | none | Enabled identity providers, comma-separated, tried in order. |
-| `web.auth.default-policy` | `:deny` | For an endpoint with no `:web/auth`, which only happens if `web-auth-refusal` is dialed down. |
+| `cli.enabled` | `false` | Whether this project is a command-line program. With it, slopp GENERATES the entry from your `:cli/command` forms and supplies argument parsing, injected streams and exit codes; without it an app's main runs with none of that. Refused alongside `app.main` — both declare an entry. |
+| `http.enabled` | `false` | Whether this project serves HTTP. The master opt-in: every http rule and `query_surface`'s `:http` section exists only when true. |
+| `http.adapter` | `:http-kit` | `:jdk` is the zero-dependency fallback. |
+| `http.host` | `127.0.0.1` | Bind address. Widen deliberately. |
+| `http.port` | unset | The port the app's server binds. Unset means 8080 in production (`serve!` defaults it) and DERIVED from the store directory for the dev server, so two projects on one machine cannot collide. Set it to pin one address for both. |
+| `http.max-body-bytes` | `1048576` | Largest accepted request body. |
+| `http.auth.providers` | none | Enabled identity providers, comma-separated, tried in order. |
+| `http.auth.default-policy` | `:deny` | For an endpoint with no `:web/auth`, which only happens if `http-auth-refusal` is dialed down. |
 
 !!! note "There is no `dev.server` setting"
 
@@ -93,31 +94,69 @@ Some keys are *families* whose tail is part of the setting:
 
 | Pattern | Meaning |
 |---|---|
-| `web.static.<url-prefix>` | A static mount. The value is a files-manifest path prefix: `web.static./assets` = `public`. |
-| `web.auth.static.users.<name>` | `{:password-hash "pbkdf2$..." :groups [...]}` |
-| `web.auth.bearer.tokens.<name>` | `{:secret "env:NAME" :groups [...]}` |
-| `web.auth.proxy.*` / `web.auth.oidc.*` | Provider settings. Secrets are `env:NAME` indirections. |
-| `web.auth.groups.<name>.members` | Comma-separated members of a named group, for `:web/auth [:group ...]`. |
+| `http.static.<url-prefix>` | A static mount. The value is a files-manifest path prefix: `http.static./assets` = `public`. |
+| `http.auth.static.users.<name>` | `{:password-hash "pbkdf2$..." :groups [...]}` |
+| `http.auth.bearer.tokens.<name>` | `{:secret "env:NAME" :groups [...]}` |
+| `http.auth.proxy.*` / `http.auth.oidc.*` | Provider settings. Secrets are `env:NAME` indirections. |
+| `http.auth.groups.<name>.members` | Comma-separated members of a named group, for `:web/auth [:group ...]`. |
 
 `query_capabilities` is the current list for the version you are on. The web
 keys are covered in [auth and security](../guide/web/auth.md).
 
-### The first segment names the owner
+### The first segment names the capability that owns the key
 
 Every key belongs to someone, and the name says who. `query_capabilities`
 reports the owner per row, with the vocabulary beside it:
 
-| Segment | Whose |
-|---|---|
-| `slopp.` | slopp itself. **Reserved** — your app can never own a key here. |
-| `app.` | Any project, whatever kind of application it is. |
-| `web.` | The web app type. Present in every store, inert until `web.enabled`. |
+| Segment | Whose | Requires |
+|---|---|---|
+| `slopp.` | slopp itself. **Reserved** — your app can never own a key here. | — |
+| `app.` | Any project, whatever kind of application it is. Always on. | — |
+| `cli.` | A command-line shell: argument parsing, injected streams, exit codes. | — |
+| `http.` | An HTTP server: routing, static mounts, identity and authorization. | — |
+| `rest.` | A typed API: contracts, boundary validation, generated clients. | `http` |
+| `webapp.` | An app whose BROWSER owns routing and state, and its build. | `http` |
 
 A key under no declared owner is not a capability and refuses at the write.
-That is what keeps one app type's settings from spreading into the generic
-pool under names that do not say whose they are: auth is web's, so it is
-`web.auth.*`, and a second application type would arrive as its own segment
-rather than as more keys in the middle of this table.
+That is what keeps one capability's settings from spreading into the generic
+pool under names that do not say whose they are: auth is the HTTP server's, so
+it is `http.auth.*`, and a new capability arrives as its own segment rather
+than as more keys in the middle of this table.
+
+### Opting in, and what comes with it
+
+`<name>.enabled` is the switch, and every capability is off by default. Two
+things happen that are worth knowing before you throw one.
+
+**Enabling writes what it requires, and says so.** `webapp` needs serving, so
+turning it on turns on `http` in the same delta and names it back to you:
+
+```
+config_file {path "capabilities" key "webapp.enabled" value "true"}
+→ {:implied ["http.enabled"] :implied-note "set with it, because …"}
+```
+
+The reverse ASKS instead of acting: turning off something a dependent stands on
+refuses and names what is holding it up. Turning something on has one safe
+answer; turning something off does not, and slopp will not remove a feature you
+never mentioned.
+
+**Opting in ARMS that capability's rules.** This is the half that used to be
+invisible — the settings said what you could configure and nothing said what
+would start refusing your writes. `query_capabilities` now reports it per
+capability:
+
+```
+{:capability "http" :enabled false :requires [] :required-by ["rest" "webapp"]
+ :arms [{:rule http-auth-refusal :grain :form} … {:rule :http-public-mutation :grain :done}]}
+```
+
+`:grain :form` refuses at the write; `:grain :done` reports at a done point. A
+project that never enables a capability is untouched by all of it.
+
+Note what is NOT a capability: hiccup rendering and CSS are always available.
+A capability exists to own IO and ship you a fake to test against, and pure
+functions that throw on unsafe input have neither.
 
 ## The client config file
 
