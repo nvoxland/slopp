@@ -529,3 +529,104 @@
         (is (= '[p.core-test/two] (:still-red r)) (pr-str r))
         (is (nil? (:reds-uncertain r))
             (str "nothing is uncertain once the names are complete: " (pr-str r)))))))
+
+(deftest affected-tests-includes-the-tests-that-read-a-forms-MARKERS
+  ;; Found in production by slopp-ui, migrating `:web/spa` → `:web/client-routes`:
+  ;;
+  ;;   edit_subform hub/project-root  →  {:ran 2, :pass 18, :status :green}
+  ;;
+  ;; **Green, on the edit that broke three assertions.** The tests that break
+  ;; read the marker off metadata — and a test that reads a var's METADATA
+  ;; never CALLS it, so there is no trace edge and no static reference for
+  ;; anything to follow. Meanwhile other tests DID have trace evidence, so the
+  ;; set narrowed to those and the readers fell out.
+  ;;
+  ;; It breaks the rule the whole narrowing rests on — PARTIAL EVIDENCE MUST
+  ;; NOT SELECT — arriving through a path the existing guard does not cover.
+  ;; `method-carrying?` forms never narrow because their bodies run where the
+  ;; tracer cannot see; a MARKED form has the same problem one level out,
+  ;; because its declaration is READ rather than executed.
+  ;;
+  ;; The fix is a UNION, deliberately: it can only ever add tests, so it cannot
+  ;; create the failure it is fixing. Same shape as `^{:covers}` — a floor,
+  ;; never a ceiling.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'f.core
+                             (str "(ns f.core)\n"
+                                  "(defn ^{:web/path \"/x\" :web/method :get} page [_] {})\n"))
+               (store/ingest 'f.core-test
+                             (str "(ns f.core-test (:require [clojure.test :refer [deftest is]]))\n"
+                                  "(deftest traced (is (map? (f.core/page {}))))\n"
+                                  "(deftest reads-the-marker\n"
+                                  "  (is (= \"/x\" (:web/path (meta #'f.core/page)))))\n")))
+        sess (atom {:store st :test-map {'f.core-test/traced #{'f.core/page}}})]
+
+    (testing "the marker-reading test is unioned into the trace-narrowed set"
+      (is (= '[f.core-test/reads-the-marker f.core-test/traced]
+             (vec (sort (engine/affected-tests sess 'f.core 'page))))
+          "a test that reads a declaration has no call edge to it — narrowing on
+           trace alone reports green while the declaration it asserts is gone"))
+
+    (testing "a test that never names the form is STILL affected, and must be"
+      ;; The case that decided the rule. slopp-ui's second reader is a SWEEP —
+      ;; `(mapcat #(:web/spa (meta %)) vars)` over ns-publics — so it names no
+      ;; form at all and is affected by ANY form gaining or losing that marker.
+      ;; Keying the union on the form's NAME would have caught two of their
+      ;; three readers and missed exactly the one that makes a declaration
+      ;; checkable store-wide.
+      (let [st2  (store/ingest st 'f.sweep-test
+                               (str "(ns f.sweep-test (:require [clojure.test :refer [deftest is]]))\n"
+                                    "(deftest every-page-has-a-path\n"
+                                    "  (is (every? :web/path (map meta (vals (ns-publics 'f.core))))))\n"))
+            sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
+        (is (contains? (set (engine/affected-tests sess 'f.core 'page))
+                       'f.sweep-test/every-page-has-a-path))))
+
+    (testing "but a marker this form does NOT carry pulls in nothing"
+      ;; the union is keyed on the marks this form actually has, or it degrades
+      ;; to running every test that mentions any slopp keyword. The accepted
+      ;; imprecision is one notch narrower: a test merely USING `:web/path` as
+      ;; data is indistinguishable from one reading it off metadata, and gets
+      ;; included. That costs time and never correctness, which is the trade a
+      ;; union is allowed to make
+      (let [st2  (store/ingest st 'f.other-test
+                               (str "(ns f.other-test (:require [clojure.test :refer [deftest is]]))\n"
+                                    "(deftest unrelated\n"
+                                    "  (is (= :public (:web/auth {:web/auth :public}))))\n"))
+            sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
+        (is (not (contains? (set (engine/affected-tests sess 'f.core 'page))
+                            'f.other-test/unrelated))
+            ":web/auth is not a marker this form carries")))
+(testing "MENTIONING a marker is not READING one, and that is the whole cost"
+      ;; The second condition, and without it this producer is unusable.
+      ;; Measured over slopp's own store — the worst case, because slopp IS the
+      ;; machinery that tests markers — `:web/path` is mentioned by 74 test
+      ;; forms and read off metadata by 3; `:web/method` by 69 and 1. Only 14
+      ;; of 1457 test forms read metadata at all.
+      ;;
+      ;; Unconditioned, an endpoint edit would union in a tenth of the suite,
+      ;; ^:external tests included, at a JVM each — for forms whose declaration
+      ;; nothing asserts. A union may cost time; it may not cost that much time
+      ;; for nothing.
+      (let [st2  (store/ingest st 'f.fixture-test
+                               (str "(ns f.fixture-test (:require [clojure.test :refer [deftest is]]))\n"
+                                    "(deftest builds-a-route-fixture\n"
+                                    "  (is (= :get (:web/method {:web/path \"/x\" :web/method :get}))))\n"))
+            sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
+        (is (not (contains? (set (engine/affected-tests sess 'f.core 'page))
+                            'f.fixture-test/builds-a-route-fixture))
+            "it uses the keywords as ordinary data and asserts nothing about
+             any form's declaration")))
+
+    (testing "an unmarked form still narrows exactly as before"
+      ;; the cost lands only on forms carrying a declaration, which is what
+      ;; keeps an ordinary defn write as fast as it was
+      (let [st2  (-> (store/empty-store)
+                     (store/ingest 'g.core "(ns g.core)\n(defn g [x] x)\n")
+                     (store/ingest 'g.core-test
+                                   (str "(ns g.core-test (:require [clojure.test :refer [deftest is]]))\n"
+                                        "(deftest traced (is (= 1 (g.core/g 1))))\n"
+                                        "(deftest elsewhere (is (= :web/path :web/path)))\n")))
+            sess (atom {:store st2 :test-map {'g.core-test/traced #{'g.core/g}}})]
+        (is (= '[g.core-test/traced]
+               (vec (sort (engine/affected-tests sess 'g.core 'g)))))))))

@@ -12,7 +12,7 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings]))
 
 (def ^{:export "slopp.concurrency"} ^:dynamic *pre-commit-hook*
   "Test seam (item 4): invoked between an op's hot-load and its commit CAS to
@@ -931,68 +931,6 @@
          sort
          vec)))
 
-(defn affected-tests
-  "Which tests must re-run after editing `ns-sym/nm`: the tests observed (via
-  tracing) to exercise that form — or the form itself if it IS a test. nil =
-  no usable trace information; run everything (conservative).
-
-  Form-aware (#129): evidence is matched against EVERY name the form defines
-  (`store/form-trace-keys`) — a test calling protocol method `m` recorded
-  `ns/m`, though the form's primary name is `P`; `->R` evidence belongs to
-  `R`'s form. And a `method-carrying?` form (defmethod, defrecord/deftype,
-  extend-*) NEVER narrows: its bodies run where the tracer cannot fully see
-  them, so its evidence is structurally partial, and narrowing on partial
-  evidence is how a false green happens. nil sends the caller to the same
-  closure fallback a silent trace does.
-
-  ROUTE-aware (D-web-html): a web endpoint's tests reach it through
-  `web/handle!`'s runtime route scan, so they leave no static reference AND no
-  trace evidence until they have run once — every endpoint write reported
-  `:no-covering-tests` during exactly the writes its red route test existed
-  for. When trace evidence is silent, `api.web/endpoint-test-refs` joins the
-  static route table to the literal URIs in test forms. Consulted only AFTER
-  tracing, so recorded evidence always wins; a form that is not an endpoint
-  simply misses the join and falls through to nil as before.
-
-  DECLARE-aware (#4 follow-up): a `^{:covers}` test reaches the form through a
-  dispatch/data/child-image path the tracer structurally can't see, so it
-  leaves no trace and no static edge. Its coverage — the `:declared` producer
-  of `refs/covered-by` — is UNIONED into any non-nil result: a declaration is
-  a floor (at least these run), not a ceiling, so it never narrows on its own
-  (a nil result already runs everything, the declared tests included)."
-  [session ns-sym nm]
-  (let [qform (symbol (str ns-sym) (str nm))
-        tmap  (:test-map @session)
-        declared (->> (refs/covered-by (:store @session) tmap qform)
-                      (filter #(contains? (:via %) :declared))
-                      (map :test))
-        with-declared (fn [res]
-                        (when res
-                          (vec (sort (distinct (concat res declared))))))
-        via-routes (fn []
-                     (when-let [hits (get (rules.http/endpoint-test-refs (:store @session))
-                                          qform)]
-                       (vec (sort hits))))]
-    (with-declared
-      (if (contains? tmap qform)
-        [qform]
-        (let [e (store/form-named (:store @session) ns-sym nm)]
-          (cond
-            (nil? e)
-            (let [hits (->> tmap
-                            (keep (fn [[t forms]] (when (contains? forms qform) t)))
-                            sort vec)]
-              (when (seq hits) hits))
-
-            (store/method-carrying? e) nil
-
-            :else
-            (let [ks   (store/form-trace-keys ns-sym e)
-                  hits (->> tmap
-                            (keep (fn [[t forms]] (when (some forms ks) t)))
-                            distinct sort vec)]
-              (if (seq hits) hits (via-routes)))))))))
-
 (defn implicate
   "Rock 2: annotate each failure with the just-changed forms that failing
   test actually exercises (trace map ∩ edited) — the correlation agents
@@ -1261,8 +1199,6 @@
   answer about any namespace, not a question only one app type has."
   (fn [session ns-sym] (store/platform-for (:store @session) ns-sym)))
 
-(defmethod after-write! :default [_ _] nil)
-
 (defn run-verification!
   "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
   `default-ns`'s tests when there's no trace information — and of `default-ns`
@@ -1434,71 +1370,6 @@
                                  (quiet? (first spec))))
                           added))))))))
 
-(defn impacted-tests
-  "Every test var the changed form-ids can affect, decided PER FORM (#132):
-  a form with trace evidence contributes exactly its observed tests; a form
-  without contributes every test in the namespaces whose require-closure
-  reaches ITS namespace. Never nil — [] means nothing reaches.
-
-  Replaces the all-or-nothing collapse, where ONE untraced form discarded
-  every other form's evidence and reverted the whole done to closure runs.
-  Measured on the journal (2026-07-17): 54.4% of real episodes touched a form
-  the tracer can never see — 43.2% an NS FORM (ns_add_require edits one),
-  28% a data def — so the collapse was the common case, not the corner.
-
-  The dominant untraced form is the ns form, and its commonest edit is an
-  alias-only require addition — SEMANTICALLY inert, so it contributes
-  NOTHING instead of its whole closure (inert-ns-require-change?,
-  frictions #2). Inertness is judged against the LAST-DONE baseline (the
-  episode's start), so a multi-edit episode where an earlier edit added a
-  :refer isn't masked by a later alias-only edit (review V-F3). Every other
-  untraced shape keeps the closure fallback: `test-nses-reaching` over a
-  union of namespaces IS the union of the per-namespace calls (the closure
-  intersection distributes), so untraced forms select exactly what the
-  global fallback selected for them, while traced forms keep their narrow
-  sets."
-  [session store changed]
-  (let [baseline (->> (:deltas store) (filter #(= :done (:op %))) last :id)
-        base-src (when baseline (store/sources-at store baseline))
-        reach (memoize
-               (fn [ns-sym]
-                 (vec (for [tns (test-nses-reaching store [ns-sym])
-                            :let [tiers (test-var-tiers store tns)]
-                            nm (concat (:image tiers) (:external tiers))]
-                        (symbol (str tns) (str nm))))))]
-    (vec (sort (distinct
-                (mapcat (fn [fid]
-                          (if-let [e (store/form-by-id store fid)]
-                            (let [ns-sym (store/ns-of-form-id store fid)]
-                              (cond
-                                (and (= (:name e) ns-sym)
-                                     (inert-ns-require-change?
-                                      store fid
-                                      (if baseline
-                                        (get base-src fid)
-                                        (prior-source store fid))))
-                                []
-
-                                :else
-                                (or (affected-tests session ns-sym
-                                                    (or (:name e) (symbol (:id e))))
-                                    (reach ns-sym))))
-                            []))
-                        changed))))))
-
-(defn impacted-external
-  "The ^:external test vars the changed form-ids can affect, for the
-  done-point to route to the external tier — `impacted-tests` filtered to the
-  tier only the external runner can execute.
-
-  Never nil (#132): an untraced form expands to its own namespace's reach
-  instead of collapsing the whole answer, so [] genuinely means no external
-  test can be affected. The #127 version returned nil on ANY untraced form and
-  done! fell back to the require-closure of everything — which selects a
-  median 43 of 46 external test namespaces and deferred 84.6% of changes."
-  [session store changed]
-  (external-among store (impacted-tests session store changed)))
-
 (defn- sha256
   "Hex SHA-256 of a string. A REAL digest rather than [[slopp.image.currency/hash-of]],
   which says in its own docstring that it is in-process only because its
@@ -1569,3 +1440,220 @@
         (swap! session assoc :store (db/load-store conn line))
         (when (:image @session) (fresh-image! session)))
       line)))
+
+(defn marker-readers
+  "Test forms that READ a marker `ns-sym/nm` carries — the tests whose subject is
+  a declaration rather than a call.
+
+  `(:web/path (meta #'app/page))` invokes nothing, so there is no trace edge to
+  record and no static var reference to follow. Such a test is invisible to
+  every other producer [[affected-tests]] has, and the measured consequence was
+  a write reporting green on an edit that broke three of them.
+
+  **Two conditions, and the second is what makes it usable.** A test qualifies
+  when it mentions a marker THIS form carries *and* actually reads metadata —
+  `(meta …)`, `ns-publics`, or `store/form-name-meta`, which are the three ways
+  a declaration can be reached.
+
+  Mentioning a marker is not reading one, and the difference is the whole cost
+  of this producer. Measured over slopp's own store, which is the worst case
+  because slopp IS the machinery that tests markers:
+
+  ```
+  :web/path      74 tests mention it  →   3 read metadata
+  :web/method    69                   →   1
+  :web/response  53                   →   1
+  :malli/schema  26                   →   1
+  ```
+
+  14 of 1457 test forms read metadata at all. Without the second condition an
+  endpoint edit would union in a tenth of the suite — including `^:external`
+  tests, which cost a JVM each — for forms whose declaration nothing asserts.
+
+  **Not keyed on the form's NAME, and that is the case that decided the rule.**
+  A marker test is very often a SWEEP — `(map meta (vals (ns-publics 'app)))` —
+  which names no form at all and is affected by ANY form gaining or losing the
+  marker. Keying on the name would have caught two of the three readers in the
+  incident that prompted this and missed exactly the one that makes a
+  declaration checkable store-wide.
+
+  **The honest limit:** a test that reaches a declaration through some other
+  accessor is missed here. `done` runs the whole in-image suite and is the
+  backstop; this producer exists so the WRITE stops saying green, which is the
+  answer an author actually acts on.
+
+  Slopp-namespaced markers only, via `crossings/known-markers`. An app's own
+  `:myapp/thing` is not a declaration slopp gives meaning to, so a form carrying
+  one has no slopp-visible readers to find.
+
+  Test namespaces only — both because that is what may be RUN, and because
+  skipping production forms is what keeps this cheap enough to do on every
+  write."
+  [store ns-sym nm]
+  (let [e     (store/form-named store (symbol (str ns-sym)) (symbol (str nm)))
+        owned (crossings/known-markers)
+        marks (when e
+                (into #{} (filter owned) (keys (store/form-name-meta e))))
+        reads-meta? (fn [^String s]
+                      (or (str/includes? s "(meta ")
+                          (str/includes? s "ns-publics")
+                          (str/includes? s "form-name-meta")))]
+    (when (seq marks)
+      (vec (sort (for [nsx   (keys (:namespaces store))
+                       :when (store.render/test-ns? nsx)
+                       t     (store/forms store nsx)
+                       :when (:name t)
+                       :let  [src (str (:node t))]
+                       :when (and (reads-meta? src)
+                                  (some #(str/includes? src (str %)) marks))]
+                   (symbol (str nsx) (str (:name t)))))))))
+
+(defn affected-tests
+  "Which tests must re-run after editing `ns-sym/nm`: the tests observed (via
+  tracing) to exercise that form — or the form itself if it IS a test. nil =
+  no usable trace information; run everything (conservative).
+
+  Form-aware (#129): evidence is matched against EVERY name the form defines
+  (`store/form-trace-keys`) — a test calling protocol method `m` recorded
+  `ns/m`, though the form's primary name is `P`; `->R` evidence belongs to
+  `R`'s form. And a `method-carrying?` form (defmethod, defrecord/deftype,
+  extend-*) NEVER narrows: its bodies run where the tracer cannot fully see
+  them, so its evidence is structurally partial, and narrowing on partial
+  evidence is how a false green happens. nil sends the caller to the same
+  closure fallback a silent trace does.
+
+  ROUTE-aware (D-web-html): a web endpoint's tests reach it through
+  `web/handle!`'s runtime route scan, so they leave no static reference AND no
+  trace evidence until they have run once — every endpoint write reported
+  `:no-covering-tests` during exactly the writes its red route test existed
+  for. When trace evidence is silent, `api.web/endpoint-test-refs` joins the
+  static route table to the literal URIs in test forms. Consulted only AFTER
+  tracing, so recorded evidence always wins; a form that is not an endpoint
+  simply misses the join and falls through to nil as before.
+
+  DECLARE-aware (#4 follow-up): a `^{:covers}` test reaches the form through a
+  dispatch/data/child-image path the tracer structurally can't see, so it
+  leaves no trace and no static edge. Its coverage — the `:declared` producer
+  of `refs/covered-by` — is UNIONED into any non-nil result: a declaration is
+  a floor (at least these run), not a ceiling, so it never narrows on its own
+  (a nil result already runs everything, the declared tests included).
+
+  MARKER-aware (2026-08-16, reported by slopp-ui): a test that READS a form's
+  declaration — `(:web/path (meta #'app/page))` — never CALLS it, so it leaves
+  no trace edge and no static reference either. Trace evidence about a MARKED
+  form is therefore partial by construction, and the measured consequence was a
+  write reporting `{:ran 2, :pass 18, :status :green}` on the edit that broke
+  three assertions: other tests DID have trace evidence, so the set narrowed to
+  those and every reader of the declaration fell out.
+
+  That is the same shape `method-carrying?` guards against, one level out — a
+  body the tracer cannot see, versus a declaration nothing executes at all —
+  and it breaks the rule the whole narrowing rests on: **partial evidence must
+  not select.** A form on both a traced and an untraced path gets a small,
+  confident count and narrows to it, which is exactly what a false green looks
+  like from the outside.
+
+  So [[marker-readers]] is UNIONED in, on the same terms as `:covers`: a floor,
+  never a ceiling, and it can only ever ADD tests — which is what makes it
+  incapable of causing the failure it fixes."
+  [session ns-sym nm]
+  (let [qform (symbol (str ns-sym) (str nm))
+        tmap  (:test-map @session)
+        store (:store @session)
+        declared (->> (refs/covered-by store tmap qform)
+                      (filter #(contains? (:via %) :declared))
+                      (map :test))
+        readers  (marker-readers store ns-sym nm)
+        with-declared (fn [res]
+                        (when res
+                          (vec (sort (distinct (concat res declared readers))))))
+        via-routes (fn []
+                     (when-let [hits (get (rules.http/endpoint-test-refs store)
+                                          qform)]
+                       (vec (sort hits))))]
+    (with-declared
+      (if (contains? tmap qform)
+        [qform]
+        (let [e (store/form-named store ns-sym nm)]
+          (cond
+            (nil? e)
+            (let [hits (->> tmap
+                            (keep (fn [[t forms]] (when (contains? forms qform) t)))
+                            sort vec)]
+              (when (seq hits) hits))
+
+            (store/method-carrying? e) nil
+
+            :else
+            (let [ks   (store/form-trace-keys ns-sym e)
+                  hits (->> tmap
+                            (keep (fn [[t forms]] (when (some forms ks) t)))
+                            distinct sort vec)]
+              (if (seq hits) hits (via-routes)))))))))
+
+(defmethod after-write! :default [_ _] nil)
+
+(defn impacted-tests
+  "Every test var the changed form-ids can affect, decided PER FORM (#132):
+  a form with trace evidence contributes exactly its observed tests; a form
+  without contributes every test in the namespaces whose require-closure
+  reaches ITS namespace. Never nil — [] means nothing reaches.
+
+  Replaces the all-or-nothing collapse, where ONE untraced form discarded
+  every other form's evidence and reverted the whole done to closure runs.
+  Measured on the journal (2026-07-17): 54.4% of real episodes touched a form
+  the tracer can never see — 43.2% an NS FORM (ns_add_require edits one),
+  28% a data def — so the collapse was the common case, not the corner.
+
+  The dominant untraced form is the ns form, and its commonest edit is an
+  alias-only require addition — SEMANTICALLY inert, so it contributes
+  NOTHING instead of its whole closure (inert-ns-require-change?,
+  frictions #2). Inertness is judged against the LAST-DONE baseline (the
+  episode's start), so a multi-edit episode where an earlier edit added a
+  :refer isn't masked by a later alias-only edit (review V-F3). Every other
+  untraced shape keeps the closure fallback: `test-nses-reaching` over a
+  union of namespaces IS the union of the per-namespace calls (the closure
+  intersection distributes), so untraced forms select exactly what the
+  global fallback selected for them, while traced forms keep their narrow
+  sets."
+  [session store changed]
+  (let [baseline (->> (:deltas store) (filter #(= :done (:op %))) last :id)
+        base-src (when baseline (store/sources-at store baseline))
+        reach (memoize
+               (fn [ns-sym]
+                 (vec (for [tns (test-nses-reaching store [ns-sym])
+                            :let [tiers (test-var-tiers store tns)]
+                            nm (concat (:image tiers) (:external tiers))]
+                        (symbol (str tns) (str nm))))))]
+    (vec (sort (distinct
+                (mapcat (fn [fid]
+                          (if-let [e (store/form-by-id store fid)]
+                            (let [ns-sym (store/ns-of-form-id store fid)]
+                              (cond
+                                (and (= (:name e) ns-sym)
+                                     (inert-ns-require-change?
+                                      store fid
+                                      (if baseline
+                                        (get base-src fid)
+                                        (prior-source store fid))))
+                                []
+
+                                :else
+                                (or (affected-tests session ns-sym
+                                                    (or (:name e) (symbol (:id e))))
+                                    (reach ns-sym))))
+                            []))
+                        changed))))))
+
+(defn impacted-external
+  "The ^:external test vars the changed form-ids can affect, for the
+  done-point to route to the external tier — `impacted-tests` filtered to the
+  tier only the external runner can execute.
+
+  Never nil (#132): an untraced form expands to its own namespace's reach
+  instead of collapsing the whole answer, so [] genuinely means no external
+  test can be affected. The #127 version returned nil on ANY untraced form and
+  done! fell back to the require-closure of everything — which selects a
+  median 43 of 46 external test namespaces and deferred 84.6% of changes."
+  [session store changed]
+  (external-among store (impacted-tests session store changed)))
