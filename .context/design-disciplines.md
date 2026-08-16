@@ -2566,3 +2566,45 @@ This is the enumeration half of the discipline whose other half is already
 here: a reason left in the head rather than the code is right by luck for the
 next reader. An option left OUT of the reasoning is worse, because the
 reasoning looks complete.
+
+## A guarantee reads as unconditional at the point it is CONSUMED
+
+**Root.** slopp-ui, 2026-08-17, adopting `webapp/load!` incrementally without
+adopting the rest of the loop.
+
+`load!`'s docstring said, exactly and truly:
+
+> Declaring the key in `:webapp/session-loads` keeps its entry across `arrive`.
+
+Every word correct. The reader looked at it three times, adopted `load!`, added
+the declaration, and would have shipped a fix that appears to work and then
+quietly does not — because `arrive` runs inside `navigate!`, and their app
+navigates with its own code. The guarantee is real and it is CONDITIONAL, and
+the sentence named the condition without marking it as one.
+
+**The shape.** A guarantee written where it is IMPLEMENTED carries its
+preconditions in the surrounding context — the author is looking straight at
+them. Written where it is CONSUMED, the same sentence arrives with the context
+stripped off, and a precondition mentioned by NAME (`across arrive`) reads as
+an implementation detail rather than as a dependency the reader must satisfy.
+Naming the function is not the same as saying "you must be calling it".
+
+**Why it bites hardest on partial adoption**, which is the case a framework
+most wants to support: the whole point of a portable piece is that somebody
+takes it without taking the rest. So the readers most exposed to a conditional
+guarantee are exactly the ones with the least surrounding context — and a
+framework that advertises "take just this piece" has an obligation to say what
+does NOT come with it.
+
+**The generalisation that made it cheap to fix:** *the machinery travels and the
+scope does not.* `load!` reads two keys and works against a hand-built map;
+`session-loads` is honoured somewhere else entirely. Splitting a surface into
+"what travels" and "what does not" is a question worth asking of every public
+piece of a framework, and the answer belongs in the docstring of the piece
+somebody reaches for FIRST.
+
+Related, and the same defect one layer out: a marker rename left a declaration
+inert in a consumer's store, and the migration note named the declaration
+without naming its readers. Both are the producer describing itself accurately
+and the consumer needing something else — see `unknown-marker` and
+`engine/marker-readers` for the two mechanisms that came out of it.
