@@ -21,7 +21,7 @@
   modernises it, which is why the reason is written here rather than assumed.
 
   **Renderer-agnostic, deliberately.** This never learns what a screen looks
-  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str]))
+  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str] [slopp.lang :as lang]))
 
 (defn- arrive
   "The state transition a navigation IS: `path` and its route in, everything
@@ -86,8 +86,14 @@
 
   - `:webapp/state` — the app's own atom. ONE atom rendered by ONE pure
     function, which is what makes every screen reproducible from a map.
-  - `:webapp/routes` — `(fn [path] -> {:screen :params} | nil)`. nil is a real
-    answer: a path this app does not route.
+  - `:webapp/routes` — a TABLE of `[pattern screen]` rows,
+    `[[\"/things\" things] [\"/things/:id\" thing]]`. Not a function, and that is
+    the difference between routing an app can DESCRIBE and routing only it can
+    perform: a function answers when called, with a path, at runtime, so nothing
+    can list an app's screens, join a link to one, or compare this table to the
+    paths the server answers for. [[match-route]] does the matching, on the same
+    grammar as the server's router. A path no row matches is a real answer, and
+    it is nil.
   - `:webapp/view` — `(fn [state] -> hiccup)`. Pure, so a JVM can call it.
 
   Optional, defaulted here so no caller has to nil-check a plug-in:
@@ -138,9 +144,23 @@
         (throw (ex-info (str "an app needs " k
                              (case k
                                :webapp/state  " — its OWN atom, so what a handler changes is what the view re-reads"
-                               :webapp/routes " — (fn [path] {:screen :params}); without one no path means anything"
+                               :webapp/routes " — a table of [pattern screen] rows; without one no path means anything"
                                :webapp/view   " — (fn [state] hiccup); without one there is no screen to read"))
                         {:webapp/missing-key k}))))
+    ;; A TABLE, never a function, and the refusal carries the migration because
+    ;; there is no shim behind it. A function answers only when called, with a
+    ;; path, at runtime — so nothing can list an app's screens, join a link to
+    ;; one, or compare this table to the prefixes the server answers for. Every
+    ;; report and gate that exists for `^{:web/path …}` was impossible on this
+    ;; side for exactly that reason.
+    (when-not (sequential? (:webapp/routes app))
+      (throw (ex-info (str ":webapp/routes is a declared TABLE, not a function —"
+                           " [[\"/things\" things-screen] [\"/things/:id\" thing-screen]]."
+                           " A function answers only when called, so nothing could"
+                           " list this app's screens, join a link to one, or check"
+                           " that the server serves the paths the browser routes."
+                           " Got " (pr-str (type (:webapp/routes app))) ".")
+                      {:webapp/routes-not-a-table true})))
     (-> (merge {:webapp/base         ""
                 :webapp/fetch        (fn [_screen _params ok _err] (ok nil))
                 :webapp/render       (fn [_state] nil)
@@ -420,6 +440,225 @@
   [base path]
   (str base path))
 
+(defn ^:export strip-base
+  "The app path inside `url-path`, or nil when the url is not under the mount
+  point at all.
+
+  The pair of [[prefixed]]; the round trip is what the tests assert.
+
+  **nil rather than the path unchanged**, because those are different
+  statements. Returning it would claim a foreign url is one of this app's
+  paths, and the caller deciding whether a click is ours would then follow a
+  link off its own site.
+
+  **The prefix has to match at a SEGMENT boundary.** A plain `starts-with?`
+  says `/p/xylophone` is under `/p/x`, which is how an app mounted at one slug
+  starts routing another slug's urls into its own screens — a wrong answer that
+  renders rather than erroring.
+
+  The mount point itself is the app's `/`, not the empty string: an empty path
+  routes to nothing and renders a blank page at a url that looks right."
+  [base url-path]
+  (let [b (str base)
+        p (str url-path)]
+    (cond
+      (= "" b) p
+
+      (= p b) "/"
+
+      (str/starts-with? p (str b "/"))
+      (let [rest* (subs p (count b))]
+        (if (= "/" rest*) "/" rest*))
+
+      :else nil)))
+
+(defn ^:export app-path
+  "The app path a browser is currently showing: `pathname` with the mount point
+  off, and `search` rejoined — or nil when the url is not this app's.
+
+  **The query string is half the address and the browser keeps it somewhere
+  else.** A path built from `location.pathname` alone routes
+  `/store/search?q=rate` to a search screen with an empty query — a box that
+  forgot what was typed between pressing enter and the page loading. slopp-ui
+  paid for that one; it is here so nobody re-derives it.
+
+  What makes it expensive is that it LOOKS correct: the screen renders, the
+  address bar is right, and only the contents of one field are wrong.
+
+  The mount point comes off the PATHNAME, before the join, so a query that
+  happens to contain the base as text is left alone.
+
+  `:cljc`, which is the point — the browser splits a url across two properties
+  and the shim's whole job is reading them. The decision about what to do with
+  them is here, where a JVM test can see it."
+  [base pathname search]
+  (when-let [p (strip-base base pathname)]
+    (let [q (str search)]
+      (if (= "" q) p (str p q)))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws [:webapp/no-mount-point]} [:cat :any] :any]}
+  mount-point
+  "`el` if the page has a mount point, or a refusal naming what is missing.
+
+  A browser entry's very first act is to find the element it renders into. When
+  the server's template did not render one, every browser answers the same way:
+  `Cannot read properties of null (reading 'getAttribute')`, in a console nobody
+  has open, under a blank page, naming a property instead of the thing that is
+  absent. The reader sees an app that does not start.
+
+  This is the constructor refusal [[wiring]] makes, one input further out — and
+  it belongs to the same rule: *the mistake is made here, so here is where it is
+  named.*
+
+  **`:cljc` despite being about a DOM node**, which is the interesting part.
+  `nil?` is not a platform question — unlike \"is this an atom\", which is why
+  that check lives one platform down in `slopp.web.screen/open!`. So the element
+  crosses this boundary as an OPAQUE value, nothing here asks what it is, and
+  the refusal a browser app depends on is an ordinary in-image test.
+
+  Deliberately identity for anything non-nil. Checking that a value is really an
+  Element would be a platform question, and would buy nothing: the next line
+  reads an attribute off it, and a wrong node fails there with its own name."
+  [el]
+  (when (nil? el)
+    (throw (ex-info (str "this page has no element with id=\"app\" — a browser"
+                         " entry mounts into one, and the server's template is"
+                         " what renders it. Without this you get a blank page"
+                         " and a null property read in the console.")
+                    {:webapp/no-mount-point true})))
+  el)
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:sequential [:tuple :string :any]] [:maybe :string]]
+                   [:maybe [:map [:screen :any] [:params [:map-of :keyword :string]]]]]}
+  match-route
+  "Match `path` against a declared route TABLE — `[[\"/things/:id\" target] …]` —
+  answering `{:screen target :params {…}}`, or nil for a path this app does not
+  route.
+
+  **The client half of routing, as DATA.** The server half already is: a handler
+  declares `^{:web/path \"/store/ns/:ns\"}` and the table is derived from var
+  metadata, which is why an endpoint can be listed, collision-checked and joined
+  against a link. The client half was one opaque `(fn [path] …)`, so none of
+  that was possible for it — and both halves live in the same application.
+
+  The `target` is OPAQUE here, deliberately. What a screen IS belongs to the
+  layer above; a matcher that never asks cannot be wrong about the answer.
+
+  **Same pattern grammar as the server**, and pinned by a test that runs both
+  over one table: a `:seg` captures one segment, a trailing `*rest` captures the
+  remainder, precedence is fewest-captures-wins so adding a route can never
+  steal an existing one, and a trailing slash is tolerated because a browser
+  produces both. Two implementations rather than one, because `slopp.web.router`
+  ships in the `http` family and this ships in `webapp`: a store may vendor
+  either without the other, so a require across them is a load failure in
+  whichever store has one half. The agreement is asserted instead.
+
+  **The QUERY is parsed here, not left to the app**, through the same
+  `slopp.lang/query-params` the server uses — one grammar, both sides. Path
+  captures and query keys land in ONE map, which is the shape a screen wants:
+  `/things/42?tab=logs` is a thing and a tab, and which half of the url each
+  arrived in is the browser's business rather than the app's.
+
+  A path capture WINS a collision with a query key of the same name. The path is
+  the address; a query string is something anyone can append to it."
+  [routes path]
+  (let [raw     (str path)
+        cut     (str/index-of raw "?")
+        p       (if cut (subs raw 0 cut) raw)
+        query   (when cut (subs raw (inc cut)))
+        segs    (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
+        u       (segs p)
+        cap?    #(str/starts-with? % ":")
+        splat?  #(str/starts-with? % "*")
+        rank    (fn [ps] (+ (count (filter cap? ps))
+                            (* 100 (count (filter splat? ps)))))
+        try-row (fn [[pattern target]]
+                  (let [ps (segs pattern)]
+                    (when (if (some splat? ps)
+                            (>= (count u) (count ps))
+                            (= (count ps) (count u)))
+                      (loop [ps ps, u u, params {}]
+                        (cond
+                          (empty? ps)
+                          (when (empty? u)
+                            {:screen target :params params :rank (rank (segs pattern))})
+
+                          (splat? (first ps))
+                          (when (and (= 1 (count ps)) (seq u))
+                            {:screen target
+                             :params (assoc params (keyword (subs (first ps) 1))
+                                            (str/join "/" u))
+                             :rank   (rank (segs pattern))})
+
+                          (cap? (first ps))
+                          (recur (rest ps) (rest u)
+                                 (assoc params (keyword (subs (first ps) 1)) (first u)))
+
+                          (= (first ps) (first u))
+                          (recur (rest ps) (rest u) params)
+
+                          :else nil)))))]
+    (when-let [hit (first (sort-by :rank (keep try-row routes)))]
+      {:screen (:screen hit)
+       ;; query first, so a PATH capture wins the collision
+       :params (merge (lang/query-params query) (:params hit))})))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/href {:optional true} [:maybe :string]]
+                          [:webapp/button {:optional true} [:maybe :int]]
+                          [:webapp/meta? {:optional true} [:maybe :boolean]]
+                          [:webapp/ctrl? {:optional true} [:maybe :boolean]]
+                          [:webapp/shift? {:optional true} [:maybe :boolean]]
+                          [:webapp/alt? {:optional true} [:maybe :boolean]]]
+                    :string [:sequential [:tuple :string :any]]]
+                   [:maybe :string]]}
+  click-target
+  "The app path this click should navigate to, or nil when the browser should
+  handle it itself.
+
+  Four independent judgements, and each is a real behaviour rather than a
+  condition in a chain:
+
+  - **a plain LEFT click.** A middle-click opens a tab and a cmd/ctrl/shift/alt
+    click opens a tab, a window or a download. Hijacking either is a browser
+    that lies about what its own gestures do.
+  - **an href at all.** A click on a button is not a navigation.
+  - **IN-APP only.** Calling `preventDefault` on an external link produces one
+    that looks live and does nothing.
+  - **ROUTED only.** An unrouted in-app path falls through to the server, so a
+    wrong url stays a 404. Swallowing it turns every typo into a blank screen at
+    a plausible url, which is the SPA failure that makes a site feel broken
+    rather than missing.
+
+  Written here, in `:cljc`, because in a browser shell this is a chain of `and`s
+  in a namespace whose only verification is that it compiled — and it is four
+  behaviours, each of which a reader will notice and none of which anything
+  could check there.
+
+  **The four modifiers arrive RAW rather than pre-combined**, and that is the
+  same rule one level down. `(or metaKey ctrlKey shiftKey altKey)` looks like
+  plumbing and is a judgement: which gestures mean \"open elsewhere\" is a fact
+  about browsers and platforms — cmd on a mac, ctrl everywhere else, shift a new
+  window, alt a download — and it differs per key. A shim that combined them
+  would be deciding, in the one place nothing can check. It reads four
+  properties and names them; the answer is here.
+
+  The click arrives as slopp's own shape rather than a DOM event, and the keys
+  are namespaced for the reason every boundary map here is: the shim reads
+  properties off an event and names them, so what crosses into this function is
+  data with an owner rather than a browser object with a shape nobody declared."
+  [{:webapp/keys [href button meta? ctrl? shift? alt?]} base routes]
+  (when (and href
+             (or (nil? button) (zero? button))
+             (not meta?) (not ctrl?) (not shift?) (not alt?))
+    (when-let [path (strip-base base (str href))]
+      (when (match-route routes path) path))))
+
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map
@@ -463,7 +702,7 @@
                   address-keys session-loads] :as app}
    path push?]
   (when push? (push-url! (prefixed base path)))
-  (swap! state arrive path (routes path) address-keys session-loads)
+  (swap! state arrive path (match-route routes path) address-keys session-loads)
   (render @state)
   (when (:screen @state)
     (let [{:keys [screen params]} @state]
@@ -532,115 +771,6 @@
      :navigate (partial navigate-for! app)
      :dispatch (partial dispatch! app)
      :boot     boot}))
-
-(defn ^:export strip-base
-  "The app path inside `url-path`, or nil when the url is not under the mount
-  point at all.
-
-  The pair of [[prefixed]]; the round trip is what the tests assert.
-
-  **nil rather than the path unchanged**, because those are different
-  statements. Returning it would claim a foreign url is one of this app's
-  paths, and the caller deciding whether a click is ours would then follow a
-  link off its own site.
-
-  **The prefix has to match at a SEGMENT boundary.** A plain `starts-with?`
-  says `/p/xylophone` is under `/p/x`, which is how an app mounted at one slug
-  starts routing another slug's urls into its own screens — a wrong answer that
-  renders rather than erroring.
-
-  The mount point itself is the app's `/`, not the empty string: an empty path
-  routes to nothing and renders a blank page at a url that looks right."
-  [base url-path]
-  (let [b (str base)
-        p (str url-path)]
-    (cond
-      (= "" b) p
-
-      (= p b) "/"
-
-      (str/starts-with? p (str b "/"))
-      (let [rest* (subs p (count b))]
-        (if (= "/" rest*) "/" rest*))
-
-      :else nil)))
-
-(defn ^:export app-path
-  "The app path a browser is currently showing: `pathname` with the mount point
-  off, and `search` rejoined — or nil when the url is not this app's.
-
-  **The query string is half the address and the browser keeps it somewhere
-  else.** A path built from `location.pathname` alone routes
-  `/store/search?q=rate` to a search screen with an empty query — a box that
-  forgot what was typed between pressing enter and the page loading. slopp-ui
-  paid for that one; it is here so nobody re-derives it.
-
-  What makes it expensive is that it LOOKS correct: the screen renders, the
-  address bar is right, and only the contents of one field are wrong.
-
-  The mount point comes off the PATHNAME, before the join, so a query that
-  happens to contain the base as text is left alone.
-
-  `:cljc`, which is the point — the browser splits a url across two properties
-  and the shim's whole job is reading them. The decision about what to do with
-  them is here, where a JVM test can see it."
-  [base pathname search]
-  (when-let [p (strip-base base pathname)]
-    (let [q (str search)]
-      (if (= "" q) p (str p q)))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/href {:optional true} [:maybe :string]]
-                          [:webapp/button {:optional true} [:maybe :int]]
-                          [:webapp/meta? {:optional true} [:maybe :boolean]]
-                          [:webapp/ctrl? {:optional true} [:maybe :boolean]]
-                          [:webapp/shift? {:optional true} [:maybe :boolean]]
-                          [:webapp/alt? {:optional true} [:maybe :boolean]]]
-                    :string ifn?]
-                   [:maybe :string]]}
-  click-target
-  "The app path this click should navigate to, or nil when the browser should
-  handle it itself.
-
-  Four independent judgements, and each is a real behaviour rather than a
-  condition in a chain:
-
-  - **a plain LEFT click.** A middle-click opens a tab and a cmd/ctrl/shift/alt
-    click opens a tab, a window or a download. Hijacking either is a browser
-    that lies about what its own gestures do.
-  - **an href at all.** A click on a button is not a navigation.
-  - **IN-APP only.** Calling `preventDefault` on an external link produces one
-    that looks live and does nothing.
-  - **ROUTED only.** An unrouted in-app path falls through to the server, so a
-    wrong url stays a 404. Swallowing it turns every typo into a blank screen at
-    a plausible url, which is the SPA failure that makes a site feel broken
-    rather than missing.
-
-  Written here, in `:cljc`, because in a browser shell this is a chain of `and`s
-  in a namespace whose only verification is that it compiled — and it is four
-  behaviours, each of which a reader will notice and none of which anything
-  could check there.
-
-  **The four modifiers arrive RAW rather than pre-combined**, and that is the
-  same rule one level down. `(or metaKey ctrlKey shiftKey altKey)` looks like
-  plumbing and is a judgement: which gestures mean \"open elsewhere\" is a fact
-  about browsers and platforms — cmd on a mac, ctrl everywhere else, shift a new
-  window, alt a download — and it differs per key. A shim that combined them
-  would be deciding, in the one place nothing can check. It reads four
-  properties and names them; the answer is here.
-
-  The click arrives as slopp's own shape rather than a DOM event, and the keys
-  are namespaced for the reason every boundary map here is: the shim reads
-  properties off an event and names them, so what crosses into this function is
-  data with an owner rather than a browser object with a shape nobody declared."
-  [{:webapp/keys [href button meta? ctrl? shift? alt?]} base routes]
-  (when (and href
-             (or (nil? button) (zero? button))
-             (not meta?) (not ctrl?) (not shift?) (not alt?))
-    (when-let [path (strip-base base (str href))]
-      (when (routes path) path))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -735,36 +865,3 @@
   [{:webapp/keys [state boot] :as app} pathname search]
   (reset! state (boot @state))
   (navigate-url! app pathname search false))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws [:webapp/no-mount-point]} [:cat :any] :any]}
-  mount-point
-  "`el` if the page has a mount point, or a refusal naming what is missing.
-
-  A browser entry's very first act is to find the element it renders into. When
-  the server's template did not render one, every browser answers the same way:
-  `Cannot read properties of null (reading 'getAttribute')`, in a console nobody
-  has open, under a blank page, naming a property instead of the thing that is
-  absent. The reader sees an app that does not start.
-
-  This is the constructor refusal [[wiring]] makes, one input further out — and
-  it belongs to the same rule: *the mistake is made here, so here is where it is
-  named.*
-
-  **`:cljc` despite being about a DOM node**, which is the interesting part.
-  `nil?` is not a platform question — unlike \"is this an atom\", which is why
-  that check lives one platform down in `slopp.web.screen/open!`. So the element
-  crosses this boundary as an OPAQUE value, nothing here asks what it is, and
-  the refusal a browser app depends on is an ordinary in-image test.
-
-  Deliberately identity for anything non-nil. Checking that a value is really an
-  Element would be a platform question, and would buy nothing: the next line
-  reads an attribute off it, and a wrong node fails there with its own name."
-  [el]
-  (when (nil? el)
-    (throw (ex-info (str "this page has no element with id=\"app\" — a browser"
-                         " entry mounts into one, and the server's template is"
-                         " what renders it. Without this you get a blank page"
-                         " and a null property read in the console.")
-                    {:webapp/no-mount-point true})))
-  el)

@@ -25,10 +25,12 @@
         asked (atom [])
         app   (webapp/wiring
                {:webapp/state  state
-                :webapp/routes (fn [path] (case path
-                                            "/things"    {:screen :things :params {}}
-                                            "/things/42" {:screen :thing :params {:id 42}}
-                                            nil))
+                ;; a TABLE, so this app's screens are a value anything can list.
+                ;; The `:id` capture comes from the PATTERN now rather than from
+                ;; a hand-written case, which is the difference between routing
+                ;; an app can describe and routing only it can perform
+                :webapp/routes [["/things"     :things]
+                                ["/things/:id" :thing]]
                 :webapp/view   (fn [s] [:main
                                         [:h1 "Catalogue"]
                                         (case (:screen s)
@@ -73,7 +75,10 @@
     (testing "a second navigation re-routes and re-renders through the same loop"
       (web.screen/visit! s "/things/42")
       (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s))
-      (is (= [[:things {}] [:thing {:id 42}]] @asked) (pr-str @asked)))
+      ;; a capture arrives as the TEXT that was in the url — the framework does
+      ;; not guess that "42" wanted to be a number, because a slug and an id
+      ;; live in the same slot and only the app knows which this is
+      (is (= [[:things {}] [:thing {:id "42"}]] @asked) (pr-str @asked)))
 
     (testing "an unrouted path is the app's own nowhere, not an exception"
       (web.screen/visit! s "/nope")
@@ -101,7 +106,7 @@
         pending (atom nil)
         app     (webapp/wiring
                  {:webapp/state  state
-                  :webapp/routes (fn [p] (when (= "/thing" p) {:screen :thing :params {}}))
+                  :webapp/routes [["/thing" :thing]]
                   :webapp/view   (fn [_] [:p "x"])
                   ;; hold the callback so the LOADING moment is observable —
                   ;; a fetch that answers synchronously never has one
@@ -132,7 +137,7 @@
       (let [err (atom nil)
             app2 (webapp/wiring
                   {:webapp/state  state
-                   :webapp/routes (fn [_] {:screen :thing :params {}})
+                   :webapp/routes [["/thing" :thing] ["/other" :thing]]
                    :webapp/view   (fn [_] [:p "x"])
                    :webapp/fetch  (fn [_s _p _ok e] (reset! err e))})]
         (webapp/navigate! app2 "/thing" false)
@@ -164,7 +169,7 @@
         pending (atom [])
         app     (webapp/wiring
                  {:webapp/state  state
-                  :webapp/routes (fn [p] {:screen (keyword (subs p 1)) :params {}})
+                  :webapp/routes [["/a" :a] ["/b" :b]]
                   :webapp/view   (fn [_] [:p "x"])
                   :webapp/fetch  (fn [screen _params ok _err]
                                    (swap! pending conj [screen ok]))})]
@@ -217,7 +222,7 @@
         calls (atom [])
         app   (webapp/wiring
                {:webapp/state   state
-                :webapp/routes  (fn [_] {:screen :home :params {}})
+                :webapp/routes  [["/" :home]]
                 :webapp/view    (fn [_] [:p "x"])
                 :webapp/act     (fn [s action value]
                                   (assoc s :last [action value]))
@@ -255,7 +260,7 @@
       ;; work; doing nothing quietly is the one outcome ruled out
       (let [bare (webapp/wiring
                   {:webapp/state   (atom {})
-                   :webapp/routes  (fn [_] nil)
+                   :webapp/routes  []
                    :webapp/view    (fn [_] [:p "x"])
                    :webapp/act     (fn [s _ _] s)
                    :webapp/actions {:thing/delete {:effectful? true}}})]
@@ -281,7 +286,7 @@
   (let [state (atom {})
         app   (webapp/wiring
                {:webapp/state       state
-                :webapp/routes      (fn [_] {:screen :home :params {}})
+                :webapp/routes      [["/" :home] ["/other" :other]]
                 :webapp/view        (fn [_] [:p "x"])
                 :webapp/act         (fn [s _ _] s)
                 :webapp/actions     {:go {:effectful? true}}
@@ -345,7 +350,7 @@
              (let [state (atom {})]
                [state (webapp/wiring
                        (merge {:webapp/state  state
-                               :webapp/routes (fn [p] {:screen (keyword (subs p 1)) :params {}})
+                               :webapp/routes [["/a" :a] ["/b" :b]]
                                :webapp/view   (fn [_] [:p "x"])}
                               extra))]))]
 
@@ -386,7 +391,7 @@
       ;; asserting the wrong thing rather than finding a bug.
       (let [state (atom {})
             app   (webapp/wiring {:webapp/state        state
-                                  :webapp/routes       (constantly nil)
+                                  :webapp/routes       []
                                   :webapp/view         (fn [_] [:p "x"])
                                   :webapp/address-keys #{}})]
         (swap! state assoc :loads {:main {:status :ready :value [:old]}})
@@ -430,7 +435,7 @@
         answer (atom nil)
         app    (webapp/wiring
                 {:webapp/state         state
-                 :webapp/routes        (fn [p] {:screen (keyword (subs p 1)) :params {}})
+                 :webapp/routes        [["/code" :code] ["/change" :change] ["/other" :other]]
                  :webapp/view          (fn [_] [:p "x"])
                  :webapp/session-loads #{:modules}})
         fetch! (fn [ok err]
@@ -466,7 +471,7 @@
             cbs (atom nil)
             app2 (webapp/wiring
                   {:webapp/state         s2
-                   :webapp/routes        (fn [_] {:screen :code :params {}})
+                   :webapp/routes        [["/code" :code] ["/change" :code]]
                    :webapp/view          (fn [_] [:p "x"])
                    :webapp/session-loads #{:modules}})]
         (webapp/load! app2 :modules (fn [ok err] (swap! n inc) (reset! cbs [ok err])))
@@ -570,7 +575,7 @@
   ;; The third is the one worth stating twice. Swallowing an unrouted in-app
   ;; path turns every typo into a blank screen at a plausible url, which is the
   ;; SPA failure that makes a site feel broken rather than missing.
-  (let [routes (fn [p] (when (#{"/things" "/"} p) {:screen :ok :params {}}))
+  (let [routes [["/things" :ok] ["/" :ok]]
         ;; namespaced, because the shim NAMES the properties it reads off the
         ;; event — what crosses into the decision is slopp's own data rather
         ;; than a browser object whose shape nobody declared
@@ -637,11 +642,8 @@
         app       (webapp/wiring
                    {:webapp/state     state
                     :webapp/base      "/p/x"
-                    :webapp/routes    (fn [p] (cond
-                                                (= "/things" p) {:screen :things :params {}}
-                                                (re-find #"^/search" p) {:screen :search
-                                                                         :params {:path p}}
-                                                :else nil))
+                    :webapp/routes    [["/things" :things]
+                                       ["/search" :search]]
                     :webapp/view      (fn [_] nil)
                     :webapp/push-url! (fn [u] (swap! pushed conj u))})
         click!    (fn [m] (webapp/click! app (merge {:webapp/button 0} m)
@@ -669,11 +671,15 @@
       (is (= :search (:screen @state)))
       (is (= 1 (count @pushed)) (pr-str @pushed)))
 
-    (testing "and the url's QUERY reaches the router, not just its path"
-      ;; the browser keeps the two in separate properties; a handler that reads
-      ;; pathname alone routes /search?q=rate to an empty box and LOOKS right
+    (testing "and the url's QUERY reaches the router PARSED, not as text"
+      ;; the browser keeps the two halves in separate properties; a handler that
+      ;; reads pathname alone routes /search?q=rate to an empty box and LOOKS
+      ;; right. Now that routes are a table, the framework parses the query as
+      ;; well as carrying it — so a screen receives `{:q "rate"}` rather than a
+      ;; url fragment it would have to take apart itself
       (webapp/navigate-url! app "/p/x/search" "?q=rate" false)
-      (is (= "/search?q=rate" (:path (:params @state))) (pr-str @state)))
+      (is (= :search (:screen @state)))
+      (is (= {:q "rate"} (:params @state)) (pr-str @state)))
 
     (testing "a url outside the mount point is not this app's to show"
       (webapp/navigate-url! app "/somewhere/else" "" false)
@@ -696,7 +702,9 @@
         called (atom [])
         app    (webapp/wiring
                 {:webapp/state       state
-                 :webapp/routes      (constantly nil)
+                 ;; an app that routes nothing declares no rows — which is a
+                 ;; table, and says so
+                 :webapp/routes      []
                  :webapp/view        (fn [_] nil)
                  :webapp/actions     {:project/switch {:leaves? true}
                                       :thing/run      {:effectful? true}}
@@ -735,7 +743,7 @@
       ;; the same refusal `:effectful?` gets without a request: a control that
       ;; appears to work and quietly does nothing is the outcome ruled out
       (let [bare (webapp/wiring {:webapp/state   (atom {})
-                                 :webapp/routes  (constantly nil)
+                                 :webapp/routes  []
                                  :webapp/view    (fn [_] nil)
                                  :webapp/actions {:project/switch {:leaves? true}}})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #":webapp/url-for"
@@ -755,7 +763,7 @@
                  ;; answers for an app served at the root: the attribute is
                  ;; simply absent. The shim reads and does not interpret
                  :webapp/base   nil
-                 :webapp/routes (fn [p] (when (= "/things" p) {:screen :things :params {}}))
+                 :webapp/routes [["/things" :things]]
                  :webapp/view   (fn [_] nil)
                  :webapp/boot   (fn [s] (swap! booted inc) (assoc s :session "abc"))})]
 
@@ -776,7 +784,7 @@
       ;; the driver, the entry, the next one — writes the same `or`
       (let [s2 (atom {})
             a2 (webapp/wiring {:webapp/state  s2
-                               :webapp/routes (constantly {:screen :ok :params {}})
+                               :webapp/routes [["/anything" :ok]]
                                :webapp/view   (fn [_] nil)})]
         (is (fn? (:webapp/boot a2)))
         (webapp/start! a2 "/anything" "")
@@ -801,3 +809,101 @@
     ;; a string stands in for the element, which is the assertion: this asks
     ;; whether there IS a node and never what it is, so anything non-nil does
     (is (= "an element" (webapp/mount-point "an element")))))
+
+(deftest a-route-TABLE-is-data-and-the-matching-agrees-with-the-server
+  ;; Routing is data on the server half — `^{:web/path "/store/ns/:ns"}` on the
+  ;; handler, derived by `web.routes/from-namespaces` — and a CLOSURE on the
+  ;; client half. Inside one app, every check, report and derivation that exists
+  ;; for one is impossible for the other, which is why `crossings` carries
+  ;; `:webapp/client-routing` and `:webapp/client-path` as unchecked exits.
+  ;;
+  ;; A row is `[pattern target]` and the target is OPAQUE here: what a screen IS
+  ;; is the next slice's question, and a matcher that does not care is one that
+  ;; cannot be wrong about it.
+  (let [routes [["/"             :index]
+                ["/things"       :things]
+                ["/things/:id"   :thing]
+                ["/things/:id/edit" :edit]
+                ["/files/*path"  :files]]
+        at     (fn [p] (webapp/match-route routes p))]
+
+    (testing "a static segment beats a capture, whatever the order"
+      ;; precedence is fewest-captures-wins rather than first-listed, matching
+      ;; the server exactly — so adding a route can never steal an existing one
+      (is (= :things (:screen (at "/things"))))
+      (is (= :thing  (:screen (at "/things/42"))))
+      (is (= {:id "42"} (:params (at "/things/42")))))
+
+    (testing "a trailing catch-all takes the remainder, and ranks below both"
+      (is (= :files (:screen (at "/files/a/b/c.txt"))))
+      (is (= {:path "a/b/c.txt"} (:params (at "/files/a/b/c.txt")))))
+
+    (testing "an unrouted path is nil, which is a real answer"
+      ;; the app's own nowhere. Defaulting to a screen tells the reader they are
+      ;; somewhere they are not
+      (is (nil? (at "/nope")))
+      (is (nil? (at "/things/42/nonsense"))))
+
+    (testing "a trailing slash is tolerated, because a browser produces both"
+      (is (= :things (:screen (at "/things/"))))
+      (is (= :index  (:screen (at "/")))))
+
+    (testing "the QUERY is parsed into params, not left for the app"
+      ;; `app-path` rejoins search onto pathname precisely so it reaches here.
+      ;; An app parsing its own query string is the browser's split leaking
+      ;; through the framework
+      (is (= :things (:screen (at "/things?q=rate&page=2"))))
+      (is (= {:q "rate" :page "2"} (:params (at "/things?q=rate&page=2"))))
+      (is (= {:id "42" :tab "logs"} (:params (at "/things/42?tab=logs")))
+          "path captures and query keys land in one map"))
+
+    (testing "and the query goes through the SAME parser the server uses"
+      ;; one grammar, both sides — a bare key is present with an empty value
+      (is (= {:flag ""} (:params (at "/things?flag"))))
+      (is (= {:q "a b"} (:params (at "/things?q=a%20b")))))))
+
+(deftest an-app-DECLARES-its-routes-rather-than-computing-them
+  ;; The change that makes the client half checkable. A function answers only
+  ;; when called, with a path, at runtime — so nothing can list an app's screens,
+  ;; join a link to one, or compare the client's table to the server's. Every
+  ;; report and gate that exists for `^{:web/path}` was impossible here for
+  ;; exactly that reason, and `crossings` records the two holes it leaves.
+  (let [state (atom {})
+        pushed (atom [])
+        app   (webapp/wiring
+               {:webapp/state     state
+                :webapp/base      "/p/x"
+                :webapp/routes    [["/things"     :things]
+                                   ["/things/:id" :thing]]
+                :webapp/view      (fn [_] nil)
+                :webapp/push-url! (fn [u] (swap! pushed conj u))})]
+
+    (testing "navigation routes through the declared table"
+      (webapp/navigate! app "/things/42" false)
+      (is (= :thing (:screen @state)))
+      (is (= {:id "42"} (:params @state))))
+
+    (testing "a click is OURS only when the table routes it"
+      ;; `click-target`'s fourth judgement now reads the same table, so an
+      ;; unrouted in-app path still falls through to the server and a typo stays
+      ;; a 404 rather than a blank screen at a plausible url
+      (let [click (fn [href] (webapp/click-target {:webapp/href href :webapp/button 0}
+                                                  "/p/x" (:webapp/routes app)))]
+        (is (= "/things/42" (click "/p/x/things/42")))
+        (is (nil? (click "/p/x/nope")))))
+
+    (testing "a FUNCTION is refused, and the message says what to write"
+      ;; no back-compat shim: the refusal carries the migration, because a
+      ;; silently-accepted function is a store that keeps every hole this change
+      ;; exists to close
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)table|\[\[\"/"
+           (webapp/wiring {:webapp/state  (atom {})
+                           :webapp/view   (fn [_] nil)
+                           :webapp/routes (fn [p] (when (= "/x" p) {:screen :x}))}))))
+
+    (testing "and the table is READABLE — which is the whole point"
+      ;; an app's screens are now a value anything can list: a gate joining a
+      ;; link to a route, a report showing a human the map, a check comparing
+      ;; this against the prefixes the server answers for
+      (is (= ["/things" "/things/:id"] (mapv first (:webapp/routes app)))))))

@@ -27,7 +27,7 @@
   Query parsing happens once, here, so no app writes its own splitter — and a
   declared read addresses `[:query-params :view]` exactly as it addresses
   `[:path-params :id]`."
-  (:require [slopp.web.router :as router] [slopp.web.auth :as auth] [clojure.string :as str]))
+  (:require [slopp.web.router :as router] [slopp.web.auth :as auth] [clojure.string :as str] [slopp.lang :as lang]))
 
 (defn authorized?
   "Does `identity` ({:web/sub … :web/groups #{…}} or nil) satisfy `policy`?
@@ -147,7 +147,7 @@
         ;; splitter and a declared read addresses a query param exactly as it
         ;; addresses a path param.
         pp   (:path-params row)
-        qp   (router/query-params (:query-string req))
+        qp   (lang/query-params (:query-string req))
         ;; decided ONCE, before the cond, so the refusal branch and the handler
         ;; branch cannot disagree about what the caller sent
         sent (decoded-input ctx row req pp qp)]

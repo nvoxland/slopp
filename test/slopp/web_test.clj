@@ -13,7 +13,7 @@
   own tests through the client would close the loop and let a symmetric bug —
   client omits a header, server ignores it — pass both suites."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web :as slopp.web] [slopp.web.static :as static] [slopp.web.router :as router] [clojure.string :as str]))
+            [slopp.web :as slopp.web] [slopp.web.static :as static] [clojure.string :as str] [slopp.lang :as lang]))
 
 (defn ^{:web/method :get :web/path "/w/mine/:owner" :web/auth :authenticated}
   t-mine
@@ -255,18 +255,18 @@
   ;; framework: a place the app has to reach around slopp.web is a gap in
   ;; slopp.web.
   (testing "the shapes a URL actually arrives in"
-    (is (= {} (router/query-params nil)))
-    (is (= {} (router/query-params "")))
-    (is (= {:view "labeled"} (router/query-params "view=labeled")))
-    (is (= {:a "1" :b "2"} (router/query-params "a=1&b=2")))
-    (is (= {:flag ""} (router/query-params "flag"))
+    (is (= {} (lang/query-params nil)))
+    (is (= {} (lang/query-params "")))
+    (is (= {:view "labeled"} (lang/query-params "view=labeled")))
+    (is (= {:a "1" :b "2"} (lang/query-params "a=1&b=2")))
+    (is (= {:flag ""} (lang/query-params "flag"))
         "a bare key is present with an empty value — present and empty are not absent"))
   (testing "percent- and plus-encoding, since a value is arbitrary text"
-    (is (= {:q "a b"} (router/query-params "q=a+b")))
-    (is (= {:q "a/b?c"} (router/query-params "q=a%2Fb%3Fc")))
-    (is (= {:ns "demo.core"} (router/query-params "ns=demo.core"))))
+    (is (= {:q "a b"} (lang/query-params "q=a+b")))
+    (is (= {:q "a/b?c"} (lang/query-params "q=a%2Fb%3Fc")))
+    (is (= {:ns "demo.core"} (lang/query-params "ns=demo.core"))))
   (testing "malformed input is data, never a 500"
-    (is (map? (router/query-params "%%%=x&=y&&"))))
+    (is (map? (lang/query-params "%%%=x&=y&&"))))
   (testing "and malformed text ARRIVES, rather than the pair being dropped"
     ;; changed when decoding moved to slopp.lang. URLDecoder throws on a stray
     ;; `%`, and the old code caught that and dropped the pair — so `?q=100%`,
@@ -281,11 +281,11 @@
     ;; the two that discriminate. The `café` and `=y` cases passed BEFORE as
     ;; well; they are regression guards, not evidence, and calling all four
     ;; evidence would be the coverage theatre the advisory names.
-    (is (= {:q "100%"} (router/query-params "q=100%")))
-    (is (= {:q "a%zzb"} (router/query-params "q=a%zzb")))
-    (is (= {:q "café"} (router/query-params "q=caf%C3%A9"))
+    (is (= {:q "100%"} (lang/query-params "q=100%")))
+    (is (= {:q "a%zzb"} (lang/query-params "q=a%zzb")))
+    (is (= {:q "café"} (lang/query-params "q=caf%C3%A9"))
         "and the portable decoder still does real UTF-8")
-    (is (= {} (router/query-params "=y"))
+    (is (= {} (lang/query-params "=y"))
         "a pair with no KEY is still dropped — there is nothing to be present under")))
 
 (deftest a-context-cannot-promise-reads-it-cannot-perform

@@ -9,7 +9,7 @@
   That is the same behavioural change `http-client-routes-consequences` states at the
   done point — the rule tells the author once, and this holds the code to it."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.routes :as routes] [slopp.web.router :as router]))
+            [slopp.web.routes :as routes] [slopp.web.router :as router] [slopp.webapp :as webapp]))
 
 (defn ^{:web/method :get :web/path "/t/users/:id" :web/auth :public
         :web/reads {:user [:user/by-id [:path-params :id]]}}
@@ -116,3 +116,60 @@
       ;; is rest's.
       (is (nil? (:web/request (by "/t/page"))) (pr-str (by "/t/page")))
       (is (nil? (:web/response (by "/t/page")))))))
+
+(deftest the-CLIENT-and-SERVER-matchers-agree-about-the-pattern-grammar
+  ;; `slopp.webapp/match-route` and `router/match` are two implementations of one
+  ;; pattern grammar, and they are two rather than one for a reason that is not
+  ;; laziness: `web.router` ships in the `http` family and `match-route` in
+  ;; `webapp`. A store may vendor either without the other, so a require across
+  ;; them is a load failure in whichever store has only one half.
+  ;;
+  ;; What must not drift is the GRAMMAR. An app declares one table of patterns
+  ;; and both sides read it — the client to route a click, the server to decide
+  ;; which paths its document answers for. The day one side learns a pattern form
+  ;; the other does not, a deep link routes in the browser and 404s on refresh,
+  ;; or the reverse; and neither is discoverable by reading either file.
+  ;;
+  ;; Same shape as `web.client-test/requester-contract`: one suite, two
+  ;; implementations, and the suite is the only thing that makes the pair a pair.
+  ;;
+  ;; It lives HERE, on the server side, because `router/match` is exported only
+  ;; within `slopp.rules.*` — running the comparison from inside `slopp.web`
+  ;; needs no widening of that, and the module edge it does need is declared
+  ;; test-only so production code under `slopp.web` still may not cross.
+  (let [patterns ["/" "/things" "/things/:id" "/things/:id/edit"
+                  "/a/b/c" "/files/*path" "/:only"]
+        paths    ["/" "/things" "/things/" "/things/42" "/things/42/edit"
+                  "/a/b/c" "/files/x" "/files/a/b/c.txt" "/solo"
+                  "/nope/deeper" "/things/42/nonsense" ""]
+        ;; the pattern is its own target, so a disagreement names itself
+        rows     (mapv (fn [p] {:method :get :path p :handler p}) patterns)
+        table    (mapv (fn [p] [p p]) patterns)]
+
+    (testing "the detector bites: both DO answer, and differently per path"
+      ;; without this the agreement below is satisfied by two matchers that
+      ;; return nil for everything — the vacuous-green shape
+      (is (< 5 (count (distinct (keep #(:path (router/match rows :get %)) paths))))
+          "the server matcher resolved fewer than six distinct patterns")
+      (is (< 5 (count (distinct (keep #(:screen (webapp/match-route table %)) paths))))
+          "the client matcher resolved fewer than six distinct patterns"))
+
+    (testing "every path routes to the same PATTERN on both sides"
+      (doseq [path paths]
+        (let [server (:path (router/match rows :get path))
+              client (:screen (webapp/match-route table path))]
+          (is (= server client)
+              (str "client and server disagree about " (pr-str path)
+                   " — server: " (pr-str server) ", client: " (pr-str client))))))
+
+    (testing "and the capture NAMES and values agree too"
+      ;; matching the same pattern while binding different names is a
+      ;; disagreement a pattern-only comparison cannot see
+      (doseq [path paths]
+        (let [server (:path-params (router/match rows :get path))
+              client (:params (webapp/match-route table path))]
+          (when (seq server)
+            (is (= server (select-keys client (keys server)))
+                (str "captures differ for " (pr-str path)
+                     " — server: " (pr-str server)
+                     ", client: " (pr-str client)))))))))

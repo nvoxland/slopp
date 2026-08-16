@@ -19,7 +19,7 @@
   which is stricter than being portable, and is the point. Code that asks
   what a character IS has already made the claim this namespace exists to
   make unnecessary."
-  )
+  (:require [clojure.string :as str]))
 
 (def ^:private hex-digit
   "Hex character → its value, both cases.
@@ -169,3 +169,42 @@
         (apply str out)
         (let [c (nth t i)]
           (recur (inc i) (conj out (or (percent-of c) (str c)))))))))
+
+(defn ^:export query-params
+  "A request's `:query-string` as `{:key \"value\"}`, percent- and
+  plus-decoded. `nil`/blank → `{}`.
+
+  A bare key (`\"flag\"`) is PRESENT with an empty value, because present
+  and empty is a different thing from absent and a handler has to be able
+  to tell them apart. A pair with no key at all is dropped — there is
+  nothing to be present UNDER.
+
+  Decoding goes through [[decode-component]], its neighbour here, and touches
+  no platform API at all. It used `java.net.URLDecoder` — correct on the server
+  and unavailable to a client router, so the framework shipped the JVM half of
+  a gap and left the browser half to whoever hit it. That is what D3.1 makes
+  slopp's problem rather than an app's.
+
+  **Which is why it now lives HERE rather than in the server's router**, beside
+  the encoder it is the other half of. A url is one grammar and both sides read
+  it: the server parses a `:query-string` off a request, a browser router parses
+  the same text off `location.search`, and duplicating ten subtle lines — a bare
+  key is PRESENT with an empty value, malformed text passes through as itself —
+  is how the two come to disagree about what `?q=100%` means.
+
+  **Malformed text is passed through as itself, never thrown and no longer
+  DROPPED.** `URLDecoder` throws on a stray `%`, and dropping the pair means
+  `?q=100%` — a real search, typed by a real person — arrives as no query at
+  all rather than as the text they typed. Garbage in a query string is data
+  from the network; the response to it is a page, and the most useful page is
+  the one that got the characters."
+  [query-string]
+  (if (str/blank? query-string)
+    {}
+    (into {}
+          (keep (fn [pair]
+                  (let [[k v] (str/split pair #"=" 2)
+                        k'    (decode-component k)]
+                    (when (seq k')
+                      [(keyword k') (decode-component (or v ""))]))))
+          (str/split query-string #"&"))))
