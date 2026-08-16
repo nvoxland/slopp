@@ -3971,13 +3971,28 @@ removal (336 KB, 8 jars) was right at the time; the premise changed when
 
 ### The manifests are per-capability, and `"_"` is not a capability
 
-`framework-files.edn` and `framework-deps.edn` became `{capability {…}}`.
-Handing every store every family would let `(require 'slopp.web)` succeed in a
-project that never enabled `http` — the opt-in holding in a config file and not
-at runtime, which is the model failing at the thing it is about. Asserted by
-running it: `ops-test/a-built-cli-app-RUNS-outside-slopp-entirely` builds a
-CLI-only tree from two declared families and checks that `slopp/web.clj` is
-absent and unloadable.
+`framework-files.edn` and `framework-deps.edn` became `{capability {…}}`, and
+a store is handed the families it USES. Asserted by running it:
+`ops-test/a-built-cli-app-RUNS-outside-slopp-entirely` builds a CLI-only tree
+from two declared families and checks that `slopp/web.clj` is absent and
+unloadable.
+
+**Use, not enablement — and the first version of this entry got that wrong.**
+It claimed per-capability vendoring stops `(require 'slopp.web)` succeeding in a
+project that never enabled `http`, i.e. that it makes the opt-in hold at
+runtime. slopp-ui disproved it by tracing it against their own store:
+`used-families` reads requires and entry markers, so a store whose requires
+outlive its config loads the framework whatever `http.enabled` says. Withholding
+a family from a store that neither requires nor marks it withholds it from the
+one store that was never going to require it.
+
+**Keying on enablement instead would be actively worse, which is why it stays.**
+That is precisely a store mid-migration — retired config keys, new registry,
+requires unchanged — and it would boot with the framework missing, fail to load,
+and lose the `config_file` calls that repair it. The 2026-08-06 shape exactly.
+What per-capability vendoring buys is the PAYLOAD: a cli app carries no
+`slopp/web/**` and inherits none of http's deps. The opt-in is enforced where it
+can answer for itself — the write gates, and the capability-driven behaviour.
 
 `"_"` is the family every store gets. It holds `slopp.lang` (D3.1) and — found
 by the guard below — `slopp.cache`. Membership has a test: **a namespace belongs
