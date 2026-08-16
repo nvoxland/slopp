@@ -2531,3 +2531,37 @@ written is worse than one that is absent**, because the citation is what stops
 the next reader asking for it — and `cli-contract` paid for itself the day it
 was finally built, catching a flush the fake half is structurally unable to
 fail.
+
+### Sharpening (2026-08-17, from slopp-ui): the option you did not ENUMERATE leaves no trace
+
+Their words, and they explain three separate defects from one day:
+
+> "I considered it and rejected it" reads as thoroughness and can be a floor
+> rather than a ceiling: **the option you did not enumerate leaves no trace in
+> the reasoning that rejected the others.**
+
+The worked examples, all of which ruled out a wrong answer CORRECTLY and then
+stopped:
+
+- slopp-ui's `show!` carried a comment saying a cross-screen load was "not
+  something the loop should grow a hook for on one app's account". Right — a
+  hook was the wrong fix. The third option was a DECLARATION, and because it was
+  never written down to be rejected, it was invisible for weeks to the person
+  who wrote the comment and to the person reading their source.
+- `arrive` cleared the effect entry as law. The reasoning correctly rejected
+  "never clear it" — most call panels are route-scoped. It did not enumerate
+  "clear by default and let it be declared", so the default became a policy.
+- `build.clj`'s family glob matched `.clj`. Nothing rejected `.cljc`; it was
+  never a candidate. The family shipped zero files and `:when (seq fs)` made
+  that indistinguishable from a family with nothing in it.
+
+**The tell is a comment that argues against one alternative.** Two options
+named and one rejected reads as a decision; it is equally consistent with never
+having looked for a third. A reader cannot tell the difference, and neither can
+the author six weeks later — which is why the useful habit is to write down
+what was considered and declined, not only what was chosen.
+
+This is the enumeration half of the discipline whose other half is already
+here: a reason left in the head rather than the code is right by luck for the
+next reader. An option left OUT of the reasoning is worse, because the
+reasoning looks complete.
