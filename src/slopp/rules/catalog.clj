@@ -62,6 +62,9 @@
    {:rule :webapp-page-unreachable :grain :form
     :escape "move the entry — and the routing, derive and view code it reaches — to a :jvm or :cljc namespace, passing the browser-shaped parts in (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:web/page entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until http.enabled)"}
+{:rule :webapp-portable-handler :grain :form
+    :escape "use the data form — {:on {:input [:your/action]}} — and read the value from your :webapp/act, which receives it as a scalar; or dial it down (config_file {path \"rules\" key \"webapp-portable-handler\" value \"advisory\"}) for an app whose own :cljs dispatcher normalises the event deliberately"
+    :teach "a value-carrying control (input, select, textarea) may not take a FUNCTION handler — in a browser it receives a DOM event and headless it receives slopp's best-effort map, so a handler written against either passes every test and does nothing in production. A function on a button carries no value and is fine (inert until webapp.enabled)"}
    {:rule :http-undeclared-effect :grain :form
     :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
     :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}

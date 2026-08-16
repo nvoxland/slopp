@@ -132,3 +132,69 @@
                                :prompt "zero arity exists, so the refusal's rationale does not apply")]
           (is (nil? (:error r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-FUNCTION-handler-on-an-input-refuses-at-the-write
+  ;; `slopp.web.screen/fill!` already states this, as a paragraph an author
+  ;; reads or does not:
+  ;;
+  ;;   A FUNCTION handler on an input cannot be portable … in a browser it
+  ;;   receives a DOM event, and reading a value out of one is interop.
+  ;;
+  ;; It is the sharpest failure in the whole capability, because it is the one
+  ;; where the tools LIE. Headless, `fill!` hands a function handler a
+  ;; best-effort `{:value v :target {:value v}}`; in a browser the same handler
+  ;; gets a real DOM event, whose value lives behind `(.. e -target -value)`.
+  ;; A handler written against either passes every test and does nothing in
+  ;; production — a green suite over broken code, which is worse than no suite.
+  ;;
+  ;; The DATA form has no such gap and now has no excuse: slopp owns the
+  ;; dispatcher, so `slopp.webapp.dom` normalises the event to a scalar once,
+  ;; for every app, and the app's interpreter never sees an event of any shape.
+  ;; Advice became structure, so the paragraph becomes a refusal.
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                        :prompt "the browser owns routing here")
+      (ops/ingest! sess 'ui.view "(ns ui.view)\n\n(defn seed \"S.\" [x] x)\n")
+
+      (testing "a replicant :on map with a function on an input refuses"
+        (let [r (ops/add-form! sess 'ui.view
+                               (str "(defn field \"F.\" [s]"
+                                    " [:input {:value (:q s)"
+                                    "          :on {:input (fn [e] (prn e))}}])")
+                               :prompt "the handler that works in exactly one of the two")]
+          (is (re-find #"(?i)scalar|data" (str (:error r))) (pr-str r))
+          (is (nil? (store/form-named (:store @sess) 'ui.view 'field))
+              "a refusal that writes anyway teaches nothing")))
+
+      (testing "the reagent spelling refuses too — it is the same defect"
+        ;; `fill!` tries both event names because real apps write both; a gate
+        ;; that knew one of them would send half its readers away reassured
+        (let [r (ops/add-form! sess 'ui.view
+                               "(defn field \"F.\" [s] [:input {:on-change #(prn %)}])"
+                               :prompt "reagent's spelling of the same mistake")]
+          (is (some? (:error r)) (pr-str r))))
+
+      (testing "a NAMED function is no better, and looks more responsible"
+        (let [r (ops/add-form! sess 'ui.view
+                               "(defn field \"F.\" [s] [:input {:on {:input handle-typing}}])"
+                               :prompt "extracted, and still receives a DOM event")]
+          (is (some? (:error r)) (pr-str r))))
+
+      (testing "the DATA form lands — it is the portable one"
+        (let [r (ops/add-form! sess 'ui.view
+                               (str "(defn field \"F.\" [s]"
+                                    " [:input {:value (:q s)"
+                                    "          :on {:input [:query/typed]}}])")
+                               :prompt "the action, and slopp supplies the value")]
+          (is (nil? (:error r)) (pr-str r))))
+
+      (testing "and a function on a BUTTON is none of this gate's business"
+        ;; a click carries no value to read off the event, so there is nothing
+        ;; for the two drivers to disagree about. Refusing it would be a rule
+        ;; about style rather than about portability
+        (let [r (ops/add-form! sess 'ui.view
+                               "(defn go \"G.\" [] [:button {:on {:click (fn [_] :ok)}} \"Go\"])"
+                               :prompt "a click handler, which is portable")]
+          (is (nil? (:error r)) (pr-str r))))
+      (finally (ops/close! sess)))))

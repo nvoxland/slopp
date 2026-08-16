@@ -23,7 +23,7 @@
   done-grain half, which sees a whole episode where these see one form."
   (:require [clojure.string :as str]
             [slopp.store :as store]
-            [slopp.edit.modules :as edit.modules]))
+            [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n]))
 
 (defn ^:export ^{:rule/applies-to :production} webapp-page-unreachable
   "The headless-review gate (D-web): a `^:web/page` entry — the fn
@@ -152,3 +152,72 @@
                 " answers from whichever it reaches first, silently, and a"
                 " screen from the wrong app is worse than no screen. Keep one"
                 " entry and let it branch.")))))))
+
+(defn ^:export ^{:rule/applies-to :production} webapp-portable-handler
+  "The port gate for EVENTS: a value-carrying control may not hand its handler a
+  function. Returns a teaching string, or nil when clean.
+
+  **This is the one place slopp's own tools lie, and the gate exists to close
+  that.** Headless, `slopp.web.screen/fill!` hands a function handler a
+  best-effort `{:value v :target {:value v}}`. In a browser, replicant hands the
+  same function a real DOM event, whose value lives behind `(.. e -target
+  -value)` — interop, which cannot run on a JVM at all. A handler written
+  against either shape passes every test and does nothing in production. A green
+  suite over broken code is worse than no suite, and `fill!`'s own docstring
+  says so, as a paragraph an author reads or does not.
+
+  **What changed is that the alternative stopped costing anything.** The DATA
+  form — `{:on {:input [:query/typed]}}` — reaches the app as `(action value)`
+  with the value already a scalar, because slopp owns the dispatcher now:
+  `slopp.webapp.dom` reads it off the event once, for every app. It used to be
+  advice that each app followed by hand or did not; it is structure, so the
+  paragraph can become a refusal.
+
+  **Scoped to controls that carry a VALUE** — `input`, `select`, `textarea` —
+  and that scope is the whole content of the rule rather than caution. A click
+  carries nothing to read off the event, so the two drivers have nothing to
+  disagree about and a function there is perfectly portable. Refusing it would
+  be a rule about style wearing this one's clothes.
+
+  Both spellings, because real apps write both: replicant's `:on {:input …}` and
+  reagent's `:on-change`. A gate that knew one of them would send half its
+  readers away reassured.
+
+  Whether this store opted into `webapp` at all is `edit.gates/gate-check`'s
+  question, answered from the namespace this gate lives in."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [;; a hiccup tag may carry classes and an id — :input.field#q — so the
+          ;; element is the leading segment rather than the whole keyword
+          control? (fn [tag]
+                     (and (keyword? tag)
+                          (contains? #{"input" "select" "textarea"}
+                                     (first (str/split (name tag) #"[.#]")))))
+          ;; DATA is a vector: the action, verbatim, as a dispatcher switches on.
+          ;; Everything else that can be called — an (fn …), a #(…) (which reads
+          ;; as fn*), a bare symbol naming one — is the defect, and the symbol
+          ;; case is the one worth catching because extracting a handler looks
+          ;; like the responsible move
+          fn-ish?  (fn [v] (and (some? v) (not (vector? v))))
+          hit      (first
+                    (for [v     (tree-seq coll? seq (try (n/sexpr (:node e))
+                                                         (catch Exception _ nil)))
+                          :when (and (vector? v) (control? (first v)) (map? (second v)))
+                          :let  [attrs (second v)
+                                 on    (:on attrs)]
+                          [k h] (concat (select-keys attrs [:on-change])
+                                        (when (map? on)
+                                          (select-keys on [:input :change])))
+                          :when (fn-ish? h)]
+                      [(first v) k]))]
+      (when hit
+        (str ns-sym "/" form-name " gives " (first hit) " a FUNCTION handler on "
+             (second hit) " — which is the one shape slopp's own tools disagree"
+             " about. In a browser it receives a DOM event and the typed text is"
+             " behind (.. e -target -value); headless, screen/fill! hands it a"
+             " best-effort map. So it passes every test and does nothing in"
+             " production. Use the data form — {:on {:input [:your/action]}} —"
+             " and the value arrives as a SCALAR through your :webapp/act,"
+             " because slopp's browser shim normalises the event once for every"
+             " app. A function on a control that carries no value (a button) is"
+             " portable and this gate ignores it.")))))
