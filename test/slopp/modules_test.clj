@@ -2002,10 +2002,14 @@
       (doseq [[nsx path] capabilities/shipping-common]
         (is (some? (clojure.java.io/resource path))
             (str nsx " declares the path " path ", and nothing is there."
-                 " The extension is load-bearing — each family's scan filters on"
-                 " `.clj`, so a `.cljc` member is named explicitly and a wrong"
-                 " extension ships nothing while failing no test that did not"
-                 " know to look."))))
+                 " The extension is load-bearing: a wrong one ships nothing"
+                 " while failing no test that did not know to look. This"
+                 " comment used to say a family's scan filters on `.clj`, which"
+                 " is why a `.cljc` member had to be named here explicitly —"
+                 " and that was TRUE and was a live bug: the first portable"
+                 " family shipped with zero files. The scan takes .clj, .cljc"
+                 " and .cljs now, so the explicit naming is no longer a"
+                 " workaround, only a route."))))
 
     (testing "and \"_\" is the ONLY route they have"
       ;; if these lived under a family's prefix they would ship as ordinary
@@ -2155,3 +2159,46 @@
              " teaching cannot be followed and the escape cannot be taken."
              " Ship it (capabilities/shipping-common, or the owning family) or"
              " stop naming it: " (pr-str (vec offenders))))))
+
+(deftest ^:external the-vendored-deps-derivation-can-see-a-cljs-require
+  ;; `framework-deps` reads each vendored file's requires and asks the build
+  ;; basis which lib ships each one, by looking for `<path>.clj` and
+  ;; `<path>.cljc` inside the resolved jars. **Not `.cljs`.**
+  ;;
+  ;; That was harmless while every framework namespace was `.clj`. It stops
+  ;; being harmless the moment a family ships browser code: a renderer ships as
+  ;; `replicant/dom.cljs`, so the lookup finds nothing and the derivation hits
+  ;; its own refusal — "no lib on the build basis provides it" — on a lib that
+  ;; is right there.
+  ;;
+  ;; **Second instance of the same blindness in two days.** The family GLOB had
+  ;; it too, and shipped `webapp` as a family with zero files; that one was
+  ;; silent, and this one is loud, which is the only difference. The pair is
+  ;; worth naming: an extension check written when one extension existed is a
+  ;; proxy for "is this source", and it reports on the proxy.
+  ;;
+  ;; Asserted textually because `build.clj` is a file humans own, outside the
+  ;; store, and its internals are private to it — the same shape as its
+  ;; neighbour above, and for the same reason. The BEHAVIOURAL proof is the
+  ;; webapp family's own `framework-deps.edn` entry, which cannot exist until
+  ;; the shim does.
+  (let [f (clojure.java.io/file "build.clj")]
+    (is (.exists f) "build.clj is the file this test is about")
+    (let [src (slurp f)]
+      (is (str/includes? src "framework-deps.edn")
+          "the deps derivation is in this file — if this fails, the build moved")
+
+            (testing "the RESOLVER tries every source extension a lib can ship"
+        ;; Anchored on `lib-providing` rather than on the bare string, and the
+        ;; first draft was not: `(str/includes? src "\".cljs\"")` went green on
+        ;; the first run, because the family GLOB one fix earlier already
+        ;; mentions `.cljs`. The test passed while the bug it was written for
+        ;; sat untouched twenty lines away.
+        ;;
+        ;; Which is this session's own lesson landing on the test that was
+        ;; written about it: an assertion has to be anchored to the thing it is
+        ;; about, or it reports on whatever else happens to satisfy it.
+        (is (str/includes? src "(lib-providing libs (str path \".cljs\"))")
+            (str "a required namespace shipped as .cljs resolves to nothing, and"
+                 " the derivation refuses on a lib that is present — which is"
+                 " what a browser family's renderer will always be"))))))

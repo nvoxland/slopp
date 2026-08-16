@@ -477,3 +477,133 @@
             (str "a failure that survives is one an app can decline to retry: "
                  (pr-str @s2)))
         (is (= 1 @n) "and nothing re-fetched it behind the app's back")))))
+
+(deftest the-mount-PREFIX-goes-on-and-comes-off-symmetrically
+  ;; An app served behind a proxy is mounted under a prefix it cannot work out
+  ;; from its own URL: `/p/slopp2/store` and `/store` are indistinguishable
+  ;; without being told. So the mount point arrives as data, and every url
+  ;; crossing the boundary is prefixed on the way out and stripped on the way
+  ;; in.
+  ;;
+  ;; Written as a PAIR, and asserted as a round trip, for the reason
+  ;; `slopp.lang`'s encoder gives about its decoder: two functions written apart
+  ;; are two guesses. The failure they prevent is a link that works when served
+  ;; at the root and 404s behind the proxy, which is the one place nobody tests.
+  (testing "prefixed puts the mount point on"
+    (is (= "/things" (webapp/prefixed "" "/things")))
+    (is (= "/p/x/things" (webapp/prefixed "/p/x" "/things"))))
+
+  (testing "strip-base takes it off"
+    (is (= "/things" (webapp/strip-base "" "/things")))
+    (is (= "/things" (webapp/strip-base "/p/x" "/p/x/things"))))
+
+  (testing "and the round trip holds for every base"
+    ;; the property, not three examples: whatever went out comes back
+    (doseq [base ["" "/p/x" "/deep/mount/point"]
+            path ["/" "/things" "/things/42" "/search?q=rate"]]
+      (is (= path (webapp/strip-base base (webapp/prefixed base path)))
+          (str "round trip failed for base " (pr-str base) " path " (pr-str path)))))
+
+  (testing "the mount point ITSELF is the root path"
+    ;; `/p/x` with nothing after it is the app's `/`, not the empty string —
+    ;; an empty path routes to nothing and renders a blank page at a url that
+    ;; looks right
+    (is (= "/" (webapp/strip-base "/p/x" "/p/x")))
+    (is (= "/" (webapp/strip-base "/p/x" "/p/x/"))))
+
+  (testing "a path OUTSIDE the mount point is not ours to strip"
+    ;; returning it unchanged would claim a foreign url is an app path; nil
+    ;; says it belongs to somebody else
+    (is (nil? (webapp/strip-base "/p/x" "/other/thing")))
+    ;; and a prefix match must be at a SEGMENT boundary — /p/xylophone is not
+    ;; under /p/x, and a naive starts-with? says it is
+    (is (nil? (webapp/strip-base "/p/x" "/p/xylophone/thing")))))
+
+(deftest the-current-path-includes-the-QUERY-STRING
+  ;; A bug slopp-ui already paid for, carried here so it cannot be re-derived.
+  ;; A url built from `location.pathname` alone routes `/store/search?q=rate`
+  ;; to a search screen with an EMPTY query — a box that forgot what was typed
+  ;; between pressing enter and the page loading.
+  ;;
+  ;; It is the shape worth naming rather than the instance: the browser splits
+  ;; a url across two properties, the app's router reads one string, and a shim
+  ;; that reads the obvious property loses the other half. **And it will look
+  ;; correct** — the screen renders, the url is right in the address bar, and
+  ;; only the contents of one field are wrong.
+  ;;
+  ;; This is `:cljc` so the JVM can assert it. The shim's whole job is reading
+  ;; two properties and handing them here, which is the split the wave is for:
+  ;; the decision is testable, the interop is not.
+  (testing "pathname and search are rejoined"
+    (is (= "/search?q=rate" (webapp/app-path "" "/search" "?q=rate"))))
+
+  (testing "an empty search adds no question mark"
+    ;; "/things?" and "/things" are different strings and only one routes
+    (is (= "/things" (webapp/app-path "" "/things" "")))
+    (is (= "/things" (webapp/app-path "" "/things" nil))))
+
+  (testing "and the mount point comes off the PATH, not the query"
+    ;; the prefix belongs to the pathname; stripping across the join would eat
+    ;; a query that happened to contain the base as text
+    (is (= "/search?q=rate" (webapp/app-path "/p/x" "/p/x/search" "?q=rate")))
+    (is (= "/search?base=/p/x" (webapp/app-path "/p/x" "/p/x/search" "?base=/p/x"))))
+
+  (testing "a url outside the mount point is not this app's path"
+    (is (nil? (webapp/app-path "/p/x" "/other" "?q=1"))))
+
+  (testing "the mount root with a query is the app's root with that query"
+    (is (= "/?tab=all" (webapp/app-path "/p/x" "/p/x" "?tab=all")))))
+
+(deftest which-clicks-are-OURS-is-a-decision-not-a-chain-of-ands
+  ;; The rules deciding whether a click belongs to the app were, in slopp-ui's
+  ;; shell, a chain of `and`s in a `:cljs` namespace nothing could check. They
+  ;; are four independent judgements and each one is a real behaviour:
+  ;;
+  ;;   plain left-click   a middle-click opens a tab, cmd-click opens a tab,
+  ;;                      and hijacking either is a browser that lies
+  ;;   in-app only        an external link must leave; preventDefault on one
+  ;;                      is a dead link
+  ;;   routed only        an unrouted path FALLS THROUGH to the server, so a
+  ;;                      wrong url stays a 404 instead of rendering nothing
+  ;;   an href at all     a click on a button is not a navigation
+  ;;
+  ;; The third is the one worth stating twice. Swallowing an unrouted in-app
+  ;; path turns every typo into a blank screen at a plausible url, which is the
+  ;; SPA failure that makes a site feel broken rather than missing.
+  (let [routes (fn [p] (when (#{"/things" "/"} p) {:screen :ok :params {}}))
+        ;; namespaced, because the shim NAMES the three properties it reads off
+        ;; the event — what crosses into the decision is slopp's own data rather
+        ;; than a browser object whose shape nobody declared
+        click  (fn [m] (webapp/click-target
+                        (merge {:webapp/button 0 :webapp/modified? false}
+                               (into {} (for [[k v] m]
+                                          [(keyword "webapp" (name k)) v])))
+                        "/p/x" routes))]
+
+    (testing "a plain left-click on a routed in-app link is ours"
+      (is (= "/things" (click {:href "/p/x/things"}))))
+
+    (testing "a MIDDLE click is not — it opens a tab, and always has"
+      (is (nil? (click {:href "/p/x/things" :button 1}))))
+
+    (testing "nor a modified one — cmd/ctrl/shift/alt all mean open elsewhere"
+      (is (nil? (click {:href "/p/x/things" :modified? true}))))
+
+    (testing "an EXTERNAL link leaves, and must"
+      ;; preventDefault here is a link that looks live and does nothing
+      (is (nil? (click {:href "https://example.com/things"})))
+      (is (nil? (click {:href "/other/app"}))))
+
+    (testing "an UNROUTED in-app path falls through to the server"
+      ;; the one that makes a site feel broken rather than missing: swallow it
+      ;; and a typo renders an empty screen at a url that looks valid
+      (is (nil? (click {:href "/p/x/nope"}))
+          "an unrouted path is the server's answer to give, which is a 404"))
+
+    (testing "and a click with no href is not a navigation at all"
+      (is (nil? (click {:href nil})))
+      (is (nil? (click {}))))
+
+    (testing "the mount ROOT is routable like any other path"
+      ;; `/p/x` is the app's `/`, and a link to it is as ordinary as any
+      (is (= "/" (click {:href "/p/x"}))))))

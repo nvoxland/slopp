@@ -149,8 +149,18 @@
                             ;; suppression: put the lib on the build basis, so
                             ;; the version a consumer is handed is the one this
                             ;; jar was built against.
+                            ;; .cljs too, and it is not hypothetical: a browser
+                            ;; family's renderer ships as `replicant/dom.cljs`,
+                            ;; so a two-extension lookup finds nothing and the
+                            ;; refusal below fires on a lib that is sitting in
+                            ;; the basis. Second instance of this blindness in
+                            ;; two days — the family GLOB had it too and shipped
+                            ;; a family with zero files. An extension check
+                            ;; written when one extension existed is a proxy for
+                            ;; "is this source", and it reports on the proxy.
                             lib  (or (lib-providing libs (str path ".clj"))
-                                     (lib-providing libs (str path ".cljc")))]
+                                     (lib-providing libs (str path ".cljc"))
+                                     (lib-providing libs (str path ".cljs")))]
                         (when-not lib
                           (throw (ex-info
                                   (str "the vendored framework requires " s

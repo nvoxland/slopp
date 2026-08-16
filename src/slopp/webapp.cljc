@@ -21,7 +21,7 @@
   modernises it, which is why the reason is written here rather than assumed.
 
   **Renderer-agnostic, deliberately.** This never learns what a screen looks
-  like. The moment it does, it is presentation and belongs to the app.")
+  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str]))
 
 (defn- arrive
   "The state transition a navigation IS: `path` and its route in, everything
@@ -330,6 +330,30 @@
        (f (fn [value] (write! {:status :ready :value (xform value)}))
           (fn [message] (write! {:status :failed :error message})))))))
 
+(defn ^:export load-value
+  "The value load `key` answered with, or nil when it has not answered.
+
+  Read this WITH [[load-status]], never instead of it. `nil` here is three
+  different facts — nothing was asked, it is still being asked, it answered
+  with nothing — and telling them apart is the whole reason the status exists.
+  A view that branches on this alone has rebuilt the nil-pun the four states
+  were added to remove."
+  [state key]
+  (get-in state [:loads key :value]))
+
+(defn ^:export prefixed
+  "`path` addressed under the app's mount point — the url a browser should see.
+
+  The pair of [[strip-base]], and written as a pair deliberately: two functions
+  written apart are two guesses, and the failure they prevent is a link that
+  works when the app is served at the root and 404s behind a proxy, which is
+  the one arrangement nobody tests locally.
+
+  `\"\"` is the ordinary case and costs nothing — an app served at the root
+  prefixes every url with the empty string."
+  [base path]
+  (str base path))
+
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map
@@ -372,7 +396,7 @@
   [{:webapp/keys [state base routes fetch render push-url! derive
                   address-keys session-loads] :as app}
    path push?]
-  (when push? (push-url! (str base path)))
+  (when push? (push-url! (prefixed base path)))
   (swap! state arrive path (routes path) address-keys session-loads)
   (render @state)
   (when (:screen @state)
@@ -442,13 +466,100 @@
      :dispatch (partial dispatch-for! app)
      :boot     (or boot identity)}))
 
-(defn ^:export load-value
-  "The value load `key` answered with, or nil when it has not answered.
+(defn ^:export strip-base
+  "The app path inside `url-path`, or nil when the url is not under the mount
+  point at all.
 
-  Read this WITH [[load-status]], never instead of it. `nil` here is three
-  different facts — nothing was asked, it is still being asked, it answered
-  with nothing — and telling them apart is the whole reason the status exists.
-  A view that branches on this alone has rebuilt the nil-pun the four states
-  were added to remove."
-  [state key]
-  (get-in state [:loads key :value]))
+  The pair of [[prefixed]]; the round trip is what the tests assert.
+
+  **nil rather than the path unchanged**, because those are different
+  statements. Returning it would claim a foreign url is one of this app's
+  paths, and the caller deciding whether a click is ours would then follow a
+  link off its own site.
+
+  **The prefix has to match at a SEGMENT boundary.** A plain `starts-with?`
+  says `/p/xylophone` is under `/p/x`, which is how an app mounted at one slug
+  starts routing another slug's urls into its own screens — a wrong answer that
+  renders rather than erroring.
+
+  The mount point itself is the app's `/`, not the empty string: an empty path
+  routes to nothing and renders a blank page at a url that looks right."
+  [base url-path]
+  (let [b (str base)
+        p (str url-path)]
+    (cond
+      (= "" b) p
+
+      (= p b) "/"
+
+      (str/starts-with? p (str b "/"))
+      (let [rest* (subs p (count b))]
+        (if (= "/" rest*) "/" rest*))
+
+      :else nil)))
+
+(defn ^:export app-path
+  "The app path a browser is currently showing: `pathname` with the mount point
+  off, and `search` rejoined — or nil when the url is not this app's.
+
+  **The query string is half the address and the browser keeps it somewhere
+  else.** A path built from `location.pathname` alone routes
+  `/store/search?q=rate` to a search screen with an empty query — a box that
+  forgot what was typed between pressing enter and the page loading. slopp-ui
+  paid for that one; it is here so nobody re-derives it.
+
+  What makes it expensive is that it LOOKS correct: the screen renders, the
+  address bar is right, and only the contents of one field are wrong.
+
+  The mount point comes off the PATHNAME, before the join, so a query that
+  happens to contain the base as text is left alone.
+
+  `:cljc`, which is the point — the browser splits a url across two properties
+  and the shim's whole job is reading them. The decision about what to do with
+  them is here, where a JVM test can see it."
+  [base pathname search]
+  (when-let [p (strip-base base pathname)]
+    (let [q (str search)]
+      (if (= "" q) p (str p q)))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/href {:optional true} [:maybe :string]]
+                          [:webapp/button {:optional true} [:maybe :int]]
+                          [:webapp/modified? {:optional true} [:maybe :boolean]]]
+                    :string ifn?]
+                   [:maybe :string]]}
+  click-target
+  "The app path this click should navigate to, or nil when the browser should
+  handle it itself.
+
+  Four independent judgements, and each is a real behaviour rather than a
+  condition in a chain:
+
+  - **a plain LEFT click.** A middle-click opens a tab and a cmd/ctrl/shift/alt
+    click opens a tab or a window. Hijacking either is a browser that lies
+    about what its own gestures do.
+  - **an href at all.** A click on a button is not a navigation.
+  - **IN-APP only.** Calling `preventDefault` on an external link produces one
+    that looks live and does nothing.
+  - **ROUTED only.** An unrouted in-app path falls through to the server, so a
+    wrong url stays a 404. Swallowing it turns every typo into a blank screen at
+    a plausible url, which is the SPA failure that makes a site feel broken
+    rather than missing.
+
+  Written here, in `:cljc`, because in a browser shell this is a chain of `and`s
+  in a namespace whose only verification is that it compiled — and it is four
+  behaviours, each of which a reader will notice and none of which anything
+  could check there.
+
+  The click arrives as slopp's own shape rather than a DOM event, and the keys
+  are namespaced for the reason every boundary map here is: the shim reads three
+  properties off an event and names them, so what crosses into this function is
+  data with an owner rather than a browser object with a shape nobody declared."
+  [{:webapp/keys [href button modified?]} base routes]
+  (when (and href
+             (or (nil? button) (zero? button))
+             (not modified?))
+    (when-let [path (strip-base base (str href))]
+      (when (routes path) path))))
