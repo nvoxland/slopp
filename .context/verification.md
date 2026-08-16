@@ -189,6 +189,35 @@ The oracle must never return a false verdict. Everything here serves that.
    (`full-set` is nil ⇒ `par` = 1). Measured: p50 = 12 covering tests, a cap of
    40 fits ~71% of forms, and the tail (p90 = 218) is the core-form case that
    honestly wants the whole suite.
+   **The DECLARATION blind spot (2026-08-16, reported by slopp-ui).** A test
+   that READS a form's marker — `(:web/path (meta #'app/page))` — never CALLS
+   it, so it leaves no trace edge and no static var reference either. Trace
+   evidence about a MARKED form is therefore partial by construction, and the
+   narrowing rule above says what happens next: partial evidence selected, the
+   readers fell out, and `edit_subform` on a `:web/spa` → `:web/client-routes`
+   rename reported `{:ran 2, :pass 18, :status :green}` on the edit that broke
+   three assertions. Same shape as `method-carrying?` one level out — a body
+   the tracer cannot see, versus a declaration nothing executes at all.
+   `engine/marker-readers` is UNIONED in on the same terms as `:covers`: a
+   floor, never a ceiling, so it can only ADD tests and cannot cause the
+   failure it fixes.
+   **Two conditions, and the second is the whole cost.** A test qualifies when
+   it mentions a marker the form carries AND actually reads metadata
+   (`(meta …)`, `ns-publics`, `form-name-meta`). Mentioning is not reading:
+   measured on this store — the worst case, since slopp IS the marker
+   machinery — `:web/path` is mentioned by 74 test forms and read off metadata
+   by 3, `:web/method` by 69 and 1, and only 14 of 1457 test forms read
+   metadata at all. Unconditioned, one endpoint edit would bill a tenth of the
+   suite including `^:external` tests at a JVM each.
+   Not keyed on the form's NAME, deliberately: a marker test is often a SWEEP
+   (`(map meta (vals (ns-publics 'app)))`) that names no form and is affected
+   by any form gaining or losing the marker. Keying on the name caught two of
+   the three readers in the incident and missed exactly that one.
+   **The honest limit:** a test reaching a declaration through some other
+   accessor is still missed. `done` runs the whole in-image suite and is the
+   backstop; this exists so the WRITE stops saying green, which is the answer
+   an author acts on.
+
    **Do not "improve" this with static reach.** Measured on this store: static
    transitive selects p50 = 49 tests vs the trace's 11, and kondo reports
    `defmethod`/`defrecord`/`extend-type` bodies with nil `:from-var` — every
