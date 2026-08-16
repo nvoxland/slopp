@@ -37,39 +37,39 @@
   that cleared it would be making a membership decision about an application's
   own state from inside the framework.
 
-  So the membership is DECLARED. `:webapp/address-keys` defaults to `#{:call}`,
-  because most ad-hoc call panels are route-scoped and a framework should be
-  right without configuration; an app whose effect panel spans screens says
-  `#{}`, and an app with its own address-scoped keys names them.
+  So the membership is DECLARED, twice, because there are two kinds of it:
+  `:webapp/address-keys` (default `#{:call}`) names plain state keys that die
+  with the route, and `:webapp/session-loads` (default `#{}`) names LOADS whose
+  entries outlive it.
 
-  The reason for that default is sharper than staleness, and it is slopp-ui's:
-  a call form's inputs are not merely stale under the new route, they are TYPED
-  to the old one. `:m` is a parameter of `/api/module/:m` and means nothing to
-  `/api/search`, so carrying it across shows a form claiming the new endpoint
-  takes arguments it does not have.
+  The reason for the `:call` default is sharper than staleness, and it is
+  slopp-ui's: a call form's inputs are not merely stale under the new route,
+  they are TYPED to the old one. `:m` is a parameter of `/api/module/:m` and
+  means nothing to `/api/search`, so carrying it across shows a form claiming
+  the new endpoint takes arguments it does not have.
 
-  **`:data`, `:error` and `:loads` clear regardless**, and that is not the same
-  kind of decision: the loop WRITES them, so clearing them is housekeeping
-  rather than a claim about the app's state. An app cannot opt a screen's
-  fetched answer into surviving the screen it was fetched for.
+  **An earlier version cleared every load regardless**, on the argument that the
+  loop writes them so clearing them is housekeeping. That reasons from
+  AUTHORSHIP, and slopp-ui showed what it costs: authorship decides who owns the
+  MACHINERY, and scope is a separate question never derivable from who does the
+  writing. A load pushed out of the framework to survive a navigation loses the
+  four states, the token and the guard with it — see [[load!]] for the three
+  defects that produced in a real app.
 
-  **`:loads` is EMPTIED, not bumped.** Emptying makes every load `:absent` —
-  nothing has been requested for this screen yet, which is the true statement —
-  and [[begin-load]] then moves it to `:loading`. A token bumped in place never
-  passes through `:absent`, so the four-state model quietly becomes three and a
-  view can no longer tell an unasked load from one that answered nil. Caught by
-  slopp-ui reading the first draft, which merged emptying and token minting into
-  one counter: they answer different questions."
-  [state path route address-keys]
+  **A load entry that stays is EMPTIED, not bumped, when it goes.** Emptying
+  makes it `:absent` — nothing has been requested for this screen yet, which is
+  the true statement — and [[begin-load]] then moves it to `:loading`. A token
+  bumped in place never passes through `:absent`, so the four-state model
+  quietly becomes three and a view can no longer tell an unasked load from one
+  that answered nil."
+  [state path route address-keys session-loads]
   (as-> state s
     (apply dissoc s address-keys)
     (assoc s
            :path   path
            :screen (:screen route)
            :params (:params route)
-           :data   nil
-           :error  nil
-           :loads  {})))
+           :loads  (select-keys (:loads s) session-loads))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
@@ -117,7 +117,7 @@
   (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/view
                   :webapp/fetch :webapp/render :webapp/push-url! :webapp/derive
                   :webapp/call :webapp/request-for :webapp/act :webapp/actions
-                  :webapp/address-keys :webapp/boot}
+                  :webapp/address-keys :webapp/session-loads :webapp/boot}
         unknown (remove known (keys app))
         listed  (fn [ks] (apply str (interpose ", " (map pr-str (sort-by str ks)))))]
     (when (seq unknown)
@@ -142,7 +142,12 @@
             ;; be right without configuration — but it is a SET so an app whose
             ;; effect panel spans screens can say #{}, and one with its own
             ;; address-scoped keys can name them
-            :webapp/address-keys #{:call}}
+            :webapp/address-keys #{:call}
+            ;; nothing outlives the screen unless the app says so. The
+            ;; conservative default, because a load that wrongly survives shows
+            ;; the previous screen's answer under a new url — while one that
+            ;; wrongly dies is only re-fetched
+            :webapp/session-loads #{}}
            app)))
 
 (defn- begin-load
@@ -160,79 +165,6 @@
     (-> state
         (assoc :load-seq n)
         (assoc-in [:loads key] {:status :loading :token n}))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/state :any]
-                          [:webapp/base {:optional true} :string]
-                          [:webapp/routes :any]
-                          [:webapp/fetch :any]
-                          [:webapp/render :any]
-                          [:webapp/push-url! :any]
-                          [:webapp/derive {:optional true} :any]]
-                    :string :boolean]
-                   :any]}
-  navigate!
-  "Move `app` to `path`, performing every effect through the app's own plug-ins.
-
-  Nothing here touches a browser, and that is the entire point: `:webapp/render`
-  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
-  a test, so \"following this link pushes that url, asks for that endpoint, and
-  shows loading until it answers\" is an ordinary in-image assertion — including
-  the slow-response race, which in a real browser is a heisenbug you reproduce
-  by throttling the network.
-
-  **`:webapp/fetch` takes CALLBACKS rather than returning a promise, and the
-  reason travels with the decision because it reads as arbitrary style
-  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
-  only run in a browser would put the whole headless exercise back where it
-  started, which is the one outcome this capability exists to prevent. An app
-  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
-  is for.
-
-  **`:webapp/derive` is inside the freshness guard, not inside the fetch.** The
-  two read as equivalent and are not: the fetch runs before anything knows
-  whether the answer is still wanted, so deriving there pays for every abandoned
-  load. An expensive value computed FROM a response — a layout, a parse — is
-  guarded by the same check as the write it accompanies."
-  [{:webapp/keys [state base routes fetch render push-url! derive address-keys]} path push?]
-  (when push? (push-url! (str base path)))
-  (swap! state arrive path (routes path) address-keys)
-  (render @state)
-  (when (:screen @state)
-    (let [{:keys [screen params]} @state
-          _      (swap! state begin-load :main)
-          token  (get-in @state [:loads :main :token])
-          fresh? (fn [] (= token (get-in @state [:loads :main :token])))]
-      (fetch screen params
-             (fn [value]
-               (when (fresh?)
-                 (swap! state #(-> %
-                                   (assoc :data (if derive (derive screen value) value))
-                                   (assoc-in [:loads :main :status] :ready)))
-                 (render @state)))
-             (fn [message]
-               (when (fresh?)
-                 (swap! state #(-> %
-                                   (assoc :error message)
-                                   (assoc-in [:loads :main :status] :failed)))
-                 (render @state)))))))
-
-(defn- navigate-for!
-  "The driver's `:navigate`, partial'd over `app`.
-
-  A named var rather than a closure inside [[driver]], and the reason is the
-  `!`-naming rule rather than taste: a constructor that builds mutating
-  closures INLINE computes as effectful itself, so the gate would demand
-  `driver!` — a name asserting that calling it does something, when calling it
-  only assembles a map. Naming the behaviours puts the `!` where the mutation
-  actually is and leaves the assembler honest.
-
-  Returns the state AFTER the move, because that is what `screen` re-renders."
-  [app _state path]
-  (navigate! app path false)
-  @(:webapp/state app))
 
 (defn ^:export load-status
   "What is KNOWN about load `key` on this screen: `:absent`, `:loading`,
@@ -355,6 +287,117 @@
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any]] :keyword :any [:? :any]]
+                   :any]}
+  load!
+  "Run one keyed load with the machinery: `:absent` → `:loading` → `:ready` or
+  `:failed`, a minted token, and the supersession guard.
+
+  `f` is `(fn [ok err])` — callbacks, for [[navigate!]]'s reason: a promise is
+  not a thing the JVM oracle has. `xform` is applied to the value INSIDE the
+  freshness guard, so work derived from an answer nobody is waiting on is never
+  paid for.
+
+  **Public because scope is the app's question and the machinery is not.** The
+  loop runs `:main` through here on every navigation; an app runs its own loads
+  through here too — a nav pane, a signed-in user, anything fetched once and
+  used on several screens. Declaring the key in `:webapp/session-loads` keeps
+  its entry across [[arrive]]; everything else about it is identical.
+
+  **This exists because the alternative was measured, in the only real webapp
+  built on slopp.** Their module nav is fetched once and read on every Code
+  screen. Because loads were emptied on every navigation they kept it outside
+  the load machinery, and outside it the load acquired: `(nil? value)` as its
+  guard — absent, failed and answered-with-nothing collapsed into one value; a
+  silent retry loop, because a swallowed failure leaves the value nil so every
+  later navigation fetches again and a failing endpoint is hit forever with the
+  reader told nothing; and no freshness token, in the one place that app
+  fetched outside the loop. Three of the defects this namespace exists to
+  prevent, caused by a SCOPE rule pushing a load out of the building.
+
+  The rule that replaced it is slopp-ui's: **authorship decides who owns the
+  MECHANISM; scope is a separate question and is never derivable from who does
+  the writing.**"
+  ([app key f] (load! app key f identity))
+  ([app key f xform]
+   (let [{:webapp/keys [state render]} app]
+     (swap! state begin-load key)
+     (let [token  (get-in @state [:loads key :token])
+           fresh? (fn [] (= token (get-in @state [:loads key :token])))
+           write! (fn [m] (when (fresh?)
+                            (swap! state update-in [:loads key] merge m)
+                            (render @state)))]
+       (f (fn [value] (write! {:status :ready :value (xform value)}))
+          (fn [message] (write! {:status :failed :error message})))))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/state :any]
+                          [:webapp/base {:optional true} :string]
+                          [:webapp/routes :any]
+                          [:webapp/fetch :any]
+                          [:webapp/render :any]
+                          [:webapp/push-url! :any]
+                          [:webapp/derive {:optional true} :any]]
+                    :string :boolean]
+                   :any]}
+  navigate!
+  "Move `app` to `path`, performing every effect through the app's own plug-ins.
+
+  Nothing here touches a browser, and that is the entire point: `:webapp/render`
+  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
+  a test, so \"following this link pushes that url, asks for that endpoint, and
+  shows loading until it answers\" is an ordinary in-image assertion — including
+  the slow-response race, which in a real browser is a heisenbug you reproduce
+  by throttling the network.
+
+  **The screen's own data is the `:main` load**, run through [[load!]] like any
+  other, so the machinery is one implementation rather than one for the loop and
+  one for everybody else. That was not true of the first version, and what it
+  cost is written up in `load!`.
+
+  **`:webapp/fetch` takes CALLBACKS rather than returning a promise, and the
+  reason travels with the decision because it reads as arbitrary style
+  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
+  only run in a browser would put the whole headless exercise back where it
+  started, which is the one outcome this capability exists to prevent. An app
+  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
+  is for.
+
+  **`:webapp/derive` is applied inside the freshness guard, not inside the
+  fetch.** The two read as equivalent and are not: the fetch runs before
+  anything knows whether the answer is still wanted, so deriving there pays for
+  every abandoned load."
+  [{:webapp/keys [state base routes fetch render push-url! derive
+                  address-keys session-loads] :as app}
+   path push?]
+  (when push? (push-url! (str base path)))
+  (swap! state arrive path (routes path) address-keys session-loads)
+  (render @state)
+  (when (:screen @state)
+    (let [{:keys [screen params]} @state]
+      (load! app :main
+             (fn [ok err] (fetch screen params ok err))
+             (fn [value] (if derive (derive screen value) value))))))
+
+(defn- navigate-for!
+  "The driver's `:navigate`, partial'd over `app`.
+
+  A named var rather than a closure inside [[driver]], and the reason is the
+  `!`-naming rule rather than taste: a constructor that builds mutating
+  closures INLINE computes as effectful itself, so the gate would demand
+  `driver!` — a name asserting that calling it does something, when calling it
+  only assembles a map. Naming the behaviours puts the `!` where the mutation
+  actually is and leaves the assembler honest.
+
+  Returns the state AFTER the move, because that is what `screen` re-renders."
+  [app _state path]
+  (navigate! app path false)
+  @(:webapp/state app))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
                    [:map [:state :any] [:view :any]
                     [:navigate :any] [:dispatch :any] [:boot :any]]]}
@@ -398,3 +441,14 @@
      :navigate (partial navigate-for! app)
      :dispatch (partial dispatch-for! app)
      :boot     (or boot identity)}))
+
+(defn ^:export load-value
+  "The value load `key` answered with, or nil when it has not answered.
+
+  Read this WITH [[load-status]], never instead of it. `nil` here is three
+  different facts — nothing was asked, it is still being asked, it answered
+  with nothing — and telling them apart is the whole reason the status exists.
+  A view that branches on this alone has rebuilt the nil-pun the four states
+  were added to remove."
+  [state key]
+  (get-in state [:loads key :value]))

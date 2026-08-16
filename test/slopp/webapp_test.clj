@@ -32,8 +32,12 @@
                 :webapp/view   (fn [s] [:main
                                         [:h1 "Catalogue"]
                                         (case (:screen s)
-                                          :things (if (:data s)
-                                                    [:ul (for [t (:data s)] [:li (:name t)])]
+                                          ;; the four-state reader, not (if (:data s) …) —
+                                          ;; which is the nil-pun this framework removes
+                                          :things (case (webapp/load-status s :main)
+                                                    :ready [:ul (for [t (webapp/load-value s :main)]
+                                                                  [:li (:name t)])]
+                                                    :failed [:p "Could not load"]
                                                     [:p "Loading…"])
                                           :thing  [:p (str "Thing " (:id (:params s)))]
                                           [:p "Nowhere"])])
@@ -115,7 +119,7 @@
       ;; "this screen has no things" versus "nobody has asked yet"
       (@pending nil)
       (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
-      (is (nil? (:data @state)) (pr-str @state)))
+      (is (nil? (webapp/load-value @state :main)) (pr-str @state)))
 
     (testing "navigating away makes it ABSENT again, not stale-READY"
       ;; the true statement about the new screen: nothing has been requested
@@ -134,7 +138,7 @@
         (webapp/navigate! app2 "/thing" false)
         (@err "no")
         (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
-        (is (= "no" (:error @state)) (pr-str @state))))))
+        (is (= "no" (get-in @state [:loads :main :error])) (pr-str @state))))))
 
 (deftest a-SUPERSEDED-answer-does-not-land-on-the-screen-that-replaced-it
   ;; I placed `:load-seq` outside `:loads` on the argument that a token drawn
@@ -178,7 +182,7 @@
     (testing "the FIRST screen's answer arrives late and is dropped"
       (let [[_ ok-a] (first @pending)]
         (ok-a :data-from-a))
-      (is (nil? (:data @state))
+      (is (nil? (webapp/load-value @state :main))
           (str "a superseded answer landing is the stale-screen failure: " (pr-str @state)))
       (is (= :loading (webapp/load-status @state :main))
           (str "and it must not mark the NEW screen ready either: " (pr-str @state))))
@@ -188,7 +192,7 @@
       ;; refusal — a guard that dropped everything would satisfy the above
       (let [[_ ok-b] (second @pending)]
         (ok-b :data-from-b))
-      (is (= :data-from-b (:data @state)) (pr-str @state))
+      (is (= :data-from-b (webapp/load-value @state :main)) (pr-str @state))
       (is (= :ready (webapp/load-status @state :main)) (pr-str @state)))))
 
 (deftest an-EFFECTFUL-action-goes-through-the-call-plugin-not-the-reducer
@@ -385,11 +389,91 @@
                                   :webapp/routes       (constantly nil)
                                   :webapp/view         (fn [_] [:p "x"])
                                   :webapp/address-keys #{}})]
-        (swap! state assoc :data [:old] :error "old" :loads {:main {:status :ready}})
+        (swap! state assoc :loads {:main {:status :ready :value [:old]}})
         (webapp/navigate! app "/search" false)
-        (is (nil? (:data @state)) (pr-str @state))
-        (is (nil? (:error @state)) (pr-str @state))
         (is (= :absent (webapp/load-status @state :main))
             (str "nothing has been requested for this screen, which is the true"
                  " statement and the one a bumped token cannot make: "
-                 (pr-str @state)))))))
+                 (pr-str @state)))
+        (is (nil? (webapp/load-value @state :main))
+            (str "and the previous screen's answer goes with the status — an app"
+                 " opts a load into surviving by naming it in :webapp/session-loads,"
+                 " not by the loop deciding: " (pr-str @state)))))))
+
+(deftest a-SESSION-scoped-load-keeps-the-machinery-it-would-otherwise-lose
+  ;; slopp-ui disagreed with the boundary I asked them to disagree with, and the
+  ;; evidence is a defect in their app that exists BECAUSE they obeyed my rule.
+  ;;
+  ;; I had written: the loop writes `:loads`, so the loop clears it, and an app
+  ;; cannot opt a fetched answer into surviving the screen. That reasons from
+  ;; AUTHORSHIP, and it conflates two things the loop owns. It owns a load's
+  ;; MACHINERY — four states, the token, the supersession guard — which is not
+  ;; negotiable. It was also deciding the load's SCOPE, and scope is the
+  ;; address-vs-session question only the app can answer.
+  ;;
+  ;; Their module nav is fetched once and used on every Code screen. Because
+  ;; `:loads` was emptied on every navigation they kept it outside `:loads`, and
+  ;; outside `:loads` it got NONE of the machinery. What that produced, in the
+  ;; one load the framework was not allowed to cover:
+  ;;
+  ;;   - `(nil? (:modules @state))` as the guard — the nil-pun, so absent,
+  ;;     failed and answered-with-nothing are one value
+  ;;   - a silent retry loop: the catch swallows, the value stays nil, and every
+  ;;     later navigation fetches again. A failing endpoint is hit once per
+  ;;     navigation forever and the reader is told nothing
+  ;;   - no freshness token, in the one place that app fetches outside the loop
+  ;;
+  ;; Three of the defects this namespace exists to prevent, caused by the scope
+  ;; rule sending the load out of the building.
+  (let [state  (atom {})
+        calls  (atom 0)
+        answer (atom nil)
+        app    (webapp/wiring
+                {:webapp/state         state
+                 :webapp/routes        (fn [p] {:screen (keyword (subs p 1)) :params {}})
+                 :webapp/view          (fn [_] [:p "x"])
+                 :webapp/session-loads #{:modules}})
+        fetch! (fn [ok err]
+                 (swap! calls inc)
+                 (reset! answer [ok err]))]
+
+    (testing "a session load gets the four states like any other"
+      (is (= :absent (webapp/load-status @state :modules)) (pr-str @state))
+      (webapp/load! app :modules fetch!)
+      (is (= :loading (webapp/load-status @state :modules)) (pr-str @state))
+      ((first @answer) [:a :b])
+      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
+      (is (= [:a :b] (webapp/load-value @state :modules)) (pr-str @state)))
+
+    (testing "and it SURVIVES navigation, which is the whole disagreement"
+      (webapp/navigate! app "/code" false)
+      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
+      (is (= [:a :b] (webapp/load-value @state :modules)) (pr-str @state)))
+
+    (testing "while an ordinary load does not"
+      (webapp/load! app :other fetch!)
+      ((first @answer) :something)
+      (is (= :ready (webapp/load-status @state :other)))
+      (webapp/navigate! app "/ns" false)
+      (is (= :absent (webapp/load-status @state :other)) (pr-str @state)))
+
+    (testing "a FAILED session load stays failed — which is what stops the retry loop"
+      ;; the defect in their app: a swallowed failure leaves the value nil, the
+      ;; guard reads nil as never-asked, and every navigation fetches again. A
+      ;; recorded :failed is a state an app can guard on and a reader can be told
+      (let [s2  (atom {})
+            n   (atom 0)
+            cbs (atom nil)
+            app2 (webapp/wiring
+                  {:webapp/state         s2
+                   :webapp/routes        (fn [_] {:screen :code :params {}})
+                   :webapp/view          (fn [_] [:p "x"])
+                   :webapp/session-loads #{:modules}})]
+        (webapp/load! app2 :modules (fn [ok err] (swap! n inc) (reset! cbs [ok err])))
+        ((second @cbs) "boom")
+        (is (= :failed (webapp/load-status @s2 :modules)) (pr-str @s2))
+        (webapp/navigate! app2 "/code" false)
+        (is (= :failed (webapp/load-status @s2 :modules))
+            (str "a failure that survives is one an app can decline to retry: "
+                 (pr-str @s2)))
+        (is (= 1 @n) "and nothing re-fetched it behind the app's back")))))
