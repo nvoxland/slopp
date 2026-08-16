@@ -469,3 +469,63 @@
       (let [m (engine/closure-hashes st '[cl.core-test cl.core cl.other])]
         (is (= '#{cl.core-test cl.core cl.other} (set (keys m))))
         (is (= 3 (count (set (vals m)))))))))
+
+(deftest went-green-never-guesses-from-a-TRUNCATED-failure-list
+  ;; Friction 4 of the capabilities wave, mechanism confirmed here. A write
+  ;; reported `:went-green [… a-rule-owned-by-an-app-type-is-named-for-it …]`
+  ;; and an immediate `test_run` on that same test showed three assertions
+  ;; still failing, with the message it had before the write.
+  ;;
+  ;; The cause: the runner caps failure DETAIL at 20 blocks (a response-size
+  ;; bound, and a right one), and `shape-episode-reds!` derived "still red"
+  ;; from those blocks. On a run with more than 20 failing assertions every
+  ;; previously-red test past the cap was therefore reported as having gone
+  ;; GREEN.
+  ;;
+  ;; **A false green is the worst direction for this signal** — it is the one
+  ;; an agent reads to decide it is finished — and it misfires only on large
+  ;; red runs, which is exactly when the reader most needs it. It is also the
+  ;; shape this namespace exists for: deciding wrongly looks like passing.
+  ;;
+  ;; The fix has two halves because the runner and the shaper SHIP SEPARATELY.
+  ;; The runner carries every failing test's NAME (cheap — symbols, not
+  ;; messages), and the shaper refuses to compute greens when handed a summary
+  ;; without them whose detail it can see was capped. The injected runtime lags
+  ;; the store by design — it is read off the reading process's classpath — so
+  ;; the second half is the state of every session between a kernel edit and a
+  ;; rebuild, not a hypothetical.
+  (let [prev  '#{p.core-test/one p.core-test/two}
+        shape (fn [summary]
+                (engine/shape-episode-reds!
+                 (atom {:episode-reds prev}) summary
+                 ;; `affected` is the set of tests that RAN, qualified — a
+                 ;; namespace here would make every case vacuous, since no
+                 ;; previously-red test would be considered at all
+                 '[p.core-test/one p.core-test/two] nil false))]
+
+    (testing "a COMPLETE failure list still reports a real green"
+      (let [r (shape {:test 2 :pass 0 :fail 1 :error 0
+                      :failures [{:test 'p.core-test/one :type :fail}]})]
+        (is (= '[p.core-test/two] (:went-green r)) (pr-str r))
+        (is (= '[p.core-test/one] (:still-red r)) (pr-str r))))
+
+    (testing "a TRUNCATED one claims no greens at all"
+      ;; 40 failing assertions, 20 blocks: `two` is absent from the detail
+      ;; because the CAP dropped it, which is indistinguishable from passing
+      (let [r (shape {:test 2 :pass 0 :fail 40 :error 0
+                      :failures (vec (repeat 20 {:test 'p.core-test/one :type :fail}))})]
+        (is (nil? (:went-green r))
+            (str "a test absent from a capped list has not been observed to "
+                 "pass — it has not been observed: " (pr-str r)))
+        (is (re-find #"(?i)capped|truncat" (str (:reds-uncertain r)))
+            (str "and the silence says why, or the reader infers the wrong "
+                 "cause from the same absence: " (pr-str r)))))
+
+    (testing "names beat blocks: given them, the cap stops mattering"
+      (let [r (shape {:test 2 :pass 0 :fail 40 :error 0
+                      :failed-tests '[p.core-test/two]
+                      :failures (vec (repeat 20 {:test 'p.core-test/one :type :fail}))})]
+        (is (= '[p.core-test/one] (:went-green r)) (pr-str r))
+        (is (= '[p.core-test/two] (:still-red r)) (pr-str r))
+        (is (nil? (:reds-uncertain r))
+            (str "nothing is uncertain once the names are complete: " (pr-str r)))))))

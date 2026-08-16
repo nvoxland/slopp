@@ -1070,3 +1070,88 @@
           (is (re-find #"99" (query/query-source sess 'un2.renamed))
               "back to the protected version, not further")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-turn-refusal-names-the-argument-a-one-shot-process-needs
+  ;; Dogfooding the cli capability found the other half of friction 4, and this
+  ;; one is worse than a dead end: **the remedy the refusal names is necessary
+  ;; and not sufficient.**
+  ;;
+  ;; `slopp --call` is one process per call. Identity is DERIVED per process, so
+  ;; `turn_begin` opens a turn for agent A and the next call arrives as agent B
+  ;; and is refused — with a message telling it to do the thing it just did.
+  ;; Following the instruction exactly reproduces the error, and there is no
+  ;; next step to try.
+  ;;
+  ;; A turn belongs to an AGENT. So the refusal has to name the identity it
+  ;; looked for and the argument that pins it; with those two facts a reader can
+  ;; see that their two calls were two agents, which is the whole diagnosis.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (ops/ingest! sess 'tc.core "(ns tc.core)\n(defn f [x] x)\n")
+      (let [r (get-in (slopp.mcp/handle! sess
+                                         {:id 1 :method "tools/call"
+                                          :params {:name "edit_add_form"
+                                                   :arguments {:ns "tc.core"
+                                                               :agent "one-shot-pid-2"
+                                                               :source "(defn g [x] x)"}}})
+                      [:result :content 0 :text])]
+        (testing "it names the identity the turn was looked up under"
+          (is (re-find #"one-shot-pid-2" r)
+              (str "two calls that were two agents look identical without it: " r)))
+        (testing "and the argument that makes two processes ONE agent"
+          (is (re-find #"agent" r)
+              (str "naming turn_begin alone is a remedy that reproduces the "
+                   "error, because the second process opens a second turn: " r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-BIG-red-run-does-not-invent-greens-past-the-detail-cap
+  ;; The end-to-end half of friction 4. `episode-reds-compress-to-direction`
+  ;; covers direction on a SMALL run, where every failing assertion fits under
+  ;; the runner's 20-block detail cap. The defect only exists above it: a test
+  ;; with no block is absent, and absence read off a capped list is the same
+  ;; observation whether the test passed or the cap dropped it.
+  ;;
+  ;; So this fixture is built to exceed the cap on purpose — one test failing
+  ;; 25 assertions, a second failing 1. The second is the one that used to be
+  ;; announced green while still failing.
+  (let [asserts (fn [n] (apply str (repeat n "(is (= 1 (bd.core/f)))")))
+        sess    (external/open!)]
+    (try
+      (ops/ingest! sess 'bd.core "(ns bd.core)\n(defn f \"F.\" [] 1)\n")
+      (ops/ingest! sess 'bd.core-test
+                   (str "(ns bd.core-test (:require [bd.core]\n"
+                        "                           [clojure.test :refer [deftest is]]))\n"
+                        "(deftest loud-t " (asserts 25) ")\n"
+                        "(deftest quiet-t (is (= 1 (bd.core/f))))\n"))
+      (testing "both go red, and the run reports MORE failures than it details"
+        (let [r (ops/edit-replace! sess 'bd.core 'f "(defn f \"F.\" [] 2)"
+                                   :prompt "break them both")
+              t (:test r)]
+          (is (= 26 (+ (:fail t 0) (:error t 0))) (pr-str t))
+          (is (= 20 (count (:failures t)))
+              (str "the cap is what makes this case exist: " (pr-str (:failures t))))
+          (is (= '[bd.core-test/loud-t bd.core-test/quiet-t] (:failed-tests t))
+              (str "the NAMES are complete where the detail is not: " (pr-str t)))))
+
+      (testing "the next write reports the quiet one as STILL RED, never green"
+        (let [r (ops/edit-replace! sess 'bd.core 'f "(defn f \"F.\" [] 3)"
+                                   :prompt "still broken, differently")
+              t (:test r)]
+          (is (nil? (:went-green t))
+              (str "quiet-t failed 1 of 26 assertions and had no detail block — "
+                   "announcing it green is the one direction of this signal "
+                   "that costs anything: " (pr-str t)))
+          (is (= '[bd.core-test/loud-t bd.core-test/quiet-t] (:still-red t))
+              (pr-str t))))
+
+      (testing "and a real recovery is still reported, so this is not just silence"
+        ;; the control. Suppressing greens whenever a run is big would pass the
+        ;; assertion above and destroy the signal; this is the arm that says
+        ;; the fix distinguishes the cases rather than muting one of them.
+        (let [r (ops/edit-replace! sess 'bd.core 'f "(defn f \"F.\" [] 1)"
+                                  :prompt "fixed")
+              t (:test r)]
+          (is (= '[bd.core-test/loud-t bd.core-test/quiet-t] (:went-green t))
+              (pr-str t))))
+      (finally (ops/close! sess)))))

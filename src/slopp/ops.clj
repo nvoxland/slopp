@@ -2873,10 +2873,13 @@ recompiled (engine/after-write! session ns-sym)]
   the file format (`:manifest` → sorted `K: V` lines). Set a key
   (`:key`+`:value`, `:format` on first touch, default :manifest), remove one
   (`:key`+`:unset true`), or read (path only: values + rendered preview).
-  The module manifest is NOT a config file — module_dep is its verb. The
-  `capabilities` path validates through the capability registry
-  (`capabilities/config-refusal`): unknown keys and type-failing values are
-  refused with teaching before any delta lands."
+  The module manifest is NOT a config file — module_dep is its verb.
+
+  TWO paths validate before any delta lands: `capabilities` through the
+  capability registry and `rules` through the rule catalog. Unknown keys and
+  type-failing values are refused with teaching. Every other path records what
+  it was given, and the result SAYS so rather than looking like a checked
+  write."
   [session path & {:keys [key value unset format prompt agent]}]
   (let [entry (get-in (:store @session) [:config (str path)])]
     (cond
@@ -3564,48 +3567,6 @@ recompiled (engine/after-write! session ns-sym)]
                        "overrides are fine (slopp.image.testmain is one); if "
                        "this was not deliberate, pick a name your project owns.")}))))
 
-(defn create-ns!
-  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
-   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
-     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
-   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
-     land the entire namespace in one verified call — forward refs within the
-     file resolve as a unit, like a real `.clj` load. For ported/reference/data
-     code that isn't subject to red→green.
-   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
-   (module_platform grain = this namespace) BEFORE the source lands, so a
-   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
-   instead of failing to load into the JVM oracle (the inherited-default
-   footgun). A bad platform refuses the whole create.
-   Delegates to `ingest!` (the shared engine); overwrite is refused there."
-  [session ns-sym & {:keys [requires source agent platform prompt]}]
-  (if (and source (seq requires))
-    {:error (str ":source and :requires are mutually exclusive — put requires "
-                 "inside the source's ns form")}
-    ;; platform must be declared FIRST: ingest reads it to decide whether to
-    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
-    (let [perr (when platform
-                 (:error (module-platform! session (str ns-sym) platform
-                                           :prompt (or prompt "platform declared at namespace creation")
-                                           :agent agent)))
-          ;; computed BEFORE the write, while the store still lacks the name
-          shadow (shadow-warning (:store @session) ns-sym)]
-      (cond
-        perr {:error perr}
-
-        :else
-        (let [r (if source
-                  (ingest! session ns-sym source :agent agent)
-                  (ingest! session ns-sym
-                           (str "(ns " ns-sym
-                                (when (seq requires)
-                                  (str "\n  (:require " (str/join "\n            " requires) ")"))
-                                ")\n")
-                           :agent agent))]
-          (cond-> r
-            (and shadow (not (:error r)))
-            (update :warnings (fnil conj []) shadow)))))))
-
 ;; --- query.* (read) ---
 
 ;; --- verification (D1 tracing + D5 restart-as-diagnostic) ---
@@ -3858,152 +3819,6 @@ recompiled (engine/after-write! session ns-sym)]
                           (refactor/destructures-key? src kname from-ns))]
            {:ns nsx :form (:name e) :via :destructuring
             :text (str "{" entry " [" kname "]}")}))))
-
-(defn rename-sweep!
-  "Q14: the docs-team rename as ONE intent — every namespace, var, keyword,
-  and prose occurrence of `from` (as a whole word/segment, boundary-guarded)
-  becomes `to`, store-wide: matching namespaces rename first (requires
-  rewrite along), then every still-matching form rewrites in ONE atomic
-  group with ONE verification. The textual segment match is deliberate: a
-  sweep means 'everything named that', locals and prose included; the
-  dialect/isolation gates and the test run judge the result. eval9's
-  measured loss (13.6k tokens / 37 calls / one restart for zone->region
-  across 41 nses vs sed's one pass) is this op's demand signal.
-
-  A KEYWORD rename (both sides starting `:`) carries a structural half the
-  text pass cannot see: `{:a/keys [x]}` names its key as a SYMBOL, with the
-  qualifier written in the entry beside it. That entry is matched on the FROM
-  qualifier and only on it — `{:keys [x]}` names `:x` and survives a rename of
-  `:a/x` untouched. Two reports come out of it, because neither half is a text
-  substitution and both were silent once:
-
-  - `:requalified` — destructurings this call restructured. A keyword rename's
-    diff should not contain a semantic change without naming it.
-  - `:left-behind` — destructurings it DECLINED. Changing a key's NAME rather
-    than its qualifier cannot move the symbol: the symbol is a local binding
-    the body still reads, so the rename is yours to finish."
-  [session from to & {:keys [prompt agent dry-run]}]
-  (let [from (str from)
-        to   (str to)
-        pat  (re-pattern (str "(?<![A-Za-z])"
-                              (java.util.regex.Pattern/quote from)
-                              "(?![A-Za-z])"))
-        why  (or prompt (str "sweep " from " -> " to))]
-    (cond
-      (or (str/blank? from) (str/blank? to))
-      {:error "rename_sweep needs :from and :to"}
-
-      (= from to)
-      {:error ":from and :to are identical"}
-
-      :else
-      (let [nses (filterv #(re-find pat (str %))
-                          (keys (:namespaces (:store @session))))
-            ;; namespace renames WRITE, so a preview must not run them — it
-                     ;; reports what they would be instead
-                     nsr  (if dry-run
-                            {:renamed-namespaces
-                             (mapv (fn [nsx]
-                                     [nsx (symbol (str/replace (str nsx) pat to))])
-                                   (sort nses))}
-                            (reduce (fn [acc nsx]
-                                      (if (:error acc)
-                                        acc
-                                        (let [new-ns (str/replace (str nsx) pat to)
-                                              r (ns-rename! session (str nsx) new-ns
-                                                            :prompt why :agent agent)]
-                                          (if (:error r)
-                                            {:error (str "renaming " nsx ": " (:error r))}
-                                            (update acc :renamed-namespaces conj
-                                                    [nsx (symbol new-ns)])))))
-                                    {:renamed-namespaces []}
-                                    (sort nses)))]
-        (if (:error nsr)
-          nsr
-          (let [st      (:store @session)
-                kw?     (and (str/starts-with? from ":")
-                             (str/starts-with? to ":"))
-                qual    (fn [k] (let [b (subs k 1)]
-                                  (when (str/includes? b "/")
-                                    (first (str/split b #"/")))))
-                lname   (fn [k] (last (str/split (subs k 1) #"/")))
-                kname   (when kw? (lname from))
-                from-ns (when kw? (qual from))
-                to-ns   (when kw? (qual to))
-                ;; only a rename that leaves the key's NAME alone can move the
-                ;; symbol — it is a local binding, not a keyword
-                requal? (and kw? (= kname (lname to)) (not= from-ns to-ns))
-                from-k  (when kw? (str (refactor/keys-entry from-ns)))
-                ;; select on the REWRITE, not the pattern: a form whose only
-                ;; occurrence is a :keys destructuring holds no keyword literal
-                rows    (vec (for [nsx (store/ns-dependency-order st)
-                                   e   (store/forms st nsx)
-                                   :when (:name e)
-                                   :let [src  (n/string (:node e))
-                                         txt  (str/replace src pat to)
-                                         src' (if (and requal?
-                                                       (str/includes? txt from-k)
-                                                       (str/includes? txt kname))
-                                                (refactor/requalify-keys
-                                                 txt kname from-ns to-ns)
-                                                txt)]
-                                   :when (not= src src')]
-                               {:ns nsx :name (:name e) :source src'
-                                :requalified? (not= txt src')}))
-                steps   (mapv #(-> (select-keys % [:ns :name :source])
-                                   (assoc :action :replace))
-                              rows)
-                requal  (vec (for [r rows :when (:requalified? r)]
-                               {:ns (:ns r) :form (:name r)}))]
-            (cond
-              (and (empty? steps) (empty? (:renamed-namespaces nsr)))
-              {:error (str "nothing named " from
-                           " in the store — query_search shows what exists")}
-
-              ;; PREVIEW: a sweep is store-wide and rewrites string literals as
-              ;; well as code. Sweeping prose is intended; rewriting a test
-              ;; FIXTURE is not, and does it silently. Separate the two so the
-              ;; string hits get an eye before anything lands.
-              dry-run
-              (let [classify (fn [{:keys [ns name]}]
-                               (let [src (n/string (:node (store/form-named
-                                                           (:store @session) ns name)))]
-                                 {:form (symbol (str ns) (str name))
-                                  :strings? (refactor/match-in-strings? src pat)}))
-                    rows'    (mapv classify steps)
-                    left     (when kw? (seq (sweep-left-behind st kname from-ns)))]
-                (merge nsr
-                       {:dry-run true
-                        :forms (count steps)
-                        :in-code (filterv (complement :strings?) rows')
-                        :in-strings (filterv :strings? rows')}
-                       (when (seq requal) {:requalified requal})
-                       (when left {:left-behind (vec left)})
-                       (when (some :strings? rows')
-                         {:note (str "string-literal hits REVIEW FIRST: a sweep"
-                                     " rewrites keyword text inside strings, so"
-                                     " a test fixture can be left"
-                                     " self-inconsistent")})))
-
-              (empty? steps)
-              (assoc nsr :forms 0)
-
-              :else
-              (let [r (edit-group! session steps :prompt why :agent agent)]
-                (if (:error r)
-                  r
-                  (let [left (when kw?
-                               (seq (sweep-left-behind (:store @session)
-                                                       kname from-ns)))]
-                    (cond-> (merge r (assoc nsr :forms (count steps)))
-                      (seq requal) (assoc :requalified requal)
-                      left (assoc :left-behind (vec left)
-                                  :note (str "these destructurings still name "
-                                             from " and were NOT rewritten: a"
-                                             " :keys entry binds the key's NAME"
-                                             " as a local the body reads, so"
-                                             " only the QUALIFIER can be moved"
-                                             " for you")))))))))))))
 
 (defn requalify-boundary-keys!
   "Namespace a module-external fn's OPTION KEYS in one verified intent: its
@@ -4402,3 +4217,307 @@ recompiled (engine/after-write! session ns-sym)]
                            :agent agent)]
         (cond-> (assoc r :sites (:sites plan) :lib (:lib plan))
           (seq (:left-behind plan)) (assoc :left-behind (:left-behind plan)))))))
+
+(defn- unwritten-requires
+  "The namespaces `requires` names that this store does not have YET and that
+  belong to it — same root segment as `ns-sym`.
+
+  This is the NAMESPACE grain of the red-first seam. `add-form!` interns a
+  throwing stub for an unimplemented VAR so a spec lands as an honest red; a
+  spec requiring an unimplemented NAMESPACE had no equivalent and failed to
+  LOAD, which is a refusal rather than a failing test. On a new project every
+  namespace is the first one, so the discipline broke exactly where it matters
+  most, and the workaround was hand-written throwing stubs — the thing the seam
+  exists to remove.
+
+  An empty namespace is that stub, and it is a real store write rather than an
+  image trick: the author is going to create it anyway, and its EXISTENCE was
+  never the thing under test.
+
+  **The root-segment test is what makes inventing a namespace safe**, and it is
+  the whole guard. A require naming a LIBRARY must never conjure an empty
+  namespace over it — the real one would be shadowed and every call would
+  resolve to nothing, which is a worse failure than the refusal this replaces,
+  and a silent one. A require sharing this namespace's own root is code the
+  author is about to write; anything else belongs to somebody else.
+
+  A clause names its namespace FIRST, in every shape `:require` accepts, so the
+  name is taken by pattern rather than by reading — a clause string is data
+  arriving from a caller and parsing it should not be able to run anything."
+  [store ns-sym requires]
+  (let [root  (fn [n] (first (str/split (str n) #"\.")))
+        mine  (root ns-sym)
+        known (set (keys (:namespaces store)))]
+    (vec (distinct
+          (for [c requires
+                :let [m (re-find #"^\s*\[?\s*([A-Za-z][A-Za-z0-9_.*+!?<>=$%&|'-]*)" (str c))
+                      n (some-> m second symbol)]
+                :when (and n
+                           (not (contains? known n))
+                           (= mine (root n)))]
+            n)))))
+
+(defn create-ns!
+  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
+   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
+     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
+   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
+     land the entire namespace in one verified call — forward refs within the
+     file resolve as a unit, like a real `.clj` load. For ported/reference/data
+     code that isn't subject to red→green.
+   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
+   (module_platform grain = this namespace) BEFORE the source lands, so a
+   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
+   instead of failing to load into the JVM oracle (the inherited-default
+   footgun). A bad platform refuses the whole create.
+
+   **A scaffold may require a namespace that does not exist yet**, which is how
+   red-first works across a namespace boundary: each such require is created
+   EMPTY and reported in `:also-created`. Without it a spec-first write does not
+   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
+   holds the rule for which requires qualify and why a library never does.
+
+   Delegates to `ingest!` (the shared engine); overwrite is refused there."
+  [session ns-sym & {:keys [requires source agent platform prompt]}]
+  (if (and source (seq requires))
+    {:error (str ":source and :requires are mutually exclusive — put requires "
+                 "inside the source's ns form")}
+    ;; platform must be declared FIRST: ingest reads it to decide whether to
+    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
+    (let [perr (when platform
+                 (:error (module-platform! session (str ns-sym) platform
+                                           :prompt (or prompt "platform declared at namespace creation")
+                                           :agent agent)))
+          ;; computed BEFORE the write, while the store still lacks the name
+          shadow (shadow-warning (:store @session) ns-sym)
+          also   (when-not perr
+                   (unwritten-requires (:store @session) ns-sym requires))]
+      (cond
+        perr {:error perr}
+
+        :else
+        (let [;; the subjects come into being BEFORE the spec that requires
+              ;; them, or the spec's own load is the failure again
+              sub-err (some (fn [n]
+                              (:error (ingest! session n (str "(ns " n ")\n")
+                                               :agent agent)))
+                            also)
+              r (if sub-err
+                  {:error sub-err}
+                  (if source
+                    (ingest! session ns-sym source :agent agent)
+                    (ingest! session ns-sym
+                             (str "(ns " ns-sym
+                                  (when (seq requires)
+                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
+                                  ")\n")
+                             :agent agent)))]
+          (cond-> r
+            (seq also) (assoc :also-created (vec also))
+            (and shadow (not (:error r)))
+            (update :warnings (fnil conj []) shadow)))))))
+
+(defn- sweep-patterns-left-behind
+  "Forms holding a regex literal that names `from` with escaped dots — what a
+  textual sweep could not see, let alone rewrite.
+
+  Read off the store over EVERY form rather than only the ones the sweep
+  touched, because a form whose sole occurrence is inside a pattern was never
+  in the changeset at all — which is precisely how one of these went a whole
+  wave unnoticed while its siblings were caught by tests.
+
+  Text-prefiltered on `#\\\"` before parsing, since this runs store-wide and a
+  regex literal cannot exist without being written."
+  [st from pat]
+  (vec (for [nsx (sort (keys (:namespaces st)))
+             e   (store/forms st nsx)
+             :when (:name e)
+             :let [src (n/string (:node e))]
+             :when (str/includes? src "#\"")
+             txt (refactor/patterns-not-swept src from pat)]
+         {:ns nsx :form (:name e) :via :regex :text txt})))
+
+(defn- sweep-note
+  "One note for everything a sweep did not do, so a reader gets a single
+  sentence per cause rather than whichever one happened to be merged last.
+
+  Composed rather than branched because the causes are independent — a sweep
+  can leave a destructuring AND a pattern AND rewrite prose in the same call —
+  and the previous shape put all three under one `:note` key where the last
+  writer won."
+  [from left strings?]
+  (let [via (set (map :via left))]
+    (not-empty
+     (str/join " "
+               (remove nil?
+                       [(when strings?
+                          (str "string-literal hits REVIEW FIRST: a sweep rewrites"
+                               " text inside strings, so a test fixture can be left"
+                               " self-inconsistent."))
+                        (when (via :destructuring)
+                          (str "these destructurings still name " from " and were"
+                               " NOT rewritten: a :keys entry binds the key's NAME"
+                               " as a local the body reads, so only the QUALIFIER"
+                               " can be moved for you."))
+                        (when (via :regex)
+                          (str "these REGEX literals still name " from " and were"
+                               " NOT rewritten: a pattern spells the name with"
+                               " escaped dots, which shares no literal text with"
+                               " the token — and whether a `.` in one is a"
+                               " separator or a wildcard is a question about what"
+                               " the author meant, not something to guess. Read"
+                               " each one."))])))))
+
+(defn rename-sweep!
+  "Q14: the docs-team rename as ONE intent — every namespace, var, keyword,
+  and prose occurrence of `from` (as a whole word/segment, boundary-guarded)
+  becomes `to`, store-wide: matching namespaces rename first (requires
+  rewrite along), then every still-matching form rewrites in ONE atomic
+  group with ONE verification. The textual segment match is deliberate: a
+  sweep means 'everything named that', locals and prose included; the
+  dialect/isolation gates and the test run judge the result. eval9's
+  measured loss (13.6k tokens / 37 calls / one restart for zone->region
+  across 41 nses vs sed's one pass) is this op's demand signal.
+
+  A KEYWORD rename (both sides starting `:`) carries a structural half the
+  text pass cannot see: `{:a/keys [x]}` names its key as a SYMBOL, with the
+  qualifier written in the entry beside it. That entry is matched on the FROM
+  qualifier and only on it — `{:keys [x]}` names `:x` and survives a rename of
+  `:a/x` untouched. Two reports come out of it, because neither half is a text
+  substitution and both were silent once:
+
+  - `:requalified` — destructurings this call restructured. A keyword rename's
+    diff should not contain a semantic change without naming it.
+  - `:left-behind` — what it DECLINED, each row tagged with `:via`. For
+    `:destructuring`: changing a key's NAME rather than its qualifier cannot
+    move the symbol, since the symbol is a local binding the body still reads,
+    so the rename is yours to finish.
+
+  **`:via :regex` is the other half, and it is not keyword-specific.** A regex
+  literal spells a dotted name `web\\.static`, which shares no literal text
+  with `web.static`, so the text pass walks past every one. Measured at seven
+  in a single wave, two of them surviving every write and three green
+  done-points: one rule then refused EVERY declared auth group as unknown,
+  teaching the author to configure the key it was already reading past.
+  Reported rather than rewritten, because a pattern is an INTENT — whether a
+  `.` in one separates or matches anything is a question about what the author
+  meant, and a sweep that guessed would be wrong silently."
+  [session from to & {:keys [prompt agent dry-run]}]
+  (let [from (str from)
+        to   (str to)
+        pat  (re-pattern (str "(?<![A-Za-z])"
+                              (java.util.regex.Pattern/quote from)
+                              "(?![A-Za-z])"))
+        why  (or prompt (str "sweep " from " -> " to))]
+    (cond
+      (or (str/blank? from) (str/blank? to))
+      {:error "rename_sweep needs :from and :to"}
+
+      (= from to)
+      {:error ":from and :to are identical"}
+
+      :else
+      (let [nses (filterv #(re-find pat (str %))
+                          (keys (:namespaces (:store @session))))
+            ;; namespace renames WRITE, so a preview must not run them — it
+                     ;; reports what they would be instead
+                     nsr  (if dry-run
+                            {:renamed-namespaces
+                             (mapv (fn [nsx]
+                                     [nsx (symbol (str/replace (str nsx) pat to))])
+                                   (sort nses))}
+                            (reduce (fn [acc nsx]
+                                      (if (:error acc)
+                                        acc
+                                        (let [new-ns (str/replace (str nsx) pat to)
+                                              r (ns-rename! session (str nsx) new-ns
+                                                            :prompt why :agent agent)]
+                                          (if (:error r)
+                                            {:error (str "renaming " nsx ": " (:error r))}
+                                            (update acc :renamed-namespaces conj
+                                                    [nsx (symbol new-ns)])))))
+                                    {:renamed-namespaces []}
+                                    (sort nses)))]
+        (if (:error nsr)
+          nsr
+          (let [st      (:store @session)
+                kw?     (and (str/starts-with? from ":")
+                             (str/starts-with? to ":"))
+                qual    (fn [k] (let [b (subs k 1)]
+                                  (when (str/includes? b "/")
+                                    (first (str/split b #"/")))))
+                lname   (fn [k] (last (str/split (subs k 1) #"/")))
+                kname   (when kw? (lname from))
+                from-ns (when kw? (qual from))
+                to-ns   (when kw? (qual to))
+                ;; only a rename that leaves the key's NAME alone can move the
+                ;; symbol — it is a local binding, not a keyword
+                requal? (and kw? (= kname (lname to)) (not= from-ns to-ns))
+                from-k  (when kw? (str (refactor/keys-entry from-ns)))
+                ;; select on the REWRITE, not the pattern: a form whose only
+                ;; occurrence is a :keys destructuring holds no keyword literal
+                rows    (vec (for [nsx (store/ns-dependency-order st)
+                                   e   (store/forms st nsx)
+                                   :when (:name e)
+                                   :let [src  (n/string (:node e))
+                                         txt  (str/replace src pat to)
+                                         src' (if (and requal?
+                                                       (str/includes? txt from-k)
+                                                       (str/includes? txt kname))
+                                                (refactor/requalify-keys
+                                                 txt kname from-ns to-ns)
+                                                txt)]
+                                   :when (not= src src')]
+                               {:ns nsx :name (:name e) :source src'
+                                :requalified? (not= txt src')}))
+                steps   (mapv #(-> (select-keys % [:ns :name :source])
+                                   (assoc :action :replace))
+                              rows)
+                requal  (vec (for [r rows :when (:requalified? r)]
+                               {:ns (:ns r) :form (:name r)}))]
+            (cond
+              (and (empty? steps) (empty? (:renamed-namespaces nsr)))
+              {:error (str "nothing named " from
+                           " in the store — query_search shows what exists")}
+
+              ;; PREVIEW: a sweep is store-wide and rewrites string literals as
+              ;; well as code. Sweeping prose is intended; rewriting a test
+              ;; FIXTURE is not, and does it silently. Separate the two so the
+              ;; string hits get an eye before anything lands.
+              dry-run
+              (let [classify (fn [{:keys [ns name]}]
+                               (let [src (n/string (:node (store/form-named
+                                                           (:store @session) ns name)))]
+                                 {:form (symbol (str ns) (str name))
+                                  :strings? (refactor/match-in-strings? src pat)}))
+                    rows'    (mapv classify steps)
+                    left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
+                                          (sweep-patterns-left-behind st from pat)))
+                    note     (sweep-note from left (some :strings? rows'))]
+                (merge nsr
+                       {:dry-run true
+                        :forms (count steps)
+                        :in-code (filterv (complement :strings?) rows')
+                        :in-strings (filterv :strings? rows')}
+                       (when (seq requal) {:requalified requal})
+                       (when (seq left) {:left-behind left})
+                       (when note {:note note})))
+
+              (empty? steps)
+              (assoc nsr :forms 0)
+
+              :else
+              (let [r (edit-group! session steps :prompt why :agent agent)]
+                (if (:error r)
+                  r
+                  ;; read off the store AFTER the write, over the OLD token:
+                  ;; whatever still names it was, by construction, not rewritten
+                  (let [st*  (:store @session)
+                        left (vec (concat (when kw?
+                                            (sweep-left-behind st* kname from-ns))
+                                          (sweep-patterns-left-behind st* from pat)))
+                        note (sweep-note from left false)]
+                    (cond-> (merge r (assoc nsr :forms (count steps)))
+                      (seq requal) (assoc :requalified requal)
+                      (seq left)   (assoc :left-behind left)
+                      note         (assoc :note note))))))))))))

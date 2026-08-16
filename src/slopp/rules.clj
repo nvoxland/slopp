@@ -1272,10 +1272,10 @@
   checks as `run-done-advisories!`, so it evals in the image and reads the
   working tree.
 
-  Returns `{:forms n :swept [key …] :not-swept [{:rule :why} …] :findings {key
-  findings}}`, where `:findings` has exactly the shape `done` reports and grades
-  through the same `status-affecting-fired?`. One rule, one check, one bar — the
-  sweep is a different POPULATION, never a different standard.
+  Returns [[sweep-plan]]'s whole answer plus `:forms` and `:findings`, where
+  `:findings` has exactly the shape `done` reports and grades through the same
+  `status-affecting-fired?`. One rule, one check, one bar — the sweep is a
+  different POPULATION, never a different standard.
 
   **Why this exists.** `done` is episode-scoped: a `:grain :done` rule sees only
   forms the episode CHANGED, so a violation older than the rule is invisible to
@@ -1288,18 +1288,25 @@
   **Which rules run, and why the rest do not, is [[sweep-plan]]** — a pure
   decision, so it is assertable without a session. `:not-swept` is the
   load-bearing half of what this returns and it belongs to a function that can
-  be tested without an image."
+  be tested without an image.
+
+  It is MERGED rather than destructured, and that is the fix for a real defect:
+  this once took `:swept` and `:not-swept` off the plan and dropped `:note` and
+  `:orphaned-dials` on the floor. Every test of that decision asserted on the
+  plan, correctly — which is how the seam went unwatched, since the decision was
+  right in every assertion and the reader still saw none of it. A key added to
+  the plan is added FOR the reader, so the performer must not be the place it
+  has to be added again."
   [session st*]
-  (let [{:keys [swept not-swept]} (sweep-plan st*)
-        kept  (set swept)
+  (let [plan  (sweep-plan st*)
+        kept  (set (:swept plan))
         run   (filterv #(kept (:key %)) done-advisories)
         ids   (into []
                     (comp (mapcat #(store/forms st* %)) (map :id))
                     (sort (keys (:namespaces st*))))]
-    {:forms      (count ids)
-     :swept      swept
-     :not-swept  not-swept
-     :findings   (run-checks session st* ids run)}))
+    (assoc plan
+           :forms    (count ids)
+           :findings (run-checks session st* ids run))))
 
 (defn status-affecting-fired?
   "True when an advisory whose EFFECTIVE severity is `:error` produced a

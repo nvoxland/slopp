@@ -621,3 +621,63 @@
                 (str "a declaration left naming a namespace that no longer"
                      " exists: " (pr-str (scan st "nkr.core")))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-sweep-names-the-REGEX-LITERALS-it-walked-past
+  ;; SEVEN instances in one wave, all config-key patterns, and two of them
+  ;; survived every write and three green `done`s to be caught by the external
+  ;; tier at `full_check`. A pattern is DATA: the sweep rewrites prose, symbols
+  ;; and string literals, and walks past `\\.` every time, because
+  ;; `web.static` and `web\\.static` share no literal text.
+  ;;
+  ;; The costs were not theoretical. One rule refused EVERY declared auth group
+  ;; as unknown — it looked for groups under the retired spelling, found none,
+  ;; and taught the author to configure the key it was already reading past.
+  ;; Another reported every asset link in an app as dangling, its own docstring
+  ;; saying `http.static` while the pattern beside it said `web`: prose and
+  ;; pattern split inside ONE form.
+  ;;
+  ;; **Rewriting is the wrong fix and reporting is the right one.** A regex is
+  ;; an intent, not a name — whether a `.` there is a separator or a wildcard
+  ;; is a question about what the author meant, and a sweep that guessed would
+  ;; be wrong silently in the harder direction. Naming it costs the author one
+  ;; look at a line the tool has already found.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pat.core
+                   (str "(ns pat.core)\n\n"
+                        "(defn mounts \"Keys under the mount prefix.\" [ks]\n"
+                        "  (filterv #(re-find #\"web\\.static\\..+\" %) ks))\n\n"
+                        "(defn label \"The prefix, as prose.\" [] \"web.static\")\n"))
+      (let [r (ops/rename-sweep! sess "web.static" "http.static"
+                                 :prompt "rename the config family")
+            src (query/query-source sess 'pat.core)]
+        (is (nil? (:error r)) (pr-str r))
+
+        (testing "the prose moved, which is exactly what makes the silence dangerous"
+          ;; a half-swept form reads as swept: everything a reader's eye lands
+          ;; on says the new name, and the one thing that DECIDES says the old
+          (is (re-find #"\"http\.static\"" src) src))
+
+        (testing "the pattern did not move, because it never matched"
+          (is (re-find #"web\\\.static" src) src))
+
+        (testing "so the sweep NAMES it, with the text to look at"
+          (is (= [{:ns 'pat.core :form 'mounts :via :regex
+                   :text "#\"web\\.static\\..+\""}]
+                 (:left-behind r))
+              (pr-str r)))
+
+        (testing "and the note says these were not rewritten, and why not"
+          (is (re-find #"(?i)not rewritten" (str (:note r))) (pr-str (:note r)))
+          (is (re-find #"(?i)regex|pattern" (str (:note r))) (pr-str (:note r)))))
+
+      (testing "a store whose patterns do not name the token leaves nothing behind"
+        ;; absence has to mean checked-and-none, or the report above is unreadable
+        (ops/ingest! sess 'pat.clean
+                     (str "(ns pat.clean)\n\n"
+                          "(defn m \"Unrelated.\" [s] (re-find #\"zzz\\.other\" s))\n\n"
+                          "(defn n \"Named.\" [] \"web.other\")\n"))
+        (let [r (ops/rename-sweep! sess "web.other" "http.other"
+                                   :prompt "a family with no pattern behind it")]
+          (is (nil? (:left-behind r)) (pr-str r))))
+      (finally (ops/close! sess)))))

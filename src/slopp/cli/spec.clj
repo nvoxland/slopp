@@ -137,6 +137,13 @@
   one malli schema that is both — `m/children` recovers the names, so an error
   can say `text` rather than `argument 0`. Options are a `:map`.
 
+  **The COUNT being wrong is one mistake and is reported as one sentence**, in
+  both directions. malli sees a shortfall as a problem per unfilled slot and
+  names it `end of input`, which describes the parser's situation rather than
+  the caller's — and reaches a caller who never wrote a schema. Too many and
+  too few are the same event from opposite sides, so they read the same way and
+  both name what the command actually takes, which is the next thing typed.
+
   Declared `:default`s are applied HERE rather than by
   `mt/default-value-transformer`, which does not fill `:optional` entries. The
   guarantee is that a declared option is always `contains?` the result: a
@@ -165,24 +172,32 @@
                                          (str/join ", " (map #(str "--" (name %)) declared))
                                          ")")
                                     " (this command takes no options)"))))
+            takes        (delay (str "this command takes " (count names) " argument"
+                                     (when (not= 1 (count names)) "s")
+                                     " (" (str/join ", " (map name names)) ")"))
             decoded-pos  (when args-schema (m/decode args-schema pos xf))
             pos-errors   (when args-schema
                            (for [[nm problem] (map vector names
                                                    (me/humanize (m/explain args-schema decoded-pos)))
-                                 :when problem]
-                             (str (name nm) " " (str/join ", " (flatten [problem])))))
+                                 :when problem
+                                 :let [text (str/join ", " (flatten [problem]))]
+                                 ;; the unfilled slots are counted below, as one
+                                 ;; event; a per-slot echo of them would report
+                                 ;; a single mistake three times
+                                 :when (not= "end of input" text)]
+                             (str (name nm) " " text)))
             ;; a :catn reports a trailing surplus as one more problem than it
             ;; has entries, so the zip above cannot see it — asked separately
             extra        (when (and args-schema names (> (count pos) (count names)))
-                           [(str "this command takes " (count names) " argument"
-                                 (when (not= 1 (count names)) "s")
-                                 " (" (str/join ", " (map name names)) "), got "
-                                 (count pos))])
+                           [(str @takes ", got " (count pos))])
+            missing      (when (and args-schema names (< (count pos) (count names)))
+                           [(str @takes " — missing: "
+                                 (str/join ", " (map name (drop (count pos) names))))])
             decoded-opts (when opts-schema (m/decode opts-schema opts xf))
             opt-errors   (when opts-schema
                            (for [[k problem] (me/humanize (m/explain opts-schema decoded-opts))]
                              (str "--" (name k) " " (str/join ", " (flatten [problem])))))
-            errors       (vec (concat unknown extra pos-errors opt-errors))]
+            errors       (vec (concat unknown extra missing pos-errors opt-errors))]
         (if (seq errors)
           {:errors errors}
           {:args (merge (into {} (for [[k v] props
@@ -293,26 +308,94 @@
   presentation is one place that can be changed — or, later, switched to JSON
   by a flag — without editing a single command.
 
-  Deliberately plain. A map prints as aligned `key: value` lines, a sequence as
-  one item per line, and anything else as itself. `:cli/exit` is dropped
-  because it is a CONTROL key rather than part of the answer, and printing it
-  would put slopp's own vocabulary in the app's output.
+  A map prints as aligned `key: value` lines. **A sequence of MAPS prints as a
+  table**, header once, columns aligned. Anything else prints as itself.
+  `:cli/exit` is dropped because it is a CONTROL key rather than part of the
+  answer, and printing it would put slopp's own vocabulary in the app's output.
 
-  Not a formatting library and should not become one: the moment a command
-  needs a table or a colour it wants a real renderer, and the honest answer is
-  to return the string it wants rather than to grow this."
+  **The table is here because dogfooding measured its absence at 36 KB.** A
+  `list` command returns a sequence of maps — that is what a list IS — and
+  pr-str per row gave a wall of EDN that was correct, machine-readable, and
+  unreadable. The framework had taken responsibility for presentation and then
+  had none for the single commonest shape.
+
+  **The line this docstring used to draw is still drawn, one step further
+  out.** No colour, no wrapping, no configuration, no column selection: a cell
+  is truncated at a fixed width because a table wider than a terminal is a wall
+  again, and that is the last accommodation. A command wanting more returns the
+  string it wants — the escape is unchanged and is still the honest answer for
+  anything a table cannot say.
+
+  Columns come from the first row, then any key later rows add. Rows are DATA
+  and a caller controls what it puts in them, so choosing columns here would be
+  slopp overriding an app about its own answer."
   [value]
-  (cond
-    (nil? value) ""
+  (let [cell (fn [v] (let [s (if (string? v) v (pr-str v))]
+                       (if (> (count s) 40) (str (subs s 0 39) "…") s)))]
+    (cond
+      (nil? value) ""
 
-    (map? value)
-    (let [rows (dissoc value :cli/exit)
-          w    (reduce max 0 (map (comp count name key) rows))]
-      (str/join "\n" (for [[k v] rows]
-                       (str (format (str "%-" (max 1 w) "s") (name k)) "  "
-                            (if (string? v) v (pr-str v))))))
+      (map? value)
+      (let [rows (dissoc value :cli/exit)
+            w    (reduce max 0 (map (comp count name key) rows))]
+        (str/join "\n" (for [[k v] rows]
+                         (str (format (str "%-" (max 1 w) "s") (name k)) "  "
+                              (if (string? v) v (pr-str v))))))
 
-    (sequential? value)
-    (str/join "\n" (map #(if (string? %) % (pr-str %)) value))
+      ;; a sequence of maps is a TABLE. `every? map?` rather than `map? (first)`
+      ;; so a mixed sequence falls through to the plain rendering instead of
+      ;; producing a table with holes in it.
+      (and (sequential? value) (seq value) (every? map? value))
+      (let [cols  (reduce (fn [acc r] (into acc (remove (set acc)) (keys r)))
+                          (vec (keys (first value)))
+                          (rest value))
+            cells (for [r value] (mapv #(cell (get r %)) cols))
+            w     (mapv (fn [c i] (reduce max (count (name c))
+                                          (map #(count (nth % i)) cells)))
+                        cols (range))
+            line  (fn [vs] (str/trimr
+                            (str/join "  " (map #(format (str "%-" (max 1 %2) "s") %1)
+                                                vs w))))]
+        (str/join "\n" (cons (line (map name cols)) (map line cells))))
 
-    :else (str value)))
+      (sequential? value)
+      (str/join "\n" (map #(if (string? %) % (pr-str %)) value))
+
+      :else (str value))))
+
+(defn ^:export schema-names
+  "The KEY NAMES malli schema form `s` describes, or the schema's own TYPE when
+  there is nothing to enumerate. nil when `s` is not a schema at all.
+
+  The companion to [[schema-entries]] and total for the same reason, with one
+  more failure it exists to prevent. `(mapv first (m/children …))` reads a
+  `:map`'s `[k props schema]` entries; EVERY other schema's children are
+  compiled schema objects, and `first` on one of those throws. Measured on a
+  real store the day its typed API was turned on: `query_surface` died with
+  `Don't know how to create ISeq from: malli.core$_map_schema$reify` because a
+  single endpoint answered `[:or [:map …] [:map …]]`. Nine endpoints were
+  unreadable because of a tenth.
+
+  **A report over a population must not be hostage to one member**, and the
+  member most likely to be unusual is the one somebody reached for when a plain
+  map would not do.
+
+  A map under a single-child collection — `[:sequential [:map …]]` — reports the
+  INNER keys, because a list endpoint is the commonest non-map contract there is
+  and answering `:sequential` alone throws away everything the reader came for.
+  Anything else answers with its type, which is a fact about the schema rather
+  than `[]`, which would be a claim about the contract."
+  [s]
+  (let [sch (try (m/schema s) (catch Exception _ nil))]
+    (when sch
+      (loop [sch sch depth 0]
+        (let [t  (m/type sch)
+              ch (try (m/children sch) (catch Exception _ nil))]
+          (cond
+            (= :map t) (mapv first ch)
+
+            (and (< depth 3) (= 1 (count ch))
+                 (contains? #{:sequential :vector :set :maybe :seqable :every} t))
+            (recur (first ch) (inc depth))
+
+            :else t))))))

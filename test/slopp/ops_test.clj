@@ -1135,10 +1135,15 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external config-writes-say-whether-anything-validated-them
-  ;; `capabilities` is the ONLY path with a registry behind it. Every other
-  ;; path — rules, gates, client — records the key and value as given and
-  ;; returns a result indistinguishable from a validated one. Saying which is
-  ;; which is D-surface-honesty at config grain.
+  ;; A config write records the key and value as given, so a caller cannot tell
+  ;; a checked write from an unchecked one unless the result says which
+  ;; happened. Saying so is D-surface-honesty at config grain.
+  ;;
+  ;; TWO paths are checked now. `rules` gained a registry after this very
+  ;; admission was probed: the note named `capabilities` as the only validated
+  ;; path, which is how the reader learned a mistyped rule dial and a renamed
+  ;; one were the same event — accepted, governing nothing, unreported. The
+  ;; honest absence is what got it fixed, which is the argument for printing it.
   (let [sess (external/open!)]
     (try
       (testing "a capabilities write was checked against the registry"
@@ -1146,13 +1151,21 @@
                                   :prompt "real port")]
           (is (= [:registry] (:verified r)) (pr-str r))
           (is (= [] (:unverified r)) (pr-str r))))
-      (testing "any other path is recorded UNVALIDATED, and says so"
+      (testing "and so was a rules write — the second registry, same claim"
         (let [r (ops/config-file! sess "rules" :key "key-typos" :value "off"
                                   :prompt "quiet that rule")]
+          (is (= [:registry] (:verified r)) (pr-str r))
+          (is (= [] (:unverified r)) (pr-str r))))
+      (testing "a path with no registry is recorded UNVALIDATED, and says so"
+        (let [r (ops/config-file! sess "client" :key "anything.at.all" :value "x"
+                                  :prompt "nothing governs this")]
           (is (= [] (:verified r)) (pr-str r))
           (is (= [:schema] (:unverified r)) (pr-str r))
-          (is (re-find #"capabilities" (str (:note r)))
-              "the note must name the one path that IS validated")))
+          (is (and (re-find #"capabilities" (str (:note r)))
+                   (re-find #"rules" (str (:note r))))
+              (str "the note must name the paths that ARE checked — a bare "
+                   "'unvalidated' tells a reader nothing to do about it: "
+                   (pr-str (:note r))))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-store-with-a-broken-namespace-stays-editable

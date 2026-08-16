@@ -105,16 +105,36 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external failed-namespace-load-is-not-silently-committed   ; T4
+  ;; The invariant: a namespace that does not LOAD does not land. A store
+  ;; holding a namespace the image never accepted is the one state from which
+  ;; nothing downstream can be trusted, since every later verification runs
+  ;; against an image that disagrees with the store.
+  ;;
+  ;; **The trigger changed and the invariant did not.** This used to require a
+  ;; not-yet-created namespace of the store's OWN, which is now the red-first
+  ;; case: `create-ns!` brings it into being empty so a spec can land red
+  ;; instead of failing to load. That is a deliberate change and it retired
+  ;; this test's fixture, not its subject — so the fixture moved to a require
+  ;; nothing can satisfy, and the arm below pins the two cases apart.
   (let [sess (external/open!)]
     (try
-      (testing "requiring a not-yet-created store ns fails loudly, nothing committed"
+      (testing "requiring something that exists NOWHERE fails loudly, nothing committed"
+        (let [r (ops/create-ns! sess 'dep.user :requires ["[nowhere.at.all :as n]"])]
+          (is (:error r) (pr-str r))
+          (is (nil? (get-in (:store @sess) [:namespaces 'dep.user])))
+          (is (nil? (get-in (:store @sess) [:namespaces 'nowhere.at.all]))
+              "and a require outside this store's root is never invented")))
+      (testing "a require of the store's OWN not-yet-written namespace is the other case"
+        ;; the control: without it, "refused" and "created empty" both leave
+        ;; a green assertion above and the reader cannot tell which happened
         (let [r (ops/create-ns! sess 'dep.user :requires ["[dep.lib :as lib]"])]
-          (is (:error r))
-          (is (nil? (get-in (:store @sess) [:namespaces 'dep.user])))))
-      (testing "after creating the dependency, it works"
-        (ops/create-ns! sess 'dep.lib)
-        (is (nil? (:error (ops/create-ns! sess 'dep.user
-                                          :requires ["[dep.lib :as lib]"])))))
+          (is (nil? (:error r)) (pr-str r))
+          (is (= '[dep.lib] (:also-created r)) (pr-str r))))
+      (testing "and an existing dependency needs nothing invented"
+        (ops/create-ns! sess 'dep.other)
+        (let [r (ops/create-ns! sess 'dep.user2 :requires ["[dep.other :as o]"])]
+          (is (nil? (:error r)) (pr-str r))
+          (is (nil? (:also-created r)) (pr-str r))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external query-eval-is-observe-only                    ; T5
@@ -693,5 +713,55 @@
                                    :prompt "green")]
           (is (nil? (:error r)) (pr-str r))
           (is (nil? (:red-first-arity r)) (pr-str r))
+          (is (zero? (+ (:fail (:test r) 0) (:error (:test r) 0))) (pr-str (:test r)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external red-first-works-across-a-NAMESPACE-boundary-too
+  ;; Dogfooding the cli capability on a brand-new project found the hole in the
+  ;; red-first seam: `add-form!` stubs an unimplemented VAR so a spec can land
+  ;; red, and there is no equivalent for an unimplemented NAMESPACE. A test
+  ;; namespace requiring one that does not exist yet does not land red — it
+  ;; fails to LOAD, which is a refusal, not a failing test.
+  ;;
+  ;; On a new project every namespace is the first one, so this bites hardest
+  ;; exactly where the discipline matters most; the workaround was hand-written
+  ;; throwing stubs, which is the thing the seam exists to remove.
+  ;;
+  ;; An empty namespace is the namespace-grained stub. It is a real store write
+  ;; rather than an image trick, because the author is going to create it
+  ;; anyway and its EXISTENCE was never what the test was about.
+  (let [sess (external/open!)]
+    (try
+      (testing "creating a spec ns brings its not-yet-written subject into being"
+        (let [r (ops/create-ns! sess 'rb.core-test
+                                :requires ["[rb.core :as c]"
+                                           "[clojure.test :refer [deftest is]]"]
+                                :prompt "spec first, subject does not exist yet")]
+          (is (nil? (:error r))
+              (str "requiring a namespace that does not exist yet is the "
+                   "red-first case, not an error: " (pr-str r)))
+          (is (= ['rb.core] (:also-created r))
+              (str "and it is NAMED — a namespace appearing without being asked "
+                   "for is worse than one refused: " (pr-str r)))))
+
+      (testing "a LIBRARY require is never invented, which is what makes this safe"
+        ;; `clojure.test` above resolves on the classpath and shares no root
+        ;; with the namespace being created; inventing an empty one would
+        ;; shadow the real thing and the failure would be silent
+        (is (nil? (get (:namespaces (:store @sess)) 'clojure.test))))
+
+      (testing "and now the seam works: a spec naming an unwritten VAR lands red"
+        (let [r (ops/add-form! sess 'rb.core-test
+                               "(deftest dbl-t (is (= 4 (c/dbl 2))))"
+                               :prompt "red first")]
+          (is (= ['rb.core/dbl] (:red-first r)) (pr-str r))
+          (is (pos? (+ (:fail (:test r) 0) (:error (:test r) 0)))
+              (str "a failing test, not a refusal: " (pr-str (:test r))))))
+
+      (testing "implementing it turns the spec green, with nothing else to undo"
+        (let [r (ops/add-form! sess 'rb.core
+                               "(defn dbl \"Doubles.\" [x] (* 2 x))"
+                               :prompt "green")]
+          (is (nil? (:error r)) (pr-str r))
           (is (zero? (+ (:fail (:test r) 0) (:error (:test r) 0))) (pr-str (:test r)))))
       (finally (ops/close! sess)))))

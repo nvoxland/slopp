@@ -1967,3 +1967,45 @@
                                    {:ns ns-sym :name (:name e) :text s}))})))))
     (catch Exception ex
       {:error (str "realias plan failed: " (ex-message ex))})))
+
+(defn ^:export patterns-not-swept
+  "The regex LITERALS in `src` that name `from` in a spelling a textual sweep
+  cannot see — an ESCAPED DOT. Returns their source text.
+
+  A sweep matches `web.static` and rewrites it wherever it appears, prose and
+  string literals included. A regex writes the same name `web\\.static`, which
+  shares no literal text with it, so the sweep walks past every one. Measured:
+  seven in a single wave, all config-key patterns, two of them surviving every
+  write and three green done-points to be caught by the external tier.
+
+  The costs were not cosmetic. One rule refused EVERY declared auth group as
+  unknown — it read groups under the retired spelling, found none, and taught
+  the author to configure the key it was already reading past. Another reported
+  every asset link in an app as dangling. A third had prose and pattern split
+  inside ONE form, its docstring naming the new spelling beside a pattern
+  naming the old.
+
+  **Reporting rather than rewriting is the decision.** A regex is an INTENT,
+  not a name: whether a `.` in it is a separator or a wildcard is a question
+  about what the author meant, and a sweep that guessed would be wrong
+  silently, in the direction where a predicate quietly matches nothing.
+  `pat` — the sweep's own exact pattern — excludes the literals it DID rewrite,
+  so this reports only what it could not see.
+
+  Dots only, deliberately: every measured instance was a dot, and widening to
+  every regex metacharacter would report literals that merely mention the
+  token."
+  [src from pat]
+  (let [loose (re-pattern
+               (str "(?<![A-Za-z])"
+                    (str/join "\\\\?\\."
+                              (map #(java.util.regex.Pattern/quote %)
+                                   (str/split (str from) #"\.")))
+                    "(?![A-Za-z])"))]
+    (vec (for [zl (->> (iterate z/next (z/of-string src))
+                       (take-while (complement z/end?)))
+               :let [nd (z/node zl)]
+               :when (= :regex (n/tag nd))
+               :let [txt (n/string nd)]
+               :when (and (re-find loose txt) (not (re-find pat txt)))]
+           txt))))

@@ -1018,16 +1018,42 @@
   session (:episode-reds) and the done-point (`boundary?` true) bypasses
   compression — the boundary always reports every standing red in full —
   and resets the ledger. Explicit test_run bypasses this shaping too
-  (spot-checks get everything)."
+  (spot-checks get everything).
+
+  **`:went-green` is derived from `:failed-tests` — the summary's complete
+  list of failing test names — and never from the failure BLOCKS.** The
+  blocks are capped for response size, so on a run with more failing
+  assertions than the cap allows, a still-failing test simply has no block,
+  which is indistinguishable here from having passed. Measured: a write
+  announced a test green while an immediate re-run showed it failing with the
+  message it had before the write. A false green is the worst direction for
+  this signal — it is the one an agent reads to decide it is FINISHED — and it
+  misfires only on large red runs, which is when the reader most needs it.
+
+  When a summary carries no `:failed-tests` and its detail was demonstrably
+  capped, no green is claimed and `:reds-uncertain` says why. That is not a
+  hypothetical: the injected runtime is read off the reading process's own
+  classpath, so a jar older than the store produces exactly this summary.
+  Absence with a stated cause can be acted on; absence alone reads as \"nothing
+  went green\", which is a different and wrong claim."
   [session summary affected scope boundary?]
   (let [prev     (or (:episode-reds @session) #{})
         blocks   (vec (:failures summary))
-        now-red  (into #{} (keep :test) blocks)
+        named    (:failed-tests summary)
+        capped?  (< (count blocks) (+ (:fail summary 0) (:error summary 0)))
+        now-red  (if named
+                   (set named)
+                   (into #{} (keep :test) blocks))
         scope-ns (into #{} (map str) (if (sequential? scope) scope [scope]))
         ran      (if (seq affected)
                    (set affected)
                    (into #{} (filter #(contains? scope-ns (namespace %))) prev))
-        greens   (vec (sort (remove now-red (filter ran prev))))
+        blind?   (and (nil? named) capped?)
+        greens   (if blind?
+                   []
+                   (vec (sort (remove now-red (filter ran prev)))))
+        ;; a test the shaper could not observe stays on the ledger: dropping it
+        ;; would report it as newly red next time, in full, having never left
         ledger   (-> prev (set/difference (set greens)) (into now-red))]
     (swap! session assoc :episode-reds (if boundary? now-red ledger))
     (if boundary?
@@ -1037,7 +1063,18 @@
         (cond-> (assoc summary :failures new-blocks)
           (empty? new-blocks) (dissoc :failures)
           (seq stills)        (assoc :still-red stills)
-          (seq greens)        (assoc :went-green greens))))))
+          (seq greens)        (assoc :went-green greens)
+          blind?              (assoc :reds-uncertain
+                                     (str "the failure detail was capped at "
+                                          (count blocks) " of " (+ (:fail summary 0)
+                                                                   (:error summary 0))
+                                          ", and this runner did not report the"
+                                          " failing test names — so no test can"
+                                          " be shown to have gone green on this"
+                                          " run. Rebuild the jar to restore the"
+                                          " signal; until then read :still-red"
+                                          " as a floor, not a list"))
+          blind?              (dissoc :went-green))))))
 
 (defn test-ns?
   "Does `nsx` hold any deftest? (Inline tests count — Q13.)"

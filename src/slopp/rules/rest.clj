@@ -38,10 +38,18 @@
   is FOR (what may I send, what comes back); `query_slice` on the handler
   answers what it accepts exactly.
 
-  Read through `slopp.cli.spec/schema-entries`, the same TOTAL accessor the cli
-  surface uses, so a malformed declaration degrades to nil in both reports
-  rather than throwing in one of them. A bad schema is caught at the WRITE,
-  where the author can fix it.
+  Read through `slopp.cli.spec/schema-names`, a TOTAL accessor shared with the
+  cli surface, so a malformed declaration degrades to nil in both reports rather
+  than throwing in one of them. A bad schema is caught at the WRITE, where the
+  author can fix it.
+
+  **Totality has to hold across SHAPES, not only across malformed input.** A
+  field is a vector of key names when the contract describes a map — including a
+  map inside a `[:sequential …]`, which is what a list endpoint is — and the
+  schema's own TYPE keyword when there is nothing to enumerate, `:or` or
+  `:string`. Reading a non-map's children as map entries is what once threw on a
+  real store the day it enabled this capability, making nine endpoints
+  unreadable because a tenth answered `[:or [:map …] [:map …]]`.
 
   `:published` is `:web/client false` inverted, and it is a field rather than an
   omission because a reader asking what consumers can CALL needs the exclusion
@@ -64,9 +72,9 @@
                     :handler   (symbol (str ns) (str name))
                     :published (not (false? (:web/client meta)))}
              (:web/request meta)
-             (assoc :request (mapv first (spec/schema-entries (:web/request meta))))
+             (assoc :request (spec/schema-names (:web/request meta)))
              (:web/response meta)
-             (assoc :response (mapv first (spec/schema-entries (:web/response meta)))))))))
+             (assoc :response (spec/schema-names (:web/response meta))))))))
 
 (defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module, as its four unexported siblings in slopp.rules.http show. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
   rest-stale-client-check

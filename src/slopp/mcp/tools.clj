@@ -160,7 +160,7 @@
 (def edit-tools
   "Write tool descriptors: forms, groups, renames, refactors. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "ns_create"
-    :description "Create a BRAND-NEW namespace (never overwrites). Either `requires` (clause strings) scaffolds an empty ns to grow with red-first TDD, or `source` lands whole namespace text in one verified call (ported/reference code) — mutually exclusive. `platform` (\"jvm\"/\"cljc\"/\"cljs\") declares the namespace's target platform up front, so a client ns is born :cljs — its js/* forms defer to the ClojureScript compiler (compile_client) instead of failing to load into the JVM oracle."
+    :description "Create a BRAND-NEW namespace (never overwrites). Either `requires` (clause strings) scaffolds an empty ns to grow with red-first TDD, or `source` lands whole namespace text in one verified call (ported/reference code) — mutually exclusive. A `requires` clause MAY name a namespace of yours that does not exist yet: it is created empty and reported in `:also-created`, so spec-first works across a namespace boundary instead of failing to load. `platform` (\"jvm\"/\"cljc\"/\"cljs\") declares the namespace's target platform up front, so a client ns is born :cljs — its js/* forms defer to the ClojureScript compiler (compile_client) instead of failing to load into the JVM oracle."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :requires {:type "array" :items {:type "string"}}

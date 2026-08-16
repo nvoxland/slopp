@@ -1198,3 +1198,46 @@
       ;; empty and absent are the same to a reader here, but an explicit empty
       ;; is what lets a renderer draw "none" instead of omitting the section
       (is (= [] (:orphaned-dials (rules/sweep-plan (store/empty-store))))))))
+
+(deftest ^:external the-sweep-DELIVERS-every-key-its-plan-decided
+  ;; Reported by slopp-ui, who was told a `:note` had landed and could not find
+  ;; it in the report. They were right: `sweep-plan` computed `:note` and
+  ;; `:orphaned-dials`, and `sweep-store!` destructured `:swept` and
+  ;; `:not-swept` out of it and dropped the rest on the floor.
+  ;;
+  ;; Every test of that decision asserted on `sweep-plan` — correctly, because
+  ;; a pure decision is the thing worth pinning. **And that is exactly how the
+  ;; seam went untested**: the decision was right in every assertion and the
+  ;; reader still saw none of it. Splitting a decision out from its performance
+  ;; buys testability and costs a join that nothing watches unless something
+  ;; watches it here.
+  ;;
+  ;; So this is asserted structurally rather than key by key. A future key
+  ;; added to the plan is added for a READER, and a list of names here would
+  ;; keep passing while the newest one silently failed to arrive.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dl.core "(ns dl.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+      (let [st   (:store @sess)
+            plan (rules/sweep-plan st)
+            sw   (rules/sweep-store! sess st)]
+        (testing "nothing the plan decided is missing from what the sweep returns"
+          (is (empty? (remove (set (keys sw)) (keys plan)))
+              (str "dropped on the floor between deciding and reporting: "
+                   (pr-str (vec (remove (set (keys sw)) (keys plan)))))))
+
+        (testing "and the values are the plan's, not a second derivation"
+          (is (= (:note plan) (:note sw)) (pr-str sw))
+          (is (= (:swept plan) (:swept sw)) (pr-str sw))
+          (is (= (:not-swept plan) (:not-swept sw)) (pr-str sw)))
+
+        (testing "the note is what the reader needed: what these lists EXCLUDE"
+          ;; a list silent about its own scope invites the inference that its
+          ;; absences are about the thing the reader is currently thinking of
+          (is (re-find #"(?i)form-grain|form grain" (str (:note sw))) (pr-str (:note sw)))
+          (is (re-find #"query_capabilities" (str (:note sw))) (pr-str (:note sw))))
+
+        (testing "and the sweep still carries the half only it can compute"
+          (is (contains? sw :findings) (pr-str (keys sw)))
+          (is (pos? (:forms sw)) (pr-str sw))))
+      (finally (ops/close! sess)))))

@@ -1024,8 +1024,9 @@
           ;; since the server takes a dir) never gets one here and the turn
           ;; cannot open itself. Both facts are in hand: the dir, and that no
           ;; pending intent has arrived. Friction 4.
-          (throw (ex-info (str "no open turn — call turn_begin {intent: "
-                               "<the user's verbatim ask>} first"
+          (throw (ex-info (str "no open turn for agent " ag
+                               " — call turn_begin {intent: <the user's verbatim"
+                               " ask>, agent: \"" ag "\"} first"
                                (when-let [d (not-empty (str (:dir @session)))]
                                  (str " (store: " d ")"))
                                ". No pending intent has arrived for this store,"
@@ -1033,7 +1034,12 @@
                                " prompt hook records the ask in the store at the"
                                " session's WORKING DIRECTORY, so a session"
                                " driving a second store has to open turns here"
-                               " by hand.")
+                               " by hand. And a turn belongs to an AGENT: a"
+                               " one-shot process (slopp --call) derives a fresh"
+                               " identity per process, so turn_begin and the"
+                               " write must be passed the SAME agent argument —"
+                               " otherwise the second call opens a second turn"
+                               " and this refusal repeats verbatim.")
                           {:dir (:dir @session) :agent ag}))))))
   (let [a   (assoc arguments :agent (or (:agent arguments)
                                         (:agent-id @session)))
