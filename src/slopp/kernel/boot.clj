@@ -282,11 +282,12 @@
   fact. Copying the source in is what makes a built app self-contained.
 
   **Keyed by capability (part 3)**, so `ops.engine/framework-injection` can hand
-  a store only the families it uses. A flat list would vendor `slopp/web/**`
-  into a project that never enabled `http`, where `(require 'slopp.web)` would
-  then succeed — the capability opt-in holding in a config file and not at
-  runtime. `\"_\"` is the dialect's own helpers, which belong to the SYNTAX
-  rather than to any one capability.
+  a store only the families it USES — a command-line app carries no
+  `slopp/web/**` and inherits none of http's deps. Use, not enablement: this
+  narrows the payload and deliberately does not enforce the opt-in, because a
+  store mid-migration has requires that outlive its config and must still boot
+  to be repairable. `\"_\"` is what ships with every family — the dialect's own
+  helpers and the namespaces slopp's rules tell an author to use.
 
   The LIST comes from a generated resource rather than a glob, because a jar
   cannot enumerate its own resources by prefix, and rather than a hand-written

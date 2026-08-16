@@ -2106,6 +2106,15 @@
   ;; nothing in the build notices: the failure appears when someone else's app
   ;; trips the gate and finds no way through.
   ;;
+  ;; **A latent broken remedy and a working one look identical until someone
+  ;; needs it** (slopp-ui's phrasing, and the reason this is a check rather than
+  ;; a review habit). Asked whether the missing namespace had ever cost them
+  ;; anything, they searched and found no: every atom in their store is app
+  ;; state a browser app legitimately holds, and their one expensive computation
+  ;; is per-navigation and so not memoizable across navigations. The escape was
+  ;; aimed at a shape their app does not have — which is exactly why nobody
+  ;; noticed for months that it named a namespace that was not there.
+  ;;
   ;; It found one on its first run. `tier-refusal`'s escape names `slopp.cache`
   ;; ("an :internal module may mutate in-process, e.g. a memo through
   ;; slopp.cache"), the shipped skill states the every-cache-goes-through-it

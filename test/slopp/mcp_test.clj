@@ -1362,6 +1362,24 @@
           (is (= "/api/ping" (:path row)) (pr-str rep))
           (is (= :public (:auth row)))
           (is (= 'wr.api/ping (:handler row)))))
+      (testing "a declared static MOUNT is part of the surface"
+        ;; slopp-ui's finding, from a migration: they set http.static./assets,
+        ;; it was effective, and query_surface's answer had ten endpoint rows
+        ;; and no mount — while the tool description promised mounts.
+        ;;
+        ;; It matters more than a doc nit because **the mount is the
+        ;; declaration whose absence is SILENT**: orphan it and the document
+        ;; still serves while the <script> it names 404s. If this is where
+        ;; someone checks their surface after a migration, a correctly
+        ;; configured mount missing from the answer teaches them to go look
+        ;; somewhere else — and somewhere else is an ^:external test most
+        ;; projects do not have.
+        (call! sess "config_file" {:path "capabilities" :key "http.static./assets"
+                                   :value "public" :prompt "serve the bundle"})
+        (let [rep (edn/read-string (call! sess "query_surface" {}))]
+          (is (= {"/assets" "public"} (:http/static rep))
+              (str "a declared mount is surface: " (pr-str rep)))))
+
       (testing "the tool is advertised read-only"
         (is (contains? tools/read-only-tools "query_surface")))
       (finally (ops/close! sess)))))

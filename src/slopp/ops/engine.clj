@@ -72,12 +72,29 @@
   remote, so a coord names something only the machine that built it can
   resolve: portable in appearance, not in fact.
 
-  **Per capability (part 3).** Handing every store every family would let
-  `(require 'slopp.web)` succeed in a project that never enabled `http` — the
-  opt-in holding in the config file and not at runtime, which is the capability
-  model failing at exactly the thing it is about. The families come from
-  `capabilities/shipping-families` rather than from a prefix written here, so a
-  new capability vendors by existing.
+  **Per capability (part 3), and it follows USE rather than ENABLEMENT.** A
+  store is handed the families it actually reaches for, so a command-line app
+  carries no `slopp/web/**` and inherits none of http's deps — a smaller tree
+  and a smaller dependency surface, which is what this buys.
+
+  It does NOT make the capability opt-in hold at runtime, and an earlier
+  version of this docstring claimed it did. slopp-ui found the hole by tracing
+  it against their own store: `used-families` keys off requires and entry
+  markers, so a store whose requires already exist still resolves `slopp.web`
+  with `http.enabled` false. Withholding a family from a store that neither
+  requires nor marks it withholds it from the one store that was not going to
+  require it.
+
+  **Keying on enablement instead would be worse, which is why it stays.** A
+  store mid-migration — retired config keys, new registry, requires unchanged —
+  would boot with the framework missing, fail to load, and lose the very
+  `config_file` calls that repair it. Vendoring on USE is what keeps that a
+  diagnosable message instead of a wedge. The opt-in is enforced where it can
+  answer for itself: the write gates, and the capability-driven behaviour
+  (the server does not start, the rules are inert).
+
+  The families come from `capabilities/shipping-families` rather than from a
+  prefix written here, so a new capability vendors by existing.
 
   Conditions, each load-bearing in a different direction.
 

@@ -441,6 +441,16 @@
                 (seq cli) (assoc :cli cli)
                 (:enabled http)
                 (assoc :http (:routes http)
+                       ;; ALWAYS present when http is, empty map included. A
+                       ;; static mount is the declaration whose absence is
+                       ;; SILENT — orphan it and the document still serves
+                       ;; while the <script> it names 404s — so "you declared
+                       ;; none" has to be sayable here rather than inferable
+                       ;; from a missing key. Reported by slopp-ui after a
+                       ;; migration in which their mount was set, effective,
+                       ;; and absent from this answer; the tool description had
+                       ;; promised mounts the whole time.
+                       :http/static (rules.http/static-mounts store)
                        :http/effect-kinds (:effect-kinds http)
                        :http/read-kinds (:read-kinds http)))]
     (if (seq m)

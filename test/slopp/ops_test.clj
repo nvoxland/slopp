@@ -610,10 +610,13 @@
   ;; published, so a coord names something only one machine can resolve.
   ;;
   ;; **Part 3 (capabilities): the files are keyed BY CAPABILITY and a store is
-  ;; given only the families it uses.** Vendoring everything would let
-  ;; `(require 'slopp.web)` succeed in a store that never enabled `http` — the
-  ;; opt-in holding in config and not at runtime, which is the capability model
-  ;; not actually applying to the thing it is about.
+  ;; given only the families it USES.** What that buys is the payload: a
+  ;; command-line app carries no `slopp/web/**` and inherits none of http's
+  ;; deps. What it deliberately does NOT buy is enforcement of the opt-in —
+  ;; `used-families` reads requires and entry markers, not `*.enabled`, so a
+  ;; store whose requires outlive its config still loads the framework. That is
+  ;; the case a migration is, and withholding the framework there would turn a
+  ;; config error into a store that cannot boot to be repaired.
   ;;
   ;; The two CONDITIONS survive, each load-bearing in a different direction:
   ;;
@@ -832,9 +835,17 @@
   ;; to require its own namespaces would run fine and simply know nothing.
   ;;
   ;; (3) The vendor boundary holds AT RUNTIME. Two families are declared and one
-  ;; is used, so the store that never enabled `http` must not be able to reach
-  ;; `slopp.web` — the capability opt-in either survives into the built tree or
-  ;; it was only ever a line in a config file.
+  ;; is USED, so a store that reaches for neither the namespaces nor the markers
+  ;; of `http` must not end up able to load `slopp.web`.
+  ;;
+  ;; Note what this does and does not claim, because the first version of the
+  ;; docstring next door got it wrong and slopp-ui traced it: vendoring follows
+  ;; USE, not enablement. It does not stop a store whose requires already name
+  ;; `slopp.web` from loading it with `http.enabled` false — and it must not,
+  ;; since that store is one mid-migration and withholding the framework would
+  ;; turn a diagnosable config error into a store that cannot boot to be fixed.
+  ;; What is asserted here is narrower and is the part that pays: an app gets
+  ;; the families it reaches for and no others.
   (let [src-of (fn [p] (some-> (io/resource p) slurp))
         files  {"cli"  {"slopp/cli.clj"      (src-of "slopp/cli.clj")
                         "slopp/cli/spec.clj" (src-of "slopp/cli/spec.clj")}
