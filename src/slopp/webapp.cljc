@@ -99,7 +99,8 @@
   [app]
   (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/view
                   :webapp/fetch :webapp/render :webapp/push-url! :webapp/derive
-                  :webapp/call :webapp/act :webapp/actions :webapp/boot}
+                  :webapp/call :webapp/request-for :webapp/act :webapp/actions
+                  :webapp/boot}
         unknown (remove known (keys app))
         listed  (fn [ks] (apply str (interpose ", " (map pr-str (sort-by str ks)))))]
     (when (seq unknown)
@@ -121,26 +122,6 @@
             :webapp/render    (fn [_state] nil)
             :webapp/push-url! (fn [_url] nil)}
            app)))
-
-(defn- dispatch-for!
-  "The driver's `:dispatch`, partial'd over `app` — see [[navigate-for!]] for
-  why it is a named var rather than a closure.
-
-  An app with no `:webapp/act` REFUSES rather than doing nothing. A control that
-  silently does nothing is the exact failure a headless drive exists to catch,
-  and swallowing it here would make the fake agree with a browser about a button
-  that works in neither."
-  [app action value]
-  (let [{:webapp/keys [state act render]} app]
-    (if act
-      (do (swap! state act action value)
-          (render @state))
-      (throw (ex-info (str "this app dispatched " (pr-str action)
-                           " and declares no :webapp/act — an action with nothing"
-                           " to apply it is a control that silently does nothing,"
-                           " which is the one failure a headless drive exists to"
-                           " catch")
-                      {:webapp/missing-key :webapp/act :action action})))))
 
 (defn- begin-load
   "Mark `key` as in flight, minting the token that decides whether its answer is
@@ -231,6 +212,118 @@
   (navigate! app path false)
   @(:webapp/state app))
 
+(defn ^:export load-status
+  "What is KNOWN about load `key` on this screen: `:absent`, `:loading`,
+  `:ready` or `:failed`.
+
+  **Four states, because three of them are routinely collapsed into nil and
+  each collapse is a lie a reader believes.** `:absent` is nothing has been
+  requested; `:loading` is asked and unanswered; `:ready` is answered, and
+  answered with NIL or an empty list is still answered; `:failed` is asked and
+  refused.
+
+  A view written as `(if (:data s) …)` reads all four as two, and the two it
+  produces are wrong in the direction that matters: an empty screen that says
+  \"no results\" when nobody has asked yet, and a spinner that never stops
+  because the answer was legitimately nothing.
+
+  This is the reader a `:webapp/view` uses instead of testing `:data`, and it is
+  the reason [[arrive]] empties rather than bumps."
+  [state key]
+  (get-in state [:loads key :status] :absent))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/call :any]] :any]
+                   :any]}
+  perform!
+  "Run `request` through the app's `:webapp/call` plug-in and record the outcome.
+
+  The sibling of [[navigate!]] and deliberately the same shape: nothing here
+  touches a browser, because `:webapp/call` is `js/fetch` in a real page and a
+  canned answer headless. That is what makes an ad-hoc call something a test can
+  press and assert on.
+
+  **Generic on purpose.** This knows a request goes out and an answer comes
+  back; it does not know what an endpoint is. Deciding WHAT to call is
+  `:webapp/request-for`, a pure function of state and action, so every judgement
+  about which request an action means stays somewhere a JVM test can read it.
+
+  `:running` is written and rendered BEFORE the call, so a slow endpoint says so
+  instead of looking like a button that did nothing.
+
+  **No freshness token, unlike a navigation, and the difference is real rather
+  than an omission.** A navigation can be superseded by another navigation; this
+  is triggered by a press. Two presses in flight resolve in whatever order they
+  resolve and the second answer wins — which is what a reader pressing twice
+  means. If that ever stops being true it wants the same token machinery, not a
+  guess."
+  [app request]
+  (when request
+    (let [{:webapp/keys [state call render]} app]
+      (swap! state assoc :call {:status :running :request request})
+      (render @state)
+      (call request
+            (fn [response]
+              (swap! state assoc :call {:status  :done
+                                        :request request
+                                        :response response})
+              (render @state))
+            (fn [message]
+              (swap! state assoc :call {:status  :failed
+                                        :request request
+                                        :error   message})
+              (render @state))))))
+
+(defn- dispatch-for!
+  "The driver's `:dispatch`, partial'd over `app` — see [[navigate-for!]] for
+  why it is a named var rather than a closure.
+
+  **One dispatcher, and the split it makes is read from DATA.** An action
+  declared `:effectful?` in `:webapp/actions` is a REQUEST and goes through
+  [[perform!]]; anything else is a state transition and goes through
+  `:webapp/act`. The distinction is not a judgement made here — it is looked up,
+  because slopp-ui measured what happens when it is written by hand: their
+  browser shell and their headless shell each carried `(= :try/execute (first
+  action))`, in a `:cljs` namespace whose only verification is that it compiled,
+  and the comment beside it already knew the risk — *both dispatchers have to
+  make the same split, or the screen a test drives and the screen a browser
+  shows differ on the one control that DOES something*. A lookup cannot disagree
+  with the map it looks in.
+
+  An effect does NOT also run the reducer. Running both is how two dispatchers
+  drift back apart: each does the half its author was thinking about.
+
+  Three refusals rather than three silences, because a control that appears to
+  exist and does nothing is the failure a headless drive exists to catch — and
+  the one their `.closest` listeners produced for real."
+  [app action value]
+  (let [{:webapp/keys [state act render actions request-for]} app]
+    (cond
+      (:effectful? (get actions (first action)))
+      (if request-for
+        (perform! app (request-for @state action))
+        (throw (ex-info (str (pr-str (first action)) " is declared :effectful?"
+                             " but this app has no :webapp/request-for — an"
+                             " effect with no request to make is a control that"
+                             " cannot work, and doing nothing quietly is the one"
+                             " outcome ruled out. Declare (fn [state action] ->"
+                             " request).")
+                        {:webapp/missing-key :webapp/request-for
+                         :action action})))
+
+      act
+      (do (swap! state act action value)
+          (render @state))
+
+      :else
+      (throw (ex-info (str "this app dispatched " (pr-str action)
+                           " and declares no :webapp/act — an action with nothing"
+                           " to apply it is a control that silently does nothing,"
+                           " which is the one failure a headless drive exists to"
+                           " catch")
+                      {:webapp/missing-key :webapp/act :action action})))))
+
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
@@ -276,23 +369,3 @@
      :navigate (partial navigate-for! app)
      :dispatch (partial dispatch-for! app)
      :boot     (or boot identity)}))
-
-(defn ^:export load-status
-  "What is KNOWN about load `key` on this screen: `:absent`, `:loading`,
-  `:ready` or `:failed`.
-
-  **Four states, because three of them are routinely collapsed into nil and
-  each collapse is a lie a reader believes.** `:absent` is nothing has been
-  requested; `:loading` is asked and unanswered; `:ready` is answered, and
-  answered with NIL or an empty list is still answered; `:failed` is asked and
-  refused.
-
-  A view written as `(if (:data s) …)` reads all four as two, and the two it
-  produces are wrong in the direction that matters: an empty screen that says
-  \"no results\" when nobody has asked yet, and a spinner that never stops
-  because the answer was legitimately nothing.
-
-  This is the reader a `:webapp/view` uses instead of testing `:data`, and it is
-  the reason [[arrive]] empties rather than bumps."
-  [state key]
-  (get-in state [:loads key :status] :absent))
