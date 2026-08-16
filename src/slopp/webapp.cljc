@@ -21,7 +21,7 @@
   modernises it, which is why the reason is written here rather than assumed.
 
   **Renderer-agnostic, deliberately.** This never learns what a screen looks
-  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str] [slopp.lang :as lang]))
+  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str] [slopp.lang :as lang] [clojure.walk :as walk]))
 
 (defn- arrive
   "The state transition a navigation IS: `path` and its route in, everything
@@ -597,9 +597,22 @@
   only assembles a map. Naming the behaviours puts the `!` where the mutation
   actually is and leaves the assembler honest.
 
+  **It takes the url a READER would type — mount point included — and strips it,
+  exactly as a browser click does.** The fake browser follows an `:href` out of
+  the rendered tree, and the render now prefixes in-app links, so the path
+  arriving here carries the mount point and would match no route unprefixed. A
+  headless drive that visited app-relative paths would be exercising a url no
+  browser ever produces, which is the shape of divergence this whole capability
+  exists to prevent.
+
+  A url outside the mount point does NOTHING. [[strip-base]] answers nil there,
+  and routing nil would clear the screen the reader was on — treating a foreign
+  path as ours because it was handed to us.
+
   Returns the state AFTER the move, because that is what `screen` re-renders."
-  [app _state path]
-  (navigate! app path false)
+  [app _state url]
+  (when-let [path (strip-base (:webapp/base app) url)]
+    (navigate! app path false))
   @(:webapp/state app))
 
 (defn ^:export
@@ -743,9 +756,52 @@
   (reset! state (boot @state))
   (navigate-url! app pathname search false))
 
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat :string [:sequential [:tuple :string :any]] :any]
+                   :any]}
+  prefix-links
+  "Rewrite every `:href` in `hiccup` that this app ROUTES so it carries the
+  mount point — leaving every other link exactly as written.
+
+  **This is the join nothing could make before.** The boundary inventory reports
+  it as an unchecked exit and says why: *the literal is a client route, the mount
+  point arrives from the render, and a fallback answers the result — so a typo'd
+  literal, a prefix that stopped being applied, and a client route nobody
+  registered all look the same.* Two of those three parts are slopp's now — the
+  mount point is declared and the route table is data — so the framework can do
+  the prefixing, and a literal in a view becomes unambiguously a CLIENT ROUTE
+  KEY. That is what makes it checkable. Every app writing its own `prefix-links`
+  is what made it not.
+
+  **Only links this app routes are touched, and the discrimination is the whole
+  safety of it.** `/api/modules` is the server's path; prefixing it would break
+  the one link the app cannot re-route. An external url is somebody else's
+  entirely. Both are left alone because [[match-route]] says nothing matches
+  them — the same table the click handler consults, so the two cannot disagree
+  about which links are the app's.
+
+  **`:href` only.** A form's `:action` submits to a server, and the client router
+  has nothing to say about it; rewriting one would point a POST at a screen.
+
+  The round trip is the property worth stating: what this PREFIXES is exactly
+  what [[click-target]] STRIPS and claims. If those two ever disagree, every link
+  in the app is either dead or leaves the page — which is why they are tested
+  against each other rather than separately."
+  [base routes hiccup]
+  (walk/postwalk
+   (fn [node]
+     (let [attrs (when (and (vector? node) (keyword? (first node)))
+                   (second node))
+           href  (when (map? attrs) (:href attrs))]
+       (if (and (string? href) (match-route routes href))
+         (assoc-in node [1 :href] (prefixed base href))
+         node)))
+   hiccup))
+
 (defn- derived-view
   "The `:webapp/view` slopp builds from an app's own parts: render the matched
-  SCREEN, hand the result to the app's chrome.
+  SCREEN, hand the result to the app's chrome, and prefix every in-app link.
 
   **This is what makes a route row point at a function rather than a keyword.**
   `:screen` used to be a bare keyword agreeing in three separate places — the
@@ -756,19 +812,27 @@
 
   **`:webapp/not-found` is a screen like any other**, and it has a default
   because slopp now KNOWS when nothing matched. Rendering nothing there would be
-  the SPA failure this capability keeps naming: a blank pane at a plausible url
-  is indistinguishable from a screen whose content is empty. The default is
+  the failure this capability keeps naming: a blank pane at a plausible url is
+  indistinguishable from a screen whose content is empty. The default is
   deliberately plain and obviously the framework's, so an app that has not
   thought about it gets something honest rather than something pretty.
 
   **Chrome wraps, and takes the state as well as the inner hiccup.** A nav bar
   needs to know which screen is current and what the session loaded; passing
-  only the inner tree would make an app reach for the atom it was handed."
-  [{:webapp/keys [chrome not-found]}]
+  only the inner tree would make an app reach for the atom it was handed. It is
+  also where a CROSS-SCREEN concern belongs — the load-status check every screen
+  would otherwise repeat is one decision about what a reader sees, and chrome is
+  the one place that sees every screen.
+
+  **[[prefix-links]] runs LAST, over the finished tree**, so a view writes client
+  route keys and never the mount point. One producer: what this adds is exactly
+  what [[click-target]] strips, which is why the two are tested against each
+  other rather than separately."
+  [{:webapp/keys [chrome not-found base routes]}]
   (fn [state]
     (let [screen (:screen state)
           inner  (if screen (screen state) (not-found state))]
-      (chrome state inner))))
+      (prefix-links base routes (chrome state inner)))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}

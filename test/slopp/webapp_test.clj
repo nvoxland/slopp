@@ -978,3 +978,63 @@
              (webapp/wiring {:webapp/state  (atom {})
                              :webapp/routes [["/things" target]]}))
             (str (pr-str target) " is callable and renders nothing"))))))
+
+(deftest slopp-PREFIXES-in-app-links-so-a-view-writes-CLIENT-paths
+  ;; The join `crossings` reports as `:webapp/client-path`, and its stated
+  ;; reason for being unchecked:
+  ;;
+  ;;   nothing joins the three parts up. The literal is a client route, the
+  ;;   mount point arrives from the render, and a :web/client-routes fallback
+  ;;   answers the result — so a typo'd literal, a prefix that stopped being
+  ;;   applied, and a client route nobody registered all look the same.
+  ;;
+  ;; Two of the three parts are slopp's now. The mount point is declared, and
+  ;; the route table is data — so the framework can do the prefixing itself and
+  ;; a literal in a view becomes unambiguously a CLIENT ROUTE KEY. That is what
+  ;; makes it checkable; every app writing its own `prefix-links` is what made
+  ;; it not.
+  (let [things (fn [_s] [:main
+                         [:a {:href "/things"} "Things"]
+                         [:a {:href "/things/42"} "Anvil"]
+                         ;; not routed — the server's, or somebody else's
+                         [:a {:href "/api/modules"} "raw"]
+                         [:a {:href "https://example.com/things"} "elsewhere"]
+                         [:form {:action "/api/save"} [:button "Save"]]])
+        routes [["/things" things] ["/things/:id" things]]
+        at     (fn [base] (webapp/prefix-links base routes (things {})))]
+
+    (testing "a link the client ROUTES gets the mount point"
+      (let [tree (at "/p/x")]
+        (is (= "/p/x/things" (get-in tree [1 1 :href])))
+        (is (= "/p/x/things/42" (get-in tree [2 1 :href])))))
+
+    (testing "a link it does NOT route is left exactly alone"
+      ;; the discrimination that makes this safe rather than a blanket rewrite:
+      ;; `/api/modules` is the server's path and prefixing it would break the
+      ;; one link the app cannot re-route
+      (let [tree (at "/p/x")]
+        (is (= "/api/modules" (get-in tree [3 1 :href])))
+        (is (= "https://example.com/things" (get-in tree [4 1 :href])))))
+
+    (testing "a form ACTION is never touched — it submits to a server"
+      ;; scoped to :href deliberately. An :action is a server submission, not a
+      ;; client route, and the client router has nothing to say about it
+      (is (= "/api/save" (get-in (at "/p/x") [5 1 :action]))))
+
+    (testing "at the ROOT the transform changes nothing"
+      ;; `prefixed` with "" is identity, so an app served at the root pays
+      ;; nothing and reads identically
+      (is (= (things {}) (at ""))))
+
+    (testing "and what slopp PREFIXES is exactly what click-target CLAIMS"
+      ;; the round trip that makes the pair a pair: a link the render prefixed
+      ;; is a link the click handler will strip and route. If these two ever
+      ;; disagree, every link in the app is either dead or leaves the page
+      (doseq [base ["" "/p/x" "/deep/mount"]]
+        (let [tree (webapp/prefix-links base routes (things {}))
+              href (get-in tree [1 1 :href])]
+          (is (= "/things"
+                 (webapp/click-target {:webapp/href href :webapp/button 0}
+                                      base routes))
+              (str "render and click disagree under base " (pr-str base)
+                   " — href was " (pr-str href))))))))

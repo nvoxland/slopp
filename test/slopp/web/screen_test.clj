@@ -11,7 +11,7 @@
   its failure mode is a green suite over a blank page."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [slopp.web.screen :as web.screen] [slopp.web.screen.hiccup :as hiccup]))
+            [slopp.web.screen :as web.screen] [slopp.web.screen.hiccup :as hiccup] [slopp.webapp :as webapp]))
 
 (deftest a-block-never-glues-to-the-text-around-it
   ;; THE founding bug, and the reason a naive flatten is not merely uglier but
@@ -1268,3 +1268,57 @@
                     [:ul [:li [:a {:href "/y"} [:p "cell"]]]]])]
         (is (empty? (filter #(re-find #"[<>]" %) out))
             (str "prose is sentences, unescaped and unmarked: " (pr-str out)))))))
+
+(deftest a-MOUNTED-webapp-can-be-clicked-through-headlessly
+  ;; The round trip end to end, through the fake browser rather than through the
+  ;; two functions separately. An app served behind a proxy at `/p/x` renders
+  ;; links carrying that prefix, and a reader clicking one arrives at the screen
+  ;; it names.
+  ;;
+  ;; This is the assertion that would have caught every version of the bug the
+  ;; mount point has produced: a link that works at the root and 404s behind the
+  ;; proxy, a `prefix-links` that stopped being applied, a click handler that
+  ;; strips a prefix the render never added. All three are one test now, because
+  ;; ONE producer adds the prefix and ONE consumer takes it off.
+  ;;
+  ;; It lives here rather than beside `slopp.webapp` because `click!` is
+  ;; package-private to `slopp.web.*`, and the module edge this needs is already
+  ;; declared test-only — production code under `slopp.web` still may not reach
+  ;; `webapp`.
+  (let [state  (atom {})
+        things (fn [_s] [:main
+                         [:h1 "Things"]
+                         [:a {:href "/things/42"} "Anvil"]])
+        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        app    (webapp/wiring
+                {:webapp/state  state
+                 :webapp/base   "/p/x"
+                 :webapp/routes [["/things"     things]
+                                 ["/things/:id" thing]]})
+        s      (web.screen/open! (webapp/driver app))]
+
+    (testing "a reader visits the url they would actually type"
+      ;; the FULL url, mount point included — which is what is in the address
+      ;; bar. A headless drive that visited app-relative paths would exercise a
+      ;; url no browser ever produces
+      (web.screen/visit! s "/p/x/things")
+      (is (re-find #"Things" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "the rendered link carries the mount point"
+      (is (re-find #"/p/x/things/42" (pr-str ((:webapp/view app) @state)))
+          (pr-str ((:webapp/view app) @state))))
+
+    (testing "and CLICKING it lands on the screen it names"
+      ;; the whole point: the href the render produced is one the navigation
+      ;; understands. If prefix and strip disagree by a character, this is the
+      ;; assertion that says so
+      (web.screen/click! s "Anvil")
+      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s))
+      (is (= thing (:screen @state))))
+
+    (testing "a url outside the mount point routes nowhere"
+      ;; `/things` is not a url under `/p/x`, and treating it as one would mean
+      ;; guessing that a foreign path was meant to be ours
+      (web.screen/visit! s "/things")
+      (is (= thing (:screen @state))
+          "the app must not have moved for a url that was never its own"))))
