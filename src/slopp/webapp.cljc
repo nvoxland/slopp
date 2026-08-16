@@ -24,35 +24,52 @@
   like. The moment it does, it is presentation and belongs to the app.")
 
 (defn- arrive
-  "The state transition a navigation IS: `path` and its route in, everything the
-  previous screen knew out.
+  "The state transition a navigation IS: `path` and its route in, everything
+  belonging to the OLD address out.
 
   Pure, and separate from [[navigate!]] for the reason every decision here is
   separate from its performance — what a navigation MEANS is assertable without
   an atom, a plug-in or a clock.
 
-  **`:loads` is EMPTIED, not bumped**, and the difference is a property rather
-  than a spelling. Emptying makes every load `:absent` — nothing has been
-  requested for this screen yet, which is the true statement — and
-  [[begin-load]] then moves it to `:loading`. A token bumped in place never
+  **The question for any key is: is it part of the ADDRESS, or part of the
+  session?** Address-scoped state dies with the route. Session-scoped state — a
+  nav pane, a signed-in user, a compose box — deliberately survives, and a loop
+  that cleared it would be making a membership decision about an application's
+  own state from inside the framework.
+
+  So the membership is DECLARED. `:webapp/address-keys` defaults to `#{:call}`,
+  because most ad-hoc call panels are route-scoped and a framework should be
+  right without configuration; an app whose effect panel spans screens says
+  `#{}`, and an app with its own address-scoped keys names them.
+
+  The reason for that default is sharper than staleness, and it is slopp-ui's:
+  a call form's inputs are not merely stale under the new route, they are TYPED
+  to the old one. `:m` is a parameter of `/api/module/:m` and means nothing to
+  `/api/search`, so carrying it across shows a form claiming the new endpoint
+  takes arguments it does not have.
+
+  **`:data`, `:error` and `:loads` clear regardless**, and that is not the same
+  kind of decision: the loop WRITES them, so clearing them is housekeeping
+  rather than a claim about the app's state. An app cannot opt a screen's
+  fetched answer into surviving the screen it was fetched for.
+
+  **`:loads` is EMPTIED, not bumped.** Emptying makes every load `:absent` —
+  nothing has been requested for this screen yet, which is the true statement —
+  and [[begin-load]] then moves it to `:loading`. A token bumped in place never
   passes through `:absent`, so the four-state model quietly becomes three and a
-  view can no longer tell an unasked load from one that answered nil.
-
-  Caught by slopp-ui reading the first draft, which merged emptying and token
-  minting into one counter. They answer different questions: what is KNOWN
-  about this screen, and whether an answer in flight is still wanted.
-
-  `:data` and `:error` go too. Leaving the previous screen's answers on display
-  under the new url is the SPA failure where the page and the address bar
-  disagree — a moment of loading is honest, a stale screen is not."
-  [state path route]
-  (assoc state
-         :path   path
-         :screen (:screen route)
-         :params (:params route)
-         :data   nil
-         :error  nil
-         :loads  {}))
+  view can no longer tell an unasked load from one that answered nil. Caught by
+  slopp-ui reading the first draft, which merged emptying and token minting into
+  one counter: they answer different questions."
+  [state path route address-keys]
+  (as-> state s
+    (apply dissoc s address-keys)
+    (assoc s
+           :path   path
+           :screen (:screen route)
+           :params (:params route)
+           :data   nil
+           :error  nil
+           :loads  {})))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
@@ -100,7 +117,7 @@
   (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/view
                   :webapp/fetch :webapp/render :webapp/push-url! :webapp/derive
                   :webapp/call :webapp/request-for :webapp/act :webapp/actions
-                  :webapp/boot}
+                  :webapp/address-keys :webapp/boot}
         unknown (remove known (keys app))
         listed  (fn [ks] (apply str (interpose ", " (map pr-str (sort-by str ks)))))]
     (when (seq unknown)
@@ -117,10 +134,15 @@
                                :webapp/routes " — (fn [path] {:screen :params}); without one no path means anything"
                                :webapp/view   " — (fn [state] hiccup); without one there is no screen to read"))
                         {:webapp/missing-key k}))))
-    (merge {:webapp/base      ""
-            :webapp/fetch     (fn [_screen _params ok _err] (ok nil))
-            :webapp/render    (fn [_state] nil)
-            :webapp/push-url! (fn [_url] nil)}
+    (merge {:webapp/base         ""
+            :webapp/fetch        (fn [_screen _params ok _err] (ok nil))
+            :webapp/render       (fn [_state] nil)
+            :webapp/push-url!    (fn [_url] nil)
+            ;; most ad-hoc call panels are route-scoped, and a framework should
+            ;; be right without configuration — but it is a SET so an app whose
+            ;; effect panel spans screens can say #{}, and one with its own
+            ;; address-scoped keys can name them
+            :webapp/address-keys #{:call}}
            app)))
 
 (defn- begin-load
@@ -174,9 +196,9 @@
   whether the answer is still wanted, so deriving there pays for every abandoned
   load. An expensive value computed FROM a response — a layout, a parse — is
   guarded by the same check as the write it accompanies."
-  [{:webapp/keys [state base routes fetch render push-url! derive]} path push?]
+  [{:webapp/keys [state base routes fetch render push-url! derive address-keys]} path push?]
   (when push? (push-url! (str base path)))
-  (swap! state arrive path (routes path))
+  (swap! state arrive path (routes path) address-keys)
   (render @state)
   (when (:screen @state)
     (let [{:keys [screen params]} @state
@@ -249,8 +271,23 @@
   `:webapp/request-for`, a pure function of state and action, so every judgement
   about which request an action means stays somewhere a JVM test can read it.
 
+  **A nil request DECLINES, and that is a channel rather than a nil-check.** It
+  is how the pure derivation refuses to perform — an unconsented press, an
+  incomplete form — which puts the gate in a function a JVM test can read
+  instead of in this one. If this threw on nil, every app's arming pattern
+  would have to move somewhere worse.
+
   `:running` is written and rendered BEFORE the call, so a slow endpoint says so
   instead of looking like a button that did nothing.
+
+  **The effect entry MERGES rather than being replaced**, which is the opposite
+  of [[begin-load]] and the asymmetry is the point. An effect's INPUTS live
+  beside its status — what the reader typed into the call form, and their
+  consent — so a fresh map blanks the form the moment the call starts, and the
+  panel whose job is to show what was SENT beside what came back loses the sent
+  half exactly when it matters. A load has no inputs the reader supplied, so
+  replacing its entry is correct there and wrong here. Caught by slopp-ui
+  reading the first version.
 
   **No freshness token, unlike a navigation, and the difference is real rather
   than an omission.** A navigation can be superseded by another navigation; this
@@ -260,20 +297,12 @@
   guess."
   [app request]
   (when request
-    (let [{:webapp/keys [state call render]} app]
-      (swap! state assoc :call {:status :running :request request})
-      (render @state)
+    (let [{:webapp/keys [state call render]} app
+          record! (fn [m] (swap! state update :call merge m) (render @state))]
+      (record! {:status :running :request request})
       (call request
-            (fn [response]
-              (swap! state assoc :call {:status  :done
-                                        :request request
-                                        :response response})
-              (render @state))
-            (fn [message]
-              (swap! state assoc :call {:status  :failed
-                                        :request request
-                                        :error   message})
-              (render @state))))))
+            (fn [response] (record! {:status :done :request request :response response}))
+            (fn [message]  (record! {:status :failed :request request :error message}))))))
 
 (defn- dispatch-for!
   "The driver's `:dispatch`, partial'd over `app` — see [[navigate-for!]] for

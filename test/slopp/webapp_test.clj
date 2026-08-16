@@ -257,3 +257,139 @@
                    :webapp/actions {:thing/delete {:effectful? true}}})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"request-for"
                               ((:dispatch (webapp/driver bare)) [:thing/delete 1] nil)))))))
+
+(deftest effect-state-MERGES-because-a-request-keeps-its-inputs-beside-its-status
+  ;; slopp-ui's catch, and it would have bitten them on migration. Their effect
+  ;; entry holds `{:params … :armed? … :status … :request … :response …}` — the
+  ;; params are what the reader TYPED into the call form and `:armed?` is their
+  ;; consent, and both live in the same entry as the status.
+  ;;
+  ;; A framework `perform!` that writes a FRESH map blanks them the moment the
+  ;; call starts: the form empties while it is running, and the panel whose job
+  ;; is to show WHAT WAS SENT beside what came back has lost the sent half in
+  ;; the window where it matters most.
+  ;;
+  ;; **This is the opposite of a LOAD, and the asymmetry is the point.**
+  ;; `begin-load` REPLACES its entry, correctly — a fetch has no inputs the
+  ;; reader supplied, so there is nothing to preserve and a stale entry would
+  ;; only be a lie. An effect's inputs and its status are one entry, so it
+  ;; merges.
+  (let [state (atom {})
+        app   (webapp/wiring
+               {:webapp/state       state
+                :webapp/routes      (fn [_] {:screen :home :params {}})
+                :webapp/view        (fn [_] [:p "x"])
+                :webapp/act         (fn [s _ _] s)
+                :webapp/actions     {:go {:effectful? true}}
+                :webapp/request-for (fn [s _action]
+                                      ;; nil until the reader consents — the
+                                      ;; DECLINE channel, not a missing value
+                                      (when (:armed? (:call s))
+                                        {:method :post :path "/go"}))
+                :webapp/call        (fn [_req ok _err] (ok {:status 200}))})
+        {:keys [dispatch]} (webapp/driver app)]
+
+    (testing "a nil request DECLINES — nothing is called and nothing is written"
+      ;; the arming gate lives in the pure derivation so neither the browser
+      ;; shell nor the headless one can forget it; if perform! threw here, the
+      ;; gate would have to move somewhere a JVM test cannot read
+      (swap! state assoc :call {:params {:name "x"}})
+      (dispatch [:go] nil)
+      (is (= {:params {:name "x"}} (:call @state))
+          (str "a decline must not write a status: " (pr-str (:call @state)))))
+
+    (testing "and when it consents, the INPUTS survive the call starting"
+      (swap! state update :call assoc :armed? true)
+      (dispatch [:go] nil)
+      (is (= {:name "x"} (get-in @state [:call :params]))
+          (str "the reader's typed inputs must still be there beside the answer: "
+               (pr-str (:call @state))))
+      (is (true? (get-in @state [:call :armed?])) (pr-str (:call @state)))
+      (is (= :done (get-in @state [:call :status])) (pr-str (:call @state)))
+      (is (= {:status 200} (get-in @state [:call :response])) (pr-str (:call @state))))
+
+    (testing "navigating away DOES clear it — leaving the panel is leaving it"
+      ;; the same display-honesty argument as :data. A call panel showing the
+      ;; previous screen's request under a new url is the page and the address
+      ;; bar disagreeing
+      (webapp/navigate! app "/elsewhere" false)
+      (is (nil? (:call @state)) (pr-str @state)))))
+
+(deftest what-dies-with-the-ADDRESS-is-declared-not-hardcoded
+  ;; slopp-ui's objection, and it is my own critique of their `nav` handed back:
+  ;; clearing `:call` unconditionally is a MEMBERSHIP decision made in the loop
+  ;; rather than declared by the app. Same shape as a framework namespace
+  ;; clearing an application's keys, with a framework-owned key instead.
+  ;;
+  ;; **The rule that decides membership is address-vs-session**, and their
+  ;; reason for it is sharper than staleness: a call form's inputs are not
+  ;; merely stale under the new route, they are TYPED to the old one. `:m` is a
+  ;; parameter of `/api/module/:m` and means nothing to `/api/search`, so
+  ;; carrying it shows a form claiming the new endpoint takes arguments it does
+  ;; not have.
+  ;;
+  ;; But an effect panel is not ALWAYS address-scoped — a compose box, a global
+  ;; command palette, a filter spanning screens. Clear as law and those apps
+  ;; have no seam, so their inputs live somewhere the framework cannot see,
+  ;; which is how state ends up in two places.
+  ;;
+  ;; So: the DEFAULT is address-scoped, because most call panels are and a
+  ;; framework should be right without configuration — and it is a declared set
+  ;; rather than a literal, so an app can say otherwise and can name its own
+  ;; keys too.
+  (let [mk (fn [extra]
+             (let [state (atom {})]
+               [state (webapp/wiring
+                       (merge {:webapp/state  state
+                               :webapp/routes (fn [p] {:screen (keyword (subs p 1)) :params {}})
+                               :webapp/view   (fn [_] [:p "x"])}
+                              extra))]))]
+
+    (testing "by DEFAULT the effect entry dies with the address"
+      (let [[state app] (mk nil)]
+        (swap! state assoc :call {:params {:m "slopp.web"}})
+        (webapp/navigate! app "/search" false)
+        (is (nil? (:call @state))
+            (str "a form typed to the old endpoint must not claim the new one"
+                 " takes those arguments: " (pr-str @state)))))
+
+    (testing "an app whose effect state is SESSION-scoped says so, and keeps it"
+      ;; a compose box survives navigation because it is not about the address
+      (let [[state app] (mk {:webapp/address-keys #{}})]
+        (swap! state assoc :call {:params {:body "half a message"}})
+        (webapp/navigate! app "/search" false)
+        (is (= {:params {:body "half a message"}} (:call @state)) (pr-str @state))))
+
+    (testing "and the declaration reaches the app's OWN keys, not just :call"
+      ;; which is what makes this the rule rather than a switch for one key
+      (let [[state app] (mk {:webapp/address-keys #{:call :lens}})]
+        (swap! state assoc :call {:params {:m "x"}} :lens :detail :kept true)
+        (webapp/navigate! app "/search" false)
+        (is (nil? (:call @state)) (pr-str @state))
+        (is (nil? (:lens @state)) (pr-str @state))
+        (is (true? (:kept @state))
+            (str "and touches nothing it was not told about: " (pr-str @state)))))
+
+    (testing "the loop's OWN machinery clears regardless of the declaration"
+      ;; :data, :error and :loads are written by the loop, so clearing them is
+      ;; not a membership decision about the app's state — an app cannot opt a
+      ;; screen's fetched answer into surviving the screen.
+      ;;
+      ;; Routed to NOWHERE on purpose: with no screen there is no fetch, so
+      ;; :absent is observable. On a routed screen the default fetch answers
+      ;; synchronously and the load is :ready before anything can look — which
+      ;; is correct, and is why asserting :absent there would have been
+      ;; asserting the wrong thing rather than finding a bug.
+      (let [state (atom {})
+            app   (webapp/wiring {:webapp/state        state
+                                  :webapp/routes       (constantly nil)
+                                  :webapp/view         (fn [_] [:p "x"])
+                                  :webapp/address-keys #{}})]
+        (swap! state assoc :data [:old] :error "old" :loads {:main {:status :ready}})
+        (webapp/navigate! app "/search" false)
+        (is (nil? (:data @state)) (pr-str @state))
+        (is (nil? (:error @state)) (pr-str @state))
+        (is (= :absent (webapp/load-status @state :main))
+            (str "nothing has been requested for this screen, which is the true"
+                 " statement and the one a bumped token cannot make: "
+                 (pr-str @state)))))))
