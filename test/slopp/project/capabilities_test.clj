@@ -438,7 +438,7 @@
     ;; `slopp.webapp` any more than a cli app names `slopp.cli` or a rest app
     ;; names `slopp.rest`.
     (is (= "slopp.webapp" (:ns-prefix (capabilities/capability "webapp"))))
-    (is (= [:web/spa] (:entry-markers (capabilities/capability "webapp")))
+    (is (= [:web/client-routes] (:entry-markers (capabilities/capability "webapp")))
         "declaring that the browser owns some paths IS using the browser framework")
     ;; and NOT `:web/page`, which the first version used. That marker declares
     ;; an entry a READER can open, and a server-rendered HTML app marks one to

@@ -7,15 +7,15 @@
   `:selftest-note` saying so.
 
   Fixtures enable `webapp`, which turns `http` on with it. That is not
-  incidental: `webapp-spa-consequences-check` gated on NOTHING until wave 4, so
+  incidental: `webapp-client-routes-consequences-check` gated on NOTHING until wave 4, so
   it fired on every store while the arms report claimed an owner controlled it
   — the same defect slopp-ui measured in rest's contract advisories. A fixture
   that enables the capability is what makes the gating observable.
 
   Neighbours: `slopp.edit.webapp-test` covers the write-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.rules.webapp :as rules.webapp] [slopp.store :as store]))
 
-(deftest ^:external declaring-a-spa-prefix-says-what-it-changed
-  ;; `:web/spa` is the biggest behavioural change available in one piece of
+(deftest ^:external declaring-CLIENT-ROUTES-says-what-it-changed
+  ;; `:web/client-routes` is the biggest behavioural change available in one piece of
   ;; metadata: every path under the prefix stops being a 404 and starts being a
   ;; 200, with not-found moving into the client. Nothing said so — the change
   ;; was noticed only because two existing tests asserted the old status.
@@ -26,31 +26,31 @@
     (try
       (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
                         :prompt "the browser owns routing here — this turns http on with it")
-      (ops/ingest! sess 'spa.ui
-                   (str "(ns spa.ui)\n"
+      (ops/ingest! sess 'browser.ui
+                   (str "(ns browser.ui)\n"
                         "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
                         "        :web/client false :web/response :string}\n"
                         "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n"))
       (external/done! sess :label "baseline")
       (testing "adding the declaration states the consequence"
-        (ops/edit-replace! sess 'spa.ui 'doc
+        (ops/edit-replace! sess 'browser.ui 'doc
                            (str "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
                                 "        :web/client false :web/response :string\n"
-                                "        :web/spa [\"/store\"]}\n"
+                                "        :web/client-routes [\"/store\"]}\n"
                                 "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})")
                            :prompt "the client routes /store")
-        (let [f (get-in (external/done! sess :label "spa") [:findings :webapp-spa-consequences])]
-          (is (some #(= 'spa.ui/doc (:form %)) f) (pr-str f))
+        (let [f (get-in (external/done! sess :label "client-routes") [:findings :webapp-client-routes-consequences])]
+          (is (some #(= 'browser.ui/doc (:form %)) f) (pr-str f))
           (is (re-find #"200" (str (:teach (first f)))) (pr-str f))
           (is (re-find #"(?i)not-found" (str (:teach (first f)))) (pr-str f))))
       (testing "it does NOT re-fire while the declaration merely stands"
-        (ops/edit-replace! sess 'spa.ui 'doc
+        (ops/edit-replace! sess 'browser.ui 'doc
                            (str "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
                                 "        :web/client false :web/response :string\n"
-                                "        :web/spa [\"/store\"]}\n"
+                                "        :web/client-routes [\"/store\"]}\n"
                                 "  doc \"The document, reworded.\" [_] {:status 200 :body \"<html></html>\"})")
                            :prompt "touch the form without touching the declaration")
-        (let [f (get-in (external/done! sess :label "again") [:findings :webapp-spa-consequences])]
+        (let [f (get-in (external/done! sess :label "again") [:findings :webapp-client-routes-consequences])]
           (is (nil? f) (pr-str f))))
       (finally (ops/close! sess)))))
 

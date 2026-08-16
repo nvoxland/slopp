@@ -104,10 +104,10 @@
                  performer among its namespaces"
     :blind      nil}
 
-   {:kind       :spa/client-routing
+   {:kind       :webapp/client-routing
     :leaves     "a prefix declared as client-routed"
     :to         "a route table that lives in the browser"
-    :markers    #{:web/spa}
+    :markers    #{:web/client-routes}
     :checked-by nil
     :blind      "declaring it makes EVERY path under the prefix answer 200 and
                  moves not-found into the client. Nothing compares the
@@ -145,14 +145,14 @@
                  foreign server serves that path or still does. This is the
                  crossing that is honest about being one"}
 
-   {:kind       :spa/client-path
+   {:kind       :webapp/client-path
     :leaves     "a link written as a CLIENT-ROUTER key, not a server path"
     :to         "this app's own router, after the render prefixes it"
     :markers    #{:web/client-path}
     :checked-by nil
     :blind      "nothing joins the three parts up. The literal is a client
                  route, the mount point arrives from the render, and a
-                 :web/spa fallback answers the result — so a typo'd literal,
+                 :web/client-routes fallback answers the result — so a typo'd literal,
                  a prefix that stopped being applied, and a client route
                  nobody registered all look the same from here. Distinct from
                  :http/foreign-route deliberately: this target IS ours, and
@@ -249,7 +249,7 @@
                        [:web/path :web/method :web/auth :web/reads :web/effects
                         :web/read :web/effect :web/effectful :web/request
                         :web/response :web/client :web/context
-                        :web/spa :web/external-path :web/client-path
+                        :web/client-routes :web/external-path :web/client-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
 

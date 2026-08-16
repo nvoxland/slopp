@@ -99,7 +99,7 @@
    :endpoints
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]
-              ;; a :web/spa var contributes catch-all rows pointing at the SAME
+              ;; a :web/client-routes var contributes catch-all rows pointing at the SAME
               ;; handler; they are one endpoint, so keep the declared path only
               :when (and (= (:path row) (str (:web/path m)))
                          (not (false? (:web/client m))))]

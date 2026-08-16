@@ -1,7 +1,7 @@
 (ns slopp.api.endpoints
   "The reviewer UI's JSON boundary — one function per endpoint.
 
-  This is what D-spa is organised around: an explicit, typed, independently
+  This is what D-webapp is organised around: an explicit, typed, independently
   testable surface. Each endpoint declares its route, its auth, the reads it
   needs and a `:web/response` contract on the name, so it is a pure function
   of data — its test is `=` with no mock, no browser and no running server,

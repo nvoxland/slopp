@@ -160,11 +160,11 @@
                 " that predicate measured 4-5 false positives out of 5; a"
                 " defmethod's dispatch value at index 2 cannot shift and is not"
                 " flagged")}
-   {:rule :webapp-spa-consequences :grain :done
+   {:rule :webapp-client-routes-consequences :grain :done
     :escape "nothing to discharge — it states a consequence once, for the episode that declared the prefix"
-    :teach (str "an endpoint gained :web/spa this episode: every path under the"
+    :teach (str "an endpoint gained :web/client-routes this episode: every path under the"
                 " declared prefix now answers 200 instead of 404, and NOT-FOUND"
-                " moves into the client. Correct, and what :web/spa is for — but"
+                " moves into the client. Correct, and what :web/client-routes is for — but"
                 " a real semantic change that no surface mentioned, and one that"
                 " two existing tests caught only by asserting the old status."
                 " The prefix ROOT is not covered by the fallback and still needs"

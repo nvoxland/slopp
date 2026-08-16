@@ -949,16 +949,16 @@
     :sweep true
     :fires-on "(ns rf.core)\n(defn scan [s] (re-find #\"rf.gone\" s))\n"}
    ;; the single biggest behavioural consequence available in one piece of
-   ;; metadata, and nothing said it: declaring :web/spa turns every path under
+   ;; metadata, and nothing said it: declaring :web/client-routes turns every path under
    ;; the prefix from 404 into 200 and moves not-found into the client.
-   {:key :webapp-spa-consequences :severity :advisory :applies-to :production :check #'rules.webapp/webapp-spa-consequences-check
+   {:key :webapp-client-routes-consequences :severity :advisory :applies-to :production :check #'rules.webapp/webapp-client-routes-consequences-check
     :sweep (str "states a consequence ONCE, for the episode that declared the"
                 " prefix — there is nobody to tell about a declaration that"
                 " predates the sweep")
     :selftest-note (str "fires only when the declaration is NEW vs the last-done"
                         " baseline, so a source-only fixture (which has no"
                         " baseline) cannot show the transition; covered by"
-                        " api.web-test/declaring-a-spa-prefix-says-what-it-changed")}
+                        " api.web-test/declaring-CLIENT-ROUTES-says-what-it-changed")}
    ;; Pattern 1's bug class, with the predicate that finally discriminates:
    ;; not "positional access" (4-5 false positives out of 5) but indexing a
    ;; position whose MEANING depends on an optional earlier element, in code

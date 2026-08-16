@@ -1627,10 +1627,10 @@
   ;; loop so a browser app never names `slopp.webapp`. Third capability, third
   ;; time.
   ;;
-  ;; **The marker is `:web/spa`, not `:web/page`, and the distinction is the one
+  ;; **The marker is `:web/client-routes`, not `:web/page`, and the distinction is the one
   ;; that kept `screen` in `http`.** `:web/page` declares *here is an entry a
   ;; reader can open* — inspectability. A server-rendered HTML app marks a page
-  ;; to be LOOKED AT, and it has no browser code at all. `:web/spa` declares
+  ;; to be LOOKED AT, and it has no browser code at all. `:web/client-routes` declares
   ;; *the browser owns these paths*, which is the capability's own definition.
   ;;
   ;; Caught by slopp-ui in a pre-flight, and the blast radius was small — one
@@ -1644,16 +1644,16 @@
   ;; turned out to be MISSING from http's. The set is the least visible
   ;; declaration in the catalog and nothing fails when it is wrong — it just
   ;; vendors the wrong thing.
-  (let [spa  (str "(ns shop.ui)\n\n"
+  (let [browser-app  (str "(ns shop.ui)\n\n"
                   "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                  "        :web/response :string :web/spa [\"/things\"]}\n"
+                  "        :web/response :string :web/client-routes [\"/things\"]}\n"
                   "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n")
         page (str "(ns shop.server)\n\n"
                   "(defn ^:web/page app \"A server-rendered app, for a reader.\" []\n"
                   "  {:web/routes []})\n")]
 
     (testing "declaring client-side routing IS using the browser framework"
-      (let [st (store/ingest (store/empty-store) 'shop.ui spa)]
+      (let [st (store/ingest (store/empty-store) 'shop.ui browser-app)]
         (is (contains? (engine/used-families st) "webapp")
             (pr-str (engine/used-families st)))))
 
@@ -1677,5 +1677,5 @@
       (let [row (first (filter #(= "webapp" (:capability %))
                                capabilities/capability-catalog))]
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
-        (is (= [:web/spa] (:entry-markers row))
+        (is (= [:web/client-routes] (:entry-markers row))
             (str "and :web/page is NOT among them, deliberately: " (pr-str row)))))))

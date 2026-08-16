@@ -48,9 +48,9 @@
            ;; the client-route prefixes this document also answers for, when it
            ;; declares any. Surfaced rather than expanded into synthetic
            ;; catch-all rows: query_surface should show what the author
-           ;; DECLARED, and three `/store/*spa-path` rows would read as
+           ;; DECLARED, and three `/store/*client-path` rows would read as
            ;; surface nobody wrote.
-           :web/spa   (:web/spa meta)
+           :web/client-routes   (:web/client-routes meta)
            :schema?   (contains? meta :web/response)
            :effectful? (boolean (:web/effectful meta))})
         (edit.http/web-endpoint-rows store)))
@@ -582,7 +582,7 @@
     this store (nginx, another service). A genuine crossing, honest about it.
   - `^{:web/client-path \"why\"}` — the target is THIS app's own path, and the
     literal is a key the CLIENT router parses. Nothing serves it as written:
-    the render adds the mount point first, and a `:web/spa` fallback answers it.
+    the render adds the mount point first, and a `:web/client-routes` fallback answers it.
 
   One marker used to serve both, and the crossings inventory then reported an
   SPA's own screens as leaving for \"somebody else's server\" — seven forms of
@@ -658,14 +658,14 @@
                                             (str file-prefix "/"
                                                  (subs path (inc (count url-prefix))))))))
                              mounts))
-        ;; a document declaring :web/spa answers for client routes BELOW each
+        ;; a document declaring :web/client-routes answers for client routes BELOW each
         ;; prefix, so a link to /store/form/f1 is served even though no
         ;; endpoint declares that path. Scoped, exactly as the fallback rows
         ;; are: a path outside every prefix still dangles, which is the half
         ;; of this that keeps the gate worth having.
-        spa-prefixes (into #{} (mapcat :web/spa) routes)
+        client-route-prefixes (into #{} (mapcat :web/client-routes) routes)
         client-route? (fn [path]
-                        (some #(str/starts-with? path (str % "/")) spa-prefixes))
+                        (some #(str/starts-with? path (str % "/")) client-route-prefixes))
         served? (fn [{:keys [kind method path]}]
                   (case kind
                     :exact  (boolean (or (router/match routes method path)

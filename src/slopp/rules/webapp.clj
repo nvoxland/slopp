@@ -12,7 +12,7 @@
   from it, because a rule that refuses at one surface and a report that lists
   at another must agree, and they only can if they are one derivation.
 
-  Both advisories gate on `webapp.enabled`. `webapp-spa-consequences-check`
+  Both advisories gate on `webapp.enabled`. `webapp-client-routes-consequences-check`
   gated on nothing until wave 4 — the same defect slopp-ui measured in `rest`'s
   contract advisories, where a check with no capability test runs on every
   store while the arms report claims its owner controls it.
@@ -24,8 +24,8 @@
             [slopp.store :as store]
             [slopp.project.capabilities :as capabilities]))
 
-(defn webapp-spa-consequences-check
-  "Done-advisory: an endpoint gained `:web/spa` this episode — state what that
+(defn webapp-client-routes-consequences-check
+  "Done-advisory: an endpoint gained `:web/client-routes` this episode — state what that
    changed, once. Inert until the store opts into `webapp`.
 
    Declaring a client-routed prefix is the single biggest behavioural change
@@ -35,14 +35,14 @@
    fetches, gets its own 404, and renders a not-found screen. **The HTTP status
    for every path under that prefix changed from 404 to 200.**
 
-   That is correct — it is what `:web/spa` is FOR — but it is a real semantic
+   That is correct — it is what `:web/client-routes` is FOR — but it is a real semantic
    change that only surfaced here because two existing tests happened to assert
    the old status.
 
    Fires only for the episode that ADDED the declaration, like
    `shell-widening`: it asks once, while the reason is still in context, and
    cannot decay into a standing warning to scroll past. It teaches rather than
-   checks, and the boundary inventory still reports `:spa/client-routing` as an
+   checks, and the boundary inventory still reports `:webapp/client-routing` as an
    UNCHECKED exit — nothing compares the client's route table to the server's,
    and a teach is not a check.
 
@@ -56,17 +56,17 @@
     (let [ds       (store/deltas st*)
           baseline (->> ds (filter #(= :done (:op %))) last :id)
           old-srcs (when baseline (store/sources-at st* baseline))
-          spa?     (fn [form] (when (and (seq? form) (symbol? (second form)))
-                                (:web/spa (meta (second form)))))]
+          declares-client-routes?     (fn [form] (when (and (seq? form) (symbol? (second form)))
+                                (:web/client-routes (meta (second form)))))]
       (vec (for [fid changed
                  :let [e (store/form-by-id st* fid)]
                  :when (and e (:name e))
                  :let [new (store/form-sexpr (:node e))
                        old (some-> (get old-srcs fid) p/parse-string store/form-sexpr)
-                       ps  (spa? new)]
+                       ps  (declares-client-routes? new)]
                  ;; only when the declaration is NEW: either the form is new, or
                  ;; its previous version did not carry one
-                 :when (and ps (not (spa? old)))]
+                 :when (and ps (not (declares-client-routes? old)))]
              {:form  (symbol (str (store/ns-of-form-id st* fid)) (str (:name e)))
               :teach (str "every path under " (pr-str ps) " now answers 200, not 404 —"
                           " the server serves this document for any path below the"

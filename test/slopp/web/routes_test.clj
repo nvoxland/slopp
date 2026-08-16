@@ -6,7 +6,7 @@
 
   The SPA fallback is here too, and it is the case that needs saying out loud:
   serving deep links under a declared prefix must not swallow a genuine 404.
-  That is the same behavioural change `http-spa-consequences` states at the
+  That is the same behavioural change `http-client-routes-consequences` states at the
   done point — the rule tells the author once, and this holds the code to it."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.web.routes :as routes] [slopp.web.router :as router]))
@@ -63,22 +63,22 @@
         (is (var? (get effects :user/insert)))
         (is (= {:user/id "7"} ((get reads :user/by-id) {} "7")))))))
 
-(deftest spa-fallback-serves-deep-links-without-swallowing-404s
+(deftest client-route-fallback-serves-deep-links-without-swallowing-404s
   ;; A client-routed app owns paths the server has no route for: /store/ns/foo
   ;; is real to the browser and meaningless to the router, so a refresh 404s.
   ;; The fix is not a catch-all — a catch-all at the root serves the app
   ;; document for EVERY unmatched path, and an app that can never 404 has no
   ;; way to tell a typo from a page.
   ;;
-  ;; So it is DECLARED, per prefix: `:web/spa ["/store"]` says "I am the
+  ;; So it is DECLARED, per prefix: `:web/client-routes ["/store"]` says "I am the
   ;; document for client routes under /store", and nothing else changes.
   (let [doc  {:handler :app :method :get :path "/" :auth :public}
         rows (concat [doc
                       {:handler :ns-page :method :get :path "/store/ns/:ns" :auth :public}]
-                     (routes/spa-rows doc ["/store" "/change"]))]
+                     (routes/client-route-rows doc ["/store" "/change"]))]
     (testing "one catch-all row per declared prefix, same handler"
-      (is (= 2 (count (routes/spa-rows doc ["/store" "/change"]))))
-      (is (every? #(= :app (:handler %)) (routes/spa-rows doc ["/store" "/change"]))))
+      (is (= 2 (count (routes/client-route-rows doc ["/store" "/change"]))))
+      (is (every? #(= :app (:handler %)) (routes/client-route-rows doc ["/store" "/change"]))))
     (testing "a real route still wins — the fallback never steals it"
       (is (= :ns-page (:handler (router/match rows :get "/store/ns/demo.core")))))
     (testing "a deep client route the server has no row for gets the document"

@@ -16,15 +16,15 @@
   `slopp.web/context` checks the assembled result against what the routes
   declare rather than trusting the namespace list it was handed.
 
-  `spa-rows` is the one place this namespace generates rather than reads, and
+  `client-route-rows` is the one place this namespace generates rather than reads, and
   it is deliberately narrow: a client-routed document declares the prefixes it
-  owns (`:web/spa [\"/store\"]`) and gets one scoped catch-all each. A root
+  owns (`:web/client-routes [\"/store\"]`) and gets one scoped catch-all each. A root
   catch-all would be worse than the bug it fixes — an app that can never 404
   has no way left to distinguish a typo from a page.")
 
-(defn ^:export spa-rows
+(defn ^:export client-route-rows
   "The catch-all rows a client-routed document contributes — one per declared
-  prefix in `:web/spa`, all pointing at the same handler as `row`.
+  prefix in `:web/client-routes`, all pointing at the same handler as `row`.
 
   A client-routed app owns paths the server has no route for: `/store/ns/foo`
   is real to the browser and meaningless to the router, so refreshing it 404s.
@@ -32,7 +32,7 @@
   the app document for EVERY unmatched path, and an app that can never 404 has
   no way left to distinguish a typo from a page.
 
-  So the fallback is DECLARED and SCOPED. `:web/spa [\"/store\"]` says \"I am
+  So the fallback is DECLARED and SCOPED. `:web/client-routes [\"/store\"]` says \"I am
   the document for client routes under /store\", and paths outside every
   declared prefix still 404 exactly as before.
 
@@ -47,7 +47,7 @@
   side effect of a fallback."
   [row prefixes]
   (vec (for [p prefixes]
-         (assoc row :path (str p "/*spa-path")))))
+         (assoc row :path (str p "/*client-path")))))
 
 (defn ^:export from-namespaces
   "Route rows from the loaded namespaces' public vars carrying `:web/path`
@@ -57,22 +57,25 @@
   Rows: {:handler <the var, callable> :method :path :auth :web/effects
   :web/reads :effectful?}.
 
-  A var may also carry `:web/spa` — a vector of path prefixes it serves as the
+  A var may also carry `:web/client-routes` — a vector of path prefixes it serves as the
   client-routed document — and then contributes one extra catch-all row per
-  prefix (see `spa-rows`), so a refreshed deep link reaches the app instead of
+  prefix (see `client-route-rows`), so a refreshed deep link reaches the app instead of
   a 404. Scoped deliberately: paths outside every declared prefix still 404,
   which is the property a root catch-all would destroy."
   [ns-syms]
   (vec
    (mapcat
-    (fn [{:keys [row spa]}] (if (seq spa) (cons row (spa-rows row spa)) [row]))
+    (fn [{:keys [row client-routes]}]
+      (if (seq client-routes)
+        (cons row (client-route-rows row client-routes))
+        [row]))
     (for [ns-sym ns-syms
           :let   [nsx (find-ns (symbol ns-sym))]
           :when  nsx
           v      (vals (ns-publics nsx))
           :let   [m (meta v)]
           :when  (:web/path m)]
-      {:spa (:web/spa m)
+      {:client-routes (:web/client-routes m)
        ;; the CONTRACT rides the row when the endpoint declared one. The
        ;; dispatcher holds a row at request time and nothing else, so a
        ;; schema that is not here cannot be honoured — which is exactly why

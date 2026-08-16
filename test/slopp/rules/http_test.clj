@@ -8,7 +8,7 @@
   declaration obliges, and what a declaration's consequences are worth saying
   out loud.
 
-  That last one is a genre of its own and worth naming: `:web/spa` changes
+  That last one is a genre of its own and worth naming: `:web/client-routes` changes
   every status code under a prefix from 404 to 200, so the test asserts that
   slopp SAYS so once, and stops. A consequence nobody states is one somebody
   discovers."
@@ -354,8 +354,8 @@
         (is (not (contains? paths "/real"))
             "a src pointing at a declared endpoint is served, like any href")))))
 
-(deftest client-routes-under-a-declared-spa-prefix-are-served
-  ;; `:web/spa` says a document serves client routes under a prefix, so a link
+(deftest client-routes-under-a-declared-prefix-are-served
+  ;; `:web/client-routes` says a document serves client routes under a prefix, so a link
   ;; to /store/form/f1 IS served even though no endpoint declares that path.
   ;; The gate has to know, or every in-app link in a client-routed app reads
   ;; as dangling and the finding becomes noise someone learns to ignore.
@@ -367,7 +367,7 @@
                          (str "(ns sp.pages)\n"
                               "(defn ^{:web/method :get :web/path \"/\""
                               "        :web/auth :public :web/response :string\n"
-                              "        :web/spa [\"/store\"]}\n"
+                              "        :web/client-routes [\"/store\"]}\n"
                               "  app [_req]\n"
                               "  [:html [:body\n"
                               "    [:a {:href \"/store/form/f1\"} \"a client route\"]\n"
@@ -375,7 +375,7 @@
         {:keys [dangling]} (rules.http/dangling-route-refs st)
         paths (set (map :path dangling))]
     (testing "the endpoint row carries the declared prefixes, so a reader sees them"
-      (is (= ["/store"] (:web/spa (first (rules.http/endpoints st))))))
+      (is (= ["/store"] (:web/client-routes (first (rules.http/endpoints st))))))
     (testing "a client route under the prefix is served by the fallback"
       (is (not (contains? paths "/store/form/f1")) (pr-str dangling)))
     (testing "a path outside every prefix still dangles"
@@ -390,7 +390,7 @@
   ;;
   ;; They are this app's own paths. The literal is a key the CLIENT router
   ;; parses, and `prefix-links` re-addresses it under the mount point before it
-  ;; reaches the DOM, so what serves it is this store's own `:web/spa` fallback.
+  ;; reaches the DOM, so what serves it is this store's own `:web/client-routes` fallback.
   ;;
   ;; The crossings report is exactly where someone goes to ask what is NOT
   ;; checked here, so a wrong reason there is worse than a missing one. Hence a
@@ -398,19 +398,19 @@
   ;; truthful category. Teaching the dangling check to SEE the prefixing was the
   ;; alternative and it cannot be done in general — the base arrives through an
   ;; ordinary function call the checker would have to trace.
-  (let [src (str "(ns spa.ui)\n\n"
+  (let [src (str "(ns browser.ui)\n\n"
                  "(defn ^{:web/client-path \"the client router parses it; prefix-links adds the mount point\"}\n"
                  "  ns-link \"N.\" [nsx]\n"
                  "  [:a {:href (str \"/store/ns/\" nsx)} \"ns\"])\n\n"
                  "(defn plain \"P.\" [] [:a {:href \"/served-by-nobody\"} \"x\"])\n")
-        s    (store/ingest (store/empty-store) 'spa.ui src)
+        s    (store/ingest (store/empty-store) 'browser.ui src)
         refs (rules.http/ui-route-refs s)]
     (testing "the marker discharges the form's refs, exactly as external-path does
               — otherwise it is not an escape and nobody can use it"
-      (is (not-any? #(= 'spa.ui/ns-link (:form %)) refs) (pr-str refs)))
+      (is (not-any? #(= 'browser.ui/ns-link (:form %)) refs) (pr-str refs)))
     (testing "and an unmarked form in the same namespace is still reported, so
               the marker discharges one form rather than switching the check off"
-      (is (some #(= 'spa.ui/plain (:form %)) refs) (pr-str refs)))))
+      (is (some #(= 'browser.ui/plain (:form %)) refs) (pr-str refs)))))
 
 (deftest serving-namespaces-derive-from-the-store-not-a-hand-kept-list
   ;; `:web/namespaces` is the one REQUIRED opt on serve!, and `web/context`'s

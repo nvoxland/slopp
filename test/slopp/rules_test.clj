@@ -126,7 +126,7 @@
   ;; reason it is a separate deftest: that one grades a rule that is already in
   ;; the right namespace, so it is blind to the failure that actually happened
   ;; here. Five web-only checks sat in the generic `slopp.rules` — reading
-  ;; `:web/spa`, calling `edit.web/client-signature` — and no naming rule could
+  ;; `:web/client-routes`, calling `edit.web/client-signature` — and no naming rule could
   ;; see them, because a check in a generic namespace has no app type to
   ;; disagree with. `inline-schema-dup` and `generated-ns` were missed by a
   ;; hand audit for exactly that reason.
@@ -139,7 +139,7 @@
   ;;
   ;; The limit, stated because a guard named without its limits reads as
   ;; broader than it is: a check can still read `:web/…` metadata with no
-  ;; require at all, which is precisely what `spa-consequences-check` did. This
+  ;; require at all, which is precisely what `client-routes-consequences-check` did. This
   ;; catches the reach, not the vocabulary.
   (let [loaded    (set (map (comp str ns-name) (all-ns)))
         app-types (set (for [t     (keys capabilities/owners)
@@ -1249,7 +1249,7 @@
   ;;
   ;;   page-unreachable   the ^:web/page entry slopp opens headlessly
   ;;   page-reach         that entry's closure reaching :cljs
-  ;;   spa-consequences   what declaring :web/spa changes about every path
+  ;;   client-routes-consequences   what declaring :web/client-routes changes about every path
   ;;
   ;; An app that serves HTML and runs no browser app has none of these
   ;; declarations and should not be graded on them; an app whose browser owns
@@ -1268,20 +1268,20 @@
     (testing "each of the three is owned by webapp, by its name"
       (is (= "webapp" (capabilities/rule-owner :webapp-page-unreachable)))
       (is (= "webapp" (capabilities/rule-owner :webapp-page-reach)))
-      (is (= "webapp" (capabilities/rule-owner :webapp-spa-consequences))))
+      (is (= "webapp" (capabilities/rule-owner :webapp-client-routes-consequences))))
 
     (testing "and each is REGISTERED under that name, at its own grain"
       (is (contains? gate-ns :webapp-page-unreachable)
           (str "the write gate must be registered: " (pr-str (sort (keys gate-ns)))))
       (is (contains? done-keys :webapp-page-reach) (pr-str (sort done-keys)))
-      (is (contains? done-keys :webapp-spa-consequences) (pr-str (sort done-keys))))
+      (is (contains? done-keys :webapp-client-routes-consequences) (pr-str (sort done-keys))))
 
     (testing "the http-owned spellings are GONE, not merely shadowed"
       ;; a rename that leaves the old key registered arms both, and a store
       ;; dialling either gets half the behaviour it asked for
       (is (not (contains? gate-ns :http-page-unreachable)) (pr-str (sort (keys gate-ns))))
       (is (not (contains? done-keys :http-page-reach)) (pr-str (sort done-keys)))
-      (is (not (contains? done-keys :http-spa-consequences)) (pr-str (sort done-keys))))
+      (is (not (contains? done-keys :http-client-routes-consequences)) (pr-str (sort done-keys))))
 
     (testing "and http keeps the SERVER half — the move must not empty it"
       ;; guard the guard: every assertion above is satisfied by deleting the

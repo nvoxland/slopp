@@ -24,7 +24,7 @@
   (let [st (-> (store/empty-store)
                (store/ingest 'app.api "(ns app.api)
 (defn ^{:web/method :get :web/path \"/api/x\" :web/response [:map]} x [_] {})
-(defn ^{:web/method :get :web/path \"/\" :web/spa [\"/app\"]} doc [_] {})"))]
+(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})"))]
     (testing "every exit is listed, with the checker that covers it"
       (let [r (crossings/store-crossings st)
             by (into {} (map (juxt :kind identity)) (:crossings r))]
@@ -48,8 +48,8 @@
       ;; identical unless one of them is written down
       (let [r  (crossings/store-crossings st)
             un (set (map :kind (:unchecked r)))]
-        (is (contains? un :spa/client-routing)
-            "declaring :web/spa turns every path under a prefix into a 200 and
+        (is (contains? un :webapp/client-routing)
+            "declaring :web/client-routes turns every path under a prefix into a 200 and
              moves not-found into the client, and nothing checks the client
              agrees — that is a hole, and it has to read as one")
         (is (not (contains? un :wire/json))
@@ -127,11 +127,11 @@
   ;; the same slot :host-stale occupies, and for the same reason.
   (let [st (store/ingest (store/empty-store) 'app.api
                          "(ns app.api)
-(defn ^{:web/method :get :web/path \"/\" :web/spa [\"/app\"]} doc [_] {})")]
+(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})")]
     (testing "a store with an unchecked exit produces a finding to attach"
       (let [f (crossings/finding st)]
         (is (some? f))
-        (is (= [:spa/client-routing] (map :kind (:unchecked f))))
+        (is (= [:webapp/client-routing] (map :kind (:unchecked f))))
         (is (string? (:note f)))))
     (testing "a store that crosses nothing produces NO finding — silence is correct here"
       ;; the opposite of the usual rule: this is a note about holes, and a

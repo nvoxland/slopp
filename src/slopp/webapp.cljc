@@ -8,8 +8,8 @@
   again. Every step calls a function the app supplied, so `:render` and
   `:push-url!` are `js/…` in a real page and recorded values in a test.
 
-  **Generalized from slopp-ui's own `spa`/`nav`, which were further along than
-  anything slopp had.** They built it because slopp shipped a fake browser
+  **Generalized from the only real browser app built on slopp, whose own
+  routing and loop were further along than anything slopp had.** They built it because slopp shipped a fake browser
   whose contract did not fit, then wrote a ~30-line adapter to bridge the two —
   a THIRD hand-written wiring beside the browser entry and the headless driver,
   with nothing comparing the three. [[driver]] is what removes it.

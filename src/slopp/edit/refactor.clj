@@ -410,7 +410,7 @@
   `where` names a row; it does not assert a value. The wire it arrives over
   has no keyword, so `:stored-name`, `'stored-name`, `\"stored-name\"` and
   `\":stored-name\"` are four spellings of one name and all four must reach
-  the same row. Namespaces survive — `:web/spa` answers to `\"web/spa\"`."
+  the same row. Namespaces survive — `:web/client-routes` answers to `\"web/client-routes\"`."
   [x]
   (let [s (if (and (seq? x) (= 'quote (first x)))
             (str (second x))
