@@ -1,5 +1,5 @@
 slopp.addelete: slopp.read slopp.store slopp.ops (test)
-slopp.api: slopp.edit slopp.index slopp.read slopp.store slopp.web slopp.ops (test) slopp.webdev (test)
+slopp.api: slopp.edit slopp.index slopp.read slopp.store slopp.web slopp.ops (test) slopp.rest (test) slopp.webdev (test)
 slopp.branch: slopp.read slopp.store slopp.ops (test)
 slopp.build-native: slopp.build slopp.ops (test)
 slopp.chsig: slopp.edit slopp.store slopp.ops (test)
@@ -7,7 +7,7 @@ slopp.coldload: slopp.index
 slopp.coldload-gate: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.commit: slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.concurrency: slopp.read slopp.store slopp.ops (test)
-slopp.edit: slopp.image slopp.index slopp.project slopp.store
+slopp.edit: slopp.image slopp.index slopp.project slopp.store slopp.ops (test)
 slopp.edit-group: slopp.read slopp.store slopp.ops (test)
 slopp.effect-boundary: slopp.edit slopp.read slopp.ops (test)
 slopp.episode: slopp.mcp slopp.read slopp.store slopp.ops (test)

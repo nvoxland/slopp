@@ -1,2 +1,3 @@
 http.enabled: true
 http.port: 7357
+rest.enabled: true

@@ -72,17 +72,35 @@
   `{:error <teaching string>}` when it violates the endpoint's declared
   `:web/request`.
 
-  TWO conditions, and both are the capability model: the endpoint must have
-  declared a contract, and the CONTEXT must carry a validator for it. An app
-  serving HTML declares neither, supplies neither, and takes exactly the path
-  it always did.
+  THREE conditions, and each is load-bearing in a different direction.
 
-  The validator arrives as a FUNCTION rather than being called by name here,
-  which is what keeps malli out of this framework — `slopp.rest` requires it
-  and `slopp.web.*` does not, so an app is never made to carry a validation
-  library because a capability it did not enable needs one."
+  The endpoint must have declared a contract, and the CONTEXT must carry a
+  validator for it. An app serving HTML declares neither, supplies neither, and
+  takes exactly the path it always did. The validator arrives as a FUNCTION
+  rather than being called by name, which is what keeps malli out of this
+  framework — `slopp.rest` requires it and `slopp.web.*` does not, so an app is
+  never made to carry a validation library because a capability it did not
+  enable needs one.
+
+  **And the method must be one that HAS a body**, which slopp's own API is what
+  taught. `:web/request` is documented as required on `:post`/`:put`/`:patch` —
+  but a GET may declare one too, and when it does it describes the PATH AND
+  QUERY PARAMS rather than a body: `/api/ns/:ns` declares `[:map [:ns :string]]`
+  for its path segment, and the generated client reads it as the wrapper's
+  argument list. Validating that against a nil body 400s every correct request,
+  which is what the first version of this did to four of slopp's own endpoints
+  the moment it was pointed at them.
+
+  So this honours the documented meaning and no more. **Params are untrusted
+  input too and are NOT covered here** — a real gap, filed rather than closed,
+  because covering it means deciding what `:web/request` means for the
+  generated client as well, and the server and the client must not answer that
+  differently."
   [ctx row req]
-  (if-let [f (and row (:web/request row) (:rest/decode-request ctx))]
+  (if-let [f (and row
+                  (contains? #{:post :put :patch} (:method row))
+                  (:web/request row)
+                  (:rest/decode-request ctx))]
     (f (:web/request row) (:body req))
     {:value (:body req)}))
 

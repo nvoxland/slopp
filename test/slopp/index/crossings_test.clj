@@ -52,13 +52,15 @@
             "declaring :web/spa turns every path under a prefix into a 200 and
              moves not-found into the client, and nothing checks the client
              agrees — that is a hole, and it has to read as one")
-        (is (contains? un :wire/json)
-            "a declared request/response contract is enforced at WRITE time and
-             honoured at runtime by nothing — the dispatcher never validates
-             against it, so an untrusted body reaches the handler unchecked.
-             This row read as CHECKED for a year. It is the hole the rest
-             capability exists to close, and until it does it has to read as
-             one")))
+        (is (not (contains? un :wire/json))
+            "the wire contract is CHECKED now — the boundary decodes a request
+             body against its declared schema and refuses what does not fit,
+             and judges a response on what the client actually receives. This
+             assertion ran the other way for one commit, deliberately: the row
+             claimed a check that did not exist, was corrected to say so, and
+             this is where it flipped back on a check that does. A crossing
+             moving between the two lists is the only honest way this inventory
+             ever changes.")))
     (testing "a marker NO kind claims is a finding — this is what stops it rotting"
       ;; the failure mode of any inventory: someone adds an exit and the list
       ;; silently does not describe the system any more

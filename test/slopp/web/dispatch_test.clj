@@ -214,6 +214,24 @@
             "and the explain does NOT reach the client — same rule the
              dispatcher already follows for an unexpected exception")))
 
+    (testing "a GET's :web/request describes its PARAMS and is not judged as a body"
+      ;; slopp's own API taught this by 400ing on four endpoints the first time
+      ;; the boundary was pointed at it. `/api/ns/:ns` declares
+      ;; [:map [:ns :string]] for its PATH SEGMENT — the generated client reads
+      ;; it as the wrapper's argument list — and a GET carries no body, so
+      ;; judging that schema against nil refuses every correct request.
+      ;;
+      ;; Params are untrusted input and are NOT covered; that gap is filed
+      ;; rather than closed, because the server and the generated client must
+      ;; not answer differently about what :web/request means.
+      (let [g (assoc row :method :get :web/request [:map [:ns :string]]
+                     :handler (fn [_] {:status 200 :body {:got {}}}))
+            r (dispatch/handle! (assoc rest-ctx :web/routes [g])
+                                {:request-method :get :uri "/api/x"})]
+        (is (= 200 (:status r))
+            (str "a GET declaring :web/request must not be refused for having "
+                 "no body: " (pr-str r)))))
+
     (testing "an ERROR response is not judged against the success contract"
       ;; :web/response describes the 200 body. A 404's {:error …} does not
       ;; match it and must not be turned into a 500 for failing to.

@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.web :as slopp.web] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.web.contract :as web.contract]))
+            [slopp.web :as slopp.web] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.web.contract :as web.contract] [slopp.rest :as slopp.rest]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -829,7 +829,7 @@
                                             :uri "/api/source/src.demo/nope"})))))))
 
 (deftest every-key-a-response-SENDS-is-a-key-its-contract-DECLARES
-  ;; The half `http-unconstrained-contract` cannot see. That rule finds a schema
+  ;; The half `rest-unconstrained-contract` cannot see. That rule finds a schema
   ;; POSITION that constrains nothing (`[:sequential :map]`, `:any`). This is
   ;; the other direction: a fully-typed `[:map …]` that simply omits entries the
   ;; handler is really sending. `m/validate` passes an OPEN map, so those keys
@@ -913,3 +913,57 @@
     (is (= [] (vec missing))
         (str "every :param in a path must appear in that endpoint's :request, "
              "or a generated client cannot address it: " (pr-str (vec missing))))))
+
+(deftest every-endpoint-HONOURS-its-contract-once-SERIALIZED
+  ;; The test above validates each body against its schema — and does it
+  ;; PRE-WIRE, on the value the handler returned. That is the shape the
+  ;; crossings registry has called blind since it was written, and it is wrong
+  ;; in both directions: a keyword fails a :string contract it satisfies once
+  ;; serialized, and a set passes a :set contract the consumer receives as an
+  ;; array.
+  ;;
+  ;; So this asks the only question that matters to a consumer: does what
+  ;; ARRIVES match what was promised? With the validators on the context a
+  ;; violation is a 500, which means the assertion is simply `200` — the
+  ;; framework does the checking, and that is the point. If this ever goes red,
+  ;; slopp's own published API is lying to the client generated from it.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'demo.core
+                              "(ns demo.core)\n\n(defn hello \"Says hi.\" [x] x)\n")
+                (store/ingest 'demo.util "(ns demo.util)\n\n(defn undocumented [x] x)\n"))
+        ctx (slopp.rest/validating
+             (slopp.web/context {:web/namespaces server/served-namespaces
+                                 :web/perform-ctx {:session (atom {:store st})}}))
+        GET (fn [path] (slopp.rest/call ctx {:method :get :path path}))]
+
+    (testing "every endpoint a bare store can answer honours its own contract"
+      ;; EVERY endpoint a bare store can answer, not a sample. Exhaustive over
+      ;; what is reachable without fixture data, because an endpoint left out is
+      ;; one whose contract nothing here checks — and this is the API the live
+      ;; reviewer UI serves.
+      (doseq [path ["/api/namespaces"
+                    "/api/ns/demo.core"
+                    "/api/contracts"
+                    "/api/modules"
+                    "/api/timeline"
+                    "/api/search?q=hello"
+                    "/api/form/f1"
+                    "/api/source/demo.core/hello"
+                    "/api/module/demo.core"]]
+        (let [r (GET path)]
+          (is (= 200 (:status r))
+              (str path " did not honour its declared :web/response once "
+                   "serialized — a 500 here IS the contract violation, and the "
+                   "explain is on stderr: " (pr-str (:body r)))))))
+
+    (testing "and the client's view is what a consumer would actually parse"
+      ;; guard the guard: if `call` handed back the pre-wire value these
+      ;; assertions would pass while proving nothing about the wire
+      (let [r (GET "/api/namespaces")]
+        (is (= [{:ns "demo.core" :forms 2} {:ns "demo.util" :forms 2}] (:body r))
+            "the same rows the pre-wire test asserts, having survived JSON")))
+
+    (testing "a 404 is not judged against the success contract"
+      ;; the deliberate-error path, which must not become a 500 for failing to
+      ;; match a schema describing the 200
+      (is (= 404 (:status (GET "/api/ns/no.such.ns")))))))

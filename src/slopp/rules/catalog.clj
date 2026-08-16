@@ -77,9 +77,9 @@
    {:rule :http-react-attrs :grain :form
     :escape "spell it as HTML (:class, :for), replace handlers with a link/form targeting an endpoint, or dial it down (config_file {path \"rules\" key \"http-react-attrs\" value \"advisory\"}) for a map that is genuinely not an element"
     :teach "a literal hiccup element carries a React attribute name (:className, :htmlFor, :onClick…) — browsers silently ignore unknown attributes, so it ships and does nothing (inert until http.enabled)"}
-   {:rule :http-endpoint-schema :grain :form
-    :escape "add :web/response (and :web/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"http-endpoint-schema\" value \"advisory\"})"
-    :teach "a :web/path endpoint must declare :web/response (and :web/request on a :post/:put/:patch body method) — its contract, shared .cljc so the client validates against the SAME schema (D-web-contracts; inert until http.enabled)"}
+   {:rule :rest-endpoint-schema :grain :form
+    :escape "add :web/response (and :web/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"rest-endpoint-schema\" value \"advisory\"})"
+    :teach "a :web/path endpoint must declare :web/response (and :web/request on a :post/:put/:patch body method) — its contract, which the boundary VALIDATES at runtime and the generated client validates against, from the same schema. Inert until rest.enabled: serving a document is http's business, and publishing a typed API is rest's"}
    {:rule :http-public-mutation :grain :done
     :escape "tighten :web/auth, or accept it — a deliberately public write surface (signup, webhook) is legitimate and this asks per changed form"
     :teach "a changed :public endpoint declares :web/effects kinds — a publicly writable surface should be a decision, not an omission (inert until http.enabled)"}
@@ -193,13 +193,13 @@
    {:rule :http-page-reach :grain :done
     :escape "move the view/derive code the entry reaches into a :jvm or :cljc namespace and pass the browser-shaped parts IN (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:web/page entry REACHES a :cljs namespace, so no JVM can open the app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. http-page-unreachable refuses the ENTRY's own shape at the write; this is the reach. At done it sees only pages you CHANGED — the dependency-flip case (some other namespace declared :cljs, no write to the entry) is reported by module_platform itself at the declaration (:stranded-pages) and re-graded by the full_check sweep (inert until http.enabled)"}
-   {:rule :http-stale-client :grain :done
+   {:rule :rest-stale-client :grain :done
     :escape "run generate_client to re-derive the client from the current endpoints, or accept the drift"
     :teach "the generated typed client is stale — an endpoint's contract changed since generate_client last ran (D-web-contracts part 2)"}
-   {:rule :http-inline-schema-dup :grain :done
+   {:rule :rest-inline-schema-dup :grain :done
     :escape "extract the shared inline schema to a named .cljc var both endpoints reference, or accept the duplication"
     :teach "2+ endpoints declare the same inline request/response schema — a shared shape belongs in one named .cljc schema so the server and the generated client agree (D-web-contracts part 2)"}
-   {:rule :http-unconstrained-contract :grain :done
+   {:rule :rest-unconstrained-contract :grain :done
     :escape "name the entries — [:map [:kind :string] [:text :string]]. If the endpoint genuinely CANNOT constrain — a proxy forwarding another service's bytes — say so with ^{:web/unconstrained-ok \"why\"}, which discharges it and is itself reported as stale once the contract does constrain. Saying :any is HONEST and does not discharge: it is the reported state, not the way out"
     :teach (str "a published endpoint declares a field that constrains nothing"
                 " — a bare :map, which accepts any map, or :any, which accepts"
@@ -212,7 +212,7 @@
                 " weeks. Both are reported and they are not the same offence:"
                 " :any ADMITS it says nothing, a bare :map looks like a type"
                 " while saying the same thing")}
-   {:rule :http-undocumented-contract :grain :done
+   {:rule :rest-undocumented-contract :grain :done
     :escape "add :doc (or :description) to the entry's property map — [:total {:doc \"hits before the limit is applied\"} :int] — or accept it; this is advisory and never blocks"
     :teach (str "a published endpoint's :web/request/:web/response schema has"
                 " fields that say nothing about what they ARE. A type is a"

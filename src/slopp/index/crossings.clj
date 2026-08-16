@@ -53,32 +53,36 @@
     :leaves     "a declared request/response contract"
     :to         "JSON, and a browser that never sees Clojure data"
     :markers    #{:web/request :web/response}
-    :checked-by nil
-    :blind      "EVERYTHING at runtime, and this row said the opposite until
-                 2026-08-15. It claimed the dispatcher validates against the
-                 same schema var the client ships. It does not: `handle!` runs
-                 identity, route, policy, reads, handler, effects, and never
-                 looks at :web/request or :web/response — the schemas are not
-                 even on the route row. No namespace in the shipped slopp.web
-                 family requires malli at all. What IS checked is that a
-                 contract was DECLARED (the endpoint-schema write gate) and
-                 that slopp's own nine endpoints match theirs (by hand, in
-                 slopp.api.endpoints-test). Declared and honoured are different
-                 claims, and an untrusted request body reaches the handler
-                 unchecked.
+    :checked-by "the boundary honours it at runtime once `rest.enabled`:
+                 `slopp.rest.contract/decode-request` decodes an incoming body
+                 to the declared types and REFUSES what does not fit with a 400,
+                 before the declared reads and before the handler; and
+                 `check-response` judges the response on what the client
+                 actually RECEIVES — a real serialize/parse, because a keyword
+                 that arrives as a string satisfies a :string contract the
+                 in-image value fails, and a set that arrives as an array fails
+                 one the in-image value passes. `slopp.rest/call` drives an
+                 endpoint through the same path in process, so a test sees the
+                 consumer's view without a socket"
+    :blind      "PARAMS. A path segment and a query string are untrusted input
+                 too, and `:web/request` on a GET describes exactly those — the
+                 generated client reads it as the wrapper's argument list — but
+                 the boundary judges it only on :post/:put/:patch, where it is
+                 a body. So `?depth=banana` against a declared [:depth :int]
+                 still reaches the handler as a string. Filed:
+                 params-are-untrusted-input-and-nothing-validates-them.
 
-                 Second and separate: an in-image test asserts on the PRE-WIRE
-                 value, so a keyword sails through a [:x :string] contract and
-                 arrives as a string — a test that does not serialize checks a
-                 shape no client receives. slopp.web.client/fake-requester says
-                 the same thing about itself and sends the author to a real
-                 server."}
+                 And all of it is conditional on the capability: a store with
+                 `rest.enabled` false declares contracts that nothing honours,
+                 which is the state this whole framework was in until
+                 2026-08-15 — the row claimed the dispatcher validated and it
+                 never had."}
 
    {:kind       :generated/client
     :leaves     "an endpoint's contract"
     :to         "generated ClojureScript nobody hand-edits"
     :markers    #{:generated}
-    :checked-by "the http-stale-client advisory when a contract drifts from
+    :checked-by "the rest-stale-client advisory when a contract drifts from
                  the last generation; the http-generated-ns gate refuses hand
                  edits"
     :blind      "generation is EXPLICIT, so between a contract change and the
@@ -198,7 +202,7 @@
                    in-process assembly. The map it returns reaches handlers as
                    :web/deps and performers as their first argument, all inside
                    the image; nothing leaves through this key"
-   :web/unconstrained-ok "waives http-unconstrained-contract for an endpoint that
+   :web/unconstrained-ok "waives rest-unconstrained-contract for an endpoint that
                    genuinely cannot constrain its shape — a statement ABOUT a
                    declaration, not a declaration of its own, so nothing
                    crosses through it"

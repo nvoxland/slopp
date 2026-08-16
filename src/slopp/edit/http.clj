@@ -260,34 +260,6 @@
                       (pr-str (:web/request meta)) (pr-str (:web/response meta))])
                    (web-endpoint-rows store)))))
 
-(defn ^:export ^{:rule/applies-to :production} http-endpoint-schema
-  "The API-contract gate (D-web-contracts): a `:web/path` endpoint must type out
-  its contract so the client validates against the SAME schema. `:web/response`
-  is required on EVERY endpoint; `:web/request` is required on a BODY method
-  (`:post`/`:put`/`:patch`) — a `:get`/`:delete`/`:head` needs only a response.
-  Declare a `.cljc` malli schema VAR (shareable/reusable — `some.contracts/order`)
-  or an inline `[:map …]` for a one-off shape. Inert until the store opts into
-  HTTP (`http.enabled`), which `edit.gates/gate-check` decides — not this gate;
-  auth is checked first, so a naked endpoint still refuses
-  on `:web/auth` before this. Returns a teaching string, or nil when clean."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (web-name-meta e)]
-      (when (:web/path m)
-        (let [body?   (contains? #{:post :put :patch} (:web/method m))
-              missing (cond-> []
-                        (not (contains? m :web/response)) (conj :web/response)
-                        (and body? (not (contains? m :web/request))) (conj :web/request))]
-          (when (seq missing)
-            (str ns-sym "/" form-name " declares the route " (pr-str (:web/path m))
-                 " but no " (str/join " / " (map str missing))
-                 " — every endpoint types out its contract so the client"
-                 " validates against the SAME schema (D-web-contracts). Add "
-                 (str/join " and " (map str missing))
-                 " to the name metadata: a .cljc malli schema VAR"
-                 " (shareable/reusable, e.g. some.contracts/order) or an inline"
-                 " [:map …] for a one-off shape.")))))))
-
 (defn http-react-attrs
   "Per-form write gate (D-web-html): a literal hiccup element carrying a
   React attribute name — `:className`, `:htmlFor`, an `:onClick`-style

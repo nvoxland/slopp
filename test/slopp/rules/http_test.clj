@@ -14,7 +14,7 @@
   discovers."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.web-test :as slopp.web-test] [clojure.string :as str]))
+            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.web-test :as slopp.web-test] [clojure.string :as str] [slopp.rules.rest :as rest]))
 
 (deftest routes-derive-from-stored-nodes
   (let [src (str "(ns shop.api)\n\n"
@@ -231,61 +231,6 @@
                                "(defn card \"C.\" [] [:div {:class \"x\"} \"c\"])"
                                :prompt "correct spelling")]
           (is (nil? (:error r)) (pr-str r))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external http-endpoint-schema-gate-requires-a-response-contract
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'shopc.api "(ns shopc.api)\n\n(defn seed \"S.\" [x] x)\n")
-      (testing "before opt-in, an endpoint without :web/response lands (grandfathered)"
-        (let [r (ops/add-form! sess 'shopc.api
-                               "(defn ^{:web/method :get :web/path \"/pre\" :web/auth :public} pre \"P.\" [req] req)"
-                               :prompt "pre-optin endpoint")]
-          (is (nil? (:error r)) (pr-str r))))
-      (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
-                        :prompt "opt into HTTP")
-      (testing "under opt-in, an endpoint with auth but NO :web/response is refused, never lands"
-        (let [r (ops/add-form! sess 'shopc.api
-                               "(defn ^{:web/method :get :web/path \"/list\" :web/auth :public} list-it \"L.\" [req] req)"
-                               :prompt "no response contract")]
-          (is (re-find #":web/response" (str (:error r))) (pr-str r))
-          (is (nil? (store/form-named (:store @sess) 'shopc.api 'list-it)) "never lands")))
-      (testing "declaring :web/response (here inline) lets it land"
-        (let [r (ops/add-form! sess 'shopc.api
-                               (str "(defn ^{:web/method :get :web/path \"/ok\" :web/auth :public"
-                                    " :web/response [:map [:n :int]]} ok \"O.\" [req] req)")
-                               :prompt "with a response contract")]
-          (is (nil? (:error r)) (pr-str r))
-          (is (some? (store/form-named (:store @sess) 'shopc.api 'ok)))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external http-endpoint-schema-requires-request-on-body-methods
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'shopr.api "(ns shopr.api)\n\n(defn seed \"S.\" [x] x)\n")
-      (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
-                        :prompt "opt into HTTP")
-      (testing "a POST endpoint with :web/response but NO :web/request is refused"
-        (let [r (ops/add-form! sess 'shopr.api
-                               (str "(defn ^{:web/method :post :web/path \"/orders\" :web/auth :public"
-                                    " :web/response [:map [:id :int]]} create \"C.\" [req] req)")
-                               :prompt "no request contract")]
-          (is (re-find #":web/request" (str (:error r))) (pr-str r))
-          (is (nil? (store/form-named (:store @sess) 'shopr.api 'create)))))
-      (testing "a GET endpoint needs only :web/response (no request body)"
-        (let [r (ops/add-form! sess 'shopr.api
-                               (str "(defn ^{:web/method :get :web/path \"/orders\" :web/auth :public"
-                                    " :web/response [:map]} listing \"L.\" [req] req)")
-                               :prompt "get needs only response")]
-          (is (nil? (:error r)) (pr-str r))))
-      (testing "declaring both contracts lets the POST land"
-        (let [r (ops/add-form! sess 'shopr.api
-                               (str "(defn ^{:web/method :post :web/path \"/orders2\" :web/auth :public"
-                                    " :web/request [:map [:item :string]] :web/response [:map [:id :int]]}"
-                                    " create2 \"C.\" [req] req)")
-                               :prompt "both contracts")]
-          (is (nil? (:error r)) (pr-str r))
-          (is (some? (store/form-named (:store @sess) 'shopr.api 'create2)))))
       (finally (ops/close! sess)))))
 
 (deftest routes-surface-the-declared-contract
@@ -917,7 +862,7 @@
         (is (= [] (vec (rules.http/undocumented-contract-fields ok))))))
     (testing "the finding teaches the fix as a literal form, and says which
               spelling it wants"
-      (let [f (first (rules.http/http-undocumented-contract-check nil s nil))]
+      (let [f (first (rest/rest-undocumented-contract-check nil s nil))]
         (is (re-find #":doc" (:teach f)) (pr-str f))
         (is (re-find #"\[:rows \{:doc" (:teach f)) (pr-str f))))))
 
@@ -982,7 +927,7 @@
 
     (testing "the finding teaches what a bare :map costs, in the words that
               matter: it is not a type, and the validator believes it"
-      (let [f (first (rules.http/http-unconstrained-contract-check nil s nil))]
+      (let [f (first (rest/rest-unconstrained-contract-check nil s nil))]
         (is (re-find #"validat" (:teach f)) (pr-str f))))))
 
 (deftest an-endpoint-that-cannot-constrain-can-say-so-and-the-marker-polices-itself
@@ -1011,14 +956,14 @@
         stale (mk " :web/unconstrained-ok \"no longer true\"" "[:map [:id :string]]")]
 
     (testing "without the marker it still fires — the finding is TRUE"
-      (is (seq (rules.http/http-unconstrained-contract-check nil plain nil))))
+      (is (seq (rest/rest-unconstrained-contract-check nil plain nil))))
 
     (testing "the marker discharges it"
-      (is (empty? (rules.http/http-unconstrained-contract-check nil proxy nil))))
+      (is (empty? (rest/rest-unconstrained-contract-check nil proxy nil))))
 
     (testing "and it polices itself — a marker on a schema that DOES constrain
               is reported, so this cannot quietly become a mute button"
-      (let [f (rules.http/http-unconstrained-contract-check nil stale nil)]
+      (let [f (rest/rest-unconstrained-contract-check nil stale nil)]
         (is (= 1 (count f)) (pr-str f))
         (is (:stale-marker (first f)) (pr-str f))
         (is (re-find #"unconstrained-ok" (str (:teach (first f)))) (pr-str f))))))

@@ -24,7 +24,7 @@
   so the published promise and the served behaviour cannot disagree."
   (:require [slopp.rest.contract :as rest.contract]
             [slopp.web.dispatch :as dispatch]
-            [cheshire.core :as json]))
+            [cheshire.core :as json] [clojure.string :as str]))
 
 (defn ^:export validating
   "`ctx` with the contract validators attached — the one call that turns a
@@ -90,12 +90,20 @@
   is the judgement, made once for both."
   [ctx {:keys [method path body headers query-string]}]
   (let [wire (fn [v] (json/parse-string (json/generate-string v) true))
+        ;; a `?` in the path is SPLIT, because the transport this stands in for
+        ;; does it: an HTTP request line carries the path and the query string
+        ;; separately, and both adapters hand the dispatcher two keys. A caller
+        ;; writes "/api/search?q=hello" because that is what a URL looks like,
+        ;; and a fake that answered 404 to one would be failing at the single
+        ;; job it has — being the transport. Found by pointing this at slopp's
+        ;; own API.
+        [p q] (str/split (str path) #"\?" 2)
         resp (dispatch/handle!
               ctx
               (cond-> {:request-method (or method :get)
-                       :uri (str path)
+                       :uri p
                        :headers (or headers {})}
-                query-string (assoc :query-string query-string)
+                (or query-string q) (assoc :query-string (or query-string q))
                 ;; through the wire on the way IN as well: the adapter parses a
                 ;; JSON string, so a caller handing us a keyword has to see it
                 ;; become a string here too. A fake that is KINDER than the
