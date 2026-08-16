@@ -4157,3 +4157,38 @@ bed rather than an empty room.
   Same marker-detection lesson cli taught, arriving a third time — which is
   enough instances to say it plainly: **usage-by-require is not a signal for any
   capability whose entry slopp generates.**
+
+### Sharpening (2026-08-16): a rule its capability declined must SAY so
+
+slopp-ui read their own `full_check` before taking the jar and found the wave's
+migration note backwards: the five contract rules were enforcement they had
+TODAY, moving to a capability off by default.
+
+Checking which five actually stop found the picture wrong in both directions,
+and the second half is the defect:
+
+- **One stops.** `rest-endpoint-schema` is a write gate, and `gate-capability`
+  derives its owner from the namespace, so it goes inert. Real, and the loss
+  they identified.
+- **Four never consulted a capability at all.** The done-grain contract checks
+  ran whatever `http.enabled` said before the move and whatever `rest.enabled`
+  says after it — while `query_capabilities` listed them under `rest`'s
+  `:arms`, the list that says what opting in WOULD arm. **A capability claiming
+  rules it does not control is the model failing at the one thing it is for.**
+
+Two fixes, and the first is what made the second possible. Ownership is derived
+ONCE (`capabilities/rule-owner`, read off the rule's own name); the arms report
+and the sweep now consult the same answer instead of each running their own
+`starts-with?`. And `sweep-plan` — extracted pure, so the DECISION is assertable
+without a session, which is what had been wrong — reports a rule whose
+capability is off in `:not-swept`, with the reason and the remedy.
+
+slopp-ui's argument, kept because it generalises past this instance: **a
+declined rule has to make a claim that can be FALSE.** Absence and a clean run
+read identically, so a silence cannot be a detector — the same reasoning that
+made the fourth app-server state worth building. It also makes the capability
+model self-teaching: the sweep report becomes where you find out which checks
+you are declining.
+
+Filed alongside, not fixed: the `rules` config has no registry, so a renamed
+dial and a mistyped one are the same event and both are accepted at the write.
