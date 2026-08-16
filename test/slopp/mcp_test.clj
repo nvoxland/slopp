@@ -2280,3 +2280,41 @@
                  is a real one rather than a leftover"))
           (finally (ops/close! sess))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-milestone-re-serves-the-app-the-way-a-done-does
+  ;; slopp-ui, 2026-08-16, with the ordering measured at the time: they enabled
+  ;; `http` in a session that had booted with it OFF, restarted, ran
+  ;; `full_check`, then `commit_point`. Afterwards nothing was listening —
+  ;; connection refused, `lsof` showing no process on the port at all. Only a
+  ;; process restart brought the app up.
+  ;;
+  ;; The cause is one call site. `refresh-app!` runs on the `done` TOOL;
+  ;; `commit_point` PERFORMS a done — it runs the whole done pipeline and
+  ;; appends a milestone — and its handler never refreshed. So a session that
+  ;; migrates config and goes straight to a milestone, which is the natural
+  ;; order and the one they took, never re-serves.
+  ;;
+  ;; This is the SAME defect `refresh-app!`'s own docstring already records one
+  ;; call site over: *"a gate on the startup path only would let the second done
+  ;; point start what the first one declined to"*. Gating the verb in one place
+  ;; and not the other is how the feature arrives — or fails to — by accident.
+  ;;
+  ;; Asserted on the CALL rather than on a socket: whether re-serving works is
+  ;; `live/refresh!`'s business and is tested there. What was missing here was
+  ;; that it is invoked at all.
+  (let [sess  (external/open!)
+        calls (atom [])]
+    (try
+      (with-redefs [mcp/refresh-app! (fn [_] (swap! calls conj :refreshed) nil)]
+        (call! sess "done" {:label "the grain that already worked"})
+        (is (= [:refreshed] @calls)
+            "guard the guard: the done tool refreshes, so a miss below is the
+             milestone path and not the redef")
+
+        (reset! calls [])
+        (call! sess "commit_point" {:description "a milestone is a done point too"})
+        (is (= [:refreshed] @calls)
+            "a milestone runs a done and must re-serve like one — otherwise the
+             app a project exists to serve is left behind by the very call that
+             says the work is finished"))
+      (finally (ops/close! sess)))))

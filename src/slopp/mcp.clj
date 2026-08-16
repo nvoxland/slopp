@@ -1319,7 +1319,31 @@
       "commit_point" (text! (let [r (external/commit-point! session (:description a)
                                                        :agent (:agent a)
                                                        :force (:force a)
-                                                       :target (:target a))]
+                                                       :target (:target a))
+                                  ;; A MILESTONE IS A DONE POINT. `commit-point!`
+                                  ;; runs the whole done pipeline, so the app
+                                  ;; server catches up here exactly as it does on
+                                  ;; the `done` tool — same call, same bound,
+                                  ;; same note.
+                                  ;;
+                                  ;; It did not, and the cost was measured:
+                                  ;; slopp-ui enabled `http` in a session that
+                                  ;; had booted with it off, restarted, ran
+                                  ;; full_check, then commit_point — the natural
+                                  ;; order — and afterwards nothing was listening
+                                  ;; at all. Connection refused, no process on
+                                  ;; the port. Only a process restart brought it
+                                  ;; up.
+                                  ;;
+                                  ;; The same shape `refresh-app!`'s own
+                                  ;; docstring already records about gating one
+                                  ;; verb and not the other: a feature that
+                                  ;; arrives, or fails to, by which call site you
+                                  ;; happened to use.
+                                  app (deref (future (refresh-app! session)) 20000 nil)
+                                  r   (if-let [note (app-note-for app)]
+                                        (assoc r :app-note note)
+                                        r)]
                                     ;; Q10: the mechanical series is the system's job —
                                     ;; a green milestone on a git-configured store
                                     ;; publishes itself; publish trouble rides along
