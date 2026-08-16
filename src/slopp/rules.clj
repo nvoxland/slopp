@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -1187,10 +1187,63 @@
   [session st* changed]
   (run-checks session st* changed (filter #(enabled? st* %) done-advisories)))
 
+(defn ^:export sweep-plan
+  "Which sweepable advisories will RUN over `st*`, and which will not with WHY:
+  `{:swept [key …] :not-swept [{:rule :why :severity} …]}`.
+
+  Pure, and separate from running them for the reason every plan in this
+  codebase is separate: what a check DECIDES is worth asserting without a
+  session, an image, or a store full of forms. `sweep-store!` performs this.
+
+  Three reasons a rule is not swept, and the third is why this exists:
+
+  - it compares against the last-done BASELINE or reads the episode's DELTAS,
+    so running it over every form reports NOTHING rather than clean. Each names
+    itself in its own `:sweep` string.
+  - it is dialed `:off` for this store.
+  - **its owning CAPABILITY is not enabled.** Reported by slopp-ui, who read
+    their own sweep before taking a jar and found five contract rules had moved
+    to a capability that is off by default. Absence is indistinguishable from a
+    clean run, so a declined rule has to make a claim that can be FALSE — the
+    same argument that makes `:orphaned` worth having.
+
+  Every advisory appears in exactly one of the two lists. A reader can tell a
+  rule that passed from a rule that was never asked, which is the distinction a
+  bare green destroys."
+  [st*]
+  (let [dialed-off? (fn [e] (= :off (gates/rule-severity st* (:key e) (:severity e))))
+        off-cap     (fn [e] (let [c (capabilities/rule-owner (:key e))]
+                              (when (and c (not (capabilities/enabled? st* c))) c)))
+        runs?       (fn [e] (and (true? (:sweep e))
+                                 (not (dialed-off? e))
+                                 (not (off-cap e))))
+        swept       (filterv runs? done-advisories)
+        kept        (set (map :key swept))]
+    {:swept     (mapv :key swept)
+     :not-swept (into []
+                      (comp (remove #(kept (:key %)))
+                            (map (fn [{:keys [key sweep] :as e}]
+                                   {:rule key
+                                    :why  (if-let [c (off-cap e)]
+                                            (str "the `" c "` capability owns this rule and"
+                                                 " this store has not enabled it. config_file"
+                                                 " {path \"capabilities\" key \"" c ".enabled\""
+                                                 " value \"true\"} turns it on; leaving it off"
+                                                 " means accepting that this goes unchecked")
+                                            (if (true? sweep)
+                                              (str "dialed :off for this store —"
+                                                   " config_file {path \"rules\" key \""
+                                                   (name key) "\" value \"advisory\"}"
+                                                   " asks it again")
+                                              (str sweep)))
+                                    :severity (gates/rule-severity
+                                               st* key (:severity e))})))
+                      done-advisories)}))
+
 (defn sweep-store!
-  "Every SWEEPABLE done-advisory (`:sweep true`, not dialed `:off`) run over
-  EVERY form in the store. `!` — same checks as `run-done-advisories!`, so it
-  evals in the image and reads the working tree.
+  "Every SWEEPABLE done-advisory run over EVERY form in the store. `!` — same
+  checks as `run-done-advisories!`, so it evals in the image and reads the
+  working tree.
 
   Returns `{:forms n :swept [key …] :not-swept [{:rule :why} …] :findings {key
   findings}}`, where `:findings` has exactly the shape `done` reports and grades
@@ -1205,35 +1258,21 @@
   was wired into `full_check` on the identical argument one layer down: the
   per-write gates see only code written THROUGH them.
 
-  **`:not-swept` is the load-bearing half.** Roughly a third of the registry
-  compares against the last-done BASELINE or reads the episode's DELTAS, and
-  running one of those over every form does not report clean — it reports
-  NOTHING, in the same shape. So each is named with WHY, and every advisory
-  appears in exactly one of the two lists: a reader can tell a rule that passed
-  from a rule that was never asked, which is the distinction a bare green
-  destroys."
+  **Which rules run, and why the rest do not, is [[sweep-plan]]** — a pure
+  decision, so it is assertable without a session. `:not-swept` is the
+  load-bearing half of what this returns and it belongs to a function that can
+  be tested without an image."
   [session st*]
-  (let [swept (filterv #(and (true? (:sweep %)) (enabled? st* %)) done-advisories)
-        kept  (set (map :key swept))
+  (let [{:keys [swept not-swept]} (sweep-plan st*)
+        kept  (set swept)
+        run   (filterv #(kept (:key %)) done-advisories)
         ids   (into []
                     (comp (mapcat #(store/forms st* %)) (map :id))
                     (sort (keys (:namespaces st*))))]
     {:forms      (count ids)
-     :swept      (mapv :key swept)
-     :not-swept  (into []
-                       (comp (remove #(kept (:key %)))
-                             (map (fn [{:keys [key sweep] :as e}]
-                                    {:rule key
-                                     :why  (if (true? sweep)
-                                             (str "dialed :off for this store —"
-                                                  " config_file {path \"rules\" key \""
-                                                  (name key) "\" value \"advisory\"}"
-                                                  " asks it again")
-                                             (str sweep))
-                                     :severity (gates/rule-severity
-                                                st* key (:severity e))})))
-                       done-advisories)
-     :findings   (run-checks session st* ids swept)}))
+     :swept      swept
+     :not-swept  not-swept
+     :findings   (run-checks session st* ids run)}))
 
 (defn status-affecting-fired?
   "True when an advisory whose EFFECTIVE severity is `:error` produced a

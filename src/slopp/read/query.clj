@@ -391,9 +391,14 @@
                                (for [v gates/per-form-write-gates
                                      :when (= c (gates/gate-capability v))]
                                  {:rule (:name (meta v)) :grain :form})
+                               ;; the SAME derivation the sweep reads, not a second
+                               ;; `starts-with?` beside it. The two answered
+                               ;; separately and disagreed: this list said
+                               ;; opting in would arm four contract rules while
+                               ;; the sweep ran them regardless of the switch.
                                (for [r catalog/rule-catalog
                                      :when (and (= :done (:grain r))
-                                                (str/starts-with? (name (:rule r)) (str c "-")))]
+                                                (= c (capabilities/rule-owner (:rule r))))]
                                  {:rule (:rule r) :grain :done})))))]
     (assoc (capabilities/report store)
            :capabilities

@@ -418,6 +418,32 @@
                (str/join ", " (map #(str % ".enabled") held))
                " off first, or leave " k " as it is."))))))
 
+(defn ^:export rule-owner
+  "The capability that owns rule `k` — read off the rule's own NAME — or nil for
+  a rule every project has.
+
+  `:rest-stale-client` is rest's; `http-auth-refusal` is http's; `key-typos` is
+  nobody's. Derived from the name rather than declared beside it, which is the
+  same move `owners` makes for a config key's first segment and
+  `gate-capability` makes for a gate's namespace: there is no second field to
+  keep in step, and renaming a rule is the only way to change who owns it.
+
+  Only a capability with `:requires` qualifies — `slopp` and `app` are owners
+  rather than opt-ins, so no rule can belong to them.
+
+  **One derivation, three readers**, and it was two of them disagreeing that
+  made this a function. `query_capabilities` reported a rule under a
+  capability's `:arms` — the list saying what opting in would turn on — while
+  the sweep ran that rule regardless of whether the capability was enabled. A
+  capability claiming rules it does not control is the model failing at the one
+  thing it exists to do."
+  [k]
+  (let [n (name k)]
+    (some (fn [{:keys [capability requires]}]
+            (when (and requires (str/starts-with? n (str capability "-")))
+              capability))
+          capability-catalog)))
+
 (def ^:export shipping-common
   "Namespaces that ship with EVERY capability — the `\"_\"` family of the vendored
   manifests, as `{ns path}`.

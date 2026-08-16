@@ -1043,3 +1043,57 @@
                               " (let [to (str \"/nope/\" 2)] [:a {:href to} \"b\"])]"))]
         (is (every? #{:info} (map :severity found))
             (str "shadowed name must stay unresolved: " (pr-str found)))))))
+
+(deftest a-rule-its-capability-has-not-enabled-says-so-rather-than-vanishing
+  ;; slopp-ui, 2026-08-16, reading their own full_check before taking a jar:
+  ;; the five contract rules moved to `rest`, `rest` is off by default, and
+  ;; "nothing changes until you enable it" was backwards — enforcement they
+  ;; have TODAY moves behind a switch nobody threw.
+  ;;
+  ;; Probing it found the picture wrong in both directions. The four done-grain
+  ;; contract checks never consulted a capability at all: they ran whatever
+  ;; `http.enabled` said before the move and whatever `rest.enabled` says after
+  ;; it, while `query_capabilities` listed them under `:arms` — the list saying
+  ;; what opting in WOULD turn on. A capability claiming rules it does not
+  ;; control is the model failing at the one thing it is for.
+  ;;
+  ;; So ownership is derived in ONE place, the arms report and the sweep read
+  ;; the same answer, and a rule its capability has not enabled is reported as
+  ;; NOT SWEPT with that as the reason. Absence would be indistinguishable from
+  ;; a clean run.
+  (let [bare (store/empty-store)
+        on   (assoc-in bare [:config "capabilities"]
+                       {:format :manifest :values {"rest.enabled" "true"}})]
+    (testing "with rest OFF, its rules are not swept and say why"
+      (let [plan (rules/sweep-plan bare)
+            rows (into {} (map (juxt :rule identity)) (:not-swept plan))
+            row  (rows :rest-unconstrained-contract)]
+        (is (not-any? #{:rest-unconstrained-contract} (:swept plan))
+            (str "a rule that cannot fire must not be reported as having run: "
+                 (pr-str (:swept plan))))
+        (is (some? row)
+            (str "and it must not simply VANISH — absent and clean read the same: "
+                 (pr-str (mapv :rule (:not-swept plan)))))
+        (is (re-find #"rest" (str (:why row)))
+            (str "the reason names the capability: " (:why row)))
+        (is (re-find #"rest\.enabled" (str (:why row)))
+            (str "and carries the remedy, so the report is where you find out "
+                 "which checks you are declining: " (:why row)))))
+
+    (testing "with rest ON, the same rules are swept"
+      (is (some #{:rest-unconstrained-contract} (:swept (rules/sweep-plan on)))
+          (pr-str (:swept (rules/sweep-plan on)))))
+
+    (testing "a rule nobody owns is unaffected either way"
+      ;; the guard against over-reach: `key-typos` belongs to no capability and
+      ;; must not acquire one by living beside rules that do
+      (is (nil? (capabilities/rule-owner :key-typos)))
+      (is (nil? (capabilities/rule-owner :schema-drift))))
+
+    (testing "and every advisory is still in exactly one of the two lists"
+      ;; the invariant the whole report rests on
+      (let [plan (rules/sweep-plan bare)
+            both (into (set (:swept plan)) (map :rule) (:not-swept plan))]
+        (is (= (set (map :key rules/done-advisories)) both))
+        (is (empty? (filter (set (:swept plan)) (map :rule (:not-swept plan))))
+            "no rule appears in both")))))
