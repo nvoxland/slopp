@@ -1133,33 +1133,40 @@ VALUE, so the report is the migration instruction: set the current key, then
         :cli/args    [:catn [:who :string]]
         :cli/opts    [:map [:loud {:optional true} :boolean]]}
   greet "Greet." [ctx args]
-  {:greeting (str "hi " (:who args))})
+  (.write (:cli/out ctx) (str "hi " (:who args) "\n"))
+  nil)
 ```
 
 There is no list to register it in and no `-main` to write. `build!` generates
 the entry, over every namespace in your store that declares a command.
 
-**A command RETURNS DATA.** slopp renders the value and sets the exit code, so
-the interesting cases are ordinary in-image `=` on a map — a wrong flag, a
-missing argument, a non-zero status — with no process and no captured text:
+**A command WRITES its answer and RETURNS its exit status.** Output is yours,
+all of it — slopp formats nothing. What slopp owns is argv, the usage text, the
+streams and the exit: `(:cli/out ctx)` and `(:cli/err ctx)` are writers,
+`(:cli/in ctx)` is a reader, and an INTEGER return becomes the process status
+(`nil` and anything else are 0).
+
+Watch the one hazard, because there is no way for slopp to see it: **a body
+whose last expression is a number exits with it.** `(count xs)` at the end of a
+command is exit code 3. End on `nil` when the value is incidental.
+
+Testing needs no process — `fake-context` gives string writers and you assert on
+the characters a user would see:
 
 ```clojure
 (cli/run (cli/fake-context {:cli/commands (cli/commands-in '[myapp.commands])})
          ["greet" "world"])
-;; => {:cli/exit 0 :cli/value {:greeting "hi world"} :cli/out "…" :cli/err ""}
+;; => {:cli/exit 0 :cli/out "hi world\n" :cli/err ""}
 ```
 
-**A sequence of maps prints as a TABLE** — header once, columns aligned, cells
-truncated — because a sequence of maps is what a `list` command returns and a
-row per `pr-str` is a wall of EDN. A map prints as `key value` lines. That is
-the whole of it: no colour, no wrapping, no configuration. A command that wants
-more returns the string it wants.
+Asserting on TEXT is the point rather than a cost. slopp used to render a
+returned map and let a test be an `=` on data — which is a shape no user of the
+program ever sees, the same defect `slopp.rest/call` exists to remove for HTTP.
+For a command line, stdout IS the wire.
 
-Choose the status yourself by returning `:cli/exit`; without one, a return is
-success. `:cli/in` and `:cli/out` are on the context for the two things a
-return value cannot express — reading stdin, and reporting progress while work
-is still happening — and writing to them is fine. Reaching for the AMBIENT
-stream is what `cli-direct-stdio` refuses.
+Reaching for the AMBIENT stream — `println`, `*out*`, `System/exit` — is what
+`cli-direct-stdio` refuses: that is a different stream, which no test captures,
+no driver redirects and no fake stands in for, so the output escapes.
 
 **Arguments are declared in malli**, the same language `rest` declares a
 contract in, so one shape can serve a command and an endpoint. Positionals are

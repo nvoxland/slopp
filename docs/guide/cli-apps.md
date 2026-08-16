@@ -29,7 +29,8 @@ true.
         :cli/args    [:catn [:who :string]]
         :cli/opts    [:map [:loud {:optional true} :boolean]]}
   greet "Greet." [ctx args]
-  {:greeting (str "hi " (:who args))})
+  (.write (:cli/out ctx) (str "hi " (:who args) "\n"))
+  nil)
 ```
 
 `:cli/args` and `:cli/opts` are [malli](https://github.com/metosin/malli)
@@ -41,52 +42,57 @@ one malli schema which is both. Options are a `:map`.
 A command that genuinely takes nothing says `[:catn]`. "Takes none" and "never
 said" are different statements, and only the first satisfies the gate.
 
-## A command returns data
+## A command writes its answer
 
-This is the decision the rest follows from. slopp renders the returned value
-and sets the exit code, so a command is an ordinary function of data:
+This is the decision the rest follows from, and it is deliberately narrow:
+**slopp owns argv, the usage text, the streams and the exit status. You own
+every character of output.**
+
+The context carries three streams. `(:cli/out ctx)` and `(:cli/err ctx)` are
+writers; `(:cli/in ctx)` is a reader. Write whatever your program should print
+— a line, a table you formatted, JSON, nothing at all.
+
+The return value is the **exit status**: an integer becomes the process's
+status, and `nil` (or anything that is not an integer) is 0.
+
+!!! warning "A number at the end of a body is an exit code"
+
+    `(count xs)` as the last expression of a command exits with 3. Only an
+    integer can be a status, so there is no way to tell a deliberate one from
+    an incidental one — end on `nil` when the value is incidental.
+
+`run` *returns* the status rather than exiting; the generated launcher is the
+only place `System/exit` is called, and it flushes first because
+`System/exit` does not drain a buffered stdout.
+
+### Testing it takes no process
+
+`fake-context` swaps the three streams for strings and goes through the same
+`run`, so a whole invocation — resolve, parse, call, exit — is an ordinary
+in-image assertion:
 
 ```clj
 query_eval {code "(cli/run (cli/fake-context
                              {:cli/commands (cli/commands-in '[myapp.commands])})
                            [\"greet\" \"world\"])"}
-;; {:cli/exit 0 :cli/value {:greeting "hi world"} :cli/out "…" :cli/err ""}
+;; {:cli/exit 0 :cli/out "hi world\n" :cli/err ""}
 ```
 
-A wrong flag, a missing argument, a non-zero status — all `=` on a map, with no
-process to spawn and no captured text to parse back. `run` *returns* the exit
-code rather than exiting; the generated launcher is the only place
-`System/exit` is called.
+You assert on **text**, and that is the point rather than the price. slopp used
+to render a returned map so a test could be an `=` on data — but that map is a
+shape no user of your program ever sees, which is exactly the defect
+[`slopp.rest/call`](web/typed-apis.md) exists to remove for HTTP. For a command
+line, stdout *is* the wire. The text is what a person reads and what a script
+pipes, and `fake-context` keeps it assertable without a process.
 
-Return `:cli/exit` to choose the status yourself. Without one, a return is
-success.
+### Reach for the injected stream, never the ambient one
 
-### How the value is rendered
-
-A map prints as aligned `key value` lines. **A sequence of maps prints as a
-table** — header once, columns aligned, long cells truncated:
-
-```
-file   from  subject
-a.md   ann   the first one
-bb.md  bo    another
-```
-
-That case is here because it is the one a `list` command returns, and one
-`pr-str` per row is a wall of EDN: correct, machine-readable, unreadable.
-
-And that is the whole of it. No colour, no wrapping, no column selection, no
-`--format`. A command that wants more returns the string it wants — rendering
-is the framework's job only for as long as it is doing a better job than you
-would.
-
-`:cli/in` and `:cli/out` are on the context for the two things a return value
-cannot express: reading stdin, and reporting progress while work is still
-happening. Writing to those is fine — it is what they are for. Reaching for the
-*ambient* `*out*` is what the `cli-direct-stdio` gate refuses, because a
-`println` in a command body is a second output channel nobody renders,
-interleaved with the first by accident, and invisible to a test asserting on the
-return value.
+`println` and `*out*` are a *different* stream from the one your context
+carries: no test captures it, no driver redirects it, and the fake cannot stand
+in for it, so the output simply escapes. `System/exit` is worse — it ends the
+process from inside business logic, so the launcher's own exit, a driver and a
+test never run. The `cli-direct-stdio` gate refuses both, and refuses nothing
+else: writing is expected.
 
 ## What you get without writing it
 
@@ -111,7 +117,7 @@ you opt in, which is the point of showing them:
 |---|---|
 | `cli-args-schema` | a `:cli/command` with no declared `:cli/args`. argv is untrusted input; what a command accepts is declared, not parsed in the body. |
 | `cli-command-collision` | two forms claiming the same command name. |
-| `cli-direct-stdio` | a command body that prints, reads a line, or exits. Answer by returning. |
+| `cli-direct-stdio` | a command body that reaches for an *ambient* stream (`println`, `*out*`, `read-line`) or calls `System/exit`. Writing to `(:cli/out ctx)` is expected. |
 
 ## Building it
 

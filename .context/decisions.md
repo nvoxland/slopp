@@ -4272,3 +4272,76 @@ the pure plan, correctly, which is exactly how the join went unwatched. Both are
 recorded as disciplines: "a report over a POPULATION must not be hostage to one
 member" and "splitting a DECISION from its PERFORMANCE creates a join nothing
 watches".
+
+### D-cli-output (2026-08-16) — REVISITED: a command writes its answer, and the return is only a status
+
+**This reverses the headline decision of D-capabilities wave 2**, one day old,
+on the user's argument. Recorded as a revisit rather than edited into the
+original, because the original was reasoned and the reasoning is what has to be
+answered.
+
+**What wave 2 decided.** A command RETURNS DATA; slopp renders the value and
+sets the exit code. The argument was testability: a command becomes an ordinary
+in-image `=` on a map, so a wrong flag, a missing argument and a non-zero status
+are assertable with no process and no captured text.
+
+**What is decided now.** A command writes to `(:cli/out ctx)` / `(:cli/err ctx)`
+and returns an exit status — an integer, or `nil` for 0. slopp formats nothing.
+`run` returns `{:cli/exit :cli/out :cli/err}`; `:cli/value` is gone, and its
+removal is the point rather than a side effect.
+
+Three arguments, and the second is the one that settles it:
+
+1. **Real CLI output is not a data structure.** The return-data model has a
+   shape for the one command whose answer is a table and none at all for the
+   ordinary one — a summary line, then rows, then a warning. An app hitting that
+   returns a pre-rendered string, at which point the framework's rendering is
+   doing nothing and the promise has quietly become "return a string".
+2. **It made a test assert on a shape no user of the program ever sees.** That
+   is precisely the defect `slopp.rest/call` was built to remove for HTTP one
+   day earlier: asserting on a handler's return value checks the pre-wire value,
+   not what the far side receives. **For a command line, stdout IS the wire.**
+   Building the opposite thing for `cli` in the same wave was an inconsistency,
+   not a difference between the two ports.
+3. **The evidence was already on file and read the wrong way.** The 36 KB of raw
+   EDN a dogfooded `list` command printed was the first real app hitting the
+   wall; the response was to add a table renderer, which moved the line
+   `render`'s own docstring said not to cross rather than asking whether the
+   line was in the right place. `render` is deleted.
+
+**What it costs, stated because it was the whole case for the old design:** a
+test asserts on text rather than on data. That is the right trade and not merely
+a tolerable one — the text is what a person reads and what a script pipes, and
+`fake-context` keeps it assertable with no process, no socket and no temp
+directory. The capability's claim is unchanged; only what is being asserted
+moved to the observable side.
+
+**The accepted hazard, stated rather than designed around.** A body whose last
+expression is a number exits with it: `(count xs)` at the end of a command is
+exit code 3. Only an integer can be a status, so nothing can distinguish a
+deliberate 3 from an incidental one, and a cleverer rule (a sentinel, a
+`{:cli/exit n}` map, a throw) would trade a documented rule for a second
+vocabulary. End on `nil` when the value is incidental.
+
+**What did NOT change, and why the gate survives intact.** `cli-direct-stdio`
+refused `println` and `System/exit` before and refuses them now — with the same
+behaviour and a different reason. It was about *whether a command has two ways
+of answering*; it is now about *which stream*. `*out*` is not the stream the
+context carries: no test captures it, no driver redirects it, and the fake
+cannot stand in for it, so the output escapes. Injection is what makes an
+invocation testable without a process, and the gate defends the injection.
+
+**Two phantom citations found while doing it, and one built.** `slopp.cli`'s
+docstring named `cli-contract` as the suite running both halves of the port —
+it did not exist, in the docstring of the thing it was supposed to check. It
+exists now, and it earned its place immediately: a command doing its own writing
+means `run` must FLUSH, and a `StringWriter` has nothing to flush, so the fake
+half cannot fail that assertion. Only the real-stream half can, and it is the
+one test in the store that would notice. The other citation, `slopp.clidev`,
+named a dev-side driver that never existed and is not needed; the claim was
+dropped rather than built.
+
+A store-wide scan then found 58 backticked citations of `slopp.*` names that no
+namespace answers to. Most are legitimate family prefixes (`slopp.api`), but the
+residue includes retired spellings from the `web.*` → `http.*` rename. Filed as
+its own item, not fixed here.
