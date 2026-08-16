@@ -4046,3 +4046,114 @@ in every context a test runs, only one of the two copies exists.
   (`clojure -M -m slopp.kernel.boot . --call build`, which works precisely
   because a checkout has no META-INF). Not compatibility: the old shape is
   still refused.
+
+### D-capabilities, wave 3 (2026-08-15) — `rest`, and a contract that is HONOURED
+
+`rest` was declared in wave 1 and armed zero rules. Its registry doc promised
+"request/response contracts, boundary validation, and generated clients derived
+from the same schemas". Two of the three existed.
+
+**Measured before building anything, and the measurement is the decision.**
+`slopp.web.dispatch/handle!` ran identity → route → policy → reads → handler →
+effects and never looked at `:web/request` or `:web/response`. The schemas were
+not even on the route row. **No namespace in the shipped `slopp.web*` family
+required malli at all** — validation existed only in slopp's own app tests, by
+hand. And `slopp.index.crossings/kinds` claimed the `:wire/json` crossing was
+`:checked-by "the dispatcher validates against the same schema var the client
+ships"`, which was false, in the one field whose job is to separate checked from
+unchecked. So: gate-enforced at write time, published to consumers, used to
+generate typed clients, and honoured by nobody.
+
+That row was corrected FIRST and separately, before any of the rest was built —
+a specification that lies about the current state is worse than none. It has
+since moved back to checked, and the test assertion moved with it rather than
+being deleted. A crossing moving between the two lists is the only honest way
+that inventory changes.
+
+**A response is judged on what the CLIENT receives, which costs a real
+serialize/parse.** The cheap idea — `m/encode` through the json-transformer —
+fixes neither failing case, and both directions are wrong:
+
+| value | schema | in-image | arrives |
+|---|---|---|---|
+| `{:x :foo}` | `[:x :string]` | INVALID | `{:x "foo"}` VALID |
+| `{:tags #{"a"}}` | `[:tags [:set :string]]` | VALID | `["a"]` INVALID |
+
+So an in-image check would 500 a response the consumer receives exactly as
+promised, AND pass one it receives broken. The round-trip is the only thing
+that answers the question the contract asks. Those measurements live in the
+test rather than here, because they are what would tempt the next reader to
+make it cheaper.
+
+**A request is DECODED and then judged, and the asymmetry is deliberate.** JSON
+cannot carry a keyword, so `[:tag :keyword]` describes a value the wire cannot
+express and decoding is what makes the contract honourable at all. JSON CAN
+carry a number, so `"7"` against `[:id :int]` is a client error and coercing it
+would publish a contract the server does not actually require. Leniency there is
+how "it worked when I tried it" and "it accepts anything" become the same system.
+
+### The validators are functions ON THE CONTEXT, and that is what keeps malli out of http
+
+`handle!` looks for `:rest/decode-request` and `:rest/check-response` and calls
+whatever it finds, exactly as it treats `:web/read-performers`. `slopp.rest`
+requires malli; `slopp.web.*` still does not, so an app serving HTML never pays
+for a validation library it has no contracts to use. The module system enforced
+this rather than the author remembering it: `slopp.web` → `slopp.rest` was
+REFUSED and had to be declared test-only.
+
+slopp generates the `serve!` call for a managed app, so a capability adding to
+the context has no call site of its own. `:web/wrap-context` is the generic
+seam — a fn applied between assembly and serving — and `slopp.rest/validating`
+is its first user.
+
+### `slopp.rest/call` — the e2e loop without the e2e cost
+
+The framework already KNEW about this gap and made it the author's problem:
+`web.client/fake-requester`'s docstring says it does not model the server's
+parsing and sends you to a real server, and `handle!`'s teach marker told you to
+round-trip through JSON by hand. `call` drives the app's own endpoints in
+process through the real encoding both ways, so a keyword arrives as a string
+and a set as an array — with the boundary REAL, because a fake that skipped
+validation would be a second implementation of the server.
+
+Named without a `!` to mirror `slopp.cli/run`, which `slopp.cli`'s docstring
+commits to. Both are equally effectful; `cli/run` was simply never flagged (its
+writes are interop, which effectfulness does not propagate through), so the pair
+had been split by DETECTION rather than judgement.
+
+### The five contract rules moved from `http` to `rest`, and an HTML app is loosened
+
+`http-endpoint-schema` → `slopp.edit.rest/rest-endpoint-schema`, plus four done
+advisories → `slopp.rules.rest`, keys `:http-*` → `:rest-*`. Ownership is
+derived — from the implementing namespace for a form gate, from the key prefix
+for a done rule — so moving the code IS the change of owner, and the naming
+guard fired in BOTH directions the moment the checks moved and the keys had not.
+
+**Accepted consequence, and it is the point rather than the cost:** an app that
+serves HTML and publishes no typed API is no longer required to declare
+`:web/response` on every page. That was http demanding a JSON contract from a
+document — one app type's vocabulary applied to every project, which is the R6
+mistake in the gate that most looked like a general rule.
+
+`http` now arms 12 rules and `rest` 5. slopp itself enables `rest`: it publishes
+`/api/contracts` and generates clients, so unlike `webapp` this store is a real
+bed rather than an empty room.
+
+### Two bugs the store found that the plan did not anticipate
+
+- **`:web/request` on a GET describes PARAMS, not a body.** `/api/ns/:ns`
+  declares `[:map [:ns :string]]` for its path segment and the generated client
+  reads it as the wrapper's argument list. Judging that against a nil body 400'd
+  four of slopp's own endpoints the moment the boundary was pointed at them. The
+  boundary now honours the documented meaning — body methods only. Params stay
+  unvalidated and that is a real gap, filed rather than closed, because covering
+  it means deciding what `:web/request` means for the client generator too and
+  the two must not answer differently.
+- **`:web/path` was missing from http's entry markers.** `:web/page` covers the
+  app slopp OPENS on its behalf and misses the app slopp SERVES: an endpoint's
+  `serve!` call is generated, so a store can declare a whole API, never name
+  `slopp.web`, and have the framework vendor nothing into its built tree. Found
+  by building a rest app, whose endpoints are all `:web/path` and none a page.
+  Same marker-detection lesson cli taught, arriving a third time — which is
+  enough instances to say it plainly: **usage-by-require is not a signal for any
+  capability whose entry slopp generates.**

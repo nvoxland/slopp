@@ -139,7 +139,7 @@ like any other [rule](../verification.md#rules).
 | Rule | Refuses |
 |---|---|
 | `http-auth-refusal` | An endpoint with no `:web/auth`. Default-deny: `:public` is typed out, never implied. |
-| `http-endpoint-schema` | A missing `:web/response`, or `:web/request` on a body method. |
+| `rest-endpoint-schema` | A missing `:web/response`, or `:web/request` on a body method. **Belongs to `rest`, not `http`** — an app serving HTML and publishing no typed API is not asked for one. See [Typed APIs](typed-apis.md). |
 | `http-route-collision` | A second owner for one method plus path. |
 | `http-undeclared-effect` | A `:web/effects` kind no marked performer provides. |
 | `http-undeclared-context` | A handler reading `:web/deps` with no `^{:web/context true}` builder in the store -- see [Running the app](running.md). |

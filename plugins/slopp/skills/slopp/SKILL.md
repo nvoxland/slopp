@@ -1159,6 +1159,87 @@ codes you turned the capability on to get.
 declared arguments — the same metadata the gates enforce, so the report and the
 refusals cannot disagree.
 
+## Typed APIs (`rest`)
+
+**`http` serves. `rest` is what makes a declared contract binding.** Turn it on
+with `config_file {path "capabilities" key "rest.enabled" value "true"}` — it
+implies `http`.
+
+An endpoint declares what it accepts and returns:
+
+```clojure
+(defn ^{:web/method   :post
+        :web/path     "/api/orders"
+        :web/auth     :public
+        :web/request  [:map [:sku :string] [:qty :int]]
+        :web/response [:map [:id :int]]}
+  create! "Place an order." [req]
+  {:status 200 :body {:id (order/place! (:body req))}})
+```
+
+With `rest` on, three things follow that you write no code for.
+
+**A request that breaks its contract never reaches your handler.** It is a 400,
+refused *before* the declared `:web/reads` run — work on unvalidated input is
+the thing a boundary exists to prevent. The explain travels to the caller,
+because it describes the caller's own data.
+
+**What the wire cannot carry is DECODED for you.** JSON has no keywords, dates
+or UUIDs, so `[:tag :keyword]` arrives as the keyword you declared and your
+handler parses nothing. What JSON *can* carry is judged, not repaired: `"7"`
+against `[:qty :int]` is a client error, because accepting it would publish a
+contract the server does not actually require.
+
+**A response that breaks its own contract is a 500**, with the explain logged
+server-side and never in the body. The client was generated from that schema, so
+a violating response breaks the consumer anyway — failing at the source beats
+failing obscurely at the far end. Error responses are exempt: `:web/response`
+describes the 200, and a 404's `{:error …}` is not judged against it.
+
+### `slopp.rest/call` — see what a client sees, with no server
+
+This is the loop to reach for. It drives your own endpoints in process, through
+the real wire encoding both ways:
+
+```clj
+query_eval {code "(slopp.rest/call ctx {:method :post :path \"/api/orders\"
+                                        :body {:sku \"abc\" :qty 2}})"}
+;; {:status 200 :body {:id 41}}
+```
+
+No socket, no port, no browser, no process — **and yet a keyword comes back as
+a string and a set comes back as an array**, which is what a consumer actually
+receives. That difference is why an in-image assertion on a handler's return
+value has always been checking a shape no client gets, and it is the gap this
+closes. `?q=x` in the path is split for you, because the transport does that.
+
+The boundary is real here too: a bad body is refused exactly as it would be over
+a socket. A fake that skipped validation would be a second implementation of
+your server, and the two would disagree on the first change.
+
+### What rest arms, and what moved
+
+Enabling `rest` arms five rules — `rest-endpoint-schema` at the write, plus four
+done-grain advisories about contract drift, duplication, unconstrained fields
+and documentation. `query_capabilities` lists them before you opt in.
+
+**These used to be `http`'s.** If you serve HTML and publish no typed API, you
+are no longer asked to declare `:web/response` on every page — serving a
+document is `http`'s business, and typing a JSON contract is `rest`'s.
+
+`query_surface` gains a `:rest` section: per endpoint, the NAMES its request and
+response declare, its handler, and whether it is `:published` (an HTML page opts
+out with `:web/client false`, and that exclusion is a field rather than an
+omission, so "opted out" and "forgot a schema" do not look alike).
+
+!!! note "Params are not validated yet"
+
+    A GET's `:web/request` describes its path and query params — the generated
+    client reads it as the wrapper's argument list — and the boundary judges
+    `:web/request` only on `:post`/`:put`/`:patch`, where it is a body. So
+    `?depth=banana` against a declared `[:depth :int]` still reaches your
+    handler as a string. Validate it yourself for now.
+
 ## Web applications (D-web)
 
 Opt in once: `config_file {path "capabilities" key "http.enabled" value
@@ -1549,7 +1630,7 @@ response IN against the SAME schema the server enforces. Call them from your
 `.cljs`: `(api/create-order! params)` returns a promise; a wrong shape throws
 before the request leaves. Rules of the road:
 - **It's EXPLICIT** — run `generate_client` after changing an endpoint (like
-  `compile_client`, not on every edit). A `http-stale-client` done-advisory nudges you
+  `compile_client`, not on every edit). A `rest-stale-client` done-advisory nudges you
   when a contract drifts from the last generation; with `client`/`auto-compile`
   on, the generate also refreshes the JS bundle.
 - **NEVER hand-edit it.** Every wrapper is `^{:generated "<endpoint>"}` and the
@@ -1560,7 +1641,7 @@ before the request leaves. Rules of the road:
 - **Schemas must be `.cljc`.** A `:web/request`/`:web/response` VAR the client
   ships has to live in a `:cljc` ns (so it compiles into the bundle AND is the
   one the server validates); `generate_client` SKIPS an endpoint whose schema
-  isn't shippable and reports it in `:problems`. A `http-inline-schema-dup` advisory
+  isn't shippable and reports it in `:problems`. A `rest-inline-schema-dup` advisory
   nudges a shape shared across endpoints toward a named `.cljc` var.
 - **Declare the entries, or the validator is off.** A field typed `[:sequential
   :map]` accepts any map, so the generated client's response validation — the
@@ -1568,7 +1649,7 @@ before the request leaves. Rules of the road:
   `:diff` moved from `[String]` to `[[String String]]` and nothing noticed for
   weeks. Name the entries (`[:map [:kind :string] [:text :string]]`), or declare
   `:any` if the shape genuinely is not settled — `:any` at least says so, where a
-  bare `:map` looks like a type and admits everything. `http-unconstrained-contract`
+  bare `:map` looks like a type and admits everything. `rest-unconstrained-contract`
   (whole-store, advisory) lists them, and it is the PRIOR question to the one
   below: prose does not make a field real.
 - **Put each field's prose ON the field.** A type says what SHAPE a value has and
@@ -1576,7 +1657,7 @@ before the request leaves. Rules of the road:
   hits BEFORE the limit is applied. Malli entry properties are open and travel
   with the schema, so `[:total {:doc "hits before the limit is applied"} :int]`
   reaches every consumer of the published contract; a docstring on the schema var
-  does not, because a docstring is not a value. The `http-undocumented-contract`
+  does not, because a docstring is not a value. The `rest-undocumented-contract`
   advisory (whole-store, never blocking) lists the fields that say nothing.
   `:description` is accepted as malli's JSON-Schema spelling. **Build a long one
   with `(str …)`** — unlike a docstring this is a value, so a multi-line literal

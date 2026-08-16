@@ -93,7 +93,7 @@ possibility from the same source.
 ## The typed client is generated
 
 Once endpoints declare their `:web/request` and `:web/response` -- which the
-`http-endpoint-schema` gate requires -- slopp can write the browser side of the
+`rest-endpoint-schema` gate requires -- slopp can write the browser side of the
 contract for you:
 
 ```clj
@@ -113,7 +113,7 @@ in, against the *same* schema var the server enforces.
 Rules of the road:
 
 - **It is explicit.** Run `generate_client` after changing an endpoint's
-  contract, like `compile_client`. A `http-stale-client` advisory at done time
+  contract, like `compile_client`. A `rest-stale-client` advisory at done time
   nudges you when a contract has drifted since the last generation. With
   `client`/`auto-compile` on, generating also refreshes the JS bundle.
 - **Never hand-edit it.** Every wrapper carries `^{:generated "<endpoint>"}`
@@ -126,7 +126,7 @@ Rules of the road:
 - **Schemas must be `.cljc`.** A schema var the client ships has to compile
   into the bundle *and* be the one the server validates. `generate_client`
   skips an endpoint whose schema is not shippable and names it in
-  `:problems`. A `http-inline-schema-dup` advisory nudges a shape shared by two
+  `:problems`. A `rest-inline-schema-dup` advisory nudges a shape shared by two
   endpoints toward a named `.cljc` var.
 - **Declare the entries, or response validation is off for that field.** A field
   typed `[:sequential :map]` accepts any map, so the generated client validates
@@ -134,7 +134,7 @@ Rules of the road:
   drift is pointed at the field and switched off. Name the entries, or say
   `:any` when the shape is genuinely unsettled: `:any` admits it is saying
   nothing, while a bare `:map` looks like a type and admits everything. The
-  `http-unconstrained-contract` advisory lists them, whole-store, and it is the
+  `rest-unconstrained-contract` advisory lists them, whole-store, and it is the
   prior question to the one below -- prose does not make a field real.
 - **Each field's prose belongs on the field.** A type says what shape a value
   has and never what it means: `:total :int` does not tell a caller the number
@@ -142,7 +142,7 @@ Rules of the road:
   travel with the schema, so `[:total {:doc "hits before the limit is applied"}
   :int]` reaches every consumer of the published contract, while a docstring on
   the schema var does not -- a docstring is not a value. The
-  `http-undocumented-contract` advisory lists the fields that say nothing; it
+  `rest-undocumented-contract` advisory lists the fields that say nothing; it
   runs over the whole store, because a published contract is stable and nothing
   episode-scoped would ever look at it again. `:description` is accepted as
   malli's JSON-Schema spelling. Build a long one with `(str ...)`: unlike a

@@ -72,6 +72,7 @@ nav:
       - Endpoints: guide/web/endpoints.md
       - Auth and security: guide/web/auth.md
       - HTML and CSS: guide/web/html.md
+      - Typed APIs: guide/web/typed-apis.md
       - ClojureScript client: guide/web/client.md
       - Running and shipping: guide/web/running.md
   - Reference:

@@ -71,6 +71,7 @@ query_capabilities {}
 | `http.host` | `127.0.0.1` | Bind address. Widen deliberately. |
 | `http.port` | unset | The port the app's server binds. Unset means 8080 in production (`serve!` defaults it) and DERIVED from the store directory for the dev server, so two projects on one machine cannot collide. Set it to pin one address for both. |
 | `http.max-body-bytes` | `1048576` | Largest accepted request body. |
+| `rest.enabled` | `false` | Whether this project publishes a typed API. With it, a request that breaks its declared `:web/request` is a 400 before your handler runs, what JSON cannot carry is decoded to the types you declared, and a response that breaks its own `:web/response` is a 500 with the explain logged rather than sent. Implies `http`. |
 | `http.auth.providers` | none | Enabled identity providers, comma-separated, tried in order. |
 | `http.auth.default-policy` | `:deny` | For an endpoint with no `:web/auth`, which only happens if `http-auth-refusal` is dialed down. |
 
