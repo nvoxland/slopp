@@ -426,10 +426,20 @@
            (:entry-markers (capabilities/capability "rest")))
         "both, because a GET-only API declares no :web/request and still has a
          typed response to honour"))
-  (testing "a capability that ships nothing yet says so by omission"
-    ;; webapp has no framework namespaces of its own, and an empty vector would
-    ;; read as "a family with no files" rather than "no family"
-    (is (nil? (:ns-prefix (capabilities/capability "webapp")))))
+  (testing "webapp ships a family too, and its marker is the PAGE"
+    ;; Wave 4. This row was the worked example of a capability declared ahead of
+    ;; being built — it shipped no namespaces and said so by omission, because
+    ;; an empty vector would read as "a family with no files" rather than "no
+    ;; family". That example is gone now, which is the point of it having been
+    ;; one: the row became shippable by gaining two keys and nothing else.
+    ;;
+    ;; Third capability, third time the marker is the ONLY usage signal. slopp
+    ;; mounts the loop from the page declaration, so a browser app never names
+    ;; `slopp.webapp` any more than a cli app names `slopp.cli` or a rest app
+    ;; names `slopp.rest`.
+    (is (= "slopp.webapp" (:ns-prefix (capabilities/capability "webapp"))))
+    (is (some #{:web/page} (:entry-markers (capabilities/capability "webapp")))
+        "declaring a page IS using the browser framework"))
   (testing "owners that are not opt-ins ship nothing at all"
     (is (nil? (:ns-prefix (capabilities/capability "app"))))
     (is (nil? (:ns-prefix (capabilities/capability "slopp")))))
@@ -440,5 +450,6 @@
     ;; the catalog while silently reaching none of its three readers. rest
     ;; joined it by being added to the table and nothing else — which is the
     ;; property this catalog was restructured for.
-    (is (= {"cli" "slopp.cli" "http" "slopp.web" "rest" "slopp.rest"}
+    (is (= {"cli" "slopp.cli" "http" "slopp.web" "rest" "slopp.rest"
+            "webapp" "slopp.webapp"}
            (capabilities/shipping-families)))))

@@ -1620,3 +1620,44 @@
           (is (= 1 (:exit r)) (pr-str r))
           (is (str/includes? (:err r) "launcher, not the application") (pr-str r))
           (is (str/includes? (:err r) "TWICE") (pr-str r)))))))
+
+(deftest a-store-that-declares-a-PAGE-uses-the-webapp-family
+  ;; Wave 4: `webapp` becomes a shipping family, and the entry MARKER is the
+  ;; only signal there is.
+  ;;
+  ;; This is the third instance of the rule the cli and rest waves each
+  ;; rediscovered: `used-families` decides what to vendor by asking whether a
+  ;; store USES a family — it requires something in it, or carries a declared
+  ;; entry marker — and the require half fails for every capability whose entry
+  ;; slopp GENERATES, because slopp writes the call so the app never names the
+  ;; namespace. A webapp declares `^:web/page` and gets its loop mounted for it;
+  ;; nothing in its source says `slopp.webapp`.
+  ;;
+  ;; `http`'s markers were `[:web/page]` alone until a rest app was built and
+  ;; vendored NOTHING, which is how that lesson was paid for the second time.
+  (let [page (str "(ns shop.ui)\n\n"
+                  "(defn ^:web/page app \"The app.\" []\n"
+                  "  {:webapp/state (atom {}) :webapp/routes (fn [_] nil)\n"
+                  "   :webapp/view (fn [_] [:p \"hi\"])})\n")]
+
+    (testing "the marker alone is enough — the app never names slopp.webapp"
+      (let [st (store/ingest (store/empty-store) 'shop.ui page)]
+        (is (contains? (engine/used-families st) "webapp")
+            (str "a page declaration IS using the browser framework: "
+                 (pr-str (engine/used-families st))))))
+
+    (testing "and a store with no page does NOT get it"
+      ;; the control: without this, a predicate that returned every family
+      ;; would satisfy the assertion above
+      (let [st (store/ingest (store/empty-store) 'shop.plain
+                             "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")]
+        (is (not (contains? (engine/used-families st) "webapp"))
+            (pr-str (engine/used-families st)))))
+
+    (testing "the capability declares a prefix, which is what makes it shippable"
+      ;; build.clj reads :ns-prefix out of this catalog rather than keeping its
+      ;; own list, so declaring it here is the whole of making the family ship
+      (let [row (first (filter #(= "webapp" (:capability %))
+                               capabilities/capability-catalog))]
+        (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
+        (is (some #{:web/page} (:entry-markers row)) (pr-str row))))))
