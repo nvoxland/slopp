@@ -303,16 +303,33 @@
     ;; so a command-line app and a web app both get them.
     (let [root     (io/file (str src))
           families (framework-families root)
+          ;; .clj AND .cljc AND .cljs. A family whose namespaces are PORTABLE is
+          ;; not exotic — `webapp`'s loop has to load into the JVM oracle and
+          ;; compile to JS, which is the whole reason a browser app can be
+          ;; driven headlessly — and a `.clj`-only glob shipped it as a family
+          ;; with zero files. The catalog declared the prefix, `shipping-families`
+          ;; derived it, the leak guard covered it, and this reader alone could
+          ;; not see the namespace: caught by reading `framework-files.edn` out
+          ;; of the built artifact rather than trusting that the three readers
+          ;; agreed.
+          src-ext? (fn [^String n] (or (.endsWith n ".clj")
+                                       (.endsWith n ".cljc")
+                                       (.endsWith n ".cljs")))
           in-fam   (fn [prefix]
-                     (let [dir  (io/file root (str/replace prefix "." "/"))
-                           top  (io/file root (str (str/replace prefix "." "/") ".clj"))]
-                       (cond-> (vec (sort (for [f (file-seq dir)
-                                                :when (and (.isFile f)
-                                                           (.endsWith (.getName f) ".clj"))]
-                                            (str (str/replace prefix "." "/") "/"
-                                                 (subs (.getPath f)
-                                                       (inc (count (.getPath dir))))))))
-                         (.exists top) (conj (str (str/replace prefix "." "/") ".clj")))))
+                     (let [path (str/replace prefix "." "/")
+                           dir  (io/file root path)
+                           tops (filter #(.exists ^java.io.File %)
+                                        (map #(io/file root (str path %))
+                                             [".clj" ".cljc" ".cljs"]))]
+                       (into (vec (sort (for [f (file-seq dir)
+                                              :when (and (.isFile f)
+                                                         (src-ext? (.getName f)))]
+                                          (str path "/"
+                                               (subs (.getPath f)
+                                                     (inc (count (.getPath dir))))))))
+                             (map #(str path (subs (.getName ^java.io.File %)
+                                                   (.lastIndexOf (.getName ^java.io.File %) ".")))
+                                  tops))))
           common   (vec (sort (filter #(.exists (io/file root %))
                                       (framework-common root))))
           by-cap   (cond-> (into (sorted-map)
