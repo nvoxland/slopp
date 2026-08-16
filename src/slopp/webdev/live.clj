@@ -62,7 +62,7 @@
 
   Two questions, and only one of them is the project's. `http.enabled` says
   the project SERVES HTTP — that is what makes the web rules and
-  `query_routes` exist, and production reads it. The second used to be the
+  `query_surface` exist, and production reads it. The second used to be the
   `dev.server` capability and is now [[self-served?]], computed: a store
   whose surface this process already serves must not get a second, staler
   copy of it.

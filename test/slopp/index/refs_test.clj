@@ -4,7 +4,7 @@
   consume. Producers normalize here; consumers never re-integrate."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.index.refs :as refs]
-            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str]))
+            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str] [slopp.read.modules :as read.modules]))
 
 (deftest the-graph-sees-every-reference-kind
   (let [st (-> (store/empty-store)
@@ -466,3 +466,42 @@
     (testing "and source text is never rewritten — it is reported to be judged"
       (is (every? #(false? (:rewritable %)) (:string-source by))
           (pr-str (:string-source by))))))
+
+(deftest a-capability-entry-marker-declares-its-own-liveness
+  ;; A `:cli/command` is called by the RUNNER, resolved by name from argv, so
+  ;; no reference inside the store reaches it — exactly the position a
+  ;; `:web/path` endpoint is in with respect to the dispatcher.
+  ;;
+  ;; Without a declared edge, every command an app writes reads as dead public
+  ;; surface and fails the unused gate. The fix an author would reach for is
+  ;; `^:entry-point` on each one, which means what `:cli/command` already
+  ;; declares — a second marker, on the forms hardest to notice missing,
+  ;; because they are the app's own surface rather than slopp's.
+  (let [st (store/ingest (store/empty-store) 'app.cmds
+                         (str "(ns app.cmds)\n\n"
+                              "(defn ^{:cli/command \"add\" :cli/args [:catn [:t :string]]} add \"A.\" [ctx args] args)\n\n"
+                              "(defn plain \"P.\" [x] x)\n"))
+        rs (refs/refs st)
+        to (fn [nm] (filter #(and (= 'app.cmds (:to-ns %)) (= nm (:to-name %))) rs))]
+    (testing "the command is reachable from OUTSIDE, and the marker says which kind"
+      (let [e (first (to 'add))]
+        (is (some? e) (str "no declared edge for a :cli/command — every command "
+                           "in every app would read as dead surface"))
+        (is (= :external (:from-ns e)) (pr-str e))
+        (is (= :declared (:via e)) (pr-str e))
+        (is (= :cli-command (:marker e))
+            (str "the marker is preserved so a stale check can tell WHICH dial "
+                 "declared it: " (pr-str e)))))
+    (testing "an unmarked public fn beside it gets no such edge"
+      ;; guard the guard: if every form got a declared edge the assertion above
+      ;; would pass while meaning nothing
+      (is (empty? (to 'plain)) (pr-str (to 'plain))))
+    (testing "and the unused report exempts the command while still flagging the other"
+      ;; the join that matters — a declared edge nothing consumes would be a
+      ;; fact the graph knows and the gate ignores
+      (let [{:keys [unused]} (read.modules/unused-report st ['app.cmds])]
+        (is (not (some #{'app.cmds/add} unused))
+            (str "a declared command must not read as dead surface: " (pr-str unused)))
+        (is (some #{'app.cmds/plain} unused)
+            (str "and the exemption must be the MARKER rather than the namespace: "
+                 (pr-str unused)))))))

@@ -29,6 +29,15 @@
   [{:rule :module-refusal :grain :form
     :escape "declare the edge (module_dep) or respect visibility (^:export / restructure)"
     :teach "a cross-module call needs a declared edge and must respect recursive visibility"}
+   {:rule :cli-args-schema :grain :form
+    :escape "add :cli/args to the name metadata — a malli schema, [:catn [:name :string]] for one positional or [:catn] if it genuinely takes none"
+    :teach "a :cli/command must declare what it ACCEPTS. argv is untrusted input, so a command with no contract has moved the boundary into its own body, where nothing checks it and the first wrong value arrives as a string (inert until cli.enabled)"}
+   {:rule :cli-command-collision :grain :form
+    :escape "rename one, or extend the existing command (query_surface lists every claim, under :cli)"
+    :teach "one command name has one owner. commands-in keys by name, so a duplicate does not fail at startup — whichever namespace loads first wins and the other command is simply unreachable, which looks exactly like one nobody has tried (inert until cli.enabled)"}
+   {:rule :cli-direct-stdio :grain :form
+    :escape "return the value — slopp renders it and sets the exit code — or write to the INJECTED stream, (.write (:cli/out ctx) …), which is what the context is for when work streams"
+    :teach "a command body prints, reads a line, or exits. A command answers by RETURNING; a second output channel is interleaved with the first by accident and is invisible to a test asserting on the return, and System/exit ends the process from inside business logic so nothing downstream runs. NOT a purity claim — printing is classified separately and a non-command may print freely (inert until cli.enabled)"}
    {:rule :tier-refusal :grain :form
     :escape "module_purity {module tier :internal/:external}, or move the effect into an :external namespace (:internal may mutate in-process, e.g. a memo through slopp.cache)"
     :teach "a form's effect or non-determinism exceeds its module's declared purity tier"}
@@ -48,13 +57,13 @@
     :escape "declare :web/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let http.auth.default-policy govern"
     :teach "an endpoint (:web/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until http.enabled)"}
    {:rule :http-route-collision :grain :form
-    :escape "change the path or method, or extend the existing handler (query_routes lists every claim)"
+    :escape "change the path or method, or extend the existing handler (query_surface lists every claim)"
     :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until http.enabled)"}
    {:rule :http-page-unreachable :grain :form
     :escape "move the entry — and the routing, derive and view code it reaches — to a :jvm or :cljc namespace, passing the browser-shaped parts in (:fetch, :render, a url pusher); or drop the ^:web/page marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:web/page entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until http.enabled)"}
    {:rule :http-undeclared-effect :grain :form
-    :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_routes lists the vocabulary)"
+    :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
     :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}
 {:rule :http-undeclared-context :grain :form
     :escape "declare ONE zero-arg builder ((defn ^{:web/context true} app-context [] {…})) — an app that runs its own serve! should mark the builder it already has and call it, since two definitions of one store's context agree until one gains a key. Dial it down (config_file {path \"rules\" key \"http-undeclared-context\" value \"advisory\"}) for a context that genuinely cannot be built without arguments"
@@ -168,7 +177,7 @@
                 " empty namespaces are exempt (there is no author to ask)")}
    {:rule :bare-throw :grain :done
     :escape "return data / (ex-info …), or ^{:bare-throw-ok \"why\"} on the name when the exact exception type is required by something outside your control — a Java API contract, an InterruptedException, a test proving a non-ex-info gets masked (it polices itself: a marker on a form with no bare throw is reported stale)"
-    :teach "ANY fn throws a freshly-constructed non-ex-info exception. The cost is not tidiness: a bare exception can only be caught by TYPE, so a caller handling one failure catches a whole class and swallows every unrelated bug with it — which is exactly how slopp.hub/post! came to report a project ABSENT whenever any bug fired. Give the throw ex-data and the catch can be narrow"}
+    :teach "ANY fn throws a freshly-constructed non-ex-info exception. The cost is not tidiness: a bare exception can only be caught by TYPE, so a caller handling one failure catches a whole class and swallows every unrelated bug with it. Measured: a registration call that caught \"the server is not there\" reported the project ABSENT whenever ANY bug fired inside it, because both arrived as the same type. Give the throw ex-data and the catch can be narrow"}
 {:rule :key-not-returned :grain :done
     :escape "fix the assertion to read a key the callee returns, or drop it — a read of a key the callee never returns is always nil"
     :teach "(:k local) where local is bound to a call whose statically-known return shape has no :k — a vacuous assertion that stays green no matter what the code does (assertions-that-cannot-fail)"}

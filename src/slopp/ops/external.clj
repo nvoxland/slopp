@@ -14,7 +14,7 @@
   reach passes on a population of zero, which is indistinguishable from
   passing on the truth."
   (:require [clojure.java.shell :as sh]
-            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch]))
+            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli]))
 
 ^:reads (defn ^:export git-config-value
   "`git config <k>` as git would resolve it in `dir` (local then global), or
@@ -153,6 +153,14 @@
         st       (:store @session)
         main     (or main (capabilities/effective st "app.main"))
         bin-name (or bin-name (capabilities/effective st "app.name"))
+        ;; A cli app declares NO entry fn: the author writes commands and slopp
+        ;; writes the launcher. So "does this build produce an executable" stops
+        ;; being "is app.main set" — it was literally `(boolean main)`, which
+        ;; would hand a cli app no :native alias and no AOT path for the very
+        ;; launcher slopp generated for it.
+        cli?     (capabilities/enabled? st "cli")
+        cmd-nses (vec (sort (distinct (map :ns (edit.cli/command-rows st)))))
+        entry?   (or (boolean main) cli?)
         de       (io/file target "deps.edn")
         provided (client-build-deps st)
         ;; `session/image-deps` adds what the VENDORED framework requires — the
@@ -168,7 +176,7 @@ client-deps (merge (:client-deps st) (:client provided))
                                                         (n/string (:node %)))
                                               (store/forms st nsx)))
                                       (keys (:namespaces st)))))
-        incompat (when main (seq (filter project.deps/native-incompatible-deps (keys deps))))
+        incompat (when entry? (seq (filter project.deps/native-incompatible-deps (keys deps))))
         ;; a deps.edn is ours iff it's byte-identical to a generated variant
         ;; (for THIS store's manifest + test layout — else it reads as foreign)
         traced?  (boolean (and has-tests?
@@ -191,16 +199,44 @@ client-deps (merge (:client-deps st) (:client provided))
       {:error (str "refusing to build into " target
                    " — it contains the running system")}
 
+      ;; BEFORE any main-specific check, because this is a contradiction in the
+      ;; CONFIG and stays one whether or not the named fn exists — diagnosing
+      ;; the missing form first would answer a question the author is not
+      ;; asking. They collide concretely (both want src/native/main.clj and the
+      ;; reserved native.main), but the silent version is the reason for the
+      ;; refusal: `native?` used to be `(boolean main)`, so a store with both
+      ;; got a launcher calling the author's fn directly — no parsing, no
+      ;; injected streams, no exit code. Exactly the bare `-m` the capability
+      ;; replaces, handed to a store that had opted INTO the capability.
+      (and main cli?)
+      {:error (str "app.main and cli.enabled both declare an entry, and a build"
+                   " has room for one. cli.enabled means slopp GENERATES the"
+                   " entry from your :cli/command forms — argument parsing,"
+                   " injected streams and exit codes come with it. app.main"
+                   " means your own fn is handed argv and owns all of that."
+                   " Keep the one you meant: unset app.main to use the"
+                   " commands, or set cli.enabled false to keep " main ".")}
+
+      ;; A shell over nothing. It would build, run, and be able to do exactly
+      ;; nothing — and `commands-in` cannot distinguish "no commands here" from
+      ;; "that namespace never loaded", so the binary would not say so either.
+      (and cli? (empty? cmd-nses))
+      {:error (str "cli.enabled, but no form in this store declares a"
+                   " :cli/command — the generated entry would have no commands"
+                   " to run. Add one: (defn ^{:cli/command \"greet\""
+                   " :cli/doc \"...\" :cli/args [:catn [:who :string]]} greet"
+                   " [ctx args] …), or set cli.enabled false.")}
+
       (and main (nil? entry-ns))
       {:error (str ":main must be a qualified entry fn (ns/name), got " main)}
 
       (and main (nil? (store/form-named st entry-ns (symbol (name main)))))
       (edit/missing-form-error st entry-ns (symbol (name main)))
 
-      (and main (get-in st [:namespaces 'native.main]))
+      (and entry? (get-in st [:namespaces 'native.main]))
       {:error "a store namespace named native.main collides with the generated launcher"}
 
-      (and main (.exists de) (not (ours?)))
+      (and entry? (.exists de) (not (ours?)))
       {:error (str target "/deps.edn exists and wasn't generated by build! — "
                    "the native recipe must own it; build into a fresh directory")}
 
@@ -269,9 +305,9 @@ client-deps (merge (:client-deps st) (:client provided))
           ;; at all. Same call the oracle image makes, so the app is built
           ;; against the framework it was developed against.
           (engine/vendor-framework! st target)
-          (when (or main (not (.exists de)))
+          (when (or entry? (not (.exists de)))
             (when has-tests? (.mkdirs (io/file target "test")))
-            (spit de (build/deps-edn (boolean main) deps has-tests? traced? client-deps instr?)))
+            (spit de (build/deps-edn entry? deps has-tests? traced? client-deps instr?)))
           (cond-> (let [missing (materialize-artifacts! session st target)]
                         (cond-> {:built (str target)}
                           (seq missing) (assoc :missing-artifacts missing)
@@ -279,17 +315,32 @@ client-deps (merge (:client-deps st) (:client provided))
                           ;; set — say so, because the whole failure mode is
                           ;; that nothing does
                           unpruned (assoc :unpruned unpruned)))
-            main
+            entry?
             (assoc :native
-                   (let [an    (analyze/analyze (store.render/render-ns st entry-ns))
-                         vdef  (first (filter #(and (= entry-ns (:ns %))
-                                                    (= (symbol (name main)) (:name %)))
-                                              (:var-definitions an)))
-                         bin   (or bin-name (first (str/split (str entry-ns) #"\.")))
+                   ;; the binary's name is ALSO the program's name in usage, and
+                   ;; deliberately ONE string rather than two settings: if they
+                   ;; could differ, generated help would teach a command the
+                   ;; shell does not have.
+                   (let [bin   (or bin-name
+                                   (first (str/split (str (if cli? (first cmd-nses) entry-ns))
+                                                     #"\.")))
                          launcher (io/file target "src" "native" "main.clj")
                          script   (io/file target "build-native.sh")]
                      (io/make-parents launcher)
-                     (spit launcher (build/launcher-source main (build/arg-style vdef)))
+                     (spit launcher
+                           (if cli?
+                             ;; no arity to inspect: the entry is slopp's own
+                             ;; `run`, of known shape. That is what the
+                             ;; capability buys — an author's fn has to be
+                             ;; MEASURED before argv can be handed to it, and
+                             ;; whatever that measurement decides, everything
+                             ;; downstream of it is still the author's problem.
+                             (build/cli-launcher-source bin cmd-nses)
+                             (let [an   (analyze/analyze (store.render/render-ns st entry-ns))
+                                   vdef (first (filter #(and (= entry-ns (:ns %))
+                                                             (= (symbol (name main)) (:name %)))
+                                                       (:var-definitions an)))]
+                               (build/launcher-source main (build/arg-style vdef)))))
                      (spit script (build/native-script bin (keys (:files st))))
                      (.setExecutable script true false)
                      (let [warns (vec (for [[lib coord] deps

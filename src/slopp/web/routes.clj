@@ -7,7 +7,7 @@
 
   That makes this the UNIVERSAL source — a live store, a jar, and a native
   binary all answer from the same var metadata, and it is the same contract
-  `query_routes` reads off the STORED node. The store-side gates and this
+  `query_surface` reads off the STORED node. The store-side gates and this
   namespace are two readings of one declaration, which is the only reason a
   write-time refusal can predict a runtime behaviour.
 
@@ -52,7 +52,7 @@
 (defn ^:export from-namespaces
   "Route rows from the loaded namespaces' public vars carrying `:web/path`
   metadata — the UNIVERSAL route source: a live store, a jar, and a native
-  binary all answer from var metadata, the same contract query_routes reads
+  binary all answer from var metadata, the same contract query_surface reads
   off the stored node. A namespace that isn't loaded contributes no rows.
   Rows: {:handler <the var, callable> :method :path :auth :web/effects
   :web/reads :effectful?}.

@@ -24,7 +24,7 @@
             [slopp.edit.tiers :as tiers]
             [slopp.edit.http :as edit.http]
             [slopp.store :as store]
-            [slopp.store.render :as store.render] [slopp.project.capabilities :as capabilities]))
+            [slopp.store.render :as store.render] [slopp.project.capabilities :as capabilities] [slopp.edit.cli :as edit.cli]))
 
 (defn ^:export rule-severity
   "The effective severity of rule `rule-key` for this store: a per-store OVERRIDE
@@ -60,7 +60,8 @@
   HTTP."
   [#'edit.modules/module-refusal #'tiers/tier-refusal #'edit.modules/schema-refusal #'edit.modules/namespaced-keys-refusal #'edit.http/http-generated-ns
    #'edit.http/http-auth-refusal #'edit.http/http-endpoint-schema #'edit.http/http-route-collision #'edit.http/http-page-unreachable #'edit.http/http-undeclared-effect #'edit.http/http-undeclared-context
-   #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs])
+   #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs
+   #'edit.cli/cli-args-schema #'edit.cli/cli-command-collision #'edit.cli/cli-direct-stdio])
 
 (defn ^:export write-gate-namespaces
   "`{rule-key defining-ns-sym}` for the registered per-form write gates — where

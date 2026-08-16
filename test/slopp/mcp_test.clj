@@ -754,17 +754,49 @@
 (deftest ^:external query-rules-rides-the-wire
   (let [sess (external/open!)]
     (try
-      (let [rs (edn/read-string (call! sess "query_rules" {}))]
+      (let [raw (call! sess "query_rules" {})
+            rs  (edn/read-string raw)]
         (is (>= (count rs) 9) (pr-str rs))
-        (is (contains? (set (map :rule rs)) :schema-drift) (pr-str rs))
         (is (= :refuse (:severity (first (filter #(= :schema-refusal (:rule %)) rs))))
-            (pr-str rs)))
-      (testing "a per-store severity override is reflected"
-        (ops/config-file! sess "rules" :key "schema-drift" :value "advisory"
-                          :prompt "dial schema-drift down")
-        (let [rs (edn/read-string (call! sess "query_rules" {}))
-              drift (first (filter #(= :schema-drift (:rule %)) rs))]
-          (is (= :advisory (:severity drift)) (pr-str drift))))
+            (pr-str rs))
+
+        (testing "what rides the wire is a PREFIX, and it says so"
+          ;; The catalog is ~23k characters against `text!`'s 8000-char gate,
+          ;; so `fit-payload` drops whole rows and roughly a third of them
+          ;; arrive. That degradation is deliberate and the response announces
+          ;; it — but in a trailing LINE, outside the edn, which anything
+          ;; parsing the response reads straight past.
+          ;;
+          ;; Asserted rather than worked around, because this test used to name
+          ;; `:schema-drift` and pass by luck: it sat inside the cut. Three cli
+          ;; rules joined the catalog, the cut moved, and a test whose subject
+          ;; is severity started failing on a rule's ABSENCE. A named rule is a
+          ;; bet on where 7800 characters happen to land.
+          (is (re-find #"\d+ of \d+ shown" raw)
+              (str "no trim marker, so either the gate moved or the catalog"
+                   " shrank — and a reader is now entitled to believe this is"
+                   " every rule: " (subs raw (max 0 (- (count raw) 200)))))
+          (let [[_ kept total] (re-find #"(\d+) of (\d+) shown" raw)]
+            (is (< (parse-long kept) (parse-long total))
+                "a marker claiming everything was shown would be worse than none")))
+
+        (testing "a per-store severity override is reflected"
+          ;; the subject is picked OUT of what arrived rather than named ahead
+          ;; of time — the point is that an override rides the wire, and which
+          ;; rule carries it is incidental
+          (let ;; NOT already advisory, and that qualifier is load-bearing: dialing a
+          ;; rule to the severity it already has leaves the payload
+          ;; byte-identical, `told!`'s knowledge differential answers with the
+          ;; :unchanged stub, and filtering a MAP for a :rule yields nothing —
+          ;; so this reads as "the override was ignored" when what happened is
+          ;; "nothing changed, and the wire said so".
+          [victim (:rule (first (remove #(= :advisory (:severity %)) rs)))]
+            (is (some? victim) (pr-str rs))
+            (ops/config-file! sess "rules" :key (name victim) :value "advisory"
+                              :prompt (str "dial " victim " down"))
+            (let [rs2 (edn/read-string (call! sess "query_rules" {}))
+                  row (first (filter #(= victim (:rule %)) rs2))]
+              (is (= :advisory (:severity row)) (pr-str row))))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external query-rule-telemetry-rides-the-wire
@@ -1289,29 +1321,49 @@
               "the branch work must be IN the mirrored tree")))
       (finally (ops/close! sess)))))
 
-(deftest ^:external query-routes-rides-the-wire
+(deftest ^:external query-surface-rides-the-wire
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "wr.api" :source "(ns wr.api)\n(defn seed \"S.\" [x] x)\n"})
-      (testing "disabled: empty with the opt-in teaching"
-        (let [rep (edn/read-string (call! sess "query_routes" {}))]
-          (is (false? (:enabled rep)) (pr-str rep))
-          (is (re-find #"http.enabled" (str (:note rep))))))
-      (testing "enabled: the declared route reports with its policy"
+      (testing "no capability enabled: TEACHING, not an empty map"
+        ;; "nothing declared" and "nothing enabled" are different answers and
+        ;; only the second has an action attached. An empty map would read as
+        ;; the first while meaning the second.
+        (let [rep (edn/read-string (call! sess "query_surface" {}))]
+          (is (re-find #"capabilit" (str (:note rep))) (pr-str rep))
+          (is (nil? (:http rep)) (pr-str rep))
+          (is (nil? (:cli rep)) (pr-str rep))))
+      (testing "a CLI-only app gets a cli section and no http one"
+        ;; the shape of the answer says what kind of application this is
+        (call! sess "config_file" {:path "capabilities" :key "cli.enabled" :value "true"
+                                   :prompt "opt into a shell"})
+        (call! sess "edit_add_form"
+               {:ns "wr.api"
+                :source (str "(defn ^{:cli/command \"ping\" :cli/doc \"Ping it.\""
+                             " :cli/args [:catn]} ping-cmd \"P.\" [ctx args] args)")
+                :prompt "a command"})
+        (let [rep (edn/read-string (call! sess "query_surface" {}))
+              row (first (:cli rep))]
+          (is (nil? (:http rep)) (str "http is not enabled, so it has no section: " (pr-str rep)))
+          (is (= "ping" (:command row)) (pr-str rep))
+          (is (= :command (:kind row)) "every row says what kind it is")
+          (is (= 'wr.api/ping-cmd (:handler row)))
+          (is (= "Ping it." (:doc row)))))
+      (testing "enabling http adds its section beside the first"
         (call! sess "config_file" {:path "capabilities" :key "http.enabled" :value "true"
                                    :prompt "opt in"})
         (call! sess "edit_add_form"
                {:ns "wr.api"
                 :source "(defn ^{:web/method :get :web/path \"/api/ping\" :web/auth :public :web/response :map} ping \"P.\" [req] req)"
                 :prompt "a public endpoint"})
-        (let [rep (edn/read-string (call! sess "query_routes" {}))
-              row (first (:routes rep))]
-          (is (true? (:enabled rep)))
+        (let [rep (edn/read-string (call! sess "query_surface" {}))
+              row (first (:http rep))]
+          (is (seq (:cli rep)) (str "and the first section is still there: " (pr-str rep)))
           (is (= "/api/ping" (:path row)) (pr-str rep))
           (is (= :public (:auth row)))
           (is (= 'wr.api/ping (:handler row)))))
       (testing "the tool is advertised read-only"
-        (is (contains? tools/read-only-tools "query_routes")))
+        (is (contains? tools/read-only-tools "query_surface")))
       (finally (ops/close! sess)))))
 
 (deftest ^:external spot-check-runs-external-tests-in-their-tier
@@ -1689,13 +1741,13 @@
     (testing "a re-read inside ONE ask still stubs — that saving is the point"
       ;; reads are 52% of all output and stable whole-store views are the fat;
       ;; the fix must narrow the withholding, not delete it
-      (is (= payload (#'mcp/told! sess "query_routes" {} payload)))
-      (is (:unchanged (#'mcp/told! sess "query_routes" {} payload))))
+      (is (= payload (#'mcp/told! sess "query_surface" {} payload)))
+      (is (:unchanged (#'mcp/told! sess "query_surface" {} payload))))
     (testing "a NEW ASK re-tells it, because the reader may be new"
       (swap! sess update :slopp.mcp/ask (fnil inc 0))
-      (is (= payload (#'mcp/told! sess "query_routes" {} payload))))
+      (is (= payload (#'mcp/told! sess "query_surface" {} payload))))
     (testing "and it stubs again within that new ask"
-      (is (:unchanged (#'mcp/told! sess "query_routes" {} payload))))))
+      (is (:unchanged (#'mcp/told! sess "query_surface" {} payload))))))
 
 (deftest an-unchanged-stub-carries-a-way-back-to-the-payload
   ;; Expiring at the ask boundary covers /clear and compaction, but not a
@@ -1707,8 +1759,8 @@
   ;; mode: the detour that made this cost a whole planning turn.
   (let [sess    (atom {})
         payload {:routes (vec (range 60))}]
-    (#'mcp/told! sess "query_routes" {} payload)
-    (let [stub (#'mcp/told! sess "query_routes" {} payload)]
+    (#'mcp/told! sess "query_surface" {} payload)
+    (let [stub (#'mcp/told! sess "query_surface" {} payload)]
       (is (:unchanged stub))
       (is (string? (:detail stub)) "the stub names its own escape")
       (is (= (pr-str payload)

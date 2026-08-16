@@ -26,7 +26,7 @@
         :teach "matches :uri ALONE — :query-string is a separate request key. A \"/x?y=z\" put in :uri matches no route and 404s, which looks exactly like the 404 you were testing for."}
   match
   "Match `method` + `uri` against `routes` (rows carrying :method :path
-  :handler, the query_routes shape). Returns the matched row with
+  :handler, the query_surface shape). Returns the matched row with
   `:path-params` merged ({:id \"42\"} for \"/api/users/:id\"), or nil.
 
   A `:x` segment captures ONE segment. A TRAILING `*x` captures the REMAINDER —

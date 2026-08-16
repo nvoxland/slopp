@@ -49,7 +49,7 @@
   the single route traversal; the collision gate and `slopp.rules.web` both
   build on it. TEST namespaces are excluded: their endpoint-shaped forms
   are fixtures, not servable surface, and a fixture must neither report in
-  query_routes nor claim a path against a production endpoint. A pure
+  query_surface nor claim a path against a production endpoint. A pure
   function of the store value."
   [store]
   (vec
@@ -120,7 +120,7 @@
             (str ns-sym "/" form-name " claims " method " " path
                  " but " (:ns other) "/" (:name other) " already serves it —"
                  " one method+path has one owner: change the path, change the"
-                 " method, or extend the existing handler (query_routes lists"
+                 " method, or extend the existing handler (query_surface lists"
                  " every claim)")))))))
 
 (defn ^:export web-context-builders
@@ -160,7 +160,7 @@
                  (if (= 1 (count missing)) "it" "them")
                  " — define one per kind: (defn ^{:web/effect "
                  (pr-str (first missing)) "} <name>! [ctx …] …), or reuse an"
-                 " existing kind (query_routes lists the vocabulary)")))))))
+                 " existing kind (query_surface lists the vocabulary)")))))))
 
 (defn ^:export ^{:rule/applies-to :production} http-unsafe-get
   "The HTTP-safety gate (D-web): a `:get`/`:head` endpoint must be SAFE in

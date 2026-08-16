@@ -24,7 +24,7 @@
   do."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.kernel.boot :as boot]
-            [next.jdbc :as jdbc] [clojure.java.io :as io]))
+            [next.jdbc :as jdbc] [clojure.java.io :as io] [clojure.string :as str]))
 
 (deftest dependency-order-is-deps-first
   (let [sources {'app.a "(ns app.a)\n(defn f [] 1)\n"
@@ -566,3 +566,54 @@
         (finally
           (remove-ns 'bkt.core)
           (remove-ns 'bkt.core-test))))))
+
+(deftest a-manifest-shape-the-reader-cannot-speak-REFUSES
+  ;; The framework manifests are generated INTO the jar by build.clj and read
+  ;; back here. Under `--live` the READER hot-reloads from the store while the
+  ;; RESOURCE stays whatever the jar was built with, so the two can be from
+  ;; different builds — the one configuration in which this mismatch is
+  ;; reachable, and the one every slopp developer runs.
+  ;;
+  ;; Measured, 2026-08-15: the shape went from a flat list to a capability-keyed
+  ;; map, a running host met a jar 560 deltas old, and `(keep (fn [[cap paths]] …)
+  ;; ["slopp/lang.cljc" …])` destructured a STRING into two characters and died
+  ;; with "Don't know how to create ISeq from: java.lang.Character". That
+  ;; sentence names no jar, no resource, no shape and no remedy; and because
+  ;; vendoring sits on the path of image creation, it took `build`, `restart`,
+  ;; the external test tier and then every WRITE down with it. The obvious
+  ;; reading is "my last edit broke something", which is where an hour went.
+  ;;
+  ;; This is not compatibility: the old shape is still refused. It is the
+  ;; difference between a refusal and a crash inside a destructure.
+  (testing "the capability-keyed shape passes through untouched"
+    (is (= {"http" ["slopp/web.clj"]}
+           (boot/by-capability {"http" ["slopp/web.clj"]} "framework-files.edn"))))
+
+  (testing "nil and empty pass through — a checkout has no manifest at all"
+    ;; the common case, and it must stay silent: `clojure -M` and a materialized
+    ;; test tree both have no META-INF, which is not an error
+    (is (nil? (boot/by-capability nil "framework-files.edn")))
+    (is (= {} (boot/by-capability {} "framework-files.edn"))))
+
+  (testing "the pre-capability FLAT LIST refuses, and names the remedy"
+    (let [e (try (boot/by-capability ["slopp/lang.cljc" "slopp/web.clj"]
+                                     "framework-files.edn")
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo e)
+          "a flat list is what every jar built before capabilities carries")
+      (is (str/includes? (ex-message e) "framework-files.edn")
+          (ex-message e))
+      (is (str/includes? (ex-message e) "rebuild")
+          (str "a diagnosis the reader cannot act on is half a message: "
+               (ex-message e)))))
+
+  (testing "and a map keyed by SYMBOL — the old framework-deps shape — refuses too"
+    ;; this one never crashed, which makes it worse: `(get m "cli")` is nil for
+    ;; every capability, so the reader answers "this framework needs nothing"
+    ;; and a vendored framework ships with none of its own requires declared —
+    ;; the exact failure the deps manifest was built after
+    (let [e (try (boot/by-capability '{garden/garden {:mvn/version "1.3.10"}}
+                                     "framework-deps.edn")
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo e))
+      (is (str/includes? (ex-message e) "framework-deps.edn") (ex-message e)))))

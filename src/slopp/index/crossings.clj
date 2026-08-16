@@ -44,7 +44,7 @@
     :to         "the served route table, and from there HTTP"
     :markers    #{:web/path :web/method}
     :checked-by "http-dangling-route-refs ties every literal :href/:src to a
-                 route; query_routes reads the same metadata the gates enforce"
+                 route; query_surface reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running
                  process, not from the store, so a route can outlive its
                  definition until the host reloads"}
@@ -142,7 +142,28 @@
                  nobody registered all look the same from here. Distinct from
                  :http/foreign-route deliberately: this target IS ours, and
                  filing it as somebody else's server put a false statement in
-                 the one report that exists to say what is unchecked"}])
+                 the one report that exists to say what is unchecked"}
+
+   {:kind       :cli/command
+    :leaves     "a form's name metadata: the command's name, its one-line doc,
+                 and the malli schemas for its positionals and options"
+    :to         "argv — untrusted process input — and the launcher slopp
+                 GENERATES at build time, which is the only code that reads it"
+    :markers    #{:cli/command :cli/doc :cli/args :cli/opts}
+    :checked-by "cli-args-schema refuses a command that declares no :cli/args,
+                 so what argv is allowed to say is always written down;
+                 cli-command-collision refuses two forms claiming one name;
+                 cli-direct-stdio refuses a body that prints, reads a line or
+                 exits rather than returning; query_surface's :cli section
+                 reads the same metadata the gates enforce"
+    :blind      "the generated launcher REQUIRES the namespaces it scans, and
+                 `commands-in` finds commands with `find-ns` — so a namespace
+                 that fails to load contributes no commands rather than
+                 throwing, and the binary answers \"unknown command\" instead of
+                 \"that namespace is broken\". Nothing compares the commands a
+                 BUILT binary actually carries against the ones the store
+                 declares, which is the same shape as the :http/route blind
+                 spot one process further out"}])
 
 (def internal-markers
   "Markers slopp owns that are deliberately NOT crossings, and why each stays

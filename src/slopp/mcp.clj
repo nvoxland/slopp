@@ -1182,7 +1182,7 @@
       "query_vocabulary" (text! (told! session name a (query/query-vocabulary session :ns (:ns a))))
       "query_rules" (text! (told! session name a (rules/query-rules session)))
       "query_capabilities" (text! (told! session name a (query/query-capabilities session)))
-      "query_routes" (text! (told! session name a (query/query-routes session)))
+      "query_surface" (text! (told! session name a (query/query-surface session)))
       "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry session :since (:since a))))
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)

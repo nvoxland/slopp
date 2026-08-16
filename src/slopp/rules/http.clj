@@ -5,7 +5,7 @@
   This is the other direction: reading a store's `:web/*` metadata as data, so
   the route table, the read/effect vocabularies and the rendered link inventory
   are answerable without starting a server. The web write gates and
-  `query_routes` are both this, which is deliberate — a rule that refuses at the
+  `query_surface` are both this, which is deliberate — a rule that refuses at the
   write and a report that lists the surface must agree, and they only can if
   they are one derivation.
 
@@ -27,7 +27,7 @@
   `{:handler :ns :name :form-id :method :path :auth :web/effects :web/reads
   :schema? :effectful?}` (slopp's own vocabulary keys stay namespaced —
   the same rule the request envelope follows). Built on the SAME traversal
-  the write gates check (`modules/web-endpoint-rows`), so what query_routes
+  the write gates check (`modules/web-endpoint-rows`), so what query_surface
   shows is what the gates enforced. A pure function of the store value."
   [store]
   (mapv (fn [{:keys [ns name form-id meta]}]
@@ -47,7 +47,7 @@
            :web/response (:web/response meta)
            ;; the client-route prefixes this document also answers for, when it
            ;; declares any. Surfaced rather than expanded into synthetic
-           ;; catch-all rows: query_routes should show what the author
+           ;; catch-all rows: query_surface should show what the author
            ;; DECLARED, and three `/store/*spa-path` rows would read as
            ;; surface nobody wrote.
            :web/spa   (:web/spa meta)
@@ -877,7 +877,7 @@
      (assoc ref :form (symbol (str nsx) (str (:name e)))))))
 
 (defn ^:export routes-report
-  "The `query_routes` payload. `http.enabled` false → `{:enabled false
+  "The `query_surface` payload. `http.enabled` false → `{:enabled false
   :routes [] :note …}` — a store that never opted into HTTP has no web
   surface and no web rules (the adoption story). Enabled → every endpoint
   row (`endpoints`), each carrying `:rendered-by` (the forms whose

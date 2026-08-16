@@ -37,7 +37,7 @@
             [slopp.edit :as edit]
             [slopp.index.refs :as refs]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog]))
+            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli]))
 
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
@@ -407,12 +407,45 @@
                                      :required-by (vec (sort (capabilities/dependents capability)))
                                      :arms (armed capability))))))))
 
-(defn ^:export query-routes
-  "The store's declared web surface: `http.enabled`, every endpoint row
-   (method, path, auth policy, handler, declared `:web/effects`/`:web/reads`,
-   schema presence, the `^:web/effectful` escape), and the derived
-   effect/read vocabularies — the SAME derivations the web write gates
-   enforce, so what this shows is what the gates guaranteed. Disabled →
-   `{:enabled false}` with the opt-in teaching."
+(defn ^:export query-surface
+  "Everything this store declares it EXPOSES, sectioned by the capability that
+  owns it: commands under `:cli`, endpoints under `:http`.
+
+  **One tool rather than one per capability**, and the reason is sharper than
+  discoverability. With a tool per capability, an agent that calls the http one
+  on a command-line app gets an empty answer and can reasonably conclude the
+  app exposes nothing — because from inside, \"I asked and there is nothing\"
+  and \"I asked the wrong tool\" are the same observation. Here the answer either
+  has a section or the app has no such surface, and there is no third state
+  where the reader simply did not know to ask.
+
+  A section appears only for an ENABLED capability, so the shape of the answer
+  says what kind of application this is. With none enabled the reply is
+  TEACHING rather than `{}` — \"nothing declared\" and \"nothing enabled\" are
+  different answers and only the second has an action attached.
+
+  Rows are self-describing: every one carries `:kind`, and a `:doc` where the
+  declaration has one. That is what lets a renderer draw a capability nobody
+  wrote a page for, and it is the same reason `query_capabilities` reports the
+  rules a capability arms.
+
+  Depth on demand: rows name their handlers and `query_slice` on one gives the
+  contract exactly. Inlining every schema would make this the one payload that
+  grows with the APP rather than with the question, and the response gate is a
+  real constraint on a tool that answers for every capability at once."
   [session]
-  (rules.http/routes-report (:store @session)))
+  (let [store (:store @session)
+        http  (rules.http/routes-report store)
+        cli   (rules.cli/commands-report store)
+        m     (cond-> {}
+                (seq cli) (assoc :cli cli)
+                (:enabled http)
+                (assoc :http (:routes http)
+                       :http/effect-kinds (:effect-kinds http)
+                       :http/read-kinds (:read-kinds http)))]
+    (if (seq m)
+      m
+      {:note (str "this store declares no surface — no capability that exposes"
+                  " one is enabled. query_capabilities lists them all with what"
+                  " each would arm; opt in with config_file {path"
+                  " \"capabilities\" key \"<name>.enabled\" value \"true\"}")})))

@@ -49,13 +49,24 @@
   to own and nothing to fake. They ship always-available, the way `slopp.lang`
   does. A capability exists where there is IO to take away from the consumer.
 
-  **`:requires` is a chain here and does not have to be.** `http` requires
-  `cli` because a server is launched with flags and signals through an exit
-  code; `rest` requires `http` because a contract is served over one; `webapp`
-  requires `rest` because a browser client consuming an untyped API is the
-  thing D-spa exists to rule out. A capability off to the side of that chain
-  (a database) is an ordinary row with its own `:requires`, which is why
-  `prerequisites` walks the graph instead of assuming an order.
+  **`:requires` is NOT a chain, and the first draft was one.** `rest` and
+  `webapp` both require `http` and neither requires the other; `cli` is nobody's
+  parent. An edge exists only where one capability genuinely cannot function
+  without another — `webapp` has to be SERVED, `rest` has to be served — and
+  not where two are merely usually used together.
+
+  The reason to be strict is mechanical rather than tidy: `:requires` drives
+  what an enable turns on AND what a DISABLE is refused for. Under the first
+  draft's chain, `rest.enabled false` would have been refused on any store with
+  `webapp` on, including one whose browser app talks to an API slopp does not
+  serve — a relationship that is not real becoming a refusal that is, met by
+  someone who has done nothing wrong. Likewise `cli`: a `-main` is a PACKAGING
+  fact, and an embedded or library-hosted server would have carried argv
+  parsing it never uses.
+
+  A capability off to the side (a database) is an ordinary row with its own
+  `:requires`, which is why `prerequisites` walks the graph rather than
+  assuming an order.
 
   `slopp` and `app` are owners rather than capabilities: there is no switch to
   throw. `:reserved` means an application can never own a key under it;
@@ -67,8 +78,10 @@
    {:capability "app" :always-on true
     :doc "any project, whatever kind of application it is"}
    {:capability "cli" :requires []
+    :ns-prefix "slopp.cli" :entry-markers [:cli/command]
     :doc "a command-line shell: argument parsing, an injected stdin/stdout/stderr, and exit codes. Without it an app's main runs with no argument or stream support at all"}
    {:capability "http" :requires []
+    :ns-prefix "slopp.web" :entry-markers [:web/page]
     :doc "an HTTP server: routing, static mounts, identity and authorization. Present in every store, inert until http.enabled"}
    {:capability "rest" :requires ["http"]
     :doc "a typed API: request/response contracts, boundary validation, and generated clients derived from the same schemas"}
@@ -186,7 +199,7 @@
     :doc "Whether this project has a command-line shell. Without it an app's main runs with no argument parsing, no injected streams and no exit codes — which is what a bare -m gives you."}
 
    {:key "http.enabled" :type [:boolean] :default false
-    :doc "Whether this project serves HTTP. The master opt-in: http rules and query_routes exist only when true. Requires nothing — how a server is launched is packaging, not a dependency."}
+    :doc "Whether this project serves HTTP. The master opt-in: http rules and query_surface exist only when true. Requires nothing — how a server is launched is packaging, not a dependency."}
    {:key "http.adapter" :type [:enum "http-kit" "jdk"] :default :http-kit
     :doc "Server adapter. http-kit is the production default; jdk (com.sun.net.httpserver) is the zero-dep fallback."}
    {:key "http.host" :type [:string] :default "127.0.0.1"
@@ -403,6 +416,56 @@
                " standing on nothing. Turn "
                (str/join ", " (map #(str % ".enabled") held))
                " off first, or leave " k " as it is."))))))
+
+(def ^:export shipping-common
+  "Namespaces that ship with EVERY capability — the `\"_\"` family of the vendored
+  manifests, as `{ns path}`.
+
+  Not a capability, and that is why it needs its own name: these belong to the
+  DIALECT and its disciplines rather than to any one kind of application, so
+  keying them under `http` would leave a command-line app requiring code it was
+  never handed, and keying them under both would be a list to keep in sync.
+
+  Membership is narrow on purpose — a namespace belongs here when slopp's own
+  rules tell an author to USE it, because a rule whose discharge names a
+  namespace the author does not have is a rule that cannot be discharged. Both
+  members arrived that way:
+
+  - `slopp.lang` — D3.1: the dialect denies reader conditionals and owes the
+    author the portable call instead, so a shipped family may require it.
+  - `slopp.cache` — the `tier-refusal` gate's escape names it (\"an :internal
+    module may mutate in-process, e.g. a memo through slopp.cache\"), and the
+    shipped skill states the rule that every cache goes through it. It was
+    documented as a day-one rule and vendored NOWHERE, which is exactly the
+    failure `no-rule-names-a-namespace-that-does-not-ship` now watches for.
+
+  Both are self-contained — zero requires between them — which is what makes
+  shipping them a copy rather than a dependency graph. THE derivation two
+  readers consume: `build.clj` files these under `\"_\"`, and the leak guard
+  permits a family namespace to reach them."
+  '{slopp.lang  "slopp/lang.cljc"
+    slopp.cache "slopp/cache.clj"})
+
+(defn ^:export shipping-families
+  "`{capability ns-prefix}` for every capability that SHIPS a namespace family
+  into consuming projects.
+
+  THE derivation three readers consume: the vendor glob in `build.clj`, the
+  injection predicate in `slopp.ops.engine`, and the leak guard that says a
+  framework namespace may not reach back into slopp. Each of those hardcoded
+  `slopp.web` before, and each was correct for one app type while being blind
+  to a second — the guard in particular went GREEN when a namespace left the
+  family, because its population is derived by prefix and a departing member
+  simply stops being in it.
+
+  A capability with no `:ns-prefix` ships nothing and is absent here, rather
+  than present with an empty family. `rest` and `webapp` are in that state
+  today: they are declared, they arm nothing, and they vendor nothing. Absent
+  and empty-family are different claims, and only the first is true."
+  []
+  (into {} (for [{:keys [capability ns-prefix]} capability-catalog
+                 :when ns-prefix]
+             [capability ns-prefix])))
 
 (defn ^:export config-refusal
   "The `capabilities` config write gate: a teaching error for an unknown

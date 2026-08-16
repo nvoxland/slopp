@@ -115,8 +115,19 @@
    {:name "query_capabilities"
     :description "Every capability setting for this store: the declared registry (type, default, doc) joined with the stored `capabilities` config — effective values, what's set, and the wildcard families (http.static.*, http.auth.<provider>.*, http.auth.groups.*.members). Set with config_file {path capabilities key <k> value <v>}; writes validate against the registry."
     :inputSchema {:type "object" :properties {}}}
-   {:name "query_routes"
-    :description "The store's declared WEB surface: every endpoint (method, path, auth policy, handler, declared :web/effects / :web/reads, schema presence) plus the derived effect/read performer vocabularies — the same derivations the web write gates enforce. Empty with teaching until http.enabled."
+   {:name "query_surface" :image-free true :read-only true
+    :description (str "EVERYTHING this store declares it EXPOSES, sectioned by the"
+                      " capability that owns it — commands under :cli, endpoints and"
+                      " static mounts and performers under :http. ONE tool rather than"
+                      " one per capability, because with separate tools an agent that"
+                      " asks the wrong one gets an empty answer and cannot tell it from"
+                      " a store that exposes nothing. A section appears only for an"
+                      " ENABLED capability, so the shape of the reply says what kind of"
+                      " application this is; with none enabled you get teaching, not {}."
+                      " Rows are self-describing (:kind on every one, :doc where the"
+                      " declaration has one) and name their handlers — query_slice on a"
+                      " handler gives the contract exactly. The same derivations the"
+                      " write gates enforce, so what this shows is what they guaranteed.")
     :inputSchema {:type "object" :properties {}}}
    {:name "query_rule_telemetry"
     :description "The D9 rules' FIRE-RATE + DISCHARGE signal for this store — the demand signal the severity dial is set by. Per rule: how often it fires (dones/instances), whether findings get :discharged (fixed) or :persisted (keep recurring = ignored/friction); plus escape-marker density (agents opting out via ^:unsafe/^:reads/^:unused-ok) and the current dials. Read-only history analysis over the delta log. Optional since (a delta/commit id from query_commits) windows it."

@@ -24,7 +24,7 @@
   place holding everything the check needs.
 
   This module reaches back into NOTHING else in slopp — pinned by
-  `slopp.modules-test/the-web-framework-never-reaches-back-into-slopp` — which
+  `slopp.modules-test/no-shipped-framework-family-reaches-back-into-slopp` — which
   is what lets `build.clj` ship it as the standalone
   `io.github.nvoxland/slopp-web` jar. A require of `slopp.store` from anywhere
   under here would pass every test in this repo and break at a USER's require

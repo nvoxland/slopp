@@ -62,6 +62,61 @@
             lib))
         libs))
 
+(defn- framework-families
+  "`{capability ns-prefix}` for every capability that ships a namespace family,
+  read out of the MATERIALIZED SOURCE's own capability catalog.
+
+  Read rather than written here, and that is the point. `build.clj` sits
+  outside the store, so a list kept in this file would be a fourth place that
+  has to learn about capability #3 — beside the catalog, the injection
+  predicate and the leak guard, all of which already derive. The store is the
+  source of truth about what slopp ships; this script is a consumer of it.
+
+  Parsed textually rather than by loading `slopp.project.capabilities`: this
+  runs under `-T:build`, where the store's namespaces are not on the classpath
+  and loading one would drag the kernel in. The catalog is a literal vector of
+  literal maps precisely so it can be read as data.
+
+  Falls back to `{\"http\" \"slopp.web\"}` when no catalog is found, which is the
+  pre-capability shape — a CHECKOUT of an older tree still builds."
+  [root]
+  (let [f (io/file root "slopp" "project" "capabilities.clj")]
+    (or (when (.exists f)
+          (not-empty
+           (into {} (for [[_ cap prefix] (re-seq #"\{:capability\s+\"([^\"]+)\"[^}]*?:ns-prefix\s+\"([^\"]+)\""
+                                                 (slurp f))]
+                      [cap prefix]))))
+        {"http" "slopp.web"})))
+
+(defn- framework-common
+  "The paths that ship with EVERY capability — the `\"_\"` family — read out of
+  the materialized source's own `shipping-common` map.
+
+  Read for the same reason the families are, and the reason is not symmetry:
+  this list was a hardcoded `slopp/lang.cljc` here, a hardcoded `slopp.lang` in
+  the leak guard, and NOWHERE in the place that decides what a rule may tell an
+  author to use. The consequence was live — `tier-refusal`'s escape named
+  `slopp.cache`, the shipped skill stated the rule, and the namespace reached no
+  consuming project at all. One derivation, in the store, is what stops the next
+  member being added to two of the three places.
+
+  Parsed textually rather than by loading the namespace: this runs under
+  `-T:build`, where the store's code is not on the classpath. The map is a
+  literal of `symbol \"path\"` pairs precisely so it can be read as data.
+
+  Falls back to slopp.lang alone, which is the pre-`shipping-common` shape — a
+  CHECKOUT of an older tree still builds."
+  [root]
+  (let [f (io/file root "slopp" "project" "capabilities.clj")]
+    (or (when (.exists f)
+          (some->> (re-find #"(?s)shipping-common.*?'\{(.*?)\}" (slurp f))
+                   second
+                   (re-seq #"\"([^\"]+)\"")
+                   (map second)
+                   not-empty
+                   (vec)))
+        ["slopp/lang.cljc"])))
+
 (defn- framework-deps
   "What the vendored framework needs from OUTSIDE, as {lib coord}.
 
@@ -78,9 +133,33 @@
                   (let [s (str nsym)]
                     (when-not (or (str/starts-with? s "clojure.")
                                   (str/starts-with? s "slopp."))
-                      (let [path (-> s (str/replace "-" "_") (str/replace "." "/"))]
-                        (when-let [lib (or (lib-providing libs (str path ".clj"))
-                                           (lib-providing libs (str path ".cljc")))]
+                      (let [path (-> s (str/replace "-" "_") (str/replace "." "/"))
+                            ;; REFUSE rather than skip. This derivation's whole
+                            ;; stated purpose is that it "cannot go stale", and
+                            ;; a require the basis cannot resolve used to fall
+                            ;; silently out of the map — shipping a framework
+                            ;; whose dependency list is missing exactly the
+                            ;; entry nobody knew to look for. The failure then
+                            ;; lands in a CONSUMER's repo at require time,
+                            ;; which is the discovery path this whole mechanism
+                            ;; exists to close (it was built after the vendored
+                            ;; framework died inside slopp.web.css on garden).
+                            ;;
+                            ;; The fix for a refusal is real work, not a
+                            ;; suppression: put the lib on the build basis, so
+                            ;; the version a consumer is handed is the one this
+                            ;; jar was built against.
+                            lib  (or (lib-providing libs (str path ".clj"))
+                                     (lib-providing libs (str path ".cljc")))]
+                        (when-not lib
+                          (throw (ex-info
+                                  (str "the vendored framework requires " s
+                                       " and no lib on the build basis provides it."
+                                       " A consumer would vendor the source and fail at"
+                                       " require time. Add the lib to deps.edn's :deps —"
+                                       " what ships must be resolvable from what builds it.")
+                                  {:namespace s :path path})))
+                        (when lib
                           ;; :mvn/version ONLY. A resolved coord carries
                           ;; :deps/manifest and friends, which are the
                           ;; resolver's bookkeeping — harmless to tools.deps
@@ -205,41 +284,54 @@
     ;;     ships each remaining namespace by looking inside the jars it resolved.
     ;;     A hand-written vector would go stale the first time slopp.web gains a
     ;;     require — and silently, since the coord that used to mask it is gone.
-    (when-let [v (get mf "X-Slopp-Web-Version")]
+    (when-let [v (get mf "X-Slopp-Framework-Version")]
       (let [f (io/file class-dir "META-INF" "slopp" "framework-version.edn")]
         (io/make-parents f)
         (spit f v)))
-    (let [root  (io/file (str src))
-          web   (io/file root "slopp" "web")
-          files (cond-> (vec (sort (for [f (file-seq web)
-                                         :when (and (.isFile f)
-                                                    (.endsWith (.getName f) ".clj"))]
-                                     (str "slopp/web/"
-                                          (subs (.getPath f)
-                                                (inc (count (.getPath web))))))))
-                  (.exists (io/file root "slopp" "web.clj"))
-                  (conj "slopp/web.clj")
-
-                  ;; slopp.lang ships with the framework because it is part of
-                  ;; the SYNTAX, not a library beside it (D3.1): the dialect
-                  ;; denies reader conditionals and owes the author the
-                  ;; portable call instead, so slopp.web.* is allowed to
-                  ;; require it — and a user's app resolves that require
-                  ;; against this jar and nothing else.
-                  ;;
-                  ;; Named explicitly rather than swept: the scan above filters
-                  ;; on `.clj`, and this one is `.cljc` because it must compile
-                  ;; to JS for a client too. Pinned by
-                  ;; modules-test/the-slim-framework-jar-carries-the-syntax-it-lets-the-framework-use,
-                  ;; which is the only thing that can see both halves — this
-                  ;; file is outside the store.
-                  (.exists (io/file root "slopp" "lang.cljc"))
-                  (conj "slopp/lang.cljc"))
-          f     (io/file class-dir "META-INF" "slopp" "framework-files.edn")]
+    ;; BOTH manifests are keyed BY CAPABILITY, and that is what makes the
+    ;; capability opt-in hold at runtime rather than only in a config file:
+    ;; a store that never enabled `http` is vendored no `slopp/web/**`, so
+    ;; `(require 'slopp.web)` there FAILS. Vendoring everything would leave the
+    ;; boundary advisory.
+    ;;
+    ;; The families come from the store's own capability catalog
+    ;; (`shipping-families`), read out of the materialized source rather than
+    ;; written here: build.clj is outside the store and a list kept here would
+    ;; be a fourth place that has to learn about capability #3. `"_"` comes from
+    ;; the same source — `shipping-common`, the namespaces that belong to the
+    ;; DIALECT and its disciplines rather than to any one kind of application,
+    ;; so a command-line app and a web app both get them.
+    (let [root     (io/file (str src))
+          families (framework-families root)
+          in-fam   (fn [prefix]
+                     (let [dir  (io/file root (str/replace prefix "." "/"))
+                           top  (io/file root (str (str/replace prefix "." "/") ".clj"))]
+                       (cond-> (vec (sort (for [f (file-seq dir)
+                                                :when (and (.isFile f)
+                                                           (.endsWith (.getName f) ".clj"))]
+                                            (str (str/replace prefix "." "/") "/"
+                                                 (subs (.getPath f)
+                                                       (inc (count (.getPath dir))))))))
+                         (.exists top) (conj (str (str/replace prefix "." "/") ".clj")))))
+          common   (vec (sort (filter #(.exists (io/file root %))
+                                      (framework-common root))))
+          by-cap   (cond-> (into (sorted-map)
+                                 (for [[cap prefix] families
+                                       :let [fs (in-fam prefix)]
+                                       :when (seq fs)]
+                                   [cap (vec (sort fs))]))
+                     (seq common) (assoc "_" common))
+          f        (io/file class-dir "META-INF" "slopp" "framework-files.edn")]
       (io/make-parents f)
-      (spit f (pr-str (vec (sort files))))
+      (spit f (pr-str by-cap))
+      ;; deps keyed the same way, so a web app is not handed cli's malli and a
+      ;; cli app is not handed garden. Derived PER FAMILY rather than from the
+      ;; flat union of the file set: one merged map would look correct and would
+      ;; make every store pay for every capability.
       (spit (io/file class-dir "META-INF" "slopp" "framework-deps.edn")
-            (pr-str (framework-deps root files basis))))
+            (pr-str (into (sorted-map)
+                          (for [[cap fs] by-cap]
+                            [cap (framework-deps root fs basis)])))))
     (when (and smain (not= main "clojure.main"))
       (gen-launcher! main smain)
       ;; the launcher dir must be ON the compile basis classpath (src-dirs

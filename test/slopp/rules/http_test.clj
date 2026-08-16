@@ -290,9 +290,9 @@
 
 (deftest routes-surface-the-declared-contract
   ;; D-web-contracts dogfood finding: the endpoint-schema gate makes
-  ;; :web/request / :web/response MANDATORY, but query_routes computed :schema?
+  ;; :web/request / :web/response MANDATORY, but query_surface computed :schema?
   ;; from :malli/schema — a DIFFERENT key — so every contract-carrying endpoint
-  ;; reported :schema? false. What query_routes shows must be what the gate
+  ;; reported :schema? false. What query_surface shows must be what the gate
   ;; enforces.
   (let [s   (store/ingest (store/empty-store) 'rc.api
                           (str "(ns rc.api)\n\n"

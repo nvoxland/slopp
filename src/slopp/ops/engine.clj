@@ -12,7 +12,7 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.edit.http :as edit.http]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities]))
 
 (def ^{:export "slopp.concurrency"} ^:dynamic *pre-commit-hook*
   "Test seam (item 4): invoked between an op's hot-load and its commit CAS to
@@ -20,63 +20,87 @@
   Exported to the contention specs that bind it; package-private otherwise."
   nil)
 
+(defn ^:export used-families
+  "The capabilities whose framework family `store` USES — the set both the
+  vendored FILES and the supplied DEPS are derived from.
+
+  One derivation because they are two halves of one fact. Vendoring hands over
+  source, and source has requires: an earlier version supplied the files and
+  not the deps, and the framework landed intact and failed inside itself. If
+  the two were computed separately they could disagree again, and the symptom
+  would be identical.
+
+  A family counts as used when the store does NOT define it and either requires
+  something in it or carries one of its declared entry markers. Both halves come
+  from `capabilities/shipping-families` and the catalog, so a capability is
+  covered by existing rather than by an edit here."
+  [store]
+  (let [nses (keys (:namespaces store))
+        in?  (fn [prefix n] (let [s (str n)]
+                              (or (= s prefix) (str/starts-with? s (str prefix ".")))))]
+    (into #{}
+          (for [[cap prefix] (capabilities/shipping-families)
+                :let  [ms (set (:entry-markers (capabilities/capability cap)))]
+                :when (and (not-any? #(in? prefix %) nses)
+                           (or (some (fn [n]
+                                       (some #(in? prefix %) (store/ns-require-libs store n)))
+                                     nses)
+                               (some (fn [n]
+                                       (some (fn [f]
+                                               (some ms (keys (store/form-name-meta f))))
+                                             (store/forms store n)))
+                                     nses)))]
+            cap))))
+
 (defn ^:export framework-injection
-  "The framework FILES slopp vendors into `store` — `{\"slopp/web.clj\" src …}` —
+  "The framework FILES slopp vendors into `store` — `{\"slopp/cli.clj\" src …}` —
   or nil when it should supply nothing.
+
+  `files` arrives keyed BY CAPABILITY (`{\"cli\" {path src} \"http\" {…}
+  \"_\" {…}}`); the answer is the flattened union of the families this store
+  actually uses, plus `\"_\"` (the dialect's own helpers, which are part of the
+  syntax rather than of any capability).
 
   D-framework-injection. The framework is slopp's own, so slopp provides it,
   exactly as `external/client-build-deps` provides the ClojureScript compiler
   and `repl/inherent-deps` provides nREPL and malli. A store that declared it
   instead could be pinned to a release the slopp serving it is not — not
   hypothetical: `slopp-ui` sat on 0.1.3 for a day while the fix made FOR it
-  shipped in the host at 0.1.4, because the declaration is what loads.
+  shipped in the host at 0.1.4.
 
-  **Files, not a coord (part 2).** `slopp-web` is never published to a remote,
-  so a coord names something only the machine that ran `slim-install` can
+  **Files, not a coord (part 2).** The framework is never published to a
+  remote, so a coord names something only the machine that built it can
   resolve: portable in appearance, not in fact.
+
+  **Per capability (part 3).** Handing every store every family would let
+  `(require 'slopp.web)` succeed in a project that never enabled `http` — the
+  opt-in holding in the config file and not at runtime, which is the capability
+  model failing at exactly the thing it is about. The families come from
+  `capabilities/shipping-families` rather than from a prefix written here, so a
+  new capability vendors by existing.
 
   Conditions, each load-bearing in a different direction.
 
   **USES but does not DEFINE.** slopp's own store CONTAINS `slopp.web.*`, and
   `src` is the FIRST classpath entry — so vendoring there would shadow the code
   being edited with the last-shipped copy, and slopp would test its release
-  instead of its working tree.
+  instead of its working tree. Judged per family: a store may define one and
+  legitimately use another.
 
-  **USES, not merely exists.** A store with no web code needs nothing, and
-  writing files into every image would cost every fixture boot for nothing.
-
-  **USING is not only REQUIRING (2026-08-05).** A `^:web/page` app is opened by
-  `slopp.web.screen`, which slopp calls on the app's BEHALF — so the image
-  needs the framework even when the app's own code names none of it. That is
-  the ordinary shape for a client-state app: `{:state … :view …}` is hiccup and
-  a couple of handlers, requiring nothing.
-
-  Worth the telling, because the failure was a good impostor: it read
-  \"Could not locate slopp/web/screen.clj\", which is what a stale jar says, and
-  it survived both a rebuild AND a process restart. What ruled the jar out in
-  ONE call was `session_brief`'s `:jar {:head}` — added that same morning for
-  an unrelated reason, and the difference between a wrong diagnosis held for
-  two minutes and one held for a day.
+  **USES is not only REQUIRING.** A `^:web/page` app is opened by
+  `slopp.web.screen`, which slopp calls on the app's BEHALF, so the app's own
+  code may name none of the framework. **For `cli` this is the ONLY signal**:
+  with a generated entry an app writes commands and slopp writes the launcher,
+  so nothing in the store ever requires `slopp.cli`. The markers come from the
+  catalog for the same reason the prefixes do.
 
   Empty or nil `files` (a checkout, a `clojure -M` run) vendors nothing rather
   than half a framework."
   [store files]
-  (let [nses (keys (:namespaces store))
-        ;; dot boundary, or equality: "slopp.web" alone matched a user's
-        ;; slopp.website (suppressing injection — that image cannot load
-        ;; slopp.web.screen) and slopp.webhooks (injecting spuriously). The
-        ;; prefix-and-its-length class, phase 4's sub-core, measured here by
-        ;; the review.
-        web? (fn [n] (let [s (str n)]
-                       (or (= s "slopp.web")
-                           (str/starts-with? s "slopp.web."))))]
-    (when (and (seq files)
-               (not-any? web? nses)
-               (or (some (fn [n] (some web? (store/ns-require-libs store n))) nses)
-                   (some (fn [n] (some #(:web/page (edit.http/web-name-meta %))
-                                       (store/forms store n)))
-                         nses)))
-      files)))
+  (when (seq files)
+    (let [used (used-families store)]
+      (when (seq used)
+        (not-empty (reduce merge (get files "_") (map #(get files %) used)))))))
 
 (defn ^:export vendor-framework!
   "Write the framework `store` needs into `dir`/src. Returns the paths written,
@@ -119,8 +143,7 @@
           (spit f v)))
       written)))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was copied from the forms this replaced, and every caller is inside slopp.api.*. Created and un-exported inside one unreleased wave, so there is no downstream to tell."}
-  image-deps
+(defn image-deps
   "The dep map an image for `store` should carry: the store's own manifest plus
   what the vendored framework requires.
 
@@ -130,11 +153,19 @@
   which vanished with it. The files landed and then failed inside themselves.
 
   Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
-  keeps it. slopp supplies what the framework needs, never what the app chose."
+  keeps it. slopp supplies what the framework needs, never what the app chose.
+
+  **Only the families this store USES**, from the same `used-families`
+  derivation the vendoring reads. `framework-deps` is keyed by capability for
+  this reason: merging all of it would hand a web app cli's malli and a cli app
+  garden, so every store would pay for every capability — the opt-in not
+  holding in the one place a consumer notices it, their dependency list."
   [store]
-  (if (framework-injection store (boot/framework-files))
-    (merge (boot/framework-deps) (:deps store))
-    (:deps store)))
+  (let [used (used-families store)
+        fw   (boot/framework-deps)]
+    (if (and (seq used) (seq (boot/framework-files)))
+      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
+      (:deps store))))
 
 (defn ^{:breaking-ok "never legitimately module-external: ^:export was copied from the forms this replaced, and every caller is inside slopp.api.*. Created and un-exported inside one unreleased wave, so there is no downstream to tell."}
   framework-dir!

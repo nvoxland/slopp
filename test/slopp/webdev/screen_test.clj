@@ -52,7 +52,10 @@
         ;; is the test's SECOND derivation of the same fact, and the two
         ;; disagreed. Following the requires is what keeps them agreeing:
         ;; a .cljc wins over a .clj, because that is the one slopp.lang is.
-        fw      (into subtree
+        ;; the out-of-subtree half, filed under "_" the way build.clj files it:
+        ;; slopp.lang belongs to the SYNTAX rather than to any one capability,
+        ;; so it vendors alongside every family
+        syntax  (into {}
                       (for [nm (distinct
                                 (map second
                                      (mapcat #(re-seq #"\[slopp\.([a-z][a-z0-9.*+!?<>=_-]*)" %)
@@ -64,7 +67,8 @@
                                                  [(str base ext) u]))
                                              [".cljc" ".clj"])]
                             :when hit]
-                        [(first hit) (slurp (second hit))]))]
+                        [(first hit) (slurp (second hit))]))
+        fw      (merge subtree syntax)]
     (is (contains? fw "slopp/web/screen.clj")
         "the derivation found the framework — an empty file map vendors nothing and every assertion below would fail for the wrong reason")
     (is (contains? fw "slopp/lang.cljc")
@@ -74,11 +78,11 @@
     ;; to arrive separately. Production derives this list at build time into
     ;; framework-deps.edn; here it is spelled out, and a drift announces itself
     ;; as "Could not locate <lib>" rather than hiding.
-    (with-redefs [boot/framework-files (constantly fw)
-                  boot/framework-deps  (constantly '{cheshire/cheshire {:mvn/version "5.13.0"}
-                                                     hiccup/hiccup     {:mvn/version "2.0.0"}
-                                                     garden/garden     {:mvn/version "1.3.10"}
-                                                     http-kit/http-kit {:mvn/version "2.8.0"}})]
+    (with-redefs [boot/framework-files (constantly {"http" subtree "_" syntax})
+                  boot/framework-deps  (constantly '{"http" {cheshire/cheshire {:mvn/version "5.13.0"}
+                                                             hiccup/hiccup     {:mvn/version "2.0.0"}
+                                                             garden/garden     {:mvn/version "1.3.10"}
+                                                             http-kit/http-kit {:mvn/version "2.8.0"}}})]
       (let [sess (external/open!)]
         (try
           (ops/ingest! sess 'demo.app

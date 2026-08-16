@@ -145,11 +145,18 @@
 
    KEEP-ALIVE markers keep a var reachable FROM the outside world —
    ^:entry-point (invoked via CLI/wire/eval injection), ^:unused-ok
-   (deliberately uncalled), and the D-web declarations: a `:web/path`
-   ENDPOINT (the dispatcher calls it) and a `:web/effect` / `:web/read`
-   PERFORMER (the effect interpreter / reads loader calls it). `:from-ns`
+   (deliberately uncalled), and the CAPABILITY declarations: a `:web/path`
+   ENDPOINT (the dispatcher calls it), a `:web/effect` / `:web/read`
+   PERFORMER (the effect interpreter / reads loader calls it), and a
+   `:cli/command` (the cli runner resolves it by name from argv). `:from-ns`
    is `:external`; `:marker` preserves WHICH dial so the stale check can
    distinguish.
+
+   **A capability marker belongs here rather than being paired with
+   `^:entry-point` by every author.** Both would mean the same thing — this is
+   called from outside — and the second one is the one people forget, on the
+   forms that are hardest to notice missing because they are the app's own
+   surface. Adding a capability adds a clause here, once.
 
    A `^{:covers \"ns/name — why\"}` marker on a deftest is the other shape:
    a COVERAGE edge FROM the test TO each form it names — the dispatch /
@@ -164,11 +171,12 @@
          :when (:name e)
          :let [s (try (n/sexpr (:node e)) (catch Exception _ nil))
                m (when (and (seq? s) (symbol? (second s))) (meta (second s)))
-               marker (cond (:entry-point m) :entry-point
-                            (:unused-ok m)   :unused-ok
-                            (:web/path m)    :web-endpoint
-                            (:web/effect m)  :web-effect
-                            (:web/read m)    :web-read
+               marker (cond (:entry-point m)  :entry-point
+                            (:unused-ok m)    :unused-ok
+                            (:web/path m)     :web-endpoint
+                            (:web/effect m)   :web-effect
+                            (:web/read m)     :web-read
+                            (:cli/command m)  :cli-command
                             :else nil)]
          :when marker]
      {:from-form nil

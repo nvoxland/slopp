@@ -5,7 +5,7 @@
   Layer 0 and store-blind, which is the constraint worth stating — this is the
   framework a USER's app runs on, and it knows nothing about stores. So the
   fixtures are plain route data rather than anything derived from a store, and
-  they have to be: `slopp.modules-test/the-web-framework-never-reaches-back-into-slopp`
+  they have to be: `slopp.modules-test/no-shipped-framework-family-reaches-back-into-slopp`
   holds the whole `slopp.web.*` subtree at layer 0, and a test reaching for a
   store here would be the first crack in the property that lets this ship as a
   slim jar."

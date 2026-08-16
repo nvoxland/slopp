@@ -172,7 +172,7 @@
                         ;; one shipped green against an empty search.
                         (filter #(str/starts-with? (str %) "slopp.api."))
                         ;; endpoint-shaped forms in tests are fixtures and
-                        ;; claim no route — query_routes scopes the same way
+                        ;; claim no route — query_surface scopes the same way
                         (remove #(str/ends-with? (str %) "-test")))
         derived    (set (filter declares? candidates))
         listed     (set server/served-namespaces)]

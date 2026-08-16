@@ -387,3 +387,36 @@
     ;; catalog being data.
     (is (every? #(not (contains? (capabilities/prerequisites %) %))
                 (map :capability capabilities/capability-catalog)))))
+
+(deftest a-capability-declares-the-family-it-ships-and-the-markers-that-use-it
+  ;; Three places currently hardcode `slopp.web` and `^:web/page`:
+  ;; `ops.engine/framework-injection`'s `web?`, `build.clj`'s vendor glob, and
+  ;; `modules-test/the-web-framework-never-reaches-back-into-slopp`'s `ships?`.
+  ;; Each was right for one app type and none of them can see a second.
+  ;;
+  ;; So the catalog carries it, and the readers derive. Capability #3 gets
+  ;; vendored, injected and leak-guarded by EXISTING rather than by three
+  ;; separate edits somebody has to remember.
+  (testing "a shipping capability names its namespace family"
+    (is (= "slopp.cli" (:ns-prefix (capabilities/capability "cli"))))
+    (is (= "slopp.web" (:ns-prefix (capabilities/capability "http")))
+        "http's family is still spelled slopp.web — the framework namespaces have not moved"))
+  (testing "and the markers that mean an app USES it without requiring it"
+    ;; the condition `framework-injection` calls uses-not-merely-requires. A
+    ;; `^:web/page` app is opened by slopp on its behalf; a cli app with a
+    ;; GENERATED entry never requires slopp.cli at all, so for cli this is the
+    ;; only usage signal there is.
+    (is (= [:cli/command] (:entry-markers (capabilities/capability "cli"))))
+    (is (some #{:web/page} (:entry-markers (capabilities/capability "http")))))
+  (testing "a capability that ships nothing yet says so by omission"
+    ;; rest and webapp have no framework namespaces of their own, and an empty
+    ;; vector would read as "a family with no files" rather than "no family"
+    (is (nil? (:ns-prefix (capabilities/capability "rest"))))
+    (is (nil? (:ns-prefix (capabilities/capability "webapp")))))
+  (testing "owners that are not opt-ins ship nothing at all"
+    (is (nil? (:ns-prefix (capabilities/capability "app"))))
+    (is (nil? (:ns-prefix (capabilities/capability "slopp")))))
+  (testing "shipping-families is the derived list every reader consumes"
+    ;; one derivation, so vendoring and the leak guard cannot disagree about
+    ;; what the framework IS
+    (is (= {"cli" "slopp.cli" "http" "slopp.web"} (capabilities/shipping-families)))))
