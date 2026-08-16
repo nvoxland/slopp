@@ -125,14 +125,35 @@
   the files themselves so it cannot go stale: read their requires, drop
   `clojure.*` and `slopp.*`, and ask the basis which lib ships each remaining
   namespace. Versions are the basis's own, so what a consumer is handed is what
-  this jar was built against."
-  [root files basis]
-  (let [libs (:libs basis)]
+  this jar was built against.
+
+  `roots` is a VECTOR because `build!` splits `src/` from `cljs-src/`; a path is
+  looked up in each, and a file found in neither reads as no requires at all."
+  [roots files basis]
+  (let [libs (:libs basis)
+        find (fn [p] (first (filter #(.exists ^java.io.File %)
+                                    (map #(io/file % p) roots))))]
     (into (sorted-map)
           (keep (fn [nsym]
                   (let [s (str nsym)]
+                    ;; `goog.*` is the third exemption and it is not a lib: the
+                    ;; ClojureScript COMPILER ships the Closure library, so no
+                    ;; Maven artifact on any basis contains `goog/object.cljs`
+                    ;; and none ever will. Without this, the first `:cljs`
+                    ;; namespace a family ships fails the build of that family
+                    ;; — and `goog.object/getValueByKeys` is the first thing a
+                    ;; browser shim reaches for, because it is the nil-safe
+                    ;; property read.
+                    ;;
+                    ;; Third instance of one shape in three days, after the
+                    ;; family glob and the `.cljs` resolver: a rule written when
+                    ;; the world had one kind of member states itself as if it
+                    ;; had enumerated them. `clojure.` and `slopp.` were never a
+                    ;; list of exemptions — they were the exemptions that
+                    ;; existed.
                     (when-not (or (str/starts-with? s "clojure.")
-                                  (str/starts-with? s "slopp."))
+                                  (str/starts-with? s "slopp.")
+                                  (str/starts-with? s "goog."))
                       (let [path (-> s (str/replace "-" "_") (str/replace "." "/"))
                             ;; REFUSE rather than skip. This derivation's whole
                             ;; stated purpose is that it "cannot go stale", and
@@ -178,7 +199,7 @@
                           ;; hand-edit, where `:deps/manifest :mvn` in a
                           ;; declared position only invites "what is that for?".
                           [lib (select-keys (get libs lib) [:mvn/version])]))))))
-          (mapcat #(ns-requires-of (io/file root %)) files))))
+          (mapcat #(some-> (find %) ns-requires-of) files))))
 
 (defn- gen-launcher!
   "Write the delegating launcher ns for `main-class` under target/launcher."
@@ -255,6 +276,17 @@
         extra (not-empty (dissoc mf "Main-Class" "Manifest-Version"))
         basis (b/create-basis {:project "deps.edn"})]
     (b/copy-dir {:src-dirs [(str src)] :target-dir class-dir})
+    ;; `cljs-src/` too, flattened onto the same classpath root — which is where
+    ;; every ClojureScript library puts its own `.cljs` (replicant ships
+    ;; `replicant/dom.cljs` at the jar root). slopp's tree keeps the two apart
+    ;; because the JVM classpath must not carry browser code; a JAR has no such
+    ;; problem, since Clojure never loads a `.cljs`. Without this the `webapp`
+    ;; family vendors its portable half and the consumer's ClojureScript compile
+    ;; dies on the shim — a file that was in the store, in the materialization,
+    ;; and in nothing the jar could hand anybody.
+    (let [cljs (io/file root "cljs-src")]
+      (when (.isDirectory cljs)
+        (b/copy-dir {:src-dirs [(.getPath cljs)] :target-dir class-dir})))
     ;; the tracked manifest is build INPUT — b/uber generates the real one
     (b/delete {:path (str class-dir "/META-INF/MANIFEST.MF")})
     ;; Declare what this jar BUNDLES, from the basis that is producing it.
@@ -312,6 +344,15 @@
     ;; DIALECT and its disciplines rather than to any one kind of application,
     ;; so a command-line app and a web app both get them.
     (let [root     (io/file (str src))
+          ;; TWO source roots, because `build!` splits them: a `:cljs` namespace
+          ;; renders under `cljs-src/` rather than `src/`, off the JVM
+          ;; classpath. Globbing `src` alone would ship `webapp` without its
+          ;; browser shim — a family that vendors, resolves, and then dies in
+          ;; the CONSUMER's ClojureScript compile on a namespace that is in the
+          ;; jar. The paths stay classpath-relative either way, which is what
+          ;; the vendoring writes and what `boot/framework-files` reads back.
+          cljs     (io/file (or (.getParent (io/file (str src))) ".") "cljs-src")
+          roots    (filterv #(.isDirectory ^java.io.File %) [root cljs])
           families (framework-families root)
           ;; .clj AND .cljc AND .cljs. A family whose namespaces are PORTABLE is
           ;; not exotic — `webapp`'s loop has to load into the JVM oracle and
@@ -326,21 +367,26 @@
                                        (.endsWith n ".cljc")
                                        (.endsWith n ".cljs")))
           in-fam   (fn [prefix]
-                     (let [path (str/replace prefix "." "/")
-                           dir  (io/file root path)
-                           tops (filter #(.exists ^java.io.File %)
-                                        (map #(io/file root (str path %))
-                                             [".clj" ".cljc" ".cljs"]))]
-                       (into (vec (sort (for [f (file-seq dir)
-                                              :when (and (.isFile f)
-                                                         (src-ext? (.getName f)))]
-                                          (str path "/"
-                                               (subs (.getPath f)
-                                                     (inc (count (.getPath dir))))))))
-                             (map #(str path (subs (.getName ^java.io.File %)
-                                                   (.lastIndexOf (.getName ^java.io.File %) ".")))
-                                  tops))))
-          common   (vec (sort (filter #(.exists (io/file root %))
+                     (let [path (str/replace prefix "." "/")]
+                       (vec (sort
+                             (distinct
+                              (for [r    roots
+                                    :let [dir  (io/file r path)
+                                          tops (filter #(.exists ^java.io.File %)
+                                                       (map #(io/file r (str path %))
+                                                            [".clj" ".cljc" ".cljs"]))]
+                                    p    (concat
+                                          (for [f (file-seq dir)
+                                                :when (and (.isFile f)
+                                                           (src-ext? (.getName f)))]
+                                            (str path "/"
+                                                 (subs (.getPath f)
+                                                       (inc (count (.getPath dir))))))
+                                          (map #(str path (subs (.getName ^java.io.File %)
+                                                                (.lastIndexOf (.getName ^java.io.File %) ".")))
+                                               tops))]
+                                p))))))
+          common   (vec (sort (filter (fn [p] (some #(.exists (io/file % p)) roots))
                                       (framework-common root))))
           by-cap   (cond-> (into (sorted-map)
                                  (for [[cap prefix] families
@@ -358,7 +404,7 @@
       (spit (io/file class-dir "META-INF" "slopp" "framework-deps.edn")
             (pr-str (into (sorted-map)
                           (for [[cap fs] by-cap]
-                            [cap (framework-deps root fs basis)])))))
+                            [cap (framework-deps roots fs basis)])))))
     (when (and smain (not= main "clojure.main"))
       (gen-launcher! main smain)
       ;; the launcher dir must be ON the compile basis classpath (src-dirs

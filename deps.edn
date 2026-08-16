@@ -46,6 +46,20 @@
         ;;     and the app it lands in cannot disagree about malli.
         ;; The 336 KB is the cost of shipping a capability that validates.
         metosin/malli           {:mvn/version "0.20.1"}
+        ;; replicant is here for the deps derivation ALONE, and that makes it
+        ;; the first entry this JVM never loads. `slopp.webapp.dom` is `:cljs`,
+        ;; so `boot-loads?` skips it and no kernel classpath needs a renderer —
+        ;; but `framework-deps` resolves a vendored file's requires against THIS
+        ;; basis, so a lib absent here is a lib a consuming project is never
+        ;; told about, and their browser build dies inside `slopp/webapp/dom.cljs`
+        ;; exactly as the vendored framework once died inside `slopp.web.css` on
+        ;; garden. Same reason malli is back, one platform over.
+        ;;
+        ;; So the rule above — "every entry here must be required by a
+        ;; PRODUCTION namespace" — holds, and the sharper statement of it is:
+        ;; required by a production namespace that SHIPS. Do not remove this
+        ;; because nothing on the JVM requires it; nothing on the JVM ever will.
+        no.cjohansen/replicant  {:mvn/version "2026.07.1"}
         http-kit/http-kit       {:mvn/version "2.8.0"}
         hiccup/hiccup           {:mvn/version "2.0.0"}
         garden/garden           {:mvn/version "1.3.10"}}
