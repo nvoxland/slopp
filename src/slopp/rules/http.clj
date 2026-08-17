@@ -16,11 +16,11 @@
   **The recurring difficulty is that a rendered path is not a call.** A link is a
   string; nothing resolves it, so a typo and a legitimate handoff are the same
   token. Everything here that classifies one — `:exact`/`:prefix`/`:unresolved`,
-  and the `:web/external-path` vs `:web/client-path` split — is an attempt to
+  and the `:web/external-path` escape that survives it — is an attempt to
   keep those apart, and each distinction was added because collapsing it made a
   report state something false. Prefer adding a category over widening one."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs]))
+            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs] [slopp.rules.webapp :as rules.webapp]))
 
 (defn endpoints
   "Every declared endpoint in the store — a `:web/path` form's route row:
@@ -575,21 +575,28 @@
   property) — correct on every branch, after every merge, at any revision.
   Test namespaces are fixtures.
 
-  TWO markers skip a form whole, and the difference between them is the whole
-  point of having two:
+  **One marker skips a form whole:** `^{:web/external-path \"why\"}` — the target
+  is served by something OUTSIDE this store (nginx, another service). A genuine
+  crossing, honest about being one.
 
-  - `^{:web/external-path \"why\"}` — the target is served by something OUTSIDE
-    this store (nginx, another service). A genuine crossing, honest about it.
-  - `^{:web/client-path \"why\"}` — the target is THIS app's own path, and the
-    literal is a key the CLIENT router parses. Nothing serves it as written:
-    the render adds the mount point first, and a `:web/client-routes` fallback answers it.
+  **`^:web/client-path` is RETIRED, and how it died is worth the paragraph.** It
+  meant *the literal is this app's own client-router key, and nothing serves it
+  as written* — true, and unfixable at the time for the reason recorded here:
+  *teaching the check to SEE the prefixing is not possible in general, because
+  the base arrives through an ordinary function call.*
 
-  One marker used to serve both, and the crossings inventory then reported an
-  SPA's own screens as leaving for \"somebody else's server\" — seven forms of
-  false statement in the one report someone reads to find out what is NOT
-  checked here. Widening the old marker's meaning would have kept the lie;
-  teaching the check to SEE the prefixing is not possible in general, because
-  the base arrives through an ordinary function call."
+  Both halves of that stopped being true. slopp does the prefixing now
+  (`webapp/prefix-links`, over the finished tree), so a literal IS a client route
+  key rather than an ambiguous string; and `:webapp/routes` is a declared table,
+  so there is something to join it to. `dangling-route-refs` resolves against
+  that table, and the marker has nothing left to say.
+
+  What it cost while it lived is the reason to record this rather than delete it
+  quietly: in one consuming store the escape sat on THIRTEEN views, each
+  discharged with the same accurate sentence. Every instance passed review
+  because every instance was true — an escape hatch every user discharges
+  identically is one missing mechanism wearing N hats, and the count is the
+  signal that nothing counts."
   [store]
   (vec
    (for [nsx (sort (keys (:namespaces store)))
@@ -598,9 +605,7 @@
          :when (:name e)
          :let [sx (try (n/sexpr (:node e)) (catch Exception _ nil))
                mt (when (seq? sx) (meta (second sx)))]
-         :when (and sx
-                    (not (:web/external-path mt))
-                    (not (:web/client-path mt)))
+         :when (and sx (not (:web/external-path mt)))
          ref (link-refs sx)]
      (assoc ref :form (symbol (str nsx) (str (:name e)))))))
 
@@ -666,11 +671,30 @@
         client-route-prefixes (into #{} (mapcat :web/client-routes) routes)
         client-route? (fn [path]
                         (some #(str/starts-with? path (str % "/")) client-route-prefixes))
+        ;; the fourth source of served paths, after endpoints, static mounts and
+        ;; the client-route PREFIXES above: the client ROUTE TABLE itself. A
+        ;; literal :href in a view is a client route key — slopp prefixes it on
+        ;; the way to the DOM — so it resolves against the patterns the app
+        ;; declared rather than against anything the server serves.
+        ;;
+        ;; This is what retires `^:web/client-path`, whose whole justification
+        ;; was that neither half existed: the prefixing was an app's own function
+        ;; call, and the table was a closure.
+        ;;
+        ;; Matched with the SERVER's matcher on purpose. The two grammars are
+        ;; pinned against each other by
+        ;; `web.routes-test/the-CLIENT-and-SERVER-matchers-agree-about-the-pattern-grammar`,
+        ;; so using one to read the other's patterns is a checked equivalence
+        ;; rather than an assumption.
+        client-rows   (mapv (fn [p] {:method :get :path p})
+                            (rules.webapp/client-routes store))
+        client-routed? (fn [path] (boolean (router/match client-rows :get path)))
         served? (fn [{:keys [kind method path]}]
                   (case kind
                     :exact  (boolean (or (router/match routes method path)
                                          (static-file? path)
-                                         (client-route? path)))
+                                         (client-route? path)
+                                         (client-routed? path)))
                     :prefix (boolean
                              (or (some #(str/starts-with? (str (:path %)) path) routes)
                                  (some (fn [[url-prefix _]]

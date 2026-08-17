@@ -148,16 +148,25 @@
    {:kind       :webapp/client-path
     :leaves     "a link written as a CLIENT-ROUTER key, not a server path"
     :to         "this app's own router, after the render prefixes it"
-    :markers    #{:web/client-path}
-    :checked-by nil
-    :blind      "nothing joins the three parts up. The literal is a client
-                 route, the mount point arrives from the render, and a
-                 :web/client-routes fallback answers the result — so a typo'd literal,
-                 a prefix that stopped being applied, and a client route
-                 nobody registered all look the same from here. Distinct from
-                 :http/foreign-route deliberately: this target IS ours, and
-                 filing it as somebody else's server put a false statement in
-                 the one report that exists to say what is unchecked"}
+    ;; no marker: the literal itself is the signal, joined against the table
+    :markers    #{}
+    :checked-by "http-dangling-route-refs resolves it against the DECLARED
+                 client route table (rules.webapp/client-routes), using the
+                 server's own matcher — legitimate because the two grammars are
+                 pinned against each other by web.routes-test. A literal that
+                 matches no client route and no server route still dangles"
+    :blind      "the join reads route patterns that are LITERAL STRINGS in a
+                 :webapp/routes table. A computed pattern is skipped rather than
+                 guessed at, so an app that builds its table dynamically gets a
+                 partial join — and its links read as dangling, which is the
+                 safe direction but is still a false report.
+
+                 This row is the one that stopped being a hole, and how is worth
+                 keeping: it was unchecked because the mount point arrived
+                 through an app's own function call and the route table was a
+                 closure. Both became the framework's, and the escape hatch that
+                 stood in for the check — ^:web/client-path, thirteen copies of
+                 one accurate sentence in the one real app — retired with it"}
 
    {:kind       :cli/command
     :leaves     "a form's name metadata: the command's name, its one-line doc,
@@ -348,6 +357,6 @@
                        [:web/path :web/method :web/auth :web/reads :web/effects
                         :web/read :web/effect :web/effectful :web/request
                         :web/response :web/client :web/context
-                        :web/client-routes :web/external-path :web/client-path
+                        :web/client-routes :web/external-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))

@@ -382,35 +382,50 @@
       (is (contains? paths "/nope/x") (pr-str dangling)))))
 
 (deftest a-client-router-path-is-not-somebody-elses-server
-  ;; Friction 13, measured on slopp-ui: seven view forms render `/store/ns/foo`
-  ;; and `/change/d1..d2`, which no SERVER route matches, so the dangling-route
-  ;; check flagged them. The only escape was ^{:web/external-path}, and it
-  ;; discharged the check while filing a FALSE statement — the crossings
-  ;; inventory then reported those forms as leaving for "somebody else's server".
+  ;; Friction 13, measured on slopp-ui: view forms render `/store/ns/foo`, which
+  ;; no SERVER route matches, so the dangling-route check flagged them. The only
+  ;; escape was `^{:web/external-path}`, and it discharged the check while filing
+  ;; a FALSE statement — the crossings inventory then reported those forms as
+  ;; leaving for "somebody else's server".
   ;;
-  ;; They are this app's own paths. The literal is a key the CLIENT router
-  ;; parses, and `prefix-links` re-addresses it under the mount point before it
-  ;; reaches the DOM, so what serves it is this store's own `:web/client-routes` fallback.
+  ;; The fix at the time was a second marker, `^:web/client-path`: same
+  ;; discharge, truthful category. Teaching the check to SEE the prefixing was
+  ;; the alternative and could not be done, because the mount point arrived
+  ;; through an ordinary function call.
   ;;
-  ;; The crossings report is exactly where someone goes to ask what is NOT
-  ;; checked here, so a wrong reason there is worse than a missing one. Hence a
-  ;; marker of its own rather than widening the old one: same discharge,
-  ;; truthful category. Teaching the dangling check to SEE the prefixing was the
-  ;; alternative and it cannot be done in general — the base arrives through an
-  ;; ordinary function call the checker would have to trace.
+  ;; **That marker is now RETIRED, and this test is what it leaves behind.**
+  ;; slopp does the prefixing and `:webapp/routes` is a declared table, so a
+  ;; literal is a client route key with something to be a key INTO. The
+  ;; distinction the marker existed to protect is still the point — a client
+  ;; path is not somebody else's server — but it is CHECKED rather than
+  ;; declared, which is strictly better: a marker asserts, a join verifies.
   (let [src (str "(ns browser.ui)\n\n"
-                 "(defn ^{:web/client-path \"the client router parses it; prefix-links adds the mount point\"}\n"
-                 "  ns-link \"N.\" [nsx]\n"
-                 "  [:a {:href (str \"/store/ns/\" nsx)} \"ns\"])\n\n"
+                 "(defn screen \"S.\" [_s] [:p \"s\"])\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes [[\"/store/ns/:ns\" screen]]})\n\n"
+                 "(defn ns-link \"N.\" [] [:a {:href \"/store/ns/shop.core\"} \"ns\"])\n\n"
                  "(defn plain \"P.\" [] [:a {:href \"/served-by-nobody\"} \"x\"])\n")
-        s    (store/ingest (store/empty-store) 'browser.ui src)
-        refs (rules.http/ui-route-refs s)]
-    (testing "the marker discharges the form's refs, exactly as external-path does
-              — otherwise it is not an escape and nobody can use it"
-      (is (not-any? #(= 'browser.ui/ns-link (:form %)) refs) (pr-str refs)))
-    (testing "and an unmarked form in the same namespace is still reported, so
-              the marker discharges one form rather than switching the check off"
-      (is (some #(= 'browser.ui/plain (:form %)) refs) (pr-str refs)))))
+        s     (store/ingest (store/empty-store) 'browser.ui src)
+        found (rules.http/dangling-route-refs s)
+        paths (set (map :path (:dangling found)))]
+
+    (testing "a client route resolves with no marker at all"
+      ;; what thirteen identical `^:web/client-path` sentences used to buy
+      (is (not (contains? paths "/store/ns/shop.core"))
+          (pr-str (:dangling found))))
+
+    (testing "and a path nothing serves is still reported"
+      ;; the arm that keeps this a check rather than a blanket pass: if every
+      ;; in-app-looking literal resolved, retiring the marker would have been
+      ;; switching the rule off and calling it progress
+      (is (contains? paths "/served-by-nobody") (pr-str found)))
+
+    (testing "the crossings category is what the marker was really protecting"
+      ;; filing an app's own screen as `external-path` put a false statement in
+      ;; the one report someone reads to learn what is NOT checked. Nobody needs
+      ;; to reach for it now, which is the honest way for that risk to end
+      (is (not (contains? paths "/store/ns/shop.core"))
+          "an app that must mark its own screens as foreign will mark them wrong"))))
 
 (deftest serving-namespaces-derive-from-the-store-not-a-hand-kept-list
   ;; `:web/namespaces` is the one REQUIRED opt on serve!, and `web/context`'s
@@ -757,3 +772,42 @@
         (is (= 1 (count f)) (pr-str f))
         (is (:stale-marker (first f)) (pr-str f))
         (is (re-find #"unconstrained-ok" (str (:teach (first f)))) (pr-str f))))))
+
+(deftest a-link-to-a-declared-CLIENT-route-needs-no-escape
+  ;; `^:web/client-path` existed because this check could not see the prefixing:
+  ;;
+  ;;   teaching the check to SEE the prefixing is not possible in general,
+  ;;   because the base arrives through an ordinary function call
+  ;;
+  ;; Both halves of that changed. slopp does the prefixing, so a literal in a
+  ;; view is a CLIENT ROUTE KEY rather than an ambiguous string — and the route
+  ;; table is data, so there is something to join it to.
+  ;;
+  ;; In one consuming store the escape was on THIRTEEN views, every one
+  ;; discharged with the same accurate sentence. That is what this retires.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes [[\"/store\" things]\n"
+                 "                   [\"/store/form/:id\" things]]})\n\n"
+                 "(defn nav \"N.\" [_s]\n"
+                 "  [:nav [:a {:href \"/store\"} \"Store\"]\n"
+                 "        [:a {:href \"/store/form/f1\"} \"A form\"]\n"
+                 "        [:a {:href \"/store/nope\"} \"Typo\"]])\n")
+        st  (store/ingest (store/empty-store) 'shop.ui src)
+        found (rules.http/dangling-route-refs st)
+        paths (set (map :path (:dangling found)))]
+
+    (testing "a link matching a declared client route is SERVED, unmarked"
+      (is (not (contains? paths "/store")) (pr-str (:dangling found)))
+      (is (not (contains? paths "/store/form/f1"))
+          (str "a parameterised client route must match like a server one: "
+               (pr-str (:dangling found)))))
+
+    (testing "and a link matching NO client route still dangles"
+      ;; the half that keeps the check worth having. If every in-app-looking
+      ;; path resolved, the escape would have been replaced by a blanket pass
+      ;; and a typo would go to a blank screen at a plausible url
+      (is (contains? paths "/store/nope")
+          (str "a typo'd client link is exactly what this check is for: "
+               (pr-str found))))))

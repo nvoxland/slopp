@@ -150,3 +150,42 @@
                          {:form (symbol (str own) (str (:name e)))
                           :cljs cljs})))))
                changed))))
+
+(defn ^{:export "slopp.rules"} client-routes
+  "Every client route PATTERN this store declares, sorted — `[]` when it has no
+  browser app.
+
+  **The value that retires an escape hatch.** `rules.http/ui-route-refs` skips
+  any form marked `^:web/client-path`, and its docstring says exactly why:
+  *teaching the check to SEE the prefixing is not possible in general, because
+  the base arrives through an ordinary function call.* That stopped being true
+  when the framework took over the prefixing — a literal `:href` in a view is now
+  a CLIENT ROUTE KEY, and this is the table it is a key into.
+
+  In one consuming store that escape was on thirteen views, every one discharged
+  with the same sentence. Thirteen copies of one accurate justification is one
+  missing mechanism wearing thirteen hats; this is the mechanism.
+
+  **Read from `:webapp/routes` literals anywhere in the store**, rather than from
+  the `^:web/page` entry alone. A big app builds its table in pieces and
+  concatenates them, and a reader that insisted on one literal in one place would
+  report a partial table as the whole one — the shape that makes a join silently
+  incomplete.
+
+  **A row whose pattern is not a literal string is SKIPPED rather than guessed
+  at.** A computed pattern is one this cannot read; inventing an answer would
+  make the join quietly partial, which is worse than a link reported as dangling,
+  because a dangling report at least gets looked at.
+
+  `[]` and never nil, so a caller joining against it does not have to tell \"no
+  webapp\" apart from \"a webapp that routes nothing\"."
+  [st]
+  (vec (sort (distinct
+              (for [nsx  (keys (:namespaces st))
+                    e    (store/forms st nsx)
+                    :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
+                    node (tree-seq coll? seq sx)
+                    :when (map? node)
+                    row  (get node :webapp/routes)
+                    :when (and (vector? row) (string? (first row)))]
+                (first row))))))

@@ -100,3 +100,43 @@
             (is (some #{'demo.app.views} (:cljs (first r)))
                 "naming the namespace that stranded it is the finding — the entry is fine"))))
       (finally (ops/close! sess)))))
+
+(deftest the-declared-CLIENT-ROUTE-TABLE-is-readable-from-the-store
+  ;; What step B bought, collected: an app's client routes are a value now, so
+  ;; anything can join against them. `^:web/client-path` exists because they were
+  ;; not — `rules.http/ui-route-refs` says so in its own docstring:
+  ;;
+  ;;   teaching the check to SEE the prefixing is not possible in general,
+  ;;   because the base arrives through an ordinary function call
+  ;;
+  ;; That stopped being true when slopp took over the prefixing. A literal in a
+  ;; view is a CLIENT ROUTE KEY, and this is the table it is a key into.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/state (atom {})\n"
+                 "   :webapp/routes [[\"/store\" things]\n"
+                 "                   [\"/store/form/:id\" things]]})\n")
+        st  (store/ingest (store/empty-store) 'shop.ui src)]
+
+    (testing "the patterns come back, and nothing else does"
+      (is (= ["/store" "/store/form/:id"] (rules.webapp/client-routes st))))
+
+    (testing "a store with no browser app has no client routes"
+      ;; and answers EMPTY rather than nil, so a caller joining against it does
+      ;; not have to tell "no webapp" apart from "a webapp routing nothing"
+      (let [plain (store/ingest (store/empty-store) 'shop.plain
+                                "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")]
+        (is (= [] (rules.webapp/client-routes plain)))))
+
+    (testing "a row whose pattern is not a literal string is SKIPPED, not guessed"
+      ;; a computed pattern is one this cannot read, and inventing an answer
+      ;; would make the join silently partial — which is worse than a link
+      ;; reported as dangling, because that at least gets looked at
+      (let [computed (store/ingest (store/empty-store) 'shop.dyn
+                                   (str "(ns shop.dyn)\n\n"
+                                        "(def base \"/store\")\n\n"
+                                        "(defn s \"S.\" [_] [:p])\n\n"
+                                        "(defn ^:web/page app \"A.\" []\n"
+                                        "  {:webapp/routes [[base s] [\"/real\" s]]})\n"))]
+        (is (= ["/real"] (rules.webapp/client-routes computed)))))))
