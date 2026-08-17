@@ -1022,8 +1022,12 @@
                          ;; not routed — the server's, or somebody else's
                          [:a {:href "/api/modules"} "raw"]
                          [:a {:href "https://example.com/things"} "elsewhere"]
-                         [:form {:action "/api/save"} [:button "Save"]]])
-        routes [["/things" things] ["/things/:id" things]]
+                         [:form {:action "/api/save"} [:button "Save"]]
+                         ;; a GET form that NAVIGATES: its action is a client
+                         ;; route and it is spelled `action` only because a text
+                         ;; box comes with it
+                         [:form {:action "/search"} [:input {:name "q"}]]])
+        routes [["/things" things] ["/things/:id" things] ["/search" things]]
         at     (fn [base] (webapp/prefix-links base routes (things {})))]
 
     (testing "a link the client ROUTES gets the mount point"
@@ -1039,10 +1043,25 @@
         (is (= "/api/modules" (get-in tree [3 1 :href])))
         (is (= "https://example.com/things" (get-in tree [4 1 :href])))))
 
-    (testing "a form ACTION is never touched — it submits to a server"
-      ;; scoped to :href deliberately. An :action is a server submission, not a
-      ;; client route, and the client router has nothing to say about it
-      (is (= "/api/save" (get-in (at "/p/x") [5 1 :action]))))
+    (testing "a form ACTION obeys the SAME rule, because it is the same question"
+      ;; This was `:href` only, on the reasoning that an `:action` submits to a
+      ;; server and rewriting one would point a POST at a screen. Right about
+      ;; the POST and wrong about the scope, reported by the app it broke: a
+      ;; search box written as a GET form is a NAVIGATION — `act` is pure and
+      ;; navigating is an effect, so a form needs no dispatcher and no bundle —
+      ;; and its action is a client route that happens to be spelled `action`.
+      ;;
+      ;; No new judgement is needed: `match-route` already separates them, and
+      ;; it is the same call that keeps `/api/modules` from being prefixed as an
+      ;; href. The failure runs the safe way too — an action that should be
+      ;; prefixed and is not silently leaves the app, while one that should not
+      ;; be matches no row.
+      (let [tree (at "/p/x")]
+        (is (= "/api/save" (get-in tree [5 1 :action]))
+            "a POST to the server's own path must not be pointed at a screen")
+        (is (= "/p/x/search" (get-in tree [6 1 :action]))
+            (str "a GET form whose action IS a client route submitted to the"
+                 " mount ROOT — a different application entirely"))))
 
     (testing "at the ROOT the transform changes nothing"
       ;; `prefixed` with "" is identity, so an app served at the root pays

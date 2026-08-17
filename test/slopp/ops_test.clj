@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1718,3 +1718,116 @@
         (is (contains? got "slopp/lang.cljc") "the common family rides along")
         (is (not (contains? got "slopp/cli.clj"))
             "and a family this store does not use is still withheld")))))
+
+(deftest ^:external a-built-WEBAPP-COMPILES-and-its-app-code-declares-no-cljs
+  ;; The wave's claim, in the one place it can be false: **an app that opts into
+  ;; `webapp` writes NO ClojureScript.** `a-REALISTIC-browser-app-is-DRIVEN-…`
+  ;; shows such an app runs headlessly, which is the half a JVM can see. This is
+  ;; the other half — that the same app, vendored the framework and handed to
+  ;; the ClojureScript compiler, produces a bundle.
+  ;;
+  ;; Those are genuinely different questions. Every screen here is `:cljc`, so
+  ;; the in-image drive exercises the JVM branch of every one of them; a form
+  ;; that loads on a JVM and does not compile to JS passes that test and fails
+  ;; this one.
+  ;;
+  ;; **The framework is vendored from the REAL rendered source**, not a
+  ;; stand-in. A checkout has no jar resources, so `framework-files` answers nil
+  ;; and nothing would vendor — but the substitute here IS `slopp.webapp` and
+  ;; `slopp.webapp.dom` as this store holds them, so what compiles is the code
+  ;; that ships.
+  (let [
+        ;; each under its OWN platform's extension. `ns-path`'s 1-arity is :jvm,
+        ;; and a framework vendored as `.clj` is invisible to the ClojureScript
+        ;; compiler — which fails as "No such namespace: slopp.webapp" and reads
+        ;; exactly like the family not being vendored at all
+        ;; read off the BUILT TREE at the paths it actually occupies, rather
+        ;; than re-derived from a store. `built-store` re-ingests source and
+        ;; says so — module platforms do not survive that round trip — so
+        ;; `ns-path` over it answers `.clj` for every one of these, and a
+        ;; framework vendored as `.clj` is INVISIBLE to the ClojureScript
+        ;; compiler. That failure reads as "No such namespace: slopp.webapp",
+        ;; which is indistinguishable from the family never being vendored
+        find!  (fn [rel]
+                 (or (first (filter #(.exists ^java.io.File %)
+                                    [(io/file "src" rel) (io/file "cljs-src" rel)]))
+                     (throw (ex-info (str "the built tree has no " rel
+                                          " — this fixture vendors the framework"
+                                          " from the ARTIFACT, so a moved or"
+                                          " renamed file fails here loudly rather"
+                                          " than compiling to nothing")
+                                     {:path rel}))))
+        family (into {} (for [rel ["slopp/lang.cljc" "slopp/webapp.cljc"
+                                   "slopp/webapp/dom.cljs"]]
+                          [rel (slurp (find! rel))]))
+        app    (str "(ns shop.ui\n"
+                    "  (:require [slopp.webapp :as webapp]))\n\n"
+                    "(defn things \"The list.\" [s]\n"
+                    "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
+                    "(defn things-request \"What it asks for.\" [_params]\n"
+                    "  {:webapp/method :get :webapp/path \"/api/things\"})\n\n"
+                    "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
+                    "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                    "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                    "(defn ^:web/page app \"The application.\" []\n"
+                    "  (webapp/wiring\n"
+                    "   {:webapp/state  (atom {})\n"
+                    "    :webapp/routes [[\"/things\" {:render  things\n"
+                    "                                :request things-request}]]}))\n")]
+    (testing "the fixture really vendors what it claims to"
+      ;; without this the compile below could be green having compiled nothing
+      ;; of the framework at all
+      (is (= 3 (count family)) (pr-str (keys family)))
+      (is (every? #(re-find #"\(ns slopp\." %) (vals family))
+          "a rendered namespace that is not source would make this vacuous")
+      (is (= #{"slopp/lang.cljc" "slopp/webapp.cljc" "slopp/webapp/dom.cljs"}
+             (set (keys family)))
+          (str "vendored under the wrong EXTENSION the compiler simply does not"
+               " see them, and the error reads as the family being absent: "
+               (pr-str (keys family)))))
+
+    (with-redefs [boot/framework-files (constantly {"webapp" family})
+                  boot/framework-deps
+                  (constantly '{"webapp" {no.cjohansen/replicant {:mvn/version "2026.07.1"}}})]
+      (let [sess (external/open!)]
+        (try
+          (ops/deps-add! sess 'org.clojure/clojurescript {:mvn/version "1.11.132"}
+                         :client true :prompt "the cljs compiler")
+          (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
+          (swap! sess update :store store/ingest 'shop.ui app)
+
+          (testing "the app declares NO ClojureScript of its own"
+            ;; the goal stated as an assertion rather than as a property of the
+            ;; fixture. If a realistic browser app cannot be written without a
+            ;; `:cljs` namespace, this is the line that goes red
+            (let [st (:store @sess)]
+              (is (= [] (filterv #(= :cljs (store/platform-for st %))
+                                 (keys (:namespaces st))))
+                  "an app's own code reached for the browser")))
+
+          (testing "and it COMPILES — the half no in-image drive can reach"
+            (let [r (cljs/compile-client! sess)]
+              (is (nil? (:error r)) (pr-str r))
+              (is (pos? (or (:bytes r) 0)) (pr-str r))))
+
+          (finally (ops/close! sess)))))
+
+    (testing "and it FIRES: without the family vendored the same store fails"
+      ;; a green compile proves nothing unless the red one is reachable, and
+      ;; every defect this wave was hidden by a check that could not fail
+      (with-redefs [boot/framework-files (constantly {})
+                    boot/framework-deps  (constantly {})]
+        (let [sess (external/open!)]
+          (try
+            (ops/deps-add! sess 'org.clojure/clojurescript {:mvn/version "1.11.132"}
+                           :client true :prompt "the cljs compiler")
+            (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
+            (swap! sess update :store store/ingest 'shop.ui app)
+            (let [r (cljs/compile-client! sess)]
+              (is (some? (:error r))
+                  (str "an app requiring slopp.webapp compiled without it: " (pr-str r)))
+              (is (str/includes? (str (:error r)) "slopp.webapp")
+                  (str "and it must fail on the FRAMEWORK's require — a red for"
+                       " any other reason makes the green above prove nothing: "
+                       (pr-str r))))
+            (finally (ops/close! sess))))))))

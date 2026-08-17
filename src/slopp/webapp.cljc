@@ -774,8 +774,8 @@
                    [:cat :string [:sequential [:tuple :string :any]] :any]
                    :any]}
   prefix-links
-  "Rewrite every `:href` in `hiccup` that this app ROUTES so it carries the
-  mount point — leaving every other link exactly as written.
+  "Rewrite every link in `hiccup` that this app ROUTES so it carries the mount
+  point — leaving every other link exactly as written.
 
   **This is the join nothing could make before.** The boundary inventory reports
   it as an unchecked exit and says why: *the literal is a client route, the mount
@@ -794,8 +794,19 @@
   them — the same table the click handler consults, so the two cannot disagree
   about which links are the app's.
 
-  **`:href` only.** A form's `:action` submits to a server, and the client router
-  has nothing to say about it; rewriting one would point a POST at a screen.
+  **`:href` and `:action`, on the same rule.** This was `:href` alone, on the
+  reasoning that a form's `:action` submits to a server and rewriting one would
+  point a POST at a screen. That is right about the POST and wrong about the
+  scope, and the app it broke reported it: a search box written as a GET FORM is
+  a NAVIGATION — a reducer is pure and navigating is an effect, so a form needs
+  no dispatcher and no bundle at all — and its action is a client route that
+  happens to be spelled `action` because a text box came with it.
+
+  No second judgement is needed, which is why this is a widening rather than a
+  new rule: the same `match-route` that keeps `/api/modules` from being prefixed
+  as an href keeps `/api/save` from being prefixed as an action. The failure
+  runs the safe way too — an action that should be prefixed and is not silently
+  submits outside the app, while one that should not be matches no row.
 
   The round trip is the property worth stating: what this PREFIXES is exactly
   what [[click-target]] STRIPS and claims. If those two ever disagree, every link
@@ -805,10 +816,15 @@
   (walk/postwalk
    (fn [node]
      (let [attrs (when (and (vector? node) (keyword? (first node)))
-                   (second node))
-           href  (when (map? attrs) (:href attrs))]
-       (if (and (string? href) (match-route routes href))
-         (assoc-in node [1 :href] (prefixed base href))
+                   (second node))]
+       (if (map? attrs)
+         (reduce (fn [n k]
+                   (let [v (get attrs k)]
+                     (if (and (string? v) (match-route routes v))
+                       (assoc-in n [1 k] (prefixed base v))
+                       n)))
+                 node
+                 [:href :action])
          node)))
    hiccup))
 

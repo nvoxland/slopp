@@ -124,24 +124,35 @@
                  partial in the safe direction"}
 
    {:kind       :app/headless-entry
-    :leaves     "the whole application as data — state, view, routing, and
-                 the handlers sitting in its tree"
+    :leaves     "the whole application as data — state, a route TABLE, the
+                 screens its rows name, and the handlers sitting in its tree"
     :to         "slopp.web.screen's driver, which opens it on a JVM and
                  presses things"
     :markers    #{:web/page}
     :checked-by "webapp-page-unreachable refuses an entry that is not a public
-                 zero-arity defn (def, defmethod, private, no [] arity), one in a :cljs namespace, and a SECOND entry; the webapp-page-reach
+                 zero-arity defn (def, defmethod, private, no [] arity), one in
+                 a :cljs namespace, and a SECOND entry; webapp-portable-handler
+                 refuses a FUNCTION handler on an input, which is the one shape
+                 that cannot be portable at all — in a browser it receives a DOM
+                 event, so one written against the map the driver passes runs
+                 headless and does nothing served; the webapp-page-reach
                  advisory re-grades a CHANGED page's closure at done;
                  module_platform reports the pages a :cljs declaration
-                 strands; screen/open refuses a page whose :state is not an
-                 atom or whose keys are typo'd"
-    :blind      "all of that grades whether the app OPENS and none of it
-                 grades whether the app WORKS: that :view returns hiccup,
-                 that a handler does anything. And a FUNCTION handler on an
-                 input cannot be portable at all — in a browser it receives a
-                 DOM event, so one written against the map passed here runs
-                 headless and does nothing served. The data form is the only
-                 route with no such gap, and nothing makes an app take it"}
+                 strands; screen/open! refuses a page whose :state is not an
+                 atom, and webapp/wiring refuses an unknown or retired key, a
+                 routes FUNCTION, a declared :webapp/view, and a row target that
+                 is callable but renders nothing"
+    :blind      "all of that grades whether the app OPENS and none of it grades
+                 whether the app WORKS: that a screen returns hiccup, that a
+                 handler does anything.
+
+                 And a screen's REQUEST is a route reference nothing joins. A
+                 literal :href is resolved against the served table by
+                 http-dangling-route-refs; the :webapp/path inside a screen's
+                 request is the same kind of claim about the same table, made in
+                 a different key, and no check reads it. So a screen can name an
+                 endpoint this store does not serve and the only symptom is a
+                 failed load at runtime"}
 
    {:kind       :http/foreign-route
     :leaves     "a link to a path this store does not serve"
