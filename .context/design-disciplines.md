@@ -2608,3 +2608,44 @@ inert in a consumer's store, and the migration note named the declaration
 without naming its readers. Both are the producer describing itself accurately
 and the consumer needing something else — see `unknown-marker` and
 `engine/marker-readers` for the two mechanisms that came out of it.
+
+## A correct justification repeated is invisible; nothing counts repetitions
+
+**Root.** slopp-ui, 2026-08-17, counting their own store while scoping wave 4c's
+step D.
+
+Thirteen views carried `^{:web/client-path "…"}`, and every one of them
+discharged it with the same sentence:
+
+> a client-router key, not a server path: `app-view` runs `prefix-links` over the
+> finished tree, so what reaches the DOM is `/p/<slug>…`
+
+Thirteen accurate statements. Each passed review on its own, because each was
+TRUE. Their conclusion, and it is the finding:
+
+> A wrong justification gets challenged; a correct one repeated thirteen times is
+> invisible, because every individual instance passes review. **The smell is the
+> repetition, not the content — and nothing counts repetitions of a docstring.**
+
+**What the repetition means.** An escape hatch every user discharges with the
+same sentence is not N judgements, it is ONE MISSING MECHANISM wearing N hats.
+The escape existed because a check could not see the prefixing; when the
+framework took the prefixing over, the marker, the escape, the function and all
+thirteen sentences retired together.
+
+**Why nothing catches it.** Every mechanism in this store keys on STRUCTURE — a
+marker slopp does not define, a test with no call edge, a schema that lies. A
+sentence repeated verbatim across thirteen forms is invisible to all of them, and
+to review, because review reads one form at a time. The count is the signal and
+nothing counts.
+
+**The related shape, from the same day.** A rule invented to settle one question
+and never run against its own precedent has been tested exactly once. "slopp owns
+what is TRUE, the app owns what is SEEN" was offered to decide who renders a
+loading state, and did not survive `not-found` — defaulted the day before for
+reasons the rule would have forbidden. Both defects are a claim that is locally
+correct and never checked against its own siblings.
+
+No mechanism was built for either. A counter needs a threshold, and a noisy
+version of this check would be worse than none — which is itself the reason to
+write the discipline down rather than pretend the absence is an oversight.
