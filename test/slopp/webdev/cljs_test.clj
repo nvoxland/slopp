@@ -15,7 +15,7 @@
   only unverifiable layer in slopp verified by something that cannot fail."
   (:require [clojure.test :refer [deftest testing is]]
             [slopp.webdev.cljs :as cljs]
-            [slopp.store :as store] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store.artifacts :as artifacts] [slopp.store.render :as store.render] [clojure.string :as str] [slopp.web.client :as web.client]))
+            [slopp.store :as store] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store.artifacts :as artifacts] [slopp.store.render :as store.render] [clojure.string :as str] [slopp.web.client :as web.client] [slopp.edit.tiers :as tiers]))
 
 (deftest parse-result-extracts-the-marked-edn
   (testing "reads the EDN after the SLOPP-CLJS-RESULT marker, ignoring other output"
@@ -866,19 +866,18 @@
   ;; (`:cljc`) and fetch WRAPPERS (`:cljs`) — and once the framework performs
   ;; every request the wrappers are dead surface. Nine public fns in theirs.
   ;;
-  ;; Worse than dead: they are `:cljs`, so they are exactly what
-  ;; `webapp-client-code` now reports, and the fix an author would reach for is
-  ;; to hand-write the request the generator could have written.
+  ;; So a store with `webapp` on gets what it can actually use: REQUEST builders
+  ;; for a row's `:request` and CONTRACT checks for its `:check`. That also
+  ;; restores what 4d took away — their response validation lived in the
+  ;; wrappers, and when the framework took over performing it went with them.
   ;;
-  ;; So a store with `webapp` on gets what it can actually use — a `:cljc`
-  ;; namespace of REQUEST builders for a row's `:request`, and CONTRACT checks
-  ;; for its `:check`. That also restores what 4d took away: their response
-  ;; validation lived in the wrappers, and when the framework took over
-  ;; performing it went with them.
-  ;;
-  ;; `:cljc` rather than `:cljs` is the point of the whole exercise. A request
-  ;; builder is a pure function of params, so it loads into the image and an
-  ;; ordinary test reads which url a screen will ask for.
+  ;; **In TWO namespaces, and that is not tidiness.** A builder is a pure data
+  ;; function; a check reaches malli, which the functional-core gate reads as
+  ;; IO. Shipped together, the builders inherit the checks' tier — and the app
+  ;; that tried to use them could not, because its views are `:pure` and the
+  ;; edge to an `:external` namespace is a layering violation. It ended up
+  ;; hand-writing every request map: correct by inspection rather than by
+  ;; construction, which is exactly the drift generation exists to remove.
   (let [wrappers [{:fn-name 'get-order :method :get :path "/api/orders/:id"
                    :endpoint 'shop.api/get-order
                    :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
@@ -891,10 +890,11 @@
                    :endpoint 'shop.api/ping
                    :request  {:kind :none}
                    :response {:kind :none}}]
-        src (cljs/render-request-ns 'shop.client.requests wrappers)]
+        src  (cljs/render-request-ns 'shop.client.api wrappers nil)
+        chk  (cljs/render-check-ns 'shop.client.checks wrappers)]
 
     (testing "one REQUEST builder per endpoint, each carrying its provenance"
-      (is (re-find #"\(ns shop\.client\.requests" src) src)
+      (is (re-find #"\(ns shop\.client\.api" src) src)
       (is (= 3 (count (re-seq #"\(defn \^\{:generated .*?-request" src)))
           (str "one request builder per endpoint, and the ! is dropped because"
                " building a request performs nothing: " src))
@@ -917,26 +917,54 @@
       ;; parameter the contract does not have
       (is (re-find #"ping-request\n  \"[^\"]*\"\n  \[\]" src) src))
 
-    (testing "a CHECK is generated wherever a response contract exists"
-      ;; the half 4d took away: their generated wrappers validated the response
-      ;; and threw, and the four-state model turned that into the failed screen
-      (is (re-find #"get-order-check" src) src)
-      (is (re-find #"m/validate shop\.contracts/order" src) src)
-      (is (not (re-find #"ping-check" src))
-          "an endpoint with no response contract has nothing to check"))
+    (testing "the REQUESTS namespace requires NOTHING, which is what keeps it pure"
+      ;; the friction this split closes: malli is what makes the checks
+      ;; `:external`, and a builder that shipped beside them could not be
+      ;; reached from a `:pure` view at all
+      (is (not (re-find #":require" src))
+          (str "a request builder needs no library to build a map, and a"
+               " require is what would tier it: " src))
+      (is (not (re-find #"m/validate|m/decode" src)) src))
 
-    (testing "and the check DECODES first, or it validates the wire's shapes"
+    (testing "and the CHECKS are their own namespace, which may reach malli"
+      (is (re-find #"\(ns shop\.client\.checks" chk) chk)
+      (is (re-find #"malli\.core" chk) chk)
+      (is (re-find #"get-order-check" chk) chk)
+      (is (re-find #"m/validate shop\.contracts/order" chk) chk)
+      (is (not (re-find #"ping-check" chk))
+          "an endpoint with no response contract has nothing to check")
+      (is (not (re-find #"-request" chk))
+          "a builder in the checks namespace would defeat the split"))
+
+    (testing "the check DECODES first, or it validates the wire's shapes"
       ;; a keyword field arrives from JSON as a string, so validating the raw
       ;; body fails a contract the server honoured — the false drift report
       ;; this whole mechanism exists to avoid
-      (is (re-find #"m/decode shop\.contracts/order" src) src))
+      (is (re-find #"m/decode shop\.contracts/order" chk) chk))
 
-    (testing "the namespace is PORTABLE, which is the whole point"
-      (is (not (re-find #"js/" src))
-          (str "a request builder that reaches for the browser is one no"
-               " in-image test can read: " src))
-      (is (= (count (re-seq #"\(" src)) (count (re-seq #"\)" src)))
-          "balanced parens"))))
+    (testing "a FOREIGN contract's builders carry their own escape"
+      ;; the second friction, and the escape had no reachable form: the
+      ;; advisory reports a generated builder whose path this store does not
+      ;; serve, and its escape is a MARKER on a form nobody may hand-edit,
+      ;; because the next generation would drop it silently.
+      ;;
+      ;; Generation knows where the contract came from, so it declares it —
+      ;; the escape stays a declaration and nothing is hand-edited.
+      (let [far (cljs/render-request-ns 'shop.client.api wrappers
+                                        "http://pub.test/contract")]
+        (is (= 3 (count (re-seq #":web/external-path" far)))
+            (str "every builder for somebody else's API must carry it, or the"
+               " advisory reports the ones that did not: " far))
+        (is (re-find #"http://pub\.test/contract" far)
+            (str "and the REASON is where the contract came from: " far))))
+
+    (testing "both namespaces are PORTABLE, which is the whole point"
+      (doseq [s [src chk]]
+        (is (not (re-find #"js/" s))
+            (str "generated code that reaches for the browser is code no"
+                 " in-image test can read: " s))
+        (is (= (count (re-seq #"\(" s)) (count (re-seq #"\)" s)))
+            "balanced parens")))))
 
 (deftest ^:external generate-client-follows-WHO-PERFORMS-the-request
   ;; The overlap named by the consuming app: with `webapp` on, the framework
@@ -968,14 +996,32 @@
         (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
                           :prompt "this store's browser owns routing")
         (let [r   (cljs/generate-client! sess :ns 'shopw.client.api)
-              src (str (store.render/render-ns (:store @sess) 'shopw.client.api))]
+              src (str (store.render/render-ns (:store @sess) 'shopw.client.api))
+              chk (str (store.render/render-ns (:store @sess) 'shopw.client.checks))]
           (is (= :cljc (:platform r))
               (str "a webapp store was handed fetch wrappers its own framework"
                    " makes unreachable: " (pr-str r)))
+          (is (= 'shopw.client.checks (:checks r)) (pr-str r))
           (is (re-find #"get-order-request" src) src)
-          (is (re-find #"get-order-check" src) src)
           (is (not (re-find #"js/fetch" src))
-              "a webapp store got a performer anyway")))
+              "a webapp store got a performer anyway")
+
+          (testing "the builders are :pure, which is what lets a :pure view name them"
+            ;; the friction this split closes: a check reaches malli, which the
+            ;; functional-core gate reads as IO, so builders shipped beside them
+            ;; inherited that tier and a `:pure` view could not name them at all
+            (is (= :pure (tiers/tier-for (:store @sess) 'shopw.client.api))
+                (pr-str (tiers/tier-for (:store @sess) 'shopw.client.api)))
+            ;; the require FORM, not the word: this namespace's docstring names
+            ;; malli to say where the checks went, and prose about a thing is
+            ;; not the thing — the same trap `the-browser-SHIM-cannot-branch`
+            ;; documents and avoids by scanning sexprs
+            (is (not (re-find #"\(:require" src))
+                (str "a require is what would tier the builders: " src)))
+
+          (testing "while the CHECKS are their own namespace and may reach it"
+            (is (re-find #"get-order-check" chk) chk)
+            (is (re-find #"malli\.core" chk) chk))))
 
       (finally (ops/close! sess)))))
 

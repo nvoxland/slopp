@@ -848,13 +848,19 @@
                n))))
 
 (defn ^:private render-request
-  "One endpoint as a REQUEST BUILDER and, when it declares a response contract,
-   a CHECK — both source strings, both `:cljc`.
+  "One endpoint as a REQUEST BUILDER — a source string, `:cljc`, requiring
+   nothing.
 
-   The builder is a pure function of params returning `slopp.webapp`'s request
-   shape, so it drops straight into a route row's `:request` and an in-image
-   test reads which url a screen will ask for. The bang is dropped from an
-   effectful endpoint's name because building a request performs nothing.
+   A pure function of params returning `slopp.webapp`'s request shape, so it
+   drops straight into a route row's `:request` and an in-image test reads which
+   url a screen will ask for. The bang is dropped from an effectful endpoint's
+   name because building a request performs nothing.
+
+   **Requiring nothing is load-bearing rather than minimal.** malli is what
+   makes the CHECKS effectful under the functional-core gate, and a builder that
+   shipped in the same namespace inherited that tier — which the app that tried
+   to use them could not reach from its `:pure` views at all. Two namespaces,
+   because two tiers.
 
    Path captures are supplied SEPARATELY as `:webapp/path-params` rather than
    interpolated, because `request-url` substitutes segment-wise and encodes each
@@ -863,15 +869,18 @@
    the reason the fetch wrapper already had: a segment must not also arrive as a
    query key.
 
-   The check DECODES before validating. A keyword field arrives from JSON as a
-   string, so validating the raw body fails a contract the server honoured —
-   which is a false drift report, and false drift reports are what make a real
-   one unreadable."
-  [{:keys [fn-name method path endpoint request response]}]
+   `external` is the url a FOREIGN contract came from, or nil for this store's
+   own endpoints. When present each builder carries
+   `^{:web/external-path <url>}`, because `webapp-request-paths-are-served`
+   would otherwise report a path this store genuinely does not serve and its
+   escape is a marker on a form nobody may hand-edit — the next generation drops
+   it silently. Generation knows where the contract came from, so generation
+   declares it."
+  [{:keys [fn-name method path endpoint request response]} external]
   (let [base      (str/replace (str fn-name) #"!$" "")
         verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
-        resp-code (schema-form response)
+        _         response
         segs      (keep #(when (str/starts-with? % ":") (keyword (subs % 1)))
                         (str/split path #"/" -1))
         body?     (contains? #{:post :put :patch} method)
@@ -894,65 +903,128 @@
                                              "params"))
                             p))
                         pairs)
-        builder   (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-request\n"
-                       "  \"" verb " " path " — generated request builder (D-web-contracts).\"\n"
-                       "  " (if params? "[params]" "[]") "\n"
-                       "  {" (str/join "\n   " pairs) "})")
-        check     (when resp-code
-                    (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-check\n"
-                         "  \"The response contract for " verb " " path " — nil when it holds,\n"
-                         "   a message when it does not. Drop into a row's :check.\"\n"
-                         "  [response]\n"
-                         "  (let [data (m/decode " resp-code " response (mt/json-transformer))]\n"
-                         "    (when-not (m/validate " resp-code " data)\n"
-                         "      (str \"" base " response failed its contract: \"\n"
-                         "           (pr-str (me/humanize (m/explain " resp-code " data)))))))"))]
-    (str/join "\n\n" (remove nil? [builder check]))))
+        meta*     (str "^{:generated \"" endpoint "\""
+                       (when external
+                         (str " :web/external-path \"generated from the contract"
+                              " published at " external "\""))
+                       "}")]
+    (str "(defn " meta* " ^:export " base "-request\n"
+         "  \"" verb " " path " — generated request builder (D-web-contracts).\"\n"
+         "  " (if params? "[params]" "[]") "\n"
+         "  {" (str/join "\n   " pairs) "})")))
 
-(defn ^:export render-request-ns
-  "Render the generated REQUEST namespace source (a string) from wrapper specs —
-   a `:cljc` namespace of request builders and contract checks, one pair per
-   endpoint.
+(defn ^:export
+  ^{:breaking-ok "gained `external` and lost the checks, one day after it
+  shipped. Both halves are the same report from the app it was built for: the
+  checks reach malli and so tiered the builders out of a :pure view's reach, and
+  a foreign contract's builders must declare where they came from or the
+  request-path advisory reports them with an escape nobody may hand-edit.
+  Restoring the old arity would have discharged the finding while changing what
+  it emits, which is the dishonest half of the two."}
+  render-request-ns
+  "Render the generated REQUEST namespace source (a string) — a `:cljc`
+   namespace of request builders, one per endpoint, requiring NOTHING.
 
    **What generation owes a consumer changed when the framework started
    performing.** A store on `webapp` declares a route table whose rows name a
-   `:request` and a `:check`; the fetch WRAPPERS `render-client-ns` emits are
-   dead surface in such a store — and worse than dead, because they are `:cljs`
-   and so are exactly what `webapp-client-code` reports. Named by the app that
-   adopted the screen value and found nine of them unreachable.
+   `:request`; the fetch WRAPPERS `render-client-ns` emits are dead surface in
+   such a store — and worse than dead, because they are `:cljs` and so are
+   exactly what `webapp-client-code` reports.
 
-   `:cljc`, which is the whole exercise: a request builder is a pure function of
+   `:cljc`, which is the exercise: a request builder is a pure function of
    params, so it loads into the image and an ordinary test reads which url a
-   screen will ask for — where a `js/fetch` wrapper could only ever be verified
-   by compiling.
+   screen will ask for, where a `js/fetch` wrapper could only be verified by
+   compiling.
 
-   It also restores what the screen value took away. Their response validation
-   lived in the wrappers, and when the framework took over performing it went
-   with them; a generated `-check` is that validation back, in the one place a
-   row can hang it."
+   **Requiring nothing is what keeps it usable.** The CHECKS live in their own
+   namespace ([[render-check-ns]]) because they reach malli, which the
+   functional-core gate reads as IO — and the first version shipped both
+   together, so the builders inherited that tier and the app they were built for
+   could not reach them from its `:pure` views at all. It hand-wrote every
+   request map instead: correct by inspection rather than by construction, which
+   is the drift generation exists to remove.
+
+   `external` is the url a FOREIGN contract came from, or nil for this store's
+   own endpoints — see [[render-request]] for why the builders carry it."
+  [ns-sym wrappers external]
+  (str "(ns " ns-sym "\n"
+       "  \"Request builders for an API this app CONSUMES — generated by\n"
+       "  generate_client, one per endpoint, from the SAME contract the\n"
+       "  server publishes.\n\n"
+       "  Drop one into a route row's :request; slopp addresses it under the\n"
+       "  app's mount point and performs it. The matching contract checks are\n"
+       "  in a sibling namespace, which reaches malli and is tiered for it —\n"
+       "  these require nothing, so a :pure view can name them.\n\n"
+       "  Regenerate, never hand-edit: every form here is ^:generated and the\n"
+       "  next generate_client overwrites the namespace wholesale.\")\n\n"
+       (str/join "\n\n" (map #(render-request % external) wrappers))))
+
+(defn ^:private render-check
+  "One endpoint's response CONTRACT as a check — a source string, or nil when
+   the endpoint declares no response.
+
+   `(fn [response] -> nil | message)`, which is the shape a route row's `:check`
+   takes: nil accepts, a message makes the load `:failed` carrying it. That is
+   the response validation the fetch wrappers used to do by throwing, back in
+   the one place a row can hang it.
+
+   **It DECODES before validating.** A keyword field arrives from JSON as a
+   string, so validating the raw body fails a contract the server honoured —
+   which is a false drift report, and false drift reports are what make a real
+   one unreadable."
+  [{:keys [fn-name path method endpoint response]}]
+  (when-let [resp-code (schema-form response)]
+    (let [base (str/replace (str fn-name) #"!$" "")
+          verb (str/upper-case (clojure.core/name method))]
+      (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-check\n"
+           "  \"The response contract for " verb " " path " — nil when it holds,\n"
+           "   a message when it does not. Drop into a row's :check.\"\n"
+           "  [response]\n"
+           "  (let [data (m/decode " resp-code " response (mt/json-transformer))]\n"
+           "    (when-not (m/validate " resp-code " data)\n"
+           "      (str \"" base " response failed its contract: \"\n"
+           "           (pr-str (me/humanize (m/explain " resp-code " data)))))))"))))
+
+(defn ^:export render-check-ns
+  "Render the generated CHECK namespace source (a string) — a `:cljc` namespace
+   of response-contract checks, one per endpoint that declares a response.
+
+   The sibling of [[render-request-ns]], and separate from it for a reason that
+   is about TIERS rather than tidiness: a check reaches malli, which the
+   functional-core gate reads as IO, so the namespace holding them cannot be
+   `:pure`. Shipped together, the request builders inherited that — and the app
+   they were built for could not reach them from its `:pure` views at all, so it
+   hand-wrote every request map instead.
+
+   Returns nil when no endpoint declares a response, because a namespace with no
+   forms is one `empty-namespaces` reports and nobody asked for."
   [ns-sym wrappers]
-  (let [schema-nses (->> wrappers
-                         (mapcat (juxt #(get-in % [:request :ns])
-                                       #(get-in % [:response :ns])))
-                         (remove nil?) distinct sort)
-        requires    (str "(:require [malli.core :as m]\n"
-                         "            [malli.error :as me]\n"
-                         "            [malli.transform :as mt]"
-                         (apply str (for [n schema-nses] (str "\n            " n)))
-                         ")")]
-    (str "(ns " ns-sym "\n"
-         "  \"Request builders and contract checks for an API this app CONSUMES —\n"
-         "  generated by generate_client, one pair per endpoint, against the\n"
-         "  SAME schema var the server validates with.\n\n"
-         "  Drop a builder into a route row's :request and its check into the\n"
-         "  row's :check; slopp performs the request and renders the failure.\n\n"
-         "  Regenerate, never hand-edit: every form here is ^:generated and the\n"
-         "  next generate_client overwrites the namespace wholesale.\"\n"
-         "  " requires ")\n\n"
-         (str/join "\n\n" (map render-request wrappers)))))
+  (let [checks      (keep render-check wrappers)
+        schema-nses (->> wrappers
+                         (map #(get-in % [:response :ns]))
+                         (remove nil?) distinct sort)]
+    (when (seq checks)
+      (str "(ns " ns-sym "\n"
+           "  \"Response-contract checks for an API this app CONSUMES —\n"
+           "  generated by generate_client, one per endpoint, against the SAME\n"
+           "  schema var the server validates with.\n\n"
+           "  Drop one into a route row's :check: nil accepts the answer, a\n"
+           "  message makes the load :failed carrying it. Separate from the\n"
+           "  request builders because these reach malli and those require\n"
+           "  nothing — two tiers, two namespaces.\n\n"
+           "  Regenerate, never hand-edit: every form here is ^:generated and\n"
+           "  the next generate_client overwrites the namespace wholesale.\"\n"
+           "  (:require [malli.core :as m]\n"
+           "            [malli.error :as me]\n"
+           "            [malli.transform :as mt]"
+           (apply str (for [n schema-nses] (str "\n            " n)))
+           "))\n\n"
+           (str/join "\n\n" checks)))))
 
 (defn ^:private client-shape
-  "Which client artifact `store` can USE — `{:platform :render}`.
+  "The client artifact `store` can USE, as `{:platform :checks :touched :write}`
+   — `:write` being a `(fn [store] store')` each generation path folds into its
+   own commit.
 
    **One producer, because there are two generation paths and only one of them
    had the branch.** [[generate-client!]] reads the endpoints this store serves;
@@ -963,18 +1035,45 @@
    names. Reported by the app in exactly that position, which regenerated and
    got nine `:cljs` wrappers its own framework makes unreachable.
 
-   With `webapp` on, the framework performs every request out of a row's
-   `:request`, so a typed fetch wrapper is surface nothing calls — and being
-   `:cljs` it is what `webapp-client-code` reports. Such a store gets REQUEST
-   BUILDERS and CONTRACT CHECKS, `:cljc`, which drop into a route row and load
-   into the image.
+   With `webapp` on the framework performs every request out of a row's
+   `:request`, so a typed fetch wrapper is surface nothing calls. Such a store
+   gets REQUEST BUILDERS in `target` and CONTRACT CHECKS in a sibling `…checks`.
+
+   **Two namespaces, and the requests one is declared `:pure`.** A builder
+   requires nothing and returns a map; a check reaches malli, which the
+   functional-core gate reads as IO. Written together the builders inherited the
+   checks' tier, and the app they were built for could not name them from its
+   `:pure` views at all — so it hand-wrote every request map, correct by
+   inspection rather than by construction, which is the drift generation exists
+   to remove. Declaring the tier is the same kind of act as declaring the
+   platform, which this has always done.
+
+   `external` is the url a FOREIGN contract came from, or nil for this store's
+   own endpoints.
 
    Not a flag: which artifact is useful FOLLOWS from who performs, and a store
    that has declared that should not have to declare it twice."
-  [store]
-  (if (capabilities/enabled? store "webapp")
-    {:platform :cljc :render render-request-ns}
-    {:platform :cljs :render render-client-ns}))
+  [store target wrappers external]
+  (if-not (capabilities/enabled? store "webapp")
+    {:platform :cljs
+     :touched  [target]
+     :write    (fn [s]
+                 (let [s1 (first (store/record-module-platform s (str target) :cljs))]
+                   (store/ingest s1 target (render-client-ns target wrappers))))}
+    (let [chks (symbol (str/replace (str target) #"[^.]+$" "checks"))
+          csrc (render-check-ns chks wrappers)
+          rsrc (render-request-ns target wrappers external)]
+      {:platform :cljc
+       :checks   (when csrc chks)
+       :touched  (if csrc [target chks] [target])
+       :write    (fn [s]
+                   (let [s1 (first (store/record-module-platform s (str target) :cljc))
+                         s2 (first (store/record-module-tier s1 (str target) :pure))
+                         s3 (store/ingest s2 target rsrc)]
+                     (if csrc
+                       (let [s4 (first (store/record-module-platform s3 (str chks) :cljc))]
+                         (store/ingest s4 chks csrc))
+                       s3)))})))
 
 (defn ^:export generate-client-from!
   "Generate a typed client for an API this app CONSUMES, from the contract
@@ -1005,9 +1104,12 @@
       ;; path had none, which was backwards for the case that motivated the
       ;; branch: a browser app consuming somebody ELSE'S API reaches generation
       ;; only through here, and that is `D-webapp`'s named architecture
-      (let [{:keys [platform render]} (client-shape st0)
-            csrc (render-contracts-ns cns defs)
-            src  (render target wrappers)]
+      ;; the SAME writer `generate-client!` uses, and the url travels with it:
+      ;; every endpoint here belongs to somebody else's server by construction,
+      ;; so the builders declare that rather than being reported for it
+      (let [{:keys [platform checks touched write]}
+            (client-shape st0 target wrappers (str url))
+            csrc (render-contracts-ns cns defs)]
         (engine/commit-appended!
          session
          (fn [s]
@@ -1015,10 +1117,9 @@
            ;; load in the image AND compile into the bundle, which is what makes
            ;; one definition check both sides of the wire
            (let [s1 (first (store/record-module-platform s (str cns) :cljc))
-                 s2 (store/ingest s1 cns csrc)
-                 s3 (first (store/record-module-platform s2 (str target) platform))]
-             (store/ingest s3 target src)))
-         [cns target])
+                 s2 (store/ingest s1 cns csrc)]
+             (write s2)))
+         (into [cns] touched))
         (let [recompiled (maybe-recompile-client! session target)]
           (cond-> {:generated target
                    :contracts cns
@@ -1027,6 +1128,7 @@
                    :platform  platform
                    :source    (str url)
                    :delta     (:id (last (:deltas (:store @session))))}
+            checks         (assoc :checks checks)
             (seq problems) (assoc :problems problems)
             recompiled     (merge recompiled)))))))
 
@@ -1068,18 +1170,15 @@
       ;; CONTRACT CHECKS instead, `:cljc`, which drop into a route row and load
       ;; into the image. Not a flag: which artifact is useful FOLLOWS from who
       ;; performs, and a store that has said so should not have to say it twice.
-      (let [{:keys [platform render]} (client-shape st0)
-            src (render target wrappers)]
+      (let [{:keys [platform checks touched write]} (client-shape st0 target wrappers nil)]
         (engine/commit-appended!
          session
          (fn [s]
-           (let [s1 (first (store/record-module-platform s (str target) platform))
-                 s2 (store/ingest s1 target src)]
-             ;; record the contract fingerprint so the done-advisory can detect
-             ;; endpoint drift and nudge a regenerate (the "explicit" safety net)
-             (first (store/record-config-put s2 "client" :manifest "generated-sig"
-                                             (edit.http/client-signature st0)))))
-         [target])
+           ;; record the contract fingerprint so the done-advisory can detect
+           ;; endpoint drift and nudge a regenerate (the "explicit" safety net)
+           (first (store/record-config-put (write s) "client" :manifest "generated-sig"
+                                           (edit.http/client-signature st0))))
+         touched)
         (let [recompiled (maybe-recompile-client! session target)
               others     (other-generated-clients (:store @session) target)]
           (cond-> {:generated target
@@ -1087,6 +1186,24 @@
                    :endpoints (count wrappers)
                    :platform  platform
                    :delta     (:id (last (:deltas (:store @session))))}
+            checks         (assoc :checks checks)
+            ;; a `:cljs` namespace never loads into any JVM, so writing one
+            ;; could not stale a process. A `:cljc` one does — and for a
+            ;; webapp store this is now the ORDINARY path, so the serving
+            ;; process falls behind on every regeneration rather than never.
+            ;; Said here because this is where it happened; `done` and
+            ;; `full_check` report it accurately afterwards, which is one unit
+            ;; of work too late to be the first anyone hears of it
+            (= :cljc platform)
+            (assoc :loads-into-the-image true
+                   :host-note (str "these namespaces are :cljc, so they LOAD —"
+                                   " the process serving MCP now holds forms the"
+                                   " store has moved past until it reloads them."
+                                   " The `restart` tool builds a fresh"
+                                   " VERIFICATION image and does not clear that;"
+                                   " the serving process has to come up again."
+                                   " A :cljs client never had this, because it"
+                                   " never loaded into a JVM at all."))
             (seq problems) (assoc :problems problems)
             (seq others)
             (assoc :other-clients others
