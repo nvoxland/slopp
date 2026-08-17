@@ -109,131 +109,6 @@
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any] [:webapp/call :any]] :any]
-                   :any]}
-  perform!
-  "Run `request` through the app's `:webapp/call` plug-in and record the outcome.
-
-  The sibling of [[navigate!]] and deliberately the same shape: nothing here
-  touches a browser, because `:webapp/call` is `js/fetch` in a real page and a
-  canned answer headless. That is what makes an ad-hoc call something a test can
-  press and assert on.
-
-  **Generic on purpose.** This knows a request goes out and an answer comes
-  back; it does not know what an endpoint is. Deciding WHAT to call is
-  `:webapp/request-for`, a pure function of state and action, so every judgement
-  about which request an action means stays somewhere a JVM test can read it.
-
-  **A nil request DECLINES, and that is a channel rather than a nil-check.** It
-  is how the pure derivation refuses to perform — an unconsented press, an
-  incomplete form — which puts the gate in a function a JVM test can read
-  instead of in this one. If this threw on nil, every app's arming pattern
-  would have to move somewhere worse.
-
-  `:running` is written and rendered BEFORE the call, so a slow endpoint says so
-  instead of looking like a button that did nothing.
-
-  **The effect entry MERGES rather than being replaced**, which is the opposite
-  of [[begin-load]] and the asymmetry is the point. An effect's INPUTS live
-  beside its status — what the reader typed into the call form, and their
-  consent — so a fresh map blanks the form the moment the call starts, and the
-  panel whose job is to show what was SENT beside what came back loses the sent
-  half exactly when it matters. A load has no inputs the reader supplied, so
-  replacing its entry is correct there and wrong here. Caught by slopp-ui
-  reading the first version.
-
-  **No freshness token, unlike a navigation, and the difference is real rather
-  than an omission.** A navigation can be superseded by another navigation; this
-  is triggered by a press. Two presses in flight resolve in whatever order they
-  resolve and the second answer wins — which is what a reader pressing twice
-  means. If that ever stops being true it wants the same token machinery, not a
-  guess."
-  [app request]
-  (when request
-    (let [{:webapp/keys [state call render]} app
-          record! (fn [m] (swap! state update :call merge m) (render @state))]
-      (record! {:status :running :request request})
-      (call request
-            (fn [response] (record! {:status :done :request request :response response}))
-            (fn [message]  (record! {:status :failed :request request :error message}))))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any]] :any :any]
-                   :any]}
-  dispatch!
-  "Apply `action` to the app — the one place a control's press is turned into
-  something happening.
-
-  Public because it has TWO callers and they must not differ: the headless
-  driver's `:dispatch`, and the browser shim's single registered dispatcher.
-  That is the whole claim of this capability stated as a var — the screen a test
-  drives and the screen a reader clicks reach the same function.
-
-  **The split it makes is read from DATA.** Three kinds, and which one an action
-  is comes out of `:webapp/actions` rather than out of this function:
-  `:effectful?` is a REQUEST and goes through [[perform!]]; `:leaves?` hands the
-  page back to the browser through `:webapp/leave!`, for the control whose
-  destination is not a client route at all; anything else is a state transition
-  and goes through `:webapp/act`. The distinction is not a
-  judgement made here — it is looked up, because slopp-ui measured what happens
-  when it is written by hand: their browser shell and their headless shell each
-  carried `(= :try/execute (first action))`, in a `:cljs` namespace whose only
-  verification is that it compiled, and the comment beside it already knew the
-  risk — *both dispatchers have to make the same split, or the screen a test
-  drives and the screen a browser shows differ on the one control that DOES
-  something*. A lookup cannot disagree with the map it looks in.
-
-  An effect does NOT also run the reducer. Running both is how two dispatchers
-  drift back apart: each does the half its author was thinking about.
-
-  Three refusals rather than three silences, because a control that appears to
-  exist and does nothing is the failure a headless drive exists to catch — and
-  the one their `.closest` listeners produced for real."
-  [app action value]
-  (let [{:webapp/keys [state act render actions request-for url-for leave!]} app]
-    (cond
-      (:leaves? (get actions (first action)))
-      (if url-for
-        ;; a nil url DECLINES, the same channel a nil request is — an unarmed
-        ;; switcher, a selection not yet made. Throwing would push every app's
-        ;; arming pattern into the browser
-        (when-let [url (url-for @state action)]
-          (leave! url))
-        (throw (ex-info (str (pr-str (first action)) " is declared :leaves? but"
-                             " this app has no :webapp/url-for — an action that"
-                             " hands the page back to the browser with nowhere"
-                             " to go is a control that cannot work. Declare"
-                             " (fn [state action] -> url).")
-                        {:webapp/missing-key :webapp/url-for
-                         :action action})))
-
-      (:effectful? (get actions (first action)))
-      (if request-for
-        (perform! app (request-for @state action))
-        (throw (ex-info (str (pr-str (first action)) " is declared :effectful?"
-                             " but this app has no :webapp/request-for — an"
-                             " effect with no request to make is a control that"
-                             " cannot work, and doing nothing quietly is the one"
-                             " outcome ruled out. Declare (fn [state action] ->"
-                             " request).")
-                        {:webapp/missing-key :webapp/request-for
-                         :action action})))
-
-      act
-      (do (swap! state act action value)
-          (render @state))
-
-      :else
-      (throw (ex-info (str "this app dispatched " (pr-str action)
-                           " and declares no :webapp/act — an action with nothing"
-                           " to apply it is a control that silently does nothing,"
-                           " which is the one failure a headless drive exists to"
-                           " catch")
-                      {:webapp/missing-key :webapp/act :action action})))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any]] :keyword :any [:? :any]]
                    :any]}
   load!
@@ -580,239 +455,6 @@
              (not meta?) (not ctrl?) (not shift?) (not alt?))
     (when-let [path (strip-base base (str href))]
       (when (match-route routes path) path))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/state :any]
-                          [:webapp/base {:optional true} :string]
-                          [:webapp/routes :any]
-                          [:webapp/call :any]
-                          [:webapp/render :any]
-                          [:webapp/push-url! :any]]
-                    :string :boolean]
-                   :any]}
-  navigate!
-  "Move `app` to `path`, performing every effect through the app's own plug-ins.
-
-  Nothing here touches a browser, and that is the entire point: `:webapp/render`
-  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
-  a test, so \"following this link pushes that url, asks for that endpoint, and
-  shows loading until it answers\" is an ordinary in-image assertion — including
-  the slow-response race, which in a real browser is a heisenbug you reproduce
-  by throttling the network.
-
-  **The SCREEN says what to fetch.** A route row's screen carries `:request`, a
-  pure `(fn [params] -> request | nil)`, so which call a url makes is decided in
-  `:cljc` where a test can read it, and `:webapp/call` is left with nothing but
-  performing. What that replaced was an app-wide `:webapp/fetch` receiving the
-  screen and casing on it — the three-place keyword agreement the route table
-  removed, one seam along.
-
-  **A nil request DECLINES**, the same channel [[perform!]] uses: a screen with
-  nothing to ask for starts no load at all, so `:main` stays `:absent` and
-  [[derived-view]] renders the screen rather than a spinner that never ends. The
-  render happens HERE in that case and inside [[load!]] otherwise, so exactly
-  one render shows the new address and it is never the empty pre-load flash.
-
-  **The screen's data is the `:main` load**, run through [[load!]] like any
-  other, so the machinery is one implementation rather than one for the loop and
-  one for everybody else. That was not true of the first version, and what it
-  cost is written up in `load!`.
-
-  **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
-  reason travels with the decision because it reads as arbitrary style
-  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
-  only run in a browser would put the whole headless exercise back where it
-  started, which is the one outcome this capability exists to prevent. An app
-  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
-  is for.
-
-  **The screen's `:derive` is applied inside the freshness guard, not inside the
-  call.** The two read as equivalent and are not: the call runs before anything
-  knows whether the answer is still wanted, so deriving there pays for every
-  abandoned load."
-  [{:webapp/keys [state base routes call render push-url!
-                  address-keys session-loads] :as app}
-   path push?]
-  (when push? (push-url! (prefixed base path)))
-  (swap! state arrive path (match-route routes path) address-keys session-loads)
-  (let [{:keys [screen params]} @state
-        request (when-let [f (:request screen)] (f params))]
-    (if request
-      (load! app :main
-             (fn [ok err] (call request ok err))
-             {:xform (:derive screen) :check (:check screen)})
-      (render @state))))
-
-(defn- navigate-for!
-  "The driver's `:navigate`, partial'd over `app`.
-
-  A named var rather than a closure inside [[driver]], and the reason is the
-  `!`-naming rule rather than taste: a constructor that builds mutating
-  closures INLINE computes as effectful itself, so the gate would demand
-  `driver!` — a name asserting that calling it does something, when calling it
-  only assembles a map. Naming the behaviours puts the `!` where the mutation
-  actually is and leaves the assembler honest.
-
-  **It takes the url a READER would type — mount point included — and strips it,
-  exactly as a browser click does.** The fake browser follows an `:href` out of
-  the rendered tree, and the render now prefixes in-app links, so the path
-  arriving here carries the mount point and would match no route unprefixed. A
-  headless drive that visited app-relative paths would be exercising a url no
-  browser ever produces, which is the shape of divergence this whole capability
-  exists to prevent.
-
-  A url outside the mount point does NOTHING. [[strip-base]] answers nil there,
-  and routing nil would clear the screen the reader was on — treating a foreign
-  path as ours because it was handed to us.
-
-  Returns the state AFTER the move, because that is what `screen` re-renders."
-  [app _state url]
-  (when-let [path (strip-base (:webapp/base app) url)]
-    (navigate! app path false))
-  @(:webapp/state app))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
-                   [:map [:state :any] [:view :any]
-                    [:navigate :any] [:dispatch :any] [:boot :any]]]}
-  driver
-  "The headless DRIVER's map, derived from the app's own wiring.
-
-  `slopp.web.screen/open!` takes `{:state :view :navigate :dispatch :boot}`.
-  That is not the same map as [[wiring]], and it should not be: **the wiring is
-  what an app IS, and this is what a DRIVER needs.** Different levels, so the
-  answer is a derivation rather than making either learn the other's shape.
-
-  **This function exists because the alternative was measured.** slopp-ui wrote
-  the derivation by hand — about thirty lines — because slopp shipped the driver
-  contract and no way to reach it from a declared app. That adapter was a THIRD
-  hand-written wiring beside the browser entry and the headless driver, with
-  nothing comparing the three, in a project whose whole point is that a headless
-  drive and a real browser must not disagree. Four of the five keys are
-  mechanical; only `:boot` was ever theirs.
-
-  Unqualified keys OUT, namespaced keys IN, and the asymmetry is the seam rather
-  than an inconsistency: `screen`'s contract is older, shipped, and used by
-  server-rendered apps that have no wiring at all.
-
-  `:boot` is defaulted by [[wiring]] rather than here. It used to be `(or boot
-  identity)` at this one caller, which was correct and became wrong the moment
-  there were three: the browser entry and [[start!]] would each have written the
-  same `or`, and one of them lives where nothing can check it.
-
-  **`:dispatch` is [[dispatch!]], and so is the browser's.** That is this
-  capability's claim reduced to a var: the three-way split between a request, a
-  leave and a state transition is read out of `:webapp/actions` by one function,
-  which both drivers call. Two hand-written dispatchers have to make that split
-  identically or the screen a test drives and the screen a reader clicks differ
-  on the one control that DOES something — and slopp-ui had exactly that, the
-  same `(= :try/execute (first action))` in two shells, one of them `:cljs`."
-  [app]
-  (let [{:webapp/keys [state view boot]} app]
-    {:state    state
-     :view     view
-     ;; the app's own atom is the one that moves; `screen` re-reads what comes
-     ;; back, which is why these return the state rather than a fresh map
-     :navigate (partial navigate-for! app)
-     :dispatch (partial dispatch! app)
-     :boot     boot}))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/routes :any]] [:map] ifn?]
-                   :any]}
-  click!
-  "Handle a click the browser just delivered: navigate if it is ours, and leave
-  it entirely alone if it is not.
-
-  [[click-target]] answers WHICH clicks are ours; this is what happens next, and
-  it is the half that goes wrong invisibly. Three failures, all of which
-  compile:
-
-  - `preventDefault` on a link that is NOT ours — a link that looks live and
-    does nothing, which is worse than a slow one because nothing reports it.
-  - no `preventDefault` on one that IS — the browser also loads the page, so
-    every in-app click restarts the application and the state it was holding.
-  - navigating without pushing — the address bar disagrees with the screen, and
-    a reload or a shared url lands somewhere else.
-
-  **`prevent!` arrives as a THUNK rather than being called by the shim.** The
-  shim's alternative is `(when (click-target …) (.preventDefault e) …)`, which
-  puts the decision back in the one namespace whose only verification is that it
-  compiled. Passing the effect in means the branch lives here, where a test
-  counts the calls — and \"was the default swallowed for this click and not that
-  one\" becomes an ordinary assertion instead of a thing you check by clicking.
-
-  Returns the path navigated to, or nil — so a caller that wants to know whether
-  the app took the click can ask."
-  [{:webapp/keys [base routes] :as app} click prevent!]
-  (when-let [path (click-target click base routes)]
-    (prevent!)
-    (navigate! app path true)
-    path))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/routes :any]]
-                    [:maybe :string] [:maybe :string] :boolean]
-                   :any]}
-  navigate-url!
-  "Show whatever the browser's URL now names — the app's entry from an ADDRESS
-  rather than from a path.
-
-  Two callers, which is why it exists rather than being inlined at each: the
-  first render at mount, and the back button. Both hand over a `pathname` and a
-  `search` because that is how a browser keeps a url, and both must reach the
-  same routing decision or the screen a reader lands on and the screen they come
-  back to differ.
-
-  **`push?` is false for both**, and the back button is the reason it is a
-  parameter rather than a constant. Pushing on a POP is the bug that makes back
-  appear broken: every press adds a history entry, so the button walks the
-  reader forward through their own history and never leaves the app.
-
-  **A url outside the mount point does NOTHING.** [[app-path]] answers nil there,
-  and routing nil would clear the screen the reader was on — a blank page caused
-  by an address that was never this app's to show.
-
-  The query string is carried, which is [[app-path]]'s whole subject: the two
-  halves of an address live in different properties and a handler that reads one
-  routes `/search?q=rate` to an empty box while LOOKING correct."
-  [{:webapp/keys [base] :as app} pathname search push?]
-  (when-let [path (app-path base pathname search)]
-    (navigate! app path push?)
-    path))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any] [:webapp/boot :any]]
-                    [:maybe :string] [:maybe :string]]
-                   :any]}
-  start!
-  "Everything a browser entry does when the bundle runs: let the app start what
-  belongs to no particular screen, then show the url the reader arrived at.
-
-  Two steps, and the ORDER is the decision. `:webapp/boot` is where an app
-  begins the loads that belong to the session rather than to a route — the
-  reader's identity, the project list, the thing every screen's chrome shows —
-  and the first screen may read them. Routing first would render that screen
-  against a state the app had not started yet, which is the four-state reader's
-  `:absent` arriving as a flash of empty chrome on every page load.
-
-  **Read-call-write, never inside `swap!`**, matching `slopp.web.screen/open!`
-  exactly. Boot is the app's own code; `swap!` demands a pure function and may
-  retry, and an entry point that starts a fetch is neither.
-
-  This is the `:cljc` half of the browser entry, which is the point: the shim
-  reads two properties off `location` and calls this. A page load is the one
-  moment an app has no reader to notice it went wrong, so it is the last place
-  a decision should live somewhere nothing can check."
-  [{:webapp/keys [state boot] :as app} pathname search]
-  (reset! state (boot @state))
-  (navigate-url! app pathname search false))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -1421,3 +1063,408 @@
     [:failed (let [said (or (:error value) (:message value)
                             (when (string? value) value))]
                (str "HTTP " status (when said (str " — " said))))]))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string] [:maybe :map]] [:maybe :map]]}
+  addressed
+  "`request` with its path under the app's mount point — the url a browser
+  should actually fetch.
+
+  **The third of three, and it was missing.** `:webapp/base` was applied by
+  `:webapp/push-url!`, by [[strip-base]] on an arriving url, and by
+  [[prefix-links]] to an `:href` or `:action`. Never to a request. So an app
+  served behind a proxy at `/p/demo` asked for `/api/things`, which is a
+  different application or nothing at all — and not on one pane: on EVERY
+  screen, because the framework builds every url.
+
+  Found by the only app served under a mount point, whose generated client had
+  been carrying the base itself; the framework taking over performing is what
+  dropped it. The asymmetry is theirs and it is the clearest statement of the
+  bug: *what `prefix-links` does to an `:href` and `strip-base` does to an
+  arriving url, nothing did to a request.*
+
+  So an app writes `/api/things` and gets its own mount point for the same
+  reason its links do, with no new vocabulary to declare.
+
+  **An ABSOLUTE url is left alone**, which is the one judgement here and the
+  same one `prefix-links` makes: a third-party API is not under this app's
+  mount point, and prefixing it would break the one request the app cannot
+  re-address. Both spellings count — a scheme, and the protocol-relative `//`
+  that a CDN link takes.
+
+  **The limit, stated rather than discovered:** a request path is relative to
+  the app's mount point, exactly as an `:href` is. An app served at `/p/demo`
+  whose API is genuinely at the ROOT `/api` cannot say so — it would have to
+  write an absolute url, which is impossible when the prefix is only known at
+  runtime. No app has needed it; when one does, that is a declaration and not a
+  special case in here."
+  [base request]
+  (let [p (:webapp/path request)]
+    (if (and (string? p)
+             (seq (str base))
+             (not (str/includes? p "://"))
+             (not (str/starts-with? p "//")))
+      (assoc request :webapp/path (prefixed base p))
+      request)))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/call :any]] :any]
+                   :any]}
+  perform!
+  "Run `request` through the app's `:webapp/call` plug-in and record the outcome.
+
+  The sibling of [[navigate!]] and deliberately the same shape: nothing here
+  touches a browser, because `:webapp/call` is `js/fetch` in a real page and a
+  canned answer headless. That is what makes an ad-hoc call something a test can
+  press and assert on.
+
+  **Generic on purpose.** This knows a request goes out and an answer comes
+  back; it does not know what an endpoint is. Deciding WHAT to call is
+  `:webapp/request-for`, a pure function of state and action, so every judgement
+  about which request an action means stays somewhere a JVM test can read it.
+
+  **A nil request DECLINES, and that is a channel rather than a nil-check.** It
+  is how the pure derivation refuses to perform — an unconsented press, an
+  incomplete form — which puts the gate in a function a JVM test can read
+  instead of in this one. If this threw on nil, every app's arming pattern
+  would have to move somewhere worse.
+
+  `:running` is written and rendered BEFORE the call, so a slow endpoint says so
+  instead of looking like a button that did nothing.
+
+  **The effect entry MERGES rather than being replaced**, which is the opposite
+  of [[begin-load]] and the asymmetry is the point. An effect's INPUTS live
+  beside its status — what the reader typed into the call form, and their
+  consent — so a fresh map blanks the form the moment the call starts, and the
+  panel whose job is to show what was SENT beside what came back loses the sent
+  half exactly when it matters. A load has no inputs the reader supplied, so
+  replacing its entry is correct there and wrong here. Caught by slopp-ui
+  reading the first version.
+
+  **No freshness token, unlike a navigation, and the difference is real rather
+  than an omission.** A navigation can be superseded by another navigation; this
+  is triggered by a press. Two presses in flight resolve in whatever order they
+  resolve and the second answer wins — which is what a reader pressing twice
+  means. If that ever stops being true it wants the same token machinery, not a
+  guess."
+  [app request]
+  (when request
+    (let [{:webapp/keys [state base call render]} app
+          ;; the SAME addressing a screen's load gets. Doing it on one path and
+          ;; not the other would make an app right once and wrong once, which
+          ;; reads as a flaky endpoint rather than as a missing prefix
+          request (addressed base request)
+          record! (fn [m] (swap! state update :call merge m) (render @state))]
+      (record! {:status :running :request request})
+      (call request
+            (fn [response] (record! {:status :done :request request :response response}))
+            (fn [message]  (record! {:status :failed :request request :error message}))))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any]] :any :any]
+                   :any]}
+  dispatch!
+  "Apply `action` to the app — the one place a control's press is turned into
+  something happening.
+
+  Public because it has TWO callers and they must not differ: the headless
+  driver's `:dispatch`, and the browser shim's single registered dispatcher.
+  That is the whole claim of this capability stated as a var — the screen a test
+  drives and the screen a reader clicks reach the same function.
+
+  **The split it makes is read from DATA.** Three kinds, and which one an action
+  is comes out of `:webapp/actions` rather than out of this function:
+  `:effectful?` is a REQUEST and goes through [[perform!]]; `:leaves?` hands the
+  page back to the browser through `:webapp/leave!`, for the control whose
+  destination is not a client route at all; anything else is a state transition
+  and goes through `:webapp/act`. The distinction is not a
+  judgement made here — it is looked up, because slopp-ui measured what happens
+  when it is written by hand: their browser shell and their headless shell each
+  carried `(= :try/execute (first action))`, in a `:cljs` namespace whose only
+  verification is that it compiled, and the comment beside it already knew the
+  risk — *both dispatchers have to make the same split, or the screen a test
+  drives and the screen a browser shows differ on the one control that DOES
+  something*. A lookup cannot disagree with the map it looks in.
+
+  An effect does NOT also run the reducer. Running both is how two dispatchers
+  drift back apart: each does the half its author was thinking about.
+
+  Three refusals rather than three silences, because a control that appears to
+  exist and does nothing is the failure a headless drive exists to catch — and
+  the one their `.closest` listeners produced for real."
+  [app action value]
+  (let [{:webapp/keys [state act render actions request-for url-for leave!]} app]
+    (cond
+      (:leaves? (get actions (first action)))
+      (if url-for
+        ;; a nil url DECLINES, the same channel a nil request is — an unarmed
+        ;; switcher, a selection not yet made. Throwing would push every app's
+        ;; arming pattern into the browser
+        (when-let [url (url-for @state action)]
+          (leave! url))
+        (throw (ex-info (str (pr-str (first action)) " is declared :leaves? but"
+                             " this app has no :webapp/url-for — an action that"
+                             " hands the page back to the browser with nowhere"
+                             " to go is a control that cannot work. Declare"
+                             " (fn [state action] -> url).")
+                        {:webapp/missing-key :webapp/url-for
+                         :action action})))
+
+      (:effectful? (get actions (first action)))
+      (if request-for
+        (perform! app (request-for @state action))
+        (throw (ex-info (str (pr-str (first action)) " is declared :effectful?"
+                             " but this app has no :webapp/request-for — an"
+                             " effect with no request to make is a control that"
+                             " cannot work, and doing nothing quietly is the one"
+                             " outcome ruled out. Declare (fn [state action] ->"
+                             " request).")
+                        {:webapp/missing-key :webapp/request-for
+                         :action action})))
+
+      act
+      (do (swap! state act action value)
+          (render @state))
+
+      :else
+      (throw (ex-info (str "this app dispatched " (pr-str action)
+                           " and declares no :webapp/act — an action with nothing"
+                           " to apply it is a control that silently does nothing,"
+                           " which is the one failure a headless drive exists to"
+                           " catch")
+                      {:webapp/missing-key :webapp/act :action action})))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/state :any]
+                          [:webapp/base {:optional true} :string]
+                          [:webapp/routes :any]
+                          [:webapp/call :any]
+                          [:webapp/render :any]
+                          [:webapp/push-url! :any]]
+                    :string :boolean]
+                   :any]}
+  navigate!
+  "Move `app` to `path`, performing every effect through the app's own plug-ins.
+
+  Nothing here touches a browser, and that is the entire point: `:webapp/render`
+  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
+  a test, so \"following this link pushes that url, asks for that endpoint, and
+  shows loading until it answers\" is an ordinary in-image assertion — including
+  the slow-response race, which in a real browser is a heisenbug you reproduce
+  by throttling the network.
+
+  **The SCREEN says what to fetch.** A route row's screen carries `:request`, a
+  pure `(fn [params] -> request | nil)`, so which call a url makes is decided in
+  `:cljc` where a test can read it, and `:webapp/call` is left with nothing but
+  performing. What that replaced was an app-wide `:webapp/fetch` receiving the
+  screen and casing on it — the three-place keyword agreement the route table
+  removed, one seam along.
+
+  **A nil request DECLINES**, the same channel [[perform!]] uses: a screen with
+  nothing to ask for starts no load at all, so `:main` stays `:absent` and
+  [[derived-view]] renders the screen rather than a spinner that never ends. The
+  render happens HERE in that case and inside [[load!]] otherwise, so exactly
+  one render shows the new address and it is never the empty pre-load flash.
+
+  **The screen's data is the `:main` load**, run through [[load!]] like any
+  other, so the machinery is one implementation rather than one for the loop and
+  one for everybody else. That was not true of the first version, and what it
+  cost is written up in `load!`.
+
+  **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
+  reason travels with the decision because it reads as arbitrary style
+  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
+  only run in a browser would put the whole headless exercise back where it
+  started, which is the one outcome this capability exists to prevent. An app
+  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
+  is for.
+
+  **The screen's `:derive` is applied inside the freshness guard, not inside the
+  call.** The two read as equivalent and are not: the call runs before anything
+  knows whether the answer is still wanted, so deriving there pays for every
+  abandoned load."
+  [{:webapp/keys [state base routes call render push-url!
+                  address-keys session-loads] :as app}
+   path push?]
+  (when push? (push-url! (prefixed base path)))
+  (swap! state arrive path (match-route routes path) address-keys session-loads)
+  (let [{:keys [screen params]} @state
+        request (when-let [f (:request screen)] (f params))]
+    (if request
+      (load! app :main
+             (fn [ok err] (call (addressed base request) ok err))
+             {:xform (:derive screen) :check (:check screen)})
+      (render @state))))
+
+(defn- navigate-for!
+  "The driver's `:navigate`, partial'd over `app`.
+
+  A named var rather than a closure inside [[driver]], and the reason is the
+  `!`-naming rule rather than taste: a constructor that builds mutating
+  closures INLINE computes as effectful itself, so the gate would demand
+  `driver!` — a name asserting that calling it does something, when calling it
+  only assembles a map. Naming the behaviours puts the `!` where the mutation
+  actually is and leaves the assembler honest.
+
+  **It takes the url a READER would type — mount point included — and strips it,
+  exactly as a browser click does.** The fake browser follows an `:href` out of
+  the rendered tree, and the render now prefixes in-app links, so the path
+  arriving here carries the mount point and would match no route unprefixed. A
+  headless drive that visited app-relative paths would be exercising a url no
+  browser ever produces, which is the shape of divergence this whole capability
+  exists to prevent.
+
+  A url outside the mount point does NOTHING. [[strip-base]] answers nil there,
+  and routing nil would clear the screen the reader was on — treating a foreign
+  path as ours because it was handed to us.
+
+  Returns the state AFTER the move, because that is what `screen` re-renders."
+  [app _state url]
+  (when-let [path (strip-base (:webapp/base app) url)]
+    (navigate! app path false))
+  @(:webapp/state app))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
+                   [:map [:state :any] [:view :any]
+                    [:navigate :any] [:dispatch :any] [:boot :any]]]}
+  driver
+  "The headless DRIVER's map, derived from the app's own wiring.
+
+  `slopp.web.screen/open!` takes `{:state :view :navigate :dispatch :boot}`.
+  That is not the same map as [[wiring]], and it should not be: **the wiring is
+  what an app IS, and this is what a DRIVER needs.** Different levels, so the
+  answer is a derivation rather than making either learn the other's shape.
+
+  **This function exists because the alternative was measured.** slopp-ui wrote
+  the derivation by hand — about thirty lines — because slopp shipped the driver
+  contract and no way to reach it from a declared app. That adapter was a THIRD
+  hand-written wiring beside the browser entry and the headless driver, with
+  nothing comparing the three, in a project whose whole point is that a headless
+  drive and a real browser must not disagree. Four of the five keys are
+  mechanical; only `:boot` was ever theirs.
+
+  Unqualified keys OUT, namespaced keys IN, and the asymmetry is the seam rather
+  than an inconsistency: `screen`'s contract is older, shipped, and used by
+  server-rendered apps that have no wiring at all.
+
+  `:boot` is defaulted by [[wiring]] rather than here. It used to be `(or boot
+  identity)` at this one caller, which was correct and became wrong the moment
+  there were three: the browser entry and [[start!]] would each have written the
+  same `or`, and one of them lives where nothing can check it.
+
+  **`:dispatch` is [[dispatch!]], and so is the browser's.** That is this
+  capability's claim reduced to a var: the three-way split between a request, a
+  leave and a state transition is read out of `:webapp/actions` by one function,
+  which both drivers call. Two hand-written dispatchers have to make that split
+  identically or the screen a test drives and the screen a reader clicks differ
+  on the one control that DOES something — and slopp-ui had exactly that, the
+  same `(= :try/execute (first action))` in two shells, one of them `:cljs`."
+  [app]
+  (let [{:webapp/keys [state view boot]} app]
+    {:state    state
+     :view     view
+     ;; the app's own atom is the one that moves; `screen` re-reads what comes
+     ;; back, which is why these return the state rather than a fresh map
+     :navigate (partial navigate-for! app)
+     :dispatch (partial dispatch! app)
+     :boot     boot}))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/routes :any]] [:map] ifn?]
+                   :any]}
+  click!
+  "Handle a click the browser just delivered: navigate if it is ours, and leave
+  it entirely alone if it is not.
+
+  [[click-target]] answers WHICH clicks are ours; this is what happens next, and
+  it is the half that goes wrong invisibly. Three failures, all of which
+  compile:
+
+  - `preventDefault` on a link that is NOT ours — a link that looks live and
+    does nothing, which is worse than a slow one because nothing reports it.
+  - no `preventDefault` on one that IS — the browser also loads the page, so
+    every in-app click restarts the application and the state it was holding.
+  - navigating without pushing — the address bar disagrees with the screen, and
+    a reload or a shared url lands somewhere else.
+
+  **`prevent!` arrives as a THUNK rather than being called by the shim.** The
+  shim's alternative is `(when (click-target …) (.preventDefault e) …)`, which
+  puts the decision back in the one namespace whose only verification is that it
+  compiled. Passing the effect in means the branch lives here, where a test
+  counts the calls — and \"was the default swallowed for this click and not that
+  one\" becomes an ordinary assertion instead of a thing you check by clicking.
+
+  Returns the path navigated to, or nil — so a caller that wants to know whether
+  the app took the click can ask."
+  [{:webapp/keys [base routes] :as app} click prevent!]
+  (when-let [path (click-target click base routes)]
+    (prevent!)
+    (navigate! app path true)
+    path))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/routes :any]]
+                    [:maybe :string] [:maybe :string] :boolean]
+                   :any]}
+  navigate-url!
+  "Show whatever the browser's URL now names — the app's entry from an ADDRESS
+  rather than from a path.
+
+  Two callers, which is why it exists rather than being inlined at each: the
+  first render at mount, and the back button. Both hand over a `pathname` and a
+  `search` because that is how a browser keeps a url, and both must reach the
+  same routing decision or the screen a reader lands on and the screen they come
+  back to differ.
+
+  **`push?` is false for both**, and the back button is the reason it is a
+  parameter rather than a constant. Pushing on a POP is the bug that makes back
+  appear broken: every press adds a history entry, so the button walks the
+  reader forward through their own history and never leaves the app.
+
+  **A url outside the mount point does NOTHING.** [[app-path]] answers nil there,
+  and routing nil would clear the screen the reader was on — a blank page caused
+  by an address that was never this app's to show.
+
+  The query string is carried, which is [[app-path]]'s whole subject: the two
+  halves of an address live in different properties and a handler that reads one
+  routes `/search?q=rate` to an empty box while LOOKING correct."
+  [{:webapp/keys [base] :as app} pathname search push?]
+  (when-let [path (app-path base pathname search)]
+    (navigate! app path push?)
+    path))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/boot :any]]
+                    [:maybe :string] [:maybe :string]]
+                   :any]}
+  start!
+  "Everything a browser entry does when the bundle runs: let the app start what
+  belongs to no particular screen, then show the url the reader arrived at.
+
+  Two steps, and the ORDER is the decision. `:webapp/boot` is where an app
+  begins the loads that belong to the session rather than to a route — the
+  reader's identity, the project list, the thing every screen's chrome shows —
+  and the first screen may read them. Routing first would render that screen
+  against a state the app had not started yet, which is the four-state reader's
+  `:absent` arriving as a flash of empty chrome on every page load.
+
+  **Read-call-write, never inside `swap!`**, matching `slopp.web.screen/open!`
+  exactly. Boot is the app's own code; `swap!` demands a pure function and may
+  retry, and an entry point that starts a fetch is neither.
+
+  This is the `:cljc` half of the browser entry, which is the point: the shim
+  reads two properties off `location` and calls this. A page load is the one
+  moment an app has no reader to notice it went wrong, so it is the last place
+  a decision should live somewhere nothing can check."
+  [{:webapp/keys [state boot] :as app} pathname search]
+  (reset! state (boot @state))
+  (navigate-url! app pathname search false))

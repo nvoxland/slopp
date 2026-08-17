@@ -1420,8 +1420,11 @@
       ;; the half that used to live in a browser: WHICH endpoint a url calls.
       ;; A request built by `js/fetch` is a string asserted nowhere; built by
       ;; the screen it is this line
-      (is (= ["/api/things" "/api/things/42"] (mapv webapp/request-url @called))
-          (pr-str @called)))
+      (is (= ["/p/demo/api/things" "/p/demo/api/things/42"]
+             (mapv webapp/request-url @called))
+          (str "this app is MOUNTED at /p/demo, so its own API is under that"
+               " prefix too — a request addressed at the root is a different"
+               " application, or nothing: " (pr-str @called))))
 
     (testing "typing reaches the reducer as a SCALAR, with no event in sight"
       ;; the shape that used to force an app into :cljs — `(.. e -target -value)`
@@ -1433,13 +1436,16 @@
     (testing "an effectful control makes the request the app DERIVED"
       (web.screen/click! s "Save")
       (is (= {:webapp/method      :put
-              :webapp/path        "/api/things/:id"
+              :webapp/path        "/p/demo/api/things/:id"
               :webapp/path-params {:id "42"}
               :webapp/body        "hello"}
              (last @called))
           (pr-str @called))
-      (is (= "/api/things/42" (webapp/request-url (last @called)))
-          "a control's request is the same shape a screen's is — one performer"))
+      (is (= "/p/demo/api/things/42" (webapp/request-url (last @called)))
+          (str "a control's request is the same shape a screen's is AND takes"
+               " the same mount point — addressing one and not the other makes"
+               " an app right once and wrong once, which reads as a flaky"
+               " endpoint rather than as a missing prefix")))
 
     (testing "and a leaving control hands the page back to the browser"
       (web.screen/click! s "Switch")

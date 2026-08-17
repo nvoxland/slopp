@@ -377,6 +377,16 @@
                 (distinct
                  (for [nsx  (keys (:namespaces st))
                        e    (store/forms st nsx)
+                       ;; `^{:web/external-path "why"}` skips a form WHOLE, the
+                       ;; same marker `rules.http/ui-route-refs` honours for a
+                       ;; link and for the same question. It is the escape the
+                       ;; absolute-url one cannot cover: an API proxied under
+                       ;; this app's own mount point is real, served, and not
+                       ;; this store's — and cannot be written in full when the
+                       ;; prefix is only known at runtime. Without it that app
+                       ;; carries a finding per screen that nothing can clear,
+                       ;; which is how a reader learns to skim the whole list
+                       :when (not (:web/external-path (store/form-name-meta e)))
                        :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
                        node (tree-seq coll? seq sx)
                        :when (map? node)
@@ -560,10 +570,18 @@
               :teach (str form " requests " (pr-str path) ", which no endpoint"
                           " in this store declares. The url will route and the"
                           " screen will render — one pane just always fails to"
-                          " load, while everything around it works."
+                          " load, while everything around it works, so this gets"
+                          " reported as slowness rather than as a missing"
+                          " endpoint."
                           (when (seq served)
                             (str " This store serves "
                                  (apply str (interpose ", " (map pr-str served)))
                                  "."))
-                          " If it is somebody else's server, write the whole url"
-                          " and this stops asking.")})))))
+                          " Two ways it is not a typo, and both are declarations"
+                          " rather than silences: a THIRD-PARTY api is a whole"
+                          " url, scheme and all; and a path something OUTSIDE"
+                          " this store serves — a proxied API under this app's"
+                          " own mount point, which cannot be written in full"
+                          " because the prefix is known only at runtime — is"
+                          " ^{:web/external-path \"why\"} on the form, the same"
+                          " marker a link takes.")})))))

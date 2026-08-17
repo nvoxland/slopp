@@ -1501,3 +1501,82 @@
         ((first @pending) {:anything true})
         (is (= 0 @checked)
             "a superseded answer was validated — the abandoned load paid for it")))))
+
+(deftest a-REQUEST-carries-the-mount-point-like-every-other-address-does
+  ;; The break 4d shipped, found by the app it broke: `:webapp/base` was applied
+  ;; in exactly three places — `push-url!`, `strip-base` on an arriving url, and
+  ;; `prefix-links` for `:href`/`:action` — and never to a REQUEST.
+  ;;
+  ;;   GET /api/modules              → 404   ← where the framework sent it
+  ;;   GET /p/slopp-ui/api/modules   → 200   ← where it lives
+  ;;
+  ;; Not one pane. EVERY screen in a mounted app fetches a 404, so the
+  ;; capability does not work for any app served anywhere but a root. Their
+  ;; generated client had carried the base itself; the framework taking over
+  ;; performing is what dropped it.
+  ;;
+  ;; The asymmetry IS the bug, in their words: what `prefix-links` does to an
+  ;; `:href` and `strip-base` does to an arriving url, nothing did to a request.
+  ;; So this makes the base-aware paths three-for-three, with no new vocabulary:
+  ;; an app writes `/api/modules` and gets its own mount point for the same
+  ;; reason its `:href` does.
+  (let [called (atom [])
+        state  (atom {})
+        screen {:render  (fn [_s] [:p "x"])
+                :request (fn [_p] {:webapp/path "/api/things"})}
+        app    (webapp/wiring
+                {:webapp/state       state
+                 :webapp/base        "/p/demo"
+                 :webapp/routes      [["/things" screen]]
+                 :webapp/actions     {:thing/save {:effectful? true}}
+                 :webapp/request-for (fn [_s _a] {:webapp/method :put
+                                                  :webapp/path   "/api/things/1"})
+                 :webapp/call        (fn [rq ok _err]
+                                       (swap! called conj (webapp/request-url rq))
+                                       (ok nil))})]
+
+    (testing "a SCREEN's request is fetched under the mount point"
+      (webapp/navigate! app "/things" false)
+      (is (= ["/p/demo/api/things"] @called)
+          (str "an app served behind a proxy fetched the root — which is a"
+               " different application, or nothing: " (pr-str @called))))
+
+    (testing "and so is an effectful CONTROL's"
+      ;; the second performer path, and it would otherwise be right once and
+      ;; wrong once in the same app — the shape that reads as a flaky endpoint
+      (reset! called [])
+      (webapp/dispatch! app [:thing/save] nil)
+      (is (= ["/p/demo/api/things/1"] @called) (pr-str @called)))
+
+    (testing "an ABSOLUTE url is somebody else's server and is left alone"
+      ;; the one judgement in it, and the same one `prefix-links` makes: a
+      ;; third-party API is not under this app's mount point and prefixing it
+      ;; would break the one request the app cannot re-address
+      (reset! called [])
+      (let [st (atom {})
+            a2 (webapp/wiring
+                {:webapp/state  st
+                 :webapp/base   "/p/demo"
+                 :webapp/routes [["/rates" {:render  (fn [_s] [:p "r"])
+                                            :request (fn [_p] {:webapp/path "https://api.example.com/v1/rates"})}]
+                                 ["/proto" {:render  (fn [_s] [:p "p"])
+                                            :request (fn [_p] {:webapp/path "//cdn.example.com/x.json"})}]]
+                 :webapp/call   (fn [rq ok _err]
+                                  (swap! called conj (webapp/request-url rq))
+                                  (ok nil))})]
+        (webapp/navigate! a2 "/rates" false)
+        (webapp/navigate! a2 "/proto" false)
+        (is (= ["https://api.example.com/v1/rates" "//cdn.example.com/x.json"] @called)
+            (pr-str @called))))
+
+    (testing "at the ROOT nothing changes, so an unmounted app reads identically"
+      (reset! called [])
+      (let [st (atom {})
+            a3 (webapp/wiring
+                {:webapp/state  st
+                 :webapp/routes [["/things" screen]]
+                 :webapp/call   (fn [rq ok _err]
+                                  (swap! called conj (webapp/request-url rq))
+                                  (ok nil))})]
+        (webapp/navigate! a3 "/things" false)
+        (is (= ["/api/things"] @called) (pr-str @called))))))

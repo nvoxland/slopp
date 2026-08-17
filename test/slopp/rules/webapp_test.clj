@@ -497,6 +497,27 @@
       (is (not (contains? (set (map :path (rules.webapp/request-paths-unserved on)))
                           "https://api.example.com/v1/rates"))))
 
+    (testing "and a form marked ^:web/external-path is skipped WHOLE"
+      ;; the escape the absolute-url one cannot cover, reported by the app that
+      ;; needed it: its API is proxied by the PROJECT server under the same
+      ;; mount point, so the path is real, served, and not this store's — and
+      ;; it cannot be written in full because the prefix is the slug, known
+      ;; only at runtime. Eight findings with nothing to do about them is the
+      ;; permanent-finding failure: a list nobody can clear is a list everybody
+      ;; skims.
+      ;;
+      ;; Same marker `http-dangling-route-refs` already uses for a link, for
+      ;; the same question, and it carries a REASON rather than a silence
+      (let [src2 (str "(ns shop.far)\n\n"
+                      "(defn ^{:web/external-path \"the project server proxies /api/*\"}\n"
+                      "  far-request \"R.\" [_p] {:webapp/path \"/api/modules\"})\n")
+            st   (assoc-in (store/ingest (store/empty-store) 'shop.far src2)
+                           [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= [] (rules.webapp/request-paths-unserved st))
+            (str "a declared crossing was still reported, so the only escape"
+                 " available to a proxied API is one it cannot use: "
+                 (pr-str (rules.webapp/request-paths-unserved st))))))
+
     (testing "the advisory is INERT until the store opts into webapp"
       ;; the reading side of the same inertness every webapp rule has
       (let [off (store/ingest (store/empty-store) 'shop.ui src)]
