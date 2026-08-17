@@ -30,9 +30,14 @@ the compiler is the gate for that code.
     A predicate, a schema, a state transition is platform-neutral. Put it in
     `.cljc` and the JVM oracle covers it for free -- write a `-test`, watch it
     go red, implement, green, exactly like Clojure. Reserve `.cljs` for the
-    genuinely browser-bound edge: DOM reads, event handlers, `fetch` glue.
-    That code is verified by "it compiled" and nothing more until browser tests
-    exist, which they do not yet.
+    genuinely browser-bound edge. That code is verified by "it compiled" and
+    nothing more until browser tests exist, which they do not yet.
+
+    **If the browser owns your routing and state, that edge should be empty.**
+    The router, the render loop, the click and popstate listeners, the
+    dispatcher and `fetch` are the `webapp` capability's -- see [Browser
+    applications](webapp.md), where the goal is that your own code declares no
+    `:cljs` namespaces at all.
 
 ## Compiling
 
@@ -167,12 +172,17 @@ One rough edge worth knowing: the `!`-effect warning fires on idiomatic
 ClojureScript entry points, because `^:export main` touches the DOM. It is
 advisory, not a refusal.
 
-## Non-trivial apps: a REST API and an SPA that consumes it
+## Non-trivial apps: a REST API and a browser app that consumes it
 
 Past a handful of pages, the shape that keeps scaling is **a JSON API with
 declared contracts, consumed by client-side code** -- rather than HTML
 assembled on the server for the browser to slot in. Server-rendered pages and
 static content stay fully supported; they just stop being the assumption.
+
+The *consuming* half of that shape is the `webapp` capability: routing, state,
+the render loop, load states, links and actions, all declared as data. This
+section is the boundary reasoning that holds either way; for the app itself,
+read [Browser applications](webapp.md).
 
 The reason is not taste. The API is an explicit, testable boundary: one call
 (`query_surface`) answers what the app can do, each endpoint is a function of
@@ -217,7 +227,13 @@ Two details that bite:
 Intercept plain left-clicks only. Middle-clicks and cmd/ctrl/shift clicks mean
 *open in a new tab*, and hijacking them takes away a capability the
 enhancement did not give. On a failed fetch, fall back to a full page load: a
-stale pane under a new URL is the SPA failure mode that lies to the reader.
+stale pane under a new URL is the failure mode that lies to the reader.
+
+Both rules are the framework's if you enable `webapp` -- the click judgement is
+one function with the modifier cases in it, and a load that has not arrived
+renders the loading state rather than the previous screen. Write them by hand
+only for a server-rendered page you are sprinkling behaviour onto, which is the
+case `webapp` is not for.
 
 ### Two wiring rules the framework enforces
 

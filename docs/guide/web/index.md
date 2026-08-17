@@ -26,6 +26,11 @@ The shape of it:
   stylesheets are garden-returning `defn`s, so a UI merges, renames, and
   re-tests at component grain. Rendered links are indexed against the route
   table.
+- **[Browser applications](webapp.md)** -- when the browser owns routing and
+  state, the router, render loop, listeners, load states and `fetch` are the
+  framework's. You declare a route table and screens as data, drive the whole
+  app headlessly with no browser and no compile, and the goal is that your own
+  code declares no `:cljs` namespaces at all.
 - **[ClojureScript client](client.md)** -- browser code lives in the same store
   under a declared platform, portable logic in `.cljc` gets the JVM oracle for
   free, and the typed `fetch` client is generated from the endpoint contracts

@@ -2747,3 +2747,136 @@ for renames and retired again as a 72-row list nothing read. With one consumer,
 a named cutover is cheaper and more honest. **With two, that trade needs
 revisiting rather than reapplying**, and this exchange is the evidence for what
 it would cost.
+
+## A breaking refusal goes behind a CONSTRUCTOR, because the recovery path runs through the load
+
+Named by slopp-ui after taking a framework change onto a store that still wrote
+the retired keys, and it decides something this repo had been getting right and
+wrong by accident.
+
+`webapp`'s retirements — `:webapp/fetch`, `:webapp/derive`, a routes function,
+a declared `:webapp/view` — all refuse inside `wiring`, which is a function an
+app CALLS. So a store on the new jar with the old shape goes red in every test,
+each failure carrying the migration, and **it still loads**. `edit_replace_form`,
+`test_run` and `restart` all keep working, so the fix can be made in band.
+
+Compare `slopp.web.screen/open` → `open!`, which wedged this store: the write
+that would have repaired the namespace was verified against that namespace's own
+pre-edit state, and refused. The tool that fixes a broken namespace runs through
+loading it.
+
+> **A runtime refusal is recoverable in band; a load-time break is not.**
+
+So the axis is not "how loud is the refusal" but **where it fires relative to
+namespace load**:
+
+| shape | consumer's position |
+|---|---|
+| a check inside a constructor / entry function | red suite, every message naming the fix, tools intact |
+| a renamed or deleted VAR | unresolvable symbol at load — and the repair tool loads it too |
+
+This does not say never rename a var. It says a rename is the expensive kind of
+break and should be priced as one: `rename_sweep` exists, and a consumer outside
+the store cannot use it. Where the same retirement can be expressed as a check in
+a constructor instead, that is the cheaper shape, and the difference only shows up
+on somebody else's clock — which is the same blindness [[a deprecation that
+removes the old path before the new one can see the consumer's data]] describes.
+
+## A guard shared by N call sites is fixed once; a guard inlined N times is fixed N-1 times
+
+slopp-ui checked all four `fetch` sites in their store rather than assuming. The
+three they WROTE all checked `.-ok`. The nine `generate_client` emitted did not
+— so the defect distribution was not "some code is careless", it was "one
+producer is wrong and it produced nine".
+
+The fix went into the generated namespace as one private helper beside the `url`
+and `qs` helpers already there, rather than as a check emitted into each wrapper.
+The reasoning generalises past generated code: **a rule inlined at N sites is one
+a later edit fixes at eight and misses the ninth**, and nothing about the ninth
+looks different from the outside.
+
+Two smaller things from the same fix worth keeping:
+
+- **Pin an ORDER as nesting, not as sequence.** `(.json (ok! resp))` cannot be
+  reordered without breaking; two consecutive `.then` steps in the right order
+  can be swapped by an edit that reads as tidying. When a property is "A must
+  happen before B", express it so that B structurally contains A.
+- **The wrong diagnosis costs more than the missing one.** A wrapper with no
+  contract fails silently on a 500. A wrapper WITH one fails loudly and says
+  *"response failed validation"* — so contract drift and a 502 from a proxy
+  produce identical words, and the check that existed to give a signal is what
+  destroys it. The loud wrong one is the one somebody built in order to trust.
+
+## "A static declaration needs a runtime value" is two problems, and only one of them is the app's
+
+Two reports an hour apart, identical in shape and opposite in answer, which is
+why this is worth a section rather than a note.
+
+`webapp`'s screen value is deliberately STATIC — that is what lets slopp list an
+app's screens and join every `:webapp/path` against the endpoints the store
+declares. Twice in one afternoon a consumer hit "my declaration needs something
+only known at runtime":
+
+| what it needed | who owns that value | answer |
+|---|---|---|
+| a `rough.js` sketcher in `:derive` | the APP — its own `:cljs` plug-in | a real gap, recorded unbuilt |
+| the mount prefix on a `:request` | the FRAMEWORK — `mount!` reads it | a missing one-liner |
+
+The second arrived louder: every screen of a mounted app fetched a 404, where
+the first was cosmetic. The tempting read was "that settles it, build the
+plug-in seam". It did not settle it, because **the framework already knew the
+base**: `mount!` read it, `prefixed` computed with it, `strip-base` applied it
+to arriving urls, and `prefix-links` applied it to links. The bug was that it
+was applied in two of the three places a URL travels, not that a declaration
+could not reach a runtime value.
+
+The consumer drew the line and it is theirs:
+
+> the base is not an app's runtime value the way a sketcher is — it is the
+> FRAMEWORK's.
+
+**So the evidence threshold for a plug-in seam is not "a second instance" — it
+is a second instance of a value the APP owns.** A framework value showing up in
+the same disguise is evidence of an inconsistency inside the framework, and
+answering it with a seam buys an app-facing mechanism to paper over a
+one-liner — after which the mechanism is load-bearing and the inconsistency is
+permanent.
+
+The tell, cheap to apply: ask whether the framework could supply the value
+without being told. If yes, it is the framework's and the gap is an asymmetry.
+If it could only ever come from the app, the seam question is real.
+
+## A FIXTURE can agree with the code as easily as an assertion can — and it lies wider
+
+slopp-ui's sentence, and it generalises one of theirs I had been repeating back
+at them:
+
+> a literal agrees with whatever it was written beside
+
+That one is about the expected VALUE, and its remedy is to assert that a
+rendered address RESOLVES rather than that it equals a string — ask a question
+the code cannot satisfy by being edited.
+
+The wider version is about the FAKE:
+
+> an assertion that agrees is one test lying; a fixture that agrees is every
+> test that uses it lying at once.
+
+The worked instance, from the app that found it in its own suite: a canned
+performer keyed BY PATH. Ask for the wrong url and it answers nil rather than
+failing, so nine screens shared one silent miss — and the whole suite stayed
+green through a defect that made every screen in a mounted app fetch a 404.
+
+**The shape to reach for: a fake RECORDS what it was asked, and the test asserts
+that set.** Then an unexpected url is a red rather than a miss. It costs one
+atom and one assertion, and it is the difference between a fake that answers
+questions and a fake that agrees with them.
+
+Two tells that a fixture is in the agreeing class:
+
+- it is keyed by the thing under test (a url, a screen, an id), so a wrong key
+  reads as "no answer" instead of "wrong answer"
+- removing an arm of it makes nothing red
+
+Neither is a reason to avoid canned data — canned data is how the headless
+drive works at all. It is a reason to make the fake report, not just respond.

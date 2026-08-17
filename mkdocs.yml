@@ -73,6 +73,7 @@ nav:
       - Auth and security: guide/web/auth.md
       - HTML and CSS: guide/web/html.md
       - Typed APIs: guide/web/typed-apis.md
+      - Browser applications: guide/web/webapp.md
       - ClojureScript client: guide/web/client.md
       - Running and shipping: guide/web/running.md
   - Reference:

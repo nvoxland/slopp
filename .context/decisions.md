@@ -2419,6 +2419,75 @@ inspect is how a tool's limitations become a product's ceiling.
   generated from**, so a handler drifting from its own contract is a red in
   the in-image tier rather than a runtime surprise in a browser.
 
+### Wave 4 (2026-08-16/17): the LOOP became the framework's, not the app's
+
+Everything above made a browser app *verifiable*. Wave 4 took the parts every
+browser app was writing identically and made them declarations. The measure is
+`query_surface`'s `:webapp/cljs` count, and the target is zero.
+
+Four decisions settled here, each replacing a shape an app had to write:
+
+- **Routes are a declared TABLE, and a routing function is refused.** A
+  function answers only when called, with a path, at runtime — so nothing can
+  list an app's screens, join a link to one, or compare the client's routes to
+  the paths the server answers for. Every report and gate that exists for
+  `^{:web/path}` was impossible on the client side for exactly that reason, and
+  the two `:checked-by nil` rows in `index.crossings` said so.
+
+  The table is **ADDRESSES, not screens** — one screen answers at several URLs
+  the moment an app has a lens bar or a print view, so anything counting one
+  against the other is wrong. Learned from the consuming app, which had a test
+  asserting a literal `11` that ratcheted to `14`.
+
+- **The view is DERIVED and declaring one is refused.** A hand-written view is
+  what made `:screen` a keyword agreeing in three places — the router returned
+  it, the view cased on it, the fetch received it, with nothing checking any of
+  the three, so a rename produced a blank pane at a URL that looked right.
+
+  The framework also renders the three states a screen cannot render against
+  (`not-found`, `loading`, `failed`) and the app's `chrome` PLACES two of them.
+  The line is structural, and the first version of it was wrong: "slopp owns
+  what is true, the app owns what is seen" does not survive `not-found`, which
+  is equally presentation and which slopp defaults. What holds is that
+  not-found replaces the WHOLE page while loading and failed replace one pane
+  — so rendering those requires knowing where they go, and placement is layout.
+
+- **A screen is a VALUE that names its own request.** `{:render :request
+  :derive}`, with a bare `(fn [state] hiccup)` as the shorthand for a screen
+  with no data. `:request` is pure and `:cljc`, so WHICH call a URL makes is a
+  fact an in-image test reads rather than a `js/fetch` in a namespace whose
+  only verification is that it compiled.
+
+  This retired `:webapp/fetch` and `:webapp/derive`, which were app-supplied
+  and received the SCREEN — the same three-place agreement the route table
+  removed, one seam along.
+
+- **The performer is slopp's, and the browser decides nothing.** The shim may
+  not branch (`ops.selfcheck-test`), so the URL, the method and headers, which
+  encoder a body wants, which decoder an answer wants, and whether a response
+  is data or a failure are all `:cljc` functions with ordinary tests. What is
+  left in `slopp.webapp.dom` is one `fetch` and three lookups.
+
+  The security half is in `request-url`: substitution is segment-wise rather
+  than `str/replace` (a parameter whose name prefixes another corrupts the
+  path, and the corrupted result looks like a URL), and every value is
+  percent-encoded, so a value cannot break out of its segment.
+
+**`fetch` rejects only on a NETWORK error**, so a 500 resolves and a performer
+that hands every resolved response to its success callback renders the error
+page's body as data. `response-outcome` is that check, and the same defect was
+then found in `generate_client`'s emitted wrappers — where it was worse:
+contract validation exists to detect DRIFT, so a transport failure wearing its
+clothes makes a real drift and a 502 produce identical words.
+
+**Constraint on where a breaking change may live**, named by the consumer:
+every `webapp` retirement refuses inside `wiring`, which is a function an app
+CALLS. So a store on the new jar with the old keys goes red with every message
+naming the fix, and still LOADS — the repair tools keep working. Compare
+`screen/open` → `open!`, which wedged this store, because the write that would
+have repaired the namespace was verified against that namespace's own broken
+state. A runtime refusal is recoverable in band; a load-time break is not.
+
 ### What the dogfood immediately found
 
 Building on the model is what surfaced these; all four are fixed, and the

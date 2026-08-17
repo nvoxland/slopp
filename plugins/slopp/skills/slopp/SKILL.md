@@ -5,7 +5,7 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
-<!-- skill-written-against: d31362 -->
+<!-- skill-written-against: d31710 -->
 
 **This skill reaches you on a DIFFERENT channel from the code.** The code is the
 jar your MCP server runs; this file ships in the plugin package. They can be
@@ -1704,8 +1704,11 @@ declare the app; slopp owns the loop.
   (webapp/wiring
    {:webapp/state  state                        ; your atom
     :webapp/routes [["/"            index]      ; a TABLE, not a function
-                    ["/things"      things]     ; each row names the SCREEN FN
-                    ["/things/:id"  thing]]
+                    ["/things"      things]     ; a bare fn IS a screen
+                    ["/things/:id"  {:render  thing         ; a screen that
+                                     :request thing-request ; asks for its
+                                     :check   valid?        ; own data, and
+                                     :derive  unwrap}]]     ; vets the answer
     :webapp/chrome (fn [state inner] [:div [nav state] inner])}))
 ```
 
@@ -1718,6 +1721,61 @@ declare the app; slopp owns the loop.
   it — which is a rename away from a blank pane at a url that looks right. A
   keyword target is refused: it is `ifn?`, so it would call cleanly and render
   nothing.
+- **A screen that fetches names its own `:request`** — `(fn [params] -> request
+  | nil)`, pure, `:cljc`. slopp turns it into a finished URL and performs it;
+  the browser entry supplies the performer, so **you never write `js/fetch`**.
+  A nil request declines and starts no load, so a screen with nothing to ask
+  for renders immediately rather than spinning. `:derive` shapes that screen's
+  own answer, inside the freshness guard, so an abandoned load never pays for
+  it. Unknown keys in a screen map are refused: `:reqeust` is not a crash, it
+  is a screen with no data forever at a url that matched.
+- **A request is data, and the URL is built where a test can read it**:
+  `{:webapp/method :get :webapp/path "/api/things/:id" :webapp/path-params {…}
+  :webapp/query {…} :webapp/body {…} :webapp/headers {…}}`. Substitution is
+  segment-wise and every value is percent-encoded, so a `/` in a value is data
+  rather than structure. Headers are how a token travels — it is state, not
+  schema, so nothing about an endpoint declaration can produce it.
+- **A non-2xx is a FAILURE, and slopp is the one that knows.** `fetch` rejects
+  only on a network error, so a hand-written performer hands a 500 to its
+  success path and the screen renders the error page's body as data. That
+  check lives in `:cljc` where a test watches it, which is the whole reason
+  the performer is not yours.
+- **A screen REFUSES a bad answer with `:check`, never by throwing.**
+  `(fn [response] -> nil | message)` — nil accepts, a message makes the load
+  `:failed` carrying it, and `:derive` never runs. Validating inside `:derive`
+  and throwing gives you two behaviours from one function: headless the
+  performer calls `ok` synchronously so the throw escapes `load!` and takes the
+  driver with it, while in a page it lands in the shim's `.catch` and renders a
+  failure screen. A `:cljc` form cannot catch on both platforms — D3 denies the
+  reader conditional — so the failure channel is a return value.
+- **A request path is JOINED against what you serve**
+  (`webapp-request-paths-are-served`). A screen naming an endpoint that does not
+  exist fails quietly — the url routes, the screen renders, one pane never loads
+  while everything around it works, so it gets reported as slowness rather than
+  as a missing endpoint. Two declarations stop it asking: a whole url for a
+  third-party server, and `^{:web/external-path "why"}` on the form when
+  something OUTSIDE your store serves the path — a proxied API under your own
+  mount point cannot be written in full, because the prefix is runtime.
+- **A request carries the MOUNT POINT, like every other address.** Write
+  `/api/things` and slopp addresses it under your `:webapp/base`, for the same
+  reason your `:href` gets it. An absolute url (scheme, or protocol-relative
+  `//`) is left alone. The limit: a request path is relative to the mount point,
+  so an app at `/p/demo` whose API is genuinely at the ROOT cannot say so yet.
+- **The table is ADDRESSES, not screens** — a row's screen is not unique and a
+  screen's row is not unique. One screen answers at several urls the moment you
+  have a lens bar, a print view, an alternate rendering, or a detail page that
+  also takes an optional segment. So anything reasoning "one row per screen" is
+  wrong: a count, a completeness check, a generated index. If you want the two
+  numbers, derive each from the table rather than asserting a literal — a real
+  app watched `11` ratchet to `14` on one widening.
+- **Prefer a ROW to a runtime table of what could exist.** The tempting
+  alternative for a lens is to peel a trailing segment off, retry the subject
+  underneath, and check the peeled part against a second table. Then that table
+  has to reject `/things/bogus`, and it is one edit away from meaning "what
+  could exist" instead of "what renders" — which is how five dead urls answered
+  200 and drew a default view, with a reader certain they had looked at
+  something they had not. With rows there is nothing to consult: an address no
+  row matches is not-found, the same answer the server gives.
 - **You do not write a view.** `:webapp/view` is derived and declaring one is
   refused. `:webapp/chrome` is your layout around a screen.
 - **A screen is only called when its data is READY**, so it never writes the
@@ -1726,7 +1784,11 @@ declare the app; slopp owns the loop.
   decides WHERE they sit — the framework will not guess at your layout.
 - **Write client-route keys in your links** — `:href "/things/42"` — and slopp
   adds the mount point on the way to the DOM. Links you do not route are left
-  alone, so `/api/…` still points at your server.
+  alone, so `/api/…` still points at your server. A form's `:action` obeys the
+  same rule and for the same reason: a search box written as a GET form is a
+  NAVIGATION, and the route table already separates it from a POST to your
+  server. Such a form submits as a full page load, which is correct — it lands
+  on the client route and the app boots there.
 - **`:webapp/state` is cleared by the framework on navigation.** Declare
   `:webapp/session-loads` for anything that must outlive a screen, and
   `:webapp/address-keys` for your own keys that must die with one.
