@@ -2697,3 +2697,53 @@ for.** A condition stays true; an expectation expires.
 All three of this week's instances were found by reading the code for an
 unrelated reason. That is the honest detection story, and it is why this is a
 discipline rather than a check.
+
+## A retirement is ONE change for the framework and TWO events for the consumer
+
+**Root.** slopp-ui, 2026-08-18, taking a jar that retired `^:web/client-path`
+before their store had declared the thing its replacement reads.
+
+`http-dangling-route-refs` stopped honouring the escape and started resolving
+against the declared client route table. From this side that is one change,
+tested, green. From theirs it is two events with a gap between them:
+
+- **the escape dies on the jar** — the moment they restart
+- **the replacement wakes on the declaration** — `:webapp/routes`, which is the
+  migration they had not done yet
+
+Between those, every marked view is an `unknown-marker` finding AND every in-app
+link dangles. 49 standing findings on a store that had touched nothing, with no
+way back — only forward.
+
+Their statement of it, which is the durable form:
+
+> **A deprecation that removes the old path before the new one can see the
+> consumer's data is not a deprecation, it is a cutover.**
+
+**Why the framework always measures the gap as zero.** The store that builds a
+capability declares the thing the check reads — that is what building it means —
+so from inside, retirement and replacement are simultaneous. The gap exists only
+on the consumer's clock and is exactly as long as their migration.
+
+**Three phrases, and only the first is about us:**
+
+```
+landed                        true of the framework's store
+available on a jar            true when the consumer takes it
+available on a DECLARATION    true when they have written what the check reads
+```
+
+Any check that reads a declaration has the third shape. Saying "landed" to a
+consumer is not shorthand, it is a claim about their store made from ours — a
+failure this repo committed four times in one week, each time in a different
+disguise (a migration note, a green light, a join wired to the wrong branch, a
+cutover called neither).
+
+**The remedy is a sentence, not a mechanism.** Every retirement must say which it
+is — deprecation or cutover — in the message that ships it. A grace window keyed
+on the retirement was the obvious alternative and is refused here: it needs a
+hand-kept ledger of retired markers, which is the machinery this repo built once
+for renames and retired again as a 72-row list nothing read. With one consumer,
+a named cutover is cheaper and more honest. **With two, that trade needs
+revisiting rather than reapplying**, and this exchange is the evidence for what
+it would cost.
