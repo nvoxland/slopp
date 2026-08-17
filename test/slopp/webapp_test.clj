@@ -28,27 +28,31 @@
   (let [state  (atom {})
         asked  (atom [])
         ;; screens are ordinary pure functions of state, which is what makes
-        ;; every one of them assertable without a browser
-        ;; a screen is only called when its data is READY, so it never writes
-        ;; the three-way case on load-status — the framework renders those
-        ;; states and chrome places them. What is left is the screen itself
-        things (fn [s] [:ul (for [t (webapp/load-value s :main)]
-                              [:li (:name t)])])
-        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        ;; every one of them assertable without a browser. A screen is only
+        ;; called when its data is READY, so it never writes the three-way case
+        ;; on load-status — the framework renders those states and chrome
+        ;; places them. What is left is the screen itself, and the REQUEST it
+        ;; names: pure, in :cljc, so which call a url makes is readable here
+        things {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
+                                        [:li (:name t)])])
+                :request (fn [_params] {:webapp/path "/api/things"})}
+        thing  {:render  (fn [s] [:p (str "Thing " (:id (:params s)))])
+                :request (fn [params] {:webapp/path        "/api/things/:id"
+                                       :webapp/path-params {:id (:id params)}})}
         app    (webapp/wiring
                 {:webapp/state     state
                  :webapp/routes    [["/things"     things]
                                     ["/things/:id" thing]]
                  :webapp/chrome    (fn [_s inner] [:main [:h1 "Catalogue"] inner])
                  :webapp/not-found (fn [_s] [:p "Nowhere"])
-                 ;; the app's own data source. In a browser this is the generated
-                 ;; typed client; here it answers from memory, which is exactly
-                 ;; the seam that makes the loop drivable at all
-                 :webapp/fetch     (fn [screen params ok _err]
-                                     (swap! asked conj [(if (= screen things) :things :thing)
-                                                        params])
-                                     (ok (when (= screen things)
-                                           [{:name "Anvil"} {:name "Rope"}])))})
+                 ;; the app's data source. In a browser the entry supplies
+                 ;; `js/fetch`; here it answers from memory by URL, exactly as a
+                 ;; server does — which is the seam that makes the loop drivable
+                 :webapp/call      (fn [request ok _err]
+                                     (let [url (webapp/request-url request)]
+                                       (swap! asked conj url)
+                                       (ok (when (= "/api/things" url)
+                                             [{:name "Anvil"} {:name "Rope"}]))))})
         s      (web.screen/open! (webapp/driver app))]
 
     (testing "the derived driver is the shape the fake browser accepts"
@@ -65,11 +69,13 @@
         (is (re-find #"Anvil" t) t)
         (is (re-find #"Rope" t) t)))
 
-    (testing "and the app's own fetch was asked, with the route's params"
+    (testing "and the URL the screen asked for is the one a server would see"
       ;; two wirings can reach equal state having asked different endpoints,
       ;; because canned answers do not care who asked — so the REQUESTS are
-      ;; part of the claim, not colour
-      (is (= [[:things {}]] @asked) (pr-str @asked)))
+      ;; part of the claim, not colour. Asserting the finished url rather than
+      ;; the screen's identity is what became possible when the request moved
+      ;; out of the browser: this string is the one that goes on the wire
+      (is (= ["/api/things"] @asked) (pr-str @asked)))
 
     (testing "a second navigation re-routes and re-renders through the same loop"
       (web.screen/visit! s "/things/42")
@@ -77,7 +83,7 @@
       ;; a capture arrives as the TEXT that was in the url — the framework does
       ;; not guess that "42" wanted to be a number, because a slug and an id
       ;; live in the same slot and only the app knows which this is
-      (is (= [[:things {}] [:thing {:id "42"}]] @asked) (pr-str @asked)))
+      (is (= ["/api/things" "/api/things/42"] @asked) (pr-str @asked)))
 
     (testing "an unrouted path is the app's own nowhere, not an exception"
       (web.screen/visit! s "/nope")
@@ -103,13 +109,14 @@
   ;;   supersession     — a token minted per request, checked on arrival
   (let [state   (atom {})
         pending (atom nil)
-        thing   (fn [_s] [:p "thing"])
+        thing   {:render  (fn [_s] [:p "thing"])
+                 :request (fn [_params] {:webapp/path "/api/thing"})}
         app     (webapp/wiring
                  {:webapp/state  state
                   :webapp/routes [["/thing" thing]]
                   ;; hold the callback so the LOADING moment is observable —
-                  ;; a fetch that answers synchronously never has one
-                  :webapp/fetch  (fn [_screen _params ok _err] (reset! pending ok))})]
+                  ;; a call that answers synchronously never has one
+                  :webapp/call   (fn [_request ok _err] (reset! pending ok))})]
 
     (testing "before anything is asked, the load is ABSENT"
       (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
@@ -131,13 +138,23 @@
       (webapp/navigate! app "/nowhere" false)
       (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
 
+    (testing "a screen that names NO request never leaves :absent"
+      ;; the fourth state earns its keep here: a screen with nothing to fetch
+      ;; is not loading, has not failed, and has not answered. Anything else
+      ;; would be a spinner with no end or a lie about an answer
+      (let [st  (atom {})
+            a3  (webapp/wiring {:webapp/state  st
+                                :webapp/routes [["/static" (fn [_s] [:p "static"])]]})]
+        (webapp/navigate! a3 "/static" false)
+        (is (= :absent (webapp/load-status @st :main)) (pr-str @st))))
+
     (testing "and a failure is FAILED, distinct from both"
       (webapp/navigate! app "/thing" false)
       (let [err (atom nil)
             app2 (webapp/wiring
                   {:webapp/state  state
                    :webapp/routes [["/thing" thing] ["/other" thing]]
-                   :webapp/fetch  (fn [_s _p _ok e] (reset! err e))})]
+                   :webapp/call   (fn [_request _ok e] (reset! err e))})]
         (webapp/navigate! app2 "/thing" false)
         (@err "no")
         (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
@@ -165,13 +182,15 @@
   ;; green through that break, so this is the only cover for the placement.
   (let [state    (atom {})
         pending  (atom [])
-        screen-a (fn [_s] [:p "a"])
-        screen-b (fn [_s] [:p "b"])
+        screen-a {:render  (fn [_s] [:p "a"])
+                  :request (fn [_p] {:webapp/path "/api/a"})}
+        screen-b {:render  (fn [_s] [:p "b"])
+                  :request (fn [_p] {:webapp/path "/api/b"})}
         app      (webapp/wiring
                   {:webapp/state  state
                    :webapp/routes [["/a" screen-a] ["/b" screen-b]]
-                   :webapp/fetch  (fn [screen _params ok _err]
-                                    (swap! pending conj [screen ok]))})]
+                   :webapp/call   (fn [request ok _err]
+                                    (swap! pending conj [request ok]))})]
 
     (webapp/navigate! app "/a" false)
     (webapp/navigate! app "/b" false)
@@ -180,7 +199,9 @@
       ;; without this the collision cannot arise and every assertion below
       ;; passes vacuously — which is the exact defect this test exists about
       (is (= 2 (count @pending)) (pr-str (count @pending)))
-      (is (= screen-b (:screen @state)) (pr-str (:path @state)))
+      (is (= ["/api/a" "/api/b"] (mapv (comp :webapp/path first) @pending))
+          "each screen asked for its OWN endpoint")
+      (is (= (:render screen-b) (:render (:screen @state))) (pr-str (:path @state)))
       (is (= :loading (webapp/load-status @state :main)) (pr-str @state)))
 
     (testing "the FIRST screen's answer arrives late and is dropped"
@@ -638,6 +659,9 @@
         prevented (atom 0)
         things    (fn [_s] [:p "things"])
         search    (fn [s] [:p (str "search " (:q (:params s)))])
+        ;; a row's target is normalised to a screen VALUE, so the fn an app
+        ;; wrote is that screen's `:render`
+        showing   (fn [] (:render (:screen @state)))
         app       (webapp/wiring
                    {:webapp/state     state
                     :webapp/base      "/p/x"
@@ -649,7 +673,7 @@
 
     (testing "a click that IS ours navigates, pushes, and swallows the default"
       (click! {:webapp/href "/p/x/things"})
-      (is (= things (:screen @state)))
+      (is (= things (showing)))
       (is (= ["/p/x/things"] @pushed) "the pushed url carries the mount prefix")
       (is (= 1 @prevented) "without this the browser also loads the page"))
 
@@ -659,14 +683,14 @@
       (click! {:webapp/href "https://example.com/things"})
       (is (= 1 @prevented) "preventDefault here is a dead external link")
       (is (= 1 (count @pushed)))
-      (is (= things (:screen @state))))
+      (is (= things (showing))))
 
     (testing "the BACK button arrives as a url and must not push"
       ;; a push on a pop is the bug that makes back appear broken: each press
       ;; adds an entry, so the button walks the reader forward through their
       ;; own history and never leaves
       (webapp/navigate-url! app "/p/x/search" "" false)
-      (is (= search (:screen @state)))
+      (is (= search (showing)))
       (is (= 1 (count @pushed)) (pr-str @pushed)))
 
     (testing "and the url's QUERY reaches the router PARSED, not as text"
@@ -676,12 +700,12 @@
       ;; well as carrying it — so a screen receives `{:q "rate"}` rather than a
       ;; url fragment it would have to take apart itself
       (webapp/navigate-url! app "/p/x/search" "?q=rate" false)
-      (is (= search (:screen @state)))
+      (is (= search (showing)))
       (is (= {:q "rate"} (:params @state)) (pr-str (:params @state))))
 
     (testing "a url outside the mount point is not this app's to show"
       (webapp/navigate-url! app "/somewhere/else" "" false)
-      (is (= search (:screen @state))
+      (is (= search (showing))
           "routing a foreign url through the app blanks the screen it was on"))))
 
 (deftest LEAVING-the-app-is-a-third-kind-of-action-and-declared-like-the-others
@@ -774,7 +798,7 @@
       (is (= "abc" (:session @state))
           "arriving must not clear what boot established — a session token
            cleared on the first navigation is a page that logs itself out")
-      (is (= things (:screen @state))))
+      (is (= things (:render (:screen @state)))))
 
     (testing "and an app that declares no boot still starts"
       ;; the default has to be a function rather than nil, or every caller —
@@ -785,7 +809,7 @@
                                :webapp/routes [["/anything" ok]]})]
         (is (fn? (:webapp/boot a2)))
         (webapp/start! a2 "/anything" "")
-        (is (= ok (:screen @s2)))))))
+        (is (= ok (:render (:screen @s2))))))))
 
 (deftest a-page-with-no-MOUNT-POINT-is-refused-by-NAME
   ;; The server's template renders `<div id="app">` and the bundle mounts into
@@ -878,7 +902,8 @@
 
     (testing "navigation routes through the declared table"
       (webapp/navigate! app "/things/42" false)
-      (is (= thing (:screen @state)) "the row's screen fn IS the screen")
+      (is (= thing (:render (:screen @state)))
+          "a row written as a bare fn IS that screen's :render")
       (is (= {:id "42"} (:params @state))))
 
     (testing "a click is OURS only when the table routes it"
@@ -1059,15 +1084,19 @@
   ;; is the one thing this capability does not take.
   ;;
   ;; Hence: the framework supplies the CONTENT as `inner`, chrome decides WHERE.
-  (let [state  (atom {})
+  (let [state   (atom {})
         pending (atom nil)
-        things (fn [_s] [:p "THE SCREEN"])
-        app    (webapp/wiring
-                {:webapp/state  state
-                 :webapp/routes [["/things" things]]
-                 :webapp/chrome (fn [_s inner] [:main [:nav "RAIL"] inner])
-                 :webapp/fetch  (fn [_screen _params ok _err] (reset! pending ok))})
-        text   (fn [] (pr-str ((:webapp/view app) @state)))]
+        ;; a screen with a REQUEST, because a load state is only reachable for
+        ;; a screen that asked for something — one that names no request is
+        ;; never loading and never failed
+        things  {:render  (fn [_s] [:p "THE SCREEN"])
+                 :request (fn [_p] {:webapp/path "/api/things"})}
+        app     (webapp/wiring
+                 {:webapp/state  state
+                  :webapp/routes [["/things" things]]
+                  :webapp/chrome (fn [_s inner] [:main [:nav "RAIL"] inner])
+                  :webapp/call   (fn [_request ok _err] (reset! pending ok))})
+        text    (fn [] (pr-str ((:webapp/view app) @state)))]
 
     (webapp/navigate! app "/things" false)
 
@@ -1087,7 +1116,7 @@
                   {:webapp/state  (atom {})
                    :webapp/routes [["/things" things]]
                    :webapp/chrome (fn [_s inner] (reset! seen inner) [:main inner])
-                   :webapp/fetch  (fn [_s _p _ok _e] nil)})]
+                   :webapp/call   (fn [_rq _ok _e] nil)})]
         ((:webapp/view a2) {})
         (is (some? @seen) "chrome received nil and would have to test it")))
 
@@ -1107,7 +1136,7 @@
                 {:webapp/state   s2
                  :webapp/routes  [["/things" things]]
                  :webapp/loading (fn [_s] [:p "Fetching your things"])
-                 :webapp/fetch   (fn [_s _p _ok _e] nil)})]
+                 :webapp/call    (fn [_rq _ok _e] nil)})]
         (webapp/navigate! a2 "/things" false)
         (is (re-find #"Fetching your things" (pr-str ((:webapp/view a2) @s2)))
             (pr-str ((:webapp/view a2) @s2)))))))
@@ -1164,3 +1193,183 @@
              (url {:webapp/path "/api/module/:m"
                    :webapp/path-params {:m "x"}
                    :webapp/query {:depth "2"}}))))))
+
+(deftest a-screen-is-a-VALUE-and-it-names-its-own-REQUEST
+  ;; The last thing forcing a real browser app into ClojureScript: `js/fetch`.
+  ;; `:webapp/fetch` was app-supplied and took the SCREEN, so every app wrote a
+  ;; performer, and every performer had to case on which screen was asking —
+  ;; the same three-place agreement the route table removed, moved one seam
+  ;; along.
+  ;;
+  ;; A screen names its own request instead. `:request` is `(fn [params] ->
+  ;; request | nil)`, pure, in `:cljc`, so WHICH call a screen makes is a fact
+  ;; a JVM test reads. What is left for a browser is `fetch`.
+  (let [state (atom {})
+        calls (atom [])
+        thing {:render  (fn [s] [:p (str "Thing " (:name (webapp/load-value s :main)))])
+               :request (fn [params] {:webapp/method      :get
+                                      :webapp/path        "/api/things/:id"
+                                      :webapp/path-params {:id (:id params)}})}
+        plain (fn [_s] [:p "Plain, and it asks for nothing"])
+        app   (webapp/wiring
+               {:webapp/state  state
+                :webapp/routes [["/things"     plain]
+                                ["/things/:id" thing]]
+                :webapp/call   (fn [request ok _err]
+                                 (swap! calls conj request)
+                                 (ok {:name "Anvil"}))})
+        s     (web.screen/open! (webapp/driver app))]
+
+    (testing "the screen's own :request decides the call, and it is a finished URL"
+      (web.screen/visit! s "/things/42")
+      (is (= 1 (count @calls)) "the screen asked for its data exactly once")
+      (is (= "/api/things/42" (webapp/request-url (first @calls)))
+          "the params the route captured are the ones the request substitutes")
+      (is (re-find #"Thing Anvil" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "a screen that declares NO request never waits for one"
+      ;; not the same as a request that answers nil: there is nothing in
+      ;; flight, so a load state would be a lie and a spinner would never end
+      (reset! calls [])
+      (web.screen/visit! s "/things")
+      (is (= [] @calls) "a screen with no request made one anyway")
+      (is (re-find #"asks for nothing" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "a bare fn is still a screen — the shorthand for exactly that case"
+      (is (fn? plain)))
+
+    (testing "the screen's :derive shapes its own answer"
+      ;; what `:webapp/derive` was for, and it could only ever be written as a
+      ;; case on screen identity — an app-wide function asked \"which screen is
+      ;; this?\" to answer a question the screen already knows
+      (let [st  (atom {})
+            app (webapp/wiring
+                 {:webapp/state  st
+                  :webapp/routes [["/thing" {:render (fn [s] [:p (webapp/load-value s :main)])
+                                             :request (fn [_] {:webapp/path "/api/thing"})
+                                             :derive  (fn [v] (str "derived:" (:name v)))}]]
+                  :webapp/call   (fn [_rq ok _err] (ok {:name "Anvil"}))})
+            s2  (web.screen/open! (webapp/driver app))]
+        (web.screen/visit! s2 "/thing")
+        (is (re-find #"derived:Anvil" (web.screen/text s2)) (web.screen/text s2))))
+
+    (testing "a screen map with no :render is REFUSED"
+      ;; the shape that made maps refusable in the first place: a map is
+      ;; `ifn?`, so a row pointing at one used to match and render nil
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i):render"
+           (webapp/wiring {:webapp/state  (atom {})
+                           :webapp/routes [["/things" {:request (fn [_] nil)}]]}))))
+
+    (testing "a TYPO inside a screen map is refused, not silently ignored"
+      ;; `:reqeust` would never be read, so the screen would render with no
+      ;; data forever and nothing would say why — the failure this whole
+      ;; capability keeps closing
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)reqeust"
+           (webapp/wiring {:webapp/state  (atom {})
+                           :webapp/routes [["/things" {:render  (fn [_] [:p])
+                                                       :reqeust (fn [_] nil)}]]}))))
+
+    (testing ":webapp/fetch and :webapp/derive are RETIRED, and the refusal migrates"
+      ;; no back-compat: both existed to be handed a screen and case on it,
+      ;; which is what the screen value removes
+      (doseq [k [:webapp/fetch :webapp/derive]]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"(?i)screen"
+             (webapp/wiring {:webapp/state  (atom {})
+                             :webapp/routes []
+                             k              (fn [& _] nil)}))
+            (str k " is still accepted"))))))
+
+(deftest what-FETCH-needs-is-decided-here-and-merely-PERFORMED-in-the-browser
+  ;; The shim may not branch, which is the property standing in for the tests a
+  ;; `:cljs` namespace cannot have. So every judgement `js/fetch` needs is made
+  ;; in `:cljc` and handed over as data: the method, the headers, WHICH encoder
+  ;; the body wants, and which decoder the answer wants. What is left in the
+  ;; browser is one `fetch` and two lookups.
+  ;;
+  ;; Naming the encoder rather than running it is the part that matters. A
+  ;; `(if body …)` in the shim would be a decision nothing can check; a `:json`
+  ;; keyword chosen here is one this test reads.
+  (testing "a GET names NO encoder, so the shim sends no body at all"
+    ;; `fetch` throws on a GET carrying a body, so this is not tidiness — a
+    ;; request that quietly acquires an empty body stops working entirely
+    (let [init (webapp/request-init {:webapp/path "/api/things"})]
+      (is (= "GET" (:method init)) (pr-str init))
+      (is (= :none (:encode init)) (pr-str init))
+      (is (nil? (:body init)) (pr-str init))))
+
+  (testing "a request WITH a body names the json encoder and says so in a header"
+    (let [init (webapp/request-init {:webapp/method :put
+                                     :webapp/path   "/api/things/1"
+                                     :webapp/body   {:name "Anvil"}})]
+      (is (= "PUT" (:method init)) (pr-str init))
+      (is (= :json (:encode init)) (pr-str init))
+      (is (= {:name "Anvil"} (:body init)) (pr-str init))
+      (is (= "application/json" (get (:headers init) "Content-Type")) (pr-str init))))
+
+  (testing "an app's own headers are carried, and win over the default"
+    ;; a token is STATE, not schema — it cannot be derived from an endpoint
+    ;; declaration, so the shape has to carry headers or an authenticated app
+    ;; falls straight back to writing its own fetch
+    (let [init (webapp/request-init {:webapp/path    "/api/me"
+                                     :webapp/headers {"Authorization" "Bearer t"}})]
+      (is (= "Bearer t" (get (:headers init) "Authorization")) (pr-str init)))
+    (let [init (webapp/request-init {:webapp/method  :post
+                                     :webapp/path    "/api/upload"
+                                     :webapp/body    "raw"
+                                     :webapp/headers {"Content-Type" "text/plain"}})]
+      (is (= "text/plain" (get (:headers init) "Content-Type"))
+          (str "a declared content type must win, or an app can never send"
+               " anything but json: " (pr-str init)))))
+
+  (testing "a body of FALSE or nil are different requests"
+    ;; the nil-pun this framework keeps removing, in the one place it would
+    ;; silently drop a value: `false` is a body somebody meant to send
+    (is (= :json (:encode (webapp/request-init {:webapp/path "/x" :webapp/body false}))))
+    (is (= :none (:encode (webapp/request-init {:webapp/path "/x" :webapp/body nil})))))
+
+  (testing "a content-type header is reduced to the MEDIA TYPE a decoder is keyed by"
+    ;; the browser answers `application/json; charset=utf-8`, and an exact
+    ;; lookup on that misses — so the normalisation is here rather than being a
+    ;; string-split in the namespace nothing can test
+    (is (= "application/json" (webapp/media-type "application/json; charset=utf-8")))
+    (is (= "application/json" (webapp/media-type "APPLICATION/JSON")))
+    (is (= "text/csv" (webapp/media-type "  text/csv  ")))
+    (is (nil? (webapp/media-type nil))
+        "an answer with no content-type has no media type — not an empty one")
+    (is (nil? (webapp/media-type "")))))
+
+(deftest a-RESPONSE-becomes-an-answer-or-a-failure-here-not-in-the-browser
+  ;; The bug this closes is the one every hand-written `fetch` has on its first
+  ;; day: `fetch` only rejects on a NETWORK error, so a 500 resolves happily and
+  ;; the screen renders the error page's body as if it were data. The check that
+  ;; prevents it is `(<= 200 status 299)` — a branch, in the namespace that may
+  ;; not have one.
+  ;;
+  ;; So the status decision is here, and the shim looks the callback up by the
+  ;; keyword this returns.
+  (testing "a 2xx is an answer, and the value passes through untouched"
+    (is (= [:ok {:name "Anvil"}] (webapp/response-outcome 200 {:name "Anvil"})))
+    (is (= [:ok nil] (webapp/response-outcome 204 nil)))
+    (is (= [:ok false] (webapp/response-outcome 200 false))
+        "a body of false is an answer, not an absence"))
+
+  (testing "anything else is a FAILURE, and the message names the status"
+    ;; a reader looking at the failure pane needs to tell 404 from 500 — one is
+    ;; a url that does not exist and the other is a server that broke
+    (let [[kind message] (webapp/response-outcome 404 nil)]
+      (is (= :failed kind))
+      (is (re-find #"404" message) message))
+    (is (= :failed (first (webapp/response-outcome 500 {:error "boom"})))))
+
+  (testing "and a server that SAID what went wrong has that carried through"
+    ;; slopp's own endpoints answer a map with an explanation, and dropping it
+    ;; for a bare status code is throwing away the only useful half
+    (let [[_ message] (webapp/response-outcome 422 {:error "name is required"})]
+      (is (re-find #"name is required" message) message))
+    (let [[_ message] (webapp/response-outcome 500 {:message "upstream timeout"})]
+      (is (re-find #"upstream timeout" message) message))
+    (let [[_ message] (webapp/response-outcome 503 "Service Unavailable")]
+      (is (re-find #"Service Unavailable" message) message))))

@@ -542,10 +542,9 @@
                           [:webapp/state :any]
                           [:webapp/base {:optional true} :string]
                           [:webapp/routes :any]
-                          [:webapp/fetch :any]
+                          [:webapp/call :any]
                           [:webapp/render :any]
-                          [:webapp/push-url! :any]
-                          [:webapp/derive {:optional true} :any]]
+                          [:webapp/push-url! :any]]
                     :string :boolean]
                    :any]}
   navigate!
@@ -558,12 +557,25 @@
   the slow-response race, which in a real browser is a heisenbug you reproduce
   by throttling the network.
 
-  **The screen's own data is the `:main` load**, run through [[load!]] like any
+  **The SCREEN says what to fetch.** A route row's screen carries `:request`, a
+  pure `(fn [params] -> request | nil)`, so which call a url makes is decided in
+  `:cljc` where a test can read it, and `:webapp/call` is left with nothing but
+  performing. What that replaced was an app-wide `:webapp/fetch` receiving the
+  screen and casing on it — the three-place keyword agreement the route table
+  removed, one seam along.
+
+  **A nil request DECLINES**, the same channel [[perform!]] uses: a screen with
+  nothing to ask for starts no load at all, so `:main` stays `:absent` and
+  [[derived-view]] renders the screen rather than a spinner that never ends. The
+  render happens HERE in that case and inside [[load!]] otherwise, so exactly
+  one render shows the new address and it is never the empty pre-load flash.
+
+  **The screen's data is the `:main` load**, run through [[load!]] like any
   other, so the machinery is one implementation rather than one for the loop and
   one for everybody else. That was not true of the first version, and what it
   cost is written up in `load!`.
 
-  **`:webapp/fetch` takes CALLBACKS rather than returning a promise, and the
+  **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
   reason travels with the decision because it reads as arbitrary style
   otherwise.** A promise is not a thing the JVM oracle has. A loop that could
   only run in a browser would put the whole headless exercise back where it
@@ -571,21 +583,22 @@
   whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
   is for.
 
-  **`:webapp/derive` is applied inside the freshness guard, not inside the
-  fetch.** The two read as equivalent and are not: the fetch runs before
-  anything knows whether the answer is still wanted, so deriving there pays for
-  every abandoned load."
-  [{:webapp/keys [state base routes fetch render push-url! derive
+  **The screen's `:derive` is applied inside the freshness guard, not inside the
+  call.** The two read as equivalent and are not: the call runs before anything
+  knows whether the answer is still wanted, so deriving there pays for every
+  abandoned load."
+  [{:webapp/keys [state base routes call render push-url!
                   address-keys session-loads] :as app}
    path push?]
   (when push? (push-url! (prefixed base path)))
   (swap! state arrive path (match-route routes path) address-keys session-loads)
-  (render @state)
-  (when (:screen @state)
-    (let [{:keys [screen params]} @state]
+  (let [{:keys [screen params]} @state
+        request (when-let [f (:request screen)] (f params))]
+    (if request
       (load! app :main
-             (fn [ok err] (fetch screen params ok err))
-             (fn [value] (if derive (derive screen value) value))))))
+             (fn [ok err] (call request ok err))
+             (or (:derive screen) identity))
+      (render @state))))
 
 (defn- navigate-for!
   "The driver's `:navigate`, partial'd over `app`.
@@ -848,216 +861,15 @@
     (let [screen (:screen state)
           inner  (if screen
                    (case (load-status state :main)
-                     :ready  (screen state)
-                     :failed (failed state)
+                     ;; :absent is the SCREEN, not a spinner: nothing was ever
+                     ;; asked for, which is a screen that declared no :request
+                     ;; or one whose :request declined. A spinner there would
+                     ;; never end
+                     (:absent :ready) ((:render screen) state)
+                     :failed          (failed state)
                      (loading state))
                    (not-found state))]
       (prefix-links base routes (chrome state inner)))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
-                   [:cat [:map
-                          [:webapp/state :any]
-                          [:webapp/routes :any]]]
-                   [:map [:webapp/state :any]]]}
-  wiring
-  "An application declared as DATA, checked and filled in — the one thing both
-  the browser entry and the headless driver are derived FROM.
-
-  Required, because nothing sensible happens without them:
-
-  - `:webapp/state` — the app's own atom. ONE atom rendered by ONE pure
-    function, which is what makes every screen reproducible from a map.
-  - `:webapp/routes` — a TABLE of `[pattern screen]` rows,
-    `[[\"/things\" things] [\"/things/:id\" thing]]`. Not a function, and that is
-    the difference between routing an app can DESCRIBE and routing only it can
-    perform: a function answers when called, with a path, at runtime, so nothing
-    can list an app's screens, join a link to one, or compare this table to the
-    paths the server answers for. [[match-route]] does the matching, on the same
-    grammar as the server's router. A path no row matches is a real answer, and
-    it is nil.
-  DERIVED, and refused if declared: `:webapp/view`. A route row names the screen
-  that renders it, so the view is those screens plus the app's chrome, composed
-  here. What that removes is a keyword agreeing in THREE places — routes
-  returned `:things`, the view cased on it, fetch received it — with nothing
-  checking any of the three.
-
-  Optional, defaulted here so no caller has to nil-check a plug-in:
-  `:webapp/chrome` (`(fn [state inner] hiccup)`, the layout around a screen;
-  identity by default).
-
-  Three STATE SCREENS, all `(fn [state] hiccup)` and all defaulted, for the
-  three moments a screen cannot render against: `:webapp/not-found` (no row
-  matched), `:webapp/loading` (the `:main` load is out) and `:webapp/failed` (it
-  failed). Defaulted rather than left blank because slopp knows which state it
-  is in, and a blank pane is indistinguishable from a screen whose content is
-  empty. Declaring one replaces the copy; deciding WHERE it sits is chrome's,
-  and [[derived-view]] says why that line falls there.
-
-  Also optional: `:webapp/base` (mount prefix, `\"\"`), `:webapp/fetch` (a
-  screen's data; answers nil when a screen needs none), `:webapp/render` and
-  `:webapp/push-url!` (no-ops headless, `js/…` in a page), plus
-  `:webapp/derive`, `:webapp/call`, `:webapp/act`, `:webapp/actions`,
-  `:webapp/request-for`, `:webapp/url-for`, `:webapp/leave!` and `:webapp/boot`.
-
-  `:webapp/leave!` is the third kind of action's effect — a full page load, for
-  a destination that is not a client route (a different mount point, so a
-  different app). Like `:webapp/render` and `:webapp/push-url!` it is `js/…` in
-  a page and a no-op headless, and like them the app never writes it: the
-  browser entry supplies it.
-
-  **Namespaced keys, like `slopp.cli`'s context and every `:web/*` marker.** An
-  unqualified `:state` in a map an app also puts its own keys in is the nil-pun
-  waiting to happen, and this map crosses a framework boundary where the reader
-  cannot see what produced it.
-
-  **It REFUSES at the constructor, naming the key.** A page that cannot open is
-  measured to die a screen later as something unrecognisable — a missing state
-  as `Cannot invoke Future.get()`, a typo'd `:vew` as a BLANK PAGE, which reads
-  as a bug in an app that was never wired. The mistake is made here, so here is
-  where it is named.
-
-  **What it does NOT check is that `:webapp/state` is an ATOM**, and that is the
-  `slopp.lang` lesson rather than an omission: asking what a thing IS differs by
-  platform, D3 denies the reader conditional that would branch, and this
-  namespace compiles to both. So the kind check lives in `slopp.web.screen/open!`,
-  which is `:clj` and can ask — one platform down, where the answer exists."
-  [app]
-  (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/chrome
-                  :webapp/not-found :webapp/loading :webapp/failed
-                  :webapp/fetch :webapp/render :webapp/push-url! :webapp/derive
-                  :webapp/call :webapp/request-for :webapp/act :webapp/actions
-                  :webapp/address-keys :webapp/session-loads :webapp/boot
-                  :webapp/url-for :webapp/leave!}
-        ;; `:webapp/view` is neither known nor unknown — it is DERIVED, and has
-        ;; its own refusal below naming what replaced it. Reported here it would
-        ;; read as a typo, which is the least useful thing to tell someone who
-        ;; wrote the key this framework asked for until yesterday
-        unknown (remove (conj known :webapp/view) (keys app))
-        listed  (fn [ks] (apply str (interpose ", " (map pr-str (sort-by str ks)))))]
-    (when (seq unknown)
-      (throw (ex-info (str "unknown wiring key" (when (next unknown) "s") " "
-                           (listed unknown) " — an app declares " (listed known)
-                           ". (A typo here used to render a BLANK page; refusing"
-                           " is the favour.)")
-                      {:webapp/unknown-key (vec unknown)})))
-    (doseq [k [:webapp/state :webapp/routes]]
-      (when-not (contains? app k)
-        (throw (ex-info (str "an app needs " k
-                             (case k
-                               :webapp/state  " — its OWN atom, so what a handler changes is what the view re-reads"
-                               :webapp/routes " — a table of [pattern screen] rows; without one no path means anything"))
-                        {:webapp/missing-key k}))))
-    ;; :webapp/view is DERIVED and no longer an app's to write. A hand-written
-    ;; view is precisely what made `:screen` a keyword agreeing in three places
-    ;; — routes returned it, the view cased on it, fetch received it — with
-    ;; nothing checking any of the three.
-    (when (contains? app :webapp/view)
-      (throw (ex-info (str ":webapp/view is DERIVED now — a route row points at"
-                           " the screen fn itself, so there is no (case (:screen"
-                           " s) …) left to write. Declare :webapp/chrome"
-                           " (fn [state inner] hiccup) for the layout around a"
-                           " screen, and :webapp/not-found (fn [state] hiccup)"
-                           " for a path no row matches.")
-                      {:webapp/derived-key :webapp/view})))
-    ;; A TABLE, never a function, and the refusal carries the migration because
-    ;; there is no shim behind it. A function answers only when called, with a
-    ;; path, at runtime — so nothing can list an app's screens, join a link to
-    ;; one, or compare this table to the prefixes the server answers for. Every
-    ;; report and gate that exists for `^{:web/path …}` was impossible on this
-    ;; side for exactly that reason.
-    (when-not (sequential? (:webapp/routes app))
-      (throw (ex-info (str ":webapp/routes is a declared TABLE, not a function —"
-                           " [[\"/things\" things-screen] [\"/things/:id\" thing-screen]]."
-                           " A function answers only when called, so nothing could"
-                           " list this app's screens, join a link to one, or check"
-                           " that the server serves the paths the browser routes."
-                           " Got " (pr-str (type (:webapp/routes app))) ".")
-                      {:webapp/routes-not-a-table true})))
-    ;; A row points at the SCREEN FUNCTION, and the ones refused here are the
-    ;; ones that would not fail: a keyword, symbol, map, set and vector are all
-    ;; `ifn?`, so they call cleanly and answer nil — a blank pane on a route
-    ;; that MATCHED, which `:webapp/not-found` cannot cover because nothing went
-    ;; wrong. `fn?` alone would be too narrow: a VAR is the readable way to
-    ;; write a row and is not `fn?`.
-    (doseq [[pattern target] (:webapp/routes app)]
-      (when (or (not (ifn? target))
-                (keyword? target) (symbol? target)
-                (map? target) (set? target) (vector? target))
-        (throw (ex-info (str "the route " (pr-str pattern) " points at "
-                             (pr-str target) ", which is not a SCREEN — a row"
-                             " names the function that renders it,"
-                             " (fn [state] hiccup). A keyword or a map is"
-                             " callable and answers nil, so this route would"
-                             " match and then render a blank page.")
-                        {:webapp/not-a-screen pattern}))))
-    (-> (merge {:webapp/base         ""
-                :webapp/fetch        (fn [_screen _params ok _err] (ok nil))
-                :webapp/render       (fn [_state] nil)
-                :webapp/push-url!    (fn [_url] nil)
-            ;; the layout around a screen. Identity by default — an app with no
-            ;; chrome is one whose screens are the whole page, which is ordinary
-            :webapp/chrome       (fn [_state inner] inner)
-            ;; slopp KNOWS when no row matched, so rendering nothing there would
-            ;; be a choice rather than an accident — and a blank pane at a
-            ;; plausible url is indistinguishable from a screen whose content is
-            ;; empty, which is the SPA failure this capability keeps naming.
-            ;; Deliberately plain and obviously the framework's: an app that has
-            ;; not thought about it gets something honest, not something pretty
-            :webapp/not-found    (fn [state]
-                                   [:div
-                                    [:h1 "Not found"]
-                                    [:p (str "No screen is routed to "
-                                             (pr-str (:path state)) ".")]])
-            ;; the CONTENT of the two states a screen cannot render against.
-            ;; Defaulted for `not-found`'s reason and placed by chrome for a
-            ;; reason `not-found` does not have — see [[derived-view]]. Plain and
-            ;; obviously the framework's: the one real app wrote almost exactly
-            ;; these by hand, which is the evidence that defaulting them is not
-            ;; picking somebody's spinner
-            :webapp/loading      (fn [_state] [:p [:small "Loading…"]])
-            :webapp/failed       (fn [state]
-                                   [:div
-                                    [:h1 "Could not load"]
-                                    [:p (str (:error (:main (:loads state))))]])
-                ;; a headless drive cannot LEAVE — there is no page to hand back
-                ;; to — so the default is the no-op `push-url!` gets, and a test
-                ;; that cares about the switcher supplies a recorder
-                :webapp/leave!       (fn [_url] nil)
-                ;; the entry point runs at page load and every app has one, even
-                ;; if it is "nothing to start". A function rather than nil, or
-                ;; the driver, the browser entry and whatever comes next each
-                ;; write the same `or` — and one of them writes it in a place
-                ;; nothing checks
-                :webapp/boot         identity
-                ;; most ad-hoc call panels are route-scoped, and a framework
-                ;; should be right without configuration — but it is a SET so an
-                ;; app whose effect panel spans screens can say #{}, and one
-                ;; with its own address-scoped keys can name them
-                :webapp/address-keys #{:call}
-                ;; nothing outlives the screen unless the app says so. The
-                ;; conservative default, because a load that wrongly survives
-                ;; shows the previous screen's answer under a new url — while
-                ;; one that wrongly dies is only re-fetched
-                :webapp/session-loads #{}}
-               app)
-        ;; a DECLARED nil is not the same as an absent key, and `merge` keeps
-        ;; it. The mount point arrives from a DOM attribute the browser answers
-        ;; nil for when it is simply absent — which is every app served at the
-        ;; root — and nil here prefixes every pushed url with the string "null".
-        ;; Normalised where the app is constructed, so the shim reads the
-        ;; attribute and interprets nothing
-        ;; a DECLARED nil is not the same as an absent key, and `merge` keeps
-        ;; it. The mount point arrives from a DOM attribute the browser answers
-        ;; nil for when it is simply absent — which is every app served at the
-        ;; root — and nil here prefixes every pushed url with the string "null".
-        ;; Normalised where the app is constructed, so the shim reads the
-        ;; attribute and interprets nothing
-        (update :webapp/base #(or % ""))
-        ;; the VIEW is derived last, from the parts above, and put where the
-        ;; driver and the browser entry both already look for it. One producer:
-        ;; a headless drive and a real page render the same function
-        (as-> a (assoc a :webapp/view (derived-view a))))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -1112,3 +924,408 @@
                    (str/join "&"))]
     (str (str/join "/" parts)
          (when (seq q) (str "?" q)))))
+
+(defn as-screen
+  "The screen VALUE a route row names — a map with `:render`, whatever the row
+  was written as.
+
+  Two ways to write a screen, and the short one is not the lesser one:
+
+  - `(fn [state] hiccup)` — the whole declaration for a screen whose data the
+    app already has.
+  - `{:render (fn [state] hiccup)
+      :request (fn [params] -> request | nil)
+      :derive  (fn [response] -> value)}` — a screen that asks for something.
+
+  `:request` is the seam this exists for. It is PURE and it is `:cljc`, so
+  which call a screen makes is a fact an in-image test reads rather than a
+  `js/fetch` in a namespace whose only verification is that it compiled. Its
+  answer goes to [[request-url]] and then to `:webapp/call`, which the browser
+  entry supplies — so an app that opts into this writes no ClojureScript to
+  fetch its own data. A nil request DECLINES, the same channel [[perform!]]
+  uses: a screen that has nothing to ask for right now waits for nothing.
+
+  `:derive` shapes that screen's own answer. It replaced an app-wide
+  `:webapp/derive` that received the screen and cased on it — a function asking
+  \"which screen is this?\" to answer something the screen already knew.
+
+  **Normalised HERE, once.** A view, a navigation and a surface report would
+  otherwise each write the same `(if (map? target) …)`, and the one that forgot
+  would pass every fixture written as a bare fn.
+
+  Two refusals, and the second is the one that would not otherwise fail. A map
+  with no `:render` is a route that matches and renders nil, because a map is
+  `ifn?`. A map with a key this framework does not read — `:reqeust` — is a
+  screen that renders with no data forever, at a url that looks right, with
+  nothing anywhere saying why."
+  [pattern target]
+  (let [known #{:render :request :derive}]
+    (cond
+      (map? target)
+      (let [unknown (remove known (keys target))]
+        (when-not (ifn? (:render target))
+          (throw (ex-info (str "the route " (pr-str pattern) " names a screen with"
+                               " no :render — a screen map is {:render (fn [state]"
+                               " hiccup)}, plus :request and :derive if it asks for"
+                               " anything. Without :render this route matches and"
+                               " draws nothing.")
+                          {:webapp/not-a-screen pattern})))
+        (when (seq unknown)
+          (throw (ex-info (str "the screen at " (pr-str pattern) " declares "
+                               (apply str (interpose ", " (map pr-str (sort-by str unknown))))
+                               " — a screen reads :render, :request and :derive."
+                               " An unread key is not a crash: it is a screen that"
+                               " renders with no data forever, at a url that"
+                               " matched.")
+                          {:webapp/unknown-key (vec unknown) :webapp/pattern pattern})))
+        target)
+
+      ;; a keyword, symbol, set and vector are all `ifn?`, so they call cleanly
+      ;; and answer nil — a blank pane on a route that MATCHED, which
+      ;; `:webapp/not-found` cannot cover because nothing went wrong. `fn?`
+      ;; alone would be too narrow: a VAR is the readable way to write a row
+      ;; and is not `fn?`
+      (or (not (ifn? target))
+          (keyword? target) (symbol? target) (set? target) (vector? target))
+      (throw (ex-info (str "the route " (pr-str pattern) " points at "
+                           (pr-str target) ", which is not a SCREEN — a row names"
+                           " (fn [state] hiccup), or {:render … :request …} for a"
+                           " screen that asks for its own data. A keyword is"
+                           " callable and answers nil, so this route would match"
+                           " and then render a blank page.")
+                      {:webapp/not-a-screen pattern}))
+
+      :else {:render target})))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
+                   [:cat [:map
+                          [:webapp/state :any]
+                          [:webapp/routes :any]]]
+                   [:map [:webapp/state :any]]]}
+  wiring
+  "An application declared as DATA, checked and filled in — the one thing both
+  the browser entry and the headless driver are derived FROM.
+
+  Required, because nothing sensible happens without them:
+
+  - `:webapp/state` — the app's own atom. ONE atom rendered by ONE pure
+    function, which is what makes every screen reproducible from a map.
+  - `:webapp/routes` — a TABLE of `[pattern screen]` rows,
+    `[[\"/things\" things] [\"/things/:id\" thing]]`. Not a function, and that is
+    the difference between routing an app can DESCRIBE and routing only it can
+    perform: a function answers when called, with a path, at runtime, so nothing
+    can list an app's screens, join a link to one, or compare this table to the
+    paths the server answers for. [[match-route]] does the matching, on the same
+    grammar as the server's router. A path no row matches is a real answer, and
+    it is nil.
+
+  **The table is ADDRESSES, not screens.** A row's screen is not unique and a
+  screen's row is not unique — one screen answers at several urls the moment an
+  app has a lens bar, a print view, or a detail page that also takes an optional
+  segment. Every row is normalised to a screen VALUE here by [[as-screen]], and
+  anything counting one against the other is counting the wrong thing.
+
+  DERIVED, and refused if declared: `:webapp/view`. A route row names the screen
+  that renders it, so the view is those screens plus the app's chrome, composed
+  here. What that removes is a keyword agreeing in THREE places — routes
+  returned `:things`, the view cased on it, fetch received it — with nothing
+  checking any of the three.
+
+  RETIRED, and refused with the migration: `:webapp/fetch` and `:webapp/derive`.
+  Both were handed the screen and had to case on it, which is that same
+  three-place agreement moved one seam along. A screen names its own `:request`
+  and its own `:derive` now; `:webapp/call` performs what the request names, and
+  the browser entry supplies it — so an app fetching its own data writes no
+  ClojureScript.
+
+  Optional, defaulted here so no caller has to nil-check a plug-in:
+  `:webapp/chrome` (`(fn [state inner] hiccup)`, the layout around a screen;
+  identity by default).
+
+  Three STATE SCREENS, all `(fn [state] hiccup)` and all defaulted, for the
+  three moments a screen cannot render against: `:webapp/not-found` (no row
+  matched), `:webapp/loading` (the `:main` load is out) and `:webapp/failed` (it
+  failed). Defaulted rather than left blank because slopp knows which state it
+  is in, and a blank pane is indistinguishable from a screen whose content is
+  empty. Declaring one replaces the copy; deciding WHERE it sits is chrome's,
+  and [[derived-view]] says why that line falls there.
+
+  Also optional: `:webapp/base` (mount prefix, `\"\"`), `:webapp/call` (the ONE
+  performer — `js/fetch` in a page, a canned answer headless), `:webapp/render`
+  and `:webapp/push-url!` (no-ops headless, `js/…` in a page), plus
+  `:webapp/act`, `:webapp/actions`, `:webapp/request-for`, `:webapp/url-for`,
+  `:webapp/leave!` and `:webapp/boot`.
+
+  `:webapp/leave!` is the third kind of action's effect — a full page load, for
+  a destination that is not a client route (a different mount point, so a
+  different app). Like `:webapp/render` and `:webapp/push-url!` it is `js/…` in
+  a page and a no-op headless, and like them the app never writes it: the
+  browser entry supplies it.
+
+  **Namespaced keys, like `slopp.cli`'s context and every `:web/*` marker.** An
+  unqualified `:state` in a map an app also puts its own keys in is the nil-pun
+  waiting to happen, and this map crosses a framework boundary where the reader
+  cannot see what produced it. A SCREEN map is the deliberate exception and its
+  keys are bare: nothing of the app's goes in it, [[as-screen]] refuses anything
+  slopp does not read, and that refusal is what makes the exception safe rather
+  than hoped.
+
+  **It REFUSES at the constructor, naming the key.** A page that cannot open is
+  measured to die a screen later as something unrecognisable — a missing state
+  as `Cannot invoke Future.get()`, a typo'd `:vew` as a BLANK PAGE, which reads
+  as a bug in an app that was never wired. The mistake is made here, so here is
+  where it is named.
+
+  **What it does NOT check is that `:webapp/state` is an ATOM**, and that is the
+  `slopp.lang` lesson rather than an omission: asking what a thing IS differs by
+  platform, D3 denies the reader conditional that would branch, and this
+  namespace compiles to both. So the kind check lives in `slopp.web.screen/open!`,
+  which is `:clj` and can ask — one platform down, where the answer exists."
+  [app]
+  (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/chrome
+                  :webapp/not-found :webapp/loading :webapp/failed
+                  :webapp/render :webapp/push-url! :webapp/call
+                  :webapp/request-for :webapp/act :webapp/actions
+                  :webapp/address-keys :webapp/session-loads :webapp/boot
+                  :webapp/url-for :webapp/leave!}
+        ;; RETIRED, each carrying its own migration rather than being reported
+        ;; as a typo. Both received the SCREEN and cased on it
+        retired {:webapp/fetch  (str "a screen names its own :request now —"
+                                     " [\"/things/:id\" {:render thing :request (fn"
+                                     " [params] {:webapp/path \"/api/things/:id\""
+                                     " :webapp/path-params {:id (:id params)}})}]."
+                                     " That request is pure and :cljc, so WHICH call"
+                                     " a screen makes is a fact a test reads;"
+                                     " :webapp/call performs it, and the browser"
+                                     " entry supplies that.")
+                 :webapp/derive (str "a screen shapes its own answer now — {:render"
+                                     " … :request … :derive (fn [response] value)}."
+                                     " An app-wide derive could only ever be a case"
+                                     " on which screen was asking, to answer"
+                                     " something the screen already knew.")}
+        ;; `:webapp/view` is neither known nor unknown — it is DERIVED, and has
+        ;; its own refusal below naming what replaced it. Reported here it would
+        ;; read as a typo, which is the least useful thing to tell someone who
+        ;; wrote the key this framework asked for until yesterday. The retired
+        ;; pair is held out for the same reason
+        unknown (remove (into (conj known :webapp/view) (keys retired)) (keys app))
+        listed  (fn [ks] (apply str (interpose ", " (map pr-str (sort-by str ks)))))]
+    (when (seq unknown)
+      (throw (ex-info (str "unknown wiring key" (when (next unknown) "s") " "
+                           (listed unknown) " — an app declares " (listed known)
+                           ". (A typo here used to render a BLANK page; refusing"
+                           " is the favour.)")
+                      {:webapp/unknown-key (vec unknown)})))
+    (doseq [k [:webapp/state :webapp/routes]]
+      (when-not (contains? app k)
+        (throw (ex-info (str "an app needs " k
+                             (case k
+                               :webapp/state  " — its OWN atom, so what a handler changes is what the view re-reads"
+                               :webapp/routes " — a table of [pattern screen] rows; without one no path means anything"))
+                        {:webapp/missing-key k}))))
+    ;; :webapp/view is DERIVED and no longer an app's to write. A hand-written
+    ;; view is precisely what made `:screen` a keyword agreeing in three places
+    ;; — routes returned it, the view cased on it, fetch received it — with
+    ;; nothing checking any of the three.
+    (when (contains? app :webapp/view)
+      (throw (ex-info (str ":webapp/view is DERIVED now — a route row points at"
+                           " the screen fn itself, so there is no (case (:screen"
+                           " s) …) left to write. Declare :webapp/chrome"
+                           " (fn [state inner] hiccup) for the layout around a"
+                           " screen, and :webapp/not-found (fn [state] hiccup)"
+                           " for a path no row matches.")
+                      {:webapp/derived-key :webapp/view})))
+    (doseq [[k why] retired]
+      (when (contains? app k)
+        (throw (ex-info (str k " is retired — " why)
+                        {:webapp/retired-key k}))))
+    ;; A TABLE, never a function, and the refusal carries the migration because
+    ;; there is no shim behind it. A function answers only when called, with a
+    ;; path, at runtime — so nothing can list an app's screens, join a link to
+    ;; one, or compare this table to the prefixes the server answers for. Every
+    ;; report and gate that exists for `^{:web/path …}` was impossible on this
+    ;; side for exactly that reason.
+    (when-not (sequential? (:webapp/routes app))
+      (throw (ex-info (str ":webapp/routes is a declared TABLE, not a function —"
+                           " [[\"/things\" things-screen] [\"/things/:id\" thing-screen]]."
+                           " A function answers only when called, so nothing could"
+                           " list this app's screens, join a link to one, or check"
+                           " that the server serves the paths the browser routes."
+                           " Got " (pr-str (type (:webapp/routes app))) ".")
+                      {:webapp/routes-not-a-table true})))
+    (-> (merge {:webapp/base         ""
+                :webapp/render       (fn [_state] nil)
+                :webapp/push-url!    (fn [_url] nil)
+                ;; the ONE performer, and the default REFUSES rather than
+                ;; answering nothing. A screen that named a request and got
+                ;; silence would render its empty self forever, which is the
+                ;; failure this capability exists to make impossible
+                :webapp/call         (fn [request _ok _err]
+                                       (throw (ex-info (str "this app has no :webapp/call,"
+                                                            " and something asked for "
+                                                            (pr-str (:webapp/path request))
+                                                            " — declare (fn [request ok err])."
+                                                            " In a page the browser entry"
+                                                            " supplies it; headless it is"
+                                                            " where a test says what the"
+                                                            " server answered.")
+                                                       {:webapp/missing-key :webapp/call
+                                                        :request request})))
+                ;; the layout around a screen. Identity by default — an app with no
+                ;; chrome is one whose screens are the whole page, which is ordinary
+                :webapp/chrome       (fn [_state inner] inner)
+                ;; slopp KNOWS when no row matched, so rendering nothing there would
+                ;; be a choice rather than an accident — and a blank pane at a
+                ;; plausible url is indistinguishable from a screen whose content is
+                ;; empty, which is the failure this capability keeps naming.
+                ;; Deliberately plain and obviously the framework's: an app that has
+                ;; not thought about it gets something honest, not something pretty
+                :webapp/not-found    (fn [state]
+                                       [:div
+                                        [:h1 "Not found"]
+                                        [:p (str "No screen is routed to "
+                                                 (pr-str (:path state)) ".")]])
+                ;; the CONTENT of the two states a screen cannot render against.
+                ;; Defaulted for `not-found`'s reason and placed by chrome for a
+                ;; reason `not-found` does not have — see [[derived-view]]. Plain and
+                ;; obviously the framework's: the one real app wrote almost exactly
+                ;; these by hand, which is the evidence that defaulting them is not
+                ;; picking somebody's spinner
+                :webapp/loading      (fn [_state] [:p [:small "Loading…"]])
+                :webapp/failed       (fn [state]
+                                       [:div
+                                        [:h1 "Could not load"]
+                                        [:p (str (:error (:main (:loads state))))]])
+                ;; a headless drive cannot LEAVE — there is no page to hand back
+                ;; to — so the default is the no-op `push-url!` gets, and a test
+                ;; that cares about the switcher supplies a recorder
+                :webapp/leave!       (fn [_url] nil)
+                ;; the entry point runs at page load and every app has one, even
+                ;; if it is "nothing to start". A function rather than nil, or
+                ;; the driver, the browser entry and whatever comes next each
+                ;; write the same `or` — and one of them writes it in a place
+                ;; nothing checks
+                :webapp/boot         identity
+                ;; most ad-hoc call panels are route-scoped, and a framework
+                ;; should be right without configuration — but it is a SET so an
+                ;; app whose effect panel spans screens can say #{}, and one
+                ;; with its own address-scoped keys can name them
+                :webapp/address-keys #{:call}
+                ;; nothing outlives the screen unless the app says so. The
+                ;; conservative default, because a load that wrongly survives
+                ;; shows the previous screen's answer under a new url — while
+                ;; one that wrongly dies is only re-fetched
+                :webapp/session-loads #{}}
+               app)
+        ;; a DECLARED nil is not the same as an absent key, and `merge` keeps
+        ;; it. The mount point arrives from a DOM attribute the browser answers
+        ;; nil for when it is simply absent — which is every app served at the
+        ;; root — and nil here prefixes every pushed url with the string "null".
+        ;; Normalised where the app is constructed, so the shim reads the
+        ;; attribute and interprets nothing
+        (update :webapp/base #(or % ""))
+        ;; every row's target becomes a screen VALUE here, so a view, a
+        ;; navigation and a surface report never ask which shape it was written
+        ;; in — and the one that forgot to ask would have passed every fixture
+        ;; written as a bare fn
+        (update :webapp/routes
+                (fn [rows] (mapv (fn [[pattern target]]
+                                   [pattern (as-screen pattern target)])
+                                 rows)))
+        ;; the VIEW is derived last, from the parts above, and put where the
+        ;; driver and the browser entry both already look for it. One producer:
+        ;; a headless drive and a real page render the same function
+        (as-> a (assoc a :webapp/view (derived-view a))))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/method {:optional true} [:maybe :keyword]]
+                          [:webapp/headers {:optional true} [:maybe [:map-of :string :string]]]
+                          [:webapp/body {:optional true} :any]]]
+                   [:map [:method :string] [:headers [:map-of :string :string]]
+                    [:encode :keyword]]]}
+  request-init
+  "Everything `fetch` needs about a request except its URL — as DATA, with the
+  encoder NAMED rather than run.
+
+  The browser shim may not branch, because a namespace whose only verification
+  is that it compiled must not be where a decision lives. So every judgement
+  moves here: the method and its spelling, the headers, and whether there is a
+  body to encode at all. What the shim does with `:encode` is one `get` into a
+  map of encoders — the choice was already made, in a function this test suite
+  drives.
+
+  `:encode` is `:none` when there is no body, and it is not decoration.
+  `fetch` throws on a GET carrying one, so a request that quietly acquired an
+  empty body would stop working rather than send something harmless.
+
+  **`false` is a body and `nil` is not**, which is the nil-pun this framework
+  keeps removing, in the one place it would silently drop a value somebody
+  meant to send.
+
+  **Headers are in the shape from the start**, rather than after the first app
+  needs them. A token is STATE and not schema — nothing about an endpoint
+  declaration can produce it — so an app without this key would fall straight
+  back to writing its own `fetch`, which is the whole thing being avoided. A
+  declared header WINS over the default content type, or an app could never
+  send anything but JSON."
+  [{:webapp/keys [method headers body]}]
+  (let [has-body? (some? body)]
+    {:method  (str/upper-case (name (or method :get)))
+     :headers ;; starts from {} so a request with no body and no declared headers
+     ;; still answers a MAP — `clj->js` on nil is null, and a caller reading
+     ;; (get (:headers init) …) would be asking a nil the same question
+     (merge {} (when has-body? {"Content-Type" "application/json"})
+                     headers)
+     :encode  (if has-body? :json :none)
+     :body    body}))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string]] [:maybe :string]]}
+  media-type
+  "The MEDIA TYPE inside a `Content-Type` header — `nil` for a header that is
+  absent or empty.
+
+  A browser answers `application/json; charset=utf-8`, so a decoder map keyed
+  by `\"application/json\"` misses on the string the response actually carries.
+  Taking the parameters off is a decision, small enough to look like none, and
+  it belongs on this side of the seam for the reason every other one does: in
+  the shim it would be a string-split nothing can run, and its failure mode is
+  every response falling through to the default decoder — which for JSON means
+  a screen rendering a string of JSON rather than the data in it.
+
+  `nil` rather than `\"\"` when there is no header, so a caller's `get` reaches
+  its default instead of matching an entry somebody keyed by the empty string."
+  [content-type]
+  (let [t (str/trim (str/lower-case (str content-type)))
+        t (str/trim (first (str/split t #";")))]
+    (when (seq t) t)))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []} [:cat :int :any] [:tuple :keyword :any]]}
+  response-outcome
+  "What a response IS — `[:ok value]` or `[:failed message]`.
+
+  **`fetch` rejects only on a NETWORK error.** A 500 resolves happily, so a
+  performer that hands every resolved response to the success callback renders
+  the error page's body as though it were data — the screen fills with
+  something, which is why it survives review. That check is `(<= 200 status
+  299)`, a branch, and the browser shim may not have one; so it is here, and
+  the shim looks its callback up by the keyword this returns.
+
+  **A server that SAID what went wrong keeps saying it.** slopp's own endpoints
+  answer a map with an explanation, and reducing that to a bare status code
+  throws away the only half a reader can act on. `:error` and `:message` are
+  the two keys worth knowing; a string body is carried as itself.
+
+  The status stays in the message either way, because 404 and 500 are different
+  problems — a url that does not exist against a server that broke — and the
+  failure pane is where somebody decides which one they are looking at."
+  [status value]
+  (if (<= 200 status 299)
+    [:ok value]
+    [:failed (let [said (or (:error value) (:message value)
+                            (when (string? value) value))]
+               (str "HTTP " status (when said (str " — " said))))]))

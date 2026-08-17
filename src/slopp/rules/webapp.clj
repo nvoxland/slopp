@@ -412,10 +412,23 @@
                                  (for [[nsx node] rows
                                        row  (get node :webapp/routes)
                                        :when (and (vector? row) (= 2 (count row))
-                                                  (string? (first row)))]
-                                   {:kind   :screen
-                                    :path   (first row)
-                                    :screen (qualify nsx (second row))})))
+                                                  (string? (first row)))
+                                       ;; a row's target is a bare render fn or a
+                                       ;; screen VALUE naming its own request.
+                                       ;; Reporting the map verbatim would answer
+                                       ;; neither question a reader has — what
+                                       ;; draws this, and what does it load
+                                       :let [target  (second row)
+                                             screen  (if (map? target) (:render target) target)
+                                             request (when (map? target) (:request target))]]
+                                   (cond-> {:kind :screen :path (first row)}
+                                     ;; absent when the map has no :render, which
+                                     ;; `wiring` refuses — but dropping the row
+                                     ;; would hide an ADDRESS this app declares,
+                                     ;; and the address is the half a server route
+                                     ;; has to answer for
+                                     screen  (assoc :screen (qualify nsx screen))
+                                     request (assoc :request (qualify nsx request))))))
           actions  (vec (sort-by :action
                                  (for [[_nsx node] rows
                                        [a decl] (get node :webapp/actions)

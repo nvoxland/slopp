@@ -80,6 +80,72 @@
   [event-data]
   (gobj/getValueByKeys (:replicant/dom-event event-data) "target" "value"))
 
+(def encoders
+  "How a request body becomes what `fetch` sends, keyed by the encoder
+  `slopp.webapp/request-init` NAMED.
+
+  A map rather than a `cond`, and the difference is the whole discipline: the
+  choice between these was made in `:cljc`, by a function an in-image test
+  drives, and what is left here is a `get`. `:none` answers `js/undefined`,
+  which is a `fetch` init with no body at all — a GET carrying even an empty
+  one throws."
+  {:json (fn [body] (js/JSON.stringify (clj->js body)))
+   :none (fn [_body] js/undefined)})
+
+(def decoders
+  "How a response body becomes a Clojure value, keyed by MEDIA TYPE —
+  `slopp.webapp/media-type` produces the key, so `application/json;
+  charset=utf-8` finds the JSON entry rather than falling through.
+
+  `::text` is the fallback, reached by `get`'s default argument rather than by
+  a test on the type. An answer with no `Content-Type` — a 204, most often — is
+  decoded as text and arrives as the empty string; that is a real limit rather
+  than a hidden one, and an app that must tell `\"\"` from nothing apart has a
+  screen-level question this seam cannot answer for it.
+
+  Each entry returns a PROMISE, because the browser's own body readers do."
+  {"application/json" (fn [response]
+                        (.then (.json response)
+                               (fn [data] (js->clj data :keywordize-keys true))))
+   ::text             (fn [response] (.text response))})
+
+(defn call!
+  "The `:webapp/call` a real page runs: `js/fetch`, and nothing else.
+
+  Every judgement it needs was made in `slopp.webapp`, which is `:cljc` and
+  driven by ordinary tests — the URL by `request-url`, the method, headers and
+  encoder by `request-init`, the decoder key by `media-type`, and whether the
+  answer is data or a failure by `response-outcome`. What is left here is one
+  `fetch` and three `get`s, which is why this namespace can be verified by
+  compiling alone without that being a claim it is correct.
+
+  **The failure this shape prevents is the one every hand-written `fetch` has
+  on its first day**: `fetch` rejects only on a NETWORK error, so a 500
+  RESOLVES, and a performer that passes every resolved response to the success
+  callback renders the error page's body as though it were data. The screen
+  fills with something, so it survives review. `response-outcome` is the check,
+  and it is on the side of the seam where a test can watch it fail.
+
+  A rejected promise — DNS, offline, CORS — is the other channel and reaches
+  `err` with the browser's own message."
+  [request ok err]
+  (let [init    (webapp/request-init request)
+        respond (fn [status]
+                  (fn [value]
+                    (let [[kind v] (webapp/response-outcome status value)]
+                      ((get {:ok ok :failed err} kind) v))))]
+    (-> (js/fetch (webapp/request-url request)
+                  #js {:method  (:method init)
+                       :headers (clj->js (:headers init))
+                       :body    ((get encoders (:encode init)) (:body init))})
+        (.then (fn [response]
+                 (-> ((get decoders
+                           (webapp/media-type (.get (.-headers response) "content-type"))
+                           (::text decoders))
+                      response)
+                     (.then (respond (.-status response))))))
+        (.catch (fn [e] (err (.-message e)))))))
+
 (defn ^:export
   ^{:unused-ok "the generated browser entry calls it, and that entry is a STRING
   built by slopp.build/webapp-launcher-source — so the only caller in existence
@@ -95,6 +161,7 @@
   | what an app used to write | who has it now |
   |---|---|
   | `replicant.dom/render` in a loop | `:webapp/render`, below |
+  | `js/fetch` for a screen's data  | [[call!]], via `:webapp/call` |
   | `history.pushState`             | `:webapp/push-url!` |
   | `location.assign`               | `:webapp/leave!` |
   | a click listener with `.closest` and `preventDefault` | [[click-data]] + `slopp.webapp/click!` |
@@ -136,7 +203,8 @@
                (merge declared
                       {:webapp/base      (.getAttribute el "data-base")
                        :webapp/push-url! (fn [url] (.pushState js/history nil "" url))
-                       :webapp/leave!    (fn [url] (.assign js/location url))}))
+                       :webapp/leave!    (fn [url] (.assign js/location url))
+                       :webapp/call      call!}))
         view  (:webapp/view wired)
         app   (assoc wired :webapp/render
                      (fn [state] (replicant/render el (view state))))]

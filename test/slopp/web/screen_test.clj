@@ -1314,13 +1314,13 @@
       ;; assertion that says so
       (web.screen/click! s "Anvil")
       (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s))
-      (is (= thing (:screen @state))))
+      (is (= thing (:render (:screen @state)))))
 
     (testing "a url outside the mount point routes nowhere"
       ;; `/things` is not a url under `/p/x`, and treating it as one would mean
       ;; guessing that a foreign path was meant to be ours
       (web.screen/visit! s "/things")
-      (is (= thing (:screen @state))
+      (is (= thing (:render (:screen @state)))
           "the app must not have moved for a url that was never its own"))))
 
 (deftest a-REALISTIC-browser-app-is-DRIVEN-with-nothing-reaching-for-the-platform
@@ -1334,7 +1334,7 @@
   ;; webapp's two worst bugs both lived.
   ;;
   ;; So the fixture is deliberately NOT minimal. It has what a real screen has —
-  ;; a table with captures, chrome with a nav rail, an async fetch, all three
+  ;; a table with captures, chrome with a nav rail, an async load, all three
   ;; kinds of action, a typed input, a link that must be prefixed — and if any
   ;; one of those still forced a browser, this is where it would show.
   ;;
@@ -1356,15 +1356,19 @@
         left    (atom [])
         nav     (fn [s] [:nav [:a {:href "/things"} "Things"]
                          [:span (str "at " (:path s))]])
-        things  (fn [s] [:ul (for [t (webapp/load-value s :main)]
-                               [:li [:a {:href (str "/things/" (:id t))} (:name t)]])])
-        thing   (fn [s] [:article
-                         [:h1 (str "Thing " (:id (:params s)))]
-                         [:input {:placeholder "note"
-                                  :value (:draft s)
-                                  :on {:input [:thing/typed]}}]
-                         [:button {:on {:click [:thing/save]}} "Save"]
-                         [:button {:on {:click [:project/switch "other"]}} "Switch"]])
+        things  {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
+                                         [:li [:a {:href (str "/things/" (:id t))} (:name t)]])])
+                 :request (fn [_params] {:webapp/method :get :webapp/path "/api/things"})}
+        thing   {:render  (fn [s] [:article
+                                   [:h1 (str "Thing " (:id (:params s)))]
+                                   [:input {:placeholder "note"
+                                            :value (:draft s)
+                                            :on {:input [:thing/typed]}}]
+                                   [:button {:on {:click [:thing/save]}} "Save"]
+                                   [:button {:on {:click [:project/switch "other"]}} "Switch"]])
+                 :request (fn [params] {:webapp/method      :get
+                                        :webapp/path        "/api/things/:id"
+                                        :webapp/path-params {:id (:id params)}})}
         app     (webapp/wiring
                  {:webapp/state       state
                   :webapp/base        "/p/demo"
@@ -1375,14 +1379,24 @@
                                        :thing/save     {:effectful? true}
                                        :project/switch {:leaves? true}}
                   :webapp/act         (fn [s _action v] (assoc s :draft v))
-                  :webapp/request-for (fn [s _a] {:method :put :body (:draft s)})
+                  :webapp/request-for (fn [s _a] {:webapp/method      :put
+                                                  :webapp/path        "/api/things/:id"
+                                                  :webapp/path-params {:id (:id (:params s))}
+                                                  :webapp/body        (:draft s)})
                   :webapp/url-for     (fn [_s a] (str "/p/" (second a)))
-                  :webapp/call        (fn [req ok _err] (swap! called conj req) (ok :saved))
-                  :webapp/leave!      (fn [u] (swap! left conj u))
-                  :webapp/fetch       (fn [_screen _params ok _err] (reset! pending ok))})
+                  ;; ONE performer, and it sees BOTH kinds of traffic: the load a
+                  ;; screen names and the request a control derives. That is the
+                  ;; seam `js/fetch` sits behind in a page, which is why there is
+                  ;; exactly one of it
+                  :webapp/call        (fn [request ok _err]
+                                        (swap! called conj request)
+                                        (if (= :put (:webapp/method request))
+                                          (ok :saved)
+                                          (reset! pending ok)))
+                  :webapp/leave!      (fn [u] (swap! left conj u))})
         s       (web.screen/open! (webapp/driver app))]
 
-    (testing "the loading state renders while the fetch is out, chrome and all"
+    (testing "the loading state renders while the load is out, chrome and all"
       (web.screen/visit! s "/p/demo/things")
       (is (re-find #"(?i)loading" (web.screen/text s)) (web.screen/text s))
       (is (re-find #"Things" (web.screen/text s))
@@ -1394,13 +1408,20 @@
 
     (testing "a link carries the mount point, and clicking it routes"
       (web.screen/click! s "Anvil")
-      ;; the new screen is :loading until ITS fetch answers — navigating runs
+      ;; the new screen is :loading until ITS request answers — navigating runs
       ;; the :main load again, and the framework will not call a screen against
       ;; data that has not arrived. Answering it here is what a server does
       (is (re-find #"(?i)loading" (web.screen/text s))
           "a screen must not render against the PREVIOUS screen's data")
       (@pending nil)
       (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "each screen asked for its OWN url, decided in :cljc"
+      ;; the half that used to live in a browser: WHICH endpoint a url calls.
+      ;; A request built by `js/fetch` is a string asserted nowhere; built by
+      ;; the screen it is this line
+      (is (= ["/api/things" "/api/things/42"] (mapv webapp/request-url @called))
+          (pr-str @called)))
 
     (testing "typing reaches the reducer as a SCALAR, with no event in sight"
       ;; the shape that used to force an app into :cljs — `(.. e -target -value)`
@@ -1411,7 +1432,14 @@
 
     (testing "an effectful control makes the request the app DERIVED"
       (web.screen/click! s "Save")
-      (is (= [{:method :put :body "hello"}] @called) (pr-str @called)))
+      (is (= {:webapp/method      :put
+              :webapp/path        "/api/things/:id"
+              :webapp/path-params {:id "42"}
+              :webapp/body        "hello"}
+             (last @called))
+          (pr-str @called))
+      (is (= "/api/things/42" (webapp/request-url (last @called)))
+          "a control's request is the same shape a screen's is — one performer"))
 
     (testing "and a leaving control hands the page back to the browser"
       (web.screen/click! s "Switch")

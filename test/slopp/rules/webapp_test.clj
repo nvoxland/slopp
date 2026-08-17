@@ -283,6 +283,37 @@
             "rows are self-describing, so a renderer that knows nothing about
              this capability can still draw one")))
 
+    (testing "a row written as a screen VALUE reports its render AND what it loads"
+      ;; the shape a screen takes once it names its own request. The report is
+      ;; the human's picture of the app, and \"which url does this screen ask
+      ;; for\" is half of what they came for — reporting the whole map verbatim
+      ;; would answer neither question
+      (let [src2 (str "(ns shop.two)\n\n"
+                      "(defn thing \"T.\" [_s] [:p \"thing\"])\n"
+                      "(defn thing-request \"R.\" [_p] {:webapp/path \"/api/thing\"})\n\n"
+                      "(defn ^:web/page app \"A.\" []\n"
+                      "  {:webapp/routes [[\"/things/:id\" {:render thing :request thing-request}]]})\n")
+            rows (:screens (rules.webapp/webapp-report
+                            (assoc-in (store/ingest (store/empty-store) 'shop.two src2)
+                                      [:config "capabilities" :values "webapp.enabled"] "true")))]
+        (is (= ["/things/:id"] (mapv :path rows)) (pr-str rows))
+        (is (= '[shop.two/thing] (mapv :screen rows)) (pr-str rows))
+        (is (= '[shop.two/thing-request] (mapv :request rows)) (pr-str rows))))
+
+    (testing "a row is READABLE or it is skipped — never a thrown report"
+      ;; `rules.rest/contracts-report`'s own scar: one member that threw made
+      ;; nine endpoints unreadable on the day a store turned the capability on
+      (let [src3 (str "(ns shop.three)\n\n"
+                      "(defn ^:web/page app \"A.\" []\n"
+                      "  {:webapp/routes [[\"/ok\" {:render identity}]\n"
+                      "                   [\"/broken\" {:request identity}]]})\n")
+            rows (:screens (rules.webapp/webapp-report
+                            (assoc-in (store/ingest (store/empty-store) 'shop.three src3)
+                                      [:config "capabilities" :values "webapp.enabled"] "true")))]
+        (is (= ["/broken" "/ok"] (mapv :path rows))
+            "a screen with no :render is still an ADDRESS this app declares")
+        (is (nil? (:screen (first rows))) (pr-str rows))))
+
     (testing "actions say what a reader can DO, and which kind each is"
       ;; the three kinds are the app's own declaration, and a human asking what
       ;; a screen does needs the effectful ones visible — those are the controls
