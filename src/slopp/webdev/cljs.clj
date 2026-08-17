@@ -356,7 +356,7 @@
          "  " arglist "\n"
          (or validate "")
          "  (-> (js/fetch (url " url-expr ") " opts ")\n"
-         "      (.then (fn [resp] (.json resp)))\n"
+         "      (.then (fn [resp] (.json (ok! resp))))\n"
          handle ")")))
 
 (defn ^:export render-client-ns
@@ -400,6 +400,30 @@
          "(defonce ^:export base (atom \"\"))\n\n"
          "(defn ^:export set-base! [b] (reset! base b))\n\n"
          "(defn- url [p] (str @base p))\n\n"
+         ;; `js/fetch` REJECTS only on a network error, so a 500 resolves and a
+         ;; wrapper that goes straight to `.json` hands the error page's body to
+         ;; `m/decode` — which fails validation and rejects with "… response
+         ;; failed validation". The server said 500 and the screen blames the
+         ;; contract. Reported by the app that consumes these, in the nine
+         ;; wrappers it did not write, beside three it did that all check.
+         ;;
+         ;; The cost is worse than the wrong sentence: contract validation
+         ;; exists to detect DRIFT, and a transport failure wearing its clothes
+         ;; makes real drift and a 502 from a proxy produce the same words. And
+         ;; a non-JSON error page rejects INSIDE `.json`, so the reader is shown
+         ;; "Unexpected token <".
+         ;;
+         ;; One helper rather than a check per wrapper, for `url` and `qs`'s
+         ;; reason: a fix applied eight times misses the ninth.
+         "(defn- ok!\n"
+         "  \"The response, or a throw naming the STATUS — called before the body\n"
+         "   is read, because fetch resolves for a 500 and a decode failure would\n"
+         "   otherwise report a transport problem as a contract problem.\"\n"
+         "  [resp]\n"
+         "  (when-not (.-ok resp)\n"
+         "    (throw (ex-info (str \"HTTP \" (.-status resp) \" \" (.-statusText resp))\n"
+         "                    {:status (.-status resp) :url (.-url resp)})))\n"
+         "  resp)\n\n"
          ;; the query-string builder every non-body wrapper calls. reduce-kv
          ;; and not str/join on purpose: this namespace requires malli and the
          ;; schema namespaces and nothing else, and a generated ns that drags

@@ -804,3 +804,58 @@
           (url-of local))
       (is (= (url-of local) (url-of remote))
           (str "local: " (url-of local) "\nremote: " (url-of remote))))))
+
+(deftest a-generated-wrapper-CHECKS-THE-STATUS-before-it-blames-the-contract
+  ;; Found by the app that consumes these wrappers, in the nine forms it did
+  ;; not write. `js/fetch` rejects only on a NETWORK error, so a 500 RESOLVES
+  ;; and a wrapper that goes straight to `.json` hands the error page's body to
+  ;; `m/decode`, where it fails validation and rejects with:
+  ;;
+  ;;     modules response failed validation
+  ;;
+  ;; **The server said 500 and the screen blames the contract.** A plain wrong
+  ;; sentence, shipped, on a screen that otherwise works — and it costs more
+  ;; than the wrong words. Contract validation exists to detect DRIFT, and a
+  ;; transport failure wearing its clothes makes real drift and a 502 from a
+  ;; proxy produce the same sentence, which destroys the signal the validation
+  ;; was added to give.
+  ;;
+  ;; Worse with a non-JSON body: an HTML error page rejects inside `.json`, and
+  ;; the reader is shown `Unexpected token <`.
+  (let [src (cljs/render-client-ns
+             'shop.client.api
+             [{:fn-name 'get-order :method :get :path "/api/orders/:id"
+               :endpoint 'shop.api/get-order
+               :request  {:kind :none}
+               :response {:kind :var :sym 'shop.contracts/order :ns 'shop.contracts}}
+              {:fn-name 'ping :method :get :path "/api/ping"
+               :endpoint 'shop.api/ping
+               :request  {:kind :none}
+               :response {:kind :none}}])]
+
+    (testing "the status is checked, and the failure names it"
+      (is (re-find #"\.-ok" src)
+          (str "no status check at all — every non-2xx becomes whatever the"
+               " decode says about the error page's body: " src))
+      (is (re-find #"\.-status" src)
+          "404 and 500 are different problems and the message must separate them"))
+
+    (testing "the check comes BEFORE the body is read, structurally"
+      ;; the ordering is the whole fix: after the decode there is nothing left
+      ;; to report but the decode's own complaint. Pinned as NESTING rather
+      ;; than as string order, because two `.then` steps in the right order is
+      ;; a thing a later edit can quietly swap
+      (is (re-find #"\(\.json \(ok! resp\)\)" src)
+          (str "the body must be read THROUGH the guard, not beside it: " src)))
+
+    (testing "one guard, beside the other generated helpers"
+      ;; `url` and `qs` are already shared here, and a check inlined per
+      ;; wrapper is one an edit can fix in eight places and miss the ninth
+      (is (re-find #"\(defn- ok!" src) src))
+
+    (testing "EVERY wrapper reads its body through it, contract or not"
+      ;; a wrapper with nothing to validate has nothing to be wrongly blamed —
+      ;; but it would silently succeed on a 500 and hand back an error page,
+      ;; which is the same failure with the diagnosis removed entirely
+      (is (= 2 (count (re-seq #"\(ok! resp\)" src)))
+          (str "one wrapper skipped the guard: " src)))))
