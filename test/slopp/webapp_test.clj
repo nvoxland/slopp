@@ -1349,6 +1349,31 @@
     (is (= :json (:encode (webapp/request-init {:webapp/path "/x" :webapp/body false}))))
     (is (= :none (:encode (webapp/request-init {:webapp/path "/x" :webapp/body nil})))))
 
+  (testing "the ENCODER follows the declared content type"
+    ;; json is the default and was briefly the only thing sendable, which is
+    ;; the asymmetry the consuming app named: slopp's own API publishes
+    ;; `application/edn`, so a framework that can only send json cannot POST to
+    ;; the endpoints slopp itself serves
+    (is (= :edn (:encode (webapp/request-init
+                          {:webapp/path    "/x"
+                           :webapp/body    {:a 1}
+                           :webapp/headers {"Content-Type" "application/edn"}}))))
+    (is (= :json (:encode (webapp/request-init
+                           {:webapp/path    "/x"
+                            :webapp/body    {:a 1}
+                            :webapp/headers {"Content-Type" "application/json; charset=utf-8"}})))
+        "the parameters come off before the lookup, the same as on the way back")
+    (is (= :text (:encode (webapp/request-init
+                           {:webapp/path    "/x"
+                            :webapp/body    "raw"
+                            :webapp/headers {"Content-Type" "text/plain"}})))
+        (str "a type slopp does not encode for sends the body AS GIVEN — which"
+             " is honest, where guessing json would corrupt it"))
+    (is (= :none (:encode (webapp/request-init
+                           {:webapp/path    "/x"
+                            :webapp/headers {"Content-Type" "application/edn"}})))
+        "a declared type on a request with NO body still sends no body"))
+
   (testing "a content-type header is reduced to the MEDIA TYPE a decoder is keyed by"
     ;; the browser answers `application/json; charset=utf-8`, and an exact
     ;; lookup on that misses — so the normalisation is here rather than being a

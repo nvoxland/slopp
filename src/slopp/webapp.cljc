@@ -1255,50 +1255,6 @@
         (as-> a (assoc a :webapp/view (derived-view a))))))
 
 (defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/method {:optional true} [:maybe :keyword]]
-                          [:webapp/headers {:optional true} [:maybe [:map-of :string :string]]]
-                          [:webapp/body {:optional true} :any]]]
-                   [:map [:method :string] [:headers [:map-of :string :string]]
-                    [:encode :keyword]]]}
-  request-init
-  "Everything `fetch` needs about a request except its URL — as DATA, with the
-  encoder NAMED rather than run.
-
-  The browser shim may not branch, because a namespace whose only verification
-  is that it compiled must not be where a decision lives. So every judgement
-  moves here: the method and its spelling, the headers, and whether there is a
-  body to encode at all. What the shim does with `:encode` is one `get` into a
-  map of encoders — the choice was already made, in a function this test suite
-  drives.
-
-  `:encode` is `:none` when there is no body, and it is not decoration.
-  `fetch` throws on a GET carrying one, so a request that quietly acquired an
-  empty body would stop working rather than send something harmless.
-
-  **`false` is a body and `nil` is not**, which is the nil-pun this framework
-  keeps removing, in the one place it would silently drop a value somebody
-  meant to send.
-
-  **Headers are in the shape from the start**, rather than after the first app
-  needs them. A token is STATE and not schema — nothing about an endpoint
-  declaration can produce it — so an app without this key would fall straight
-  back to writing its own `fetch`, which is the whole thing being avoided. A
-  declared header WINS over the default content type, or an app could never
-  send anything but JSON."
-  [{:webapp/keys [method headers body]}]
-  (let [has-body? (some? body)]
-    {:method  (str/upper-case (name (or method :get)))
-     :headers ;; starts from {} so a request with no body and no declared headers
-     ;; still answers a MAP — `clj->js` on nil is null, and a caller reading
-     ;; (get (:headers init) …) would be asking a nil the same question
-     (merge {} (when has-body? {"Content-Type" "application/json"})
-                     headers)
-     :encode  (if has-body? :json :none)
-     :body    body}))
-
-(defn ^:export
   ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string]] [:maybe :string]]}
   media-type
   "The MEDIA TYPE inside a `Content-Type` header — `nil` for a header that is
@@ -1318,6 +1274,70 @@
   (let [t (str/trim (str/lower-case (str content-type)))
         t (str/trim (first (str/split t #";")))]
     (when (seq t) t)))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/method {:optional true} [:maybe :keyword]]
+                          [:webapp/headers {:optional true} [:maybe [:map-of :string :string]]]
+                          [:webapp/body {:optional true} :any]]]
+                   [:map [:method :string] [:headers [:map-of :string :string]]
+                    [:encode :keyword]]]}
+  request-init
+  "Everything `fetch` needs about a request except its URL — as DATA, with the
+  encoder NAMED rather than run.
+
+  The browser shim may not branch, because a namespace whose only verification
+  is that it compiled must not be where a decision lives. So every judgement
+  moves here: the method and its spelling, the headers, and WHICH encoder the
+  body wants. What the shim does with `:encode` is one `get` into a map of
+  encoders — the choice was already made, in a function this test suite drives.
+
+  **The encoder follows the DECLARED content type**, and JSON is the default
+  rather than the only option. That asymmetry was real and the consuming app
+  named it: slopp's own API publishes `application/edn`, so a framework that
+  could only send JSON could not POST to the endpoints slopp itself serves.
+
+  | declared `Content-Type` | `:encode` |
+  |---|---|
+  | absent, or `application/json` | `:json` |
+  | `application/edn` | `:edn` |
+  | anything else | `:text` — the body AS GIVEN |
+
+  `:text` is the honest answer rather than a gap: slopp does not know how to
+  encode for `image/png`, and guessing JSON would corrupt what the caller
+  handed over.
+
+  `:encode` is `:none` when there is no body, whatever the declared type says.
+  `fetch` throws on a GET carrying one, so a request that quietly acquired an
+  empty body would stop working rather than send something harmless.
+
+  **`false` is a body and `nil` is not**, which is the nil-pun this framework
+  keeps removing, in the one place it would silently drop a value somebody
+  meant to send.
+
+  **Headers are in the shape from the start**, rather than after the first app
+  needs them. A token is STATE and not schema — nothing about an endpoint
+  declaration can produce it — so an app without this key would fall straight
+  back to writing its own `fetch`, which is the whole thing being avoided. A
+  declared header WINS over the default content type, which is also what makes
+  the table above reachable at all."
+  [{:webapp/keys [method headers body]}]
+  (let [has-body? (some? body)
+        declared  (media-type (get headers "Content-Type"))]
+    {:method  (str/upper-case (name (or method :get)))
+     ;; starts from {} so a request with no body and no declared headers
+     ;; still answers a MAP — `clj->js` on nil is null, and a caller reading
+     ;; (get (:headers init) …) would be asking a nil the same question
+     :headers (merge {} (when has-body? {"Content-Type" "application/json"})
+                     headers)
+     :encode  (if has-body?
+                (case declared
+                  "application/edn" :edn
+                  ("application/json" nil) :json
+                  :text)
+                :none)
+     :body    body}))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []} [:cat :int :any] [:tuple :keyword :any]]}

@@ -32,7 +32,7 @@
   the table."
   (:require [goog.object :as gobj]
             [replicant.dom :as replicant]
-            [slopp.webapp :as webapp]))
+            [slopp.webapp :as webapp] [cljs.reader :as reader]))
 
 (defn- click-data
   "A DOM click event read into the map `slopp.webapp/click-target` decides on.
@@ -86,10 +86,17 @@
 
   A map rather than a `cond`, and the difference is the whole discipline: the
   choice between these was made in `:cljc`, by a function an in-image test
-  drives, and what is left here is a `get`. `:none` answers `js/undefined`,
-  which is a `fetch` init with no body at all — a GET carrying even an empty
-  one throws."
+  drives, and what is left here is a `get`. The table mirrors [[decoders]] on
+  purpose — what a framework can SEND and what it can READ drifting apart is
+  how an app ends up able to browse an API it cannot post to.
+
+  `:none` answers `js/undefined`, which is a `fetch` init with no body at all —
+  a GET carrying even an empty one throws. `:text` sends the body AS GIVEN,
+  which is the honest answer for a media type slopp does not encode for:
+  guessing JSON would corrupt what the caller handed over."
   {:json (fn [body] (js/JSON.stringify (clj->js body)))
+   :edn  pr-str
+   :text str
    :none (fn [_body] js/undefined)})
 
 (def decoders
@@ -97,8 +104,31 @@
   `slopp.webapp/media-type` produces the key, so `application/json;
   charset=utf-8` finds the JSON entry rather than falling through.
 
-  `::text` is the fallback, reached by `get`'s default argument rather than by
-  a test on the type. An answer with no `Content-Type` — a 204, most often — is
+  **`application/edn` is here because slopp's own API publishes it.** `:web/raw`
+  serves EDN, `generate_client` reads the contract document as EDN, and until
+  this entry existed `slopp.webapp` was the one consumer that could not — so an
+  app browsing slopp's own API hit it on its first screen. That was not a
+  degradation to raw text either: the screen called `(:endpoints doc)` on a
+  string, got nil, and rendered an empty index, which reads as *this project has
+  no API* — a sentence about the project rather than about a decoder.
+
+  **The honest cost, measured rather than estimated:** `cljs.reader` adds about
+  150 KB to a `:simple` bundle — slopp's own went from 1,346,912 to 1,497,561
+  bytes on the compile that added this line — and every app pays it, including
+  one that never sees an EDN response. That is the price of the table not being
+  configurable, and it is the right side of the trade only because the
+  alternative is an app that silently renders an empty screen.
+
+  It ships by default rather than being declarable, and the earlier decision not
+  to ship it was made on a misreading of the dialect gate. The denylist covers
+  the BARE `read-string`, which evaluates; `clojure.edn/read-string` and its
+  ClojureScript counterpart are a different var and the gate says so in its own
+  message. Making the table configurable was the alternative and is refused for
+  the reason `:webapp/fetch` was retired: a seam every app has to configure is a
+  second vocabulary, and this one has a right answer.
+
+  `::text` is the fallback, reached by `get`'s default argument rather than by a
+  test on the type. An answer with no `Content-Type` — a 204, most often — is
   decoded as text and arrives as the empty string; that is a real limit rather
   than a hidden one, and an app that must tell `\"\"` from nothing apart has a
   screen-level question this seam cannot answer for it.
@@ -107,6 +137,9 @@
   {"application/json" (fn [response]
                         (.then (.json response)
                                (fn [data] (js->clj data :keywordize-keys true))))
+   "application/edn"  (fn [response]
+                        (.then (.text response)
+                               (fn [text] (reader/read-string text))))
    ::text             (fn [response] (.text response))})
 
 (defn call!
