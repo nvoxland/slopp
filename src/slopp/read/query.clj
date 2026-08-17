@@ -37,7 +37,7 @@
             [slopp.edit :as edit]
             [slopp.index.refs :as refs]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli] [slopp.rules.rest :as rules.rest]))
+            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli] [slopp.rules.rest :as rules.rest] [slopp.rules.webapp :as rules.webapp]))
 
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
@@ -414,7 +414,8 @@
 
 (defn ^:export query-surface
   "Everything this store declares it EXPOSES, sectioned by the capability that
-  owns it: commands under `:cli`, endpoints under `:http`.
+  owns it: commands under `:cli`, endpoints under `:http`, typed contracts under
+  `:rest`, screens under `:webapp`.
 
   **One tool rather than one per capability**, and the reason is sharper than
   discoverability. With a tool per capability, an agent that calls the http one
@@ -443,9 +444,22 @@
         http  (rules.http/routes-report store)
         cli   (rules.cli/commands-report store)
         rest  (rules.rest/contracts-report store)
+        wapp  (rules.webapp/webapp-report store)
         m     (cond-> {}
                 (seq cli) (assoc :cli cli)
                 (seq rest) (assoc :rest rest)
+                ;; the SCREENS are the section; actions and the :cljs count ride
+                ;; beside them the way :http/static rides beside routes. Keyed on
+                ;; screens rather than on the capability being enabled, so an app
+                ;; that turned webapp on and declared nothing yet reads as having
+                ;; no browser surface rather than as having an empty one
+                (seq (:screens wapp))
+                (assoc :webapp (:screens wapp)
+                       :webapp/actions (:actions wapp)
+                       ;; the goal stated as a number. "An app that opts into
+                       ;; webapp writes no ClojureScript" is an aspiration until
+                       ;; a store can answer how much it writes
+                       :webapp/cljs (:cljs wapp))
                 (:enabled http)
                 (assoc :http (:routes http)
                        ;; ALWAYS present when http is, empty map included. A

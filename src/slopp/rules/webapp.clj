@@ -337,3 +337,78 @@
                           " [\"/store\"] generates /store/*client-path, which"
                           " needs at least one segment below it, so a route AT"
                           " the prefix needs its own server route.")})))))
+
+(defn ^:export webapp-report
+  "The `webapp` section of `query_surface`: what this browser application IS.
+
+  The fifth thing a capability is — PORT, ADAPTER, FAKE, GATES, SURFACE REPORT —
+  and the only one `webapp` had never had. Its readers are the three the catalog
+  names: the agent, a consuming tool, and the HUMAN, who does not read the code
+  and needs a rendered picture of the application.
+
+  Three questions, which between them are what a browser app is:
+
+  - `:screens` — every declared route and the function that renders it. This is
+    the map somebody draws.
+  - `:actions` — what a reader can DO, and which kind each is. The `:effectful?`
+    ones reach a server and the `:leaves?` ones hand the page back to the
+    browser, so a human asking what a control does needs the kind visible rather
+    than inferred from the name.
+  - `:cljs` — how many namespaces are outside the fast loop.
+
+  **`:cljs` is the goal stated as a NUMBER.** \"An app that opts into `webapp`
+  writes no ClojureScript\" is an aspiration until a store can answer how much it
+  writes; zero is the claim being true, and a store that has drifted to five says
+  so without anybody having to go looking.
+
+  Empty until `webapp.enabled` — the reading side of the inertness the gates
+  have, and for the same reason: a project with no browser app must not be
+  DESCRIBED as having one.
+
+  Rows carry `:kind`, so a renderer that knows nothing about this capability can
+  draw a screen beside a command or an endpoint.
+
+  **No member may take the report down**, which is `rules.rest/contracts-report`'s
+  own scar rather than caution in the abstract: a contract that answered
+  `[:or …]` threw while reading its children as map entries, and made nine
+  endpoints unreadable on the day a store enabled the capability. Here every
+  extraction is total — a malformed action map contributes a row with the kinds
+  it could read, and a route row that is not a `[pattern screen]` pair is
+  skipped rather than throwing over the rest."
+  [store]
+  (if-not (capabilities/enabled? store "webapp")
+    {:screens [] :actions [] :cljs 0}
+    (let [rows     (for [nsx  (keys (:namespaces store))
+                         e    (store/forms store nsx)
+                         :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
+                         node (tree-seq coll? seq sx)
+                         :when (map? node)]
+                     [nsx node])
+          ;; an unqualified screen name is resolvable only against the namespace
+          ;; that DECLARED the table, and a row nobody can look up answers half
+          ;; the question. A symbol written with an alias is left as written:
+          ;; resolving one means reading the ns form, and `views/thing` is
+          ;; already findable by a reader
+          qualify  (fn [nsx s]
+                     (if (and (symbol? s) (nil? (namespace s)))
+                       (symbol (str nsx) (str s))
+                       s))
+          screens  (vec (sort-by :path
+                                 (for [[nsx node] rows
+                                       row  (get node :webapp/routes)
+                                       :when (and (vector? row) (= 2 (count row))
+                                                  (string? (first row)))]
+                                   {:kind   :screen
+                                    :path   (first row)
+                                    :screen (qualify nsx (second row))})))
+          actions  (vec (sort-by :action
+                                 (for [[_nsx node] rows
+                                       [a decl] (get node :webapp/actions)
+                                       :when (keyword? a)]
+                                   (cond-> {:kind :action :action a}
+                                     (:effectful? decl) (assoc :effectful? true)
+                                     (:leaves? decl)    (assoc :leaves? true)))))]
+      {:screens screens
+       :actions actions
+       :cljs    (count (filter #(= :cljs (store/platform-for store %))
+                               (keys (:namespaces store))))})))

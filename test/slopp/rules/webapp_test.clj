@@ -245,3 +245,55 @@
                                       "(defn ^:web/page app \"A.\" []\n"
                                       "  {:webapp/routes [[\"/store\" s]]})\n"))]
         (is (= [] (rules.webapp/derived-client-route-prefixes no-doc)))))))
+
+(deftest the-webapp-section-reports-what-a-BROWSER-APP-IS
+  ;; The fifth thing a capability is — PORT, ADAPTER, FAKE, GATES, SURFACE
+  ;; REPORT — and the only one `webapp` has never had. Its readers are the
+  ;; three the catalog names: the agent, a consuming tool, and the HUMAN, who
+  ;; does not read the code and needs a rendered picture of what the
+  ;; application is.
+  ;;
+  ;; Three questions, which is what a browser app is: what screens are there,
+  ;; what can a reader DO, and how much of this is outside the fast loop.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn things \"T.\" [_s] [:p \"things\"])\n"
+                 "(defn thing \"T.\" [_s] [:p \"thing\"])\n\n"
+                 "(defn ^{:web/method :get :web/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes  [[\"/things\" things] [\"/things/:id\" thing]]\n"
+                 "   :webapp/actions {:thing/rename {}\n"
+                 "                    :thing/delete {:effectful? true}\n"
+                 "                    :project/switch {:leaves? true}}})\n")
+        on  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")]
+
+    (testing "inert until the capability is on"
+      ;; the reading side of the same inertness the gates have: a project with
+      ;; no browser app must not be DESCRIBED as having one
+      (is (empty? (:screens (rules.webapp/webapp-report
+                             (store/ingest (store/empty-store) 'shop.ui src))))))
+
+    (testing "every declared route is a screen row, naming what renders it"
+      (let [rows (:screens (rules.webapp/webapp-report on))]
+        (is (= ["/things" "/things/:id"] (mapv :path rows)))
+        (is (= '[shop.ui/things shop.ui/thing] (mapv :screen rows)))
+        (is (every? #(= :screen (:kind %)) rows)
+            "rows are self-describing, so a renderer that knows nothing about
+             this capability can still draw one")))
+
+    (testing "actions say what a reader can DO, and which kind each is"
+      ;; the three kinds are the app's own declaration, and a human asking what
+      ;; a screen does needs the effectful ones visible — those are the controls
+      ;; that reach a server
+      (let [by (into {} (map (juxt :action identity))
+                     (:actions (rules.webapp/webapp-report on)))]
+        (is (= #{:thing/rename :thing/delete :project/switch} (set (keys by))))
+        (is (true? (:effectful? (by :thing/delete))))
+        (is (true? (:leaves? (by :project/switch))))
+        (is (not (:effectful? (by :thing/rename))))))
+
+    (testing "and the :cljs count, which is the goal stated as a number"
+      ;; "an app that opts into webapp writes NO ClojureScript" is an aspiration
+      ;; until a store can answer how much it writes. Zero here, and a store
+      ;; that has drifted says so
+      (is (= 0 (:cljs (rules.webapp/webapp-report on)))))))
