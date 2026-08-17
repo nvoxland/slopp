@@ -68,6 +68,9 @@
 {:rule :unknown-marker :grain :done
     :escape "fix the spelling, or move the key into your OWN namespace if it is yours — slopp reads nothing under :web/*, :webapp/*, :cli/*, :rest/*, :rule/* or :malli/* that it does not define"
     :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :web/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
+{:rule :webapp-client-routes-are-served :grain :done
+    :escape "declare a :web/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. The prefix ROOT is not covered by the fallback — [\"/store\"] generates /store/*client-path, which needs at least one segment below it"
+    :teach "a client route the server does not serve on a hard load: clicking to it works, refreshing it or opening a shared link 404s. So the app is fine for whoever is already inside it and broken for whoever was sent a url — the population that never reports it, because they assume the link was bad (inert until webapp.enabled)"}
    {:rule :http-undeclared-effect :grain :form
     :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
     :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}

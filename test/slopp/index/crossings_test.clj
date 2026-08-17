@@ -24,7 +24,8 @@
   (let [st (-> (store/empty-store)
                (store/ingest 'app.api "(ns app.api)
 (defn ^{:web/method :get :web/path \"/api/x\" :web/response [:map]} x [_] {})
-(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})"))]
+(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})
+(defn ^{:web/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])"))]
     (testing "every exit is listed, with the checker that covers it"
       (let [r (crossings/store-crossings st)
             by (into {} (map (juxt :kind identity)) (:crossings r))]
@@ -48,10 +49,15 @@
       ;; identical unless one of them is written down
       (let [r  (crossings/store-crossings st)
             un (set (map :kind (:unchecked r)))]
-        (is (contains? un :webapp/client-routing)
-            "declaring :web/client-routes turns every path under a prefix into a 200 and
-             moves not-found into the client, and nothing checks the client
-             agrees — that is a hole, and it has to read as one")
+        (is (contains? un :http/foreign-route)
+            "a link marked as served by somebody ELSE is the crossing that is
+             honest about being one: the declaration IS the whole check, and
+             nothing confirms the foreign server serves that path or still
+             does. It is permanent by construction, which makes it the right
+             example here — :webapp/client-routing used to be this test's
+             example and stopped being a hole when the client table became
+             data, so an example that CAN be closed makes this test a hostage
+             to progress")
         (is (not (contains? un :wire/json))
             "the wire contract is CHECKED now — the boundary decodes a request
              body against its declared schema and refuses what does not fit,
@@ -125,13 +131,19 @@
   ;; always red is a check people stop running. The finding earns its place by
   ;; being visible at the moment a whole-store green is about to be believed —
   ;; the same slot :host-stale occupies, and for the same reason.
+  ;;
+  ;; The example is `:http/foreign-route` and that is deliberate: it is the
+  ;; crossing that is honest about being one, where the DECLARATION is the whole
+  ;; check and nothing confirms the far side. It cannot be closed, so this test
+  ;; cannot become a hostage to progress — which the previous example did,
+  ;; when :webapp/client-routing stopped being a hole.
   (let [st (store/ingest (store/empty-store) 'app.api
                          "(ns app.api)
-(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})")]
+(defn ^{:web/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])")]
     (testing "a store with an unchecked exit produces a finding to attach"
       (let [f (crossings/finding st)]
         (is (some? f))
-        (is (= [:webapp/client-routing] (map :kind (:unchecked f))))
+        (is (= [:http/foreign-route] (map :kind (:unchecked f))))
         (is (string? (:note f)))))
     (testing "a store that crosses nothing produces NO finding — silence is correct here"
       ;; the opposite of the usual rule: this is a note about holes, and a

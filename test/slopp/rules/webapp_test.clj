@@ -140,3 +140,55 @@
                                         "(defn ^:web/page app \"A.\" []\n"
                                         "  {:webapp/routes [[base s] [\"/real\" s]]})\n"))]
         (is (= ["/real"] (rules.webapp/client-routes computed)))))))
+
+(deftest a-client-route-the-SERVER-does-not-serve-404s-on-a-hard-load
+  ;; `:webapp/client-routing`'s blind spot, stated in the inventory itself:
+  ;; *nothing compares the client's route table to the server's.* The failure is
+  ;; the one the consuming app hit for real — eight client routes that worked on
+  ;; every in-app click and 404'd on refresh or on a shared link, because the
+  ;; document's declared prefixes and the client's table had drifted apart.
+  ;;
+  ;; **The comparison is on the prefix's TAIL, and it has to be.** A declared
+  ;; prefix is in SERVER space (`/p/:slug/store`) and a client route is in APP
+  ;; space (`/store/form/:id`), because the mount point is a deployment fact the
+  ;; store cannot know. What is decidable is whether some suffix of the prefix
+  ;; is a leading segment of the client route — which is exactly the question
+  ;; the generated catch-all answers.
+  (let [app-src (fn [prefixes routes]
+                  (str "(ns shop.ui)\n\n"
+                       "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                       "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                       "        :web/client-routes " (pr-str prefixes) "}\n"
+                       "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n\n"
+                       "(defn ^:web/page app \"A.\" []\n"
+                       "  {:webapp/routes " routes "})\n"))
+        check   (fn [prefixes routes]
+                  (rules.webapp/client-routes-unserved
+                   (store/ingest (store/empty-store) 'shop.ui
+                                 (app-src prefixes routes))))]
+
+    (testing "a client route BELOW a declared prefix is served by the fallback"
+      (is (= [] (check ["/p/:slug/store"]
+                       "[[\"/store/form/:id\" s]]"))))
+
+    (testing "a client route under NO declared prefix is reported"
+      ;; the eight-routes-404 failure, caught before a reader meets it
+      (is (= ["/settings/:tab"]
+             (check ["/p/:slug/store"]
+                    "[[\"/store/form/:id\" s] [\"/settings/:tab\" s]]"))))
+
+    (testing "the prefix ROOT is reported too, and it is the subtle one"
+      ;; `["/store"]` generates `/store/*client-path`, which needs at least one
+      ;; segment below it — so the root itself is NOT covered by the fallback
+      ;; and needs its own server route. That gotcha is documented in
+      ;; `client-route-rows` and nothing has ever enforced it
+      (is (= ["/store"]
+             (check ["/p/:slug/store"] "[[\"/store\" s]]"))))
+
+    (testing "a store with no declared prefixes reports every client route"
+      ;; not silence: an app whose browser owns routes and whose document
+      ;; declares none is the whole failure, not an app with nothing to check
+      (is (= ["/store"] (check [] "[[\"/store\" s]]"))))
+
+    (testing "and a store with no client routes reports nothing"
+      (is (= [] (check ["/p/:slug/store"] "[]"))))))

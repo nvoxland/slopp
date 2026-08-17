@@ -108,12 +108,20 @@
     :leaves     "a prefix declared as client-routed"
     :to         "a route table that lives in the browser"
     :markers    #{:web/client-routes}
-    :checked-by nil
-    :blind      "declaring it makes EVERY path under the prefix answer 200 and
-                 moves not-found into the client. Nothing compares the
-                 client's route table to the server's, and nothing says the
-                 status codes changed — two existing tests caught it only by
-                 asserting the old 404"}
+    :checked-by "webapp-client-routes-are-served compares the client's declared
+                 route TABLE against the prefixes this document answers for, and
+                 reports every route that 404s on a hard load — the failure that
+                 is invisible from inside the app, because clicking to it works
+                 and only a refresh or a shared link breaks.
+                 webapp-client-routes-consequences states, once, what declaring
+                 a prefix changed about every status code beneath it"
+    :blind      "the comparison is on the prefix's TAIL, because a prefix is in
+                 SERVER space and a client route is in APP space and the mount
+                 point is a deployment fact no store knows. So a prefix whose
+                 tail coincidentally matches an unrelated client route reads as
+                 covered. And the client table must be LITERAL: a computed
+                 pattern is skipped rather than guessed at, which makes the join
+                 partial in the safe direction"}
 
    {:kind       :app/headless-entry
     :leaves     "the whole application as data — state, view, routing, and

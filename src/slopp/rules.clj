@@ -1027,6 +1027,20 @@
     ;; the sweep or it is nothing
     :sweep true
     :fires-on "(ns rf.core)\n(defn ^{:web/spa [\"/x\"]} doc \"D.\" [_] {})\n"}
+;; the client's route table against the paths the server answers for. Every
+   ;; in-app CLICK works either way — only a refresh or a shared link 404s, so
+   ;; the app is fine for whoever is inside it and broken for whoever was sent
+   ;; a url, which is the population that never reports it
+   {:key :webapp-client-routes-are-served :severity :advisory :applies-to :production
+    :check #'rules.webapp/webapp-client-routes-are-served-check
+    ;; the two declarations that drift apart are usually not edited together,
+    ;; so the episode that breaks the join touches only ONE of them — this rule
+    ;; is the sweep or it is nothing
+    :sweep true
+    :selftest-note (str "needs webapp.enabled AND two declarations that must"
+                        " disagree — a source-only fixture cannot carry the"
+                        " capability config; covered by rules.webapp-test/"
+                        "a-client-route-the-SERVER-does-not-serve-404s-on-a-hard-load")}
 ;; the stored :name and the source's own name, which must agree. NOT
    ;; :fires-on-able: ingesting source recomputes :name, so no fixture text
    ;; can express the disagreement — which is exactly why nothing caught it.

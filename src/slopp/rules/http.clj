@@ -700,7 +700,22 @@
                                  (some (fn [[url-prefix _]]
                                          (str/starts-with? path (str url-prefix "/")))
                                        mounts)
-                                 (client-route? path)))
+                                 (client-route? path)
+                                 ;; the same question the server arm above asks,
+                                 ;; of the client table: does some declared
+                                 ;; route START WITH this reference? The
+                                 ;; DOMINANT link shape in a real browser app is
+                                 ;; `(str "/store/form/" id)`, whose literal is a
+                                 ;; prefix of the pattern `/store/form/:id` —
+                                 ;; neither the pattern nor a whole path. It is
+                                 ;; already CLASSIFIED as a prefix reference,
+                                 ;; which is why the escape hatch went on those
+                                 ;; views; resolving it any other way would
+                                 ;; retire the marker for the six links that did
+                                 ;; not need it and leave it on the eighteen
+                                 ;; that did.
+                                 (some #(str/starts-with? (str (:path %)) path)
+                                       client-rows)))
                     false))]
     {:dangling   (vec (remove served? (remove #(= :unresolved (:kind %)) refs)))
      :unresolved (filterv #(= :unresolved (:kind %)) refs)}))

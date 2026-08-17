@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:web/client-routes` this episode — state what that
@@ -189,3 +189,96 @@
                     row  (get node :webapp/routes)
                     :when (and (vector? row) (string? (first row)))]
                 (first row))))))
+
+(defn ^{:export "slopp.rules"} client-routes-unserved
+  "The client routes this store declares that its own document does NOT serve on
+  a hard load, sorted — `[]` when every one is covered.
+
+  **The join `:webapp/client-routing` records as its blind spot**, in the
+  inventory's own words: *nothing compares the client's route table to the
+  server's.* The failure is not hypothetical — the one real app hit it with
+  eight routes at once. Every in-app click kept working, because that is client
+  routing; only a refresh or a shared link 404'd, so the app looked fine to
+  whoever was already in it and broken to whoever was sent a url.
+
+  **The comparison is on the prefix's TAIL, and it has to be.** A declared
+  prefix is in SERVER space (`/p/:slug/store`) and a client route is in APP space
+  (`/store/form/:id`), because the mount point is a deployment fact no store can
+  know. What IS decidable is whether some suffix of the prefix is a leading
+  segment of the client route — which is exactly the question the generated
+  catch-all answers, since `slopp.web.routes/client-route-rows` turns each prefix
+  into `<prefix>/*client-path`.
+
+  **The prefix ROOT is reported, and it is the subtle one.** `[\"/store\"]`
+  generates `/store/*client-path`, which needs at least one segment below it —
+  so the root itself is not covered by the fallback and needs its own server
+  route. That gotcha has been documented in `client-route-rows` since it was
+  written and nothing has ever enforced it.
+
+  A store that declares client routes and NO prefixes reports all of them, which
+  is the whole failure rather than nothing to check.
+
+  Reads the marker through `store/form-name-meta` rather than through
+  `rules.http/endpoints`, and not by preference: `rules.http` already depends on
+  this namespace for [[client-routes]], so asking it back would be a require
+  cycle. The generic address is what makes that avoidable — a webapp check has
+  no business needing http's namespace to ask what metadata a form carries."
+  [st]
+  (let [segs     (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
+        prefixes (for [nsx (keys (:namespaces st))
+                       e   (store/forms st nsx)
+                       :when (:name e)
+                       p   (:web/client-routes (store/form-name-meta e))]
+                   p)
+        ;; the mount point is unknown, so every split of a declared prefix is a
+        ;; candidate for where app space begins
+        tails    (for [pfx  prefixes
+                       :let [ps (segs pfx)]
+                       n    (range (count ps))]
+                   (vec (drop n ps)))
+        covered? (fn [route]
+                   (let [rs (segs route)]
+                     (boolean
+                      (some (fn [tail]
+                              ;; STRICTLY below: the fallback needs at least one
+                              ;; segment under the prefix, so an exact match is
+                              ;; the root case and is not covered by it
+                              (and (< (count tail) (count rs))
+                                   (= tail (vec (take (count tail) rs)))))
+                            tails))))]
+    (vec (sort (remove covered? (client-routes st))))))
+
+(defn webapp-client-routes-are-served-check
+  "Done-advisory: client routes this store declares that its own document does
+  not serve on a hard load. Inert until the store opts into `webapp`.
+
+  **The blind spot `:webapp/client-routing` has carried since it was
+  registered**, in the inventory's own words: *nothing compares the client's
+  route table to the server's.* Both halves are readable now — the client table
+  is data and the prefixes are metadata — so the comparison exists.
+
+  The failure it reports is the one the only real webapp hit, with eight routes
+  at once: every in-app CLICK keeps working, because that is client routing, and
+  only a refresh or a shared link 404s. So the app is fine for whoever is already
+  inside it and broken for whoever was sent a url — which is the population that
+  never reports bugs, because they assume the link was bad.
+
+  **Whole-store, not episode-scoped**, unlike its `webapp-page-reach` neighbour:
+  the two declarations that drift apart are usually not edited together, and the
+  episode that breaks the join is the one that touches only ONE of them.
+
+  Advisory rather than a refusal, for the reason a store mid-migration always
+  gets: the state this fires on is a table and a declaration that have not been
+  reconciled yet, and refusing the writes would block the reconciliation."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    (vec (for [route (client-routes-unserved st*)]
+           {:route route
+            :teach (str "the client route " (pr-str route) " is not served on a"
+                        " hard load — clicking to it works, refreshing it or"
+                        " opening a shared link 404s. Declare a"
+                        " :web/client-routes prefix on the document endpoint"
+                        " that covers it, or give it a server route of its own."
+                        " Note the prefix ROOT is not covered by the fallback:"
+                        " [\"/store\"] generates /store/*client-path, which needs"
+                        " at least one segment below it.")}))))

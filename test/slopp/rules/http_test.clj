@@ -811,3 +811,50 @@
       (is (contains? paths "/store/nope")
           (str "a typo'd client link is exactly what this check is for: "
                (pr-str found))))))
+
+(deftest a-PREFIX-literal-resolves-against-a-client-route-pattern
+  ;; The shape that decides whether retiring `^:web/client-path` helps anybody.
+  ;; slopp-ui counted their own links: 6 whole literals, ~18 PREFIX literals
+  ;; inside `(str …)`, 2 with no literal at all. The dominant shape is
+  ;;
+  ;;   [:a {:href (str "/store/form/" (:form-id r))} …]
+  ;;
+  ;; whose literal is `"/store/form/"` — a prefix of the pattern
+  ;; `/store/form/:id`, not the pattern and not a whole path. The rule already
+  ;; classifies it as a `:prefix` reference, which is why the markers went on
+  ;; those views in the first place.
+  ;;
+  ;; So the retirement only helps if resolution treats it the same way the
+  ;; classification does. The server arm of this branch already asks whether
+  ;; some declared route STARTS WITH the reference; the client arm has to ask
+  ;; the same question of the client table, or eighteen of nineteen markers stay
+  ;; on for exactly the reason they went on.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes [[\"/store/form/:id\" s]\n"
+                 "                   [\"/store/ns/:ns\" s]]})\n\n"
+                 "(defn links \"L.\" [r]\n"
+                 "  [:nav [:a {:href (str \"/store/form/\" (:id r))} \"form\"]\n"
+                 "        [:a {:href (str \"/store/ns/\" (:ns r))} \"ns\"]\n"
+                 "        [:a {:href (str \"/nowhere/\" (:x r))} \"nope\"]])\n")
+        st    (store/ingest (store/empty-store) 'shop.ui src)
+        found (rules.http/dangling-route-refs st)
+        paths (set (map :path (:dangling found)))]
+
+    (testing "the reference really is classified as a PREFIX"
+      ;; the premise. If these were :exact the test would be about a different
+      ;; shape than the one that matters
+      (is (= #{:prefix}
+             (set (map :kind (filter #(= "/store/form/" (:path %))
+                                     (rules.http/ui-route-refs st)))))
+          (pr-str (rules.http/ui-route-refs st))))
+
+    (testing "a prefix literal covering a declared client route resolves"
+      (is (not (contains? paths "/store/form/")) (pr-str (:dangling found)))
+      (is (not (contains? paths "/store/ns/")) (pr-str (:dangling found))))
+
+    (testing "and a prefix literal covering NOTHING still dangles"
+      ;; the arm that keeps this from being a blanket pass on anything ending
+      ;; in a slash
+      (is (contains? paths "/nowhere/") (pr-str found)))))
