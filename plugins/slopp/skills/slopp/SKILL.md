@@ -12,10 +12,18 @@ jar your MCP server runs; this file ships in the plugin package. They can be
 different ages, and nothing about running a newer jar updates this text.
 
 So the line above is a stamp, and it is checkable in one call: `session_brief`
-reports `:jar-head`, the store head the running artifact was built from. If that
-head is far ahead of the stamp, treat this skill's specifics — key names,
-refusals, what a tool returns — as possibly describing an older shape, and let
-the tools' own refusals win. They come from the jar and cannot be stale.
+reports `:jar-head`, the store head the running artifact was built from. Compare
+them. **The tools win either way — refusals come from the jar and cannot be
+stale — but the DIRECTION tells you which confusion to expect:**
+
+- **Skill BEHIND the jar** (stamp older): this text may describe a shape that no
+  longer exists. The symptom is a refusal you did not expect, and the refusal is
+  correct.
+- **Skill AHEAD of the jar** (stamp newer): this text may describe a capability
+  your jar does not have. The symptom is *"no such thing"* rather than a
+  refusal — and the natural reading is that YOU made a mistake, when in fact the
+  running artifact is simply older. Take a newer jar, or work from what the
+  tools actually offer.
 
 A mismatch is a SIGNAL, not a verdict: the stamp is hand-kept, so it under-
 reports currency when somebody edits this file and forgets it. That is the safe
