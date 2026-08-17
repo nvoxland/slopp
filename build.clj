@@ -151,9 +151,26 @@
                     ;; had enumerated them. `clojure.` and `slopp.` were never a
                     ;; list of exemptions — they were the exemptions that
                     ;; existed.
+                    ;;
+                    ;; `cljs.*` is the fourth, and it is `goog.*`'s case with
+                    ;; one difference worth stating: a Maven artifact DOES
+                    ;; contain `cljs/reader.cljs` — the ClojureScript compiler's
+                    ;; own — so this one could be resolved by putting the
+                    ;; compiler on the build basis. That is the wrong fix. slopp
+                    ;; INJECTS the compiler into every client build
+                    ;; (`external/client-build-deps`) precisely so it never
+                    ;; enters a consumer's manifest, and declaring it here would
+                    ;; hand every webapp store the toolchain as a dependency it
+                    ;; owns. Compiler-provided is compiler-provided whether or
+                    ;; not an artifact happens to exist.
+                    ;;
+                    ;; Fired for real on `cljs.reader`, added so the browser
+                    ;; shim could decode `application/edn` — which is what
+                    ;; slopp's own contract endpoint serves.
                     (when-not (or (str/starts-with? s "clojure.")
                                   (str/starts-with? s "slopp.")
-                                  (str/starts-with? s "goog."))
+                                  (str/starts-with? s "goog.")
+                                  (str/starts-with? s "cljs."))
                       (let [path (-> s (str/replace "-" "_") (str/replace "." "/"))
                             ;; REFUSE rather than skip. This derivation's whole
                             ;; stated purpose is that it "cannot go stale", and
