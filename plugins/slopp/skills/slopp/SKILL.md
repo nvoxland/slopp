@@ -1666,20 +1666,58 @@ stop being the assumption once the app grows.
   to 404 now serves the document and the client renders "not found" after its
   fetch 404s. That is correct, and it is a real change in what your status
   codes mean. `done` says it once, for the episode that adds the declaration
-  (`webapp-client-routes-consequences`) — and `full_check`'s `:crossings` keeps
-  listing it as an UNCHECKED exit, because nothing compares your client's route
-  table to the server's.
-- **`route-for` in `.cljc`, returning nil for unknown paths.** With server
-  rendering gone this IS your routing table, so make it a pure function and
-  test it in-image. Never default an unknown path to a screen — that tells
-  the reader they are somewhere they are not.
-- **ONE pure `app-view` from state to the whole page.** Then *every* screen
-  is an in-image assertion on hiccup data, including the two an SPA invents:
-  **loading** and **not-found**. Both render as a blank pane if nobody
-  handles them, and a blank pane is indistinguishable from a screen whose
-  content is empty.
-- **Clear the previous screen's data before fetching.** Leaving it up under
-  the new URL shows one thing while the address bar claims another.
+  (`webapp-client-routes-consequences`), and `webapp-client-routes-are-served`
+  reports any client route the server does NOT answer on a hard load — the
+  failure that is invisible from inside the app, because clicking to it works
+  and only a refresh or a shared link breaks.
+
+**Everything below the declaration is `webapp`'s, not yours.** Turn it on
+(`config_file {path "capabilities" key "webapp.enabled" value "true"}`) and
+declare the app; slopp owns the loop.
+
+```clojure
+(defn ^:web/page app []
+  (webapp/wiring
+   {:webapp/state  state                        ; your atom
+    :webapp/routes [["/"            index]      ; a TABLE, not a function
+                    ["/things"      things]     ; each row names the SCREEN FN
+                    ["/things/:id"  thing]]
+    :webapp/chrome (fn [state inner] [:div [nav state] inner])}))
+```
+
+- **Routes are DATA and a function is refused.** A function answers only when
+  called, so nothing can list your screens, join a link to one, or check that
+  the server serves what the browser routes. The table is what makes all three
+  possible, and `query_surface`'s `:webapp` section is what draws it.
+- **A row names the screen FUNCTION.** There is no `:screen` keyword agreeing
+  in three places — routes returning it, a view casing on it, a fetch receiving
+  it — which is a rename away from a blank pane at a url that looks right. A
+  keyword target is refused: it is `ifn?`, so it would call cleanly and render
+  nothing.
+- **You do not write a view.** `:webapp/view` is derived and declaring one is
+  refused. `:webapp/chrome` is your layout around a screen.
+- **A screen is only called when its data is READY**, so it never writes the
+  three-way case on load status. `:webapp/loading`, `:webapp/failed` and
+  `:webapp/not-found` are declared screens with plain defaults, and chrome
+  decides WHERE they sit — the framework will not guess at your layout.
+- **Write client-route keys in your links** — `:href "/things/42"` — and slopp
+  adds the mount point on the way to the DOM. Links you do not route are left
+  alone, so `/api/…` still points at your server.
+- **`:webapp/state` is cleared by the framework on navigation.** Declare
+  `:webapp/session-loads` for anything that must outlive a screen, and
+  `:webapp/address-keys` for your own keys that must die with one.
+- **Read a load with `load-status` AND `load-value`, never value alone.** Four
+  states — `:absent :loading :ready :failed` — because "nobody asked" and
+  "answered nil" are different facts and `(if (:data s) …)` cannot tell them
+  apart.
+- **Actions are declared**, and there are three kinds: a plain state
+  transition, `:effectful?` (a request through `:webapp/call`), and `:leaves?`
+  (a full page load, for a destination that is not a client route). Declaring
+  the kind is what stops a browser dispatcher and a headless one drifting
+  apart.
+- **Drive it headlessly**: `(screen/open! (webapp/driver app))`, then `visit!`
+  the url a reader would type — mount point included — and `click!` a link.
+  No browser, no compile, and the same functions the real page runs.
 - **Endpoint tests must ROUND-TRIP through JSON.** `web/handle!` returns the
   body as Clojure DATA — the adapter serializes — so a keyword sails through
   a `[:x :string]` contract in-image and reaches the browser as a string. A
