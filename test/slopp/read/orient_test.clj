@@ -605,3 +605,57 @@
           (str who ": two causes, so no single one is named: " (pr-str note)))
       (is (re-find #"2 form" (str note))
           (str who ": and the note is still produced: " (pr-str note))))))
+
+(deftest the-BUNDLE-says-how-far-behind-the-browser-is
+  ;; Reported by slopp-ui, and it is the sharpest "green that is not one" this
+  ;; wave produced. They rewrote ten screens in :cljc, then took a green `done`,
+  ;; a green `commit_point`, a green `full_check` and `:app {:behind 0}` — and
+  ;; the browser was still being served the PRE-rewrite bundle.
+  ;;
+  ;; Nothing was wrong. They simply had not run `compile_client`, and no check
+  ;; knows that. `:app {:behind n}` tracks the IMAGE, which is a different
+  ;; artifact answering a different question, and its zero is honest about the
+  ;; thing it measures.
+  ;;
+  ;; So the browser is a third artifact that can be stale, beside the host and
+  ;; the jar, and it was the only one with no report.
+  (let [entry  {:sha "abc" :bytes 10 :content-type "application/javascript"}
+        out    "public/cljs/main.js"
+        client (fn [st nsx src platform]
+                 (-> st
+                     (store/ingest nsx src)
+                     (as-> s (first (store/record-module-platform
+                                     s (str nsx) platform)))))
+        built  (fn [st] (first (store/record-artifact st out entry)))]
+
+    (testing "no bundle recorded is NIL, not zero"
+      ;; zero would claim a bundle exists and is current, which is the stronger
+      ;; form of the mistake this whole record exists to avoid
+      (is (nil? (orient/bundle-currency (store/empty-store) out))))
+
+    (testing "a fresh compile is behind nothing"
+      (let [st (-> (store/empty-store)
+                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
+                   built)]
+        (is (= 0 (:behind (orient/bundle-currency st out))))
+        (is (= "abc" (:sha (orient/bundle-currency st out))))))
+
+    (testing "a CLIENT write after the compile counts"
+      (let [st (-> (store/empty-store)
+                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
+                   built
+                   (client 'app.other "(ns app.other)\n\n(defn w \"W.\" [s] s)\n" :cljs))]
+        (is (= 1 (:behind (orient/bundle-currency st out)))
+            "a :cljs namespace written after the compile is IN the browser's
+             blind spot — the bundle predates it")))
+
+    (testing "and a JVM-only write does NOT"
+      ;; the discrimination that makes this worth having rather than noisy: a
+      ;; server-side edit cannot stale a browser bundle, and reporting it would
+      ;; train the reader to ignore the number
+      (let [st (-> (store/empty-store)
+                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
+                   built
+                   (store/ingest 'app.server "(ns app.server)\n\n(defn h \"H.\" [r] r)\n"))]
+        (is (= 0 (:behind (orient/bundle-currency st out)))
+            "a :jvm write is not something the browser can be behind on")))))

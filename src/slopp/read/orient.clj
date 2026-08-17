@@ -535,3 +535,56 @@
   (when (:serving? running)
     (when-let [at (:served-at running)]
       (code-deltas-since store at))))
+
+(defn ^:export bundle-currency
+  "What the compiled BUNDLE at `path` is, placed against `store` — `{:sha …
+  :behind n}` — or nil when nothing has compiled one.
+
+  **The third artifact that can be stale, and until now the only one with no
+  report.** The host has `:app {:behind n}`, the jar has [[jar-currency]], and
+  the browser had nothing — so a store could take a green `done`, a green
+  `commit_point`, a green `full_check` AND `:app {:behind 0}` while the browser
+  was being served a bundle from before the work started. Reported by the app it
+  happened to, after rewriting ten screens and finding the page unchanged.
+
+  Nothing was wrong in any of those checks. `:app {:behind n}` measures the
+  IMAGE, and its zero was honest about the image. The bundle is a different
+  artifact answering a different question, and the answer was simply missing.
+
+  **Only CLIENT deltas count**, and that discrimination is what keeps the number
+  worth reading. A `:jvm` namespace cannot stale a browser bundle; counting
+  server-side edits would make the figure move constantly for reasons the
+  browser does not care about, which trains a reader to ignore it — the failure
+  mode of every number that is nearly always non-zero.
+
+  **nil rather than 0 when no bundle exists.** Zero would claim one is present
+  and current, which is the stronger form of the mistake: a store that has never
+  compiled and a store that just compiled must not read the same.
+
+  The platform consulted is each namespace's CURRENT one, so a namespace that
+  became `:cljs` after the compile counts from the whole window rather than from
+  its declaration. That over-counts in one narrow case and under-counts in
+  none — the safe direction for a staleness number.
+
+  **Counted by POSITION in the delta log, not by timestamp.** The first cut
+  compared `:at` and was green alone and red in the suite: a compile and the
+  write after it can land in the same millisecond, so the comparison dropped the
+  write and the answer was a confident zero. The log is already ordered and the
+  artifact IS a delta in it, so `after` is a subvector rather than a comparison
+  and ties cannot exist. [[code-deltas-since]] keeps its timestamp because it
+  compares against a BOOT, which has no position in this log."
+  [store path]
+  (let [ds  (vec (store/deltas store))
+        idx (last (keep-indexed
+                   (fn [i d] (when (and (= :artifact-put (:op d))
+                                        (= (str path) (str (:path d)))
+                                        (not= :remove (:action d)))
+                               i))
+                   ds))]
+    (when idx
+      (let [client (fn [nsx] (contains? #{:cljc :cljs}
+                                        (store/platform-for store nsx)))]
+        {:sha    (:sha (:entry (nth ds idx)))
+         :behind (count (filter #(and (not (contains? fields/markers (:op %)))
+                                      (client (:ns %)))
+                                (subvec ds (inc idx))))}))))

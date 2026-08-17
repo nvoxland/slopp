@@ -1058,3 +1058,57 @@
         ;; driver and the browser entry both already look for it. One producer:
         ;; a headless drive and a real page render the same function
         (as-> a (assoc a :webapp/view (derived-view a))))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:webapp/path :string]
+                          [:webapp/path-params {:optional true} [:maybe [:map-of :keyword :any]]]
+                          [:webapp/query {:optional true} [:maybe [:map-of :keyword :any]]]]]
+                   :string]}
+  request-url
+  "The complete URL a request names — path parameters substituted, query
+  appended, everything percent-encoded.
+
+  **The performer receives a FINISHED string and decides nothing.** That is the
+  whole design: whatever a browser shim computes is computed in the one
+  namespace no JVM test can reach, so every judgement moved here is a judgement
+  a reader can assert on. The app that prompted this had the same rule and
+  stopped one step short — splitting a url into literal and encodable PARTS for
+  its performer to join — because its encoder was `encodeURIComponent` and only
+  existed in the browser. `slopp.lang/encode-component` is `:cljc`, so the join
+  comes here too and the browser is left with `fetch`.
+
+  **Substitution is SEGMENT-WISE, never `str/replace`.** A parameter whose name
+  is a prefix of another corrupts the path: replacing `:m` in `/api/:module/:m`
+  gives `/api/yodule/y`, which is a url, which is why it ships. Their docstring
+  named this before either of us had a use for the fix, and the reason it is
+  worth restating is that the corrupted result LOOKS correct.
+
+  **A value cannot break out of its segment, and that is the security half.**
+  `slopp.lang/percent-of` escapes every character outside RFC 3986's unreserved
+  set, so a `/` in a value is data rather than structure and a `?` does not start
+  a query. A request built in a browser is a string asserted nowhere; built here
+  it is one an ordinary test reads.
+
+  Non-ASCII passes through verbatim — `encode-component`'s documented limit,
+  because asking a character for its code point is the platform question
+  `slopp.lang` exists so nobody has to ask. A browser percent-encodes it as UTF-8
+  before sending, so the wire is right; a caller needing exact bytes for a
+  non-ASCII path segment needs a platform encoder and should say so where it is
+  used.
+
+  **An empty query appends nothing.** A trailing `?` makes a url that differs
+  from the one a reader typed, which is a cache key nobody predicted."
+  [{:webapp/keys [path path-params query]}]
+  (let [enc   lang/encode-component
+        seg   (fn [s]
+                (if (str/starts-with? s ":")
+                  (enc (get path-params (keyword (subs s 1))))
+                  s))
+        parts (map seg (str/split (str path) #"/"))
+        q     (->> (sort-by key (or query {}))
+                   (map (fn [[k v]] (str (enc (name k)) "=" (enc v))))
+                   (str/join "&"))]
+    (str (str/join "/" parts)
+         (when (seq q) (str "?" q)))))

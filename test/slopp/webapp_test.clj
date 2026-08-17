@@ -1111,3 +1111,56 @@
         (webapp/navigate! a2 "/things" false)
         (is (re-find #"Fetching your things" (pr-str ((:webapp/view a2) @s2)))
             (pr-str ((:webapp/view a2) @s2)))))))
+
+(deftest a-request-becomes-a-FINISHED-url-where-a-test-can-read-it
+  ;; The performer seam's pure half. slopp-ui's `url-parts` splits a request into
+  ;; `[:lit …]`/`[:enc …]` pieces so their browser performer "has nothing left to
+  ;; decide" — and slopp can go one step further, because
+  ;; `slopp.lang/encode-component` is already `:cljc`: the performer receives a
+  ;; COMPLETE url and does nothing but fetch it.
+  ;;
+  ;; Their docstring says why it cannot live in the browser, and it is the
+  ;; sentence this test exists for:
+  ;;
+  ;;   The performer lives in the one namespace the JVM oracle cannot reach, so
+  ;;   anything it decides is something no test can see. The concrete bug: a
+  ;;   performer doing `str/replace` on `:m` would corrupt `/api/:module/:m`, and
+  ;;   that would ship — the string is assembled in a browser and asserted
+  ;;   nowhere.
+  (let [url webapp/request-url]
+
+    (testing "a path with no params is itself"
+      (is (= "/api/modules" (url {:webapp/path "/api/modules"}))))
+
+    (testing "SEGMENT-WISE substitution, which is the bug they already paid for"
+      ;; `(str/replace "/api/:module/:m" ":m" "y")` gives "/api/yodule/y" —
+      ;; a parameter whose name is a PREFIX of another corrupts the path, and
+      ;; the result looks like a url
+      (is (= "/api/x/y" (url {:webapp/path "/api/:module/:m"
+                              :webapp/path-params {:module "x" :m "y"}}))))
+
+    (testing "a value cannot BREAK OUT of its segment, which is the security half"
+      ;; percent-of escapes every non-unreserved ASCII character, so a slash in
+      ;; a value is data rather than structure. This is why the derivation is
+      ;; here and not in a namespace whose only verification is that it compiled
+      (is (= "/api/module/a%2Fb" (url {:webapp/path "/api/module/:m"
+                                       :webapp/path-params {:m "a/b"}})))
+      (is (= "/api/module/a%3Fq%3D1" (url {:webapp/path "/api/module/:m"
+                                           :webapp/path-params {:m "a?q=1"}})))
+      (is (= "/api/module/a%26b" (url {:webapp/path "/api/module/:m"
+                                       :webapp/path-params {:m "a&b"}}))))
+
+    (testing "the query is appended and encoded, and absent when there is none"
+      (is (= "/api/search?q=a%20b" (url {:webapp/path "/api/search"
+                                         :webapp/query {:q "a b"}})))
+      (is (= "/api/search" (url {:webapp/path "/api/search" :webapp/query {}}))
+          "an empty query must not leave a trailing ? — a url that differs from
+           the one a reader typed is a cache key nobody predicted"))
+
+    (testing "and a param the path does not name is a QUERY key, not silence"
+      ;; dropping it would send a request missing an argument the caller
+      ;; supplied, which reaches them as a wrong answer rather than an error
+      (is (= "/api/module/x?depth=2"
+             (url {:webapp/path "/api/module/:m"
+                   :webapp/path-params {:m "x"}
+                   :webapp/query {:depth "2"}}))))))

@@ -1417,7 +1417,16 @@ client-deps (merge (:client-deps st) (:client provided))
   :url}` — how many code changes the SERVED image is behind the store it just
   called green. `0` is reported rather than omitted: the question is \"is the
   page I am about to look at built from what I just wrote?\", and staying
-  silent on yes leaves the reader curling the endpoint by hand."
+  silent on yes leaves the reader curling the endpoint by hand.
+
+  And `:bundle {:sha :behind :note}` when the compiled browser bundle is behind
+  CLIENT code — the third artifact that can be stale, after the host and the
+  jar, and the only one that had no report. A store took a green `done`, a green
+  `commit_point`, a green check here AND `:app {:behind 0}` while the browser
+  served a bundle from before ten screens were rewritten; nothing was wrong,
+  because `:app` measures the IMAGE and its zero was honest about the image.
+  Reported only when BEHIND, unlike `:app`: a store with no client code has no
+  bundle and must not be told about one."
   [session & {:keys [affected]}]
   (let [t0    (System/currentTimeMillis)
         st    (:store @session)
@@ -1482,6 +1491,15 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; different image — and reported for the same reason: a whole-store
         ;; green is exactly the verdict someone acts on.
         app   (orient/behind st (:app-server @session))
+        ;; the BROWSER's artifact, and the third that can be stale after the
+        ;; host and the jar. It was the only one with no report, so a store
+        ;; could take a green done, a green commit_point, a green check here
+        ;; AND :app {:behind 0} while the page served a bundle from before the
+        ;; work started — which is what happened to the app that reported it,
+        ;; after rewriting ten screens and finding the browser unchanged.
+        ;; Nothing was wrong: :app measures the IMAGE, and its zero was honest
+        ;; about the image.
+        bundle (orient/bundle-currency st "public/cljs/main.js")
 ;; a namespace holding nothing but its own ns form. Reported HERE
         ;; because it can be reported nowhere else: every advisory is
         ;; addressed by changed FORM IDS and sweep-store! builds its
@@ -1639,6 +1657,18 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; friction #10: a whole-store green is exactly the verdict an agent
       ;; commits on, so a host running superseded code has to say so HERE.
       (host-warning-now (:image @session) st) (assoc :host-stale (host-warning-now (:image @session) st))
+;; the BROWSER's artifact, third after the host and the jar and the only
+      ;; one that had no report. Reported only when BEHIND, unlike :app: a store
+      ;; with no client code has no bundle and must not be told about one, and
+      ;; `bundle-currency` answers nil there rather than 0 for the same reason.
+      (and bundle (pos? (:behind bundle)))
+      (assoc :bundle
+             (assoc bundle :note
+                    (str (:behind bundle) " CLIENT code change(s) since the browser"
+                         " bundle was compiled — the page is serving JavaScript"
+                         " from before them. compile_client rebuilds it. Nothing"
+                         " else here can tell you: :app tracks the IMAGE, and a"
+                         " green there is honest about a different artifact.")))
       ;; slopp-ui friction #5, bitten twice: a restyled page passed
       ;; full_check, compile_client and a bundle copy, and the SERVED
       ;; stylesheet was still the old one. Markup that has moved on from its
