@@ -498,7 +498,7 @@
                   :properties {:lib {:type "string"}}
                   :required ["lib"]}}
    {:name "deps_list" :image-free true :read-only true
-    :description "The dependency manifest: {:deps {lib coord}}, plus :host-override for any declaration slopp's own process bundles at a different version and so cannot honor (inert; the host's copy wins). Note what is NOT here: slopp's web framework. slopp vendors it into every store that uses it, at the version slopp is, so it is never declared and never drifts."
+    :description "The dependency manifest: {:deps {lib coord}}, plus :host-override for any declaration slopp's own process bundles at a different version and so cannot honor (inert; the host's copy wins). Note what is NOT here: slopp's framework, AND what the framework itself requires. slopp vendors the source into every store that uses it and supplies its deps alongside, at the version slopp is, so neither is ever declared and neither drifts. A store reasoning 'the vendored code requires replicant, so I must declare replicant' is reasoning about a classpath it does not own — measured by a consumer who removed the declaration and found the artifact still carried it."
     :inputSchema {:type "object" :properties {}}}
    {:name "store_health" :read-only true
     :description "What this store CARRIES, in bytes: the journal per op (heaviest first), the materialized state, the blob table, and the on-disk artifact cache. Cheap — SQLite LENGTH only, nothing parsed. full_check answers whether the store is CORRECT; this answers what it COSTS. Reach for it when a session feels slow to open, before growing what a delta carries, and periodically: a store can rot by GROWING, and nothing else measures that."

@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:web/client-routes` this episode — state what that
@@ -353,6 +353,38 @@
                           " needs at least one segment below it, so a route AT"
                           " the prefix needs its own server route.")})))))
 
+(defn ^:export request-paths
+  "Every `:webapp/path` literal this store declares, as
+  `[{:path :form} …]` sorted — `[]` when nothing requests anything.
+
+  **The other half of a route reference.** A literal `:href` in a view is
+  joined against the served table by `http-dangling-route-refs`; a screen's
+  request names a path in exactly the same way, and until this existed nothing
+  read it. Both are a claim that this store serves something.
+
+  **Read from map literals anywhere in the store**, like [[client-routes]] and
+  for the same reason: a request is an ordinary function, so its map can be
+  built in a helper, a `cond`, or beside the screen it belongs to, and a reader
+  that insisted on one shape in one place would report a partial answer as a
+  whole one.
+
+  A non-literal path is SKIPPED rather than guessed at — a computed path is one
+  this cannot read, and inventing an answer would make the join quietly partial,
+  which is worse than a path reported as unserved because that at least gets
+  looked at."
+  [st]
+  (vec (sort-by (juxt :path (comp str :form))
+                (distinct
+                 (for [nsx  (keys (:namespaces st))
+                       e    (store/forms st nsx)
+                       :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
+                       node (tree-seq coll? seq sx)
+                       :when (map? node)
+                       :let [p (get node :webapp/path)]
+                       :when (string? p)]
+                   {:path p
+                    :form (symbol (str nsx) (str (:name e)))})))))
+
 (defn ^:export webapp-report
   "The `webapp` section of `query_surface`: what this browser application IS.
 
@@ -363,8 +395,15 @@
 
   Three questions, which between them are what a browser app is:
 
-  - `:screens` — every declared route and the function that renders it. This is
-    the map somebody draws.
+  - `:screens` — every declared ADDRESS, the function that renders it, and what
+    it LOADS. This is the map somebody draws, so the load is the url rather than
+    the name of the function that computes one: a var answers WHICH function,
+    and the reader of this report does not read the code.
+
+    Addresses rather than screens, and the distinction is load-bearing here
+    because this is what a count would be taken from: a row's screen is not
+    unique and a screen's row is not unique, so an app with a lens bar or a
+    print view has more rows than screens and neither number is wrong.
   - `:actions` — what a reader can DO, and which kind each is. The `:effectful?`
     ones reach a server and the `:leaves?` ones hand the page back to the
     browser, so a human asking what a control does needs the kind visible rather
@@ -408,6 +447,13 @@
                      (if (and (symbol? s) (nil? (namespace s)))
                        (symbol (str nsx) (str s))
                        s))
+          ;; request VAR → the path it names, so a row can say what it loads as
+          ;; a url rather than as the name of the function that computes one.
+          ;; `first` because a request that names two paths is answering a
+          ;; question this report does not ask; the finding grain for that is
+          ;; `request-paths-unserved`, which lists every one
+          loads    (into {} (for [[form rows] (group-by :form (request-paths store))]
+                              [form (:path (first rows))]))
           screens  (vec (sort-by :path
                                  (for [[nsx node] rows
                                        row  (get node :webapp/routes)
@@ -421,14 +467,24 @@
                                        :let [target  (second row)
                                              screen  (if (map? target) (:render target) target)
                                              request (when (map? target) (:request target))]]
-                                   (cond-> {:kind :screen :path (first row)}
-                                     ;; absent when the map has no :render, which
-                                     ;; `wiring` refuses — but dropping the row
-                                     ;; would hide an ADDRESS this app declares,
-                                     ;; and the address is the half a server route
-                                     ;; has to answer for
-                                     screen  (assoc :screen (qualify nsx screen))
-                                     request (assoc :request (qualify nsx request))))))
+                                   (let [rq (when request (qualify nsx request))]
+                                     (cond-> {:kind :screen :path (first row)}
+                                       ;; absent when the map has no :render, which
+                                       ;; `wiring` refuses — but dropping the row
+                                       ;; would hide an ADDRESS this app declares,
+                                       ;; and the address is the half a server route
+                                       ;; has to answer for
+                                       screen (assoc :screen (qualify nsx screen))
+                                       rq     (assoc :request rq)
+                                       ;; and what it LOADS, as the url rather than
+                                       ;; as the var that computes it. A var name
+                                       ;; answers WHICH function; the reader of this
+                                       ;; report does not read the code, and their
+                                       ;; question is which endpoint. Absent when a
+                                       ;; request builds its path rather than naming
+                                       ;; one — the same limit [[request-paths]]
+                                       ;; states, in the same safe direction
+                                       (get loads rq) (assoc :loads (get loads rq)))))))
           actions  (vec (sort-by :action
                                  (for [[_nsx node] rows
                                        [a decl] (get node :webapp/actions)
@@ -440,3 +496,74 @@
        :actions actions
        :cljs    (count (filter #(= :cljs (store/platform-for store %))
                                (keys (:namespaces store))))})))
+
+(defn ^:export request-paths-unserved
+  "The [[request-paths]] no endpoint in this store declares, sorted — `[]` when
+  every screen asks for something that exists.
+
+  **The join is EQUALITY, not a route match.** A request path is a PATTERN in
+  the same grammar as `:web/path` — `/api/things/:id`, with its captures
+  supplied separately as `:webapp/path-params` — so asking the router to match
+  it as though it were a concrete url would answer nil for every parameterized
+  endpoint in the store and report a working app as entirely broken. The two
+  sides are the same kind of string and compare directly.
+
+  **An ABSOLUTE url is left alone.** An app calling a third-party API declares a
+  whole url, and reporting those would make this noise on every store that talks
+  to anything. Same discipline `:web/external-path` states for links: this
+  answers for what THIS store serves and says nothing about anyone else's
+  server.
+
+  Reads `edit.http/web-endpoint-rows` — the store's single route traversal —
+  rather than `rules.http/endpoints`, which is the same rows one layer up.
+  `rules.http` already depends on this namespace for the client route table, so
+  the join has to be made from here or not at all."
+  [st]
+  (let [served (into #{} (keep #(:web/path (:meta %))) (edit.http/web-endpoint-rows st))]
+    (vec (remove (fn [{:keys [path]}]
+                   (or (contains? served path)
+                       (str/includes? path "://")))
+                 (request-paths st)))))
+
+(defn webapp-request-paths-are-served-check
+  "Done-advisory: screens whose request names a path this store does not serve.
+  Inert until the store opts into `webapp`.
+
+  **The gap wave 4d created, and it was written into the boundary inventory the
+  day it appeared rather than found later.** A literal `:href` is resolved
+  against the served table by `http-dangling-route-refs`. The `:webapp/path`
+  inside a screen's request is the same kind of claim about the same table, made
+  in a different key, and nothing read it — so moving the fetch out of the
+  browser and into a declaration bought verifiability everywhere except here.
+
+  The failure is quiet in the way this capability keeps naming: the url routes,
+  the screen renders, chrome and nav are fine, and one pane says it could not
+  load. Every other pane works, so the reader's report is *the thing pages are
+  slow* rather than *this endpoint does not exist*.
+
+  **The finding names what the store DOES serve**, because a typo is nearly
+  always one of them and a complaint an author cannot act on is one they learn
+  to skim.
+
+  Advisory rather than a refusal, and whole-store rather than episode-scoped,
+  for the same two reasons its `webapp-client-routes-are-served` neighbour has:
+  a store mid-migration is exactly the state this fires on, and the two
+  declarations that drift apart are usually not edited together."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    (let [served (sort (distinct (keep #(:web/path (:meta %))
+                                       (edit.http/web-endpoint-rows st*))))]
+      (vec (for [{:keys [path form]} (request-paths-unserved st*)]
+             {:path path
+              :form form
+              :serves (vec served)
+              :teach (str form " requests " (pr-str path) ", which no endpoint"
+                          " in this store declares. The url will route and the"
+                          " screen will render — one pane just always fails to"
+                          " load, while everything around it works."
+                          (when (seq served)
+                            (str " This store serves "
+                                 (apply str (interpose ", " (map pr-str served)))
+                                 "."))
+                          " If it is somebody else's server, write the whole url"
+                          " and this stops asking.")})))))

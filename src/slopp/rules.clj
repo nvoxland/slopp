@@ -1041,6 +1041,20 @@
                         " disagree — a source-only fixture cannot carry the"
                         " capability config; covered by rules.webapp-test/"
                         "a-client-route-the-SERVER-does-not-serve-404s-on-a-hard-load")}
+   ;; the OTHER half of a route reference. A literal :href is joined against
+   ;; the served table by http-dangling-route-refs; a screen's :webapp/path is
+   ;; the same claim about the same table in a different key, and nothing read
+   ;; it — so moving the fetch out of the browser bought verifiability
+   ;; everywhere except here. The failure is quiet: the url routes, the screen
+   ;; renders, one pane always fails to load while everything around it works
+   {:key :webapp-request-paths-are-served :severity :advisory :applies-to :production
+    :check #'rules.webapp/webapp-request-paths-are-served-check
+    ;; a screen and the endpoint it calls are rarely edited together, and the
+    ;; one that breaks the join is whichever was touched alone
+    :sweep true
+    :selftest-note (str "needs webapp.enabled, which a source-only fixture"
+                        " cannot carry; covered by rules.webapp-test/"
+                        "a-screens-REQUEST-PATH-is-joined-against-what-this-store-SERVES")}
 ;; the stored :name and the source's own name, which must agree. NOT
    ;; :fires-on-able: ingesting source recomputes :name, so no fixture text
    ;; can express the disagreement — which is exactly why nothing caught it.

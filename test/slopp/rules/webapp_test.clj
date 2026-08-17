@@ -298,7 +298,11 @@
                                       [:config "capabilities" :values "webapp.enabled"] "true")))]
         (is (= ["/things/:id"] (mapv :path rows)) (pr-str rows))
         (is (= '[shop.two/thing] (mapv :screen rows)) (pr-str rows))
-        (is (= '[shop.two/thing-request] (mapv :request rows)) (pr-str rows))))
+        (is (= '[shop.two/thing-request] (mapv :request rows)) (pr-str rows))
+        (is (= ["/api/thing"] (mapv :loads rows))
+            (str "a var name answers WHICH function, and the reader's question"
+                 " is which endpoint — the report is the picture somebody who"
+                 " does not read the code is looking at: " (pr-str rows)))))
 
     (testing "a row is READABLE or it is skipped — never a thrown report"
       ;; `rules.rest/contracts-report`'s own scar: one member that threw made
@@ -440,3 +444,70 @@
                                     "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
                  [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))))
+
+(deftest a-screens-REQUEST-PATH-is-joined-against-what-this-store-SERVES
+  ;; The gap wave 4d created, recorded in `index.crossings` at the moment it was
+  ;; created rather than found later: a literal `:href` is resolved against the
+  ;; served route table by `http-dangling-route-refs`, and the `:webapp/path`
+  ;; inside a screen's request is the same kind of claim about the same table,
+  ;; made in a different key, with nothing reading it.
+  ;;
+  ;; So a screen could name an endpoint this store does not serve, and the only
+  ;; symptom is a load that always fails — at a url that routes, on a screen
+  ;; that renders, in an app where every other pane works.
+  ;;
+  ;; **The join is EQUALITY, not `router/match`.** A request path is a PATTERN
+  ;; in the same grammar as `:web/path` — `/api/things/:id`, with the captures
+  ;; supplied separately as `:webapp/path-params` — so matching it as though it
+  ;; were a concrete url would ask the wrong question and answer nil for every
+  ;; parameterized endpoint in the store.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn ^{:web/method :get :web/path \"/api/things\"\n"
+                 "        :web/auth :public :web/response :string}\n"
+                 "  things \"T.\" [_] {:status 200 :body \"[]\"})\n\n"
+                 "(defn ^{:web/method :get :web/path \"/api/things/:id\"\n"
+                 "        :web/auth :public :web/response :string}\n"
+                 "  thing \"T.\" [_] {:status 200 :body \"{}\"})\n\n"
+                 "(defn list-request \"R.\" [_p] {:webapp/path \"/api/things\"})\n\n"
+                 "(defn detail-request \"R.\" [p]\n"
+                 "  {:webapp/path \"/api/things/:id\" :webapp/path-params {:id (:id p)}})\n\n"
+                 "(defn typo-request \"R.\" [_p] {:webapp/path \"/api/thing\"})\n\n"
+                 "(defn far-request \"R.\" [_p]\n"
+                 "  {:webapp/path \"https://api.example.com/v1/rates\"})\n")
+        on  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")]
+
+    (testing "a request path that names a declared endpoint is served"
+      (let [unserved (set (map :path (rules.webapp/request-paths-unserved on)))]
+        (is (not (contains? unserved "/api/things")) (pr-str unserved))
+        (is (not (contains? unserved "/api/things/:id"))
+            (str "a PARAMETERIZED endpoint must join by its pattern — resolving"
+                 " it as a concrete url answers nil for every one of them: "
+                 (pr-str unserved)))))
+
+    (testing "and a path nothing serves is reported, with the form that names it"
+      (let [rows (rules.webapp/request-paths-unserved on)]
+        (is (= ["/api/thing"] (mapv :path rows)) (pr-str rows))
+        (is (= 'shop.ui/typo-request (:form (first rows))) (pr-str rows))))
+
+    (testing "an ABSOLUTE url is somebody else's server and is left alone"
+      ;; the escape that keeps this worth having: an app calling a third-party
+      ;; API declares a whole url, and reporting it would make the advisory
+      ;; noise on every app that talks to anything
+      (is (not (contains? (set (map :path (rules.webapp/request-paths-unserved on)))
+                          "https://api.example.com/v1/rates"))))
+
+    (testing "the advisory is INERT until the store opts into webapp"
+      ;; the reading side of the same inertness every webapp rule has
+      (let [off (store/ingest (store/empty-store) 'shop.ui src)]
+        (is (empty? (rules.webapp/webapp-request-paths-are-served-check
+                     nil off nil))
+            "a project with no browser app must not be told about one")
+        (is (seq (rules.webapp/webapp-request-paths-are-served-check nil on nil))
+            "and with it on, the finding is there — or the line above is vacuous")))
+
+    (testing "the finding NAMES the paths this store does serve"
+      ;; a complaint an author cannot act on is one they learn to skim: the
+      ;; endpoint table is right there, and a typo is nearly always one of them
+      (let [f (first (rules.webapp/webapp-request-paths-are-served-check nil on nil))]
+        (is (re-find #"/api/things" (:teach f)) (pr-str f))))))

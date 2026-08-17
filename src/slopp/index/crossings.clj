@@ -146,13 +146,13 @@
                  whether the app WORKS: that a screen returns hiccup, that a
                  handler does anything.
 
-                 And a screen's REQUEST is a route reference nothing joins. A
-                 literal :href is resolved against the served table by
-                 http-dangling-route-refs; the :webapp/path inside a screen's
-                 request is the same kind of claim about the same table, made in
-                 a different key, and no check reads it. So a screen can name an
-                 endpoint this store does not serve and the only symptom is a
-                 failed load at runtime"}
+                 A screen's REQUEST is the other half of a route reference and is
+                 joined by webapp-request-paths-are-served — an EQUALITY join,
+                 because a request path is a PATTERN in the same grammar as
+                 :web/path rather than a concrete url. Its own limit: an
+                 absolute url is skipped as somebody else's server, so a typo in
+                 one is invisible, and a computed path is skipped rather than
+                 guessed at, which makes the join partial in the safe direction"}
 
    {:kind       :http/foreign-route
     :leaves     "a link to a path this store does not serve"
