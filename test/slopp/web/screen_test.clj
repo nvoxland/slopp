@@ -1322,3 +1322,97 @@
       (web.screen/visit! s "/things")
       (is (= thing (:screen @state))
           "the app must not have moved for a url that was never its own"))))
+
+(deftest a-REALISTIC-browser-app-is-DRIVEN-with-nothing-reaching-for-the-platform
+  ;; The wave's claim, stated so it can be false: **an app that opts into
+  ;; `webapp` writes NO ClojureScript.** Not "as little as possible" — none, as
+  ;; the default it has to deliberately leave.
+  ;;
+  ;; That matters because a `:cljs` namespace is not merely untested, it is
+  ;; outside the LOOP: every edit costs a compile to learn anything, which is
+  ;; the slow path this project exists to avoid, and it is where the only real
+  ;; webapp's two worst bugs both lived.
+  ;;
+  ;; So the fixture is deliberately NOT minimal. It has what a real screen has —
+  ;; a table with captures, chrome with a nav rail, an async fetch, all three
+  ;; kinds of action, a typed input, a link that must be prefixed — and if any
+  ;; one of those still forced a browser, this is where it would show.
+  ;;
+  ;; **What this does NOT cover**, because a checker named without its limits is
+  ;; the conflation this repo keeps naming:
+  ;;
+  ;;   - it does not prove a bundle COMPILES in a consumer's tree
+  ;;     (`compile_client` over slopp's own store covers the framework half,
+  ;;     `a-built-web-app-RUNS-outside-slopp-entirely` covers vendoring)
+  ;;   - it cannot COUNT an app's `:cljs` namespaces, because this fixture has
+  ;;     no namespaces of its own — that question is answered at store grain by
+  ;;     `query_surface`'s `:webapp/cljs`
+  ;;
+  ;; What IS asserted: a full application driven end to end, every function of
+  ;; which a JVM just called.
+  (let [state   (atom {})
+        pending (atom nil)
+        called  (atom [])
+        left    (atom [])
+        nav     (fn [s] [:nav [:a {:href "/things"} "Things"]
+                         [:span (str "at " (:path s))]])
+        things  (fn [s] [:ul (for [t (webapp/load-value s :main)]
+                               [:li [:a {:href (str "/things/" (:id t))} (:name t)]])])
+        thing   (fn [s] [:article
+                         [:h1 (str "Thing " (:id (:params s)))]
+                         [:input {:placeholder "note"
+                                  :value (:draft s)
+                                  :on {:input [:thing/typed]}}]
+                         [:button {:on {:click [:thing/save]}} "Save"]
+                         [:button {:on {:click [:project/switch "other"]}} "Switch"]])
+        app     (webapp/wiring
+                 {:webapp/state       state
+                  :webapp/base        "/p/demo"
+                  :webapp/routes      [["/things"     things]
+                                       ["/things/:id" thing]]
+                  :webapp/chrome      (fn [s inner] [:main (nav s) inner])
+                  :webapp/actions     {:thing/typed    {}
+                                       :thing/save     {:effectful? true}
+                                       :project/switch {:leaves? true}}
+                  :webapp/act         (fn [s _action v] (assoc s :draft v))
+                  :webapp/request-for (fn [s _a] {:method :put :body (:draft s)})
+                  :webapp/url-for     (fn [_s a] (str "/p/" (second a)))
+                  :webapp/call        (fn [req ok _err] (swap! called conj req) (ok :saved))
+                  :webapp/leave!      (fn [u] (swap! left conj u))
+                  :webapp/fetch       (fn [_screen _params ok _err] (reset! pending ok))})
+        s       (web.screen/open! (webapp/driver app))]
+
+    (testing "the loading state renders while the fetch is out, chrome and all"
+      (web.screen/visit! s "/p/demo/things")
+      (is (re-find #"(?i)loading" (web.screen/text s)) (web.screen/text s))
+      (is (re-find #"Things" (web.screen/text s))
+          "the nav rail stays up, which is why chrome places the load state"))
+
+    (testing "and the screen renders when the answer lands"
+      (@pending [{:id "42" :name "Anvil"}])
+      (is (re-find #"Anvil" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "a link carries the mount point, and clicking it routes"
+      (web.screen/click! s "Anvil")
+      ;; the new screen is :loading until ITS fetch answers — navigating runs
+      ;; the :main load again, and the framework will not call a screen against
+      ;; data that has not arrived. Answering it here is what a server does
+      (is (re-find #"(?i)loading" (web.screen/text s))
+          "a screen must not render against the PREVIOUS screen's data")
+      (@pending nil)
+      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "typing reaches the reducer as a SCALAR, with no event in sight"
+      ;; the shape that used to force an app into :cljs — `(.. e -target -value)`
+      ;; in a hand-written dispatcher — is the framework's now, so the app's
+      ;; interpreter never sees an event of any kind
+      (web.screen/fill! s "note" "hello")
+      (is (= "hello" (:draft @state)) (pr-str @state)))
+
+    (testing "an effectful control makes the request the app DERIVED"
+      (web.screen/click! s "Save")
+      (is (= [{:method :put :body "hello"}] @called) (pr-str @called)))
+
+    (testing "and a leaving control hands the page back to the browser"
+      (web.screen/click! s "Switch")
+      (is (= ["/p/other"] @left) (pr-str @left)))))
