@@ -5,6 +5,22 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
+<!-- skill-written-against: d31362 -->
+
+**This skill reaches you on a DIFFERENT channel from the code.** The code is the
+jar your MCP server runs; this file ships in the plugin package. They can be
+different ages, and nothing about running a newer jar updates this text.
+
+So the line above is a stamp, and it is checkable in one call: `session_brief`
+reports `:jar-head`, the store head the running artifact was built from. If that
+head is far ahead of the stamp, treat this skill's specifics — key names,
+refusals, what a tool returns — as possibly describing an older shape, and let
+the tools' own refusals win. They come from the jar and cannot be stale.
+
+A mismatch is a SIGNAL, not a verdict: the stamp is hand-kept, so it under-
+reports currency when somebody edits this file and forgets it. That is the safe
+direction — it says older than it is, never newer.
+
 slopp is an agent-native codebase: code lives in a **store** (not files),
 the unit of everything is the **top-level form**, and a **live JVM image**
 runs your code continuously. Every write hot-reloads, re-runs exactly the
