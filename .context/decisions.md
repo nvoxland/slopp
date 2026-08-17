@@ -2513,10 +2513,30 @@ first is the one worth remembering:
   making the message state the question it asked rather than a conclusion it
   had not earned (D-surface-honesty).
 
-Deferred: extending client-route integrity to the client-side route table;
-`:web/client-routes` is built but nothing declares it, because the reviewer UI has real
-server routes for every client route and is progressively enhanced rather than
-a hard SPA. Remaining frictions: `ideas/logs/spa-wave-frictions.md`.
+~~Deferred: extending client-route integrity to the client-side route table;
+`:web/client-routes` is built but nothing declares it, because the reviewer UI
+has real server routes for every client route and is progressively enhanced
+rather than a hard SPA.~~
+
+**DONE and the reason had stopped holding — both clauses, measured 2026-08-17
+by the consuming app** (`hub/project-root` declares three
+`:web/client-routes` prefixes; 9 server routes against 14 client addresses;
+their `spa` and `nav` namespaces deleted). So it is a hard SPA on this loop,
+there is no longer a server route per client route, and something does declare
+the marker. The WORK shipped separately in wave 4 —
+`webapp-client-routes-are-served` joins the client table to the prefixes the
+document answers for, and `webapp-request-paths-are-served` joins a screen's
+request to the endpoints the store serves.
+
+**The entry did not notice any of that**, which is the failure mode this log
+should be watched for: a deferral records a blocker AND a reason, the blocker
+clears, and nothing re-reads the entry. Their words for the same thing on their
+side, an hour earlier: *a queue entry inherits the blocker of the item above it
+unless someone re-checks.* Same shape here — a stale reason reads as a live one,
+and it is the sentence a later reader trusts.
+
+Remaining frictions: `ideas/logs/spa-wave-frictions.md` for this wave's own,
+`ideas/logs/webapp-wave-frictions.md` for wave 4's.
 
 ## D-module-view (2026-07-26) — the Code screen is a module map, and the diagram is DATA
 

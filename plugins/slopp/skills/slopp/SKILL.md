@@ -5,7 +5,7 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
-<!-- skill-written-against: d31710 -->
+<!-- skill-written-against: d31794 -->
 
 **This skill reaches you on a DIFFERENT channel from the code.** The code is the
 jar your MCP server runs; this file ships in the plugin package. They can be
@@ -1789,9 +1789,18 @@ declare the app; slopp owns the loop.
   NAVIGATION, and the route table already separates it from a POST to your
   server. Such a form submits as a full page load, which is correct — it lands
   on the client route and the app boots there.
-- **`:webapp/state` is cleared by the framework on navigation.** Declare
-  `:webapp/session-loads` for anything that must outlive a screen, and
-  `:webapp/address-keys` for your own keys that must die with one.
+- **On navigation, `:loads` is emptied and `:webapp/address-keys` are dropped
+  with the route — every other key survives.** A plain state key outlives a
+  screen by saying nothing, which is what a nav rail wants. Do NOT read this as
+  "state is wiped": the reader who does moves the value INTO `:loads` to protect
+  it, which is the one action that makes it start dying on every navigation.
+- **A load that belongs to no screen is DECLARED**, and slopp starts it at page
+  load: `:webapp/session-loads {:modules {:request (fn [state] {…}) :derive …}}`.
+  Its `:request` takes STATE where a screen's takes params — a session load has
+  no address, so there are no captures to hand it. Declaring one with no
+  `:request` scopes it without starting it, for the load you begin yourself
+  after a sign-in. This is what stops a nav rail being the last thing forcing
+  `:cljs` on an app.
 - **Read a load with `load-status` AND `load-value`, never value alone.** Four
   states — `:absent :loading :ready :failed` — because "nobody asked" and
   "answered nil" are different facts and `(if (:data s) …)` cannot tell them
@@ -1803,7 +1812,10 @@ declare the app; slopp owns the loop.
   apart.
 - **Drive it headlessly**: `(screen/open! (webapp/driver app))`, then `visit!`
   the url a reader would type — mount point included — and `click!` a link.
-  No browser, no compile, and the same functions the real page runs.
+  No browser, no compile, and the same functions the real page runs. **`visit!`
+  takes the FULL url**, which is what is in the address bar; a drive that passes
+  app-relative paths exercises a url no browser produces, and is correct only
+  while the fixture's base is `""`.
 - **Endpoint tests must ROUND-TRIP through JSON.** `web/handle!` returns the
   body as Clojure DATA — the adapter serializes — so a keyword sails through
   a `[:x :string]` contract in-image and reaches the browser as a string. A

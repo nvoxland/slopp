@@ -149,10 +149,40 @@ Read both, never the value alone. "Nobody asked" and "answered nil" are
 different facts about the world, and `(if (:data s) ...)` cannot tell them
 apart -- which is how a silent retry loop gets built on a failing endpoint.
 
-`:webapp/state` is cleared by the framework on navigation, so a previous
-screen's answers never appear under a new URL. Declare `:webapp/session-loads`
-for anything that must outlive a screen -- a nav rail, a signed-in user -- and
-`:webapp/address-keys` for your own keys that must die with one.
+On navigation, `:loads` is emptied and `:webapp/address-keys` are dropped with
+the route. **Every other key survives** -- a plain state key outlives a screen by
+saying nothing.
+
+!!! warning "Do not read that as 'state is wiped'"
+    It is the sentence that sends a reader with a nav rail to move the value
+    *into* `:loads` to protect it, which is the one action that makes it start
+    dying on every navigation. `:webapp/address-keys` is for the keys that must
+    die with a route; `:webapp/session-loads` is for a load you want the load
+    machinery for *and* want to outlive a screen.
+
+### A load that belongs to no screen is declared too
+
+```clj
+:webapp/session-loads {:modules {:request (fn [state] {:webapp/path "/api/modules"})
+                                 :derive  :names}
+                       :user    {}}
+```
+
+slopp starts each one at page load, after `:webapp/boot` and before routing --
+boot first because a session request reads the state boot established (a token,
+say), and routing last because the first screen may read a session load and
+rendering before they are in flight shows a flash of empty chrome.
+
+A session `:request` takes **state** where a screen's takes **params**: a
+session load has no address, so there are no captures to hand it. A nil request
+declines, which is how a load waits for a sign-in. Declaring one with no
+`:request` -- `:user` above -- scopes it without starting it, for the load you
+begin yourself.
+
+This is the piece that stops a nav rail being the last thing forcing a `:cljs`
+namespace on an app: `load!` takes `(fn [ok err])`, so a load nothing declares
+has to be hand-written where the wiring is, and in a browser that means
+ClojureScript.
 
 `webapp/load!` is public, because *scope* is your question and the *machinery*
 is not. Run your own loads through it and you get the state model, a minted
@@ -248,6 +278,39 @@ gaps, so a canned performer left in your wiring for tests cannot ship to a page.
     compiles and fails in a browser, and no guard catches that. Read as coverage
     it would be worse than absent.
 
+## Generation follows who performs
+
+```clj
+generate_client {}
+```
+
+With `webapp` on, this emits a **`.cljc`** namespace of request builders and
+contract checks rather than the `.cljs` fetch wrappers a server-rendered client
+gets:
+
+```clj
+(defn ^{:generated "shop.api/get-order"} ^:export get-order-request [params]
+  {:webapp/method      :get
+   :webapp/path        "/api/orders/:id"
+   :webapp/path-params {:id (:id params)}
+   :webapp/query       (dissoc params :id)})
+
+(defn ^{:generated "shop.api/get-order"} ^:export get-order-check [response]
+  ;; nil when the contract holds, a message when it does not
+  …)
+```
+
+Drop the builder into a row's `:request` and the check into its `:check`. The
+capability decides the shape and there is no flag: which artifact is useful
+*follows* from who performs the request, and a store that has declared that
+should not have to declare it twice.
+
+Two things this buys beyond tidiness. The builders are **portable**, so which
+URL a screen will ask for is an ordinary in-image value rather than a string
+assembled in a browser. And the checks are the response validation back — it
+used to live in the wrappers, and when the framework took over performing it
+went with them.
+
 ## What slopp checks
 
 Turning the capability on arms these:
@@ -271,9 +334,14 @@ Turning the capability on arms these:
   `:cljs`, so the page can no longer be opened headlessly. Reported at the
   `module_platform` write that stranded it, because that write is what broke the
   reach and no later form change would hang the finding anywhere.
+- **`webapp-client-code`** -- the `:cljs` namespaces you still hand-write, named
+  with what each costs. This is the capability's goal arriving rather than
+  waiting to be asked, and it is silent at zero. Advisory, never a refusal: a
+  browser-only binding with no portable form is a real answer, and there is no
+  marker to silence it because the finding *is* the inventory.
 - **`query_surface`'s `:webapp` section** -- every address, the screen that
-  renders it and the URL it loads, every action with its kind, and the `:cljs`
-  count.
+  renders it and the URL it loads, every declared session load, every action
+  with its kind, and the `:cljs` count.
 
 ## Vendoring
 
