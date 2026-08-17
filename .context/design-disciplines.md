@@ -2649,3 +2649,51 @@ correct and never checked against its own siblings.
 No mechanism was built for either. A counter needs a threshold, and a noisy
 version of this check would be worse than none — which is itself the reason to
 write the discipline down rather than pretend the absence is an oversight.
+
+## A reason is tested exactly once, unless something re-asks it
+
+**Root.** slopp-ui, 2026-08-17, correcting their own example an hour after
+offering it — third instance in one week of a description outliving its code.
+
+Their `:module` screen assembles itself from a cached index when its load is
+empty, and both docstrings around it said why:
+
+> `GET /api/module/:m` was asked for and does not exist yet … When it lands,
+> `value` arrives filled and this falls through to it.
+
+The endpoint had shipped weeks earlier. The fall-through those comments describe
+as FUTURE had been the ordinary path since. Their own backlog was right the whole
+time — *"the index fallback remains for the case where it cannot be reached"* —
+so the record knew and the code did not.
+
+**Why it is not just a stale comment.** A stopgap and a resilience path READ
+IDENTICALLY and point opposite ways:
+
+- a stopgap should be DELETED when the thing it stands in for lands
+- a resilience path should SURVIVE
+
+Both are an `or`. Nothing in the code distinguishes "not built yet" from "might
+not answer", so the justification is the only thing that decides whether the next
+reader removes it — and a justification that has gone stale sends them the wrong
+way with full confidence. This nearly reached a migration note telling readers to
+delete the only thing keeping a screen useful when its call fails.
+
+**The generalisation, in their words:** a rule invented to settle one question and
+never run against its own precedent has been tested exactly once — *and so has a
+REASON*. "The endpoint does not exist yet" settled the question the day it was
+written and was never re-asked on the day the endpoint landed.
+
+**Why nothing catches it.** `stale-reference` finds a named form that moved.
+`unknown-marker` finds a declaration nothing reads. Both key on STRUCTURE. A
+stale reason is well-formed prose sitting next to correct code, and the claim it
+makes is about the world rather than about the store.
+
+No mechanism, deliberately, and both sides declined it independently: the
+threshold problem is the same one that stopped a repeated-prose counter, and a
+noisy version of either would be worse than none. What is available instead is
+cheap and worth saying: **write what a fallback COVERS, not what it is waiting
+for.** A condition stays true; an expectation expires.
+
+All three of this week's instances were found by reading the code for an
+unrelated reason. That is the honest detection story, and it is why this is a
+discipline rather than a check.
