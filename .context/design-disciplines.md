@@ -2874,9 +2874,30 @@ questions and a fake that agrees with them.
 
 Two tells that a fixture is in the agreeing class:
 
-- it is keyed by the thing under test (a url, a screen, an id), so a wrong key
-  reads as "no answer" instead of "wrong answer"
-- removing an arm of it makes nothing red
+- **it is keyed by the thing under test** (a url, a screen, an id), so a wrong
+  key reads as "no answer" instead of "wrong answer". This is the mechanism.
+- **the reds it produces name the DATA rather than the fixture.** This is the
+  symptom, and it is the one that costs debugging time.
+
+The second tell was first written as *"removing an arm of it makes nothing
+red"*, and that is FALSE — measured by the app this came from, which broke an
+arm on purpose and watched three tests go red. Any test asserting real content
+goes red when content disappears.
+
+What is wrong is not the silence, it is the SENTENCE. Their three reds said
+*"nothing to show — this project's timeline came back empty"*, which is a true
+statement about the data and a false one about the cause. A reader follows it to
+the endpoint, then the response shape, then the screen's empty branch, and
+reaches the map that answers urls last — which is the cost this repo has named
+in another context: **a red whose message points somewhere else is worse than
+the bug, because the debugging budget is spent in the wrong place first.**
+
+That is why the mechanism tell is the sharp one and the symptom tell is the
+weaker claim that survives: a fixture keyed by the subject fails by answering
+nil, and nil is a value every honest screen already renders a sentence for. The
+sentence is true about the screen and false about the fault.
 
 Neither is a reason to avoid canned data — canned data is how the headless
 drive works at all. It is a reason to make the fake report, not just respond.
+And a fake that records what it was ASKED catches the other direction too, which
+nothing else catches at all: an arm canned for a path no screen requests.
