@@ -1417,3 +1417,87 @@
       (is (re-find #"upstream timeout" message) message))
     (let [[_ message] (webapp/response-outcome 503 "Service Unavailable")]
       (is (re-find #"Service Unavailable" message) message))))
+
+(deftest a-screen-can-REJECT-what-it-was-SENT-and-both-drivers-agree
+  ;; Reported by the app that lost its response validation to 4d, and measured
+  ;; rather than argued: their generated `fetch` wrappers THREW on a contract
+  ;; violation, the four-state model turned that into the failed screen, and
+  ;; when the framework took over performing, the wrappers stopped being called.
+  ;;
+  ;; The obvious repair — validate inside `:derive` — is not available, and the
+  ;; reason is worth stating because it is structural rather than an oversight:
+  ;;
+  ;;   headless  `ok` is called SYNCHRONOUSLY by the fake, so a throw inside
+  ;;             `write!` propagates out of `load!` and takes the driver with it
+  ;;   browser   `ok` is called from inside a `.then`, so the same throw lands
+  ;;             in `call!`'s `.catch` and becomes a rendered failure screen
+  ;;
+  ;; Same `:derive`, two behaviours — which is the ONE difference this
+  ;; capability exists to prevent, arriving through the seam it added. And it
+  ;; cannot be closed by catching, because a `:cljc` form cannot catch on both
+  ;; platforms without the reader conditional D3 denies.
+  ;;
+  ;; So a rejection is a VALUE. `:check` answers nil for an acceptable response
+  ;; and a MESSAGE for one it refuses, and nothing throws anywhere.
+  (let [state (atom {})
+        screen {:render  (fn [s] [:p (str "got " (webapp/load-value s :main))])
+                :request (fn [_p] {:webapp/path "/api/thing"})
+                :check   (fn [v] (when-not (:ok v) "contract violation: :ok is missing"))
+                :derive  :name}
+        answer (atom {:ok true :name "Anvil"})
+        app    (webapp/wiring
+                {:webapp/state  state
+                 :webapp/routes [["/thing" screen]]
+                 :webapp/call   (fn [_rq ok _err] (ok @answer))})
+        s      (web.screen/open! (webapp/driver app))]
+
+    (testing "an answer the screen accepts is derived and rendered"
+      (web.screen/visit! s "/thing")
+      (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
+      (is (re-find #"got Anvil" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "an answer it REJECTS becomes :failed, carrying the check's message"
+      (reset! answer {:name "Anvil"})
+      (web.screen/visit! s "/thing")
+      (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
+      (is (= "contract violation: :ok is missing"
+             (get-in @state [:loads :main :error]))
+          (pr-str @state))
+      (is (re-find #"contract violation" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "and :derive never runs on an answer that was rejected"
+      ;; deriving from a value the screen just refused is work on data nobody
+      ;; trusts, and its own failure would arrive as the second error for one
+      ;; fault — the louder and less true of the two
+      (let [derived (atom 0)
+            st      (atom {})
+            a2      (webapp/wiring
+                     {:webapp/state  st
+                      :webapp/routes [["/thing" {:render  (fn [_s] [:p "x"])
+                                                 :request (fn [_p] {:webapp/path "/api/thing"})
+                                                 :check   (fn [_v] "no")
+                                                 :derive  (fn [v] (swap! derived inc) v)}]]
+                      :webapp/call   (fn [_rq ok _err] (ok {:whatever true}))})]
+        (webapp/navigate! a2 "/thing" false)
+        (is (= 0 @derived) "the derive ran on a value the check had refused")))
+
+    (testing "a SUPERSEDED answer is never checked either"
+      ;; the check is inside the freshness guard for `:derive`'s own reason: an
+      ;; answer nobody is waiting on must not be paid for. The app this came
+      ;; from had exactly the opposite — generated wrappers that validated
+      ;; BEFORE the guard, so an abandoned load paid for its own validation
+      (let [checked (atom 0)
+            st      (atom {})
+            pending (atom [])
+            a3      (webapp/wiring
+                     {:webapp/state  st
+                      :webapp/routes [["/a" {:render  (fn [_s] [:p "a"])
+                                             :request (fn [_p] {:webapp/path "/api/a"})
+                                             :check   (fn [_v] (swap! checked inc) nil)}]
+                                      ["/b" (fn [_s] [:p "b"])]]
+                      :webapp/call   (fn [_rq ok _err] (swap! pending conj ok))})]
+        (webapp/navigate! a3 "/a" false)
+        (webapp/navigate! a3 "/b" false)
+        ((first @pending) {:anything true})
+        (is (= 0 @checked)
+            "a superseded answer was validated — the abandoned load paid for it")))))

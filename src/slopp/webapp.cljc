@@ -241,9 +241,31 @@
   `:failed`, a minted token, and the supersession guard.
 
   `f` is `(fn [ok err])` — callbacks, for [[navigate!]]'s reason: a promise is
-  not a thing the JVM oracle has. `xform` is applied to the value INSIDE the
+  not a thing the JVM oracle has.
+
+  `opts` is `{:xform :check}`, both optional and both applied INSIDE the
   freshness guard, so work derived from an answer nobody is waiting on is never
-  paid for.
+  paid for:
+
+  - `:xform` — `(fn [value] value')`, the shaping a caller wants.
+  - `:check` — `(fn [value] -> nil | message)`. nil accepts the answer; a
+    MESSAGE rejects it, and the load becomes `:failed` carrying that message
+    with `:xform` never run.
+
+  **A rejection is a VALUE, not a throw, and the reason is structural rather
+  than stylistic.** A caller's obvious move is to validate inside `:xform` and
+  throw — and that produces two different behaviours from one function. Headless
+  the performer calls `ok` synchronously, so the throw propagates out of here
+  and takes the driver with it; in a page `ok` is called from inside a `.then`,
+  so the same throw lands in the shim's `.catch` and becomes a rendered failure
+  screen. Same code, two outcomes, which is the one difference this capability
+  exists to prevent. It cannot be closed by catching either: a `:cljc` form
+  cannot catch on both platforms without the reader conditional D3 denies. So
+  the failure channel is a return value, and nothing throws anywhere.
+
+  Reported by the app that lost its response validation when the framework took
+  over performing — its generated wrappers threw on a contract violation, and
+  the four-state model had been turning that into the failed screen.
 
   **Public because scope is the app's question and the machinery is not.** The
   loop runs `:main` through here on every navigation; an app runs its own loads
@@ -281,16 +303,39 @@
   The rule that replaced it is slopp-ui's: **authorship decides who owns the
   MECHANISM; scope is a separate question and is never derivable from who does
   the writing.**"
-  ([app key f] (load! app key f identity))
-  ([app key f xform]
-   (let [{:webapp/keys [state render]} app]
+  ([app key f] (load! app key f {}))
+  ([app key f opts]
+   ;; a bare fn was the old fourth argument, and it is refused rather than
+   ;; accepted alongside: two shapes for one slot is how a caller writes the
+   ;; one that silently does less
+   ;; asked as "is this a map" rather than "is this callable", because a MAP
+   ;; is `ifn?` — the same trap `as-screen` refuses a keyword row target for,
+   ;; met here by the guard written to catch it
+   (when-not (map? opts)
+     (throw (ex-info (str "load!'s fourth argument is an OPTS MAP now — {:xform"
+                          " (fn [value] value') :check (fn [value] nil-or-message)}."
+                          " A bare xform fn was the old shape; the map exists"
+                          " because a screen needs to REJECT an answer, and a"
+                          " rejection cannot be a throw: headless it escapes"
+                          " load! and in a page it becomes a failure screen.")
+                     {:webapp/retired-shape :load-xform-fn})))
+   (let [{:webapp/keys [state render]} app
+         {:keys [xform check]} opts]
      (swap! state begin-load key)
      (let [token  (get-in @state [:loads key :token])
            fresh? (fn [] (= token (get-in @state [:loads key :token])))
            write! (fn [m] (when (fresh?)
                             (swap! state update-in [:loads key] merge m)
                             (render @state)))]
-       (f (fn [value] (write! {:status :ready :value (xform value)}))
+       (f (fn [value]
+            ;; the guard is asked BEFORE the check, so a superseded answer is
+            ;; not validated either — the app this came from had generated
+            ;; wrappers validating ahead of the guard, so an abandoned load
+            ;; paid for its own validation
+            (when (fresh?)
+              (if-let [msg (and check (check value))]
+                (write! {:status :failed :error msg})
+                (write! {:status :ready :value ((or xform identity) value)}))))
           (fn [message] (write! {:status :failed :error message})))))))
 
 (defn ^:export load-value
@@ -597,7 +642,7 @@
     (if request
       (load! app :main
              (fn [ok err] (call request ok err))
-             (or (:derive screen) identity))
+             {:xform (:derive screen) :check (:check screen)})
       (render @state))))
 
 (defn- navigate-for!
@@ -951,6 +996,7 @@
     app already has.
   - `{:render (fn [state] hiccup)
       :request (fn [params] -> request | nil)
+      :check   (fn [response] -> nil | message)
       :derive  (fn [response] -> value)}` — a screen that asks for something.
 
   `:request` is the seam this exists for. It is PURE and it is `:cljc`, so
@@ -960,6 +1006,16 @@
   entry supplies — so an app that opts into this writes no ClojureScript to
   fetch its own data. A nil request DECLINES, the same channel [[perform!]]
   uses: a screen that has nothing to ask for right now waits for nothing.
+
+  `:check` is how a screen REFUSES what it was sent — nil accepts, a message
+  rejects and the load becomes `:failed` carrying it, with `:derive` never run.
+  It exists because validating inside `:derive` and throwing produces two
+  different behaviours from one function: headless the performer calls `ok`
+  synchronously so the throw escapes [[load!]] and takes the driver with it,
+  while in a page `ok` is called from inside a `.then` and the same throw
+  becomes a rendered failure screen. A rejection is a VALUE for that reason, and
+  it cannot be fixed by catching — a `:cljc` form cannot catch on both platforms
+  without the reader conditional D3 denies.
 
   `:derive` shapes that screen's own answer. It replaced an app-wide
   `:webapp/derive` that received the screen and cased on it — a function asking
@@ -975,7 +1031,7 @@
   screen that renders with no data forever, at a url that looks right, with
   nothing anywhere saying why."
   [pattern target]
-  (let [known #{:render :request :derive}]
+  (let [known #{:render :request :check :derive}]
     (cond
       (map? target)
       (let [unknown (remove known (keys target))]
@@ -989,7 +1045,7 @@
         (when (seq unknown)
           (throw (ex-info (str "the screen at " (pr-str pattern) " declares "
                                (apply str (interpose ", " (map pr-str (sort-by str unknown))))
-                               " — a screen reads :render, :request and :derive."
+                               " — a screen reads :render, :request, :check and :derive."
                                " An unread key is not a crash: it is a screen that"
                                " renders with no data forever, at a url that"
                                " matched.")
