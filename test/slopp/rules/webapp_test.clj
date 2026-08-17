@@ -517,6 +517,19 @@
       (is (not (contains? (set (map :path (rules.webapp/request-paths-unserved on)))
                           "https://api.example.com/v1/rates"))))
 
+    (testing "a FROM-ORIGIN request is not this store's to serve either"
+      ;; the same statement an absolute url makes, in the form a MOUNTED app
+      ;; can actually write: the path is measured from the origin, so it is
+      ;; addressed at whatever sits there — which is not this store, or the
+      ;; declaration would be saying nothing
+      (let [src5 (str "(ns shop.five)\n\n"
+                      "(defn hub-request \"R.\" [_p]\n"
+                      "  {:webapp/path \"/api/projects\" :webapp/from-origin true})\n")
+            st   (assoc-in (store/ingest (store/empty-store) 'shop.five src5)
+                           [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= [] (rules.webapp/request-paths-unserved st))
+            (pr-str (rules.webapp/request-paths-unserved st)))))
+
     (testing "and a form marked ^:web/external-path is skipped WHOLE"
       ;; the escape the absolute-url one cannot cover, reported by the app that
       ;; needed it: its API is proxied by the PROJECT server under the same

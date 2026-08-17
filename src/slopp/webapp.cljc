@@ -1119,22 +1119,27 @@
   So an app writes `/api/things` and gets its own mount point for the same
   reason its links do, with no new vocabulary to declare.
 
-  **An ABSOLUTE url is left alone**, which is the one judgement here and the
-  same one `prefix-links` makes: a third-party API is not under this app's
-  mount point, and prefixing it would break the one request the app cannot
-  re-address. Both spellings count — a scheme, and the protocol-relative `//`
-  that a CDN link takes.
+  **An ABSOLUTE url is left alone**, which is the same judgement `prefix-links`
+  makes: a third-party API is not under this app's mount point, and prefixing it
+  would break the one request the app cannot re-address. Both spellings count —
+  a scheme, and the protocol-relative `//` that a CDN link takes.
 
-  **The limit, stated rather than discovered:** a request path is relative to
-  the app's mount point, exactly as an `:href` is. An app served at `/p/demo`
-  whose API is genuinely at the ROOT `/api` cannot say so — it would have to
-  write an absolute url, which is impossible when the prefix is only known at
-  runtime. No app has needed it; when one does, that is a declaration and not a
-  special case in here."
+  **`:webapp/from-origin true` says the path is measured from the ORIGIN**, and
+  it is the escape an absolute url cannot cover. The app that needed it is
+  served at `/p/<slug>` and also calls the HUB, a genuinely different
+  application at the same origin with its endpoint at the root: it cannot write
+  the whole url, because the origin is only known at runtime, and prefixing
+  sends the request to a project that does not serve it.
+
+  Declared on the REQUEST rather than on the app, because that is where the fact
+  lives — the same app's other requests ARE under its mount point, and only this
+  one is not. It was a stated limit for exactly one day; a limit with an
+  instance is a gap."
   [base request]
   (let [p (:webapp/path request)]
     (if (and (string? p)
              (seq (str base))
+             (not (:webapp/from-origin request))
              (not (str/includes? p "://"))
              (not (str/starts-with? p "//")))
       (assoc request :webapp/path (prefixed base p))
@@ -1382,53 +1387,6 @@
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
-                   [:map [:state :any] [:view :any]
-                    [:navigate :any] [:dispatch :any] [:boot :any]]]}
-  driver
-  "The headless DRIVER's map, derived from the app's own wiring.
-
-  `slopp.web.screen/open!` takes `{:state :view :navigate :dispatch :boot}`.
-  That is not the same map as [[wiring]], and it should not be: **the wiring is
-  what an app IS, and this is what a DRIVER needs.** Different levels, so the
-  answer is a derivation rather than making either learn the other's shape.
-
-  **This function exists because the alternative was measured.** slopp-ui wrote
-  the derivation by hand — about thirty lines — because slopp shipped the driver
-  contract and no way to reach it from a declared app. That adapter was a THIRD
-  hand-written wiring beside the browser entry and the headless driver, with
-  nothing comparing the three, in a project whose whole point is that a headless
-  drive and a real browser must not disagree. Four of the five keys are
-  mechanical; only `:boot` was ever theirs.
-
-  Unqualified keys OUT, namespaced keys IN, and the asymmetry is the seam rather
-  than an inconsistency: `screen`'s contract is older, shipped, and used by
-  server-rendered apps that have no wiring at all.
-
-  `:boot` is defaulted by [[wiring]] rather than here. It used to be `(or boot
-  identity)` at this one caller, which was correct and became wrong the moment
-  there were three: the browser entry and [[start!]] would each have written the
-  same `or`, and one of them lives where nothing can check it.
-
-  **`:dispatch` is [[dispatch!]], and so is the browser's.** That is this
-  capability's claim reduced to a var: the three-way split between a request, a
-  leave and a state transition is read out of `:webapp/actions` by one function,
-  which both drivers call. Two hand-written dispatchers have to make that split
-  identically or the screen a test drives and the screen a reader clicks differ
-  on the one control that DOES something — and slopp-ui had exactly that, the
-  same `(= :try/execute (first action))` in two shells, one of them `:cljs`."
-  [app]
-  (let [{:webapp/keys [state view boot]} app]
-    {:state    state
-     :view     view
-     ;; the app's own atom is the one that moves; `screen` re-reads what comes
-     ;; back, which is why these return the state rather than a fresh map
-     :navigate (partial navigate-for! app)
-     :dispatch (partial dispatch! app)
-     :boot     boot}))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/routes :any]] [:map] ifn?]
                    :any]}
   click!
@@ -1493,6 +1451,91 @@
     (navigate! app path push?)
     path))
 
+(defn- begin!
+  "Boot the app and start every declared session load, returning the state that
+  leaves. Answers the question a page load and a headless drive must answer
+  identically, so it is one function and not two.
+
+  **Two callers and they must not differ.** [[start!]] is what the browser entry
+  runs; `(:boot (driver app))` is what `slopp.web.screen/open!` runs. When only
+  the first started session loads, a declaration that worked in a page was
+  invisible to every headless drive — which is the ONE difference this
+  capability exists to prevent, arriving in the change that closed the previous
+  one. The app that took it found sixteen driven screens rendering an empty nav
+  rail and reverted the declaration rather than paper over it.
+
+  Third instance of the shape in a fortnight, after a throwing `:derive` and an
+  unprefixed `:action`, so the rule is worth having explicitly: **anything a
+  page load does before routing, a headless drive does too, out of one
+  producer.**
+
+  Boot FIRST, because a session `:request` is `(fn [state])` and the state it
+  reads is the one boot established — an authenticated load carries a token boot
+  put there, and reversing these two sends the request without one.
+
+  Read-call-write, never inside `swap!`: boot is the app's own code, `swap!`
+  demands a pure function and may retry, and an entry point that starts a fetch
+  is neither."
+  [{:webapp/keys [state boot session-loads] :as app}]
+  (reset! state (boot @state))
+  (doseq [[key spec] session-loads]
+    (fetch! app key spec (when-let [f (:request spec)] (f @state))))
+  @state)
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
+                   [:map [:state :any] [:view :any]
+                    [:navigate :any] [:dispatch :any] [:boot :any]]]}
+  driver
+  "The headless DRIVER's map, derived from the app's own wiring.
+
+  `slopp.web.screen/open!` takes `{:state :view :navigate :dispatch :boot}`.
+  That is not the same map as [[wiring]], and it should not be: **the wiring is
+  what an app IS, and this is what a DRIVER needs.** Different levels, so the
+  answer is a derivation rather than making either learn the other's shape.
+
+  **This function exists because the alternative was measured.** slopp-ui wrote
+  the derivation by hand — about thirty lines — because slopp shipped the driver
+  contract and no way to reach it from a declared app. That adapter was a THIRD
+  hand-written wiring beside the browser entry and the headless driver, with
+  nothing comparing the three, in a project whose whole point is that a headless
+  drive and a real browser must not disagree. Four of the five keys are
+  mechanical; only `:boot` was ever theirs.
+
+  Unqualified keys OUT, namespaced keys IN, and the asymmetry is the seam rather
+  than an inconsistency: `screen`'s contract is older, shipped, and used by
+  server-rendered apps that have no wiring at all.
+
+  `:boot` is defaulted by [[wiring]] rather than here. It used to be `(or boot
+  identity)` at this one caller, which was correct and became wrong the moment
+  there were three: the browser entry and [[start!]] would each have written the
+  same `or`, and one of them lives where nothing can check it.
+
+  **`:dispatch` is [[dispatch!]], and so is the browser's.** That is this
+  capability's claim reduced to a var: the three-way split between a request, a
+  leave and a state transition is read out of `:webapp/actions` by one function,
+  which both drivers call. Two hand-written dispatchers have to make that split
+  identically or the screen a test drives and the screen a reader clicks differ
+  on the one control that DOES something — and slopp-ui had exactly that, the
+  same `(= :try/execute (first action))` in two shells, one of them `:cljs`."
+  [app]
+  (let [{:webapp/keys [state view]} app]
+    {:state    state
+     :view     view
+     ;; the app's own atom is the one that moves; `screen` re-reads what comes
+     ;; back, which is why these return the state rather than a fresh map
+     :navigate (partial navigate-for! app)
+     :dispatch (partial dispatch! app)
+     ;; everything a page load does BEFORE routing, which is boot AND every
+     ;; declared session load — not the app's own transform alone. When this
+     ;; was `boot`, a session load ran in a browser and in no headless drive,
+     ;; and sixteen driven screens in the one real app rendered an empty nav
+     ;; rail against a declaration that worked in production. The state
+     ;; argument is ignored because [[begin!]] reads the same atom `open!`
+     ;; read it from
+     :boot     (fn [_state] (begin! app))}))
+
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any] [:webapp/boot :any]]
@@ -1545,8 +1588,7 @@
   reads two properties off `location` and calls this. A page load is the one
   moment an app has no reader to notice it went wrong, so it is the last place
   a decision should live somewhere nothing can check."
-  [{:webapp/keys [state boot session-loads] :as app} pathname search]
-  (reset! state (boot @state))
-  (doseq [[key spec] session-loads]
-    (fetch! app key spec (when-let [f (:request spec)] (f @state))))
+  [app pathname search]
+  
+  (begin! app)
   (navigate-url! app pathname search false))

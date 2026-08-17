@@ -392,8 +392,13 @@
                        :when (map? node)
                        :let [p (get node :webapp/path)]
                        :when (string? p)]
-                   {:path p
-                    :form (symbol (str nsx) (str (:name e)))})))))
+                   (cond-> {:path p
+                            :form (symbol (str nsx) (str (:name e)))}
+                     ;; carried rather than filtered here: a from-origin path is
+                     ;; still what a screen LOADS, so the surface report wants
+                     ;; it. Only the served join skips it, because the origin is
+                     ;; not this store's to answer for
+                     (:webapp/from-origin node) (assoc :from-origin true)))))))
 
 (defn ^:export webapp-report
   "The `webapp` section of `query_surface`: what this browser application IS.
@@ -542,15 +547,30 @@
   answers for what THIS store serves and says nothing about anyone else's
   server.
 
+  **`:webapp/from-origin` is left alone for the same reason**, and it is the
+  form of that statement a MOUNTED app can actually write: it cannot spell an
+  absolute url, because the origin is only known at runtime. A path measured
+  from the origin is addressed at whatever sits there, which is not this store
+  or the declaration would be saying nothing.
+
+  Every escape here is a DECLARATION rather than a silence, which is what keeps
+  the finding list clearable — and a list nobody can clear is a list everybody
+  skims.
+
   Reads `edit.http/web-endpoint-rows` — the store's single route traversal —
   rather than `rules.http/endpoints`, which is the same rows one layer up.
   `rules.http` already depends on this namespace for the client route table, so
   the join has to be made from here or not at all."
   [st]
   (let [served (into #{} (keep #(:web/path (:meta %))) (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path]}]
+    (vec (remove (fn [{:keys [path from-origin]}]
                    (or (contains? served path)
-                       (str/includes? path "://")))
+                       (str/includes? path "://")
+                       ;; the same statement an absolute url makes, in the form
+                       ;; a MOUNTED app can actually write: measured from the
+                       ;; origin, so addressed at whatever sits there — which is
+                       ;; not this store, or the declaration says nothing
+                       from-origin))
                  (request-paths st)))))
 
 (defn webapp-request-paths-are-served-check

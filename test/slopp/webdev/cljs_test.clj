@@ -978,3 +978,54 @@
               "a webapp store got a performer anyway")))
 
       (finally (ops/close! sess)))))
+
+(deftest ^:external generating-FROM-a-published-contract-follows-who-performs-too
+  ;; The half the branch missed, reported by the app it was built for.
+  ;; `generate-client!` reads the endpoints THIS store serves;
+  ;; `generate-client-from!` reads a contract published elsewhere. Only the
+  ;; first got the webapp branch — which is backwards for the motivating case,
+  ;; because a browser app consuming somebody ELSE'S API reaches generation
+  ;; only through `from`, and that is the architecture `D-webapp` names:
+  ;;
+  ;;   "a frontend consuming a GENERATED contract instead of sharing implicit
+  ;;    server internals"
+  ;;
+  ;; They regenerated, got nine `:cljs` wrappers their own framework makes
+  ;; unreachable, and `webapp-client-code` then named the namespace holding
+  ;; them — a finding whose only fix was a tool that would not emit it.
+  ;;
+  ;; The FETCH is redefed rather than given a seam: what is under test is which
+  ;; artifact the store gets, and `a-published-contract-is-READ-and-never-
+  ;; evaluated` already drives the transport through `fake-requester`.
+  (let [doc  {:slopp/contract-version 1
+              :endpoints [{:method :get :path "/api/modules" :name 'modules
+                           :response [:map [:names :string]]}]}
+        sess (external/open!)]
+    (try
+      (with-redefs [cljs/fetch-contract (fn [& _] doc)]
+        (testing "without webapp, the consumer still gets the :cljs performer"
+          (let [r (cljs/generate-client-from! sess "http://pub.test/contract"
+                                              :ns 'shopx.client.api)]
+            (is (= :cljs (:platform r)) (pr-str r))))
+
+        (testing "with webapp on, it gets the portable REQUEST namespace"
+          (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                            :prompt "this store's browser owns routing")
+          (let [r   (cljs/generate-client-from! sess "http://pub.test/contract"
+                                                :ns 'shopx.client.api)
+                src (str (store.render/render-ns (:store @sess) 'shopx.client.api))]
+            (is (= :cljc (:platform r))
+                (str "the path a consuming browser app actually reaches still"
+                     " emitted wrappers its framework cannot call: " (pr-str r)))
+            (is (re-find #"modules-request" src) src)
+            (is (not (re-find #"js/fetch" src))
+                "a webapp store got a performer through the consumer path")))
+
+        (testing "and the CONTRACTS namespace is :cljc either way"
+          ;; unchanged by any of this: the schemas have to load in the image AND
+          ;; compile into the bundle, which is what makes one definition check
+          ;; both sides of the wire
+          (is (= :cljc (store/platform-for (:store @sess) 'shopx.client.contracts))
+              (pr-str (store/platform-for (:store @sess) 'shopx.client.contracts)))))
+
+      (finally (ops/close! sess)))))

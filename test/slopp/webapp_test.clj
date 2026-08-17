@@ -1572,6 +1572,34 @@
         (is (= ["https://api.example.com/v1/rates" "//cdn.example.com/x.json"] @called)
             (pr-str @called))))
 
+    (testing "a request can say it is measured from the ORIGIN, not the mount"
+      ;; the limit this shipped with, now with an instance. The app served at
+      ;; /p/<slug> also calls the HUB, whose endpoint is at the origin root — a
+      ;; genuinely different application at the same origin. It cannot write an
+      ;; absolute url, because the origin is only known at runtime, and
+      ;; prefixing sends the request to a project that does not serve it.
+      ;;
+      ;; Declared on the REQUEST rather than on the app, which is where the fact
+      ;; lives: this app's other requests ARE mounted and only this one is not
+      (reset! called [])
+      (let [st (atom {})
+            a4 (webapp/wiring
+                {:webapp/state  st
+                 :webapp/base   "/p/demo"
+                 :webapp/routes [["/mine"   {:render  (fn [_s] [:p "m"])
+                                             :request (fn [_p] {:webapp/path "/api/modules"})}]
+                                 ["/theirs" {:render  (fn [_s] [:p "t"])
+                                             :request (fn [_p] {:webapp/path        "/api/projects"
+                                                                :webapp/from-origin true})}]]
+                 :webapp/call   (fn [rq ok _err]
+                                  (swap! called conj (webapp/request-url rq))
+                                  (ok nil))})]
+        (webapp/navigate! a4 "/mine" false)
+        (webapp/navigate! a4 "/theirs" false)
+        (is (= ["/p/demo/api/modules" "/api/projects"] @called)
+            (str "a from-origin request took the mount point anyway, so it"
+                 " reached a project that does not serve it: " (pr-str @called)))))
+
     (testing "at the ROOT nothing changes, so an unmounted app reads identically"
       (reset! called [])
       (let [st (atom {})
@@ -1672,3 +1700,57 @@
            (webapp/wiring {:webapp/state         (atom {})
                            :webapp/routes        []
                            :webapp/session-loads #{:modules}}))))))
+
+(deftest a-SESSION-load-runs-in-the-HEADLESS-drive-as-well-as-the-page
+  ;; The divergence this capability exists to prevent, shipped by the change
+  ;; that closed the last one. `start!` — the BROWSER entry — performs every
+  ;; declared session load. `driver` hands `screen/open!` the app's raw
+  ;; `:webapp/boot`, and `open!` refuses any key it does not know, so nothing
+  ;; headless ever started one.
+  ;;
+  ;; A declaration that works in a page and not in a test is worse than no
+  ;; declaration: the app that took it found sixteen driven screens rendering an
+  ;; empty nav, reverted, and kept the `:cljs` fetch — with the three defects
+  ;; `load!`'s docstring cites that app for still attached to it.
+  ;;
+  ;; Third finding in this shape in a fortnight — a throwing `:derive`, an
+  ;; unprefixed `:action`, and this — so the rule is worth stating where it can
+  ;; be checked rather than remembered: **anything a page load does before
+  ;; routing, a headless drive does too, out of one producer.**
+  (let [state  (atom {})
+        called (atom [])
+        app    (webapp/wiring
+                {:webapp/state         state
+                 :webapp/base          "/p/demo"
+                 :webapp/routes        [["/code" (fn [s] [:main "rail: "
+                                                          (str (webapp/load-value s :modules))])]]
+                 :webapp/boot          (fn [s] (assoc s :token "abc"))
+                 :webapp/session-loads {:modules {:request (fn [_s] {:webapp/path "/api/modules"})
+                                                  :derive  :names}}
+                 :webapp/call          (fn [rq ok _err]
+                                         (swap! called conj (webapp/request-url rq))
+                                         (ok {:names "web ops"}))})
+        s      (web.screen/open! (webapp/driver app))]
+
+    (testing "opening the driver starts the session load, as a page load does"
+      (is (= ["/p/demo/api/modules"] @called)
+          (str "a declared session load ran in the browser and in no headless"
+               " drive, which is the one difference this capability exists to"
+               " prevent: " (pr-str @called)))
+      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state)))
+
+    (testing "and boot still ran, so a driven app is not half-started"
+      (is (= "abc" (:token @state)) (pr-str @state)))
+
+    (testing "so a screen READING it draws the same thing a browser draws"
+      ;; the assertion the consuming app could not make: sixteen of their
+      ;; screens render a nav rail out of a session load, and every one of them
+      ;; was empty under the driver
+      (web.screen/visit! s "/p/demo/code")
+      (is (re-find #"web ops" (web.screen/text s)) (web.screen/text s)))
+
+    (testing "and it is started ONCE, not again on every navigation"
+      ;; the load survives `arrive` by being declared, so re-fetching it per
+      ;; navigation would be the silent retry loop this model removed
+      (web.screen/visit! s "/p/demo/code")
+      (is (= 1 (count @called)) (pr-str @called)))))

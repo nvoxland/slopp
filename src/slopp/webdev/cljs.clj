@@ -826,52 +826,6 @@
         (str fam ".client.api"))
       'app.client.api))
 
-(defn ^:export generate-client-from!
-  "Generate a typed client for an API this app CONSUMES, from the contract
-   published at `url` — the cross-store twin of [[generate-client!]].
-
-   Writes TWO namespaces: a `:cljc` contracts namespace of the published
-   schemas (so the JVM oracle verifies them and the bundle can compile them),
-   and the `:cljs` client of typed wrappers pointing at it. Both are
-   `^:generated` — regenerate, never hand-edit.
-
-   This is what lets a UI live in a different store from the API it renders:
-   nothing here reads the producer's store, and the producer publishes values,
-   not source it expects anyone to trust.
-
-   Returns `{:generated :contracts :wrappers :endpoints :platform :delta}`, or
-   `:problems` when the contract could not be used at all."
-  [session url & {:keys [ns]}]
-  (let [st0      (:store @session)
-        target   (symbol (str (or ns (default-client-ns st0))))
-        cns      (symbol (str/replace (str target) #"[^.]+$" "contracts"))
-        document (fetch-contract url)
-        {:keys [defs wrappers problems]} (contract->plan document cns)]
-    (if (empty? wrappers)
-      (cond-> {:generated target :contracts cns :wrappers [] :endpoints 0
-               :note "no endpoints in the published contract — nothing generated"}
-        (seq problems) (assoc :problems problems))
-      (let [csrc (render-contracts-ns cns defs)
-            src  (render-client-ns target wrappers)]
-        (engine/commit-appended!
-         session
-         (fn [s]
-           (let [s1 (first (store/record-module-platform s (str cns) :cljc))
-                 s2 (store/ingest s1 cns csrc)
-                 s3 (first (store/record-module-platform s2 (str target) :cljs))]
-             (store/ingest s3 target src)))
-         [cns target])
-        (let [recompiled (maybe-recompile-client! session target)]
-          (cond-> {:generated target
-                   :contracts cns
-                   :wrappers  (mapv (comp str :fn-name) wrappers)
-                   :endpoints (count wrappers)
-                   :platform  :cljs
-                   :source    (str url)
-                   :delta     (:id (last (:deltas (:store @session))))}
-            (seq problems) (assoc :problems problems)
-            recompiled     (merge recompiled)))))))
-
 (defn- other-generated-clients
   "Namespaces OTHER than `target` that already hold generated client forms.
 
@@ -997,6 +951,85 @@
          "  " requires ")\n\n"
          (str/join "\n\n" (map render-request wrappers)))))
 
+(defn ^:private client-shape
+  "Which client artifact `store` can USE — `{:platform :render}`.
+
+   **One producer, because there are two generation paths and only one of them
+   had the branch.** [[generate-client!]] reads the endpoints this store serves;
+   [[generate-client-from!]] reads a contract published elsewhere. The first got
+   the webapp branch and the second did not — which is backwards for the case
+   that motivated it, since a browser app consuming somebody ELSE'S API reaches
+   generation only through `from`, and that is the architecture `D-webapp`
+   names. Reported by the app in exactly that position, which regenerated and
+   got nine `:cljs` wrappers its own framework makes unreachable.
+
+   With `webapp` on, the framework performs every request out of a row's
+   `:request`, so a typed fetch wrapper is surface nothing calls — and being
+   `:cljs` it is what `webapp-client-code` reports. Such a store gets REQUEST
+   BUILDERS and CONTRACT CHECKS, `:cljc`, which drop into a route row and load
+   into the image.
+
+   Not a flag: which artifact is useful FOLLOWS from who performs, and a store
+   that has declared that should not have to declare it twice."
+  [store]
+  (if (capabilities/enabled? store "webapp")
+    {:platform :cljc :render render-request-ns}
+    {:platform :cljs :render render-client-ns}))
+
+(defn ^:export generate-client-from!
+  "Generate a typed client for an API this app CONSUMES, from the contract
+   published at `url` — the cross-store twin of [[generate-client!]].
+
+   Writes TWO namespaces: a `:cljc` contracts namespace of the published
+   schemas (so the JVM oracle verifies them and the bundle can compile them),
+   and the `:cljs` client of typed wrappers pointing at it. Both are
+   `^:generated` — regenerate, never hand-edit.
+
+   This is what lets a UI live in a different store from the API it renders:
+   nothing here reads the producer's store, and the producer publishes values,
+   not source it expects anyone to trust.
+
+   Returns `{:generated :contracts :wrappers :endpoints :platform :delta}`, or
+   `:problems` when the contract could not be used at all."
+  [session url & {:keys [ns]}]
+  (let [st0      (:store @session)
+        target   (symbol (str (or ns (default-client-ns st0))))
+        cns      (symbol (str/replace (str target) #"[^.]+$" "contracts"))
+        document (fetch-contract url)
+        {:keys [defs wrappers problems]} (contract->plan document cns)]
+    (if (empty? wrappers)
+      (cond-> {:generated target :contracts cns :wrappers [] :endpoints 0
+               :note "no endpoints in the published contract — nothing generated"}
+        (seq problems) (assoc :problems problems))
+      ;; the SAME decision `generate-client!` makes, out of one producer. This
+      ;; path had none, which was backwards for the case that motivated the
+      ;; branch: a browser app consuming somebody ELSE'S API reaches generation
+      ;; only through here, and that is `D-webapp`'s named architecture
+      (let [{:keys [platform render]} (client-shape st0)
+            csrc (render-contracts-ns cns defs)
+            src  (render target wrappers)]
+        (engine/commit-appended!
+         session
+         (fn [s]
+           ;; the CONTRACTS namespace is :cljc either way — the schemas have to
+           ;; load in the image AND compile into the bundle, which is what makes
+           ;; one definition check both sides of the wire
+           (let [s1 (first (store/record-module-platform s (str cns) :cljc))
+                 s2 (store/ingest s1 cns csrc)
+                 s3 (first (store/record-module-platform s2 (str target) platform))]
+             (store/ingest s3 target src)))
+         [cns target])
+        (let [recompiled (maybe-recompile-client! session target)]
+          (cond-> {:generated target
+                   :contracts cns
+                   :wrappers  (mapv (comp str :fn-name) wrappers)
+                   :endpoints (count wrappers)
+                   :platform  platform
+                   :source    (str url)
+                   :delta     (:id (last (:deltas (:store @session))))}
+            (seq problems) (assoc :problems problems)
+            recompiled     (merge recompiled)))))))
+
 (defn ^:export generate-client!
   "Generate the typed client (D-web-contracts part 2): read every web endpoint's
    contract (client-wrapper-specs) and write a stored, edit-PROTECTED :cljs
@@ -1035,11 +1068,8 @@
       ;; CONTRACT CHECKS instead, `:cljc`, which drop into a route row and load
       ;; into the image. Not a flag: which artifact is useful FOLLOWS from who
       ;; performs, and a store that has said so should not have to say it twice.
-      (let [webapp?  (capabilities/enabled? st0 "webapp")
-            platform (if webapp? :cljc :cljs)
-            src      (if webapp?
-                       (render-request-ns target wrappers)
-                       (render-client-ns target wrappers))]
+      (let [{:keys [platform render]} (client-shape st0)
+            src (render target wrappers)]
         (engine/commit-appended!
          session
          (fn [s]
