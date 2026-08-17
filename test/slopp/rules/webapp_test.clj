@@ -199,21 +199,19 @@
   ;; in SERVER space and a client route is in APP space, and the mount point is
   ;; a deployment fact no store knows.
   ;;
-  ;; It is not a deployment fact. **The document endpoint's own `:web/path` IS
-  ;; the mount point** — `/p/:slug` is where this app is served, declared right
-  ;; beside the prefixes it hand-lists. So the whole list is computable:
-  ;;
-  ;;   the document's path  +  each top-level segment of the client table
-  ;;
-  ;; Reported rather than enforced, and the difference is deliberate: an app may
-  ;; legitimately serve only some of its client routes as deep links (a section
-  ;; reachable only from inside). What it should not do is arrive at that by
-  ;; forgetting, so slopp computes the answer and the author declines it on
-  ;; purpose.
+  ;; It is not. **The document's own `:web/path` IS the mount point**, and the
+  ;; document is the form carrying `:web/client-routes` — the only unambiguous
+  ;; way to name it. Identifying it any other way was the first cut's bug: it
+  ;; took the alphabetically-first endpoint, which was the same form in these
+  ;; fixtures and `/` in the first real store.
   (let [src (fn [routes]
               (str "(ns shop.ui)\n\n"
                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                   "(defn ^{:web/method :get :web/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
+                   ;; sorts first, is not the document
+                   "(defn ^{:web/method :get :web/path \"/\"} root \"R.\" [_] {})\n\n"
+                   "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                   "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                   "  doc \"D.\" [_] {})\n\n"
                    "(defn ^:web/page app \"A.\" []\n"
                    "  {:webapp/routes " routes "})\n"))
         at  (fn [routes] (rules.webapp/derived-client-route-prefixes
@@ -236,15 +234,19 @@
       ;; document already answers its own url
       (is (= [] (at "[[\"/\" s]]"))))
 
-    (testing "and a store with no document has nothing to mount under"
-      ;; answers empty rather than guessing at a root: a client table with no
-      ;; endpoint serving it is the coverage check's finding, not this one's
-      (let [no-doc (store/ingest (store/empty-store) 'shop.ui
-                                 (str "(ns shop.ui)\n\n"
-                                      "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                      "(defn ^:web/page app \"A.\" []\n"
-                                      "  {:webapp/routes [[\"/store\" s]]})\n"))]
-        (is (= [] (rules.webapp/derived-client-route-prefixes no-doc)))))))
+    (testing "an app that declares NO prefix has no mount point, and says nothing"
+      ;; the honest limit. Without a declaration there is no form to read the
+      ;; mount from, and guessing at one — the first endpoint, the ^:web/page
+      ;; entry — is exactly the bug this rewrite fixed. The advisory names the
+      ;; app-space segments instead, which is the half that IS known
+      (let [none (store/ingest (store/empty-store) 'shop.ui
+                               (str "(ns shop.ui)\n\n"
+                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"}\n"
+                                    "  doc \"D.\" [_] {})\n\n"
+                                    "(defn ^:web/page app \"A.\" []\n"
+                                    "  {:webapp/routes [[\"/store\" s]]})\n"))]
+        (is (= [] (rules.webapp/derived-client-route-prefixes none)))))))
 
 (deftest the-webapp-section-reports-what-a-BROWSER-APP-IS
   ;; The fifth thing a capability is — PORT, ADAPTER, FAKE, GATES, SURFACE
@@ -297,3 +299,113 @@
       ;; until a store can answer how much it writes. Zero here, and a store
       ;; that has drifted says so
       (is (= 0 (:cljs (rules.webapp/webapp-report on)))))))
+
+(deftest the-mount-point-is-the-form-that-DECLARES-client-routes
+  ;; Reported by slopp-ui on the first real run, with three false positives and
+  ;; a malformed remedy: `:declare ["//change" "//endpoints" "//store"]`.
+  ;;
+  ;; **Their store separates two forms my fixtures had merged.** `^:web/page` is
+  ;; the HEADLESS entry — zero-arg, `:cljc`, carrying canned fixtures, and NOT a
+  ;; route, because `:web/page` means "an entry `screen` can open" and a store
+  ;; may mark a page that is served by something else. The document is a
+  ;; different form, and it is the one carrying `:web/client-routes`.
+  ;;
+  ;; The cause was worse than "read the wrong marker": the derivation read NO
+  ;; marker. It took the alphabetically-first endpoint path in the store — `/`
+  ;; in theirs — which is how a mount point became the empty string and every
+  ;; derived prefix gained a doubled slash. The docstring meanwhile explained
+  ;; that it "picks the FIRST document by name … a store with two ^:web/page
+  ;; entries is already refused", which describes a selection the code did not
+  ;; make. A justification for behaviour that does not exist is the shape this
+  ;; week has been about, arriving in my own new form.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                 ;; sorts FIRST and is not the document — the trap
+                 "(defn ^{:web/method :get :web/path \"/\"} root \"R.\" [_] {})\n\n"
+                 "(defn ^{:web/method :get :web/path \"/api/things\"} api \"A.\" [_] {})\n\n"
+                 ;; the prefix ROOT's own route — the catch-all under
+                 ;; /p/:slug/store needs a segment below it, so this is the
+                 ;; remedy the advisory names and the one it must be able to SEE
+                 "(defn ^{:web/method :get :web/path \"/p/:slug/store\"} sroot \"S.\" [_] {})\n\n"
+                 ;; the DOCUMENT: it declares the client routes
+                 "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                 "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                 "  doc \"D.\" [_] {})\n\n"
+                 ;; the HEADLESS entry, a different form with no server path
+                 "(defn ^:web/page page \"P.\" []\n"
+                 "  {:webapp/routes [[\"/\" s] [\"/store\" s] [\"/store/form/:id\" s]]})\n")
+        st  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")]
+
+    (testing "the mount point comes from the form DECLARING client routes"
+      (is (= ["/p/:slug/store"] (rules.webapp/derived-client-route-prefixes st))
+          "not the first endpoint by path, and not the ^:web/page entry"))
+
+    (testing "no doubled slash, which is what a wrong mount point looks like"
+      (is (not-any? #(re-find #"//" %)
+                    (rules.webapp/derived-client-route-prefixes st))))
+
+    (testing "an EXPLICIT server route is coverage, which the remedy already said"
+      ;; `/store` is a prefix root, so the generated catch-all does not answer
+      ;; it — and the advisory's own escape text says "or give it a server route
+      ;; of its own". The check did not look for one, so it reported three
+      ;; routes as unserved that a socket test proves are served
+      (is (= [] (rules.webapp/client-routes-unserved st))
+          (str "the client root maps to the document's own path, and /store to"
+               " the declared prefix — both are real server routes: "
+               (pr-str (rules.webapp/client-routes-unserved st)))))
+
+    (testing "and a route with NO coverage of either kind is still reported"
+      ;; the arm that keeps the fix from being a blanket pass
+      (let [gap (assoc-in
+                 (store/ingest (store/empty-store) 'shop.ui
+                               (str "(ns shop.ui)\n\n"
+                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                                    "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                                    "  doc \"D.\" [_] {})\n\n"
+                                    "(defn ^:web/page page \"P.\" []\n"
+                                    "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
+                 [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))
+(testing "a prefix whose ROOT is not a client route needs no server route"
+      ;; slopp-ui's third case, and it is correct rather than a gap. Their
+      ;; `/change` prefix exists only to generate the catch-all: the client
+      ;; table has `/change/:range` and no bare `/change` screen, so arm 1
+      ;; covers everything under it and arm 2 has nothing to do.
+      ;;
+      ;; Worth a fixture because the two shapes are indistinguishable from the
+      ;; DECLARATION and opposite in what they require:
+      ;;
+      ;;   root IS a client route      → needs its own server route
+      ;;   root is NOT a client route  → needs nothing
+      ;;
+      ;; The check gets this right by never asking about a path the app does not
+      ;; route — which is correct by construction and therefore easy to break
+      ;; while refactoring, since nothing else asserts it
+      (let [no-root (assoc-in
+                     (store/ingest (store/empty-store) 'shop.ui
+                                   (str "(ns shop.ui)\n\n"
+                                        "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                        "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                                        "        :web/client-routes [\"/p/:slug/change\"]}\n"
+                                        "  doc \"D.\" [_] {})\n\n"
+                                        "(defn ^:web/page page \"P.\" []\n"
+                                        "  {:webapp/routes [[\"/change/:range\" s]]})\n"))
+                     [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= [] (rules.webapp/client-routes-unserved no-root))
+            "a prefix with no root screen is a catch-all generator and nothing more")))
+
+    (testing "and a route with NO coverage of either kind is still reported"
+      ;; the arm that keeps the fix from being a blanket pass
+      (let [gap (assoc-in
+                 (store/ingest (store/empty-store) 'shop.ui
+                               (str "(ns shop.ui)\n\n"
+                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
+                                    "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                                    "  doc \"D.\" [_] {})\n\n"
+                                    "(defn ^:web/page page \"P.\" []\n"
+                                    "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
+                 [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))))

@@ -201,65 +201,84 @@
   routing; only a refresh or a shared link 404'd, so the app looked fine to
   whoever was already in it and broken to whoever was sent a url.
 
-  **The comparison is on the prefix's TAIL, and it has to be.** A declared
-  prefix is in SERVER space (`/p/:slug/store`) and a client route is in APP space
-  (`/store/form/:id`), because the mount point is a deployment fact no store can
-  know. What IS decidable is whether some suffix of the prefix is a leading
-  segment of the client route — which is exactly the question the generated
-  catch-all answers, since `slopp.web.routes/client-route-rows` turns each prefix
-  into `<prefix>/*client-path`.
+  **Two ways a client route is served, and the check has to know both.**
 
-  **The prefix ROOT is reported, and it is the subtle one.** `[\"/store\"]`
-  generates `/store/*client-path`, which needs at least one segment below it —
-  so the root itself is not covered by the fallback and needs its own server
-  route. That gotcha has been documented in `client-route-rows` since it was
-  written and nothing has ever enforced it.
+  1. **The generated catch-all.** A declared prefix becomes
+     `<prefix>/*client-path`, so anything STRICTLY BELOW the prefix is answered.
+     The comparison is on the prefix's TAIL, because a prefix is in SERVER space
+     (`/p/:slug/store`) and a client route is in APP space (`/store/form/:id`);
+     what is decidable is whether some suffix of the prefix is a leading segment
+     of the route.
+  2. **An EXPLICIT server route.** The catch-all needs at least one segment
+     below the prefix, so the prefix ROOT is not covered by it and needs a route
+     of its own — which the advisory's escape text has always said and this
+     check did not look for. That cost three false positives on the first real
+     store, against the app's own socket test proving all three answer. **A
+     remedy the check cannot see is a remedy that produces findings for taking
+     it**, which is worse than not offering it.
 
-  A store that declares client routes and NO prefixes reports all of them, which
-  is the whole failure rather than nothing to check.
+  The client ROOT is the document's own url, so a document at `/p/:slug` serves
+  the client route `/` by existing.
 
-  Reads the marker through `store/form-name-meta` rather than through
-  `rules.http/endpoints`, and not by preference: `rules.http` already depends on
-  this namespace for [[client-routes]], so asking it back would be a require
-  cycle. The generic address is what makes that avoidable — a webapp check has
-  no business needing http's namespace to ask what metadata a form carries."
+  Advisory rather than a refusal, for the reason a store mid-migration always
+  gets: the state this fires on is a table and a declaration that have not been
+  reconciled, and refusing the writes would block the reconciliation."
   [st]
   (let [segs     (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
-        prefixes (for [nsx (keys (:namespaces st))
+        marked   (for [nsx (keys (:namespaces st))
                        e   (store/forms st nsx)
                        :when (:name e)
-                       p   (:web/client-routes (store/form-name-meta e))]
-                   p)
-        ;; the mount point is unknown, so every split of a declared prefix is a
-        ;; candidate for where app space begins
+                       :let [m (store/form-name-meta e)]]
+                   m)
+        prefixes (mapcat :web/client-routes marked)
+        ;; every path the server declares outright
+        served   (set (map str (keep :web/path marked)))
+        ;; the mount is the document's own path, and the document is the form
+        ;; carrying the prefixes — the one unambiguous way to name it
+        mounts   (for [m marked
+                       :when (and (seq (:web/client-routes m)) (:web/path m))]
+                   (str (:web/path m)))
+        explicit? (fn [route]
+                    (boolean (some #(or (contains? served (str % route))
+                                        (and (= "/" route) (contains? served %)))
+                                   mounts)))
+        ;; the mount point is unknown from a prefix alone, so every split of one
+        ;; is a candidate for where app space begins
         tails    (for [pfx  prefixes
                        :let [ps (segs pfx)]
                        n    (range (count ps))]
                    (vec (drop n ps)))
-        covered? (fn [route]
+        below?   (fn [route]
                    (let [rs (segs route)]
                      (boolean
                       (some (fn [tail]
-                              ;; STRICTLY below: the fallback needs at least one
+                              ;; STRICTLY below: the catch-all needs at least one
                               ;; segment under the prefix, so an exact match is
-                              ;; the root case and is not covered by it
+                              ;; the root case and wants arm 2
                               (and (< (count tail) (count rs))
                                    (= tail (vec (take (count tail) rs)))))
                             tails))))]
-    (vec (sort (remove covered? (client-routes st))))))
+    (vec (sort (remove #(or (below? %) (explicit? %)) (client-routes st))))))
 
 (defn ^{:export "slopp.rules"} derived-client-route-prefixes
   "The `:web/client-routes` prefixes this store's client table IMPLIES, sorted —
-  `[]` when there is no document to mount them under.
+  `[]` when no form declares any.
 
-  **The mount point turned out not to be a deployment fact.** The obstacle to
-  deriving these looked fatal: a prefix is in SERVER space (`/p/:slug/store`), a
-  client route is in APP space (`/store/form/:id`), and where the app is mounted
-  is a property of how it is served. It is not — **the document endpoint's own
-  `:web/path` IS the mount point**, declared a line above the prefixes an author
-  hand-lists. So the whole list is computable:
+  **The mount point turned out not to be a deployment fact.** A prefix is in
+  SERVER space (`/p/:slug/store`), a client route is in APP space
+  (`/store/form/:id`), and where the app is mounted looked like a property of how
+  it is served. It is not — **the document's own `:web/path` IS the mount
+  point**, declared beside the prefixes an author keeps by hand:
 
       the document's :web/path  +  each top-level segment of the client table
+
+  **The document is the form carrying `:web/client-routes`**, and identifying it
+  any other way is wrong in a store that separates its forms. The first cut took
+  the alphabetically-first endpoint path, which was the same form in slopp's own
+  fixtures and `/` in the first real store — so every derived prefix came back
+  with a doubled slash. It is NOT the `^:web/page` entry either: that marker
+  means *an entry `screen` can open*, and a store may mark a headless entry that
+  no route serves, which the first real store does.
 
   **One prefix per top-level SEGMENT, not one per route.** `/store` and
   `/store/form/:id` are one prefix, because the generated catch-all under
@@ -269,25 +288,21 @@
   **The app root contributes nothing.** `/` would generate `//*client-path`,
   which is not a path — and the document already answers its own url.
 
-  **Reported, never enforced, and the difference is the point.** An app may
-  legitimately serve only some of its client routes as deep links: a section
-  reachable only from inside the app is a real design, not an oversight.
-  Rewriting the declaration would take that choice away. What an author should
-  not do is arrive at a gap by FORGETTING, so slopp computes the answer and
-  leaves declining it to them — which is the same shape as every advisory here.
-
-  Picks the FIRST document by name when a store serves several; a store with two
-  `^:web/page` entries is already refused by `webapp-page-unreachable`, so the
-  ambiguity this could face has been ruled out one layer down."
+  **Reported, never enforced.** An app may legitimately serve only some of its
+  client routes as deep links: a section reachable only from inside the app is a
+  real design. Rewriting the declaration would take that choice away. What an
+  author should not do is arrive at a gap by FORGETTING, so slopp computes the
+  answer and leaves declining it to them."
   [st]
-  (let [segs   (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
-        doc    (first (sort (for [nsx (keys (:namespaces st))
-                                  e   (store/forms st nsx)
-                                  :when (:name e)
-                                  :let [m (store/form-name-meta e)]
-                                  :when (and (:web/path m) (:web/method m))]
-                              (str (:web/path m)))))
-        tops   (distinct (keep (comp first segs) (client-routes st)))]
+  (let [segs (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
+        doc  (first (sort (for [nsx (keys (:namespaces st))
+                                e   (store/forms st nsx)
+                                :when (:name e)
+                                :let [m (store/form-name-meta e)]
+                                :when (and (seq (:web/client-routes m))
+                                           (:web/path m))]
+                            (str (:web/path m)))))
+        tops (distinct (keep (comp first segs) (client-routes st)))]
     (if doc
       (vec (sort (map #(str doc "/" %) tops)))
       [])))
