@@ -248,6 +248,50 @@
                             tails))))]
     (vec (sort (remove covered? (client-routes st))))))
 
+(defn ^{:export "slopp.rules"} derived-client-route-prefixes
+  "The `:web/client-routes` prefixes this store's client table IMPLIES, sorted —
+  `[]` when there is no document to mount them under.
+
+  **The mount point turned out not to be a deployment fact.** The obstacle to
+  deriving these looked fatal: a prefix is in SERVER space (`/p/:slug/store`), a
+  client route is in APP space (`/store/form/:id`), and where the app is mounted
+  is a property of how it is served. It is not — **the document endpoint's own
+  `:web/path` IS the mount point**, declared a line above the prefixes an author
+  hand-lists. So the whole list is computable:
+
+      the document's :web/path  +  each top-level segment of the client table
+
+  **One prefix per top-level SEGMENT, not one per route.** `/store` and
+  `/store/form/:id` are one prefix, because the generated catch-all under
+  `/store` answers both; listing them separately would be three declarations
+  where one serves.
+
+  **The app root contributes nothing.** `/` would generate `//*client-path`,
+  which is not a path — and the document already answers its own url.
+
+  **Reported, never enforced, and the difference is the point.** An app may
+  legitimately serve only some of its client routes as deep links: a section
+  reachable only from inside the app is a real design, not an oversight.
+  Rewriting the declaration would take that choice away. What an author should
+  not do is arrive at a gap by FORGETTING, so slopp computes the answer and
+  leaves declining it to them — which is the same shape as every advisory here.
+
+  Picks the FIRST document by name when a store serves several; a store with two
+  `^:web/page` entries is already refused by `webapp-page-unreachable`, so the
+  ambiguity this could face has been ruled out one layer down."
+  [st]
+  (let [segs   (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
+        doc    (first (sort (for [nsx (keys (:namespaces st))
+                                  e   (store/forms st nsx)
+                                  :when (:name e)
+                                  :let [m (store/form-name-meta e)]
+                                  :when (and (:web/path m) (:web/method m))]
+                              (str (:web/path m)))))
+        tops   (distinct (keep (comp first segs) (client-routes st)))]
+    (if doc
+      (vec (sort (map #(str doc "/" %) tops)))
+      [])))
+
 (defn webapp-client-routes-are-served-check
   "Done-advisory: client routes this store declares that its own document does
   not serve on a hard load. Inert until the store opts into `webapp`.
@@ -272,13 +316,24 @@
   reconciled yet, and refusing the writes would block the reconciliation."
   [_session st* _changed]
   (when (capabilities/enabled? st* "webapp")
-    (vec (for [route (client-routes-unserved st*)]
-           {:route route
-            :teach (str "the client route " (pr-str route) " is not served on a"
-                        " hard load — clicking to it works, refreshing it or"
-                        " opening a shared link 404s. Declare a"
-                        " :web/client-routes prefix on the document endpoint"
-                        " that covers it, or give it a server route of its own."
-                        " Note the prefix ROOT is not covered by the fallback:"
-                        " [\"/store\"] generates /store/*client-path, which needs"
-                        " at least one segment below it.")}))))
+    (let [want (derived-client-route-prefixes st*)]
+      (vec (for [route (client-routes-unserved st*)]
+             {:route route
+              ;; the finding carries the ANSWER, not just the complaint: the
+              ;; prefixes are computable from the document's own :web/path plus
+              ;; the client table, so there is no reason to make an author work
+              ;; out what to paste
+              :declare want
+              :teach (str "the client route " (pr-str route) " is not served on a"
+                          " hard load — clicking to it works, refreshing it or"
+                          " opening a shared link 404s, so the app is fine for"
+                          " whoever is already inside it and broken for whoever"
+                          " was sent a url."
+                          (when (seq want)
+                            (str " Your client table and this document's own"
+                                 " path imply :web/client-routes "
+                                 (pr-str want) "."))
+                          " Note the prefix ROOT is not covered by the fallback:"
+                          " [\"/store\"] generates /store/*client-path, which"
+                          " needs at least one segment below it, so a route AT"
+                          " the prefix needs its own server route.")})))))

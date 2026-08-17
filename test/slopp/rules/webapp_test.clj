@@ -192,3 +192,56 @@
 
     (testing "and a store with no client routes reports nothing"
       (is (= [] (check ["/p/:slug/store"] "[]"))))))
+
+(deftest the-prefixes-an-app-should-declare-are-DERIVABLE
+  ;; The plan for this step was "derive `:web/client-routes` from the client
+  ;; table so the two cannot drift", and the obstacle looked fatal: a prefix is
+  ;; in SERVER space and a client route is in APP space, and the mount point is
+  ;; a deployment fact no store knows.
+  ;;
+  ;; It is not a deployment fact. **The document endpoint's own `:web/path` IS
+  ;; the mount point** — `/p/:slug` is where this app is served, declared right
+  ;; beside the prefixes it hand-lists. So the whole list is computable:
+  ;;
+  ;;   the document's path  +  each top-level segment of the client table
+  ;;
+  ;; Reported rather than enforced, and the difference is deliberate: an app may
+  ;; legitimately serve only some of its client routes as deep links (a section
+  ;; reachable only from inside). What it should not do is arrive at that by
+  ;; forgetting, so slopp computes the answer and the author declines it on
+  ;; purpose.
+  (let [src (fn [routes]
+              (str "(ns shop.ui)\n\n"
+                   "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                   "(defn ^{:web/method :get :web/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
+                   "(defn ^:web/page app \"A.\" []\n"
+                   "  {:webapp/routes " routes "})\n"))
+        at  (fn [routes] (rules.webapp/derived-client-route-prefixes
+                          (store/ingest (store/empty-store) 'shop.ui (src routes))))]
+
+    (testing "the document's own path is the mount point, and the rest is the table"
+      (is (= ["/p/:slug/change" "/p/:slug/endpoints" "/p/:slug/store"]
+             (at (str "[[\"/store\" s] [\"/store/form/:id\" s]"
+                      " [\"/change/:range\" s] [\"/endpoints\" s]]")))))
+
+    (testing "one prefix per TOP-LEVEL segment, not one per route"
+      ;; /store and /store/form/:id are one prefix: the catch-all under /store
+      ;; answers both, and listing them separately would be three declarations
+      ;; where one serves
+      (is (= ["/p/:slug/store"]
+             (at "[[\"/store\" s] [\"/store/form/:id\" s] [\"/store/ns/:ns\" s]]"))))
+
+    (testing "the app ROOT contributes nothing, because a prefix needs a segment"
+      ;; `["/"]` would generate `//*client-path`, which is not a path — and the
+      ;; document already answers its own url
+      (is (= [] (at "[[\"/\" s]]"))))
+
+    (testing "and a store with no document has nothing to mount under"
+      ;; answers empty rather than guessing at a root: a client table with no
+      ;; endpoint serving it is the coverage check's finding, not this one's
+      (let [no-doc (store/ingest (store/empty-store) 'shop.ui
+                                 (str "(ns shop.ui)\n\n"
+                                      "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                      "(defn ^:web/page app \"A.\" []\n"
+                                      "  {:webapp/routes [[\"/store\" s]]})\n"))]
+        (is (= [] (rules.webapp/derived-client-route-prefixes no-doc)))))))
