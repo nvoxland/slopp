@@ -5,7 +5,7 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
-<!-- skill-written-against: d31794 -->
+<!-- skill-written-against: d31858 -->
 
 **This skill reaches you on a DIFFERENT channel from the code.** The code is the
 jar your MCP server runs; this file ships in the plugin package. They can be
@@ -1759,8 +1759,10 @@ declare the app; slopp owns the loop.
 - **A request carries the MOUNT POINT, like every other address.** Write
   `/api/things` and slopp addresses it under your `:webapp/base`, for the same
   reason your `:href` gets it. An absolute url (scheme, or protocol-relative
-  `//`) is left alone. The limit: a request path is relative to the mount point,
-  so an app at `/p/demo` whose API is genuinely at the ROOT cannot say so yet.
+  `//`) is left alone, and `:webapp/from-origin true` on the request says the
+  path is measured from the ORIGIN instead — which is what you write when you
+  call a different app at the same origin and cannot spell the url, because the
+  origin is only known at runtime.
 - **The table is ADDRESSES, not screens** — a row's screen is not unique and a
   screen's row is not unique. One screen answers at several urls the moment you
   have a lens bar, a print view, an alternate rendering, or a detail page that

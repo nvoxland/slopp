@@ -210,9 +210,18 @@ and slopp addresses it under your base before performing it, exactly as it does
 an `:href`; an absolute url (a scheme, or the protocol-relative `//` a CDN link
 takes) is left alone. That makes three base-aware paths -- the pushed url, the
 arriving url, and the outgoing request -- and it was two until an app served
-under `/p/<slug>` found every one of its screens fetching a 404. The limit,
-stated rather than discovered: a request path is relative to the mount point, so
-an app at `/p/demo` whose API is genuinely at the root cannot yet say so.
+under `/p/<slug>` found every one of its screens fetching a 404.
+
+When a request is *not* under your mount point, say so on the request:
+
+```clj
+{:webapp/path "/api/projects" :webapp/from-origin true}
+```
+
+That is the escape an absolute URL cannot cover -- an app calling a different
+application at the same origin cannot spell the whole URL, because the origin is
+only known at runtime. It is declared per request rather than per app, because
+that is where the fact lives: the same app's other requests *are* mounted.
 
 ## Actions are declared, in three kinds
 

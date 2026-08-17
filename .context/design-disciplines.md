@@ -2901,3 +2901,35 @@ Neither is a reason to avoid canned data — canned data is how the headless
 drive works at all. It is a reason to make the fake report, not just respond.
 And a fake that records what it was ASKED catches the other direction too, which
 nothing else catches at all: an arm canned for a path no screen requests.
+
+## Anything a page load does before routing, a headless drive does too — out of one producer
+
+Three findings in one fortnight had the same shape, and the third arrived in the
+change that closed the second:
+
+| what diverged | page | headless |
+|---|---|---|
+| a throwing `:derive` | caught by the shim's `.catch` → failure screen | escapes `load!`, kills the driver |
+| a client-routed `:action` | left unprefixed → submits outside the app | fixture's base is `""`, so invisible |
+| a declared session load | `start!` performs it | `driver` never did |
+
+The capability exists to make "the screen a test drives" and "the screen a
+reader clicks" the same screen. Each of these broke that in a different place,
+and each was found by the consumer rather than here — because slopp's own
+fixtures have no mount point, no proxied API and no second server.
+
+**The structural cause of the third is worth keeping.** `start!` is the BROWSER
+entry; `driver` builds what `slopp.web.screen/open!` runs. Both existed, both
+were correct about what they knew, and the new step was added to one of them.
+Nothing could have flagged it: `open!` refuses unknown keys, so the missing
+behaviour was not a missing key, it was a missing CALL.
+
+The remedy is not vigilance. It is that the boot-and-start step is now ONE
+function (`begin!`), and the two entries call it rather than each doing the
+work. A shared producer cannot be added to on one side only.
+
+**The generalisation, which is where to apply it next:** whenever two entry
+points exist for one lifecycle — a real one and a fake one, a page and a driver,
+a server and an in-process caller — the steps between them belong in a function
+they both call, not in a list each maintains. The failure mode is silent by
+construction, because the side you are working in keeps working.
