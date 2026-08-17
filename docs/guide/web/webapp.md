@@ -293,17 +293,18 @@ gaps, so a canned performer left in your wiring for tests cannot ship to a page.
 generate_client {}
 ```
 
-With `webapp` on, this emits a **`.cljc`** namespace of request builders and
-contract checks rather than the `.cljs` fetch wrappers a server-rendered client
-gets:
+With `webapp` on, this emits **two `.cljc` namespaces** rather than the `.cljs`
+fetch wrappers a server-rendered client gets:
 
 ```clj
+;; app.client.api — request builders, requiring NOTHING
 (defn ^{:generated "shop.api/get-order"} ^:export get-order-request [params]
   {:webapp/method      :get
    :webapp/path        "/api/orders/:id"
    :webapp/path-params {:id (:id params)}
    :webapp/query       (dissoc params :id)})
 
+;; app.client.checks — contract checks, which reach malli
 (defn ^{:generated "shop.api/get-order"} ^:export get-order-check [response]
   ;; nil when the contract holds, a message when it does not
   …)
@@ -314,11 +315,31 @@ capability decides the shape and there is no flag: which artifact is useful
 *follows* from who performs the request, and a store that has declared that
 should not have to declare it twice.
 
+!!! note "Two namespaces, because two tiers"
+    A builder requires nothing and returns a map. A check reaches malli, which
+    the functional-core gate reads as IO. Shipped together, the builders
+    inherit the checks' tier — and an app whose views are `:pure` then cannot
+    name them at all, so it hand-writes every request map instead: correct by
+    inspection rather than by construction, which is the drift generation
+    exists to remove. The requests namespace is declared `:pure` for you.
+
 Two things this buys beyond tidiness. The builders are **portable**, so which
 URL a screen will ask for is an ordinary in-image value rather than a string
 assembled in a browser. And the checks are the response validation back — it
 used to live in the wrappers, and when the framework took over performing it
 went with them.
+
+When the contract came from **somebody else's server** (`generate_client` with a
+`from` url), each builder carries `^{:web/external-path …}` naming that url, so
+`webapp-request-paths-are-served` does not report a path your store genuinely
+does not serve. That has to be generated rather than added by hand: the
+namespace is `^:generated`, and the next regeneration would drop a hand-written
+marker silently.
+
+One consequence worth knowing: a `.cljc` client **loads**, where a `.cljs` one
+never could. So regenerating leaves the process serving MCP holding forms the
+store has moved past, and `restart` — which rebuilds the *verification* image —
+does not clear that. The result says so at the point it happens.
 
 ## What slopp checks
 
