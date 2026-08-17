@@ -329,6 +329,26 @@
         (is (true? (:leaves? (by :project/switch))))
         (is (not (:effectful? (by :thing/rename))))))
 
+    (testing "declared SESSION loads are reported, because they belong to no screen"
+      ;; the fetch a reader never navigates to and every screen may read — a
+      ;; nav rail, a signed-in user. Absent from the screen rows by definition,
+      ;; so a report drawing only screens shows an app fetching less than it does
+      (let [src4 (str "(ns shop.four)\n\n"
+                      "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
+                      "(defn ^:web/page app \"A.\" []\n"
+                      "  {:webapp/routes        []\n"
+                      "   :webapp/session-loads {:modules {:request modules-request}\n"
+                      "                          :user    {}}})\n")
+            rows (:session-loads (rules.webapp/webapp-report
+                                  (assoc-in (store/ingest (store/empty-store) 'shop.four src4)
+                                            [:config "capabilities" :values "webapp.enabled"] "true")))]
+        (is (= [:modules :user] (mapv :load rows)) (pr-str rows))
+        (is (= '[shop.four/modules-request nil] (mapv :request rows)) (pr-str rows))
+        (is (= ["/api/modules" nil] (mapv :loads rows))
+            (str "the url a session load fetches is the same question a screen's"
+                 " is: " (pr-str rows)))
+        (is (every? #(= :session-load (:kind %)) rows) (pr-str rows))))
+
     (testing "and the :cljs count, which is the goal stated as a number"
       ;; "an app that opts into webapp writes NO ClojureScript" is an aspiration
       ;; until a store can answer how much it writes. Zero here, and a store
@@ -532,3 +552,48 @@
       ;; endpoint table is right there, and a typo is nearly always one of them
       (let [f (first (rules.webapp/webapp-request-paths-are-served-check nil on nil))]
         (is (re-find #"/api/things" (:teach f)) (pr-str f))))))
+
+(deftest the-CLJS-a-webapp-still-writes-is-reported-at-DONE-not-only-on-request
+  ;; The capability's goal stated as a number — "an app that opts into `webapp`
+  ;; writes NO ClojureScript" — has been readable since `query_surface` gained
+  ;; `:cljs`. Readable is not the same as REPORTED: nobody asks a surface report
+  ;; on a normal day, so a store that drifts from zero to five drifts silently
+  ;; and the number is only ever consulted by whoever already suspects.
+  ;;
+  ;; The consuming app's own score, sent unprompted once they read the metric:
+  ;; six hand-written `:cljs` forms, four of which slopp had an answer for and
+  ;; two of which it did not. That exchange is what this advisory automates —
+  ;; not the fixing, the ASKING.
+  ;;
+  ;; Advisory and never a refusal: sketching in a `:cljs` namespace is
+  ;; legitimate, and a browser-only library binding may have no portable form at
+  ;; all. What is not legitimate is not knowing.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
+                 "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                 "  doc \"D.\" [_] {:status 200 :body \"<html></html>\"})\n")
+        cljs (str "(ns shop.sketch)\n\n(defn draw \"D.\" [x] x)\n")
+        st   (-> (store/ingest (store/empty-store) 'shop.ui src)
+                 (store/ingest 'shop.sketch cljs))
+        st   (first (store/record-module-platform st "shop.sketch" :cljs))
+        on   (assoc-in st [:config "capabilities" :values "webapp.enabled"] "true")]
+
+    (testing "a store at ZERO says nothing — the goal being met is silence"
+      (let [none (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                           [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (empty? (rules.webapp/webapp-client-code-check nil none nil))
+            "an app writing no ClojureScript was told about ClojureScript")))
+
+    (testing "and a store above zero NAMES each namespace"
+      (let [found (rules.webapp/webapp-client-code-check nil on nil)]
+        (is (= '[shop.sketch] (mapv :ns found)) (pr-str found))
+        (is (re-find #"(?i)compil" (:teach (first found)))
+            (str "the finding must say what a :cljs namespace COSTS — that it is"
+                 " outside the in-image loop and verified by compiling alone: "
+                 (pr-str found)))))
+
+    (testing "INERT until the store opts into webapp, like every rule here"
+      ;; a store with browser code and no browser app is an ordinary cljs
+      ;; project, and telling it about a goal it never adopted is noise
+      (is (empty? (rules.webapp/webapp-client-code-check nil st nil))
+          (pr-str (rules.webapp/webapp-client-code-check nil st nil))))))

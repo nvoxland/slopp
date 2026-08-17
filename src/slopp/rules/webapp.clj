@@ -403,7 +403,7 @@
   names: the agent, a consuming tool, and the HUMAN, who does not read the code
   and needs a rendered picture of the application.
 
-  Three questions, which between them are what a browser app is:
+  Four questions, which between them are what a browser app is:
 
   - `:screens` — every declared ADDRESS, the function that renders it, and what
     it LOADS. This is the map somebody draws, so the load is the url rather than
@@ -414,6 +414,10 @@
     because this is what a count would be taken from: a row's screen is not
     unique and a screen's row is not unique, so an app with a lens bar or a
     print view has more rows than screens and neither number is wrong.
+  - `:session-loads` — what this app fetches that belongs to NO screen: a nav
+    rail, a signed-in user, anything started at page load and readable
+    everywhere. Absent from `:screens` by definition, so a report drawing only
+    screens shows an app fetching less than it does.
   - `:actions` — what a reader can DO, and which kind each is. The `:effectful?`
     ones reach a server and the `:leaves?` ones hand the page back to the
     browser, so a human asking what a control does needs the kind visible rather
@@ -441,7 +445,7 @@
   skipped rather than throwing over the rest."
   [store]
   (if-not (capabilities/enabled? store "webapp")
-    {:screens [] :actions [] :cljs 0}
+    {:screens [] :actions [] :session-loads [] :cljs 0}
     (let [rows     (for [nsx  (keys (:namespaces store))
                          e    (store/forms store nsx)
                          :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
@@ -501,11 +505,25 @@
                                        :when (keyword? a)]
                                    (cond-> {:kind :action :action a}
                                      (:effectful? decl) (assoc :effectful? true)
-                                     (:leaves? decl)    (assoc :leaves? true)))))]
-      {:screens screens
-       :actions actions
-       :cljs    (count (filter #(= :cljs (store/platform-for store %))
-                               (keys (:namespaces store))))})))
+                                     (:leaves? decl)    (assoc :leaves? true)))))
+          ;; the fetches that belong to NO screen — a nav rail, a signed-in
+          ;; user — started at page load and readable from every screen. A
+          ;; report drawing only screens would show an app fetching less than
+          ;; it does, and these are the requests a reader never navigates to
+          sessions (vec (sort-by :load
+                                 (for [[nsx node] rows
+                                       [k spec] (get node :webapp/session-loads)
+                                       :when (and (keyword? k) (map? spec))
+                                       :let [rq (when-let [r (:request spec)]
+                                                  (qualify nsx r))]]
+                                   (cond-> {:kind :session-load :load k}
+                                     rq             (assoc :request rq)
+                                     (get loads rq) (assoc :loads (get loads rq))))))]
+      {:screens       screens
+       :actions       actions
+       :session-loads sessions
+       :cljs          (count (filter #(= :cljs (store/platform-for store %))
+                                     (keys (:namespaces store))))})))
 
 (defn ^:export request-paths-unserved
   "The [[request-paths]] no endpoint in this store declares, sorted — `[]` when
@@ -585,3 +603,44 @@
                           " because the prefix is known only at runtime — is"
                           " ^{:web/external-path \"why\"} on the form, the same"
                           " marker a link takes.")})))))
+
+(defn webapp-client-code-check
+  "Done-advisory: the `:cljs` namespaces this store still hand-writes. Inert
+  until the store opts into `webapp`, and silent at zero.
+
+  **This is the capability's own goal, arriving instead of waiting to be
+  asked.** \"An app that opts into `webapp` writes NO ClojureScript\" became
+  readable when [[webapp-report]] gained `:cljs`, and readable is not reported:
+  nobody opens a surface report on an ordinary day, so a store drifting from
+  zero to five drifts silently and the number is consulted only by whoever
+  already suspects.
+
+  What a `:cljs` namespace costs, which is what the finding says rather than
+  implies: it cannot load into the JVM oracle, so it is outside the fast loop
+  and every edit costs a compile to learn anything — and its only verification
+  is that it COMPILED, which is a proxy for correctness and a weak one. The only
+  real webapp's two worst bugs both lived in exactly such a namespace.
+
+  **Advisory and never a refusal.** Sketching in ClojureScript is legitimate; a
+  browser-only library binding may have no portable form at all; and an app
+  mid-migration is precisely the state this fires on. What is not legitimate is
+  not knowing.
+
+  Whole-store rather than episode-scoped, for its neighbours' reason: a
+  namespace becomes `:cljs` by a `module_platform` declaration that touches no
+  form, so the episode that adds one has nothing for an episode-scoped rule to
+  hang a finding on."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    (vec (for [n (sort (filter #(= :cljs (store/platform-for st* %))
+                               (keys (:namespaces st*))))]
+           {:ns n
+            :teach (str n " is :cljs, so it never loads into the image — it is"
+                        " outside the fast loop, every edit costs a compile to"
+                        " learn anything, and its only verification is that it"
+                        " COMPILED. `webapp` exists so an app needs none of it:"
+                        " routing, the render loop, the listeners, load states,"
+                        " the performer and session loads are all declarations"
+                        " now. If this namespace is a browser-only binding with"
+                        " no portable form, that is a real answer — and worth"
+                        " being a deliberate one rather than a leftover.")}))))

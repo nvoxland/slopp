@@ -455,7 +455,10 @@
                  :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
                                         ["/change" (fn [_s] [:p "change"])]
                                         ["/other"  (fn [_s] [:p "other"])]]
-                 :webapp/session-loads #{:modules}})
+                 ;; declared with no :request: scoped, and STARTED by the app.
+                 ;; That is exactly what the old SET meant and all this test is
+                 ;; about — starting one at page load is its own test
+                 :webapp/session-loads {:modules {}}})
         fetch! (fn [ok err]
                  (swap! calls inc)
                  (reset! answer [ok err]))]
@@ -491,7 +494,7 @@
                   {:webapp/state         s2
                    :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
                                           ["/change" (fn [_s] [:p "code"])]]
-                   :webapp/session-loads #{:modules}})]
+                   :webapp/session-loads {:modules {}}})]
         (webapp/load! app2 :modules (fn [ok err] (swap! n inc) (reset! cbs [ok err])))
         ((second @cbs) "boom")
         (is (= :failed (webapp/load-status @s2 :modules)) (pr-str @s2))
@@ -1580,3 +1583,92 @@
                                   (ok nil))})]
         (webapp/navigate! a3 "/things" false)
         (is (= ["/api/things"] @called) (pr-str @called))))))
+
+(deftest a-SESSION-load-is-DECLARED-and-STARTS-at-page-load
+  ;; The gap between what `:webapp/boot` says and what its shape can do.
+  ;;
+  ;;   "`:webapp/boot` is where an app begins the loads that belong to the
+  ;;    session rather than to a route"
+  ;;
+  ;; It is `(fn [state] state)`. No `app`, so no `:webapp/call` and no
+  ;; `:webapp/render`, so it cannot reach [[load!]] and cannot begin anything.
+  ;; An app that wants a nav pane fetched once has to write ClojureScript after
+  ;; `mount!` — which is the remaining `:cljs` in the only real consumer, and
+  ;; the goal of this whole capability stated as a number that is not zero.
+  ;;
+  ;; A docstring promising what the signature cannot deliver is worse than a
+  ;; missing feature: it sends the reader to write the wrong thing and then to
+  ;; wonder why the framework's own `session-loads` did not cover it.
+  ;;
+  ;; So a session load is DATA, like a route row and like a screen's request —
+  ;; and `:webapp/session-loads` is one declaration rather than two, because
+  ;; declaring what a load IS and declaring that it outlives a screen were
+  ;; always the same statement about the same load.
+  (let [state  (atom {})
+        called (atom [])
+        app    (webapp/wiring
+                {:webapp/state         state
+                 :webapp/base          "/p/demo"
+                 :webapp/routes        [["/code" (fn [s] [:p (str "code "
+                                                                  (webapp/load-value s :modules))])]]
+                 :webapp/boot          (fn [s] (assoc s :token "abc"))
+                 :webapp/session-loads {:modules {:request (fn [s] {:webapp/path    "/api/modules"
+                                                                   :webapp/headers {"Authorization" (:token s)}})
+                                                  :derive  :names}
+                                        ;; declared session-scoped, started by
+                                        ;; the app itself — no :request
+                                        :user    {}}
+                 :webapp/call          (fn [rq ok _err]
+                                         (swap! called conj rq)
+                                         (ok {:names ["a" "b"]}))})]
+
+    (testing "page load starts every session load that names a request"
+      (webapp/start! app "/p/demo/code" "")
+      (is (= ["/p/demo/api/modules"] (mapv webapp/request-url @called))
+          (str "a declared session load did not start, or started at the wrong"
+               " address: " (pr-str @called)))
+      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
+      (is (= ["a" "b"] (webapp/load-value @state :modules))
+          "the :derive did not run on a session load"))
+
+    (testing "and BOOT ran first, so its state is what the request reads"
+      ;; the order start! already documents, now with something that depends on
+      ;; it: a token established by boot is what an authenticated session load
+      ;; must carry, and routing first would send the request without one
+      (is (= "abc" (get-in (first @called) [:webapp/headers "Authorization"]))
+          (pr-str (first @called))))
+
+    (testing "a load declared with NO request is scoped but not started"
+      ;; the two questions are still two: this one outlives a screen AND is the
+      ;; app's to begin — after a sign-in, say, which is not page load
+      (is (= :absent (webapp/load-status @state :user)) (pr-str @state))
+      (is (= 1 (count @called)) (pr-str @called)))
+
+    (testing "and both still SURVIVE navigation, which is what scoped means"
+      (webapp/navigate! app "/code" false)
+      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
+      (is (= ["a" "b"] (webapp/load-value @state :modules)) (pr-str @state)))
+
+    (testing "a nil request DECLINES, the same channel everywhere else"
+      ;; the shape an app needs before sign-in: the load is declared, and it
+      ;; starts when there is something to ask with
+      (let [st (atom {})
+            hit (atom 0)
+            a2 (webapp/wiring
+                {:webapp/state         st
+                 :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
+                 :webapp/session-loads {:me {:request (fn [s] (when (:token s)
+                                                                {:webapp/path "/api/me"}))}}
+                 :webapp/call          (fn [_rq ok _err] (swap! hit inc) (ok nil))})]
+        (webapp/start! a2 "/x" "")
+        (is (= 0 @hit) "an unarmed session load fetched anyway")
+        (is (= :absent (webapp/load-status @st :me)) (pr-str @st))))
+
+    (testing "a SET is refused, and the message carries the migration"
+      ;; no back-compat: the set said only which loads survive, and the map says
+      ;; that AND what they are — one declaration where there were two
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)session-loads"
+           (webapp/wiring {:webapp/state         (atom {})
+                           :webapp/routes        []
+                           :webapp/session-loads #{:modules}}))))))

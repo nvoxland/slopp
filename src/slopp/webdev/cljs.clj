@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.web.client :as web.client] [slopp.edit.http :as edit.http]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.web.client :as web.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -893,6 +893,110 @@
                                     (store/forms store n)))]
                n))))
 
+(defn ^:private render-request
+  "One endpoint as a REQUEST BUILDER and, when it declares a response contract,
+   a CHECK — both source strings, both `:cljc`.
+
+   The builder is a pure function of params returning `slopp.webapp`'s request
+   shape, so it drops straight into a route row's `:request` and an in-image
+   test reads which url a screen will ask for. The bang is dropped from an
+   effectful endpoint's name because building a request performs nothing.
+
+   Path captures are supplied SEPARATELY as `:webapp/path-params` rather than
+   interpolated, because `request-url` substitutes segment-wise and encodes each
+   value — a builder that pasted them into the string would hand the framework a
+   finished path and lose both properties. They are dissoc'd from the query for
+   the reason the fetch wrapper already had: a segment must not also arrive as a
+   query key.
+
+   The check DECODES before validating. A keyword field arrives from JSON as a
+   string, so validating the raw body fails a contract the server honoured —
+   which is a false drift report, and false drift reports are what make a real
+   one unreadable."
+  [{:keys [fn-name method path endpoint request response]}]
+  (let [base      (str/replace (str fn-name) #"!$" "")
+        verb      (str/upper-case (clojure.core/name method))
+        req-code  (schema-form request)
+        resp-code (schema-form response)
+        segs      (keep #(when (str/starts-with? % ":") (keyword (subs % 1)))
+                        (str/split path #"/" -1))
+        body?     (contains? #{:post :put :patch} method)
+        params?   (boolean (or req-code (seq segs)))
+        pairs     (cond-> [(str ":webapp/method " method)
+                           (str ":webapp/path " (pr-str path))]
+                    (seq segs)
+                    (conj (str ":webapp/path-params {"
+                               (str/join " " (map #(str % " (" % " params)") segs))
+                               "}"))
+                    (and req-code body?)       (conj "?BODY?")
+                    (and req-code (not body?)) (conj "?QUERY?"))
+        pairs     (mapv (fn [p]
+                          (case p
+                            "?BODY?"  ":webapp/body params"
+                            "?QUERY?" (str ":webapp/query "
+                                           (if (seq segs)
+                                             (str "(dissoc params "
+                                                  (str/join " " (map pr-str segs)) ")")
+                                             "params"))
+                            p))
+                        pairs)
+        builder   (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-request\n"
+                       "  \"" verb " " path " — generated request builder (D-web-contracts).\"\n"
+                       "  " (if params? "[params]" "[]") "\n"
+                       "  {" (str/join "\n   " pairs) "})")
+        check     (when resp-code
+                    (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-check\n"
+                         "  \"The response contract for " verb " " path " — nil when it holds,\n"
+                         "   a message when it does not. Drop into a row's :check.\"\n"
+                         "  [response]\n"
+                         "  (let [data (m/decode " resp-code " response (mt/json-transformer))]\n"
+                         "    (when-not (m/validate " resp-code " data)\n"
+                         "      (str \"" base " response failed its contract: \"\n"
+                         "           (pr-str (me/humanize (m/explain " resp-code " data)))))))"))]
+    (str/join "\n\n" (remove nil? [builder check]))))
+
+(defn ^:export render-request-ns
+  "Render the generated REQUEST namespace source (a string) from wrapper specs —
+   a `:cljc` namespace of request builders and contract checks, one pair per
+   endpoint.
+
+   **What generation owes a consumer changed when the framework started
+   performing.** A store on `webapp` declares a route table whose rows name a
+   `:request` and a `:check`; the fetch WRAPPERS `render-client-ns` emits are
+   dead surface in such a store — and worse than dead, because they are `:cljs`
+   and so are exactly what `webapp-client-code` reports. Named by the app that
+   adopted the screen value and found nine of them unreachable.
+
+   `:cljc`, which is the whole exercise: a request builder is a pure function of
+   params, so it loads into the image and an ordinary test reads which url a
+   screen will ask for — where a `js/fetch` wrapper could only ever be verified
+   by compiling.
+
+   It also restores what the screen value took away. Their response validation
+   lived in the wrappers, and when the framework took over performing it went
+   with them; a generated `-check` is that validation back, in the one place a
+   row can hang it."
+  [ns-sym wrappers]
+  (let [schema-nses (->> wrappers
+                         (mapcat (juxt #(get-in % [:request :ns])
+                                       #(get-in % [:response :ns])))
+                         (remove nil?) distinct sort)
+        requires    (str "(:require [malli.core :as m]\n"
+                         "            [malli.error :as me]\n"
+                         "            [malli.transform :as mt]"
+                         (apply str (for [n schema-nses] (str "\n            " n)))
+                         ")")]
+    (str "(ns " ns-sym "\n"
+         "  \"Request builders and contract checks for an API this app CONSUMES —\n"
+         "  generated by generate_client, one pair per endpoint, against the\n"
+         "  SAME schema var the server validates with.\n\n"
+         "  Drop a builder into a route row's :request and its check into the\n"
+         "  row's :check; slopp performs the request and renders the failure.\n\n"
+         "  Regenerate, never hand-edit: every form here is ^:generated and the\n"
+         "  next generate_client overwrites the namespace wholesale.\"\n"
+         "  " requires ")\n\n"
+         (str/join "\n\n" (map render-request wrappers)))))
+
 (defn ^:export generate-client!
   "Generate the typed client (D-web-contracts part 2): read every web endpoint's
    contract (client-wrapper-specs) and write a stored, edit-PROTECTED :cljs
@@ -923,11 +1027,23 @@
       (cond-> {:generated target :wrappers [] :endpoints 0
                :note "no shippable endpoints — nothing generated"}
         (seq problems) (assoc :problems problems))
-      (let [src (render-client-ns target wrappers)]
+      ;; WHO PERFORMS decides the shape, and it is already declared. With
+      ;; `webapp` on, the framework performs every request from a row's
+      ;; `:request`, so a typed fetch wrapper is surface nothing calls — and it
+      ;; is `:cljs`, so it is what `webapp-client-code` reports and what an
+      ;; author is then asked to justify. Such a store gets REQUEST BUILDERS and
+      ;; CONTRACT CHECKS instead, `:cljc`, which drop into a route row and load
+      ;; into the image. Not a flag: which artifact is useful FOLLOWS from who
+      ;; performs, and a store that has said so should not have to say it twice.
+      (let [webapp?  (capabilities/enabled? st0 "webapp")
+            platform (if webapp? :cljc :cljs)
+            src      (if webapp?
+                       (render-request-ns target wrappers)
+                       (render-client-ns target wrappers))]
         (engine/commit-appended!
          session
          (fn [s]
-           (let [s1 (first (store/record-module-platform s (str target) :cljs))
+           (let [s1 (first (store/record-module-platform s (str target) platform))
                  s2 (store/ingest s1 target src)]
              ;; record the contract fingerprint so the done-advisory can detect
              ;; endpoint drift and nudge a regenerate (the "explicit" safety net)
@@ -939,7 +1055,7 @@
           (cond-> {:generated target
                    :wrappers  (mapv (comp str :fn-name) wrappers)
                    :endpoints (count wrappers)
-                   :platform  :cljs
+                   :platform  platform
                    :delta     (:id (last (:deltas (:store @session))))}
             (seq problems) (assoc :problems problems)
             (seq others)

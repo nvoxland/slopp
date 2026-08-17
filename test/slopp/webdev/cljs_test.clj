@@ -859,3 +859,122 @@
       ;; which is the same failure with the diagnosis removed entirely
       (is (= 2 (count (re-seq #"\(ok! resp\)" src)))
           (str "one wrapper skipped the guard: " src)))))
+
+(deftest a-webapp-store-generates-REQUESTS-and-CHECKS-not-performers
+  ;; Named by the app that adopted the screen value: `generate_client` and
+  ;; `webapp` now overlap. The generated namespace is two things — schemas
+  ;; (`:cljc`) and fetch WRAPPERS (`:cljs`) — and once the framework performs
+  ;; every request the wrappers are dead surface. Nine public fns in theirs.
+  ;;
+  ;; Worse than dead: they are `:cljs`, so they are exactly what
+  ;; `webapp-client-code` now reports, and the fix an author would reach for is
+  ;; to hand-write the request the generator could have written.
+  ;;
+  ;; So a store with `webapp` on gets what it can actually use — a `:cljc`
+  ;; namespace of REQUEST builders for a row's `:request`, and CONTRACT checks
+  ;; for its `:check`. That also restores what 4d took away: their response
+  ;; validation lived in the wrappers, and when the framework took over
+  ;; performing it went with them.
+  ;;
+  ;; `:cljc` rather than `:cljs` is the point of the whole exercise. A request
+  ;; builder is a pure function of params, so it loads into the image and an
+  ;; ordinary test reads which url a screen will ask for.
+  (let [wrappers [{:fn-name 'get-order :method :get :path "/api/orders/:id"
+                   :endpoint 'shop.api/get-order
+                   :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
+                   :response {:kind :var :sym 'shop.contracts/order :ns 'shop.contracts}}
+                  {:fn-name 'create-order! :method :post :path "/api/orders"
+                   :endpoint 'shop.api/create-order
+                   :request  {:kind :var :sym 'shop.contracts/order :ns 'shop.contracts}
+                   :response {:kind :none}}
+                  {:fn-name 'ping :method :get :path "/api/ping"
+                   :endpoint 'shop.api/ping
+                   :request  {:kind :none}
+                   :response {:kind :none}}]
+        src (cljs/render-request-ns 'shop.client.requests wrappers)]
+
+    (testing "one REQUEST builder per endpoint, each carrying its provenance"
+      (is (re-find #"\(ns shop\.client\.requests" src) src)
+      (is (= 3 (count (re-seq #"\(defn \^\{:generated .*?-request" src)))
+          (str "one request builder per endpoint, and the ! is dropped because"
+               " building a request performs nothing: " src))
+      (is (re-find #"\^\{:generated \"shop\.api/get-order\"\}" src) src))
+
+    (testing "the builder returns slopp.webapp's request SHAPE"
+      (is (re-find #":webapp/method :get" src) src)
+      (is (re-find #":webapp/path \"/api/orders/:id\"" src) src)
+      (is (re-find #":webapp/path-params \{:id \(:id params\)\}" src)
+          (str "a captured segment must be supplied SEPARATELY, or request-url"
+               " has nothing to substitute: " src)))
+
+    (testing "a body verb sends a BODY; anything else sends a query"
+      (is (re-find #":webapp/body params" src) src)
+      (is (re-find #":webapp/query \(dissoc params :id\)" src)
+          (str "a path param must not also arrive as a query key: " src)))
+
+    (testing "an endpoint with no request takes NO arguments"
+      ;; `ping` declares nothing, so a builder taking params would invent a
+      ;; parameter the contract does not have
+      (is (re-find #"ping-request\n  \"[^\"]*\"\n  \[\]" src) src))
+
+    (testing "a CHECK is generated wherever a response contract exists"
+      ;; the half 4d took away: their generated wrappers validated the response
+      ;; and threw, and the four-state model turned that into the failed screen
+      (is (re-find #"get-order-check" src) src)
+      (is (re-find #"m/validate shop\.contracts/order" src) src)
+      (is (not (re-find #"ping-check" src))
+          "an endpoint with no response contract has nothing to check"))
+
+    (testing "and the check DECODES first, or it validates the wire's shapes"
+      ;; a keyword field arrives from JSON as a string, so validating the raw
+      ;; body fails a contract the server honoured — the false drift report
+      ;; this whole mechanism exists to avoid
+      (is (re-find #"m/decode shop\.contracts/order" src) src))
+
+    (testing "the namespace is PORTABLE, which is the whole point"
+      (is (not (re-find #"js/" src))
+          (str "a request builder that reaches for the browser is one no"
+               " in-image test can read: " src))
+      (is (= (count (re-seq #"\(" src)) (count (re-seq #"\)" src)))
+          "balanced parens"))))
+
+(deftest ^:external generate-client-follows-WHO-PERFORMS-the-request
+  ;; The overlap named by the consuming app: with `webapp` on, the framework
+  ;; performs every request, so a generated `:cljs` fetch wrapper is surface
+  ;; nothing calls — and it is `:cljs`, so it is what `webapp-client-code`
+  ;; reports and what an author is then told to justify.
+  ;;
+  ;; So the capability decides the SHAPE. Not a flag: which artifact is useful
+  ;; follows from who performs, and that is already declared.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shopw.contracts
+                   (str "(ns shopw.contracts)\n\n"
+                        "(def order \"O.\" [:map [:id :string]])\n"))
+      (ops/module-platform! sess "shopw.contracts" :cljc :prompt "shared with the browser")
+      (ops/ingest! sess 'shopw.api
+                   (str "(ns shopw.api)\n\n"
+                        "(defn ^{:web/method :get :web/path \"/api/orders/:id\"\n"
+                        "        :web/auth :public :web/response shopw.contracts/order}\n"
+                        "  get-order \"G.\" [_] {:status 200 :body {}})\n"))
+
+      (testing "without webapp, generation still emits the :cljs performer"
+        ;; a store whose browser does NOT own routing has no framework
+        ;; performer, so a typed fetch wrapper is exactly what it needs
+        (let [r (cljs/generate-client! sess :ns 'shopw.client.api)]
+          (is (= :cljs (:platform r)) (pr-str r))))
+
+      (testing "with webapp on, it emits the PORTABLE request namespace instead"
+        (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                          :prompt "this store's browser owns routing")
+        (let [r   (cljs/generate-client! sess :ns 'shopw.client.api)
+              src (str (store.render/render-ns (:store @sess) 'shopw.client.api))]
+          (is (= :cljc (:platform r))
+              (str "a webapp store was handed fetch wrappers its own framework"
+                   " makes unreachable: " (pr-str r)))
+          (is (re-find #"get-order-request" src) src)
+          (is (re-find #"get-order-check" src) src)
+          (is (not (re-find #"js/fetch" src))
+              "a webapp store got a performer anyway")))
+
+      (finally (ops/close! sess)))))

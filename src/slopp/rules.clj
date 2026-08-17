@@ -1047,6 +1047,12 @@
    ;; it — so moving the fetch out of the browser bought verifiability
    ;; everywhere except here. The failure is quiet: the url routes, the screen
    ;; renders, one pane always fails to load while everything around it works
+      ;; the OTHER half of a route reference. A literal :href is joined against
+   ;; the served table by http-dangling-route-refs; a screen's :webapp/path is
+   ;; the same claim about the same table in a different key, and nothing read
+   ;; it — so moving the fetch out of the browser bought verifiability
+   ;; everywhere except here. The failure is quiet: the url routes, the screen
+   ;; renders, one pane always fails to load while everything around it works
    {:key :webapp-request-paths-are-served :severity :advisory :applies-to :production
     :check #'rules.webapp/webapp-request-paths-are-served-check
     ;; a screen and the endpoint it calls are rarely edited together, and the
@@ -1055,6 +1061,22 @@
     :selftest-note (str "needs webapp.enabled, which a source-only fixture"
                         " cannot carry; covered by rules.webapp-test/"
                         "a-screens-REQUEST-PATH-is-joined-against-what-this-store-SERVES")}
+   ;; the capability's own GOAL, arriving rather than waiting to be asked.
+   ;; "An app that opts into webapp writes NO ClojureScript" has been readable
+   ;; in query_surface since the section shipped, and readable is not reported:
+   ;; nobody opens a surface report on an ordinary day, so a store drifting
+   ;; from zero drifts silently and the number is consulted only by whoever
+   ;; already suspects
+   {:key :webapp-client-code :severity :advisory :applies-to :production
+    :check #'rules.webapp/webapp-client-code-check
+    ;; a namespace becomes :cljs by a module_platform declaration that touches
+    ;; no FORM, so the episode that adds one has nothing for an episode-scoped
+    ;; rule to hang a finding on — this rule is the sweep or it is nothing
+    :sweep true
+    :selftest-note (str "needs webapp.enabled AND a :cljs module declaration,"
+                        " neither of which a source-only fixture can carry;"
+                        " covered by rules.webapp-test/the-CLJS-a-webapp-still-"
+                        "writes-is-reported-at-DONE-not-only-on-request")}
 ;; the stored :name and the source's own name, which must agree. NOT
    ;; :fires-on-able: ingesting source recomputes :name, so no fixture text
    ;; can express the disagreement — which is exactly why nothing caught it.
