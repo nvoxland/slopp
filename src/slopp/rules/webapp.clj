@@ -90,25 +90,6 @@
        sort
        vec))
 
-(defn ^:export stranded-pages
-  "Every `^:web/page` in `st` whose namespace closure reaches `:cljs`, as
-  `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
-
-  This is the whole-store face of [[page-cljs-reach]], and it exists for the
-  surface the done-advisory structurally cannot serve: declaring a namespace
-  `:cljs` strands a page WITHOUT any write to the page, so the done that
-  follows has no changed form to hang the finding on. `module_platform` is
-  the write that does the stranding, so `module_platform` is where this
-  report belongs — the reader who broke the reach is told at the moment they
-  broke it, not at the next full_check."
-  [st]
-  (vec (for [n     (keys (:namespaces st))
-             f     (store/forms st n)
-             :when (and (:name f) (:web/page (store/form-name-meta f)))
-             :let  [cljs (page-cljs-reach st n)]
-             :when (seq cljs)]
-         {:page (symbol (str n) (str (:name f))) :cljs cljs})))
-
 (defn webapp-page-reach-check
   "Done-advisory: a `^:web/page` entry whose namespace CLOSURE reaches a
   `:cljs` namespace. Reports `{:form :cljs [namespaces]}`; inert until the
@@ -744,3 +725,43 @@
                         " now. If this namespace is a browser-only binding with"
                         " no portable form, that is a real answer — and worth"
                         " being a deliberate one rather than a leftover.")}))))
+
+(defn ^:export page-rows
+  "Every `^:web/page` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —
+  `[]` when nothing declares one.
+
+  `:page` is the qualified symbol a generated browser entry CALLS, and
+  `:closure` is `ns` plus everything it transitively requires, which is what
+  that entry must REQUIRE. Naming a page without requiring what it reaches
+  produces a call to a var that does not exist — which reaches a reader as a
+  blank page and reads like a rendering bug rather than a wiring one.
+
+  One traversal, because four sites had inlined it — the page-unreachable gate,
+  the page-reach advisory, its whole-store face, and now the build. A fifth copy
+  is how the answers start to differ."
+  [st]
+  (vec (sort-by (comp str :page)
+                (for [n     (keys (:namespaces st))
+                      f     (store/forms st n)
+                      :when (and (:name f) (:web/page (store/form-name-meta f)))]
+                  {:ns      n
+                   :name    (:name f)
+                   :page    (symbol (str n) (str (:name f)))
+                   :closure (vec (sort (store/ns-closure st n)))}))))
+
+(defn ^:export stranded-pages
+  "Every `^:web/page` in `st` whose namespace closure reaches `:cljs`, as
+  `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
+
+  This is the whole-store face of [[page-cljs-reach]], and it exists for the
+  surface the done-advisory structurally cannot serve: declaring a namespace
+  `:cljs` strands a page WITHOUT any write to the page, so the done that
+  follows has no changed form to hang the finding on. `module_platform` is
+  the write that does the stranding, so `module_platform` is where this
+  report belongs — the reader who broke the reach is told at the moment they
+  broke it, not at the next full_check."
+  [st]
+  (vec (for [{:keys [ns page]} (page-rows st)
+             :let  [cljs (page-cljs-reach st ns)]
+             :when (seq cljs)]
+         {:page page :cljs cljs})))

@@ -1831,3 +1831,119 @@
                        " any other reason makes the green above prove nothing: "
                        (pr-str r))))
             (finally (ops/close! sess))))))))
+
+(deftest ^:external a-BROWSER-app-gets-its-entry-GENERATED-like-a-cli-app-does
+  ;; `slopp.build/webapp-launcher-source` builds the `main`/`bootstrap` entry,
+  ;; has a test, and is cited by `slopp.webapp.dom/mount!`'s own `^:unused-ok`
+  ;; as *"the only caller in existence is one no reference graph can see"*.
+  ;;
+  ;; It has no caller at all. Its cli twin IS called by `build!`; the webapp one
+  ;; was written and never wired — so every browser app still hand-writes the
+  ;; two forms slopp generates for it, which is exactly two of the three `:cljs`
+  ;; forms the only real consumer has left against this capability's own metric.
+  ;;
+  ;; The shape is one this wave keeps producing: a mechanism written, tested,
+  ;; documented as working, and connected to nothing. What made it survive is
+  ;; that the docstring asserting a caller exists is the thing that stops anyone
+  ;; looking for one.
+  (with-redefs [boot/framework-files
+                (constantly
+                 {"webapp"
+                  {"slopp/webapp/dom.cljs"
+                   (str "(ns slopp.webapp.dom)\n"
+                        "(defn ^:export mount! \"M.\" [declared] declared)\n")}})
+                boot/framework-deps (constantly {})]
+    (let [sess (external/open!)
+          dir  (str (Files/createTempDirectory "slopp-entry"
+                                               (make-array FileAttribute 0)))]
+      (try
+        (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
+                          :prompt "the document is served")
+        (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                          :prompt "this store's browser owns routing")
+        (swap! sess update :store store/ingest 'shop.ui
+               (str "(ns shop.ui)\n\n"
+                    "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                    "(defn ^{:web/method :get :web/path \"/\"\n"
+                    "        :web/auth :public :web/response :string\n"
+                    "        :web/client-routes [\"/things\"]}\n"
+                    "  doc \"D.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                    "(defn ^:web/page app \"A.\" []\n"
+                    "  {:webapp/routes [[\"/things\" things]]})\n"))
+        (let [r (external/build! sess dir)]
+          (is (nil? (:error r)))
+          (testing "the result NAMES the entry it wrote"
+            ;; a file appearing in a tree nobody reads is how the previous
+            ;; version of this went unnoticed for a whole wave — and the
+            ;; consumer has to know to DELETE its own entry, or both mount
+            (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))
+
+        (testing "the built tree carries an entry the app never wrote"
+          (let [f (io/file dir "cljs-src" "native" "client.cljs")]
+            (is (.exists f)
+                (str "a browser app still has to hand-write main and bootstrap,"
+                     " which are two of the :cljs forms this capability's own"
+                     " metric counts against it"))
+            (let [src (slurp f)]
+              (testing "it MOUNTS the declared page"
+                (is (re-find #"dom/mount!" src) src)
+                (is (re-find #"shop\.ui/app" src) src))
+              (testing "and REQUIRES the namespace holding it"
+                ;; the failure this closes is a call to a var that does not
+                ;; exist, which reaches a reader as a blank page
+                (is (re-find #"\[shop\.ui\]" src) src))
+              (testing "and starts from a top-level form, not from inline script"
+                ;; the security property: the document starts the app with no
+                ;; inline JS, so the page stays script-src-only
+                (is (re-find #"defonce" src) src)))))
+
+        (testing "a store namespace of that NAME is refused, as native.main is"
+          ;; the same collision the cli path already refuses, and the silent
+          ;; version is worse here: two entries both mount, so the app runs
+          ;; twice over one element and the second render loop is one nobody
+          ;; declared
+          (let [d3 (str (Files/createTempDirectory "slopp-collide"
+                                                   (make-array FileAttribute 0)))
+                s3 (external/open!)]
+            (try
+              (ops/config-file! s3 "capabilities" :key "http.enabled" :value "true"
+                                :prompt "served")
+              (ops/config-file! s3 "capabilities" :key "webapp.enabled" :value "true"
+                                :prompt "the browser owns routing")
+              (swap! s3 update :store store/ingest 'shop.two
+                     (str "(ns shop.two)\n\n"
+                          "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                          "(defn ^:web/page app \"A.\" []\n"
+                          "  {:webapp/routes [[\"/things\" things]]})\n"))
+              (swap! s3 update :store store/ingest 'native.client
+                     "(ns native.client)\n\n(defn ^:export main \"M.\" [] nil)\n")
+              (is (re-find #"native\.client" (str (:error (external/build! s3 d3))))
+                  (str "a hand-written native.client was about to be overwritten"
+                       " by the generated one: "
+                       (pr-str (external/build! s3 d3))))
+              (finally
+                (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                          (.delete f))]
+                  (rm! (io/file d3)))
+                (ops/close! s3)))))
+
+        (testing "a store with no page gets no entry — this is not a fixed file"
+          (let [d2 (str (Files/createTempDirectory "slopp-noentry"
+                                                   (make-array FileAttribute 0)))
+                s2 (external/open!)]
+            (try
+              (swap! s2 update :store store/ingest 'plain.core
+                     "(ns plain.core)\n\n(defn f \"F.\" [x] x)\n")
+              (external/build! s2 d2)
+              (is (not (.exists (io/file d2 "cljs-src" "native" "client.cljs")))
+                  "a store with no browser app was handed a browser entry")
+              (finally
+                (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                          (.delete f))]
+                  (rm! (io/file d2)))
+                (ops/close! s2)))))
+
+        (finally
+          (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+            (rm! (io/file dir)))
+          (ops/close! sess))))))
