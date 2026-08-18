@@ -1754,3 +1754,53 @@
       ;; navigation would be the silent retry loop this model removed
       (web.screen/visit! s "/p/demo/code")
       (is (= 1 (count @called)) (pr-str @called)))))
+
+(deftest a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry
+  ;; The reason `slopp.build/webapp-launcher-source` still has no caller, pinned
+  ;; so the next attempt to wire it fails HERE rather than in a consumer.
+  ;;
+  ;; It was wired into `build!` for one milestone and reverted. `^:web/page` is
+  ;; the only marker naming a browser app's entry fn, and it is asked for two
+  ;; incompatible things:
+  ;;
+  ;;   slopp.web.screen/open!   {:state :view :navigate :dispatch :boot}
+  ;;   slopp.webapp.dom/mount!  the WIRING DECLARATION
+  ;;
+  ;; A page that serves one refuses at the other, so a generated entry calling
+  ;; `(mount! (page))` breaks any app whose page can be opened headlessly —
+  ;; which is what the marker is documented to mean.
+  ;;
+  ;; **My own fixture hid it.** Its `^:web/page` returned a raw declaration,
+  ;; which `screen` refuses — so the test proved a file gets written and
+  ;; nothing about whether an app can use it. Caught by the consuming app
+  ;; reading the generator rather than running it.
+  (let [declared {:webapp/state  (atom {})
+                  :webapp/routes [["/things" (fn [_s] [:p "t"])]]}
+        driver   (webapp/driver (webapp/wiring declared))]
+
+    (testing "a page that OPENS headlessly is a driver, and its keys are unqualified"
+      (is (= #{:state :view :navigate :dispatch :boot} (set (keys driver)))
+          (pr-str (keys driver))))
+
+    (testing "and `wiring` refuses a driver, so it cannot be MOUNTED"
+      ;; what a generated `(mount! (page))` would hit for any app whose page is
+      ;; openable — a refusal at page load, naming keys the author never wrote
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)unknown wiring key"
+           (webapp/wiring driver))))
+
+    (testing "while the DECLARATION mounts and cannot be opened"
+      ;; the other half, and the symmetry is the point: neither shape serves
+      ;; both consumers, so one marker cannot name both entries
+      (is (map? (webapp/wiring declared)))
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)unknown page key"
+           (web.screen/open! declared))))
+
+    (testing "so the two are not one wiring entered twice — they are two SHAPES"
+      ;; the consuming app's sentence, and it is the thing to settle before a
+      ;; browser entry can be generated at all: whether `:web/page` becomes the
+      ;; declaration and `screen` derives the driver (which moves a headless
+      ;; drive's canned performer out of the page), or a second declaration
+      ;; names the browser entry
+      (is (not= (set (keys driver)) (set (keys declared)))))))

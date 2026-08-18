@@ -181,14 +181,16 @@
 
 (defn ^:export
   ^{:unused-ok "the generated browser entry calls it, and that entry is a STRING
-  built by slopp.build/webapp-launcher-source and written into the tree by
-  slopp.ops.external/build! — so the only caller in existence is one no
-  reference graph can see. Same shape as the cli launcher's -main.
+  built by slopp.build/webapp-launcher-source — which has NO CALLER, so this
+  var is genuinely unused today and an app supplies its own entry.
 
-  That was FALSE for the whole of wave 4: the generator was written and tested
-  and build! never called it, so the caller this named did not exist and every
-  browser app hand-wrote its own entry. A justification asserting a caller is
-  exactly what stops anyone looking for one."}
+  Said plainly because the earlier version was false and unfalsifiable at once:
+  it named a caller that did not exist, and a justification asserting a caller
+  is exactly what stops anyone looking for one. Wiring the generator into
+  build! then failed for a reason worth recording here — `^:web/page` returns a
+  DRIVER for slopp.web.screen/open!, and this function needs the wiring
+  DECLARATION, so a generated (mount! (page)) refuses at page load. Pinned by
+  webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry."}
   mount!
   "Run `declared` as a browser application: supply the effects a page has,
   register the two listeners a page needs, and start.
