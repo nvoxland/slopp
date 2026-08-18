@@ -484,6 +484,51 @@
           declared (fn [node k pred]
                      (let [v (get node k)]
                        (when (pred v) v)))
+          ;; what a skip SHOWS, because "not a literal" is the rule and the
+          ;; value is the evidence — an author reading this needs to know
+          ;; whether they meant it
+          shown    (fn [v] (let [s (pr-str v)]
+                             (if (> (count s) 60) (str (subs s 0 57) "…") s)))
+          ;; **A skipped ENTRY is as named as a skipped SECTION**, and the
+          ;; sentence that justified naming sections turns on this one step in:
+          ;; a section quietly missing reads as a store that declares nothing
+          ;; there, and an entry quietly missing reads as an app that declares
+          ;; FEWER than it does. `:actions []` is the worse of the two, because
+          ;; an empty vector is an affirmative claim of emptiness rather than an
+          ;; absence — nothing in it distinguishes a store with seven actions
+          ;; declared by var from one with none.
+          ;;
+          ;; Reported by the store that would have asked this tool "does the
+          ;; surface agree with what I declared?", which is the question it is
+          ;; for. It said yes about routes and quietly no about the rest.
+          unreadable
+          (vec (concat
+                ;; a whole declaration written as something other than a literal
+                (for [[nsx node] rows
+                      [k pred] [[:webapp/routes sequential?]
+                                [:webapp/actions map?]
+                                [:webapp/session-loads map?]]
+                      :when (and (contains? node k) (not (pred (get node k))))]
+                  (str nsx " declares " k " as " (shown (get node k))
+                       " — only a literal can be read here, so none of it is"
+                       " in this answer"))
+                ;; one entry inside a declaration that IS readable
+                (for [[nsx node] rows
+                      [k spec] (declared node :webapp/session-loads map?)
+                      :when (not (and (keyword? k) (map? spec)))]
+                  (str nsx " declares the session load " (pr-str k) " as "
+                       (shown spec) " — only a literal map can be read"))
+                (for [[nsx node] rows
+                      row (declared node :webapp/routes sequential?)
+                      :when (not (and (vector? row) (= 2 (count row))
+                                      (string? (first row))))]
+                  (str nsx " declares a route row as " (shown row)
+                       " — a readable row is [\"/pattern\" screen]"))
+                (for [[nsx node] rows
+                      [a _decl] (declared node :webapp/actions map?)
+                      :when (not (keyword? a))]
+                  (str nsx " declares the action " (shown a)
+                       " — an action is named by a keyword"))))
           ;; request VAR → the path it names, so a row can say what it loads as
           ;; a url rather than as the name of the function that computes one.
           ;; `first` because a request that names two paths is answering a
@@ -545,6 +590,7 @@
       {:screens       screens
        :actions       actions
        :session-loads sessions
+       :unreadable    unreadable
        :cljs          (count (filter #(= :cljs (store/platform-for store %))
                                      (keys (:namespaces store))))})))
 

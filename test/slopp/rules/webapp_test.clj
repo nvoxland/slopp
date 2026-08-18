@@ -668,3 +668,69 @@
                             [:config "capabilities" :values "webapp.enabled"] "true")]
           (is (map? (rules.webapp/webapp-report st))
               (str k " taken by var still takes the report down")))))))
+
+(deftest what-the-report-CANNOT-read-is-named-at-every-grain
+  ;; The hole in the fix for the throw. Turning a crash into a SKIP was right;
+  ;; naming the skip only at SECTION grain was not, and the sentence that
+  ;; justified the section-grain naming turns on it one step further in:
+  ;;
+  ;;   A section quietly missing reads as a store that declares nothing there.
+  ;;
+  ;; An ENTRY quietly missing reads as an app that declares FEWER than it does.
+  ;; And the actions case is the worse of the two, because `[]` is an
+  ;; affirmative claim of emptiness rather than an absence — nothing in that
+  ;; answer distinguishes it from a store with no actions at all.
+  ;;
+  ;; Reported by the store that would have used this to ask "does the surface
+  ;; agree with what I declared?", which is the question the tool is for. It
+  ;; said yes about routes and quietly no about the other two.
+  ;;
+  ;; Not asking it to RESOLVE a `cond->` — skipping what it cannot read is
+  ;; right, and their declaration is a `cond->` for a real reason: `:check` is
+  ;; only there when a contract was generated.
+  (let [src (str "(ns shop.seven)\n\n"
+                 "(def actions \"A.\" {:thing/save {:effectful? true}})\n"
+                 "(defn things \"T.\" [_s] [:p \"t\"])\n"
+                 "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes        [[\"/things\" things]]\n"
+                 ;; a whole declaration naming a VAR
+                 "   :webapp/actions       actions\n"
+                 ;; a readable declaration with ONE unreadable entry
+                 "   :webapp/session-loads {:modules  (cond-> {:request modules-request})\n"
+                 "                          :projects {:request modules-request}}})\n")
+        on  (assoc-in (store/ingest (store/empty-store) 'shop.seven src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")
+        r   (rules.webapp/webapp-report on)]
+
+    (testing "the readable half is still reported, which is what makes skipping honest"
+      (is (= ["/things"] (mapv :path (:screens r))) (pr-str r))
+      (is (= [:projects] (mapv :load (:session-loads r))) (pr-str r)))
+
+    (testing "a whole DECLARATION it cannot read is named"
+      (is (some #(re-find #"webapp/actions" %) (:unreadable r))
+          (str "an empty :actions is an affirmative claim of emptiness — there"
+               " is nothing in it a reader could tell from a store with no"
+               " actions: " (pr-str (:unreadable r)))))
+
+    (testing "and a single unreadable ENTRY inside a readable one is named too"
+      (is (some #(re-find #":modules" %) (:unreadable r))
+          (str "one session load vanished from an otherwise-complete list: "
+               (pr-str (:unreadable r)))))
+
+    (testing "the note SHOWS what it found, so the reader can see why"
+      ;; "not a literal" is a rule; the value is the evidence, and it is what
+      ;; tells an author whether they meant it
+      (is (some #(re-find #"actions" %) (:unreadable r)) (pr-str (:unreadable r)))
+      (is (some #(re-find #"cond->" %) (:unreadable r))
+          (str "the reader has to go and look otherwise: " (pr-str (:unreadable r)))))
+
+    (testing "a store it can read entirely says NOTHING — silence is the good case"
+      (let [clean (assoc-in (store/ingest (store/empty-store) 'shop.eight
+                                          (str "(ns shop.eight)\n\n"
+                                               "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                                               "(defn ^:web/page app \"A.\" []\n"
+                                               "  {:webapp/routes [[\"/things\" things]]})\n"))
+                            [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (empty? (:unreadable (rules.webapp/webapp-report clean)))
+            (pr-str (:unreadable (rules.webapp/webapp-report clean))))))))

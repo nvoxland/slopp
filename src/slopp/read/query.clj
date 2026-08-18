@@ -430,7 +430,8 @@
   TEACHING rather than `{}` — \"nothing declared\" and \"nothing enabled\" are
   different answers and only the second has an action attached.
 
-  **A section that cannot be READ is absent and NAMED, under `:unreadable`.**
+  **Anything this could not READ is absent and NAMED, under `:unreadable` —
+  a whole SECTION that threw, or a single DECLARATION inside a living one.**
   That is the same conflation one step further out: a section quietly missing
   reads as a store that declares nothing there. `rules.rest/contracts-report`
   carries this discipline at MEMBER grain — one contract that threw made nine
@@ -439,6 +440,14 @@
   down with it. Reported by the store that could no longer read the number
   `D-webapp` names as the webapp target, so the throw hid the metric the wave is
   scored by, in the tool that reports it.
+
+  **The same store then found the entry-grain half**, which the section-grain
+  fix had created: a declaration written as a var or built with a `cond->` was
+  silently dropped from a section that otherwise answered. An entry quietly
+  missing reads as an app that declares FEWER than it does — and an empty
+  `:webapp/actions` is worse than an absence, because `[]` is an affirmative
+  claim of emptiness. Both grains land in one list, because a reader has one
+  question: what is missing here that exists in my store.
 
   Rows are self-describing: every one carries `:kind`, and a `:doc` where the
   declaration has one. That is what lets a renderer draw a capability nobody
@@ -460,7 +469,14 @@
         cli*  (read* "cli" rules.cli/commands-report)
         rest* (read* "rest" rules.rest/contracts-report)
         wapp* (read* "webapp" rules.webapp/webapp-report)
-        unreadable (vec (keep :error [cli* rest* wapp* http*]))
+        ;; a section that could not be BUILT and a declaration inside a section
+        ;; that could not be READ are the same question for a reader — what is
+        ;; missing from this answer that exists in my store — so they are one
+        ;; list. The section-grain half was built first and named only
+        ;; sections; an ENTRY quietly dropped reads as an app that declares
+        ;; fewer than it does, which is the same conflation one step in
+        unreadable (vec (concat (keep :error [cli* rest* wapp* http*])
+                                (:unreadable (:value wapp*))))
         http  (:value http*)
         cli   (:value cli*)
         rest  (:value rest*)
