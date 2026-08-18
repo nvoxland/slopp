@@ -610,3 +610,61 @@
       ;; project, and telling it about a goal it never adopted is noise
       (is (empty? (rules.webapp/webapp-client-code-check nil st nil))
           (pr-str (rules.webapp/webapp-client-code-check nil st nil))))))
+
+(deftest the-webapp-section-survives-a-declaration-it-cannot-READ
+  ;; `webapp-report`'s own docstring says it: **no member may take the report
+  ;; down**, citing `rules.rest/contracts-report`, where one contract that threw
+  ;; made nine endpoints unreadable on the day a store enabled the capability.
+  ;;
+  ;; It happened here, in the function that cites it. An app may name a VAR
+  ;; rather than write a literal —
+  ;;
+  ;;   {:webapp/routes routes :webapp/session-loads session-loads}
+  ;;
+  ;; — and every extractor seq'd the value, so a symbol threw
+  ;; `Don't know how to create ISeq from: clojure.lang.Symbol`. Not a refusal
+  ;; naming a store condition: a raw throw, taking `query_surface` with it, and
+  ;; with it `:cli`, `:http` and `:rest`, which have nothing to do with any of
+  ;; this.
+  ;;
+  ;; Reported by the store that could no longer read the number `D-webapp` names
+  ;; as this capability's target — so the throw hid the metric the wave is
+  ;; scored by, in the tool that reports it.
+  (let [src (str "(ns shop.six)\n\n"
+                 "(def routes \"R.\" [])\n"
+                 "(def actions \"A.\" {})\n"
+                 "(def session-loads \"S.\" {:modules {}})\n\n"
+                 "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                 "(defn ^:web/page app \"A.\" []\n"
+                 "  {:webapp/routes        routes\n"
+                 "   :webapp/actions       actions\n"
+                 "   :webapp/session-loads session-loads})\n\n"
+                 ;; a second, READABLE app in the same store — without it a
+                 ;; report that returned empty would look like it had coped
+                 "(defn ^:web/page other \"O.\" []\n"
+                 "  {:webapp/routes  [[\"/things\" things]]\n"
+                 "   :webapp/actions {:thing/save {:effectful? true}}})\n")
+        on  (assoc-in (store/ingest (store/empty-store) 'shop.six src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")]
+
+    (testing "a declaration naming a VAR does not throw"
+      (is (map? (rules.webapp/webapp-report on))
+          "a store that names its route table by var made the whole surface unreadable"))
+
+    (testing "and what IS readable is still reported"
+      ;; the half that makes skipping honest rather than a shrug: an
+      ;; unreadable declaration costs its own rows and nothing else
+      (let [r (rules.webapp/webapp-report on)]
+        (is (= ["/things"] (mapv :path (:screens r))) (pr-str r))
+        (is (= [:thing/save] (mapv :action (:actions r))) (pr-str r))))
+
+    (testing "every extractor, not just the one that was reported"
+      ;; routes, actions and session-loads all seq'd their value, so fixing the
+      ;; reported one would leave two loaded guns in the same function
+      (doseq [k [:webapp/routes :webapp/actions :webapp/session-loads]]
+        (let [one (str "(ns shop.one)\n\n(def v \"V.\" nil)\n\n"
+                       "(defn ^:web/page app \"A.\" [] {" k " v})\n")
+              st  (assoc-in (store/ingest (store/empty-store) 'shop.one one)
+                            [:config "capabilities" :values "webapp.enabled"] "true")]
+          (is (map? (rules.webapp/webapp-report st))
+              (str k " taken by var still takes the report down")))))))

@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.web.client :as web.client] [slopp.read.history :as history] [slopp.ops.branch :as branch]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.web.client :as web.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -2396,3 +2396,50 @@
           f (#'mcp/fit-payload m 2000)]
       (is (map? (edn/read-string (:body f))))
       (is (re-find #"keys shown" (str (:note f))) (:note f)))))
+
+(deftest ^:external one-SECTION-cannot-take-the-whole-surface-down
+  ;; `webapp-report`'s docstring already says no MEMBER may take a report down,
+  ;; citing `rules.rest/contracts-report`, where one contract that threw made
+  ;; nine endpoints unreadable. It happened one level up: a declaration naming a
+  ;; var instead of a literal threw inside the webapp section, and took `:cli`,
+  ;; `:http` and `:rest` with it — capabilities that have nothing to do with
+  ;; browser apps.
+  ;;
+  ;; That specific bug is fixed and guarded at its own grain. This is the
+  ;; ISOLATION, which is a different claim and the one that survives the next
+  ;; bug: a section that cannot be read costs its own rows and names itself.
+  ;;
+  ;; Broken deliberately rather than by finding another defect, because a test
+  ;; that needs a real bug to demonstrate resilience stops testing resilience
+  ;; the moment the bug is fixed.
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
+                        :prompt "this store serves")
+      (ops/ingest! sess 'shopq.api
+                   (str "(ns shopq.api)\n\n"
+                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
+                        "        :web/auth :public :web/response :string}\n"
+                        "  things \"T.\" [_] {:status 200 :body \"[]\"})\n"))
+
+      (testing "the control: with nothing broken, http is reported and nothing complains"
+        (let [r (query/query-surface sess)]
+          (is (seq (:http r)) (pr-str r))
+          (is (nil? (:unreadable r)) (pr-str r))))
+
+      (testing "a section that THROWS costs its own rows and nothing else"
+        (with-redefs [slopp.rules.webapp/webapp-report
+                      (fn [_] (throw (ex-info "deliberate" {})))]
+          (let [r (query/query-surface sess)]
+            (is (seq (:http r))
+                (str "one capability's failure erased another's surface: "
+                     (pr-str r)))
+            (is (seq (:unreadable r))
+                (str "and it did so SILENTLY, which is worse than the throw — a"
+                     " section quietly absent reads as a store that declares"
+                     " nothing there: " (pr-str r)))
+            (is (re-find #"(?i)webapp" (str (:unreadable r)))
+                (str "the report must name WHICH section it could not read: "
+                     (pr-str (:unreadable r)))))))
+
+      (finally (ops/close! sess)))))

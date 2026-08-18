@@ -801,7 +801,25 @@
 
 (defn- default-client-ns
   "Where a generated client goes when the caller does not name one: the
-  `client` / `generated-ns` config, else `<this store's family>.client.api`.
+  `client` / `generated-ns` config, else `<family>.wire.api` for a store whose
+  browser owns routing and `<family>.client.api` otherwise.
+
+  **The split is a cycle, not a preference.** A browser entry's natural home is
+  `<family>.client.*` — the app that found this has `<root>.client.app` — and it
+  requires the app, which reads the route table in the views. A client generated
+  under `<root>.client` therefore closes `views → client → app → views`, which
+  no declaration can open: the module gate is right and the arrangement is
+  wrong. The recommended TARGET and the recommended ENTRY wanted the same
+  module, so every webapp store taking the shape this capability enables meets
+  it.
+
+  `wire` is the consuming app's word and it says the useful thing rather than
+  merely dodging the clash: **a consumed API is not part of this app's browser
+  layer.** The name is where it lives, not where it is called from.
+
+  A store WITHOUT `webapp` has no framework entry and no cycle, so its default
+  is unchanged — this is not a rename, it is a second answer for a second
+  situation.
 
   The literal `app.client.api` this used to fall back to is only ever right
   for a store whose family is literally `app` — it was a placeholder that
@@ -823,7 +841,7 @@
                           frequencies
                           (sort-by (juxt (comp - val) key))
                           ffirst)]
-        (str fam ".client.api"))
+        (str fam (if (capabilities/enabled? store "webapp") ".wire.api" ".client.api")))
       'app.client.api))
 
 (defn- other-generated-clients
@@ -1075,62 +1093,44 @@
                          (store/ingest s4 chks csrc))
                        s3)))})))
 
-(defn ^:export generate-client-from!
-  "Generate a typed client for an API this app CONSUMES, from the contract
-   published at `url` — the cross-store twin of [[generate-client!]].
+(defn ^:private hand-written-collision
+  "The first of `targets` that already holds code this tool did not write, or
+   nil when every one of them is free or is its own previous output.
 
-   Writes TWO namespaces: a `:cljc` contracts namespace of the published
-   schemas (so the JVM oracle verifies them and the bundle can compile them),
-   and the `:cljs` client of typed wrappers pointing at it. Both are
-   `^:generated` — regenerate, never hand-edit.
+   **`store/ingest` is BELOW the per-form gates, deliberately** — that is what
+   lets regeneration overwrite a generated namespace wholesale and be its only
+   writer. The same property makes overwriting somebody's OWN code silent, and
+   the names at risk are not the ones a caller passes: `<root>.api` derives
+   `<root>.contracts` for the published schemas and `<root>.checks` for the
+   contract checks, and either can already exist.
 
-   This is what lets a UI live in a different store from the API it renders:
-   nothing here reads the producer's store, and the producer publishes values,
-   not source it expects anyone to trust.
+   Reported as a near-miss by the app that read what the generator DERIVES
+   rather than what it had passed, and stopped. That is not a habit a tool
+   should need: the derived name is the generator's to compute, so the collision
+   is the generator's to refuse.
 
-   Returns `{:generated :contracts :wrappers :endpoints :platform :delta}`, or
-   `:problems` when the contract could not be used at all."
-  [session url & {:keys [ns]}]
-  (let [st0      (:store @session)
-        target   (symbol (str (or ns (default-client-ns st0))))
-        cns      (symbol (str/replace (str target) #"[^.]+$" "contracts"))
-        document (fetch-contract url)
-        {:keys [defs wrappers problems]} (contract->plan document cns)]
-    (if (empty? wrappers)
-      (cond-> {:generated target :contracts cns :wrappers [] :endpoints 0
-               :note "no endpoints in the published contract — nothing generated"}
-        (seq problems) (assoc :problems problems))
-      ;; the SAME decision `generate-client!` makes, out of one producer. This
-      ;; path had none, which was backwards for the case that motivated the
-      ;; branch: a browser app consuming somebody ELSE'S API reaches generation
-      ;; only through here, and that is `D-webapp`'s named architecture
-      ;; the SAME writer `generate-client!` uses, and the url travels with it:
-      ;; every endpoint here belongs to somebody else's server by construction,
-      ;; so the builders declare that rather than being reported for it
-      (let [{:keys [platform checks touched write]}
-            (client-shape st0 target wrappers (str url))
-            csrc (render-contracts-ns cns defs)]
-        (engine/commit-appended!
-         session
-         (fn [s]
-           ;; the CONTRACTS namespace is :cljc either way — the schemas have to
-           ;; load in the image AND compile into the bundle, which is what makes
-           ;; one definition check both sides of the wire
-           (let [s1 (first (store/record-module-platform s (str cns) :cljc))
-                 s2 (store/ingest s1 cns csrc)]
-             (write s2)))
-         (into [cns] touched))
-        (let [recompiled (maybe-recompile-client! session target)]
-          (cond-> {:generated target
-                   :contracts cns
-                   :wrappers  (mapv (comp str :fn-name) wrappers)
-                   :endpoints (count wrappers)
-                   :platform  platform
-                   :source    (str url)
-                   :delta     (:id (last (:deltas (:store @session))))}
-            checks         (assoc :checks checks)
-            (seq problems) (assoc :problems problems)
-            recompiled     (merge recompiled)))))))
+   **A namespace holding ANY `^:generated` form is this tool's own output** and
+   is not a collision — a refusal that caught that would make the tool unusable
+   on its second run. An EMPTY namespace is not one either: nothing is lost.
+
+   `some` rather than `every`, and both shapes that make the difference are
+   real. An `(ns …)` form carries no marker and never could. And the `:cljs`
+   client emits unmarked HELPERS on purpose — `url`, `qs`, `ok!` — because the
+   wrapper count is taken from the marker and helpers must not read as
+   endpoints. `every` was false for output this tool had just written, twice
+   over.
+
+   The cost of `some` is a namespace somebody hand-wrote AROUND one generated
+   form, which would be overwritten. That shape is already refused elsewhere:
+   `http-generated-ns` gates hand edits inside a generated namespace, so mixing
+   the two is not a state a store reaches by working normally."
+  [store targets]
+  (some (fn [ns-sym]
+          (let [fs (store/forms store ns-sym)]
+            (when (and (seq fs)
+                       (not-any? #(:generated (store/form-name-meta %)) fs))
+              ns-sym)))
+        targets))
 
 (defn ^:export generate-client!
   "Generate the typed client (D-web-contracts part 2): read every web endpoint's
@@ -1170,7 +1170,18 @@
       ;; CONTRACT CHECKS instead, `:cljc`, which drop into a route row and load
       ;; into the image. Not a flag: which artifact is useful FOLLOWS from who
       ;; performs, and a store that has said so should not have to say it twice.
-      (let [{:keys [platform checks touched write]} (client-shape st0 target wrappers nil)]
+      (let [{:keys [platform checks touched write]} (client-shape st0 target wrappers nil)
+            _ (when-let [clash (hand-written-collision st0 touched)]
+                (throw (ex-info (str "generating here would overwrite " clash
+                                     ", which holds code this tool did not"
+                                     " write. With webapp on, generation derives"
+                                     " MORE names than the one you pass — the"
+                                     " contract checks go to a sibling — and"
+                                     " store/ingest is below the per-form gates,"
+                                     " so the overwrite would be silent. Pass"
+                                     " :ns naming a family nothing else"
+                                     " occupies.")
+                                {:collision clash :would-write (mapv str touched)})))]
         (engine/commit-appended!
          session
          (fn [s]
@@ -1214,6 +1225,75 @@
                               " them, or pass :ns to regenerate over the one"
                               " you mean to keep."))
             recompiled     (merge recompiled)))))))
+
+(defn ^:export generate-client-from!
+  "Generate a typed client for an API this app CONSUMES, from the contract
+   published at `url` — the cross-store twin of [[generate-client!]].
+
+   Writes TWO namespaces: a `:cljc` contracts namespace of the published
+   schemas (so the JVM oracle verifies them and the bundle can compile them),
+   and the `:cljs` client of typed wrappers pointing at it. Both are
+   `^:generated` — regenerate, never hand-edit.
+
+   This is what lets a UI live in a different store from the API it renders:
+   nothing here reads the producer's store, and the producer publishes values,
+   not source it expects anyone to trust.
+
+   Returns `{:generated :contracts :wrappers :endpoints :platform :delta}`, or
+   `:problems` when the contract could not be used at all."
+  [session url & {:keys [ns]}]
+  (let [st0      (:store @session)
+        target   (symbol (str (or ns (default-client-ns st0))))
+        cns      (symbol (str/replace (str target) #"[^.]+$" "contracts"))
+        document (fetch-contract url)
+        {:keys [defs wrappers problems]} (contract->plan document cns)]
+    (if (empty? wrappers)
+      (cond-> {:generated target :contracts cns :wrappers [] :endpoints 0
+               :note "no endpoints in the published contract — nothing generated"}
+        (seq problems) (assoc :problems problems))
+      ;; the SAME decision `generate-client!` makes, out of one producer. This
+      ;; path had none, which was backwards for the case that motivated the
+      ;; branch: a browser app consuming somebody ELSE'S API reaches generation
+      ;; only through here, and that is `D-webapp`'s named architecture
+      ;; the SAME writer `generate-client!` uses, and the url travels with it:
+      ;; every endpoint here belongs to somebody else's server by construction,
+      ;; so the builders declare that rather than being reported for it
+      (let [{:keys [platform checks touched write]}
+            (client-shape st0 target wrappers (str url))
+            csrc  (render-contracts-ns cns defs)
+            names (into [cns] touched)
+            clash (hand-written-collision st0 names)]
+        (if clash
+          {:error (str "generating here would overwrite " clash ", which holds"
+                       " code this tool did not write. Generation derives MORE"
+                       " names than the one you pass — the published schemas go"
+                       " to " cns " — and store/ingest is below the per-form"
+                       " gates, so the overwrite would be silent. Pass :ns"
+                       " naming a family nothing else occupies.")
+           :collision   clash
+           :would-write (mapv str names)}
+          (do
+            (engine/commit-appended!
+             session
+             (fn [s]
+               ;; the CONTRACTS namespace is :cljc either way — the schemas have
+               ;; to load in the image AND compile into the bundle, which is what
+               ;; makes one definition check both sides of the wire
+               (let [s1 (first (store/record-module-platform s (str cns) :cljc))
+                     s2 (store/ingest s1 cns csrc)]
+                 (write s2)))
+             names)
+            (let [recompiled (maybe-recompile-client! session target)]
+              (cond-> {:generated target
+                       :contracts cns
+                       :wrappers  (mapv (comp str :fn-name) wrappers)
+                       :endpoints (count wrappers)
+                       :platform  platform
+                       :source    (str url)
+                       :delta     (:id (last (:deltas (:store @session))))}
+                checks         (assoc :checks checks)
+                (seq problems) (assoc :problems problems)
+                recompiled     (merge recompiled)))))))))
 
 (defmethod engine/after-write! :cljs [session ns-sym]
   (maybe-recompile-client! session ns-sym))

@@ -1075,3 +1075,112 @@
               (pr-str (store/platform-for (:store @sess) 'shopx.client.contracts)))))
 
       (finally (ops/close! sess)))))
+
+(deftest ^:external generation-REFUSES-to-overwrite-what-it-did-not-write
+  ;; Reported as a near-miss rather than a break, which is the only reason it
+  ;; is cheap to fix. The consuming app nearly generated into `<root>.api`,
+  ;; which DERIVES `<root>.contracts` for the schemas — a hand-written
+  ;; namespace that store already had. `store/ingest` is BELOW the per-form
+  ;; gates, deliberately, so regeneration can overwrite its own output
+  ;; wholesale; the same property makes overwriting somebody's own code silent.
+  ;;
+  ;; They caught it by reading what the generator DERIVES rather than what they
+  ;; passed. That is not a habit a tool should need: the derived name is the
+  ;; generator's to compute, so the collision is the generator's to refuse.
+  ;;
+  ;; A namespace whose forms are all `^:generated` is this tool's own output and
+  ;; is overwritten as before — regeneration is the ONLY writer there and that is
+  ;; the whole contract.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shopz.contracts
+                   (str "(ns shopz.contracts\n"
+                        "  \"Hand-written. The hub's own schemas.\")\n\n"
+                        "(def project \"P.\" [:map [:slug :string]])\n"))
+      (ops/module-platform! sess "shopz.contracts" :cljc :prompt "shared")
+      (ops/ingest! sess 'shopz.api
+                   (str "(ns shopz.api)\n\n"
+                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
+                        "        :web/auth :public :web/response shopz.contracts/project}\n"
+                        "  things \"T.\" [_] {:status 200 :body {}})\n"))
+
+      (testing "generating into a name whose DERIVED sibling is hand-written is refused"
+        ;; `<root>.thing` derives `<root>.contracts` for the published schemas,
+        ;; which is exactly the near-miss: the name the caller passes is not the
+        ;; only name written, and the derived one is the generator's to compute
+        (with-redefs [cljs/fetch-contract
+                      (fn [& _] {:slopp/contract-version 1
+                                 :endpoints [{:method :get :path "/api/things"
+                                              :name 'things
+                                              :response [:map [:id :string]]}]})]
+          (let [r (cljs/generate-client-from! sess "http://pub.test/contract"
+                                              :ns 'shopz.thing)]
+            (is (:error r)
+                (str "generation was about to overwrite hand-written code and"
+                     " said nothing: " (pr-str r)))
+            (is (re-find #"shopz\.contracts" (str (:error r))) (pr-str r)))))
+
+      (testing "and the hand-written namespace is UNTOUCHED"
+        ;; the assertion that makes the refusal worth having rather than a
+        ;; message beside a completed overwrite
+        (let [src (str (store.render/render-ns (:store @sess) 'shopz.contracts))]
+          (is (re-find #"Hand-written" src) src)
+          (is (re-find #"def project" src) src)))
+
+      (testing "while regenerating over its OWN output still works"
+        ;; regeneration is the only writer of a generated namespace and
+        ;; overwrites wholesale — that is the contract, and a refusal that
+        ;; caught it too would make the tool unusable on its second run
+        (let [r1 (cljs/generate-client! sess :ns 'shopz.client.api)
+              r2 (cljs/generate-client! sess :ns 'shopz.client.api)]
+          (is (nil? (:error r1)) (pr-str r1))
+          (is (nil? (:error r2))
+              (str "the second run refused its own first: " (pr-str r2)))))
+
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-webapp-store-generates-OUTSIDE-its-browser-module
+  ;; Reported after the tier fix landed and a MODULE gate stood behind it. The
+  ;; builders were `:pure` and still unusable:
+  ;;
+  ;;   views/client-routes names api/timeline-request
+  ;;     → module_dep refuses: views → client → app → views
+  ;;
+  ;; The browser ENTRY is `<root>.client.app`; it requires the app, which reads
+  ;; the route table in the views. So a client generated under `<root>.client`
+  ;; closes the loop — and `<root>.client.api` was the default while
+  ;; `<root>.client.*` is the natural home for an entry. **The recommended
+  ;; target and the recommended entry wanted the same module**, so every webapp
+  ;; store taking this shape meets it.
+  ;;
+  ;; Their fix and their word: `<root>.wire.*`. It says the useful thing rather
+  ;; than merely avoiding the clash — a CONSUMED api is not part of this app's
+  ;; browser layer, and naming it after the wire says where it lives.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shopv.views (str "(ns shopv.views)\n\n(defn v \"V.\" [] [:p])\n"))
+      (ops/ingest! sess 'shopv.api
+                   (str "(ns shopv.api)\n\n"
+                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
+                        "        :web/auth :public :web/response :string}\n"
+                        "  things \"T.\" [_] {:status 200 :body \"[]\"})\n"))
+
+      (testing "without webapp the default is unchanged — no entry, no cycle"
+        (let [r (cljs/generate-client! sess)]
+          (is (= 'shopv.client.api (:generated r)) (pr-str r))))
+
+      (testing "with webapp on it defaults OUTSIDE the browser module"
+        (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                          :prompt "this store's browser owns routing")
+        (let [r (cljs/generate-client! sess :ns nil)]
+          (is (= 'shopv.wire.api (:generated r))
+              (str "a webapp store's generated client defaulted into the module"
+                   " its browser entry lives in, which closes a cycle the app"
+                   " cannot declare its way out of: " (pr-str r)))
+          (is (= 'shopv.wire.checks (:checks r)) (pr-str r))))
+
+      (testing "and an explicit :ns still wins, because the default is a default"
+        (let [r (cljs/generate-client! sess :ns 'shopv.elsewhere.api)]
+          (is (= 'shopv.elsewhere.api (:generated r)) (pr-str r))))
+
+      (finally (ops/close! sess)))))

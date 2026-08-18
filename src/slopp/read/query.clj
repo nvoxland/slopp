@@ -430,6 +430,16 @@
   TEACHING rather than `{}` — \"nothing declared\" and \"nothing enabled\" are
   different answers and only the second has an action attached.
 
+  **A section that cannot be READ is absent and NAMED, under `:unreadable`.**
+  That is the same conflation one step further out: a section quietly missing
+  reads as a store that declares nothing there. `rules.rest/contracts-report`
+  carries this discipline at MEMBER grain — one contract that threw made nine
+  endpoints unreadable — and it recurred here at SECTION grain, where a webapp
+  declaration naming a var instead of a literal took `:cli`, `:http` and `:rest`
+  down with it. Reported by the store that could no longer read the number
+  `D-webapp` names as the webapp target, so the throw hid the metric the wave is
+  scored by, in the tool that reports it.
+
   Rows are self-describing: every one carries `:kind`, and a `:doc` where the
   declaration has one. That is what lets a renderer draw a capability nobody
   wrote a page for, and it is the same reason `query_capabilities` reports the
@@ -441,21 +451,37 @@
   real constraint on a tool that answers for every capability at once."
   [session]
   (let [store (:store @session)
-        http  (rules.http/routes-report store)
-        cli   (rules.cli/commands-report store)
-        rest  (rules.rest/contracts-report store)
-        wapp  (rules.webapp/webapp-report store)
+        read* (fn [label f]
+                (try {:value (f store)}
+                     (catch Exception e
+                       {:error (str label ": " (or (ex-message e)
+                                                   (str (type e))))})))
+        http* (read* "http" rules.http/routes-report)
+        cli*  (read* "cli" rules.cli/commands-report)
+        rest* (read* "rest" rules.rest/contracts-report)
+        wapp* (read* "webapp" rules.webapp/webapp-report)
+        unreadable (vec (keep :error [cli* rest* wapp* http*]))
+        http  (:value http*)
+        cli   (:value cli*)
+        rest  (:value rest*)
+        wapp  (:value wapp*)
         m     (cond-> {}
                 (seq cli) (assoc :cli cli)
                 (seq rest) (assoc :rest rest)
-                ;; the SCREENS are the section; actions and the :cljs count ride
-                ;; beside them the way :http/static rides beside routes. Keyed on
-                ;; screens rather than on the capability being enabled, so an app
-                ;; that turned webapp on and declared nothing yet reads as having
-                ;; no browser surface rather than as having an empty one
+                ;; the SCREENS are the section; actions, session loads and the
+                ;; :cljs count ride beside them the way :http/static rides
+                ;; beside routes. Keyed on screens rather than on the capability
+                ;; being enabled, so an app that turned webapp on and declared
+                ;; nothing yet reads as having no browser surface rather than as
+                ;; having an empty one
                 (seq (:screens wapp))
                 (assoc :webapp (:screens wapp)
                        :webapp/actions (:actions wapp)
+                       ;; the fetches that belong to NO screen — a nav rail, a
+                       ;; signed-in user. Absent from the screen rows by
+                       ;; definition, so a surface drawing only screens shows an
+                       ;; app fetching less than it does
+                       :webapp/session-loads (:session-loads wapp)
                        ;; the goal stated as a number. "An app that opts into
                        ;; webapp writes no ClojureScript" is an aspiration until
                        ;; a store can answer how much it writes
@@ -473,7 +499,16 @@
                        ;; promised mounts the whole time.
                        :http/static (rules.http/static-mounts store)
                        :http/effect-kinds (:effect-kinds http)
-                       :http/read-kinds (:read-kinds http)))]
+                       :http/read-kinds (:read-kinds http))
+                (seq unreadable)
+                (assoc :unreadable unreadable
+                       :unreadable-note
+                       (str "these sections THREW while being built, so they are"
+                            " missing from this answer rather than empty in your"
+                            " store — read the absence as unknown, not as"
+                            " nothing declared. Everything else here is"
+                            " unaffected: a capability that cannot be read costs"
+                            " its own rows and no others.")))]
     (if (seq m)
       m
       {:note (str "this store declares no surface — no capability that exposes"

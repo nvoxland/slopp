@@ -466,6 +466,24 @@
                      (if (and (symbol? s) (nil? (namespace s)))
                        (symbol (str nsx) (str s))
                        s))
+          ;; **An app may name a VAR where a literal would go** —
+          ;; `{:webapp/routes routes}` — and every extractor below seq's what it
+          ;; finds, so a symbol threw `Don't know how to create ISeq from` and
+          ;; took the whole of `query_surface` with it, including `:cli`,
+          ;; `:http` and `:rest`, which have nothing to do with any of this.
+          ;;
+          ;; That is this function's own docstring failing in this function: no
+          ;; member may take the report down. Reported by the store that could
+          ;; no longer read the number `D-webapp` names as the target — so the
+          ;; throw hid the metric the wave is scored by, in the tool that
+          ;; reports it.
+          ;;
+          ;; Skipped rather than guessed at, like a computed route pattern: an
+          ;; unreadable declaration costs its own rows and the readable ones in
+          ;; the same store still land
+          declared (fn [node k pred]
+                     (let [v (get node k)]
+                       (when (pred v) v)))
           ;; request VAR → the path it names, so a row can say what it loads as
           ;; a url rather than as the name of the function that computes one.
           ;; `first` because a request that names two paths is answering a
@@ -475,7 +493,7 @@
                               [form (:path (first rows))]))
           screens  (vec (sort-by :path
                                  (for [[nsx node] rows
-                                       row  (get node :webapp/routes)
+                                       row  (declared node :webapp/routes sequential?)
                                        :when (and (vector? row) (= 2 (count row))
                                                   (string? (first row)))
                                        ;; a row's target is a bare render fn or a
@@ -506,7 +524,7 @@
                                        (get loads rq) (assoc :loads (get loads rq)))))))
           actions  (vec (sort-by :action
                                  (for [[_nsx node] rows
-                                       [a decl] (get node :webapp/actions)
+                                       [a decl] (declared node :webapp/actions map?)
                                        :when (keyword? a)]
                                    (cond-> {:kind :action :action a}
                                      (:effectful? decl) (assoc :effectful? true)
@@ -517,7 +535,7 @@
           ;; it does, and these are the requests a reader never navigates to
           sessions (vec (sort-by :load
                                  (for [[nsx node] rows
-                                       [k spec] (get node :webapp/session-loads)
+                                       [k spec] (declared node :webapp/session-loads map?)
                                        :when (and (keyword? k) (map? spec))
                                        :let [rq (when-let [r (:request spec)]
                                                   (qualify nsx r))]]
