@@ -2971,3 +2971,42 @@ The counterexample that keeps this honest: `client-routes` skips a computed
 route pattern and always did, deliberately. That skip is fine because it is
 NAMED — what makes a skip acceptable is never that it is small, it is that the
 reader is told.
+
+### The corollary: a report of what is MISSING must be as trustworthy as the report itself
+
+The entry-grain fix above shipped with a false positive, and the shape is worth
+keeping because it runs the opposite way to everything else on this page.
+
+`sequential?` was the predicate for a declared route table. A CALL FORM is a
+list, so `(mapv f (:webapp/routes views/client-routes))` passed it, and the
+reader walked the call as if it were the table — reporting its three elements
+(`mapv`, the fn, the argument) as three unreadable ROWS, on a store whose
+fourteen routes were all present and correct. A threaded argument would have
+made it four.
+
+**So the answer was complete AND claimed three things were missing from it.**
+Every other failure in this document is a check that says too little; this one
+said too much, in the mechanism built to stop exactly that. The consumer's
+sentence is the rule:
+
+> `:unreadable` only works if it is exactly as trustworthy as the answer beside
+> it.
+
+A reader who trusts the list goes looking for something that is there. A reader
+who checks once and finds it there learns to skim the list — and a skimmed
+finding list is the failure this page names three separate times. **A false
+"missing" costs more than a missing "missing"**, because it spends the reader's
+trust in the only thing that was supposed to be earning it.
+
+Two smaller corollaries from the same fix, both about over-claiming:
+
+- **Do not say what you cannot know.** The finding ended *"so none of it is in
+  this answer"*. These readers scan every map literal in the store, so the same
+  rows may be declared literally elsewhere and reported from there — which is
+  precisely the shape of the app that found the bug. It says *nothing was taken
+  from THIS declaration* now, which is what it actually knows.
+- **A note written for one population stops being true when the population
+  grows.** The list's own note said *"these sections THREW"*, which was accurate
+  while the list held only sections and became a claim about a CAUSE it did not
+  know once entries joined. That is this page's own subject, occurring in the
+  prose instead of the data.
