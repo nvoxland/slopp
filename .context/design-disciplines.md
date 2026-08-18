@@ -2972,6 +2972,31 @@ route pattern and always did, deliberately. That skip is fine because it is
 NAMED — what makes a skip acceptable is never that it is small, it is that the
 reader is told.
 
+### Only BREAKING the subject finds a green that could not have failed
+
+Three instances in one week, and none was found by reading a test:
+
+| the green | what it could not have failed for |
+|---|---|
+| a double-prefix assertion | prefixing is idempotent, so the property was unrepresentable |
+| two assertions added beside their implementation | never watched fail; `assertions-never-red` caught it |
+| a launcher fixture whose `^:web/page` returned a declaration | `screen` refuses that shape, so it proved a file was written and nothing about whether an app could use it |
+
+Every one was found by breaking the subject on purpose and watching what did
+NOT go red. Reading the test finds none of them, because a test that cannot
+fail reads exactly like one that passes — the assertions are present, the
+subject is named, the intent is stated in the comment.
+
+The third is the sharpest because it was the test written to PROVE a fix, by
+someone who had spent the same week writing this page. Knowing the failure mode
+does not detect it; only the break does.
+
+So `assertions-never-red`'s demand is not ceremony and its scope is narrower
+than the problem: it fires on assertions added to a test that never went red
+THIS EPISODE. A fixture that could never exercise the case is invisible to it,
+and the only detector is the same one — break the subject, and check that the
+red you get is the red you expected, in the test you expected.
+
 ### The corollary: a report of what is MISSING must be as trustworthy as the report itself
 
 The entry-grain fix above shipped with a false positive, and the shape is worth
@@ -3010,3 +3035,39 @@ Two smaller corollaries from the same fix, both about over-claiming:
   while the list held only sections and became a claim about a CAUSE it did not
   know once entries joined. That is this page's own subject, occurring in the
   prose instead of the data.
+
+## An EPHEMERAL artifact is invisible to inspection and still decides what runs
+
+The consuming app refused a correct migration with a confident wrong
+explanation, and every step of the reasoning was true:
+
+1. the generated browser entry is written into a `build!` TREE — true
+2. this project has no built tree: no `target/`, no generated `deps.edn`, and
+   its own `AGENTS.md` says so — true
+3. therefore the entry cannot reach its bundle — **false**
+
+`compile_client` materializes THROUGH `build!` into a throwaway directory,
+compiles it, and deletes it. So the tree exists for the length of one compile
+and decides exactly what runs, while leaving nothing for `ls` to find.
+
+> *No artifact on disk* and *no build* are different facts, and only the first
+> is observable the way it was checked.
+
+This is the counterpart to **read the ARTIFACT, not the intention**, and it is
+the case that habit does not cover: some artifacts cannot be read after the
+fact, so the only way to know what one contains is to read the CODE THAT WRITES
+IT. The cheap check that neither side ran is one grep for `build!` inside the
+tool that does the compiling.
+
+**Why it survived being corrected.** The false sentence lived in a paragraph
+written to correct an EARLIER false claim about the same file. A correction is
+written with more care than the thing it replaces and is trusted accordingly, so
+an error that enters at that moment inherits the trust — which is the same
+shape as [[a justification asserting a caller is exactly what stops anyone
+looking for one]], one document out.
+
+**And the call was right while the reasoning was wrong**, which is the part
+worth keeping: they held the migration, the migration deserved holding for an
+unrelated reason, and nothing in the outcome would ever have said so. A correct
+decision reached by false reasoning leaves no evidence to correct — so the
+reasoning has to be stated where someone can check it, not just the conclusion.
