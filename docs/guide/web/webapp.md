@@ -336,6 +336,21 @@ does not serve. That has to be generated rather than added by hand: the
 namespace is `^:generated`, and the next regeneration would drop a hand-written
 marker silently.
 
+**Where it lands matters, so the default moves for a browser app.** Without
+`webapp` the target defaults to `<family>.client.api`; with it, to
+`<family>.wire.api`. A browser entry's natural home is `<family>.client.*`, and
+it requires the app, which reads the route table in your views — so a client
+generated under `client` closes `views → client → app → views`, which no
+declaration can open. `wire` also says the useful thing: **a consumed API is not
+part of your browser layer.** An explicit `ns` still wins, and
+`client`/`generated-ns` still wins over both.
+
+Generation also **refuses to overwrite a namespace it did not write**. It
+derives more names than the one you pass — the schemas and the checks are
+siblings — and `ingest` sits below the per-form gates so regeneration can
+replace its own output wholesale. That same property would make overwriting
+your own code silent, so a collision is a refusal naming the namespace.
+
 One consequence worth knowing: a `.cljc` client **loads**, where a `.cljs` one
 never could. So regenerating leaves the process serving MCP holding forms the
 store has moved past, and `restart` — which rebuilds the *verification* image —

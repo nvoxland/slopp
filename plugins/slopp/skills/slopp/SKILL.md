@@ -5,7 +5,7 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
-<!-- skill-written-against: d31906 -->
+<!-- skill-written-against: d31976 -->
 
 **This skill reaches you on a DIFFERENT channel from the code.** The code is the
 jar your MCP server runs; this file ships in the plugin package. They can be
