@@ -505,13 +505,29 @@
           (vec (concat
                 ;; a whole declaration written as something other than a literal
                 (for [[nsx node] rows
-                      [k pred] [[:webapp/routes sequential?]
+                      ;; `vector?` and not `sequential?`, which is the whole of a false
+                      ;; positive worth remembering: a CALL FORM is a list, so
+                      ;; `(mapv f (:webapp/routes views/client-routes))` passed
+                      ;; `sequential?` and the reader walked the call as if it
+                      ;; were the table — reporting its three elements (`mapv`,
+                      ;; the fn, the argument) as three unreadable ROWS, on a
+                      ;; store whose fourteen routes were all present. A
+                      ;; threaded argument would have made it four. A literal
+                      ;; table is a vector; anything else is a computation
+                      [k pred] [[:webapp/routes vector?]
                                 [:webapp/actions map?]
                                 [:webapp/session-loads map?]]
                       :when (and (contains? node k) (not (pred (get node k))))]
+                  ;; NOT "so none of it is in this answer", which this cannot know:
+                  ;; these readers scan every map literal in the store, so the
+                  ;; same rows may be declared literally somewhere else and
+                  ;; reported from there. The app that found the row bug has
+                  ;; exactly that shape — a computed table here, the literal one
+                  ;; it maps over in the views — so the over-claim would have
+                  ;; been a second false statement beside the first
                   (str nsx " declares " k " as " (shown (get node k))
-                       " — only a literal can be read here, so none of it is"
-                       " in this answer"))
+                       " — only a literal is read here, so nothing was taken"
+                       " from THIS declaration"))
                 ;; one entry inside a declaration that IS readable
                 (for [[nsx node] rows
                       [k spec] (declared node :webapp/session-loads map?)
@@ -519,7 +535,7 @@
                   (str nsx " declares the session load " (pr-str k) " as "
                        (shown spec) " — only a literal map can be read"))
                 (for [[nsx node] rows
-                      row (declared node :webapp/routes sequential?)
+                      row (declared node :webapp/routes vector?)
                       :when (not (and (vector? row) (= 2 (count row))
                                       (string? (first row))))]
                   (str nsx " declares a route row as " (shown row)
@@ -538,7 +554,7 @@
                               [form (:path (first rows))]))
           screens  (vec (sort-by :path
                                  (for [[nsx node] rows
-                                       row  (declared node :webapp/routes sequential?)
+                                       row  (declared node :webapp/routes vector?)
                                        :when (and (vector? row) (= 2 (count row))
                                                   (string? (first row)))
                                        ;; a row's target is a bare render fn or a

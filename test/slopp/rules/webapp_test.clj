@@ -725,6 +725,38 @@
       (is (some #(re-find #"cond->" %) (:unreadable r))
           (str "the reader has to go and look otherwise: " (pr-str (:unreadable r)))))
 
+    (testing "a COMPUTED table is ONE finding, not one per element of the call"
+      ;; The false-positive half, and it is worse than an ordinary one because
+      ;; it lives in the mechanism built to stop false confidence — running the
+      ;; other way. The answer was COMPLETE and claimed three things were
+      ;; missing from it, so a reader who trusts the list hunts for routes that
+      ;; are there, and a reader who checks once learns to skim it.
+      ;;
+      ;; `(mapv (fn [[p s]] …) (:webapp/routes views/client-routes))` is a LIST,
+      ;; and a list is `sequential?` — so the reader walked the CALL as if it
+      ;; were the vector of rows and reported its three elements: the symbol
+      ;; `mapv`, the `fn`, and the argument. A threaded arg would have made it
+      ;; four. `:unreadable` only works if it is exactly as trustworthy as the
+      ;; answer beside it.
+      (let [src2 (str "(ns shop.nine)\n\n"
+                      "(defn things \"T.\" [_s] [:p \"t\"])\n"
+                      "(def client-routes \"CR.\" {:webapp/routes [[\"/things\" things]]})\n\n"
+                      "(defn ^:web/page app \"A.\" []\n"
+                      "  {:webapp/routes (mapv (fn [[p s]] [p s])\n"
+                      "                        (:webapp/routes client-routes))})\n")
+            st   (assoc-in (store/ingest (store/empty-store) 'shop.nine src2)
+                           [:config "capabilities" :values "webapp.enabled"] "true")
+            r2   (rules.webapp/webapp-report st)]
+        (is (= ["/things"] (mapv :path (:screens r2)))
+            (str "the literal table elsewhere still reads: " (pr-str r2)))
+        (is (= 1 (count (:unreadable r2)))
+            (str "a call form's ELEMENTS were each reported as a route row: "
+                 (pr-str (:unreadable r2))))
+        (is (re-find #"mapv" (first (:unreadable r2))) (pr-str (:unreadable r2)))
+        (is (not (re-find #"a route row" (first (:unreadable r2))))
+            (str "the finding is about the TABLE, not about a row inside it: "
+                 (pr-str (:unreadable r2))))))
+
     (testing "a store it can read entirely says NOTHING — silence is the good case"
       (let [clean (assoc-in (store/ingest (store/empty-store) 'shop.eight
                                           (str "(ns shop.eight)\n\n"

@@ -519,12 +519,20 @@
                 (seq unreadable)
                 (assoc :unreadable unreadable
                        :unreadable-note
-                       (str "these sections THREW while being built, so they are"
-                            " missing from this answer rather than empty in your"
-                            " store — read the absence as unknown, not as"
-                            " nothing declared. Everything else here is"
-                            " unaffected: a capability that cannot be read costs"
-                            " its own rows and no others.")))]
+                       ;; NOT "these sections THREW". That was true when the list was
+                       ;; section-grain and stayed put when it grew an entry
+                       ;; grain, so it began claiming a CAUSE it does not know
+                       ;; about two thirds of its own contents — which is the
+                       ;; defect this list exists to prevent, in the prose
+                       ;; rather than in the data. Reported by the reader it
+                       ;; misinformed.
+                       (str "these could not be read — either building the"
+                            " section threw, or a declaration inside it is not a"
+                            " literal. So they are missing from this answer"
+                            " rather than absent from your store: read them as"
+                            " unknown, not as nothing declared. Everything else"
+                            " here is unaffected — what cannot be read costs its"
+                            " own rows and no others.")))]
     (if (seq m)
       m
       {:note (str "this store declares no surface — no capability that exposes"
