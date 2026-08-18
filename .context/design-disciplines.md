@@ -2933,3 +2933,41 @@ points exist for one lifecycle — a real one and a fake one, a page and a drive
 a server and an in-process caller — the steps between them belong in a function
 they both call, not in a list each maintains. The failure mode is silent by
 construction, because the side you are working in keeps working.
+
+## A skip must be as loud as the throw it replaced — and `[]` is a claim, not an absence
+
+Three instances of one principle at three grains, each found after the previous
+fix created the next:
+
+| grain | what happened | what it read as |
+|---|---|---|
+| MEMBER | one contract threw while being read | nine endpoints unreadable |
+| SECTION | one capability threw | the whole surface gone, `:cli` and `:http` with it |
+| ENTRY | one declaration was not a literal | an app that declares fewer than it does |
+
+The first two are the same lesson and were learned: catch it, report the rest,
+and say which one you could not read. What the third adds is that **turning a
+throw into a skip is only half the fix.** A crash is at least loud. A skip that
+says nothing is a wrong answer delivered confidently, which is strictly worse —
+and the reader has no way to tell it from a right one.
+
+**The sharpest form, worth its own sentence:** an empty collection is an
+AFFIRMATIVE CLAIM of emptiness, not an absence. `:actions []` on a store with
+seven actions declared by var is indistinguishable from a store with no actions
+at all. A missing KEY at least invites the question; `[]` answers it wrongly.
+
+So the rule for any reader that skips what it cannot parse:
+
+- skip rather than guess — an invented answer makes a join quietly partial,
+  which is worse than a reported gap, because a gap gets looked at
+- **name what was skipped, at the grain it was skipped**, in the same list
+  whatever grain it came from: the reader has one question — *what is missing
+  here that exists in my store* — and does not care which layer dropped it
+- **show the value**, not just the rule. "Not a literal" is the rule; the value
+  is the evidence, and it is what tells an author whether they meant it
+- silence is the good case, so say nothing when everything read cleanly
+
+The counterexample that keeps this honest: `client-routes` skips a computed
+route pattern and always did, deliberately. That skip is fine because it is
+NAMED — what makes a skip acceptable is never that it is small, it is that the
+reader is told.

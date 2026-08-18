@@ -388,6 +388,15 @@ Turning the capability on arms these:
   renders it and the URL it loads, every declared session load, every action
   with its kind, and the `:cljs` count.
 
+!!! note "What the surface could not read, it names"
+    Everything here is read from *literals* in your store, so a declaration
+    written as a var (`:webapp/actions actions`) or built with a `cond->` is
+    skipped rather than guessed at. Every skip lands in `:unreadable`, whether
+    it cost a whole section or one entry -- because an entry quietly dropped
+    reads as an app that declares fewer than it does, and an empty
+    `:webapp/actions` is worse still: `[]` is an affirmative claim of
+    emptiness, not an absence. Silence there means everything read cleanly.
+
 ## Vendoring
 
 An app that declares `:web/client-routes` is using the browser framework, so
