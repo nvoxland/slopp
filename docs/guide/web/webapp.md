@@ -258,6 +258,25 @@ This is where the slow-response race stops being a heisenbug: hold the
 performer's callback, navigate again, then answer the first one, and assert the
 superseded answer never lands.
 
+## Your app writes no entry either
+
+`build` generates the browser entry — the `main` that mounts your page and the
+top-level form that starts it — into `cljs-src/native/client.cljs`, and names it
+back to you as `:client-entry`. It requires the namespaces your page reaches, so
+a page named but not required cannot reach a reader as a blank screen.
+
+The bootstrap is a top-level `defonce` rather than an inline script, and that is
+a security property rather than a style: the document starts the app with no
+inline JS, so the page stays `script-src`-only. An inline starter would put
+`unsafe-inline` into the CSP of every app built on this capability.
+
+!!! warning "Delete your own entry when you adopt this"
+    A hand-written `main`/`bootstrap` that calls `dom/mount!` will mount a
+    *second* time over the same element — two render loops, one of them
+    undeclared. A store namespace literally named `native.client` is refused at
+    build, the way `native.main` is for a command-line app; any other name slopp
+    cannot see, so that one is yours to remove.
+
 ## What the browser is left with
 
 One namespace, and it may not branch -- checked, because slopp has no

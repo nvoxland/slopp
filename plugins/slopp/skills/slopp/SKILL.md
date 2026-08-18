@@ -5,7 +5,7 @@ description: "Work efficiently with a slopp codebase over MCP: form-addressed re
 
 # Working with slopp
 
-<!-- skill-written-against: d32015 -->
+<!-- skill-written-against: d32073 -->
 
 **This skill reaches you on a DIFFERENT channel from the code.** The code is the
 jar your MCP server runs; this file ships in the plugin package. They can be
@@ -1812,6 +1812,11 @@ declare the app; slopp owns the loop.
   (a full page load, for a destination that is not a client route). Declaring
   the kind is what stops a browser dispatcher and a headless one drifting
   apart.
+- **You write no browser ENTRY.** `build` generates the `main` that mounts your
+  page and the top-level form that starts it, into `cljs-src/native/client.cljs`,
+  and reports it as `:client-entry`. If you already hand-wrote one, delete it —
+  otherwise it mounts a second time over the same element, and a namespace
+  literally named `native.client` is refused at build.
 - **Drive it headlessly**: `(screen/open! (webapp/driver app))`, then `visit!`
   the url a reader would type — mount point included — and `click!` a link.
   No browser, no compile, and the same functions the real page runs. **`visit!`
