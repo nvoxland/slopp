@@ -15,7 +15,7 @@
   Neighbours: `slopp.edit.webapp-test` covers the write-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.rules.webapp :as rules.webapp] [slopp.store :as store]))
 
 (deftest ^:external declaring-CLIENT-ROUTES-says-what-it-changed
-  ;; `:web/client-routes` is the biggest behavioural change available in one piece of
+  ;; `:webapp/client-routes` is the biggest behavioural change available in one piece of
   ;; metadata: every path under the prefix stops being a 404 and starts being a
   ;; 200, with not-found moving into the client. Nothing said so — the change
   ;; was noticed only because two existing tests asserted the old status.
@@ -28,15 +28,15 @@
                         :prompt "the browser owns routing here — this turns http on with it")
       (ops/ingest! sess 'browser.ui
                    (str "(ns browser.ui)\n"
-                        "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                        "        :web/client false :web/response :string}\n"
+                        "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                        "        :rest/client false :rest/response :string}\n"
                         "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n"))
       (external/done! sess :label "baseline")
       (testing "adding the declaration states the consequence"
         (ops/edit-replace! sess 'browser.ui 'doc
-                           (str "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                                "        :web/client false :web/response :string\n"
-                                "        :web/client-routes [\"/store\"]}\n"
+                           (str "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                                "        :rest/client false :rest/response :string\n"
+                                "        :webapp/client-routes [\"/store\"]}\n"
                                 "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})")
                            :prompt "the client routes /store")
         (let [f (get-in (external/done! sess :label "client-routes") [:findings :webapp-client-routes-consequences])]
@@ -45,9 +45,9 @@
           (is (re-find #"(?i)not-found" (str (:teach (first f)))) (pr-str f))))
       (testing "it does NOT re-fire while the declaration merely stands"
         (ops/edit-replace! sess 'browser.ui 'doc
-                           (str "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                                "        :web/client false :web/response :string\n"
-                                "        :web/client-routes [\"/store\"]}\n"
+                           (str "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                                "        :rest/client false :rest/response :string\n"
+                                "        :webapp/client-routes [\"/store\"]}\n"
                                 "  doc \"The document, reworded.\" [_] {:status 200 :body \"<html></html>\"})")
                            :prompt "touch the form without touching the declaration")
         (let [f (get-in (external/done! sess :label "again") [:findings :webapp-client-routes-consequences])]
@@ -103,7 +103,7 @@
 
 (deftest the-declared-CLIENT-ROUTE-TABLE-is-readable-from-the-store
   ;; What step B bought, collected: an app's client routes are a value now, so
-  ;; anything can join against them. `^:web/client-path` exists because they were
+  ;; anything can join against them. `^:webapp/client-path` exists because they were
   ;; not — `rules.http/ui-route-refs` says so in its own docstring:
   ;;
   ;;   teaching the check to SEE the prefixing is not possible in general,
@@ -157,8 +157,8 @@
   (let [app-src (fn [prefixes routes]
                   (str "(ns shop.ui)\n\n"
                        "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                       "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                       "        :web/client-routes " (pr-str prefixes) "}\n"
+                       "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                       "        :webapp/client-routes " (pr-str prefixes) "}\n"
                        "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n\n"
                        "(defn ^:app/entry app \"A.\" []\n"
                        "  {:webapp/routes " routes "})\n"))
@@ -194,13 +194,13 @@
       (is (= [] (check ["/p/:slug/store"] "[]"))))))
 
 (deftest the-prefixes-an-app-should-declare-are-DERIVABLE
-  ;; The plan for this step was "derive `:web/client-routes` from the client
+  ;; The plan for this step was "derive `:webapp/client-routes` from the client
   ;; table so the two cannot drift", and the obstacle looked fatal: a prefix is
   ;; in SERVER space and a client route is in APP space, and the mount point is
   ;; a deployment fact no store knows.
   ;;
-  ;; It is not. **The document's own `:web/path` IS the mount point**, and the
-  ;; document is the form carrying `:web/client-routes` — the only unambiguous
+  ;; It is not. **The document's own `:http/path` IS the mount point**, and the
+  ;; document is the form carrying `:webapp/client-routes` — the only unambiguous
   ;; way to name it. Identifying it any other way was the first cut's bug: it
   ;; took the alphabetically-first endpoint, which was the same form in these
   ;; fixtures and `/` in the first real store.
@@ -208,9 +208,9 @@
               (str "(ns shop.ui)\n\n"
                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
                    ;; sorts first, is not the document
-                   "(defn ^{:web/method :get :web/path \"/\"} root \"R.\" [_] {})\n\n"
-                   "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                   "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                   "(defn ^{:http/method :get :http/path \"/\"} root \"R.\" [_] {})\n\n"
+                   "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                   "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
                    "  doc \"D.\" [_] {})\n\n"
                    "(defn ^:app/entry app \"A.\" []\n"
                    "  {:webapp/routes " routes "})\n"))
@@ -242,7 +242,7 @@
       (let [none (store/ingest (store/empty-store) 'shop.ui
                                (str "(ns shop.ui)\n\n"
                                     "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"}\n"
+                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"}\n"
                                     "  doc \"D.\" [_] {})\n\n"
                                     "(defn ^:app/entry app \"A.\" []\n"
                                     "  {:webapp/routes [[\"/store\" s]]})\n"))]
@@ -260,7 +260,7 @@
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn things \"T.\" [_s] [:p \"things\"])\n"
                  "(defn thing \"T.\" [_s] [:p \"thing\"])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
+                 "(defn ^{:http/method :get :http/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
                  "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes  [[\"/things\" things] [\"/things/:id\" thing]]\n"
                  "   :webapp/actions {:thing/rename {}\n"
@@ -363,7 +363,7 @@
   ;; the HEADLESS entry — zero-arg, `:cljc`, carrying canned fixtures, and NOT a
   ;; route, because `:app/entry` means "an entry `screen` can open" and a store
   ;; may mark a page that is served by something else. The document is a
-  ;; different form, and it is the one carrying `:web/client-routes`.
+  ;; different form, and it is the one carrying `:webapp/client-routes`.
   ;;
   ;; The cause was worse than "read the wrong marker": the derivation read NO
   ;; marker. It took the alphabetically-first endpoint path in the store — `/`
@@ -376,15 +376,15 @@
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
                  ;; sorts FIRST and is not the document — the trap
-                 "(defn ^{:web/method :get :web/path \"/\"} root \"R.\" [_] {})\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/things\"} api \"A.\" [_] {})\n\n"
+                 "(defn ^{:http/method :get :http/path \"/\"} root \"R.\" [_] {})\n\n"
+                 "(defn ^{:http/method :get :http/path \"/api/things\"} api \"A.\" [_] {})\n\n"
                  ;; the prefix ROOT's own route — the catch-all under
                  ;; /p/:slug/store needs a segment below it, so this is the
                  ;; remedy the advisory names and the one it must be able to SEE
-                 "(defn ^{:web/method :get :web/path \"/p/:slug/store\"} sroot \"S.\" [_] {})\n\n"
+                 "(defn ^{:http/method :get :http/path \"/p/:slug/store\"} sroot \"S.\" [_] {})\n\n"
                  ;; the DOCUMENT: it declares the client routes
-                 "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                 "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                 "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                 "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
                  "  doc \"D.\" [_] {})\n\n"
                  ;; the HEADLESS entry, a different form with no server path
                  "(defn ^:app/entry page \"P.\" []\n"
@@ -416,8 +416,8 @@
                  (store/ingest (store/empty-store) 'shop.ui
                                (str "(ns shop.ui)\n\n"
                                     "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                                    "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                                    "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
                                     "  doc \"D.\" [_] {})\n\n"
                                     "(defn ^:app/entry page \"P.\" []\n"
                                     "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
@@ -442,8 +442,8 @@
                      (store/ingest (store/empty-store) 'shop.ui
                                    (str "(ns shop.ui)\n\n"
                                         "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                        "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                                        "        :web/client-routes [\"/p/:slug/change\"]}\n"
+                                        "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                                        "        :webapp/client-routes [\"/p/:slug/change\"]}\n"
                                         "  doc \"D.\" [_] {})\n\n"
                                         "(defn ^:app/entry page \"P.\" []\n"
                                         "  {:webapp/routes [[\"/change/:range\" s]]})\n"))
@@ -457,8 +457,8 @@
                  (store/ingest (store/empty-store) 'shop.ui
                                (str "(ns shop.ui)\n\n"
                                     "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
-                                    "        :web/client-routes [\"/p/:slug/store\"]}\n"
+                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
+                                    "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
                                     "  doc \"D.\" [_] {})\n\n"
                                     "(defn ^:app/entry page \"P.\" []\n"
                                     "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
@@ -477,16 +477,16 @@
   ;; that renders, in an app where every other pane works.
   ;;
   ;; **The join is EQUALITY, not `router/match`.** A request path is a PATTERN
-  ;; in the same grammar as `:web/path` — `/api/things/:id`, with the captures
+  ;; in the same grammar as `:http/path` — `/api/things/:id`, with the captures
   ;; supplied separately as `:webapp/path-params` — so matching it as though it
   ;; were a concrete url would ask the wrong question and answer nil for every
   ;; parameterized endpoint in the store.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/things\"\n"
-                 "        :web/auth :public :web/response :string}\n"
+                 "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                 "        :http/auth :public :rest/response :string}\n"
                  "  things \"T.\" [_] {:status 200 :body \"[]\"})\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/things/:id\"\n"
-                 "        :web/auth :public :web/response :string}\n"
+                 "(defn ^{:http/method :get :http/path \"/api/things/:id\"\n"
+                 "        :http/auth :public :rest/response :string}\n"
                  "  thing \"T.\" [_] {:status 200 :body \"{}\"})\n\n"
                  "(defn list-request \"R.\" [_p] {:webapp/path \"/api/things\"})\n\n"
                  "(defn detail-request \"R.\" [p]\n"
@@ -530,7 +530,7 @@
         (is (= [] (rules.webapp/request-paths-unserved st))
             (pr-str (rules.webapp/request-paths-unserved st)))))
 
-    (testing "and a form marked ^:web/external-path is skipped WHOLE"
+    (testing "and a form marked ^:http/external-path is skipped WHOLE"
       ;; the escape the absolute-url one cannot cover, reported by the app that
       ;; needed it: its API is proxied by the PROJECT server under the same
       ;; mount point, so the path is real, served, and not this store's — and
@@ -542,7 +542,7 @@
       ;; Same marker `http-dangling-route-refs` already uses for a link, for
       ;; the same question, and it carries a REASON rather than a silence
       (let [src2 (str "(ns shop.far)\n\n"
-                      "(defn ^{:web/external-path \"the project server proxies /api/*\"}\n"
+                      "(defn ^{:http/external-path \"the project server proxies /api/*\"}\n"
                       "  far-request \"R.\" [_p] {:webapp/path \"/api/modules\"})\n")
             st   (assoc-in (store/ingest (store/empty-store) 'shop.far src2)
                            [:config "capabilities" :values "webapp.enabled"] "true")]
@@ -582,8 +582,8 @@
   ;; legitimate, and a browser-only library binding may have no portable form at
   ;; all. What is not legitimate is not knowing.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                 "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                 "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                  "  doc \"D.\" [_] {:status 200 :body \"<html></html>\"})\n")
         cljs (str "(ns shop.sketch)\n\n(defn draw \"D.\" [x] x)\n")
         st   (-> (store/ingest (store/empty-store) 'shop.ui src)

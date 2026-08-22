@@ -3,7 +3,7 @@
 
   Same contract as `slopp.web.server.httpkit` — own the socket and the wire
   encoding, own nothing else. Request in, `dispatch/handle!`, JSON out unless
-  the response says `:web/raw`. Port 0 binds ephemeral and the return carries
+  the response says `:http/raw`. Port 0 binds ephemeral and the return carries
   the real number.
 
   It exists for two reasons. The first is that a web app should be runnable
@@ -14,7 +14,7 @@
   on http-kit's particular ring dialect, and any behaviour the two disagree
   on is a bug in whichever one is doing more than it should.
 
-  Not the default — http-kit is (`serve!`'s `:web/adapter` defaults to
+  Not the default — http-kit is (`serve!`'s `:http/adapter` defaults to
   `:http-kit`). Reach for `:jdk` when the dependency is the problem."
   (:require [slopp.web.dispatch :as dispatch]
             [cheshire.core :as json] [clojure.string :as str])
@@ -65,9 +65,9 @@
   {:host :port}: ONE catch-all handler doing request-map →
   `dispatch/handle!` → JSON. Port 0 binds ephemeral; the returned
   {:server :port} carries the real one. `stop!` takes the return. A body
-  over `ctx`'s :web/max-body-bytes gets a 413 (review W8)."
+  over `ctx`'s :http/max-body-bytes gets a 413 (review W8)."
   [ctx {:keys [host port] :or {host "127.0.0.1" port 8080}}]
-  (let [max-body (:web/max-body-bytes ctx 1048576)
+  (let [max-body (:http/max-body-bytes ctx 1048576)
         server (HttpServer/create (InetSocketAddress. (str host) (int port)) 0)]
     (.createContext server "/"
                     (reify HttpHandler
@@ -78,7 +78,7 @@
                               (respond! ex 413 (json/generate-string
                                                 {:error "request body too large"}))
                               (let [resp (dispatch/handle! ctx req)]
-                                (if (:web/raw resp)
+                                (if (:http/raw resp)
                                   (respond-raw! ex (int (or (:status resp) 200))
                                                 (get (:headers resp) "Content-Type")
                                                 (:body resp))

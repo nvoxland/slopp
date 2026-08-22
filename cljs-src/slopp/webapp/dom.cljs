@@ -104,7 +104,7 @@
   `slopp.webapp/media-type` produces the key, so `application/json;
   charset=utf-8` finds the JSON entry rather than falling through.
 
-  **`application/edn` is here because slopp's own API publishes it.** `:web/raw`
+  **`application/edn` is here because slopp's own API publishes it.** `:http/raw`
   serves EDN, `generate_client` reads the contract document as EDN, and until
   this entry existed `slopp.webapp` was the one consumer that could not — so an
   app browsing slopp's own API hit it on its first screen. That was not a

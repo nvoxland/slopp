@@ -1,7 +1,7 @@
 (ns slopp.web.routes
   "Where an app's shape comes from: **var metadata, read off the loaded
-  namespaces.** A public var carrying `:web/path` IS a route; a var carrying
-  `:web/read` or `:web/effect` IS an entry in a performer vocabulary. There is
+  namespaces.** A public var carrying `:http/path` IS a route; a var carrying
+  `:http/read` or `:http/effect` IS an entry in a performer vocabulary. There is
   no route table to keep in step with the code, because there is no route
   table.
 
@@ -18,13 +18,13 @@
 
   `client-route-rows` is the one place this namespace generates rather than reads, and
   it is deliberately narrow: a client-routed document declares the prefixes it
-  owns (`:web/client-routes [\"/store\"]`) and gets one scoped catch-all each. A root
+  owns (`:webapp/client-routes [\"/store\"]`) and gets one scoped catch-all each. A root
   catch-all would be worse than the bug it fixes — an app that can never 404
   has no way left to distinguish a typo from a page.")
 
 (defn ^:export client-route-rows
   "The catch-all rows a client-routed document contributes — one per declared
-  prefix in `:web/client-routes`, all pointing at the same handler as `row`.
+  prefix in `:webapp/client-routes`, all pointing at the same handler as `row`.
 
   A client-routed app owns paths the server has no route for: `/store/ns/foo`
   is real to the browser and meaningless to the router, so refreshing it 404s.
@@ -32,7 +32,7 @@
   the app document for EVERY unmatched path, and an app that can never 404 has
   no way left to distinguish a typo from a page.
 
-  So the fallback is DECLARED and SCOPED. `:web/client-routes [\"/store\"]` says \"I am
+  So the fallback is DECLARED and SCOPED. `:webapp/client-routes [\"/store\"]` says \"I am
   the document for client routes under /store\", and paths outside every
   declared prefix still 404 exactly as before.
 
@@ -50,14 +50,14 @@
          (assoc row :path (str p "/*client-path")))))
 
 (defn ^:export from-namespaces
-  "Route rows from the loaded namespaces' public vars carrying `:web/path`
+  "Route rows from the loaded namespaces' public vars carrying `:http/path`
   metadata — the UNIVERSAL route source: a live store, a jar, and a native
   binary all answer from var metadata, the same contract query_surface reads
   off the stored node. A namespace that isn't loaded contributes no rows.
-  Rows: {:handler <the var, callable> :method :path :auth :web/effects
-  :web/reads :effectful?}.
+  Rows: {:handler <the var, callable> :method :path :auth :http/effects
+  :http/reads :effectful?}.
 
-  A var may also carry `:web/client-routes` — a vector of path prefixes it serves as the
+  A var may also carry `:webapp/client-routes` — a vector of path prefixes it serves as the
   client-routed document — and then contributes one extra catch-all row per
   prefix (see `client-route-rows`), so a refreshed deep link reaches the app instead of
   a 404. Scoped deliberately: paths outside every declared prefix still 404,
@@ -74,8 +74,8 @@
           :when  nsx
           v      (vals (ns-publics nsx))
           :let   [m (meta v)]
-          :when  (:web/path m)]
-      {:client-routes (:web/client-routes m)
+          :when  (:http/path m)]
+      {:client-routes (:webapp/client-routes m)
        ;; the CONTRACT rides the row when the endpoint declared one. The
        ;; dispatcher holds a row at request time and nothing else, so a
        ;; schema that is not here cannot be honoured — which is exactly why
@@ -84,18 +84,18 @@
        ;; carry no key, because nil-because-absent and nil-because-broken
        ;; would otherwise be the same row.
        :row (cond-> {:handler   v
-                     :method    (:web/method m)
-                     :path      (str (:web/path m))
-                     :auth      (:web/auth m)
-                     :web/effects (:web/effects m)
-                     :web/reads   (:web/reads m)
-                     :effectful? (boolean (:web/effectful m))}
-              (:web/request m)  (assoc :web/request (:web/request m))
-              (:web/response m) (assoc :web/response (:web/response m)))}))))
+                     :method    (:http/method m)
+                     :path      (str (:http/path m))
+                     :auth      (:http/auth m)
+                     :http/effects (:http/effects m)
+                     :http/reads   (:http/reads m)
+                     :effectful? (boolean (:http/effectful m))}
+              (:rest/request m)  (assoc :rest/request (:rest/request m))
+              (:rest/response m) (assoc :rest/response (:rest/response m)))}))))
 
 (defn ^:export performers-from-namespaces
   "The performer vocabulary off loaded var metadata: {kind → the var,
-  callable} for `marker-key` (`:web/effect` or `:web/read`) — the runtime
+  callable} for `marker-key` (`:http/effect` or `:http/read`) — the runtime
   twin of the store-side derivation the gates check. A namespace that
   isn't loaded contributes nothing."
   [ns-syms marker-key]

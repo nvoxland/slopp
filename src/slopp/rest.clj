@@ -1,7 +1,7 @@
 (ns slopp.rest
   "The typed-API capability: the ONE namespace an app enabling `rest` requires.
 
-  A contract declared in `:web/request` / `:web/response` was already gated at
+  A contract declared in `:rest/request` / `:rest/response` was already gated at
   write time, published to consumers and used to generate typed clients — and
   honoured by nothing. An untrusted body reached the handler unchecked. This
   namespace is what turns the declaration into a boundary, and it is deliberately
@@ -11,7 +11,7 @@
 
   **The dispatcher never learns this namespace exists.** It looks for
   `:rest/decode-request` and `:rest/check-response` on the context and calls
-  whatever it finds, exactly as it treats `:web/read-performers`. That is what
+  whatever it finds, exactly as it treats `:http/read-performers`. That is what
   keeps malli here rather than in the http framework: an app serving HTML has no
   contracts to check and must not pay for a validation library to prove it.
 
@@ -33,13 +33,13 @@
   Written as a function OVER a context rather than an option to
   `slopp.web/context` on purpose. The dispatcher must not know this namespace
   exists: it looks for `:rest/decode-request` and `:rest/check-response` and
-  calls whatever it finds, the same way it treats `:web/read-performers`. That
+  calls whatever it finds, the same way it treats `:http/read-performers`. That
   is what keeps malli here and out of the http framework, so an app serving
   HTML never pays for a validation library it has no contracts to use.
 
   So an app assembles its own boundary and can SEE that it did:
 
-      (-> (web/context {:web/namespaces [...]}) (rest/validating))
+      (-> (web/context {:http/namespaces [...]}) (rest/validating))
 
   Leaving the call out is how an app opts out, and the absence is visible at
   the call site rather than in a config file somewhere else."
@@ -71,7 +71,7 @@
   would disagree on the first change — the failure every test double in this
   framework is written to avoid.
 
-  A `:web/raw` response is handed back untouched: its body is bytes or markup
+  A `:http/raw` response is handed back untouched: its body is bytes or markup
   the adapter writes verbatim, so parsing it as JSON would be inventing a
   shape. Same branch both adapters take.
 
@@ -109,6 +109,6 @@
                 ;; become a string here too. A fake that is KINDER than the
                 ;; socket passes tests production would refuse.
                 (some? body) (assoc :body (wire body))))]
-    (if (:web/raw resp)
+    (if (:http/raw resp)
       resp
       (assoc resp :body (wire (:body resp))))))

@@ -1,5 +1,5 @@
 (ns slopp.web.auth
-  "Identity POLICY: turn a request into `{:web/sub :web/groups :web/provider}`
+  "Identity POLICY: turn a request into `{:http/sub :http/groups :http/provider}`
   or nil, for each provider slopp ships — static users, bearer tokens, a
   trusted proxy header, and the resource-server half of OIDC.
 
@@ -71,8 +71,8 @@
 (defn- augment-groups
   "The identity's groups plus every configured group (`:auth/groups`,
   {group-name #{subs}}) that lists the subject."
-  [{:web/keys [sub] :as identity} groups-config]
-  (update identity :web/groups
+  [{:http/keys [sub] :as identity} groups-config]
+  (update identity :http/groups
           (fnil into #{})
           (for [[g members] groups-config
                 :when (contains? (set members) sub)]
@@ -92,8 +92,8 @@
                            (java.security.MessageDigest/isEqual
                             (.getBytes tok "UTF-8")
                             (.getBytes (str (secret-value secret getenv)) "UTF-8")))
-                  {:web/sub nm :web/groups (set groups)
-                   :web/provider :bearer}))
+                  {:http/sub nm :http/groups (set groups)
+                   :http/provider :bearer}))
               (:auth/bearer config))))))
 
 (defn- static-identity
@@ -110,8 +110,8 @@
             [user pass] (when decoded (str/split decoded #":" 2))
             {:keys [password-hash groups]} (get (:auth/static config) user)]
         (when (and password-hash pass (verify-password pass password-hash))
-          {:web/sub user :web/groups (set groups)
-           :web/provider :static})))))
+          {:http/sub user :http/groups (set groups)
+           :http/provider :static})))))
 
 (defn- proxy-identity
   "Identity headers from a TRUSTED upstream only (`:auth/proxy` {:trusted
@@ -126,12 +126,12 @@
         user (hdr user-header)]
     (when (and (contains? (set trusted) (:remote-addr req))
                (seq (str user)))
-      {:web/sub (str user)
-       :web/groups (into #{}
+      {:http/sub (str user)
+       :http/groups (into #{}
                          (remove str/blank?)
                          (str/split (str (or (hdr groups-header) ""))
                                     #","))
-       :web/provider :proxy-header})))
+       :http/provider :proxy-header})))
 
 (defn ^:export config-from-values
   "Parse the `capabilities` config's {key value} STRINGS into the runtime
@@ -275,15 +275,15 @@
             now  (or (:now opts) (quot (System/currentTimeMillis) 1000))]
         (when-let [claims (some-> (decode-jwt (subs h 7))
                                   (verify-jwt oidc now))]
-          {:web/sub (str (or (:sub claims) (:preferred_username claims)))
-           :web/groups (into #{}
+          {:http/sub (str (or (:sub claims) (:preferred_username claims)))
+           :http/groups (into #{}
                              (map str)
                              (get claims (keyword (or (:groups-claim oidc)
                                                       "groups"))))
-           :web/provider :oidc})))))
+           :http/provider :oidc})))))
 
 (defn ^:export resolve-identity
-  "Resolve a request into `{:web/sub :web/groups :web/provider}` or nil
+  "Resolve a request into `{:http/sub :http/groups :http/provider}` or nil
   (anonymous — the policy layer's default-deny takes it from there). Walks
   `:auth/providers` in declared order; the FIRST provider claiming the
   request wins; configured group membership (`:auth/groups`) augments

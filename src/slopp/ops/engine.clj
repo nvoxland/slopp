@@ -1463,7 +1463,7 @@
   "Test forms that READ a marker `ns-sym/nm` carries — the tests whose subject is
   a declaration rather than a call.
 
-  `(:web/path (meta #'app/page))` invokes nothing, so there is no trace edge to
+  `(:http/path (meta #'app/page))` invokes nothing, so there is no trace edge to
   record and no static var reference to follow. Such a test is invisible to
   every other producer [[affected-tests]] has, and the measured consequence was
   a write reporting green on an edit that broke three of them.
@@ -1478,9 +1478,9 @@
   because slopp IS the machinery that tests markers:
 
   ```
-  :web/path      74 tests mention it  →   3 read metadata
-  :web/method    69                   →   1
-  :web/response  53                   →   1
+  :http/path      74 tests mention it  →   3 read metadata
+  :http/method    69                   →   1
+  :rest/response  53                   →   1
   :malli/schema  26                   →   1
   ```
 
@@ -1557,7 +1557,7 @@
   (a nil result already runs everything, the declared tests included).
 
   MARKER-aware (2026-08-16, reported by slopp-ui): a test that READS a form's
-  declaration — `(:web/path (meta #'app/page))` — never CALLS it, so it leaves
+  declaration — `(:http/path (meta #'app/page))` — never CALLS it, so it leaves
   no trace edge and no static reference either. Trace evidence about a MARKED
   form is therefore partial by construction, and the measured consequence was a
   write reporting `{:ran 2, :pass 18, :status :green}` on the edit that broke

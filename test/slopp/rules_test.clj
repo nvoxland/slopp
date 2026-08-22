@@ -126,7 +126,7 @@
   ;; reason it is a separate deftest: that one grades a rule that is already in
   ;; the right namespace, so it is blind to the failure that actually happened
   ;; here. Five web-only checks sat in the generic `slopp.rules` — reading
-  ;; `:web/client-routes`, calling `edit.web/client-signature` — and no naming rule could
+  ;; `:webapp/client-routes`, calling `edit.web/client-signature` — and no naming rule could
   ;; see them, because a check in a generic namespace has no app type to
   ;; disagree with. `inline-schema-dup` and `generated-ns` were missed by a
   ;; hand audit for exactly that reason.
@@ -413,11 +413,11 @@
 
 (deftest public-mutation-asks-at-done
   (let [src (str "(ns pm.api)\n\n"
-                 "(defn ^{:web/method :post :web/path \"/signup\" :web/auth :public\n"
-                 "        :web/effects [:user/insert]} signup \"S.\" [req] req)\n\n"
-                 "(defn ^{:web/method :post :web/path \"/admin\" :web/auth :authenticated\n"
-                 "        :web/effects [:user/insert]} admin \"A.\" [req] req)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/ping\" :web/auth :public} ping \"P.\" [req] req)\n")
+                 "(defn ^{:http/method :post :http/path \"/signup\" :http/auth :public\n"
+                 "        :http/effects [:user/insert]} signup \"S.\" [req] req)\n\n"
+                 "(defn ^{:http/method :post :http/path \"/admin\" :http/auth :authenticated\n"
+                 "        :http/effects [:user/insert]} admin \"A.\" [req] req)\n\n"
+                 "(defn ^{:http/method :get :http/path \"/ping\" :http/auth :public} ping \"P.\" [req] req)\n")
         s0  (store/ingest (store/empty-store) 'pm.api src)
         on  (first (store/record-config-put s0 "capabilities" :manifest
                                             "http.enabled" "true"))
@@ -427,7 +427,7 @@
       (let [r (f on)]
         (is (= 1 (count r)) (pr-str r))
         (is (= 'pm.api/signup (:form (first r))))
-        (is (= [:user/insert] (:web/effects (first r))))))
+        (is (= [:user/insert] (:http/effects (first r))))))
     (testing "inert until http.enabled"
       (is (empty? (f s0))))))
 
@@ -439,8 +439,8 @@
   (let [mk (fn [resp] (-> (store/empty-store)
                           (store/ingest 'st.api
                                         (str "(ns st.api)\n\n"
-                                             "(defn ^{:web/method :post :web/path \"/o\""
-                                             " :web/request st.c/a :web/response " resp "} make [r] r)\n"))))
+                                             "(defn ^{:http/method :post :http/path \"/o\""
+                                             " :rest/request st.c/a :rest/response " resp "} make [r] r)\n"))))
         old-sig (edit.http/client-signature (mk "st.c/a"))]
     (testing "a recorded sig that no longer matches the current endpoints fires the advisory"
       (let [drifted (first (store/record-config-put (mk "st.c/b") "client" :manifest
@@ -461,10 +461,10 @@
     (let [st (-> (store/empty-store)
                  (store/ingest 'dup.api
                                (str "(ns dup.api)\n\n"
-                                    "(defn ^{:web/method :post :web/path \"/a\""
-                                    " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
-                                    "(defn ^{:web/method :post :web/path \"/b\""
-                                    " :web/request [:map [:x :int]] :web/response :map} b [r] r)\n")))
+                                    "(defn ^{:http/method :post :http/path \"/a\""
+                                    " :rest/request [:map [:x :int]] :rest/response :map} a [r] r)\n\n"
+                                    "(defn ^{:http/method :post :http/path \"/b\""
+                                    " :rest/request [:map [:x :int]] :rest/response :map} b [r] r)\n")))
           findings (rules.rest/rest-inline-schema-dup-check nil st nil)]
       (is (seq findings))
       (is (some #(re-find #"named .cljc" (:teach %)) findings))))
@@ -472,10 +472,10 @@
     (let [st (-> (store/empty-store)
                  (store/ingest 'dup2.api
                                (str "(ns dup2.api)\n\n"
-                                    "(defn ^{:web/method :post :web/path \"/a\""
-                                    " :web/request [:map [:x :int]] :web/response :map} a [r] r)\n\n"
-                                    "(defn ^{:web/method :post :web/path \"/b\""
-                                    " :web/request [:map [:y :string]] :web/response :map} b [r] r)\n")))]
+                                    "(defn ^{:http/method :post :http/path \"/a\""
+                                    " :rest/request [:map [:x :int]] :rest/response :map} a [r] r)\n\n"
+                                    "(defn ^{:http/method :post :http/path \"/b\""
+                                    " :rest/request [:map [:y :string]] :rest/response :map} b [r] r)\n")))]
       (is (empty? (rules.rest/rest-inline-schema-dup-check nil st nil))))))
 
 (deftest catalog-severity-is-derived-not-restated
@@ -517,7 +517,7 @@
 
 (deftest dangling-route-advisory-reports-dynamic-refs-without-flipping
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/todos\" :web/auth :public} todos-page \"T.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/todos\" :http/auth :public} todos-page \"T.\" [req]\n"
                  "  [:div [:a {:href \"/nowhere\"} \"bad\"]\n"
                  "        [:a {:href (:uri req)} \"dyn\"]])\n")
         s (store/ingest (store/empty-store) 'shop.ui src)
@@ -1012,8 +1012,8 @@
   (let [mk (fn [body]
              (let [s (store/ingest (store/empty-store) 'shop.ui
                                    (str "(ns shop.ui)\n\n"
-                                        "(defn ^{:web/method :get :web/path \"/p/:slug\""
-                                        " :web/auth :public} page \"P.\" [req]\n"
+                                        "(defn ^{:http/method :get :http/path \"/p/:slug\""
+                                        " :http/auth :public} page \"P.\" [req]\n"
                                         "  " body ")\n"))]
                (first (store/record-config-put s "capabilities" :manifest
                                                "http.enabled" "true"))))
@@ -1249,7 +1249,7 @@
   ;;
   ;;   page-unreachable   the ^:app/entry entry slopp opens headlessly
   ;;   page-reach         that entry's closure reaching :cljs
-  ;;   client-routes-consequences   what declaring :web/client-routes changes about every path
+  ;;   client-routes-consequences   what declaring :webapp/client-routes changes about every path
   ;;
   ;; An app that serves HTML and runs no browser app has none of these
   ;; declarations and should not be graded on them; an app whose browser owns
@@ -1293,7 +1293,7 @@
 
 (deftest a-marker-in-slopps-OWN-namespace-that-slopp-does-not-know-is-reported
   ;; The failure this exists for, arriving today: `:web/spa` was renamed to
-  ;; `:web/client-routes`, and a consuming store that keeps the old spelling
+  ;; `:webapp/client-routes`, and a consuming store that keeps the old spelling
   ;; carries a declaration that means NOTHING. Its app still serves, every
   ;; in-app click still works, and only a refresh or a shared deep link 404s —
   ;; because the catch-all rows are generated from a key nothing reads any more.
@@ -1314,7 +1314,7 @@
   ;; Squatting `:web/*` with a key slopp does not define is the only thing
   ;; reported, and it is always either a typo or a name that used to work.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/\" :web/spa [\"/store\"]}\n"
+                 "(defn ^{:http/method :get :http/path \"/\" :web/spa [\"/store\"]}\n"
                  "  doc \"The document.\" [_] {:status 200 :body \"<html>\"})\n\n"
                  "(defn ^{:myapp/audited true} totals \"T.\" [x] x)\n")
         st  (store/ingest (store/empty-store) 'shop.ui src)
@@ -1338,8 +1338,8 @@
     (testing "and the current spelling reports nothing"
       (let [ok  (store/ingest (store/empty-store) 'shop.ok
                               (str "(ns shop.ok)\n\n"
-                                   "(defn ^{:web/method :get :web/path \"/\"\n"
-                                   "        :web/client-routes [\"/store\"]}\n"
+                                   "(defn ^{:http/method :get :http/path \"/\"\n"
+                                   "        :webapp/client-routes [\"/store\"]}\n"
                                    "  doc \"The document.\" [_] {:status 200 :body \"<html>\"})\n"))
             ids (mapv :id (filter :name (store/forms ok 'shop.ok)))]
         (is (empty? (rules/unknown-marker-check nil ok ids))

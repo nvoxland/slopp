@@ -1358,7 +1358,7 @@
                                    :prompt "opt in"})
         (call! sess "edit_add_form"
                {:ns "wr.api"
-                :source "(defn ^{:web/method :get :web/path \"/api/ping\" :web/auth :public :web/response :map} ping \"P.\" [req] req)"
+                :source "(defn ^{:http/method :get :http/path \"/api/ping\" :http/auth :public :rest/response :map} ping \"P.\" [req] req)"
                 :prompt "a public endpoint"})
         (let [rep (edn/read-string (call! sess "query_surface" {}))
               row (first (:http rep))]
@@ -1397,7 +1397,7 @@
           (is (= "/api/ping" (:path row)))
           (is (= 'wr.api/ping (:handler row)))
           (is (true? (:published row))
-              "an endpoint with no :web/client false is part of the published API")))
+              "an endpoint with no :rest/client false is part of the published API")))
 
       (testing "the tool is advertised read-only"
         (is (contains? tools/read-only-tools "query_surface")))
@@ -1907,7 +1907,7 @@
   (doseq [n server/served-namespaces] (require n))
   (let [paths   (->> server/served-namespaces
                      (mapcat (comp vals ns-publics))
-                     (keep (comp :web/path meta))
+                     (keep (comp :http/path meta))
                      sort vec)
         non-api (remove #(str/starts-with? % "/api") paths)
         desc    (:description (first (filter #(= "ui_serve" (:name %)) tools/tools)))]
@@ -2001,9 +2001,9 @@
       (let [off (atom {:store (store/ingest
                                web 'slopp.api.reads
                                (str "(ns slopp.api.reads)\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/api/x\"\n"
+                                    "(defn ^{:http/method :get :http/path \"/api/x\"\n"
                                     "        :malli/schema [:=> [:cat :map] :map]\n"
-                                    "        :web/response :map} x \"X.\" [req] {:ok true})\n"))
+                                    "        :rest/response :map} x \"X.\" [req] {:ok true})\n"))
                        :dir "/tmp/slopp-no-such-dir"})]
         (is (nil? (mcp/start-app! off)))
         (is (nil? (:app-server @off)))))
@@ -2032,9 +2032,9 @@
                  (put "http.enabled" "true")
                  (store/ingest 'slopp.api.reads
                                (str "(ns slopp.api.reads)\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/api/x\"\n"
+                                    "(defn ^{:http/method :get :http/path \"/api/x\"\n"
                                     "        :malli/schema [:=> [:cat :map] :map]\n"
-                                    "        :web/response :map} x \"X.\" [req] {:ok true})\n")))
+                                    "        :rest/response :map} x \"X.\" [req] {:ok true})\n")))
         ;; no :image on the handle — live/stop! tolerates a handle with
         ;; no process, which is what keeps this test in-image instead of
         ;; costing a JVM to assert bookkeeping
@@ -2418,8 +2418,8 @@
                         :prompt "this store serves")
       (ops/ingest! sess 'shopq.api
                    (str "(ns shopq.api)\n\n"
-                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
-                        "        :web/auth :public :web/response :string}\n"
+                        "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                        "        :http/auth :public :rest/response :string}\n"
                         "  things \"T.\" [_] {:status 200 :body \"[]\"})\n"))
 
       (testing "the control: with nothing broken, http is reported and nothing complains"

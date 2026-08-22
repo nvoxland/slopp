@@ -69,7 +69,7 @@
 
 (deftest html-response-is-a-raw-html-ring-map
   (is (= {:status 200
-          :web/raw true
+          :http/raw true
           :headers {"Content-Type" "text/html; charset=utf-8"}
           :body "<p>hi</p>"}
          (html/html-response [:p "hi"])))

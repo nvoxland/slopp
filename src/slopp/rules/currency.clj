@@ -48,7 +48,7 @@
   - `def` / `defonce` — the init expression runs once, at load. `(def tools
     (vec (concat env-tools [:b])))` holds whatever `env-tools` was THEN.
   - any form whose name carries metadata containing a SYMBOL — var metadata is
-    evaluated, so `^{:web/response schema}` captured the schema's value and
+    evaluated, so `^{:rest/response schema}` captured the schema's value and
     the name `schema` no longer exists at runtime.
 
   A `defn` body is deliberately NOT included, and that exclusion is what makes

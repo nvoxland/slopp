@@ -21,10 +21,9 @@
             [slopp.project.capabilities :as capabilities]
             [slopp.cli.spec :as spec] [clojure.string :as str] [slopp.rules.http :as rules.http]))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module, as its four unexported siblings in slopp.rules.http show. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
-  rest-stale-client-check
+(defn rest-stale-client-check
   "Done-advisory (D-web-contracts part 2): the generated typed client
-   (generate_client) is STALE — an endpoint or its :web/request/:web/response
+   (generate_client) is STALE — an endpoint or its :rest/request/:rest/response
    changed since the client was last generated. Fires only once a client has been
    generated (a `client`/`generated-sig` is on record), so it never nags a store
    that has not opted into a generated client. Regenerating re-records the
@@ -34,20 +33,19 @@
     (when (and recorded (not= recorded (edit.http/client-signature store)))
       [{:rest-stale-client true
         :teach (str "the generated typed client is out of date — an endpoint or its"
-                    " :web/request/:web/response changed since generate_client last"
+                    " :rest/request/:rest/response changed since generate_client last"
                     " ran. Re-run generate_client to re-derive the wrappers.")}])))
 
-(defn ^{:breaking-ok "never legitimately module-external: ^:export was passed on the move that brought it here, and its only caller is slopp.rules — the SAME module. Exported and narrowed inside one unreleased episode, so there is no downstream to tell."}
-  rest-inline-schema-dup-check
+(defn rest-inline-schema-dup-check
   "Done-advisory (D-web-contracts part 2): 2+ endpoints declare the SAME
-   structured inline :web/request/:web/response schema — the DRY nudge toward the
+   structured inline :rest/request/:rest/response schema — the DRY nudge toward the
    paved road. A shared shape should be a named .cljc schema VAR so server and
    client validate against ONE definition and a change lands in one place. Only
    structured (vector) inline schemas count — a bare keyword like :map is too
    trivial to extract. Fires once per duplicated shape."
   [_session store _changed]
   (let [inlines (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
-                      k     [:web/request :web/response]
+                      k     [:rest/request :rest/response]
                       :let  [v (get meta k)]
                       :when (vector? v)]
                   {:endpoint (symbol (str ns) (str name)) :schema v})
@@ -115,7 +113,7 @@
    `:any` ADMITS it is saying nothing; a bare `:map` looks like a type while
    saying the same thing, and that is the one a reader trusts by mistake.
 
-   **`^{:web/unconstrained-ok \"why\"}` on the handler discharges it**, and
+   **`^{:rest/unconstrained-ok \"why\"}` on the handler discharges it**, and
    that escape exists because slopp-ui found the rule had none. The teach used
    to end \"if the shape genuinely is not settled, say `:any`\" — advice that
    names the very state the rule reports, so an endpoint that legitimately
@@ -137,7 +135,7 @@
   (let [rows    (rules.http/unconstrained-contract-fields store)
         loose   (set (map :endpoint rows))
         marked  (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
-                      :when (:web/unconstrained-ok meta)]
+                      :when (:rest/unconstrained-ok meta)]
                   (symbol (str ns) (str name)))
         marked? (set marked)]
     (concat
@@ -147,7 +145,7 @@
      (for [ep marked :when (not (loose ep))]
        {:endpoint ep
         :stale-marker true
-        :teach (str ep " carries ^{:web/unconstrained-ok …} but every field of"
+        :teach (str ep " carries ^{:rest/unconstrained-ok …} but every field of"
                     " its contract constrains something — the waiver describes"
                     " nothing. Remove it. A marker is a CLAIM about the code"
                     " around it, and one that outlives what it waived reads"
@@ -184,7 +182,7 @@
                     " Name the entries — [:map [:kind :string] [:text :string]]."
                     " If this endpoint CANNOT constrain — a proxy forwarding"
                     " another service's bytes — say so where a reader will see"
-                    " it: ^{:web/unconstrained-ok \"a proxy: the response is"
+                    " it: ^{:rest/unconstrained-ok \"a proxy: the response is"
                     " whatever the project sent\"}. That discharges this, and"
                     " is reported as stale if the contract later constrains.")}))))
 
@@ -262,9 +260,9 @@
   real store the day it enabled this capability, making nine endpoints
   unreadable because a tenth answered `[:or [:map …] [:map …]]`.
 
-  `:published` is `:web/client false` inverted, and it is a field rather than an
+  `:published` is `:rest/client false` inverted, and it is a field rather than an
   omission because a reader asking what consumers can CALL needs the exclusion
-  visible. An HTML document is a `:web/path` form like any other and a generated
+  visible. An HTML document is a `:http/path` form like any other and a generated
   fetch wrapper over it would be nonsense — but \"excluded on purpose\" and
   \"forgot to declare a schema\" must not look the same.
 
@@ -286,17 +284,17 @@
                          ;; stronger form of the `[]` mistake this report
                          ;; already refuses to make.
                          decl))]
-      (vec (for [{:keys [ns name meta]} (sort-by #(str (:web/path (:meta %)))
+      (vec (for [{:keys [ns name meta]} (sort-by #(str (:http/path (:meta %)))
                                                  (edit.http/web-endpoint-rows store))
-                 :when (or (:web/request meta) (:web/response meta)
-                           (false? (:web/client meta)))
+                 :when (or (:rest/request meta) (:rest/response meta)
+                           (false? (:rest/client meta)))
                  :let [from [ns name]]]
              (cond-> {:kind      :contract
-                      :method    (:web/method meta)
-                      :path      (str (:web/path meta))
+                      :method    (:http/method meta)
+                      :path      (str (:http/path meta))
                       :handler   (symbol (str ns) (str name))
-                      :published (not (false? (:web/client meta)))}
-               (:web/request meta)
-               (assoc :request (names from (:web/request meta)))
-               (:web/response meta)
-               (assoc :response (names from (:web/response meta)))))))))
+                      :published (not (false? (:rest/client meta)))}
+               (:rest/request meta)
+               (assoc :request (names from (:rest/request meta)))
+               (:rest/response meta)
+               (assoc :response (names from (:rest/response meta)))))))))

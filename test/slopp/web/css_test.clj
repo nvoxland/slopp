@@ -41,7 +41,7 @@
 
 (deftest css-response-is-a-raw-css-ring-map
   (is (= {:status 200
-          :web/raw true
+          :http/raw true
           :headers {"Content-Type" "text/css; charset=utf-8"}
           :body "p{margin:0}a{color:#333}"}
          (css/css-response [[:p {:margin 0}] [:a {:color "#333"}]])))

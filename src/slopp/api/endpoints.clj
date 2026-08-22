@@ -3,7 +3,7 @@
 
   This is what D-webapp is organised around: an explicit, typed, independently
   testable surface. Each endpoint declares its route, its auth, the reads it
-  needs and a `:web/response` contract on the name, so it is a pure function
+  needs and a `:rest/response` contract on the name, so it is a pure function
   of data — its test is `=` with no mock, no browser and no running server,
   and the same schema var validates the response here and in the generated
   client.
@@ -21,9 +21,9 @@
   an organising principle and became the only thing there is."
   (:require [slopp.api.contracts :as contracts]))
 
-(defn ^{:web/method :get :web/path "/api/namespaces" :web/auth :public
-        :web/response contracts/namespace-list
-        :web/reads {:namespaces [:browse/namespaces []]}}
+(defn ^{:http/method :get :http/path "/api/namespaces" :http/auth :public
+        :rest/response contracts/namespace-list
+        :http/reads {:namespaces [:browse/namespaces []]}}
   namespaces
   "GET /api/namespaces — every namespace with its form count, sorted.
 
@@ -40,12 +40,12 @@
   [req]
   {:status 200
    :body (mapv (fn [{:keys [ns forms]}] {:ns (str ns) :forms forms})
-               (:namespaces (:web/reads req)))})
+               (:namespaces (:http/reads req)))})
 
-(defn ^{:web/method :get :web/path "/api/ns/:ns" :web/auth :public
-        :web/request contracts/ns-outline-request
-        :web/response contracts/ns-outline
-        :web/reads {:outline [:browse/ns-outline [:path-params :ns]]}}
+(defn ^{:http/method :get :http/path "/api/ns/:ns" :http/auth :public
+        :rest/request contracts/ns-outline-request
+        :rest/response contracts/ns-outline
+        :http/reads {:outline [:browse/ns-outline [:path-params :ns]]}}
   ns-outline
   "GET /api/ns/:ns — one namespace's forms in store order, and what tests it.
 
@@ -59,7 +59,7 @@
   that a new key on the read must be named here too; the contract check is
   what makes that a red test rather than a silently missing field."
   [req]
-  (if-let [{:keys [ns tier forms tested-by gaps]} (:outline (:web/reads req))]
+  (if-let [{:keys [ns tier forms tested-by gaps]} (:outline (:http/reads req))]
     {:status 200
      :body {:ns (str ns)
             :tier tier
@@ -78,9 +78,9 @@
             :gaps gaps}}
     {:status 404 :body {:error "no such namespace"}}))
 
-(defn ^{:web/method :get :web/path "/api/timeline" :web/auth :public
-        :web/response contracts/timeline
-        :web/reads {:timeline [:ui/timeline []]}}
+(defn ^{:http/method :get :http/path "/api/timeline" :http/auth :public
+        :rest/response contracts/timeline
+        :http/reads {:timeline [:ui/timeline []]}}
   timeline
   "GET /api/timeline — milestones newest first, plus the working set.
 
@@ -88,12 +88,12 @@
   JSON-shaped value, which is why the SPA rewrite is mostly moving rendering
   rather than inventing data."
   [req]
-  {:status 200 :body (:timeline (:web/reads req))})
+  {:status 200 :body (:timeline (:http/reads req))})
 
-(defn ^{:web/method :get :web/path "/api/change/:range" :web/auth :public
-        :web/request contracts/change-request
-        :web/response contracts/change-view
-        :web/reads {:change [:ui/change [:path-params :range]]}}
+(defn ^{:http/method :get :http/path "/api/change/:range" :http/auth :public
+        :rest/request contracts/change-request
+        :rest/response contracts/change-view
+        :http/reads {:change [:ui/change [:path-params :range]]}}
   change
   "GET /api/change/:range — one milestone reviewed, `from..to`.
 
@@ -101,14 +101,14 @@
   separates \"nothing changed here\" from \"that is not a range\", and only the
   second is a 404."
   [req]
-  (if-let [c (:change (:web/reads req))]
+  (if-let [c (:change (:http/reads req))]
     {:status 200 :body c}
     {:status 404 :body {:error "no such change range"}}))
 
-(defn ^{:web/method :get :web/path "/api/form/:id" :web/auth :public
-        :web/request contracts/form-request
-        :web/response contracts/form-view
-        :web/reads {:view [:ui/form []]}}
+(defn ^{:http/method :get :http/path "/api/form/:id" :http/auth :public
+        :rest/request contracts/form-request
+        :rest/response contracts/form-view
+        :http/reads {:view [:ui/form []]}}
   form
   "GET /api/form/:id — one form's permalink model, at the requested rendering
   FIDELITY (`?view=`) and call-graph DEPTH (`?depth=`).
@@ -119,20 +119,20 @@
   other thing. An unreadable depth is NOT one of those: it has an obvious
   floor, and 1 is what every link written before the parameter existed meant.
 
-  `:web/request` is declared even though this is a GET with no body. It is
+  `:rest/request` is declared even though this is a GET with no body. It is
   what a caller SENDS, and how that travels follows from the method — without
   it the generated client takes a params map that only the path reads from, so
   `?depth=` answers on the wire and is unreachable through the typed client,
   which pushes a consumer toward the hand-rolled fetch `direct-http` refuses."
   [req]
-  (if-let [v (:view (:web/reads req))]
+  (if-let [v (:view (:http/reads req))]
     {:status 200 :body v}
     {:status 404 :body {:error "no such form"}}))
 
-(defn ^{:web/method :get :web/path "/api/source/:ns/:name" :web/auth :public
-        :web/request contracts/source-request
-        :web/response contracts/form-source
-        :web/reads {:source [:browse/form-source [:path-params]]}}
+(defn ^{:http/method :get :http/path "/api/source/:ns/:name" :http/auth :public
+        :rest/request contracts/source-request
+        :rest/response contracts/form-source
+        :http/reads {:source [:browse/form-source [:path-params]]}}
   source
   "GET /api/source/:ns/:name — one form's source text.
 
@@ -142,14 +142,14 @@
   it to the one place that must never build markup by concatenation."
   [req]
   (let [{:keys [ns name]} (:path-params req)]
-    (if-let [{:keys [form-id source]} (:source (:web/reads req))]
+    (if-let [{:keys [form-id source]} (:source (:http/reads req))]
       {:status 200 :body {:ns (str ns) :name (str name)
                           :form-id form-id :source source}}
       {:status 404 :body {:error "no such form"}})))
 
-(defn ^{:web/method :get :web/path "/api/modules" :web/auth :public
-        :web/response contracts/module-index
-        :web/reads {:modules [:browse/modules []]}}
+(defn ^{:http/method :get :http/path "/api/modules" :http/auth :public
+        :rest/response contracts/module-index
+        :http/reads {:modules [:browse/modules []]}}
   modules
   "GET /api/modules — the architecture: one row per module, the layering, and
   the cycles.
@@ -165,33 +165,33 @@
   the layering, and each module's dependencies — and placement belongs to
   whoever is rendering."
   [req]
-  {:status 200 :body (:modules (:web/reads req))})
+  {:status 200 :body (:modules (:http/reads req))})
 
-(defn ^{:web/method :get :web/path "/api/contracts" :web/auth :public
-        :web/client false
-        :web/response :string
-        :web/reads {:contract [:ui/contract []]}}
+(defn ^{:http/method :get :http/path "/api/contracts" :http/auth :public
+        :rest/client false
+        :rest/response :string
+        :http/reads {:contract [:ui/contract []]}}
   contract
   "GET /api/contracts — the shape of this API, as EDN.
 
   What makes a reviewer UI in a DIFFERENT store possible: it generates its
   typed client from this document instead of sharing slopp's contracts
-  namespace. `:web/client false` because generating a typed wrapper for the
+  namespace. `:rest/client false` because generating a typed wrapper for the
   endpoint that describes the wrappers is circular and useless.
 
-  EDN, not JSON, and `:web/raw` so the adapter leaves it alone. A malli schema
+  EDN, not JSON, and `:http/raw` so the adapter leaves it alone. A malli schema
   is data made of keywords, symbols and vectors; JSON would render `:string`
   and `\"string\"` identically and the far end could not tell them apart."
   [req]
   {:status 200
-   :web/raw true
+   :http/raw true
    :headers {"Content-Type" "application/edn"}
-   :body (pr-str (:contract (:web/reads req)))})
+   :body (pr-str (:contract (:http/reads req)))})
 
-(defn ^{:web/method :get :web/path "/api/module/:m" :web/auth :public
-        :web/request contracts/module-request
-        :web/response contracts/module-detail
-        :web/reads {:detail [:browse/module [:path-params :m]]}}
+(defn ^{:http/method :get :http/path "/api/module/:m" :http/auth :public
+        :rest/request contracts/module-request
+        :rest/response contracts/module-detail
+        :http/reads {:detail [:browse/module [:path-params :m]]}}
   module
   "GET /api/module/:m — one module from the inside: its namespaces, the edges
   among them, the layering, and what crosses its boundary.
@@ -204,14 +204,14 @@
   `ns-outline` uses: `{:namespaces []}` would say the module exists and holds
   nothing, which is a different statement and a false one."
   [req]
-  (if-let [d (:detail (:web/reads req))]
+  (if-let [d (:detail (:http/reads req))]
     {:status 200 :body d}
     {:status 404 :body {:error "no such module"}}))
 
-(defn ^{:web/method :get :web/path "/api/search" :web/auth :public
-        :web/request contracts/search-request
-        :web/response contracts/search-results
-        :web/reads {:results [:browse/search []]}}
+(defn ^{:http/method :get :http/path "/api/search" :http/auth :public
+        :rest/request contracts/search-request
+        :rest/response contracts/search-results
+        :http/reads {:results [:browse/search []]}}
   search
   "GET /api/search?q=&limit= — the door: everything whose name, docstring,
   recorded why or source matches, ranked across all three grains at once.
@@ -230,9 +230,9 @@
   has no subject that can fail to exist, only a question that can go
   unanswered, and those are different things.
 
-  `:web/request` is declared for the same reason `form`'s is: without it the
+  `:rest/request` is declared for the same reason `form`'s is: without it the
   generated client takes a params map nothing reads from, so `?q=` answers on
   the wire and is unreachable through the typed client — which pushes a
   consumer toward the hand-rolled fetch `direct-http` refuses."
   [req]
-  {:status 200 :body (:results (:web/reads req))})
+  {:status 200 :body (:results (:http/reads req))})

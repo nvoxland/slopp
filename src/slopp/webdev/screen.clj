@@ -52,7 +52,7 @@
          "                      :when (:app/entry (meta v))] v))]"
          "  (if-not pv"
          "    {:error \"no ^:app/entry in this store — mark the zero-arg fn that"
-         " builds your app (a :web/routes ctx, a :webapp/routes declaration, or"
+         " builds your app (a :http/routes ctx, a :webapp/routes declaration, or"
          " {:state :view}) and slopp can open it; nothing else has to change\"}"
          ;; fully qualified, NOT an alias: a `require` inside this form runs at
          ;; runtime while the body compiles at read time, so an :as here is a

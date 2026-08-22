@@ -1280,7 +1280,7 @@
             ;; attach the boundary, and call an endpoint with a bad body
             probe (str "(require 'slopp.web 'slopp.rest 'shop.api)\n"
                        "(let [ctx (slopp.rest/validating\n"
-                       "            (slopp.web/context {:web/namespaces '[shop.api]}))\n"
+                       "            (slopp.web/context {:http/namespaces '[shop.api]}))\n"
                        "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
                        "                                :body {:sku 42}})]\n"
                        "  (println :STATUS (:status r)))")]
@@ -1290,10 +1290,10 @@
           ;; fail. build! reads the store, which is what is under test.
           (swap! sess update :store store/ingest 'shop.api
                  (str "(ns shop.api)\n\n"
-                      "(defn ^{:web/method :post :web/path \"/api/orders\"\n"
-                      "        :web/auth :public\n"
-                      "        :web/request [:map [:sku :string]]\n"
-                      "        :web/response [:map [:id :int]]}\n"
+                      "(defn ^{:http/method :post :http/path \"/api/orders\"\n"
+                      "        :http/auth :public\n"
+                      "        :rest/request [:map [:sku :string]]\n"
+                      "        :rest/response [:map [:id :int]]}\n"
                       "  create! \"Place an order.\" [req] {:status 200 :body {:id 1}})\n"))
           ;; through the real write, not a hand-built map: a config entry carries a
           ;; :format its serializer needs, and assoc-in'ing the values alone
@@ -1627,10 +1627,10 @@
   ;; loop so a browser app never names `slopp.webapp`. Third capability, third
   ;; time.
   ;;
-  ;; **The marker is `:web/client-routes`, not `:app/entry`, and the distinction is the one
+  ;; **The marker is `:webapp/client-routes`, not `:app/entry`, and the distinction is the one
   ;; that kept `screen` in `http`.** `:app/entry` declares *here is an entry a
   ;; reader can open* — inspectability. A server-rendered HTML app marks a page
-  ;; to be LOOKED AT, and it has no browser code at all. `:web/client-routes` declares
+  ;; to be LOOKED AT, and it has no browser code at all. `:webapp/client-routes` declares
   ;; *the browser owns these paths*, which is the capability's own definition.
   ;;
   ;; Caught by slopp-ui in a pre-flight, and the blast radius was small — one
@@ -1640,17 +1640,17 @@
   ;; never enabled `webapp`, which is the opt-in holding in the config file and
   ;; not at runtime.
   ;;
-  ;; Second consequence of this marker set in two days, after `:web/path`
+  ;; Second consequence of this marker set in two days, after `:http/path`
   ;; turned out to be MISSING from http's. The set is the least visible
   ;; declaration in the catalog and nothing fails when it is wrong — it just
   ;; vendors the wrong thing.
   (let [browser-app  (str "(ns shop.ui)\n\n"
-                  "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                  "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                  "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                   "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n")
         page (str "(ns shop.server)\n\n"
                   "(defn ^:app/entry app \"A server-rendered app, for a reader.\" []\n"
-                  "  {:web/routes []})\n")]
+                  "  {:http/routes []})\n")]
 
     (testing "declaring client-side routing IS using the browser framework"
       (let [st (store/ingest (store/empty-store) 'shop.ui browser-app)]
@@ -1677,7 +1677,7 @@
       (let [row (first (filter #(= "webapp" (:capability %))
                                capabilities/capability-catalog))]
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
-        (is (= [:web/client-routes] (:entry-markers row))
+        (is (= [:webapp/client-routes] (:entry-markers row))
             (str "and :app/entry is NOT among them, deliberately: " (pr-str row)))))))
 
 (deftest the-vendored-tree-tracks-the-STORE-not-the-process-start
@@ -1708,8 +1708,8 @@
       ;; nothing about the process changed — only the store did
       (let [after (store/ingest before 'shop.ui
                                 (str "(ns shop.ui)\n\n"
-                                     "(defn ^{:web/method :get :web/path \"/\"\n"
-                                     "        :web/client-routes [\"/things\"]}\n"
+                                     "(defn ^{:http/method :get :http/path \"/\"\n"
+                                     "        :webapp/client-routes [\"/things\"]}\n"
                                      "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n"))
             got   (engine/framework-injection after files)]
         (is (contains? got "slopp/webapp.cljc")
@@ -1766,8 +1766,8 @@
                     "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
                     "(defn things-request \"What it asks for.\" [_params]\n"
                     "  {:webapp/method :get :webapp/path \"/api/things\"})\n\n"
-                    "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                    "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                    "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                    "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                     "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
                     ;; the DECLARATION, not `(webapp/wiring …)`. Both entries
                     ;; derive from this one value — `cljnx/driver-for`
@@ -1850,8 +1850,8 @@
                  "  (:require [slopp.webapp :as webapp]))\n\n"
                  "(defn things \"The list.\" [s]\n"
                  "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
-                 "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                 "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                  "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
                  "(defn ^:app/entry app \"The application.\" []\n"
                  "  {:webapp/state  (atom {})\n"

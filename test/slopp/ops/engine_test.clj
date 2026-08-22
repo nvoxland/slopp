@@ -352,7 +352,7 @@
 (deftest an-endpoint-selects-the-tests-that-drive-its-route
   (let [s (store/ingest (store/empty-store) 'shop.api
                         (str "(ns shop.api)\n\n"
-                             "(defn ^{:web/method :get :web/path \"/todos\" :web/auth :public} todos \"T.\" [req] req)\n"))
+                             "(defn ^{:http/method :get :http/path \"/todos\" :http/auth :public} todos \"T.\" [req] req)\n"))
         s (store/ingest s 'shop.api-test
                         (str "(ns shop.api-test)\n\n"
                              "(deftest listing (handle! ctx {:request-method :get :uri \"/todos\"}))\n\n"
@@ -531,7 +531,7 @@
             (str "nothing is uncertain once the names are complete: " (pr-str r)))))))
 
 (deftest affected-tests-includes-the-tests-that-read-a-forms-MARKERS
-  ;; Found in production by slopp-ui, migrating `:web/spa` → `:web/client-routes`:
+  ;; Found in production by slopp-ui, migrating `:web/spa` → `:webapp/client-routes`:
   ;;
   ;;   edit_subform hub/project-root  →  {:ran 2, :pass 18, :status :green}
   ;;
@@ -553,12 +553,12 @@
   (let [st (-> (store/empty-store)
                (store/ingest 'f.core
                              (str "(ns f.core)\n"
-                                  "(defn ^{:web/path \"/x\" :web/method :get} page [_] {})\n"))
+                                  "(defn ^{:http/path \"/x\" :http/method :get} page [_] {})\n"))
                (store/ingest 'f.core-test
                              (str "(ns f.core-test (:require [clojure.test :refer [deftest is]]))\n"
                                   "(deftest traced (is (map? (f.core/page {}))))\n"
                                   "(deftest reads-the-marker\n"
-                                  "  (is (= \"/x\" (:web/path (meta #'f.core/page)))))\n")))
+                                  "  (is (= \"/x\" (:http/path (meta #'f.core/page)))))\n")))
         sess (atom {:store st :test-map {'f.core-test/traced #{'f.core/page}}})]
 
     (testing "the marker-reading test is unioned into the trace-narrowed set"
@@ -577,7 +577,7 @@
       (let [st2  (store/ingest st 'f.sweep-test
                                (str "(ns f.sweep-test (:require [clojure.test :refer [deftest is]]))\n"
                                     "(deftest every-page-has-a-path\n"
-                                    "  (is (every? :web/path (map meta (vals (ns-publics 'f.core))))))\n"))
+                                    "  (is (every? :http/path (map meta (vals (ns-publics 'f.core))))))\n"))
             sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
         (is (contains? (set (engine/affected-tests sess 'f.core 'page))
                        'f.sweep-test/every-page-has-a-path))))
@@ -585,23 +585,23 @@
     (testing "but a marker this form does NOT carry pulls in nothing"
       ;; the union is keyed on the marks this form actually has, or it degrades
       ;; to running every test that mentions any slopp keyword. The accepted
-      ;; imprecision is one notch narrower: a test merely USING `:web/path` as
+      ;; imprecision is one notch narrower: a test merely USING `:http/path` as
       ;; data is indistinguishable from one reading it off metadata, and gets
       ;; included. That costs time and never correctness, which is the trade a
       ;; union is allowed to make
       (let [st2  (store/ingest st 'f.other-test
                                (str "(ns f.other-test (:require [clojure.test :refer [deftest is]]))\n"
                                     "(deftest unrelated\n"
-                                    "  (is (= :public (:web/auth {:web/auth :public}))))\n"))
+                                    "  (is (= :public (:http/auth {:http/auth :public}))))\n"))
             sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
         (is (not (contains? (set (engine/affected-tests sess 'f.core 'page))
                             'f.other-test/unrelated))
-            ":web/auth is not a marker this form carries")))
+            ":http/auth is not a marker this form carries")))
 (testing "MENTIONING a marker is not READING one, and that is the whole cost"
       ;; The second condition, and without it this producer is unusable.
       ;; Measured over slopp's own store — the worst case, because slopp IS the
-      ;; machinery that tests markers — `:web/path` is mentioned by 74 test
-      ;; forms and read off metadata by 3; `:web/method` by 69 and 1. Only 14
+      ;; machinery that tests markers — `:http/path` is mentioned by 74 test
+      ;; forms and read off metadata by 3; `:http/method` by 69 and 1. Only 14
       ;; of 1457 test forms read metadata at all.
       ;;
       ;; Unconditioned, an endpoint edit would union in a tenth of the suite,
@@ -611,7 +611,7 @@
       (let [st2  (store/ingest st 'f.fixture-test
                                (str "(ns f.fixture-test (:require [clojure.test :refer [deftest is]]))\n"
                                     "(deftest builds-a-route-fixture\n"
-                                    "  (is (= :get (:web/method {:web/path \"/x\" :web/method :get}))))\n"))
+                                    "  (is (= :get (:http/method {:http/path \"/x\" :http/method :get}))))\n"))
             sess (atom {:store st2 :test-map {'f.core-test/traced #{'f.core/page}}})]
         (is (not (contains? (set (engine/affected-tests sess 'f.core 'page))
                             'f.fixture-test/builds-a-route-fixture))
@@ -626,7 +626,7 @@
                      (store/ingest 'g.core-test
                                    (str "(ns g.core-test (:require [clojure.test :refer [deftest is]]))\n"
                                         "(deftest traced (is (= 1 (g.core/g 1))))\n"
-                                        "(deftest elsewhere (is (= :web/path :web/path)))\n")))
+                                        "(deftest elsewhere (is (= :http/path :http/path)))\n")))
             sess (atom {:store st2 :test-map {'g.core-test/traced #{'g.core/g}}})]
         (is (= '[g.core-test/traced]
                (vec (sort (engine/affected-tests sess 'g.core 'g)))))))))

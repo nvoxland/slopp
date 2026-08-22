@@ -15,14 +15,14 @@
             [slopp.store :as store]
             [slopp.api.model :as model] [clojure.string :as str] [slopp.web.contract :as web.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
 
-(defn ^{:web/read :browse/namespaces} namespaces-read
+(defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
   [{:keys [session]} _]
   (let [st (:store @session)]
     (mapv (fn [nsx] {:ns nsx :forms (count (filter :name (store/forms st nsx)))})
           (sort (keys (:namespaces st))))))
 
-(defn ^{:web/read :browse/form-source} form-source-read
+(defn ^{:http/read :browse/form-source} form-source-read
   "Read performer: one form's source text AND its store id, or nil when the
   form is unknown.
 
@@ -36,13 +36,13 @@
     (when-let [e (store/form-named st (symbol (str ns)) (symbol (str name)))]
       {:form-id (:id e) :source (n/string (:node e))})))
 
-(defn ^{:web/read :ui/timeline} timeline-read
+(defn ^{:http/read :ui/timeline} timeline-read
   "Read performer: the reviewer landing model — milestones plus the
   working set."
   [{:keys [session]} _]
   (model/timeline session))
 
-(defn ^{:web/read :ui/change} change-read
+(defn ^{:http/read :ui/change} change-read
   "Read performer: the review of one `from..to` range, or nil when the
   range is malformed or names deltas that do not exist — the page needs
   those to be the same answer, since both are a 404."
@@ -51,7 +51,7 @@
     (when (and (seq from) (seq to))
       (model/change-view session from to))))
 
-(defn ^{:web/read :ui/form} form-view-read
+(defn ^{:http/read :ui/form} form-view-read
   "Read performer: one form's page model by ID, at the requested rendering
   FIDELITY and call-graph DEPTH. Addressed by BOTH halves of the URL — the id
   from the path, `?view=` and `?depth=` from the query — so it is declared
@@ -69,7 +69,7 @@
   (model/form-view session (str (:id path-params)) (:view query-params)
                    (or (parse-long (str (:depth query-params))) 1)))
 
-(defn ^{:web/read :browse/modules} modules-read
+(defn ^{:http/read :browse/modules} modules-read
   "Read performer: the architecture as module rows plus a drawable canvas.
 
   Named `:browse/modules` to sit beside `:browse/namespaces` — reads are
@@ -78,7 +78,7 @@
   [{:keys [session]} _]
   (model/module-index session))
 
-(defn ^{:web/read :ui/contract} contract-read
+(defn ^{:http/read :ui/contract} contract-read
   "The shape of this app's own API, for a consumer that generates a typed
   client against it.
 
@@ -136,7 +136,7 @@
      :private? (boolean (or (= "defn-" kind) (:private (meta nm))))
      :schema   (some-> (:malli/schema (meta nm)) pr-str)}))
 
-(defn ^{:web/read :browse/ns-outline} ns-outline-read
+(defn ^{:http/read :browse/ns-outline} ns-outline-read
   "Read performer: one namespace's form rows in store order — name, doc,
   shape, and the facts a consumer needs to rank them — plus the test
   namespaces covering it, or nil for an unknown namespace.
@@ -178,7 +178,7 @@
          ;; already rendering, which is the arithmetic this exists to save.
          :gaps (get (model/gaps-by-ns st (:test-map @session)) sym)}))))
 
-(defn ^{:web/read :browse/module} module-detail-read
+(defn ^{:http/read :browse/module} module-detail-read
   "Read performer: one module from the inside — its production namespaces,
   the ns→ns edges among them, the layering, and the boundary crossings; nil
   for a module with no production namespaces.
@@ -189,7 +189,7 @@
   [{:keys [session]} m]
   (model/module-detail session m))
 
-(defn ^{:web/read :browse/search} search-read
+(defn ^{:http/read :browse/search} search-read
   "Read performer: everything matching `?q=`, ranked across modules,
   namespaces and forms, cut to `?limit=`.
 

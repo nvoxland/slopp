@@ -11,10 +11,10 @@
 
 (deftest a-serve-plan-is-derived-from-the-store
   (let [src (str "(ns shop.api)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/users\"\n"
-                 "        :web/auth :authenticated\n"
+                 "(defn ^{:http/method :get :http/path \"/api/users\"\n"
+                 "        :http/auth :authenticated\n"
                  "        :malli/schema [:=> [:cat :map] :map]\n"
-                 "        :web/response :map} users \"U.\" [req] req)\n")
+                 "        :rest/response :map} users \"U.\" [req] req)\n")
         off (store/ingest (store/empty-store) 'shop.api src)
         on  (first (store/record-config-put off "capabilities" :manifest
                                             "http.enabled" "true"))
@@ -58,14 +58,14 @@
               (store/ingest 'shop.db "(ns shop.db)\n(defn fetch \"F.\" [id] id)\n")
               (store/ingest 'shop.api
                             (str "(ns shop.api (:require [shop.db :as db]))\n\n"
-                                 "(defn ^{:web/method :get :web/path \"/api/u/:id\"\n"
-                                 "        :web/auth :authenticated\n"
-                                 "        :web/reads {:u [:u/by-id [:path-params :id]]}\n"
+                                 "(defn ^{:http/method :get :http/path \"/api/u/:id\"\n"
+                                 "        :http/auth :authenticated\n"
+                                 "        :http/reads {:u [:u/by-id [:path-params :id]]}\n"
                                  "        :malli/schema [:=> [:cat :map] :map]\n"
-                                 "        :web/response :map} u \"U.\" [req] (db/fetch req))\n"))
+                                 "        :rest/response :map} u \"U.\" [req] (db/fetch req))\n"))
               (store/ingest 'shop.data
                             (str "(ns shop.data)\n"
-                                 "(defn ^{:web/read :u/by-id} by-id \"R.\" [ctx id] id)\n"))
+                                 "(defn ^{:http/read :u/by-id} by-id \"R.\" [ctx id] id)\n"))
               ;; nothing in the web surface reaches this
               (store/ingest 'shop.tools "(ns shop.tools)\n(defn cli \"C.\" [x] x)\n")
               (#(first (store/record-config-put % "capabilities" :manifest
@@ -101,7 +101,7 @@
   ;; The first cut generated four of serve!'s options — namespaces, host,
   ;; port, adapter, all of which say WHERE to serve — and dropped every one
   ;; that says what the app NEEDS. Measured on a real app: handlers taking
-  ;; `:web/deps` got nil, which either 500s or, worse, answers 200 with an
+  ;; `:http/deps` got nil, which either 500s or, worse, answers 200 with an
   ;; empty body that a client generator reads as success.
   (let [plan {:enabled? true :mode :dev
               :namespaces ['shop.api 'shop.data]
@@ -114,27 +114,27 @@
     (testing "the app's CONTEXT is built by the declared builder and passed in"
       ;; not quoted — this one is a CALL, which is why the opts can no longer
       ;; be one flat quoted map
-      (is (= '(shop.system/deps) (:web/perform-ctx (last call))) (pr-str call)))
+      (is (= '(shop.system/deps) (:http/perform-ctx (last call))) (pr-str call)))
     (testing "and its namespace is required, since nothing else need reach it"
       ;; the builder lives wherever the app's system does — it is not part of
-      ;; the served surface and so is not in :web/namespaces
+      ;; the served surface and so is not in :http/namespaces
       (is (some #{'(require (quote shop.system))} form) (pr-str form)))
     (testing "the body cap rides too — it has a capability, and the generated
               call ignoring it made that capability describe nothing"
-      (is (= 2048 (:web/max-body-bytes (last call)))))
+      (is (= 2048 (:http/max-body-bytes (last call)))))
     (testing "the address fields still cross, quoted, because a namespace
               symbol in evaluated position is read as a CLASS name"
       ;; not hypothetical: unquoted, `demo.app` came back from a real app
       ;; image as `Syntax error (ClassNotFoundException) … demo.app`
       (let [opts (last call)]
-        (is (= '(quote [shop.api shop.data]) (:web/namespaces opts)))
-        (is (= "127.0.0.1" (:web/host opts)))
-        (is (= 51234 (:web/port opts)))
-        (is (= :jdk (:web/adapter opts)))))
+        (is (= '(quote [shop.api shop.data]) (:http/namespaces opts)))
+        (is (= "127.0.0.1" (:http/host opts)))
+        (is (= 51234 (:http/port opts)))
+        (is (= :jdk (:http/adapter opts)))))
     (testing "an app that declares NO builder passes no context, rather than
               an empty map that would read as one"
       (let [none (edn/read-string (live/serve-code (dissoc plan :context-builder)))]
-        (is (not (contains? (last (second (nth none 2))) :web/perform-ctx)))))
+        (is (not (contains? (last (second (nth none 2))) :http/perform-ctx)))))
     (testing "and it still evaluates to the BOUND port — an integer, so a
               throw (which comes back as a string) cannot read as success"
       (is (= :port (first read))))))
@@ -155,7 +155,7 @@
   stands in for it. Zero deps on purpose: the child image carries only the
   store's own manifest, which for this fixture is empty.
 
-  It echoes `:web/routes` for the same reason it echoes `:web/perform-ctx`:
+  It echoes `:http/routes` for the same reason it echoes `:http/perform-ctx`:
   the managed server's failures have all been options that never crossed,
   and an option is only observably carried if something on the far side can
   be asked about it."
@@ -169,16 +169,16 @@
        "\n"
        "(defn serve! \"Bind and answer.\" [opts]\n"
        "  (let [srv (HttpServer/create\n"
-       "             (InetSocketAddress. ^String (:web/host opts)\n"
-       "                                 (int (:web/port opts))) 0)]\n"
+       "             (InetSocketAddress. ^String (:http/host opts)\n"
+       "                                 (int (:http/port opts))) 0)]\n"
        "    (.createContext srv \"/\"\n"
        "      (reify HttpHandler\n"
        "        (handle [_ x]\n"
        "          (let [b (.getBytes\n"
-       "                   (str \"ns=\" (pr-str (:web/namespaces opts))\n"
-       "                        \" ctx=\" (pr-str (:web/perform-ctx opts))\n"
-       "                        \" cap=\" (pr-str (:web/max-body-bytes opts))\n"
-       "                        \" routes=\" (pr-str (:web/routes opts))\n"
+       "                   (str \"ns=\" (pr-str (:http/namespaces opts))\n"
+       "                        \" ctx=\" (pr-str (:http/perform-ctx opts))\n"
+       "                        \" cap=\" (pr-str (:http/max-body-bytes opts))\n"
+       "                        \" routes=\" (pr-str (:http/routes opts))\n"
        "                        \" app=\" (when-let [v (resolve 'demo.app/greeting)] (v))))]\n"
        "            (.sendResponseHeaders x 200 (long (alength b)))\n"
        "            (with-open [o (.getResponseBody x)] (.write o b))))))\n"
@@ -230,11 +230,11 @@
                  (store/ingest 'demo.app
                                (str "(ns demo.app)\n\n"
                                     "(defn greeting \"G.\" [] \"hello from the store\")\n\n"
-                                    "(defn ^{:web/context true} deps \"D.\"\n"
+                                    "(defn ^{:http/context true} deps \"D.\"\n"
                                     "  [] {:built-by :the-app})\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/hi\"\n"
+                                    "(defn ^{:http/method :get :http/path \"/hi\"\n"
                                     "        :malli/schema [:=> [:cat :map] :map]\n"
-                                    "        :web/response :map} hi \"H.\" [req] {:ok true})\n"))
+                                    "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
                  (#(first (store/record-config-put % "capabilities" :manifest
                                                    "http.enabled" "true"))))
         sess (atom {})
@@ -260,7 +260,7 @@
         (testing "and the app's declared CONTEXT was BUILT and passed in —
                   the failure that made a managed server useless to the one
                   app that measured it"
-          ;; handlers receive this as :web/deps and performers as their first
+          ;; handlers receive this as :http/deps and performers as their first
           ;; argument. nil either 500s or, worse, answers 200 with an empty
           ;; body a client generator reads as success.
           (is (str/includes? body ":built-by :the-app") body))
@@ -293,9 +293,9 @@
                (store/ingest base 'demo.app
                              (str "(ns demo.app)\n\n"
                                   "(defn greeting \"G.\" [] \"" greeting "\")\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/hi\"\n"
+                                  "(defn ^{:http/method :get :http/path \"/hi\"\n"
                                   "        :malli/schema [:=> [:cat :map] :map]\n"
-                                  "        :web/response :map} hi \"H.\" [req] {:ok true})\n")))
+                                  "        :rest/response :map} hi \"H.\" [req] {:ok true})\n")))
         sess (atom {})
         body (fn [r] (:http/body (web.client/request {:http/url (:url r)
                                                   :http/timeout-ms 5000})))]
@@ -316,9 +316,9 @@
             (is (= (:url v1) (:url v2))))
           (let [red (store/ingest (app "version three") 'demo.broken
                                   (str "(ns demo.broken (:require [demo.app :as a]))\n\n"
-                                       "(defn ^{:web/method :get :web/path \"/b\"\n"
+                                       "(defn ^{:http/method :get :http/path \"/b\"\n"
                                        "        :malli/schema [:=> [:cat :map] :map]\n"
-                                       "        :web/response :map} b \"B.\"\n"
+                                       "        :rest/response :map} b \"B.\"\n"
                                        "  [req] (a/nope-not-a-thing))\n"))
                 v3  (live/refresh! sess red dir)]
             (testing "a store that will not load does NOT come up"
@@ -349,9 +349,9 @@
   (let [web (-> (store/empty-store)
                 (store/ingest 'app.api
                               (str "(ns app.api)\n\n"
-                                   "(defn ^{:web/method :get :web/path \"/hi\"\n"
+                                   "(defn ^{:http/method :get :http/path \"/hi\"\n"
                                    "        :malli/schema [:=> [:cat :map] :map]\n"
-                                   "        :web/response :map} hi \"H.\" [req] {:ok true})\n"))
+                                   "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
                 (#(first (store/record-config-put % "capabilities" :manifest
                                                   "http.enabled" "true"))))]
     (testing "a web project is managed, and the app does not have to ask —
@@ -382,9 +382,9 @@
                  (store/ingest 'slopp.web.static fake-static-src)
                  (store/ingest 'demo.app
                                (str "(ns demo.app)\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/hi\"\n"
+                                    "(defn ^{:http/method :get :http/path \"/hi\"\n"
                                     "        :malli/schema [:=> [:cat :map] :map]\n"
-                                    "        :web/response :map} hi \"H.\" [req] {:ok true})\n"))
+                                    "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
                  (#(first (store/record-config-put % "capabilities" :manifest
                                                    "http.enabled" "true"))))
         sess (atom {})
@@ -410,7 +410,7 @@
               "one code delta landed since the image was built")))
       (finally (live/stop! r)))))
 
-(deftest ^{:correspondence "the options webdev.live/serve-code GENERATES vs the :web/keys arglists of web/serve! + web/context (the destructuring IS the implementation, and the malli schemas drift from it) — plus the only exemption cross-check in the store: nothing may be both generated and declared-dropped"}
+(deftest ^{:correspondence "the options webdev.live/serve-code GENERATES vs the */keys arglists of web/serve! + web/context (the destructuring IS the implementation, and the malli schemas drift from it) — plus the only exemption cross-check in the store: nothing may be both generated and declared-dropped"}
   the-generated-serve-call-accounts-for-every-option-it-could-carry
   ;; The generalisation of `catalog-covers-every-registered-rule`, which is
   ;; the one completeness test this codebase had and the only reason the new
@@ -426,14 +426,30 @@
   ;; Derived from the ARGLISTS rather than from the malli schemas: the
   ;; destructuring IS the implementation, so it cannot drift from what the
   ;; functions actually read. The schemas can and do — `serve!`'s omits
-  ;; :web/routes and :web/max-body-bytes, which `context` destructures.
-  (let [opt-keys  (fn [v] (->> (:arglists (meta v)) first first :web/keys
-                               (map #(keyword "web" (name %))) set))
+  ;; :http/routes and :http/max-body-bytes, which `context` destructures.
+  (let [;; EVERY `*/keys` entry, with its qualifier taken from the entry rather
+        ;; than assumed. It read `:web/keys` and minted `(keyword "web" …)`,
+        ;; which was true while one prefix owned the whole vocabulary — until
+        ;; the marker wave moved options between prefixes and the assumed
+        ;; qualifier silently dropped every option that had moved. The
+        ;; vocabulary has since landed back under ONE prefix (`:http/*`), so
+        ;; that bug is no longer reproducible from today's arglists — which is
+        ;; the reason to say why this stays: it is not defending against a
+        ;; mixture that exists now, it is defending against the next split,
+        ;; and reading the entry means nothing here changes when one comes.
+        opt-keys  (fn [v]
+                    (let [m (->> (:arglists (meta v)) first first)]
+                      (set (for [[entry syms] m
+                                 :when (and (keyword? entry)
+                                            (= "keys" (name entry))
+                                            (namespace entry))
+                                 s syms]
+                             (keyword (namespace entry) (name s))))))
         ;; serve! reads the address options and hands the whole map to
         ;; context, which reads the rest. Both, because either alone is half.
         accepted  (into (opt-keys #'slopp.web/serve!) (opt-keys #'slopp.web/context))
                 ;; every option it COULD carry, so the plan has to exercise them all —
-        ;; a plan missing :static made :web/routes look ungenerated and let the
+        ;; a plan missing :static made :http/routes look ungenerated and let the
         ;; stale "deliberately dropped" entry survive the change that generated it
         plan      {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
                    :adapter :http-kit :max-body-bytes 42
@@ -574,9 +590,9 @@
         web  (-> (store/empty-store)
                  (store/ingest 'app.api
                                (str "(ns app.api)\n\n"
-                                    "(defn ^{:web/method :get :web/path \"/hi\"\n"
+                                    "(defn ^{:http/method :get :http/path \"/hi\"\n"
                                     "        :malli/schema [:=> [:cat :map] :map]\n"
-                                    "        :web/response :map} hi \"H.\" [req] {:ok true})\n"))
+                                    "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
                  (put "http.enabled" "true"))]
     (testing "an ordinary web project is not self-served, whatever else is running"
       (is (not (live/self-served? web #{'some.other.ns}))))
@@ -754,7 +770,7 @@
 
     (testing "with rest on, the context is wrapped and the namespace required"
       (let [code (live/serve-code (assoc plan :validate? true))]
-        ;; NOT ":web/wrap-context …" — the opts print as a namespaced map
+        ;; NOT ":http/wrap-context …" — the opts print as a namespaced map
         ;; (#:web{…}), so the qualifier is on the map and the key reads bare.
         ;; Matching the spelling that is actually emitted rather than the one
         ;; the source is written in.

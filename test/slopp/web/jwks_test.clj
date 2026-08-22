@@ -27,7 +27,7 @@
   ;; part being tested.
   (let [jwk  {:kid "k1" :kty "RSA" :n "bXktbW9kdWx1cw" :e "AQAB"}
         base (atom nil)
-        ctx  {:web/routes
+        ctx  {:http/routes
               [{:method :get :path "/.well-known/openid-configuration" :auth :public
                 :handler (fn [_] {:status 200 :body {:jwks_uri (str @base "/keys")}})}
                {:method :get :path "/keys" :auth :public

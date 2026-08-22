@@ -116,8 +116,8 @@
                                 (symbol (str (:to-ns r)) (str (:to-name r)))))
         ;; DECLARED LIVENESS: something outside the store references this —
         ;; `^:entry-point`, `^:unused-ok`, and the D-web declarations (a
-        ;; `:web/path` endpoint the dispatcher calls, a `:web/read` /
-        ;; `:web/effect` performer the interpreter resolves by name). The graph
+        ;; `:http/path` endpoint the dispatcher calls, a `:http/read` /
+        ;; `:http/effect` performer the interpreter resolves by name). The graph
         ;; already models every one as a `:via :declared` edge from `:external`.
         ;;
         ;; This used to be five hand-written metadata checks a few lines below,

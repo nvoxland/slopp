@@ -31,7 +31,7 @@ slopp.lab: slopp.mcp slopp.ops slopp.read slopp.store
 slopp.lintgate: slopp.edit slopp.index slopp.store
 slopp.mcp: slopp.api slopp.hub slopp.ops slopp.project slopp.read slopp.rules slopp.store slopp.sync slopp.webdev slopp.web (test)
 slopp.merge: slopp.store
-slopp.modules: slopp.edit slopp.read slopp.store slopp.ops (test) slopp.project (test) slopp.rules (test)
+slopp.modules: slopp.edit slopp.read slopp.store slopp.index (test) slopp.ops (test) slopp.project (test) slopp.rules (test)
 slopp.multiproc: slopp.read slopp.store slopp.ops (test)
 slopp.observe: slopp.ops (test)
 slopp.ops: slopp.build slopp.edit slopp.image slopp.index slopp.kernel slopp.project slopp.read slopp.rules slopp.store slopp.store (test) slopp.webdev (test)

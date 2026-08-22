@@ -6,7 +6,7 @@
 
   - **`context` and `serve!`** assemble an app from its NAMESPACES. The route
     table and both performer vocabularies derive from var METADATA
-    (`:web/path`, `:web/read`, `:web/effect`), so an app is declared where its
+    (`:http/path`, `:http/read`, `:http/effect`), so an app is declared where its
     code is rather than in a table that drifts from it. `serve!` is `context`
     plus a socket; `context` alone is what a test uses.
   - **`handle!`** runs a whole request with no socket anywhere — request map
@@ -16,7 +16,7 @@
 
   The recurring difficulty this namespace exists to manage is that **assembly
   is where a web app fails silently.** Performers resolve by VOCABULARY
-  store-wide, so a `:web/namespaces` list missing half the app assembles
+  store-wide, so a `:http/namespaces` list missing half the app assembles
   happily and then answers 500 — not 404 — at request time, with the detail
   server-side. That is the worst pairing available: the failure with no check
   is also the hardest one to read from outside. So `context` refuses an
@@ -35,18 +35,18 @@
 
 (defn enforce
   "In-handler guard for what route policy can't see (row-level authz: is
-  this the owner?): a falsey `ok?` throws ex-info carrying {:web/status
+  this the owner?): a falsey `ok?` throws ex-info carrying {:http/status
   403}, which the dispatcher maps to the 403 response. Returns true when
   ok. Deliberately NOT bang-named — a throw mutates nothing, so handlers
   using it stay analyzer-pure."
   ([ok?] (enforce ok? "forbidden"))
   ([ok? msg]
    (when-not ok?
-     (throw (ex-info (str msg) {:web/status 403})))
+     (throw (ex-info (str msg) {:http/status 403})))
    true))
 
 (defn authorized?
-  "Does the resolved identity satisfy the `:web/auth` policy? The boolean
+  "Does the resolved identity satisfy the `:http/auth` policy? The boolean
   twin of `enforce`, for handlers that BRANCH on permission rather than
   refuse (`dispatch/authorized?` — :public | :authenticated |
   [:group \"g\"] | [:any …] | [:all …])."
@@ -54,24 +54,24 @@
   (dispatch/authorized? policy identity))
 
 (defn ^{:malli/schema [:=> {:throws [[:map
-                       [:web/missing-performers [:vector :string]]
-                       [:web/namespaces [:vector :symbol]]]]} [:cat [:map
-                                  [:web/namespaces [:sequential :symbol]]
-                                  [:web/routes {:optional true} [:vector :map]]
-                                  [:web/perform-ctx {:optional true} :any]
-                                  [:web/max-body-bytes {:optional true} :int]
-                                  [:web/auth-config {:optional true} [:maybe :map]]]]
+                       [:http/missing-performers [:vector :string]]
+                       [:http/namespaces [:vector :symbol]]]]} [:cat [:map
+                                  [:http/namespaces [:sequential :symbol]]
+                                  [:http/routes {:optional true} [:vector :map]]
+                                  [:http/perform-ctx {:optional true} :any]
+                                  [:http/max-body-bytes {:optional true} :int]
+                                  [:http/auth-config {:optional true} [:maybe :map]]]]
                        [:map
-                        [:web/routes [:vector :map]]
-                        [:web/read-performers :map]
-                        [:web/effect-performers :map]]]}
+                        [:http/routes [:vector :map]]
+                        [:http/read-performers :map]
+                        [:http/effect-performers :map]]]}
   context
-  "Assemble the dispatch context from `{:web/namespaces [ns-syms]
-  :web/routes [extra rows — static mounts, programmatic routes]
-  :web/perform-ctx <passed to every performer>
-  :web/max-body-bytes <request-body cap, default 1 MiB — the http.max-body-bytes
+  "Assemble the dispatch context from `{:http/namespaces [ns-syms]
+  :http/routes [extra rows — static mounts, programmatic routes]
+  :http/perform-ctx <passed to every performer>
+  :http/max-body-bytes <request-body cap, default 1 MiB — the http.max-body-bytes
   capability an app threads in>
-  :web/auth-config <the provider config identity resolves through>}`: the
+  :http/auth-config <the provider config identity resolves through>}`: the
   route table and both performer vocabularies derive from the namespaces'
   VAR metadata — the same contract the store gates enforced at write time —
   with the explicit rows appended.
@@ -79,7 +79,7 @@
   REFUSES a context whose routes declare reads or effects no performer here
   can serve. Reads resolve by VOCABULARY store-wide, so an endpoint in one
   namespace legitimately reuses a performer declared in another — which means
-  a `:web/namespaces` list missing half the app assembles happily and answers
+  a `:http/namespaces` list missing half the app assembles happily and answers
   **500, not 404**, at request time, with the detail server-side and a
   generic error in the body. That is the worst pairing available: the failure
   with no check is also the one that is hardest to read from the outside.
@@ -88,18 +88,18 @@
   difference. Found by dogfooding: adding an `/api` namespace to this repo's
   own reviewer UI hit it immediately, because the endpoints and their read
   performers live in different namespaces on purpose."
-  [{:web/keys [namespaces routes perform-ctx max-body-bytes auth-config]}]
-  (let [ctx (cond-> {:web/routes (into (routes/from-namespaces namespaces) routes)
-                     :web/read-performers (routes/performers-from-namespaces namespaces :web/read)
-                     :web/effect-performers (routes/performers-from-namespaces namespaces :web/effect)
-                     :web/perform-ctx perform-ctx
-                     :web/max-body-bytes (or max-body-bytes 1048576)}
-              auth-config (assoc :web/auth-config auth-config))
-        missing (for [row (:web/routes ctx)
-                      [decl performers] [[:web/reads (:web/read-performers ctx)]
-                                         [:web/effects (:web/effect-performers ctx)]]
+  [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes]}]
+  (let [ctx (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
+                     :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
+                     :http/effect-performers (routes/performers-from-namespaces namespaces :http/effect)
+                     :http/perform-ctx perform-ctx
+                     :http/max-body-bytes (or max-body-bytes 1048576)}
+              auth-config (assoc :http/auth-config auth-config))
+        missing (for [row (:http/routes ctx)
+                      [decl performers] [[:http/reads (:http/read-performers ctx)]
+                                         [:http/effects (:http/effect-performers ctx)]]
                       kind (let [d (get row decl)]
-                             ;; :web/reads is {key [kind & path]}; :web/effects
+                             ;; :http/reads is {key [kind & path]}; :http/effects
                              ;; is a plain collection of kinds
                              (if (map? d) (map (comp first val) d) (seq d)))
                       :when (not (contains? performers kind))]
@@ -107,12 +107,12 @@
     (when (seq missing)
       (throw (ex-info (str "this context declares "
                            (if (next missing) "kinds that no performer" "a kind that no performer")
-                           " in :web/namespaces can serve: "
+                           " in :http/namespaces can serve: "
                            (str/join ", " (distinct missing))
                            " — a route whose performer is missing answers 500, not 404,"
                            " so the namespace list is checked here rather than at request time")
-                      {:web/missing-performers (vec (distinct missing))
-                       :web/namespaces (vec namespaces)})))
+                      {:http/missing-performers (vec (distinct missing))
+                       :http/namespaces (vec namespaces)})))
     ctx))
 
 (defn handle!
@@ -158,34 +158,33 @@
       (str "port " port " is already in use"))))
 
 (defn ^{:malli/schema [:=> {:throws [[:map
-                       [:web/missing-performers [:vector :string]]
-                       [:web/namespaces [:vector :symbol]]]
+                       [:http/missing-performers [:vector :string]]
+                       [:http/namespaces [:vector :symbol]]]
                       [:map
-                       [:web/port :int]]]} [:cat [:map
-                                  [:web/namespaces [:sequential :symbol]]
-                                  [:web/adapter {:optional true} :keyword]
-                                  [:web/host {:optional true} :string]
-                                  [:web/port {:optional true} :int]
-                                  [:web/perform-ctx {:optional true} :any]
-                                  [:web/auth-config {:optional true} [:maybe :map]]]]
+                       [:http/port :int]]]} [:cat [:map
+                                  [:http/namespaces [:sequential :symbol]]
+                                  [:http/adapter {:optional true} :keyword]
+                                  [:http/host {:optional true} :string]
+                                  [:http/port {:optional true} :int]
+                                  [:http/perform-ctx {:optional true} :any]
+                                  [:http/auth-config {:optional true} [:maybe :map]]]]
                        :map]}
   serve!
-  "Assemble `context` from the opts and serve it: `{:web/namespaces […]
-  :web/adapter :http-kit|:jdk :web/host \"127.0.0.1\" :web/port 8080
-  :web/perform-ctx …}`. :http-kit is the production default (D-web §9);
+  "Assemble `context` from the opts and serve it: `{:http/namespaces […]
+  :http/adapter :http-kit|:jdk :http/host \"127.0.0.1\" :http/port 8080
+  :http/perform-ctx …}`. :http-kit is the production default (D-web §9);
   :jdk is the zero-dep fallback. Returns the adapter's handle
-  (+ :web/adapter) for `stop!`. The adapter is a VALUE — the seam that
+  (+ :http/adapter) for `stop!`. The adapter is a VALUE — the seam that
   keeps the server library choice a config key, not a rewrite.
 
   **A taken port THROWS, and the diagnosis leads.** It is never routed around
   — an address someone was handed must not quietly become a different one, so
   there is no port hunt here in production any more than in development. What
   changed is only what the operator reads: [[bind-diagnosis]]'s sentence
-  first, the adapter's raw failure preserved behind it, and `:web/port` in the
+  first, the adapter's raw failure preserved behind it, and `:http/port` in the
   ex-data so a caller acts on the number rather than re-parsing the sentence."
-  [{:web/keys [adapter host port] :or {adapter :http-kit host "127.0.0.1" port 8080}
-    :as opts}]
-  (let ;; `:web/wrap-context` is a fn applied to the ASSEMBLED context, between
+  [{:http/keys [port host adapter] :or {adapter :http-kit host "127.0.0.1" port 8080} :as opts}]
+  (let ;; `:http/wrap-context` is a fn applied to the ASSEMBLED context, between
         ;; assembly and serving. It exists because slopp GENERATES this call for
         ;; a managed app (`webdev.live/serve-code`), so a capability that must
         ;; add something to the context has no call site of its own to add it at.
@@ -194,22 +193,22 @@
         ;; this namespace does not learn that rest exists. That is what keeps a
         ;; validation library out of an app serving HTML — the dependency runs
         ;; rest -> web and never back.
-        [ctx ((or (:web/wrap-context opts) identity) (context opts))]
+        [ctx ((or (:http/wrap-context opts) identity) (context opts))]
     (try
       (case adapter
         :http-kit (assoc (httpkit/start! ctx {:host host :port port})
-                         :web/adapter :http-kit)
+                         :http/adapter :http-kit)
         :jdk (assoc (jdk/start! ctx {:host host :port port})
-                    :web/adapter :jdk))
+                    :http/adapter :jdk))
       (catch Throwable t
         (if-let [d (bind-diagnosis port t)]
-          (throw (ex-info (str d "\n" (ex-message t)) {:web/port port} t))
+          (throw (ex-info (str d "\n" (ex-message t)) {:http/port port} t))
           (throw t))))))
 
 (defn stop!
   "Stop a `serve!` return."
   [srv]
-  (case (:web/adapter srv)
+  (case (:http/adapter srv)
     :http-kit (httpkit/stop! srv)
     :jdk (jdk/stop! srv)))
 

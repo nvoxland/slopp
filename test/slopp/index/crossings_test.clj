@@ -23,19 +23,19 @@
   ;; that keep it from becoming a document that rots are below.
   (let [st (-> (store/empty-store)
                (store/ingest 'app.api "(ns app.api)
-(defn ^{:web/method :get :web/path \"/api/x\" :web/response [:map]} x [_] {})
-(defn ^{:web/method :get :web/path \"/\" :web/client-routes [\"/app\"]} doc [_] {})
-(defn ^{:web/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])"))]
+(defn ^{:http/method :get :http/path \"/api/x\" :rest/response [:map]} x [_] {})
+(defn ^{:http/method :get :http/path \"/\" :webapp/client-routes [\"/app\"]} doc [_] {})
+(defn ^{:http/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])"))]
     (testing "every exit is listed, with the checker that covers it"
       (let [r (crossings/store-crossings st)
             by (into {} (map (juxt :kind identity)) (:crossings r))]
-        (is (contains? by :http/route))
+        (is (contains? by :http/routing))
         (is (contains? by :wire/json))
         ;; NOT `(string? (:checked-by …))`, which is what this asserted until
         ;; 2026-08-15 — and it passed for a year against a string claiming the
         ;; dispatcher validates every request and response against the schema
         ;; the client ships. It does not, and never did: `handle!` never reads
-        ;; :web/request or :web/response, and no namespace in the shipped
+        ;; :rest/request or :rest/response, and no namespace in the shipped
         ;; slopp.web family requires malli at all.
         ;;
         ;; So the test asserted the field was FILLED IN rather than that it was
@@ -85,9 +85,9 @@
 
 (deftest a-marker-that-is-deliberately-not-an-exit-must-say-so
   ;; Run against slopp's own store the moment it existed, the inventory
-  ;; reported five markers as unclassified: :web/auth, :web/client,
-  ;; :web/effectful, :rule/applies-to, :rule/severity. None is an exit —
-  ;; auth is enforced in-process, :web/client MODIFIES the generated-client
+  ;; reported five markers as unclassified: :http/auth, :rest/client,
+  ;; :http/effectful, :rule/applies-to, :rule/severity. None is an exit —
+  ;; auth is enforced in-process, :rest/client MODIFIES the generated-client
   ;; crossing rather than being one, and :rule/* is the rule registry talking
   ;; to itself.
   ;;
@@ -98,7 +98,7 @@
   ;; withdrawn.
   (let [st (store/ingest (store/empty-store) 'app.api
                          "(ns app.api)
-(defn ^{:web/method :get :web/path \"/x\" :web/auth :public :web/effectful true} x [_] {})")]
+(defn ^{:http/method :get :http/path \"/x\" :http/auth :public :http/effectful true} x [_] {})")]
     (testing "a declared-internal marker is not a finding"
       (let [r (crossings/store-crossings st)]
         (is (= [] (:unclassified r))
@@ -108,7 +108,7 @@
       (is (empty? (crossings/unclassified-markers))
           "a marker in neither list is an exit nobody decided about"))
     (testing "including a marker slopp's OWN store never uses"
-      ;; `:web/context` shipped classified nowhere. slopp declares no builder,
+      ;; `:http/context` shipped classified nowhere. slopp declares no builder,
       ;; so nothing here exercised it, and the vocabulary list above is
       ;; hand-kept — the guard-on-the-guard cannot see a marker nobody added
       ;; to it. It was found by the first APP to declare one, whose full_check
@@ -116,7 +116,7 @@
       ;; about. A standing unexplained line is how a report stops being read,
       ;; so the cost lands on every store that adopts the feature.
       (let [st (store/ingest (store/empty-store) 'app.sys
-                             "(ns app.sys)\n(defn ^{:web/context true} deps \"D.\" [] {})")]
+                             "(ns app.sys)\n(defn ^{:http/context true} deps \"D.\" [] {})")]
         (is (= [] (:unclassified (crossings/store-crossings st)))
             "a builder DECLARATION is not an exit — it names which fn builds
              the context, and the map it returns never leaves the image")))))
@@ -139,7 +139,7 @@
   ;; when :webapp/client-routing stopped being a hole.
   (let [st (store/ingest (store/empty-store) 'app.api
                          "(ns app.api)
-(defn ^{:web/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])")]
+(defn ^{:http/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])")]
     (testing "a store with an unchecked exit produces a finding to attach"
       (let [f (crossings/finding st)]
         (is (some? f))

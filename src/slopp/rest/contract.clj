@@ -29,7 +29,7 @@
   the whole of it — `{:value {:path-params … :query-params … :body …}}` with
   each carrier decoded in place, or `{:error <teaching string>}`.
 
-  **`:web/request` describes what the caller sends, not where it travels.** The
+  **`:rest/request` describes what the caller sends, not where it travels.** The
   codebase said so before a boundary existed to act on it — `api.contracts/form-request`:
   *\"a GET sends a query string for the same reason a POST sends a body\"* — and
   the generated client reads the METHOD to decide which carrier each key takes.

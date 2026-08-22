@@ -835,7 +835,7 @@
     (is (= "an element" (webapp/mount-point "an element")))))
 
 (deftest a-route-TABLE-is-data-and-the-matching-agrees-with-the-server
-  ;; Routing is data on the server half — `^{:web/path "/store/ns/:ns"}` on the
+  ;; Routing is data on the server half — `^{:http/path "/store/ns/:ns"}` on the
   ;; handler, derived by `web.routes/from-namespaces` — and a CLOSURE on the
   ;; client half. Inside one app, every check, report and derivation that exists
   ;; for one is impossible for the other, which is why `crossings` carries
@@ -890,7 +890,7 @@
   ;; The change that makes the client half checkable. A function answers only
   ;; when called, with a path, at runtime — so nothing can list an app's screens,
   ;; join a link to one, or compare the client's table to the server's. Every
-  ;; report and gate that exists for `^{:web/path}` was impossible here for
+  ;; report and gate that exists for `^{:http/path}` was impossible here for
   ;; exactly that reason, and `crossings` records the two holes it leaves.
   (let [state  (atom {})
         pushed (atom [])
@@ -1010,7 +1010,7 @@
   ;; reason for being unchecked:
   ;;
   ;;   nothing joins the three parts up. The literal is a client route, the
-  ;;   mount point arrives from the render, and a :web/client-routes fallback
+  ;;   mount point arrives from the render, and a :webapp/client-routes fallback
   ;;   answers the result — so a typo'd literal, a prefix that stopped being
   ;;   applied, and a client route nobody registered all look the same.
   ;;

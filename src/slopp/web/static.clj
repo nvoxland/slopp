@@ -39,7 +39,7 @@
   (`{\"/assets\" \"public\"}` maps GET /assets/cljs/main.js → (reader
   \"public/cljs/main.js\")); `reader` returns {:content <bytes|string>
   :content-type …} or nil. The handler answers a RAW response
-  (`:web/raw true` + :headers Content-Type) the adapters write verbatim —
+  (`:http/raw true` + :headers Content-Type) the adapters write verbatim —
   no JSON wrapping. Assets are :public.
 
   Serves a whole TREE under the prefix via the router's trailing catch-all —
@@ -71,7 +71,7 @@
                    (if-let [{:keys [content content-type]}
                             (when safe? (reader (str path-prefix "/" rel)))]
                      {:status 200
-                      :web/raw true
+                      :http/raw true
                       ;; a store-backed reader supplies no type for a blob, and a script served
                       ;; with NO Content-Type is refused by strict MIME checking — fall
                       ;; back to the same extension table the built-app reader uses

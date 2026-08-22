@@ -12,7 +12,7 @@
   privilege it exists to remove.
 
   The price of deriving from vars rather than source: schema NAMES are gone by
-  runtime — `^{:web/response contracts/timeline}` is evaluated at def time, so
+  runtime — `^{:rest/response contracts/timeline}` is evaluated at def time, so
   a schema referenced by name inlines into every endpoint that uses it. Names
   are a source-level convenience the wire never had."
   (:require [slopp.web.routes :as routes] [clojure.string :as str]))
@@ -50,7 +50,7 @@
                  :handler my.app/x :doc \"GET /x — …\"
                  :auth :public :request nil :response […]}]}`
 
-  `:auth` is the endpoint's `:web/auth` declaration verbatim — `:public`, or
+  `:auth` is the endpoint's `:http/auth` declaration verbatim — `:public`, or
   `[:group \"admin\"]`, or whatever an app declares. It is the cheapest key
   here to trust, because the auth write gate REFUSES an endpoint that declares
   none: unlike `:request`, it can never be nil-because-nobody-said, so a
@@ -81,7 +81,7 @@
   something any slopp-web app can do, not a privilege of the tool that happens
   to keep its code in a store.
 
-  Schemas travel as VALUES, not source. `^{:web/response contracts/timeline}`
+  Schemas travel as VALUES, not source. `^{:rest/response contracts/timeline}`
   is evaluated at def time, so by the time we see it the schema is already
   plain malli data — no store read, no source text on the wire, and no schema
   importer at the far end. The cost is that the author's schema NAMES are gone:
@@ -91,23 +91,23 @@
   A missing schema is published as an explicit nil rather than an absent key,
   so a consumer can tell \"no body\" from \"I don't know\".
 
-  `:web/client false` opts an endpoint OUT, the same exclusion the client
-  generator honours — an HTML page is a `:web/path` form like any other, and a
+  `:rest/client false` opts an endpoint OUT, the same exclusion the client
+  generator honours — an HTML page is a `:http/path` form like any other, and a
   typed fetch wrapper over it would be nonsense."
   [ns-syms]
   {:slopp/contract-version 1
    :endpoints
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]
-              ;; a :web/client-routes var contributes catch-all rows pointing at the SAME
+              ;; a :webapp/client-routes var contributes catch-all rows pointing at the SAME
               ;; handler; they are one endpoint, so keep the declared path only
-              :when (and (= (:path row) (str (:web/path m)))
-                         (not (false? (:web/client m))))]
+              :when (and (= (:path row) (str (:http/path m)))
+                         (not (false? (:rest/client m))))]
           {:method   (:method row)
            :path     (:path row)
            :name     (:name m)
            :handler  (symbol (str (:ns m)) (str (:name m)))
            :doc      (undent (:doc m))
-           :auth     (:web/auth m)
-           :request  (:web/request m)
-           :response (:web/response m)}))})
+           :auth     (:http/auth m)
+           :request  (:rest/request m)
+           :response (:rest/response m)}))})

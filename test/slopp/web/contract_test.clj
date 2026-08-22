@@ -9,8 +9,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.web.contract :as web.contract]))
 
-(defn ^{:web/method :get :web/path "/c/things" :web/auth :public
-        :web/response [:map [:things [:sequential :string]]]}
+(defn ^{:http/method :get :http/path "/c/things" :http/auth :public
+        :rest/response [:map [:things [:sequential :string]]]}
   c-list
   "Fixture: a typed GET — the ordinary case a published contract describes.
 
@@ -21,33 +21,33 @@
   [_req]
   {:status 200 :body {:things []}})
 
-(defn ^{:web/method :post :web/path "/c/things" :web/auth :public
-        :web/effectful true
-        :web/request [:map [:name :string]]
-        :web/response [:map [:id :int]]}
+(defn ^{:http/method :post :http/path "/c/things" :http/auth :public
+        :http/effectful true
+        :rest/request [:map [:name :string]]
+        :rest/response [:map [:id :int]]}
   c-create!
-  "Fixture: a body verb — the only shape that carries a :web/request."
+  "Fixture: a body verb — the only shape that carries a :rest/request."
   [req]
   {:status 201 :body {:id (count (str (:name (:body req))))}})
 
-(defn ^{:web/method :get :web/path "/c/page" :web/auth :public
-        :web/client false :web/response :string}
+(defn ^{:http/method :get :http/path "/c/page" :http/auth :public
+        :rest/client false :rest/response :string}
   c-page
-  "Fixture: an HTML page. A :web/path form like any other, and no part of a
+  "Fixture: an HTML page. A :http/path form like any other, and no part of a
   TYPED contract — a fetch wrapper whose (.json resp) runs against HTML is
-  nonsense, which is what :web/client false already says at the client
+  nonsense, which is what :rest/client false already says at the client
   generator."
   [_req]
   {:status 200 :body "<h1>c</h1>"})
 
-(defn ^{:web/method :get :web/path "/c/bare" :web/auth :public
-        :web/response [:map [:ok :boolean]]}
+(defn ^{:http/method :get :http/path "/c/bare" :http/auth :public
+        :rest/response [:map [:ok :boolean]]}
   c-bare
   [_req]
   {:status 200 :body {:ok true}})
 
-(defn ^{:web/method :get :web/path "/c/admin" :web/auth [:group "admin"]
-        :web/response [:map [:secret :string]]}
+(defn ^{:http/method :get :http/path "/c/admin" :http/auth [:group "admin"]
+        :rest/response [:map [:secret :string]]}
   c-admin
   "Fixture: an endpoint only a group may call — the case `:public` cannot show."
   [_req]
@@ -80,7 +80,7 @@
     (testing "the endpoint carries its NAME — the consumer names its wrapper from it"
       (is (= 'c-list (:name (by-addr [:get "/c/things"])))))
 
-    (testing ":web/client false opts an endpoint out, exactly as it does at the client generator"
+    (testing ":rest/client false opts an endpoint out, exactly as it does at the client generator"
       (is (not (contains? (set (map :path (:endpoints doc))) "/c/page"))))))
 
 (deftest an-endpoint-says-what-it-IS-and-WHERE-it-lives
@@ -138,7 +138,7 @@
   ;; the two facts a reader wants BEFORE calling anything. One of them arrived
   ;; and this one did not.
   ;;
-  ;; It is cheaper than either, because `:web/auth` is already REQUIRED — the
+  ;; It is cheaper than either, because `:http/auth` is already REQUIRED — the
   ;; `http-auth-refusal` gate refuses an endpoint that declares none. So unlike
   ;; `:request`, this key can never be nil-because-unknown, and a consumer
   ;; never has to tell "public" from "nobody said".

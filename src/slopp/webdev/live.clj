@@ -150,7 +150,7 @@
      :adapter    (capabilities/effective store "http.adapter")
      ;; what the app NEEDS, not only where it answers. Dropping these is what
      ;; made a managed server 500 on any app that took slopp's own advice to
-     ;; receive its dependencies as :web/deps.
+     ;; receive its dependencies as :http/deps.
      :max-body-bytes  (capabilities/effective store "http.max-body-bytes")
      :context-builder (rules.http/context-builder store)
      ;; the app's own assets. A UI's stylesheet and cljs bundle ARE the
@@ -212,7 +212,7 @@
   cannot be lost; an entry with no reason is an omission wearing a decision's
   clothes."
   {
-   :web/auth-config "not threaded yet. Nobody has hit it only because the apps
+   :http/auth-config "not threaded yet. Nobody has hit it only because the apps
                      measuring the managed server have no auth; one that did
                      would deny everything, or fail resolving identity"})
 
@@ -279,14 +279,14 @@
 
   **It must carry what the app NEEDS, not only where to serve.** The first
   cut generated four of `serve!`'s options — namespaces, host, port, adapter
-  — and dropped `:web/perform-ctx`, `:web/auth-config`, `:web/routes` and
-  `:web/max-body-bytes`, which is every option describing the application
+  — and dropped `:http/perform-ctx`, `:http/auth-config`, `:http/routes` and
+  `:http/max-body-bytes`, which is every option describing the application
   rather than its address. Measured on a real app: handlers taking
-  `:web/deps` received nil, which either 500s (loud) or answers 200 with an
+  `:http/deps` received nil, which either 500s (loud) or answers 200 with an
   empty body (silent, and worse — a client generated against that surface
   comes back with zero endpoints and looks successful).
 
-  `:web/perform-ctx` is a CALL to the app's `^{:web/context true}` builder,
+  `:http/perform-ctx` is a CALL to the app's `^{:http/context true}` builder,
   which is why the opts can no longer be one flat quoted map: the address
   fields stay quoted (a namespace symbol in evaluated position is read as a
   class name) and the context is evaluated.
@@ -299,14 +299,14 @@
   RUNNING image instead of booting a new one — is the change that would fix
   it, and it is not made yet.
 
-  `:web/routes` USED to be dropped for a reason that sounded structural —
+  `:http/routes` USED to be dropped for a reason that sounded structural —
   static mounts need the store's bytes and the child image has no store. It
   was not structural: `mount-routes` takes a READER, so materializing the
   bytes and handing the child a file reader serves them without the child
   ever seeing a store. That is what `materialize-static!` does, and it is why
   a UI's stylesheet and cljs bundle now reach a managed server.
 
-  **`:web/auth-config` is still dropped, and it is the last one.** An app
+  **`:http/auth-config` is still dropped, and it is the last one.** An app
   with auth gets a managed server on which identity does not resolve. There
   is no switch to turn the managed server off — [[managed?]] is derived — so
   this is a gap to close, not a case to configure around.
@@ -317,12 +317,12 @@
   [plan]
   (let [builder (:context-builder plan)
         mounts  (not-empty (:static plan))
-        opts    (cond-> {:web/namespaces (list 'quote (vec (:namespaces plan)))
-                         :web/host       (:host plan)
-                         :web/port       (:port plan)
-                         :web/adapter    (:adapter plan)}
+        opts    (cond-> {:http/namespaces (list 'quote (vec (:namespaces plan)))
+                         :http/host       (:host plan)
+                         :http/port       (:port plan)
+                         :http/adapter    (:adapter plan)}
                   (:max-body-bytes plan)
-                  (assoc :web/max-body-bytes (:max-body-bytes plan))
+                  (assoc :http/max-body-bytes (:max-body-bytes plan))
                   ;; where `rest.enabled` stops being a line in a config file.
                   ;; The app writes no serve! call, so the capability switch has
                   ;; to reach the GENERATED one or the boundary exists and
@@ -332,11 +332,11 @@
                   ;; data, and the child resolves it — which is why the require
                   ;; below is not optional.
                   (:validate? plan)
-                  (assoc :web/wrap-context 'slopp.rest/validating)
+                  (assoc :http/wrap-context 'slopp.rest/validating)
                   builder
-                  (assoc :web/perform-ctx (list builder))
+                  (assoc :http/perform-ctx (list builder))
                   mounts
-                  (assoc :web/routes
+                  (assoc :http/routes
                          (list 'slopp.web.static/mount-routes
                                mounts
                                (list 'slopp.web.static/file-or-resource-reader

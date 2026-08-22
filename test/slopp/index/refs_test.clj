@@ -160,9 +160,9 @@
   (let [st (-> (store/empty-store)
                (store/ingest 'w.api
                              (str "(ns w.api)\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/api/users/:id\"} get-user \"U.\" [req] req)\n\n"
-                                  "(defn ^{:web/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n\n"
-                                  "(defn ^{:web/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n\n"
+                                  "(defn ^{:http/method :get :http/path \"/api/users/:id\"} get-user \"U.\" [req] req)\n\n"
+                                  "(defn ^{:http/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n\n"
+                                  "(defn ^{:http/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n\n"
                                   "(defn plain \"P.\" [x] x)\n")))]
     (testing "an endpoint form is declared-invoked by the dispatcher"
       (let [r (first (refs/refs-to st 'w.api/get-user))]
@@ -470,7 +470,7 @@
 (deftest a-capability-entry-marker-declares-its-own-liveness
   ;; A `:cli/command` is called by the RUNNER, resolved by name from argv, so
   ;; no reference inside the store reaches it — exactly the position a
-  ;; `:web/path` endpoint is in with respect to the dispatcher.
+  ;; `:http/path` endpoint is in with respect to the dispatcher.
   ;;
   ;; Without a declared edge, every command an app writes reads as dead public
   ;; surface and fails the unused gate. The fix an author would reach for is

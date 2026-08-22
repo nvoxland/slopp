@@ -1,5 +1,5 @@
 (ns slopp.web.routes-test
-  "Deriving a route TABLE from var metadata — `:web/method`, `:web/path` and
+  "Deriving a route TABLE from var metadata — `:http/method`, `:http/path` and
   their neighbours — which is how a slopp app declares its surface without a
   routing DSL. The declaration and the thing declared are one var, so there is
   no table to drift.
@@ -11,37 +11,37 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.web.routes :as routes] [slopp.web.router :as router] [slopp.webapp :as webapp]))
 
-(defn ^{:web/method :get :web/path "/t/users/:id" :web/auth :public
-        :web/reads {:user [:user/by-id [:path-params :id]]}}
+(defn ^{:http/method :get :http/path "/t/users/:id" :http/auth :public
+        :http/reads {:user [:user/by-id [:path-params :id]]}}
   t-get
   "Test endpoint."
   [req]
-  {:status 200 :body (:web/reads req)})
+  {:status 200 :body (:http/reads req)})
 
-(defn ^{:web/method :post :web/path "/t/users" :web/auth :authenticated
-        :web/effects [:user/insert]
-        :web/request [:map [:name :string]]
-        :web/response [:map [:id :int]]}
+(defn ^{:http/method :post :http/path "/t/users" :http/auth :authenticated
+        :http/effects [:user/insert]
+        :rest/request [:map [:name :string]]
+        :rest/response [:map [:id :int]]}
   t-post
   "Test endpoint."
   [req]
-  {:status 201 :web/effects [[:user/insert (:body req)]]})
+  {:status 201 :http/effects [[:user/insert (:body req)]]})
 
-(defn ^{:web/effect :user/insert} t-insert!
+(defn ^{:http/effect :user/insert} t-insert!
   "Test performer."
   [ctx row]
   (swap! (:db ctx) conj row))
 
-(defn ^{:web/read :user/by-id} t-by-id
+(defn ^{:http/read :user/by-id} t-by-id
   "Test read performer."
   [_ctx id]
   {:user/id id})
 
-(defn ^{:web/method :get :web/path "/t/page" :web/auth :public}
+(defn ^{:http/method :get :http/path "/t/page" :http/auth :public}
   t-html
   "Test endpoint that serves a document and publishes no typed contract."
   [_req]
-  {:status 200 :web/raw true :body "<h1>hi</h1>"})
+  {:status 200 :http/raw true :body "<h1>hi</h1>"})
 
 (defn ^{:unused-ok "the negative control for route discovery — it exists to be PASSED OVER by the scan, so having no caller is the property under test"} plain "Not an endpoint." [x] x)
 
@@ -54,12 +54,12 @@
       (let [row (first (filter #(= "/t/users/:id" (:path %)) rows))]
         (is (= :get (:method row)))
         (is (= :public (:auth row)))
-        (is (= {:user [:user/by-id [:path-params :id]]} (:web/reads row)))
+        (is (= {:user [:user/by-id [:path-params :id]]} (:http/reads row)))
         (is (var? (:handler row)))
-        (is (= 200 (:status ((:handler row) {:web/reads :probe}))))))
+        (is (= 200 (:status ((:handler row) {:http/reads :probe}))))))
     (testing "performers index by kind, var-callable"
-      (let [effects (routes/performers-from-namespaces ['slopp.web.routes-test] :web/effect)
-            reads   (routes/performers-from-namespaces ['slopp.web.routes-test] :web/read)]
+      (let [effects (routes/performers-from-namespaces ['slopp.web.routes-test] :http/effect)
+            reads   (routes/performers-from-namespaces ['slopp.web.routes-test] :http/read)]
         (is (var? (get effects :user/insert)))
         (is (= {:user/id "7"} ((get reads :user/by-id) {} "7")))))))
 
@@ -70,7 +70,7 @@
   ;; document for EVERY unmatched path, and an app that can never 404 has no
   ;; way to tell a typo from a page.
   ;;
-  ;; So it is DECLARED, per prefix: `:web/client-routes ["/store"]` says "I am the
+  ;; So it is DECLARED, per prefix: `:webapp/client-routes ["/store"]` says "I am the
   ;; document for client routes under /store", and nothing else changes.
   (let [doc  {:handler :app :method :get :path "/" :auth :public}
         rows (concat [doc
@@ -96,7 +96,7 @@
 (deftest a-row-carries-the-CONTRACT-its-endpoint-declared
   ;; The row is what the dispatcher holds at request time, and until now it
   ;; carried the route, the policy and the effect vocabulary but NOT the
-  ;; contract — so a dispatcher could not have honoured :web/request even if it
+  ;; contract — so a dispatcher could not have honoured :rest/request even if it
   ;; had tried. That absence is why the wire crossing has been unchecked since
   ;; the day it was declared.
   ;;
@@ -106,16 +106,16 @@
   (let [rows (routes/from-namespaces ['slopp.web.routes-test])
         by   (into {} (map (juxt :path identity)) rows)]
     (testing "a typed endpoint's schemas reach the row"
-      (is (= [:map [:name :string]] (:web/request (by "/t/users"))))
-      (is (= [:map [:id :int]] (:web/response (by "/t/users")))))
+      (is (= [:map [:name :string]] (:rest/request (by "/t/users"))))
+      (is (= [:map [:id :int]] (:rest/response (by "/t/users")))))
 
     (testing "an endpoint that declares neither carries neither"
       ;; ABSENCE has to stay absence. nil is what "declared no contract" means
       ;; to the boundary, and it is the state an HTML page is now allowed to be
       ;; in — serving a document is http's business, and typing a JSON contract
       ;; is rest's.
-      (is (nil? (:web/request (by "/t/page"))) (pr-str (by "/t/page")))
-      (is (nil? (:web/response (by "/t/page")))))))
+      (is (nil? (:rest/request (by "/t/page"))) (pr-str (by "/t/page")))
+      (is (nil? (:rest/response (by "/t/page")))))))
 
 (deftest the-CLIENT-and-SERVER-matchers-agree-about-the-pattern-grammar
   ;; `slopp.webapp/match-route` and `router/match` are two implementations of one

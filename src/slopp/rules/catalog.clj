@@ -54,8 +54,8 @@
                 " which defaults to unqualified keys: the argument for bare keys assumes"
                 " context disambiguates, and an agent reads one form")}
    {:rule :http-auth-refusal :grain :form
-    :escape "declare :web/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let http.auth.default-policy govern"
-    :teach "an endpoint (:web/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until http.enabled)"}
+    :escape "declare :http/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let http.auth.default-policy govern"
+    :teach "an endpoint (:http/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until http.enabled)"}
    {:rule :http-route-collision :grain :form
     :escape "change the path or method, or extend the existing handler (query_surface lists every claim)"
     :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until http.enabled)"}
@@ -67,39 +67,39 @@
     :teach "a value-carrying control (input, select, textarea) may not take a FUNCTION handler — in a browser it receives a DOM event and headless it receives slopp's best-effort map, so a handler written against either passes every test and does nothing in production. A function on a button carries no value and is fine (inert until webapp.enabled)"}
 {:rule :unknown-marker :grain :done
     :escape "fix the spelling, or move the key into your OWN namespace if it is yours — slopp reads nothing under :web/*, :webapp/*, :cli/*, :rest/*, :rule/* or :malli/* that it does not define"
-    :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :web/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
+    :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :webapp/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
 {:rule :webapp-client-routes-are-served :grain :done
-    :escape "declare a :web/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. The prefix ROOT is not covered by the fallback — [\"/store\"] generates /store/*client-path, which needs at least one segment below it"
+    :escape "declare a :webapp/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. The prefix ROOT is not covered by the fallback — [\"/store\"] generates /store/*client-path, which needs at least one segment below it"
     :teach "a client route the server does not serve on a hard load: clicking to it works, refreshing it or opening a shared link 404s. So the app is fine for whoever is already inside it and broken for whoever was sent a url — the population that never reports it, because they assume the link was bad (inert until webapp.enabled)"}
    {:rule :webapp-request-paths-are-served :grain :done
-    :escape "fix the path to one this store declares (the finding lists them), declare the endpoint, write the WHOLE url if it is a third-party server (an absolute url is never reported), or mark the form ^{:web/external-path \"why\"} when something OUTSIDE this store serves it — a proxied API under the app's own mount point cannot be written in full, because the prefix is known only at runtime"
+    :escape "fix the path to one this store declares (the finding lists them), declare the endpoint, write the WHOLE url if it is a third-party server (an absolute url is never reported), or mark the form ^{:http/external-path \"why\"} when something OUTSIDE this store serves it — a proxied API under the app's own mount point cannot be written in full, because the prefix is known only at runtime"
     :teach "a screen's :webapp/path names an endpoint this store does not serve. It is the other half of a route reference: a literal :href is joined against the served table, and this is the same claim in a different key. The failure is quiet — the url routes, the screen renders, chrome and nav are fine, and one pane always fails to load while everything around it works, so it is reported as slowness rather than as a missing endpoint (inert until webapp.enabled)"}
    {:rule :webapp-client-code :grain :done
     :escape "move what is portable into :cljc — routing, the render loop, the listeners, load states, the performer and session loads are all declarations now, so most of a browser app has no :cljs left to be. A browser-only binding with no portable form is a real answer; there is no marker, because the finding IS the inventory and a permanently silenced entry would defeat it"
     :teach "a :cljs namespace this store still hand-writes. It never loads into the image, so it is outside the fast loop — every edit costs a compile to learn anything — and its only verification is that it COMPILED, which is a weak proxy for correctness: the only real webapp's two worst bugs both lived in one. This is the capability's goal stated as a number, arriving rather than waiting to be asked, and silent at zero (inert until webapp.enabled)"}
    {:rule :http-undeclared-effect :grain :form
-    :escape "define a performer per kind ((defn ^{:web/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
-    :teach "an endpoint's :web/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}
+    :escape "define a performer per kind ((defn ^{:http/effect <kind>} name! [ctx …] …)) or reuse an existing kind (query_surface lists the vocabulary)"
+    :teach "an endpoint's :http/effects may only name kinds a marked performer provides — a typo'd kind fails at the write, not at the first request (inert until http.enabled)"}
 {:rule :http-undeclared-context :grain :form
-    :escape "declare ONE zero-arg builder ((defn ^{:web/context true} app-context [] {…})) — an app that runs its own serve! should mark the builder it already has and call it, since two definitions of one store's context agree until one gains a key. Dial it down (config_file {path \"rules\" key \"http-undeclared-context\" value \"advisory\"}) for a context that genuinely cannot be built without arguments"
-    :teach "an endpoint reading :web/deps needs a store that declares where those deps come from — otherwise the map arrives nil, which 500s or, worse, answers 200 with an empty body, and generate_client consumes the empty one as a success (inert until http.enabled)"}
+    :escape "declare ONE zero-arg builder ((defn ^{:http/context true} app-context [] {…})) — an app that runs its own serve! should mark the builder it already has and call it, since two definitions of one store's context agree until one gains a key. Dial it down (config_file {path \"rules\" key \"http-undeclared-context\" value \"advisory\"}) for a context that genuinely cannot be built without arguments"
+    :teach "an endpoint reading :http/deps needs a store that declares where those deps come from — otherwise the map arrives nil, which 500s or, worse, answers 200 with an empty body, and generate_client consumes the empty one as a success (inert until http.enabled)"}
    {:rule :http-unsafe-get :grain :form
     :escape "make it :post/:put/:delete, drop the declared effects, or return the change as data from a non-safe endpoint"
-    :teach "a :get/:head endpoint must be SAFE — it may neither declare :web/effects kinds nor reach a mutation (inert until http.enabled)"}
+    :teach "a :get/:head endpoint must be SAFE — it may neither declare :http/effects kinds nor reach a mutation (inert until http.enabled)"}
    {:rule :http-unknown-group :grain :form
-    :escape "config_file {path \"capabilities\" key \"http.auth.groups.<name>.members\" value \"…\"} defines the group, or fix the name in :web/auth"
+    :escape "config_file {path \"capabilities\" key \"http.auth.groups.<name>.members\" value \"…\"} defines the group, or fix the name in :http/auth"
     :teach "an endpoint's [:group …] policy may only name groups the capabilities config defines — a typo'd group silently denies forever, the authz nil-pun (inert until http.enabled)"}
    {:rule :http-react-attrs :grain :form
     :escape "spell it as HTML (:class, :for), replace handlers with a link/form targeting an endpoint, or dial it down (config_file {path \"rules\" key \"http-react-attrs\" value \"advisory\"}) for a map that is genuinely not an element"
     :teach "a literal hiccup element carries a React attribute name (:className, :htmlFor, :onClick…) — browsers silently ignore unknown attributes, so it ships and does nothing (inert until http.enabled)"}
    {:rule :rest-endpoint-schema :grain :form
-    :escape "add :web/response (and :web/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"rest-endpoint-schema\" value \"advisory\"})"
-    :teach "a :web/path endpoint must declare :web/response (and :web/request on a :post/:put/:patch body method) — its contract, which the boundary VALIDATES at runtime and the generated client validates against, from the same schema. Inert until rest.enabled: serving a document is http's business, and publishing a typed API is rest's"}
+    :escape "add :rest/response (and :rest/request on a body method) to the endpoint's name metadata — a .cljc malli schema var (shareable/reusable) or an inline [:map …] for a one-off — or dial it down (config_file {path \"rules\" key \"rest-endpoint-schema\" value \"advisory\"})"
+    :teach "a :http/path endpoint must declare :rest/response (and :rest/request on a :post/:put/:patch body method) — its contract, which the boundary VALIDATES at runtime and the generated client validates against, from the same schema. Inert until rest.enabled: serving a document is http's business, and publishing a typed API is rest's"}
    {:rule :http-public-mutation :grain :done
-    :escape "tighten :web/auth, or accept it — a deliberately public write surface (signup, webhook) is legitimate and this asks per changed form"
-    :teach "a changed :public endpoint declares :web/effects kinds — a publicly writable surface should be a decision, not an omission (inert until http.enabled)"}
+    :escape "tighten :http/auth, or accept it — a deliberately public write surface (signup, webhook) is legitimate and this asks per changed form"
+    :teach "a changed :public endpoint declares :http/effects kinds — a publicly writable surface should be a decision, not an omission (inert until http.enabled)"}
    {:rule :http-dangling-route-refs :grain :done
-    :escape "fix the path, add the endpoint or static asset, declare the client ROUTE it names (:webapp/routes — a link to a declared client route resolves with no marker at all), or mark the RENDERING form ^{:web/external-path \"why\"} when something OUTSIDE this store serves it. ^:web/client-path is RETIRED: slopp prefixes in-app links and the route table is data, so the literal is joined against it rather than escaped — and external-path on an app's own path files a false statement in the one report that says what is unchecked"
+    :escape "fix the path, add the endpoint or static asset, declare the client ROUTE it names (:webapp/routes — a link to a declared client route resolves with no marker at all), or mark the RENDERING form ^{:http/external-path \"why\"} when something OUTSIDE this store serves it. ^:webapp/client-path is RETIRED: slopp prefixes in-app links and the route table is data, so the literal is joined against it rather than escaped — and external-path on an app's own path files a false statement in the one report that says what is unchecked"
     :teach "a rendered link/form targets a path no declared route or static mount serves — the UI nil-pun: it ships and 404s. Dynamic paths ride along as :info findings: reported, never status-flipping (inert until http.enabled)"}
    {:rule :schema-drift :grain :done
     :escape "fix the schema or the impl so they agree"
@@ -136,7 +136,7 @@
     :escape "^:breaking-ok on the name (a DELIBERATE break — you own telling downstream; it polices itself, a marker that narrowed nothing is reported stale), restore the arity/key/visibility, or rename for a clean break"
     :teach "a module-external fn's contract narrowed (arity/schema-key/visibility) vs the last-done baseline"}
    {:rule :ambient-state :grain :done
-    :escape "pass state in as an arg, or accept it (a legit top-level cache — and a defonce that a ^{:web/context true} builder merely REFERENCES is one, since a builder allocating its own atom hands the app a fresh one per call)"
+    :escape "pass state in as an arg, or accept it (a legit top-level cache — and a defonce that a ^{:http/context true} builder merely REFERENCES is one, since a builder allocating its own atom hands the app a fresh one per call)"
     :teach "a global (def _ (atom/ref/agent/volatile! …)) — ambient mutable state a slice can't track"}
    {:rule :assertions-never-red :grain :done
     :escape (str "break the subject with a WRITE and watch the test bounce."
@@ -174,9 +174,9 @@
                 " flagged")}
    {:rule :webapp-client-routes-consequences :grain :done
     :escape "nothing to discharge — it states a consequence once, for the episode that declared the prefix"
-    :teach (str "an endpoint gained :web/client-routes this episode: every path under the"
+    :teach (str "an endpoint gained :webapp/client-routes this episode: every path under the"
                 " declared prefix now answers 200 instead of 404, and NOT-FOUND"
-                " moves into the client. Correct, and what :web/client-routes is for — but"
+                " moves into the client. Correct, and what :webapp/client-routes is for — but"
                 " a real semantic change that no surface mentioned, and one that"
                 " two existing tests caught only by asserting the old status."
                 " The prefix ROOT is not covered by the fallback and still needs"
@@ -203,7 +203,7 @@
     :escape "call slopp.web.client/request, taking it as a PARAMETER so callers can pass client/fake-requester — or ^{:adapter \"http — why\"} on the name if this form IS the adapter (it polices itself; the value's first word names the port, so a \"postgres\" adapter is ignored rather than called stale)"
     :teach "a form reaches the network itself — a java.net.http.HttpClient, or a slurp of an http(s):// literal. Raw reaching belongs in a declared ADAPTER; everything else goes through the port and inherits its fake and its contract suite. TESTS ARE NOT EXEMPT: calling the port from a test still makes a REAL call, so an exemption would buy nothing and would carve out the one place this boilerplate breeds. Scoped to HTTP because a gate may only demand a port that EXISTS — slopp ships one for HTTP and none for files or subprocesses"}
    {:rule :http-generated-ns :grain :form
-    :escape "regenerate via generate_client after changing the ENDPOINT (its :web/request/:web/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"http-generated-ns\" value \"advisory\"})"
+    :escape "regenerate via generate_client after changing the ENDPOINT (its :rest/request/:rest/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"http-generated-ns\" value \"advisory\"})"
     :teach "a ^:generated form is generate_client's output and must not be hand-edited — regeneration rewrites the whole client namespace, so a hand edit is lost on the next generate (D-web-contracts part 2)"}
    {:rule :webapp-page-reach :grain :done
     :escape "move the view/derive code the entry reaches into a :jvm or :cljc namespace and pass the browser-shaped parts IN (:fetch, :render, a url pusher); or drop the ^:app/entry marker if this app is not meant to be reviewed headlessly"
@@ -215,7 +215,7 @@
     :escape "extract the shared inline schema to a named .cljc var both endpoints reference, or accept the duplication"
     :teach "2+ endpoints declare the same inline request/response schema — a shared shape belongs in one named .cljc schema so the server and the generated client agree (D-web-contracts part 2)"}
    {:rule :rest-unconstrained-contract :grain :done
-    :escape "name the entries — [:map [:kind :string] [:text :string]]. If the endpoint genuinely CANNOT constrain — a proxy forwarding another service's bytes — say so with ^{:web/unconstrained-ok \"why\"}, which discharges it and is itself reported as stale once the contract does constrain. Saying :any is HONEST and does not discharge: it is the reported state, not the way out"
+    :escape "name the entries — [:map [:kind :string] [:text :string]]. If the endpoint genuinely CANNOT constrain — a proxy forwarding another service's bytes — say so with ^{:rest/unconstrained-ok \"why\"}, which discharges it and is itself reported as stale once the contract does constrain. Saying :any is HONEST and does not discharge: it is the reported state, not the way out"
     :teach (str "a published endpoint declares a field that constrains nothing"
                 " — a bare :map, which accepts any map, or :any, which accepts"
                 " anything. The cost is not vagueness but a SILENT mechanism:"
@@ -229,7 +229,7 @@
                 " while saying the same thing")}
    {:rule :rest-undocumented-contract :grain :done
     :escape "add :doc (or :description) to the entry's property map — [:total {:doc \"hits before the limit is applied\"} :int] — or accept it; this is advisory and never blocks"
-    :teach (str "a published endpoint's :web/request/:web/response schema has"
+    :teach (str "a published endpoint's :rest/request/:rest/response schema has"
                 " fields that say nothing about what they ARE. A type is a"
                 " SHAPE, not a term of the contract: :total :int does not say"
                 " the number counts hits before the limit is applied, and the"

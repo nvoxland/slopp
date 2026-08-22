@@ -10,7 +10,7 @@
 
   **The move has a consequence worth stating, because it is a loosening.** An
   app that serves HTML and publishes no typed API is no longer asked to declare
-  `:web/response` on every page. That was http demanding a JSON contract from a
+  `:rest/response` on every page. That was http demanding a JSON contract from a
   document, which is the R6 mistake — one app type's vocabulary applied to
   every project. It is now rest's demand, made only of stores that opted into
   publishing an API.
@@ -25,25 +25,32 @@
             [slopp.store :as store]))
 
 (defn ^:export ^{:rule/applies-to :production} rest-endpoint-schema
-  "The API-contract gate (D-web-contracts): a `:web/path` endpoint must type out
-  its contract so the client validates against the SAME schema. `:web/response`
-  is required on EVERY endpoint; `:web/request` is required on a BODY method
+  "The API-contract gate (D-web-contracts): a `:http/path` endpoint must type out
+  its contract so the client validates against the SAME schema. `:rest/response`
+  is required on EVERY endpoint; `:rest/request` is required on a BODY method
   (`:post`/`:put`/`:patch`) — a `:get`/`:delete`/`:head` needs only a response.
   Declare a `.cljc` malli schema VAR (shareable/reusable — `some.contracts/order`)
   or an inline `[:map …]` for a one-off shape. Inert until the store opts into
   HTTP (`http.enabled`), which `edit.gates/gate-check` decides — not this gate;
   auth is checked first, so a naked endpoint still refuses
-  on `:web/auth` before this. Returns a teaching string, or nil when clean."
+  on `:http/auth` before this. Returns a teaching string, or nil when clean."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (edit.http/web-name-meta e)]
-      (when (:web/path m)
-        (let [body?   (contains? #{:post :put :patch} (:web/method m))
+      ;; BOTH spellings, for the length of the marker wave and no longer — see
+      ;; `edit.http/http-auth-refusal` for why. This gate requires a contract to
+      ;; be PRESENT, so a sweep that re-tags it is refused at the first endpoint
+      ;; unless the gate already answers to the name it is moving to.
+      (when (or (:http/path m) (:http/path m))
+        (let [body?   (contains? #{:post :put :patch}
+                                 (or (:http/method m) (:http/method m)))
+              has?    (fn [new old] (or (contains? m new) (contains? m old)))
               missing (cond-> []
-                        (not (contains? m :web/response)) (conj :web/response)
-                        (and body? (not (contains? m :web/request))) (conj :web/request))]
+                        (not (has? :rest/response :rest/response)) (conj :rest/response)
+                        (and body? (not (has? :rest/request :rest/request))) (conj :rest/request))]
           (when (seq missing)
-            (str ns-sym "/" form-name " declares the route " (pr-str (:web/path m))
+            (str ns-sym "/" form-name " declares the route "
+                 (pr-str (or (:http/path m) (:http/path m)))
                  " but no " (str/join " / " (map str missing))
                  " — every endpoint types out its contract so the client"
                  " validates against the SAME schema (D-web-contracts). Add "

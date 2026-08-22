@@ -81,13 +81,13 @@
     :ns-prefix "slopp.cli" :entry-markers [:cli/command]
     :doc "a command-line shell: argument parsing, an injected stdin/stdout/stderr, and exit codes. Without it an app's main runs with no argument or stream support at all"}
    {:capability "http" :requires []
-    :ns-prefix "slopp.web" :entry-markers [:app/entry :web/path]
+    :ns-prefix "slopp.web" :entry-markers [:app/entry :http/path]
     :doc "an HTTP server: routing, static mounts, identity and authorization. Present in every store, inert until http.enabled"}
    {:capability "rest" :requires ["http"]
-    :ns-prefix "slopp.rest" :entry-markers [:web/request :web/response]
+    :ns-prefix "slopp.rest" :entry-markers [:rest/request :rest/response]
     :doc "a typed API: request/response contracts, boundary validation, and generated clients derived from the same schemas"}
    {:capability "webapp" :requires ["http"]
-    :ns-prefix "slopp.webapp" :entry-markers [:web/client-routes]
+    :ns-prefix "slopp.webapp" :entry-markers [:webapp/client-routes]
     :doc "an application whose BROWSER owns routing and state: client-side routes, event dispatch, and the ClojureScript build. Needs serving, so it requires http — but NOT rest: a browser app may talk to a third-party API, a socket, or to no server data at all. Not the same as serving HTML, which needs only http"}])
 
 (defn ^:export capability

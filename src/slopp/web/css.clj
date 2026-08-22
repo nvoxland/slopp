@@ -82,13 +82,13 @@
 
 (defn ^:export css-response
   "Ring response serving rendered garden `rules` (a vector of rules) as
-  text/css. :web/raw true — the adapters write the body verbatim. opts may
+  text/css. :http/raw true — the adapters write the body verbatim. opts may
   carry :status and extra :headers; Content-Type stays ours. Serve it from
   a :get endpoint; a page's [:link {:href …}] to that path is then covered
   by the http-dangling-route-refs advisory like any other link."
   ([rules] (css-response rules nil))
   ([rules {:keys [status headers]}]
    {:status  (or status 200)
-    :web/raw true
+    :http/raw true
     :headers (merge headers {"Content-Type" "text/css; charset=utf-8"})
     :body    (apply render rules)}))

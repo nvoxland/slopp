@@ -17,9 +17,9 @@
 
 (deftest web-gates-guard-the-declared-surface
   (let [src (str "(ns shop.api)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/users/:id\"\n"
-                 "        :web/auth [:group \"admin\"]} get-user \"U.\" [req] req)\n\n"
-                 "(defn ^{:web/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n")
+                 "(defn ^{:http/method :get :http/path \"/api/users/:id\"\n"
+                 "        :http/auth [:group \"admin\"]} get-user \"U.\" [req] req)\n\n"
+                 "(defn ^{:http/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n")
         s0  (store/ingest (store/empty-store) 'shop.api src)
         on  (first (store/record-config-put s0 "capabilities" :manifest "http.enabled" "true"))
         land (fn [st form-src]
@@ -34,44 +34,44 @@
               a-gate-under-a-capability-is-inert-while-it-is-off covers the
               whole derived population — this keeps one concrete instance
               beside the ON cases it pairs with."
-      (let [s (land s0 "(defn ^{:web/method :get :web/path \"/x\"} bare \"B.\" [req] req)")]
+      (let [s (land s0 "(defn ^{:http/method :get :http/path \"/x\"} bare \"B.\" [req] req)")]
         (is (empty? (:refusals (gates/gate-check s 'shop.more 'bare))))
         (is (some? (edit.http/http-auth-refusal s 'shop.more 'bare))
             "the gate itself still answers — that is the seam, not a leak")))
-    (testing "http-auth-refusal: an endpoint with no :web/auth refuses with teaching"
-      (let [s (land on "(defn ^{:web/method :get :web/path \"/x\"} bare \"B.\" [req] req)")]
-        (is (re-find #":web/auth" (str (edit.http/http-auth-refusal s 'shop.more 'bare))))
+    (testing "http-auth-refusal: an endpoint with no :http/auth refuses with teaching"
+      (let [s (land on "(defn ^{:http/method :get :http/path \"/x\"} bare \"B.\" [req] req)")]
+        (is (re-find #":http/auth" (str (edit.http/http-auth-refusal s 'shop.more 'bare))))
         (testing "a declared :public discharges it — deny is the default, not the ceiling"
-          (let [s2 (land on "(defn ^{:web/method :get :web/path \"/x\" :web/auth :public} open \"O.\" [req] req)")]
+          (let [s2 (land on "(defn ^{:http/method :get :http/path \"/x\" :http/auth :public} open \"O.\" [req] req)")]
             (is (nil? (edit.http/http-auth-refusal s2 'shop.more 'open)))))
         (testing "a non-endpoint never trips it"
           (is (nil? (edit.http/http-auth-refusal s 'shop.api 'insert-user!))))))
     (testing "http-route-collision: a second claim on method+path refuses; the same form re-landing does not"
-      (let [s (land on "(defn ^{:web/method :get :web/path \"/api/users/:id\" :web/auth :public} dupe \"D.\" [req] req)")]
+      (let [s (land on "(defn ^{:http/method :get :http/path \"/api/users/:id\" :http/auth :public} dupe \"D.\" [req] req)")]
         (is (re-find #"/api/users/:id" (str (edit.http/http-route-collision s 'shop.more 'dupe))))
         (is (nil? (edit.http/http-route-collision on 'shop.api 'get-user))
             "a form is never its own collision (the re-land/replace case)")
         (testing "same path, different method, no collision"
-          (let [s2 (land on "(defn ^{:web/method :post :web/path \"/api/users/:id\" :web/auth :public} other \"O.\" [req] req)")]
+          (let [s2 (land on "(defn ^{:http/method :post :http/path \"/api/users/:id\" :http/auth :public} other \"O.\" [req] req)")]
             (is (nil? (edit.http/http-route-collision s2 'shop.more 'other)))))))
     (testing "http-undeclared-effect: a declared kind needs a marked performer"
-      (let [s (land on (str "(defn ^{:web/method :post :web/path \"/y\" :web/auth :public\n"
-                            "        :web/effects [:user/insert :email/welcome]} mk \"M.\" [req] req)"))]
+      (let [s (land on (str "(defn ^{:http/method :post :http/path \"/y\" :http/auth :public\n"
+                            "        :http/effects [:user/insert :email/welcome]} mk \"M.\" [req] req)"))]
         (is (re-find #":email/welcome" (str (edit.http/http-undeclared-effect s 'shop.more 'mk))))
         (testing "every kind covered → clean"
-          (let [s2 (land on (str "(defn ^{:web/method :post :web/path \"/y\" :web/auth :public\n"
-                                 "        :web/effects [:user/insert]} mk2 \"M.\" [req] req)"))]
+          (let [s2 (land on (str "(defn ^{:http/method :post :http/path \"/y\" :http/auth :public\n"
+                                 "        :http/effects [:user/insert]} mk2 \"M.\" [req] req)"))]
             (is (nil? (edit.http/http-undeclared-effect s2 'shop.more 'mk2)))))))
     (testing "http-unsafe-get: a GET declaring effect kinds refuses; a POST doing the same is fine"
-      (let [s (land on (str "(defn ^{:web/method :get :web/path \"/z\" :web/auth :public\n"
-                            "        :web/effects [:user/insert]} gz \"G.\" [req] req)"))]
+      (let [s (land on (str "(defn ^{:http/method :get :http/path \"/z\" :http/auth :public\n"
+                            "        :http/effects [:user/insert]} gz \"G.\" [req] req)"))]
         (is (re-find #"GET" (str (edit.http/http-unsafe-get s 'shop.more 'gz))))
-        (let [s2 (land on (str "(defn ^{:web/method :post :web/path \"/z\" :web/auth :public\n"
-                               "        :web/effects [:user/insert]} pz \"P.\" [req] req)"))]
+        (let [s2 (land on (str "(defn ^{:http/method :post :http/path \"/z\" :http/auth :public\n"
+                               "        :http/effects [:user/insert]} pz \"P.\" [req] req)"))]
           (is (nil? (edit.http/http-unsafe-get s2 'shop.more 'pz))))))
     (testing "http-unsafe-get: a GET whose handler reaches a mutation refuses"
       (let [s (land on (str "(def store-atom (atom {}))\n\n"
-                            "(defn ^{:web/method :get :web/path \"/w\" :web/auth :public} gw \"G.\" [req]\n"
+                            "(defn ^{:http/method :get :http/path \"/w\" :http/auth :public} gw \"G.\" [req]\n"
                             "  (swap! store-atom assoc :hit req))"))]
         (is (re-find #"mutation" (str (edit.http/http-unsafe-get s 'shop.more 'gw))))))))
 
@@ -83,21 +83,21 @@
         land (fn [st form-src]
                (store/ingest st 'shop.more (str "(ns shop.more)\n\n" form-src "\n")))]
     (testing "a policy naming a configured group lands"
-      (let [s (land on "(defn ^{:web/method :get :web/path \"/a\" :web/auth [:group \"admin\"]} a \"A.\" [req] req)")]
+      (let [s (land on "(defn ^{:http/method :get :http/path \"/a\" :http/auth [:group \"admin\"]} a \"A.\" [req] req)")]
         (is (nil? (edit.http/http-unknown-group s 'shop.more 'a)))))
     (testing "a typo'd group refuses with the configured vocabulary in the teaching"
-      (let [s (land on "(defn ^{:web/method :get :web/path \"/b\" :web/auth [:group \"admn\"]} b \"B.\" [req] req)")]
+      (let [s (land on "(defn ^{:http/method :get :http/path \"/b\" :http/auth [:group \"admn\"]} b \"B.\" [req] req)")]
         (is (re-find #"admn" (str (edit.http/http-unknown-group s 'shop.more 'b))))
         (is (re-find #"admin" (str (edit.http/http-unknown-group s 'shop.more 'b))))))
     (testing "composite policies are walked"
-      (let [s (land on "(defn ^{:web/method :get :web/path \"/c\" :web/auth [:any :authenticated [:group \"ghost\"]]} c \"C.\" [req] req)")]
+      (let [s (land on "(defn ^{:http/method :get :http/path \"/c\" :http/auth [:any :authenticated [:group \"ghost\"]]} c \"C.\" [req] req)")]
         (is (re-find #"ghost" (str (edit.http/http-unknown-group s 'shop.more 'c))))))
     (testing "inert until http.enabled — decided by DISPATCH, not by the gate.
               The gate answers about the form wherever it is asked; whether
               this store asked is edit.gates/gate-check's question, read off
               the namespace the gate lives in. Nine gates used to carry that
               guard themselves, which is nine places to forget it."
-      (let [s (land s0 "(defn ^{:web/method :get :web/path \"/d\" :web/auth [:group \"ghost\"]} d \"D.\" [req] req)")]
+      (let [s (land s0 "(defn ^{:http/method :get :http/path \"/d\" :http/auth [:group \"ghost\"]} d \"D.\" [req] req)")]
         (is (empty? (:refusals (gates/gate-check s 'shop.more 'd))))))))
 
 (deftest http-generated-ns-gate-refuses-hand-edits
@@ -123,8 +123,8 @@
   ;; changes, so the advisory can nudge "run generate_client" without re-rendering.
   (let [mk (fn [resp] (store/ingest (store/empty-store) 'sig.api
                                     (str "(ns sig.api)\n\n"
-                                         "(defn ^{:web/method :post :web/path \"/o\""
-                                         " :web/request sig.c/a :web/response " resp "} make [r] r)\n")))]
+                                         "(defn ^{:http/method :post :http/path \"/o\""
+                                         " :rest/request sig.c/a :rest/response " resp "} make [r] r)\n")))]
     (testing "stable for identical contracts"
       (is (= (edit.http/client-signature (mk "sig.c/a"))
              (edit.http/client-signature (mk "sig.c/a")))))
@@ -139,24 +139,24 @@
         on   (first (store/record-config-put s0 "capabilities" :manifest "http.enabled" "true"))
         with-builder (store/ingest on 'shop.sys
                                    (str "(ns shop.sys)\n\n"
-                                        "(defn ^{:web/context true} app-context \"C.\" [] {:registry :r})\n"))
+                                        "(defn ^{:http/context true} app-context \"C.\" [] {:registry :r})\n"))
         land (fn [st form-src]
                (store/ingest st 'shop.more (str "(ns shop.more)\n\n" form-src "\n")))
         endpoint (fn [body]
-                   (str "(defn ^{:web/method :get :web/path \"/x\" :web/auth :public} h \"H.\" [req] "
+                   (str "(defn ^{:http/method :get :http/path \"/x\" :http/auth :public} h \"H.\" [req] "
                         body ")"))]
     (testing "OFF: dispatch runs no http gate while http.enabled is absent —
               the gate itself still answers about the form, which is the seam"
-      (let [s (land s0 (endpoint "(:web/deps req)"))]
+      (let [s (land s0 (endpoint "(:http/deps req)"))]
         (is (empty? (:refusals (gates/gate-check s 'shop.more 'h))))))
-    (testing "an endpoint reading :web/deps with no builder refuses, naming the marker"
-      (let [teach (str (edit.http/http-undeclared-context (land on (endpoint "(:web/deps req)"))
+    (testing "an endpoint reading :http/deps with no builder refuses, naming the marker"
+      (let [teach (str (edit.http/http-undeclared-context (land on (endpoint "(:http/deps req)"))
                                                        'shop.more 'h))]
         (testing "the fix is a LITERAL FORM, not a description of one — cold-read
                   evidence says that is what made it actionable without the skill:
                   the marker spelling, the arity, defn-not-def and the return
                   shape all come off it at once"
-          (is (re-find #"\(defn \^\{:web/context true\}" teach) teach)
+          (is (re-find #"\(defn \^\{:http/context true\}" teach) teach)
           (is (re-find #"ONE" teach) "and that a second is not allowed"))
         (testing "it does NOT argue that the context cannot be a performer"
           ;; the right sentence in the wrong room. It answers a DESIGN question
@@ -173,17 +173,17 @@
           ;; voice, which is the shape that keeps costing us.
           (is (not (re-find #"done point|managed server" teach)) teach)
           (is (re-find #"new each time" teach) teach))))
-    (testing ":web/keys destructuring is the same read"
-      (let [s (land on (str "(defn ^{:web/method :get :web/path \"/x\" :web/auth :public} h \"H.\"\n"
-                            "  [{:web/keys [deps]}] deps)"))]
-        (is (re-find #":web/context" (str (edit.http/http-undeclared-context s 'shop.more 'h))))))
+    (testing ":http/keys destructuring is the same read"
+      (let [s (land on (str "(defn ^{:http/method :get :http/path \"/x\" :http/auth :public} h \"H.\"\n"
+                            "  [{:http/keys [deps]}] deps)"))]
+        (is (re-find #":http/context" (str (edit.http/http-undeclared-context s 'shop.more 'h))))))
     (testing "a declared builder discharges it"
-      (is (nil? (edit.http/http-undeclared-context (land with-builder (endpoint "(:web/deps req)"))
+      (is (nil? (edit.http/http-undeclared-context (land with-builder (endpoint "(:http/deps req)"))
                                                 'shop.more 'h))))
     (testing "an endpoint that never reads deps is not asked to declare a source"
       (is (nil? (edit.http/http-undeclared-context (land on (endpoint "req")) 'shop.more 'h))))
-    (testing "a NON-endpoint naming :web/deps is the framework's own dispatcher, not an app handler"
-      (let [s (land on "(defn dispatch! \"D.\" [ctx req] (assoc req :web/deps (:web/perform-ctx ctx)))")]
+    (testing "a NON-endpoint naming :http/deps is the framework's own dispatcher, not an app handler"
+      (let [s (land on "(defn dispatch! \"D.\" [ctx req] (assoc req :http/deps (:http/perform-ctx ctx)))")]
         (is (nil? (edit.http/http-undeclared-context s 'shop.more 'dispatch!)))))))
 
 (deftest ^{:correspondence "every gate in edit.gates/per-form-write-gates implemented under slopp.edit.<capability> vs that capability being off — the guard each gate used to write for itself"}
@@ -216,12 +216,12 @@
                        (last (str/split ns-sym #"\.")))]
               :when (and c (:requires c))]
           {:capability (:capability c) :gate (:name (meta v))})
-        ;; a :web/path endpoint declaring NO auth policy: the exact shape
+        ;; a :http/path endpoint declaring NO auth policy: the exact shape
         ;; http-auth-refusal exists to refuse, so an opted-out store LANDING it
         ;; is the property under test rather than an absence of anything to
         ;; trip over.
         src   (str "(ns shop.api)\n\n"
-                   "(defn ^{:web/method :get :web/path \"/x\"} x \"X.\" [req] req)\n")
+                   "(defn ^{:http/method :get :http/path \"/x\"} x \"X.\" [req] req)\n")
         naked (store/ingest (store/empty-store) 'shop.api src)
         on    (first (store/record-config-put naked "capabilities" :manifest
                                               "http.enabled" "true"))]
@@ -240,8 +240,8 @@
       ;; the other half, and it is what stops this passing by breaking dispatch
       ;; altogether — a gate that never runs anywhere satisfies the case above.
       (let [{:keys [refuse]} (gates/gate-check on 'shop.api 'x)]
-        (is (some? refuse) "an endpoint with no :web/auth must refuse once http is enabled")
-        (is (re-find #":web/auth" (str refuse)) (pr-str refuse))))
+        (is (some? refuse) "an endpoint with no :http/auth must refuse once http is enabled")
+        (is (re-find #":http/auth" (str refuse)) (pr-str refuse))))
     (testing "a capability gate still answers about the FORM when asked directly"
       ;; the seam this change creates, stated so it is not mistaken for a bug:
       ;; the gate is a pure question about the candidate form, and only

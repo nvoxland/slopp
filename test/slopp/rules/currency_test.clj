@@ -27,7 +27,7 @@
        "(def env-tools [:a])\n\n"
        "(def tools (vec (concat env-tools [:b])))\n\n"
        "(def schema [:map [:x :string]])\n\n"
-       "(defn ^{:web/response schema} endpoint \"E.\" [req] req)\n\n"
+       "(defn ^{:rest/response schema} endpoint \"E.\" [req] req)\n\n"
        "(defn plain \"P.\" [x] (inc x))\n"))
 
 (defn- ids [st]
@@ -73,7 +73,7 @@
         "naming what it is behind is the difference between a warning and a fix — QUALIFIED, because it is usually in another namespace")))
 
 (deftest evaluated-var-metadata-goes-stale-the-same-way
-  ;; friction 17: `^{:web/response schema}` captured schema's VALUE at load, so
+  ;; friction 17: `^{:rest/response schema}` captured schema's VALUE at load, so
   ;; editing the schema left the published contract advertising the old shape
   ;; while the store, the tests and done all agreed it had changed.
   (let [st    (store/ingest (store/empty-store) 'app.core src)

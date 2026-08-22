@@ -92,13 +92,13 @@
   (str (h/html {:mode :html} (prepare hiccup))))
 
 (defn ^:export html-response
-  "Ring response serving rendered hiccup as text/html. :web/raw true — both
+  "Ring response serving rendered hiccup as text/html. :http/raw true — both
   adapters write the body verbatim. opts may carry :status and extra
   :headers; Content-Type stays ours."
   ([hiccup] (html-response hiccup nil))
   ([hiccup {:keys [status headers]}]
    {:status  (or status 200)
-    :web/raw true
+    :http/raw true
     :headers (merge headers {"Content-Type" "text/html; charset=utf-8"})
     :body    (render hiccup)}))
 

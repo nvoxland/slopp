@@ -65,7 +65,7 @@
                said no are different facts, and only one of them is this")))
       (finally (server/stop!))))
   (testing "a port someone else holds is reported as a sentence, not a stack trace"
-    (let [held (slopp.web/serve! {:web/namespaces [] :web/port 0})]
+    (let [held (slopp.web/serve! {:http/namespaces [] :http/port 0})]
       (try
         (let [r (server/serve! (atom {:store (store/empty-store)}) (:port held))]
           ;; the same sentence every listener uses — slopp.web/bind-diagnosis writes
@@ -161,7 +161,7 @@
   ;; metadata, so this needs no store read — which matters, because nothing
   ;; in this tier can open slopp's own store.
   (let [declares? (fn [nsx] (some #(let [m (meta %)]
-                                     (or (:web/path m) (:web/read m)))
+                                     (or (:http/path m) (:http/read m)))
                                   (vals (ns-publics nsx))))
         candidates (->> (all-ns) (map ns-name)
                         ;; the prefix is DATA — a rename rewrites code and
@@ -183,7 +183,7 @@
       (is (seq derived) (str "scanned " (count candidates) " namespaces")))
     (testing "and the list is exactly what declares an endpoint or a read performer"
       (is (= derived listed)
-          (str "declares :web/path or :web/read but is not served: "
+          (str "declares :http/path or :http/read but is not served: "
                (set/difference derived listed)
                " / served but declares neither: "
                (set/difference listed derived))))))

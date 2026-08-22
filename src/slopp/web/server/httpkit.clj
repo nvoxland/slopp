@@ -7,7 +7,7 @@
   turns a live request into the ring-shaped map `dispatch/handle!` expects
   (JSON body decoded to DATA, because no handler should ever see an
   InputStream), calls it, and encodes what comes back: JSON, unless the
-  response says `:web/raw`, in which case the body is written verbatim with
+  response says `:http/raw`, in which case the body is written verbatim with
   the headers it carries.
 
   Everything ABOVE this line is pure and testable without a port; everything
@@ -16,7 +16,7 @@
   rather than a rewrite. `slopp.web.server.jdk` is the same contract with no
   dependency, and the two agreeing is the point.
 
-  Body size is capped from the context (`:web/max-body-bytes`, 1 MiB by
+  Body size is capped from the context (`:http/max-body-bytes`, 1 MiB by
   default) and answered 413, because an unbounded slurp is bounded only by
   heap — the same guard, from the same shared reader, in both adapters."
   (:require [slopp.web.dispatch :as dispatch]
@@ -43,9 +43,9 @@
   production default adapter (ring-compatible, WebSocket-capable,
   native-image proven). Port 0 binds ephemeral; the returned
   {:server :port} carries the real one. `stop!` takes the return. Requests
-  whose body exceeds `ctx`'s :web/max-body-bytes get a 413 (review W8)."
+  whose body exceeds `ctx`'s :http/max-body-bytes get a 413 (review W8)."
   [ctx {:keys [host port] :or {host "127.0.0.1" port 8080}}]
-  (let [max-body (:web/max-body-bytes ctx 1048576)
+  (let [max-body (:http/max-body-bytes ctx 1048576)
         server (hk/run-server
                 (fn [ring-req]
                   (let [req (try (request-map ring-req max-body)
@@ -57,7 +57,7 @@
                       (let [resp (try (dispatch/handle! ctx req)
                                       (catch Exception _
                                         {:status 500 :body {:error "internal server error"}}))]
-                        (if (:web/raw resp)
+                        (if (:http/raw resp)
                           {:status (or (:status resp) 200)
                            :headers (:headers resp {})
                            :body (:body resp)}

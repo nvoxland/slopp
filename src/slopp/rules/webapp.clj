@@ -25,7 +25,7 @@
             [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http]))
 
 (defn webapp-client-routes-consequences-check
-  "Done-advisory: an endpoint gained `:web/client-routes` this episode — state what that
+  "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
    changed, once. Inert until the store opts into `webapp`.
 
    Declaring a client-routed prefix is the single biggest behavioural change
@@ -35,7 +35,7 @@
    fetches, gets its own 404, and renders a not-found screen. **The HTTP status
    for every path under that prefix changed from 404 to 200.**
 
-   That is correct — it is what `:web/client-routes` is FOR — but it is a real semantic
+   That is correct — it is what `:webapp/client-routes` is FOR — but it is a real semantic
    change that only surfaced here because two existing tests happened to assert
    the old status.
 
@@ -57,7 +57,7 @@
           baseline (->> ds (filter #(= :done (:op %))) last :id)
           old-srcs (when baseline (store/sources-at st* baseline))
           declares-client-routes?     (fn [form] (when (and (seq? form) (symbol? (second form)))
-                                (:web/client-routes (meta (second form)))))]
+                                (:webapp/client-routes (meta (second form)))))]
       (vec (for [fid changed
                  :let [e (store/form-by-id st* fid)]
                  :when (and e (:name e))
@@ -137,7 +137,7 @@
   browser app.
 
   **The value that retires an escape hatch.** `rules.http/ui-route-refs` skips
-  any form marked `^:web/client-path`, and its docstring says exactly why:
+  any form marked `^:webapp/client-path`, and its docstring says exactly why:
   *teaching the check to SEE the prefixing is not possible in general, because
   the base arrives through an ordinary function call.* That stopped being true
   when the framework took over the prefixing — a literal `:href` in a view is now
@@ -211,14 +211,14 @@
                        :when (:name e)
                        :let [m (store/form-name-meta e)]]
                    m)
-        prefixes (mapcat :web/client-routes marked)
+        prefixes (mapcat :webapp/client-routes marked)
         ;; every path the server declares outright
-        served   (set (map str (keep :web/path marked)))
+        served   (set (map str (keep :http/path marked)))
         ;; the mount is the document's own path, and the document is the form
         ;; carrying the prefixes — the one unambiguous way to name it
         mounts   (for [m marked
-                       :when (and (seq (:web/client-routes m)) (:web/path m))]
-                   (str (:web/path m)))
+                       :when (and (seq (:webapp/client-routes m)) (:http/path m))]
+                   (str (:http/path m)))
         explicit? (fn [route]
                     (boolean (some #(or (contains? served (str % route))
                                         (and (= "/" route) (contains? served %)))
@@ -242,18 +242,18 @@
     (vec (sort (remove #(or (below? %) (explicit? %)) (client-routes st))))))
 
 (defn ^{:export "slopp.rules"} derived-client-route-prefixes
-  "The `:web/client-routes` prefixes this store's client table IMPLIES, sorted —
+  "The `:webapp/client-routes` prefixes this store's client table IMPLIES, sorted —
   `[]` when no form declares any.
 
   **The mount point turned out not to be a deployment fact.** A prefix is in
   SERVER space (`/p/:slug/store`), a client route is in APP space
   (`/store/form/:id`), and where the app is mounted looked like a property of how
-  it is served. It is not — **the document's own `:web/path` IS the mount
+  it is served. It is not — **the document's own `:http/path` IS the mount
   point**, declared beside the prefixes an author keeps by hand:
 
-      the document's :web/path  +  each top-level segment of the client table
+      the document's :http/path  +  each top-level segment of the client table
 
-  **The document is the form carrying `:web/client-routes`**, and identifying it
+  **The document is the form carrying `:webapp/client-routes`**, and identifying it
   any other way is wrong in a store that separates its forms. The first cut took
   the alphabetically-first endpoint path, which was the same form in slopp's own
   fixtures and `/` in the first real store — so every derived prefix came back
@@ -280,9 +280,9 @@
                                 e   (store/forms st nsx)
                                 :when (:name e)
                                 :let [m (store/form-name-meta e)]
-                                :when (and (seq (:web/client-routes m))
-                                           (:web/path m))]
-                            (str (:web/path m)))))
+                                :when (and (seq (:webapp/client-routes m))
+                                           (:http/path m))]
+                            (str (:http/path m)))))
         tops (distinct (keep (comp first segs) (client-routes st)))]
     (if doc
       (vec (sort (map #(str doc "/" %) tops)))
@@ -316,7 +316,7 @@
       (vec (for [route (client-routes-unserved st*)]
              {:route route
               ;; the finding carries the ANSWER, not just the complaint: the
-              ;; prefixes are computable from the document's own :web/path plus
+              ;; prefixes are computable from the document's own :http/path plus
               ;; the client table, so there is no reason to make an author work
               ;; out what to paste
               :declare want
@@ -327,7 +327,7 @@
                           " was sent a url."
                           (when (seq want)
                             (str " Your client table and this document's own"
-                                 " path imply :web/client-routes "
+                                 " path imply :webapp/client-routes "
                                  (pr-str want) "."))
                           " Note the prefix ROOT is not covered by the fallback:"
                           " [\"/store\"] generates /store/*client-path, which"
@@ -358,7 +358,7 @@
                 (distinct
                  (for [nsx  (keys (:namespaces st))
                        e    (store/forms st nsx)
-                       ;; `^{:web/external-path "why"}` skips a form WHOLE, the
+                       ;; `^{:http/external-path "why"}` skips a form WHOLE, the
                        ;; same marker `rules.http/ui-route-refs` honours for a
                        ;; link and for the same question. It is the escape the
                        ;; absolute-url one cannot cover: an API proxied under
@@ -367,7 +367,7 @@
                        ;; prefix is only known at runtime. Without it that app
                        ;; carries a finding per screen that nothing can clear,
                        ;; which is how a reader learns to skim the whole list
-                       :when (not (:web/external-path (store/form-name-meta e)))
+                       :when (not (:http/external-path (store/form-name-meta e)))
                        :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
                        node (tree-seq coll? seq sx)
                        :when (map? node)
@@ -596,7 +596,7 @@
   every screen asks for something that exists.
 
   **The join is EQUALITY, not a route match.** A request path is a PATTERN in
-  the same grammar as `:web/path` — `/api/things/:id`, with its captures
+  the same grammar as `:http/path` — `/api/things/:id`, with its captures
   supplied separately as `:webapp/path-params` — so asking the router to match
   it as though it were a concrete url would answer nil for every parameterized
   endpoint in the store and report a working app as entirely broken. The two
@@ -604,7 +604,7 @@
 
   **An ABSOLUTE url is left alone.** An app calling a third-party API declares a
   whole url, and reporting those would make this noise on every store that talks
-  to anything. Same discipline `:web/external-path` states for links: this
+  to anything. Same discipline `:http/external-path` states for links: this
   answers for what THIS store serves and says nothing about anyone else's
   server.
 
@@ -623,7 +623,7 @@
   `rules.http` already depends on this namespace for the client route table, so
   the join has to be made from here or not at all."
   [st]
-  (let [served (into #{} (keep #(:web/path (:meta %))) (edit.http/web-endpoint-rows st))]
+  (let [served (into #{} (keep #(:http/path (:meta %))) (edit.http/web-endpoint-rows st))]
     (vec (remove (fn [{:keys [path from-origin]}]
                    (or (contains? served path)
                        (str/includes? path "://")
@@ -660,7 +660,7 @@
   declarations that drift apart are usually not edited together."
   [_session st* _changed]
   (when (capabilities/enabled? st* "webapp")
-    (let [served (sort (distinct (keep #(:web/path (:meta %))
+    (let [served (sort (distinct (keep #(:http/path (:meta %))
                                        (edit.http/web-endpoint-rows st*))))]
       (vec (for [{:keys [path form]} (request-paths-unserved st*)]
              {:path path
@@ -682,7 +682,7 @@
                           " this store serves — a proxied API under this app's"
                           " own mount point, which cannot be written in full"
                           " because the prefix is known only at runtime — is"
-                          " ^{:web/external-path \"why\"} on the form, the same"
+                          " ^{:http/external-path \"why\"} on the form, the same"
                           " marker a link takes.")})))))
 
 (defn webapp-client-code-check

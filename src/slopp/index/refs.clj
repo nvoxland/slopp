@@ -145,8 +145,8 @@
 
    KEEP-ALIVE markers keep a var reachable FROM the outside world —
    ^:entry-point (invoked via CLI/wire/eval injection), ^:unused-ok
-   (deliberately uncalled), and the CAPABILITY declarations: a `:web/path`
-   ENDPOINT (the dispatcher calls it), a `:web/effect` / `:web/read`
+   (deliberately uncalled), and the CAPABILITY declarations: a `:http/path`
+   ENDPOINT (the dispatcher calls it), a `:http/effect` / `:http/read`
    PERFORMER (the effect interpreter / reads loader calls it), and a
    `:cli/command` (the cli runner resolves it by name from argv). `:from-ns`
    is `:external`; `:marker` preserves WHICH dial so the stale check can
@@ -173,9 +173,9 @@
                m (when (and (seq? s) (symbol? (second s))) (meta (second s)))
                marker (cond (:entry-point m)  :entry-point
                             (:unused-ok m)    :unused-ok
-                            (:web/path m)     :web-endpoint
-                            (:web/effect m)   :web-effect
-                            (:web/read m)     :web-read
+                            (:http/path m)     :web-endpoint
+                            (:http/effect m)   :web-effect
+                            (:http/read m)     :web-read
                             (:cli/command m)  :cli-command
                             :else nil)]
          :when marker]

@@ -626,7 +626,7 @@
   ;; friction 17 is friction 1 wearing different clothes, and the root-cause
   ;; fix closed it without knowing about it — which is the evidence they were
   ;; one problem. An endpoint declares its shape as var METADATA,
-  ;; `^{:web/response timeline}`, and var metadata is evaluated when the form
+  ;; `^{:rest/response timeline}`, and var metadata is evaluated when the form
   ;; loads. Editing the schema used to leave the endpoint publishing the old
   ;; one, so `/api/contracts` served a schema the store no longer had and a
   ;; client generated from it was wrong in a way that only appeared later, as a
@@ -640,14 +640,14 @@
       (ops/ingest! sess 'sc.api
                    (str "(ns sc.api)\n"
                         "(def timeline [:map [:n :int]])\n"
-                        "(defn ^{:web/response timeline} ^:unused-ok handler [_] {:n 1})\n"))
+                        "(defn ^{:rest/response timeline} ^:unused-ok handler [_] {:n 1})\n"))
       (let [r (ops/edit-replace! sess 'sc.api 'timeline
                                  "(def timeline [:map [:n :int] [:extra :string]])"
                                  :prompt "add a field to the response")]
         (is (nil? (:error r)) (pr-str r))
         (is (= '[sc.api] (:image-reloaded r)) (pr-str r)))
       (is (= [[:map [:n :int] [:extra :string]]]
-             (ops/query-eval sess "(:web/response (meta #'sc.api/handler))"))
+             (ops/query-eval sess "(:rest/response (meta #'sc.api/handler))"))
           "the endpoint publishes the schema the store now has")
       (testing "and ACROSS namespaces, which is the real topology"
         ;; slopp's own shape: schemas in `<app>.contracts`, endpoints in
@@ -659,7 +659,7 @@
         (ops/ingest! sess 'sc.core.api
                      (str "(ns sc.core.api"
                           " (:require [sc.core.contracts :as c]))\n"
-                          "(defn ^{:web/response c/beat} ^:unused-ok heartbeat [_]"
+                          "(defn ^{:rest/response c/beat} ^:unused-ok heartbeat [_]"
                           " {:ms 1})\n"))
         (let [r (ops/edit-replace! sess 'sc.core.contracts 'beat
                                    "(def ^:export beat [:map [:ms :int] [:at :int]])"
@@ -669,7 +669,7 @@
               (str "the OTHER namespace is what had to be reloaded: " (pr-str r))))
         (is (= [[:map [:ms :int] [:at :int]]]
                (ops/query-eval sess
-                               "(:web/response (meta #'sc.core.api/heartbeat))"))))
+                               "(:rest/response (meta #'sc.core.api/heartbeat))"))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-spec-may-drive-an-arity-that-does-not-exist-yet

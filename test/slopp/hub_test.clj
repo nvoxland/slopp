@@ -41,8 +41,8 @@
   ;; is the observable proof the project took the number from the wire.
   (let [seen (atom [])
         srv  (slopp.web/serve!
-              {:web/namespaces []
-               :web/routes
+              {:http/namespaces []
+               :http/routes
                [{:method :post :path "/api/register" :auth :public
                  :handler (fn [req]
                             (swap! seen conj [:register (:name (:body req))])
@@ -51,7 +51,7 @@
                  :handler (fn [_]
                             (swap! seen conj [:deregister])
                             {:status 200 :body {:dropped true}})}]
-               :web/host "127.0.0.1" :web/port 0})
+               :http/host "127.0.0.1" :http/port 0})
         url  (str "http://127.0.0.1:" (:port srv) "/")
         me   {:name "toy" :dir "/w/toy" :url "http://127.0.0.1:1/"
               :pid 7 :version "0.1.0" :status "idle"}
@@ -129,13 +129,13 @@
   ;; go away too, or this is the same stale-claim bug one layer along.
   (let [answers (atom [])
         srv (slopp.web/serve!
-             {:web/namespaces []
-              :web/routes
+             {:http/namespaces []
+              :http/routes
               [{:method :post :path "/api/register" :auth :public
                 :handler (fn [_] {:status 200 :body {:slug "toy" :beat-ms 30}})}
                {:method :post :path "/api/deregister" :auth :public
                 :handler (fn [_] {:status 200 :body {:dropped true}})}]
-              :web/host "127.0.0.1" :web/port 0})
+              :http/host "127.0.0.1" :http/port 0})
         url (str "http://127.0.0.1:" (:port srv) "/")
         me  {:name "toy" :dir "/w/toy" :url "http://127.0.0.1:1/"}
         wait (fn [pred]
@@ -179,10 +179,10 @@
   ;; swallow the 400, there is no story at all.
   (let [refuse (fn [status body]
                  (slopp.web/serve!
-                  {:web/namespaces []
-                   :web/routes [{:method :post :path "/api/register" :auth :public
+                  {:http/namespaces []
+                   :http/routes [{:method :post :path "/api/register" :auth :public
                                  :handler (fn [_] {:status status :body body})}]
-                   :web/host "127.0.0.1" :web/port 0}))
+                   :http/host "127.0.0.1" :http/port 0}))
         answers (atom [])
         wait (fn [pred]
                (loop [n 0]
@@ -216,7 +216,7 @@
     (testing "an ABSENT hub is still a quiet nil — nobody has to run one"
       (reset! answers [])
       (let [;; NOT an ephemeral port opened-and-closed: that races. A sibling
-            ;; `web/serve!` with {:web/port 0} in the same shard JVM can be
+            ;; `web/serve!` with {:http/port 0} in the same shard JVM can be
             ;; handed the port we just freed, and the beat then gets a real
             ;; 404 (`{:error "no route"}` — our own server answering) instead
             ;; of a refused connection, which is the OPPOSITE of what this

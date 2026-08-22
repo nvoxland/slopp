@@ -170,7 +170,7 @@
   | the entry returned | derived by |
   |---|---|
   | a webapp DECLARATION (`:webapp/routes`) | `slopp.webapp/driver` over its wiring |
-  | a served CTX (`:web/routes`) | `slopp.web/driver` |
+  | a served CTX (`:http/routes`) | `slopp.web/driver` |
   | the contract already | itself |
 
   **There is exactly one of these, and it is public, because two would drift.**
@@ -195,7 +195,7 @@
   (cond
     (not (map? entry))
     (throw (ex-info (str "an app entry returns a MAP — a webapp declaration"
-                         " (:webapp/routes), a served ctx (:web/routes), or a"
+                         " (:webapp/routes), a served ctx (:http/routes), or a"
                          " page ({:state :view}) — got " (pr-str entry))
                     {:got entry}))
 
@@ -203,7 +203,7 @@
     (let [wire ((requiring-resolve 'slopp.webapp/wiring) entry)]
       ((requiring-resolve 'slopp.webapp/driver) wire))
 
-    (:web/routes entry)
+    (:http/routes entry)
     ((requiring-resolve 'slopp.web/driver) entry)
 
     ;; already the contract — :view or :document is what produces a screen, and
@@ -214,7 +214,7 @@
     :else
     (throw (ex-info (str "this entry is none of the three shapes an app can"
                          " return: no :webapp/routes (a browser app), no"
-                         " :web/routes (a served app), and no :view or"
+                         " :http/routes (a served app), and no :view or"
                          " :document (a page wired by hand). Keys: "
                          (pr-str (vec (sort (map str (keys entry))))))
                     {:keys (vec (keys entry))}))))
@@ -288,13 +288,13 @@
   ;; a served ctx is the one wrong shape worth naming rather than reporting as
   ;; unknown keys: its author did not typo anything, they handed over the map
   ;; this used to take, and the answer is one call away
-  (when (:web/routes app)
+  (when (:http/routes app)
     (throw (ex-info (str "this is a served CONTEXT, not a page — wrap it:"
                          " (open! (slopp.web/driver ctx)). The fake browser no"
                          " longer performs http's requests itself, so that the"
                          " same contract can be produced from a browser app's"
                          " wiring by slopp.webapp/driver.")
-                    {:unknown [:web/routes]})))
+                    {:unknown [:http/routes]})))
   (let [allowed #{:state :view :navigate :dispatch :boot :document}
         unknown (remove allowed (keys app))]
     (when (seq unknown)
@@ -374,7 +374,7 @@
     function, deliberately not a router: which screen, which params, what to
     fetch, whether anything loads at all is the app's business. The path
     arrives VERBATIM, query string included.
-  - **`:web/routes`** — a real request through `slopp.web.dispatch/handle!`:
+  - **`:http/routes`** — a real request through `slopp.web.dispatch/handle!`:
     routing, auth policy, declared reads, the handler, effects. The url is
     split the way a browser sends it — `:uri` never carries the `?`, the
     query string arrives as `:query-string`, and a `#fragment` never reaches

@@ -164,7 +164,7 @@
   ;; gone on passing forever while measuring nothing.)
   ;;
   ;; The registry default was the duplicate: `slopp.web/serve!` ALREADY
-  ;; defaults `:web/port` to 8080, so declaring it again here resolved
+  ;; defaults `:http/port` to 8080, so declaring it again here resolved
   ;; "unset" into "8080" one layer too early — early enough that the dev
   ;; server's own derivation could no longer be told apart from a pin.
   (let [s0 (store/empty-store)]
@@ -408,13 +408,13 @@
     ;; only usage signal there is.
     (is (= [:cli/command] (:entry-markers (capabilities/capability "cli"))))
     (is (some #{:app/entry} (:entry-markers (capabilities/capability "http"))))
-    ;; and :web/path, which was MISSING until a rest app was built. :app/entry
+    ;; and :http/path, which was MISSING until a rest app was built. :app/entry
     ;; covers the app slopp OPENS on its behalf; it misses the app slopp
     ;; SERVES. An endpoint's serve! call is generated, so a store can declare a
     ;; whole API, never name slopp.web, and have the framework vendor nothing
     ;; into its built tree — which is exactly what happened the first time a
     ;; tree was built from endpoints alone.
-    (is (some #{:web/path} (:entry-markers (capabilities/capability "http")))
+    (is (some #{:http/path} (:entry-markers (capabilities/capability "http")))
         "declaring an endpoint IS using the http framework"))
   (testing "rest ships a family too, and its markers are the CONTRACT"
     ;; A rest app never requires slopp.rest either: slopp assembles the context
@@ -422,9 +422,9 @@
     ;; Declaring a contract is therefore the only usage signal there is — the
     ;; same lesson cli taught with its generated entry, arriving a second time.
     (is (= "slopp.rest" (:ns-prefix (capabilities/capability "rest"))))
-    (is (= [:web/request :web/response]
+    (is (= [:rest/request :rest/response]
            (:entry-markers (capabilities/capability "rest")))
-        "both, because a GET-only API declares no :web/request and still has a
+        "both, because a GET-only API declares no :rest/request and still has a
          typed response to honour"))
   (testing "webapp ships a family too, and its marker is CLIENT ROUTING"
     ;; Wave 4. This row was the worked example of a capability declared ahead of
@@ -438,7 +438,7 @@
     ;; `slopp.webapp` any more than a cli app names `slopp.cli` or a rest app
     ;; names `slopp.rest`.
     (is (= "slopp.webapp" (:ns-prefix (capabilities/capability "webapp"))))
-    (is (= [:web/client-routes] (:entry-markers (capabilities/capability "webapp")))
+    (is (= [:webapp/client-routes] (:entry-markers (capabilities/capability "webapp")))
         "declaring that the browser owns some paths IS using the browser framework")
     ;; and NOT `:app/entry`, which the first version used. That marker declares
     ;; an entry a READER can open, and a server-rendered HTML app marks one to
@@ -448,7 +448,7 @@
     ;; principle, since `framework-injection` exists so the opt-in holds at
     ;; RUNTIME rather than only in a config file.
     ;;
-    ;; Second consequence of this marker set in two days, after `:web/path`
+    ;; Second consequence of this marker set in two days, after `:http/path`
     ;; turned out to be MISSING from http's. It is the least visible declaration
     ;; here and nothing fails when it is wrong — it vendors the wrong thing.
     (is (not (some #{:app/entry} (:entry-markers (capabilities/capability "webapp"))))

@@ -37,16 +37,16 @@
         rid (fn [req] (auth/resolve-identity config req :getenv getenv))]
     (testing "a bearer token resolves through the env-indirect secret"
       (let [id (rid {:headers {"authorization" "Bearer tok-123"}})]
-        (is (= "ci" (:web/sub id)))
-        (is (contains? (:web/groups id) "ci"))))
+        (is (= "ci" (:http/sub id)))
+        (is (contains? (:http/groups id) "ci"))))
     (testing "a wrong bearer token is anonymous, never an error"
       (is (nil? (rid {:headers {"authorization" "Bearer nope"}}))))
     (testing "static basic-auth verifies the sha-256 hash and augments groups from config"
       (let [creds (str "Basic " (.encodeToString (java.util.Base64/getEncoder)
                                                  (.getBytes "alice:s3cret" "UTF-8")))
             id (rid {:headers {"authorization" creds}})]
-        (is (= "alice" (:web/sub id)))
-        (is (= #{"admin" "ops"} (:web/groups id))))
+        (is (= "alice" (:http/sub id)))
+        (is (= #{"admin" "ops"} (:http/groups id))))
       (testing "a wrong password is anonymous"
         (let [creds (str "Basic " (.encodeToString (java.util.Base64/getEncoder)
                                                    (.getBytes "alice:wrong" "UTF-8")))]
@@ -56,8 +56,8 @@
                  :headers {"x-forwarded-user" "root"
                            "x-forwarded-groups" "dev,sre"}}
             id (rid req)]
-        (is (= "root" (:web/sub id)))
-        (is (= #{"dev" "sre" "admin"} (:web/groups id))))
+        (is (= "root" (:http/sub id)))
+        (is (= #{"dev" "sre" "admin"} (:http/groups id))))
       (is (nil? (rid {:remote-addr "203.0.113.9"
                       :headers {"x-forwarded-user" "root"}}))))
     (testing "no credentials → nil (anonymous), and policy's default-deny takes it from there"
@@ -128,9 +128,9 @@
     (testing "a valid token (matching aud) resolves: sub + the configured groups claim"
       (let [id (rid (sign {:iss "https://idp.test" :sub "ada" :aud "slopp-app"
                            :exp (+ now 3600) :roles ["admin" "dev"]}))]
-        (is (= "ada" (:web/sub id)) (pr-str id))
-        (is (= #{"admin" "dev"} (:web/groups id)))
-        (is (= :oidc (:web/provider id)))))
+        (is (= "ada" (:http/sub id)) (pr-str id))
+        (is (= #{"admin" "dev"} (:http/groups id)))
+        (is (= :oidc (:http/provider id)))))
     (testing "expiry, wrong issuer, wrong audience, tampering, and garbage are all anonymous"
       (is (nil? (rid (sign {:iss "https://idp.test" :sub "ada" :aud "slopp-app" :exp (- now 10)}))))
       (is (nil? (rid (sign {:iss "https://evil.test" :sub "ada" :aud "slopp-app" :exp (+ now 3600)}))))
@@ -155,8 +155,8 @@
                           "x-forwarded-groups" "dev,sre"}}
         id     (auth/resolve-identity config req)]
     (testing "a canonically-cased header config still resolves the lowercased request header"
-      (is (= "alice" (:web/sub id)) (pr-str id))
-      (is (= #{"dev" "sre"} (:web/groups id))))))
+      (is (= "alice" (:http/sub id)) (pr-str id))
+      (is (= #{"dev" "sre"} (:http/groups id))))))
 
 (deftest passwords-are-salted-and-iterated
   ;; review W6: static passwords were unsalted single-round SHA-256, stored

@@ -39,10 +39,10 @@
   Registering a kind does not verify anything. It makes the exit ENUMERABLE,
   which is the thing that was missing: an exit with no checker and an exit
   that does not exist look identical until one of them is written down."
-  [{:kind       :http/route
+  [{:kind       :http/routing
     :leaves     "a form's name metadata"
     :to         "the served route table, and from there HTTP"
-    :markers    #{:web/path :web/method}
+    :markers    #{:http/path :http/method}
     :checked-by "http-dangling-route-refs ties every literal :href/:src to a
                  route; query_surface reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running
@@ -52,7 +52,7 @@
    {:kind       :wire/json
     :leaves     "a declared request/response contract"
     :to         "JSON, and a browser that never sees Clojure data"
-    :markers    #{:web/request :web/response}
+    :markers    #{:rest/request :rest/response}
     :checked-by "the boundary honours it at runtime once `rest.enabled`.
                  `slopp.rest.contract/decode-request` judges EVERYTHING the
                  caller sent — path segments, query string and body against one
@@ -95,11 +95,11 @@
     :blind      "a schema that is not .cljc cannot ship, and the endpoint is
                  SKIPPED rather than failing loudly"}
 
-   {:kind       :web/vocabulary
+   {:kind       :http/vocabulary
     :leaves     "a declared read/effect KIND, resolved by name"
     :to         "a performer found by scanning namespaces the caller lists
                  by hand"
-    :markers    #{:web/reads :web/effects :web/read :web/effect}
+    :markers    #{:http/reads :http/effects :http/read :http/effect}
     :checked-by "web/context refuses at assembly when a declared kind has no
                  performer among its namespaces"
     :blind      nil}
@@ -107,7 +107,7 @@
    {:kind       :webapp/client-routing
     :leaves     "a prefix declared as client-routed"
     :to         "a route table that lives in the browser"
-    :markers    #{:web/client-routes}
+    :markers    #{:webapp/client-routes}
     :checked-by "webapp-client-routes-are-served compares the client's declared
                  route TABLE against the prefixes this document answers for, and
                  reports every route that 404s on a hard load — the failure that
@@ -149,7 +149,7 @@
                  A screen's REQUEST is the other half of a route reference and is
                  joined by webapp-request-paths-are-served — an EQUALITY join,
                  because a request path is a PATTERN in the same grammar as
-                 :web/path rather than a concrete url. Its own limit: an
+                 :http/path rather than a concrete url. Its own limit: an
                  absolute url is skipped as somebody else's server, so a typo in
                  one is invisible, and a computed path is skipped rather than
                  guessed at, which makes the join partial in the safe direction"}
@@ -157,7 +157,7 @@
    {:kind       :http/foreign-route
     :leaves     "a link to a path this store does not serve"
     :to         "somebody else's server"
-    :markers    #{:web/external-path}
+    :markers    #{:http/external-path}
     :checked-by nil
     :blind      "the DECLARATION is the whole check: it stops
                  http-dangling-route-refs asking, and nothing confirms the
@@ -184,7 +184,7 @@
                  keeping: it was unchecked because the mount point arrived
                  through an app's own function call and the route table was a
                  closure. Both became the framework's, and the escape hatch that
-                 stood in for the check — ^:web/client-path, thirteen copies of
+                 stood in for the check — ^:webapp/client-path, thirteen copies of
                  one accurate sentence in the one real app — retired with it"}
 
    {:kind       :cli/command
@@ -205,7 +205,7 @@
                  throwing, and the binary answers \"unknown command\" instead of
                  \"that namespace is broken\". Nothing compares the commands a
                  BUILT binary actually carries against the ones the store
-                 declares, which is the same shape as the :http/route blind
+                 declares, which is the same shape as the :http/routing blind
                  spot one process further out"}])
 
 (def internal-markers
@@ -217,17 +217,17 @@
   and the one real hole drowns in five false ones. That precision failure is
   what got the `:positional-form-access` advisory withdrawn, so it is a named
   hazard rather than a hypothetical."
-  {:web/auth      "a policy the dispatcher enforces in-process, on data that
+  {:http/auth      "a policy the dispatcher enforces in-process, on data that
                    never leaves"
-   :web/effectful "declares the handler performs its own effects — a statement
+   :http/effectful "declares the handler performs its own effects — a statement
                    about where effects run, not about anything crossing"
-   :web/client    "a MODIFIER on the generated-client crossing (opt this
+   :rest/client    "a MODIFIER on the generated-client crossing (opt this
                    endpoint out), not an exit of its own"
-   :web/context   "names WHICH fn builds the perform-ctx — a declaration about
+   :http/context   "names WHICH fn builds the perform-ctx — a declaration about
                    in-process assembly. The map it returns reaches handlers as
-                   :web/deps and performers as their first argument, all inside
+                   :http/deps and performers as their first argument, all inside
                    the image; nothing leaves through this key"
-   :web/unconstrained-ok "waives rest-unconstrained-contract for an endpoint that
+   :rest/unconstrained-ok "waives rest-unconstrained-contract for an endpoint that
                    genuinely cannot constrain its shape — a statement ABOUT a
                    declaration, not a declaration of its own, so nothing
                    crosses through it"
@@ -347,7 +347,7 @@
   be decided about.
 
   **The vocabulary below is HAND-KEPT, and that is the hole this guard cannot
-  cover.** `:web/context` shipped in neither registry and this returned empty
+  cover.** `:http/context` shipped in neither registry and this returned empty
   the whole time, because a marker nobody added to the list is invisible to a
   list. It was caught by the first APP to declare a builder, whose `full_check`
   then carried a permanent unclassified entry — the cost landing on adopters
@@ -373,9 +373,117 @@
   []
   (let [owned (known-markers)]
     (vec (sort (remove owned
-                       [:web/path :web/method :web/auth :web/reads :web/effects
-                        :web/read :web/effect :web/effectful :web/request
-                        :web/response :web/client :web/context
-                        :web/client-routes :web/external-path
+                       [:http/path :http/method :http/auth :http/reads :http/effects
+                        :http/read :http/effect :http/effectful :rest/request
+                        :rest/response :rest/client :http/context
+                        :webapp/client-routes :http/external-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
+
+(def ^:export
+  ^{:unused-ok "read by bin/check-retired-markers.sh, which is outside the
+  store and so invisible to the reference graph. It has to be outside: the
+  check reads the SHIPPED docs, and both test tiers run in a materialized temp
+  dir where plugins/slopp/skills resolves to nothing — an in-store version read
+  ZERO files and passed every absence assertion vacuously, which is the exact
+  failure it exists to prevent."}
+  retired-markers
+  "The marker renames of the `:web/*` → owning-capability wave, as
+  `{\"old/name\" :new/name}`.
+
+  **The retired side is a STRING, and that is the whole reason this form works
+  at all.** It was written with keyword keys and the sweep ATE it: a rename
+  rewrites every occurrence of the keyword it is renaming, and a ledger is
+  nothing but occurrences of that keyword. Fifteen of forty entries came back
+  mapping each new name to itself — not a wrong table so much as no table at
+  all. Written without the leading colon nothing can match it, because every
+  sweep pattern begins with one.
+
+  The general rule, which cost a form to learn: **a rename ledger must be
+  written in a spelling the rename cannot match.** The same is true of prose
+  describing a rename, which is why a comment saying `a -> b` comes out saying
+  `b -> b`.
+
+  **A LEDGER, rebuilt deliberately and meant to be retired again.** slopp had
+  one — a declared old→new table plus checks reading it — retired on 2026-08-06
+  once its restructure finished, because it had become a hand-kept list for a
+  conversion nobody was doing. AGENTS.md says to rebuild something like it if a
+  rename of that scale recurs and not to carry it between times.
+
+  **The rule the table encodes: a marker takes the prefix of the capability
+  whose code READS it** — not where the data comes from. That is what makes a
+  stale marker detectable, and what `:cli/command` always did while the web
+  family was the exception. Two entries are judgements rather than
+  derivations: the contract pair is rest's (inert while `rest.enabled` is
+  false, unrelated to whether HTTP works), and `unconstrained-ok` follows the
+  advisory it discharges rather than the family it was spelled in.
+
+  **Three names are held out, and all three are the same shape.**
+
+  - `web/spa` was retired long ago; every occurrence left is an incident record
+    or a test whose SUBJECT is the retired spelling. Sweeping those invents a
+    past.
+  - `web/websocket` was never a real marker. It is the FIXTURE of
+    `crossings-test/the-inventory-reports-holes-and-refuses-to-miss-a-new-one`,
+    which needs a slopp-namespaced marker no crossing kind claims. Swept once,
+    and the result is worth stating: renaming the fixture AND the registry
+    together made the deliberately-unclaimed marker claimed, so the test that
+    exists to report holes reported none.
+  - `web/summary` names nothing anywhere. It appears in a comment arguing that
+    an endpoint's prose belongs in its docstring RATHER than in a second marker
+    beside it. The consuming store found this class first, in their own store,
+    and this store turned out to carry one too.
+
+  So: **this table is a complete account of what the PRODUCER reads, and never
+  a complete account of what a CONSUMER wrote down.** Prose about a rejected
+  design is invisible to a derived table by construction. The instruction that
+  travels is not the table — it is *derive your own census from RENDERED
+  source, diff it against this table, and open every marker the table does not
+  explain.* **A census tells you which markers are WRITTEN; only reading each
+  one tells you which are MEANT.**
+
+  Rendered source, not sexprs, and that is measured rather than stylistic:
+  `form-sexpr` drops reader metadata, so every marker on a defn is invisible to
+  it. Measured here, 1582 occurrences via `rewrite-clj.node/string` against
+  1353 via `form-sexpr` — and in a consumer whose markers live ONLY in metadata
+  the gap swallowed six markers whole, including the subject of the wave."
+  '{"web/page"              :app/entry
+    "web/client-routes"     :webapp/client-routes
+    "web/client-path"       :webapp/client-path
+    "web/request"           :rest/request
+    "web/response"          :rest/response
+    "web/client"            :rest/client
+    "web/unconstrained-ok"  :rest/unconstrained-ok
+    "web/path"              :http/path
+    "web/method"            :http/method
+    "web/auth"              :http/auth
+    "web/auth-config"       :http/auth-config
+    "web/namespaces"        :http/namespaces
+    "web/routes"            :http/routes
+    "web/reads"             :http/reads
+    "web/read"              :http/read
+    "web/read-performers"   :http/read-performers
+    "web/effects"           :http/effects
+    "web/effect"            :http/effect
+    "web/effect-performers" :http/effect-performers
+    "web/effectful"         :http/effectful
+    "web/perform-ctx"       :http/perform-ctx
+    "web/deps"              :http/deps
+    "web/context"           :http/context
+    "web/context-builders"  :http/context-builders
+    "web/port"              :http/port
+    "web/host"              :http/host
+    "web/adapter"           :http/adapter
+    "web/max-body-bytes"    :http/max-body-bytes
+    "web/sub"               :http/sub
+    "web/groups"            :http/groups
+    "web/provider"          :http/provider
+    "web/identity"          :http/identity
+    "web/raw"               :http/raw
+    "web/status"            :http/status
+    "web/public"            :http/public
+    "web/external-path"     :http/external-path
+    "web/wrap-context"      :http/wrap-context
+    "web/missing-performers" :http/missing-performers
+    "web/keys"              :http/keys
+    "web/vocabulary"        :http/vocabulary})

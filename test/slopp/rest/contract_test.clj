@@ -50,7 +50,7 @@
     (is (:error (rest.contract/decode-request [:map [:id :int]] {:body {}}))))
 
   (testing "no schema declared means nothing to judge"
-    ;; a :get with no params declares no :web/request; that is an absence, not a
+    ;; a :get with no params declares no :rest/request; that is an absence, not a
     ;; violation, and decoding against a schema nobody wrote would be inventing
     ;; one. Same distinction :cli/args [:catn] draws on the other side —
     ;; "takes nothing" and "never said" are different statements.
@@ -106,7 +106,7 @@
     (is (string? (rest.contract/check-response [:map [:f :any]] {:f (fn [])})))))
 
 (deftest a-contract-covers-everything-the-caller-SENDS
-  ;; `:web/request` means what the caller sends — the codebase said so before
+  ;; `:rest/request` means what the caller sends — the codebase said so before
   ;; the boundary existed, in `api.contracts/form-request`: "a GET sends a query
   ;; string for the same reason a POST sends a body", and the generated client
   ;; reads the METHOD to decide where each key travels. One schema, three

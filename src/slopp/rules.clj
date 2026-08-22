@@ -888,7 +888,7 @@
   exactly like a marker that works. There is no error, no warning, and no
   behaviour to notice missing until something downstream is quietly absent.
 
-  **Built the day a rename proved it.** `:web/spa` became `:web/client-routes`,
+  **Built the day a rename proved it.** `:web/spa` became `:webapp/client-routes`,
   and a store keeping the old spelling serves fine, clicks fine, and 404s on
   every refresh and every shared deep link — because the scoped catch-all rows
   are generated from a key nothing reads any more. The one app that hit it
@@ -940,7 +940,7 @@
                          " refuses nothing, generates nothing and changes"
                          " nothing, while looking exactly like a marker that"
                          " works. Usually a typo, or a name that used to work:"
-                         " :web/spa became :web/client-routes, and a store"
+                         " :web/spa became :webapp/client-routes, and a store"
                          " keeping the old spelling serves fine, clicks fine,"
                          " and 404s on every refresh. If the key is your own,"
                          " put it in your own namespace.")}))))
@@ -1024,7 +1024,7 @@
     :fires-on "(ns rf.core)\n(defn ^:unused-ok spare \"S.\" [x] x)\n"}
 ;; a marker in a namespace SLOPP owns that slopp does not define — a
    ;; declaration nothing reads. The silent half of every marker rename:
-   ;; `:web/spa` became `:web/client-routes`, and a store keeping the old
+   ;; `:web/spa` became `:webapp/client-routes`, and a store keeping the old
    ;; spelling serves fine, clicks fine, and 404s on every refresh, because
    ;; the catch-all rows come from a key nothing reads any more.
    {:key :unknown-marker :severity :advisory :applies-to :production :check #'unknown-marker-check
@@ -1105,7 +1105,7 @@
     :sweep true
     :fires-on "(ns rf.core)\n(defn scan [s] (re-find #\"rf.gone\" s))\n"}
    ;; the single biggest behavioural consequence available in one piece of
-   ;; metadata, and nothing said it: declaring :web/client-routes turns every path under
+   ;; metadata, and nothing said it: declaring :webapp/client-routes turns every path under
    ;; the prefix from 404 into 200 and moves not-found into the client.
    {:key :webapp-client-routes-consequences :severity :advisory :applies-to :production :check #'rules.webapp/webapp-client-routes-consequences-check
     :sweep (str "states a consequence ONCE, for the episode that declared the"
@@ -1262,10 +1262,10 @@
    {:key :rest-inline-schema-dup :severity :advisory :applies-to :production :check #'rules.rest/rest-inline-schema-dup-check
     :sweep true
     :fires-on (str "(ns ds.api)\n"
-                   "(defn ^{:web/method :post :web/path \"/a\" :web/request [:map [:x :int]]"
-                   " :web/response :map} a [r] r)\n"
-                   "(defn ^{:web/method :post :web/path \"/b\" :web/request [:map [:x :int]]"
-                   " :web/response :map} b [r] r)\n")}
+                   "(defn ^{:http/method :post :http/path \"/a\" :rest/request [:map [:x :int]]"
+                   " :rest/response :map} a [r] r)\n"
+                   "(defn ^{:http/method :post :http/path \"/b\" :rest/request [:map [:x :int]]"
+                   " :rest/response :map} b [r] r)\n")}
    ;; the PRIOR question to the rule below: not whether a declared field says
    ;; what it means, but whether it is declared at all. A bare `:map` accepts
    ;; any map, so the generated client's response validation — the mechanism
@@ -1276,8 +1276,8 @@
     :check #'rules.rest/rest-unconstrained-contract-check
     :sweep true
     :fires-on (str "(ns dv.api)\n"
-                   "(defn ^{:web/method :get :web/path \"/v\" :web/auth :public"
-                   " :web/response [:map [:rows [:sequential :map]]]} v \"V.\" [r] r)\n")}
+                   "(defn ^{:http/method :get :http/path \"/v\" :http/auth :public"
+                   " :rest/response [:map [:rows [:sequential :map]]]} v \"V.\" [r] r)\n")}
    ;; a published contract's fields say what SHAPE they are and never what they
    ;; MEAN. Asked for by slopp-ui, who measured it: every entry-property map in
    ;; slopp's own 9-endpoint document is `{:optional true}` and nothing else.
@@ -1287,8 +1287,8 @@
     :check #'rules.rest/rest-undocumented-contract-check
     :sweep true
     :fires-on (str "(ns du.api)\n"
-                   "(defn ^{:web/method :get :web/path \"/t\" :web/auth :public"
-                   " :web/response [:map [:total :int]]} t \"T.\" [r] r)\n")}
+                   "(defn ^{:http/method :get :http/path \"/t\" :http/auth :public"
+                   " :rest/response [:map [:total :int]]} t \"T.\" [r] r)\n")}
    ])
 
 (defn run-done-advisories!

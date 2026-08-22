@@ -20,10 +20,10 @@
   ;; framework doing it: in process, no socket, no browser, through the SAME
   ;; encoding the adapter uses.
   (let [ctx (slopp.rest/validating
-             {:web/routes
+             {:http/routes
               [{:handler (fn [req] {:status 200 :body {:echo (:body req) :kind :ok}})
                 :method :post :path "/api/echo" :auth :public
-                :web/request [:map [:sku :string]]}
+                :rest/request [:map [:sku :string]]}
                {:handler (fn [_] {:status 200 :body {:tags #{"a"}}})
                 :method :get :path "/api/tags" :auth :public}]})]
 

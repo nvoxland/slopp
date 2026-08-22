@@ -217,7 +217,7 @@
   ;; rather than ceremony: the fake browser knows no app type, so http supplies
   ;; its own adapter exactly as `webapp` supplies its.
   (let [page (fn [body] {:status 200 :body body})
-        ctx  {:web/routes
+        ctx  {:http/routes
               [{:method :get :path "/" :auth :public :handler
                 (fn [_] (page [:div [:h1 "Home"] [:a {:href "/about"} "About"]]))}
                {:method :get :path "/about" :auth :public :handler
@@ -757,11 +757,11 @@
       ;; request itself. That is http's adapter living inside the fake browser,
       ;; which is what stopped a browser app's entry ever reaching it — so the
       ;; ctx shape leaves rather than being tolerated beside the new one
-      (let [m (msg #(cljnx/open! {:web/routes []}))]
+      (let [m (msg #(cljnx/open! {:http/routes []}))]
         (is (some? m) "a ctx is no longer a page and must not be accepted as one")
         (is (str/includes? m "slopp.web/driver")
             "the refusal has to carry the migration; the author typo'd nothing"))
-      (is (str/includes? (msg #(cljnx/open! {:web/routes [] :state (atom {})
+      (is (str/includes? (msg #(cljnx/open! {:http/routes [] :state (atom {})
                                                   :view (fn [_] [:div])}))
                          "slopp.web/driver")
           "an app that is BOTH still enters through its capability's driver,
@@ -771,7 +771,7 @@
   ;; Review F3: visit! passed the raw path as :uri, and Ring's :uri never
   ;; contains "?" — so /search?q=web 404'd on a mounted route that works, and
   ;; every pagination or filter link in a real app read as a broken route.
-  (let [ctx {:web/routes
+  (let [ctx {:http/routes
              [{:method :get :path "/search" :auth :public :handler
                (fn [req] {:status 200
                           :body [:div [:h1 "Search"]
@@ -1477,7 +1477,7 @@
 
     (testing "a :document-only app needs no state and no view"
       ;; the server-rendered case, which used to require this namespace to
-      ;; carry `:web/routes` and call the dispatcher itself
+      ;; carry `:http/routes` and call the dispatcher itself
       (let [s (cljnx/open! {:document (fn [path]
                                              (swap! visited conj path)
                                              [:main [:h1 (str "at " path)]])})]
@@ -1499,7 +1499,7 @@
       ;; knows, and a silent acceptance would put http's adapter back
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"slopp\.web/driver"
-           (cljnx/open! {:web/routes [{:method :get :path "/x"}]}))))
+           (cljnx/open! {:http/routes [{:method :get :path "/x"}]}))))
 
     (testing "and an app that declares NEITHER a view nor a document refuses"
       ;; an app with no way to produce a screen is a mistake worth hearing
@@ -1537,7 +1537,7 @@
 
     (testing "a served CTX becomes the same contract"
       (let [d (cljnx/driver-for
-               {:web/routes [{:method :get :path "/" :auth :public
+               {:http/routes [{:method :get :path "/" :auth :public
                               :handler (fn [_] {:status 200 :body [:main [:h1 "home"]]})}]})]
         (is (fn? (:document d)) (pr-str (keys d)))
         (let [s (cljnx/open! d)]

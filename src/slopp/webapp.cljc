@@ -341,7 +341,7 @@
   route.
 
   **The client half of routing, as DATA.** The server half already is: a handler
-  declares `^{:web/path \"/store/ns/:ns\"}` and the table is derived from var
+  declares `^{:http/path \"/store/ns/:ns\"}` and the table is derived from var
   metadata, which is why an endpoint can be listed, collision-checked and joined
   against a link. The client half was one opaque `(fn [path] …)`, so none of
   that was possible for it — and both halves live in the same application.
@@ -880,7 +880,7 @@
     ;; there is no shim behind it. A function answers only when called, with a
     ;; path, at runtime — so nothing can list an app's screens, join a link to
     ;; one, or compare this table to the prefixes the server answers for. Every
-    ;; report and gate that exists for `^{:web/path …}` was impossible on this
+    ;; report and gate that exists for `^{:http/path …}` was impossible on this
     ;; side for exactly that reason.
     (when-not (sequential? (:webapp/routes app))
       (throw (ex-info (str ":webapp/routes is a declared TABLE, not a function —"

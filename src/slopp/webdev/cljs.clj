@@ -178,7 +178,7 @@
                " key \"compiler\" value \"clojurescript\"}.")})
 
 (defn ^:private resolve-schema-ref
-  "Resolve a :web/request/:web/response value into a client-usable schema
+  "Resolve a :rest/request/:rest/response value into a client-usable schema
    reference. A schema VAR symbol (alias- or fully-qualified) →
    {:kind :var :sym <fq> :ns <schema-ns>} when it lives in a :cljc namespace so
    it compiles into BOTH the server oracle and the client bundle; a var that
@@ -216,17 +216,17 @@
   [store]
   (reduce
    (fn [acc {:keys [ns name meta]}]
-     ;; ^{:web/client false} opts an endpoint OUT of client generation. An HTML
-     ;; page is a :web/path form like any other, but a typed fetch wrapper whose
+     ;; ^{:rest/client false} opts an endpoint OUT of client generation. An HTML
+     ;; page is a :http/path form like any other, but a typed fetch wrapper whose
      ;; (.json resp) runs against HTML is nonsense. Declared, never sniffed:
      ;; :string is a legitimate JSON response, so the response schema cannot
      ;; decide this — only the endpoint can.
-     (if (false? (:web/client meta))
+     (if (false? (:rest/client meta))
        acc
        (let [endpoint (symbol (str ns) (str name))
-             method   (:web/method meta)
-             req      (resolve-schema-ref store ns (:web/request meta))
-             resp     (resolve-schema-ref store ns (:web/response meta))
+             method   (:http/method meta)
+             req      (resolve-schema-ref store ns (:rest/request meta))
+             resp     (resolve-schema-ref store ns (:rest/response meta))
              bad      (vals (into {} (map (juxt :sym identity))
                                  (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
          (if (seq bad)
@@ -243,7 +243,7 @@
                                                   (not (.endsWith (str name) "!")))
                                          "!")))
                     :method   method
-                    :path     (:web/path meta)
+                    :path     (:http/path meta)
                     :endpoint endpoint
                     ;; whatever the verb. WHETHER there is a request is the endpoint's
                     ;; declaration; HOW it travels — body or query string — is
@@ -295,7 +295,7 @@
 
    **How the request TRAVELS follows from the method, not from a second
    declaration.** A body verb (POST/PUT/PATCH) JSON-encodes the params map into
-   the body; anything else sends it as a QUERY STRING. `:web/request` already
+   the body; anything else sends it as a QUERY STRING. `:rest/request` already
    means \"what the caller sends\", and the contract already carries the method,
    so a `?depth=`-style parameter needs no new vocabulary — it needs the
    generator to stop assuming every declared request is a body.
@@ -889,7 +889,7 @@
 
    `external` is the url a FOREIGN contract came from, or nil for this store's
    own endpoints. When present each builder carries
-   `^{:web/external-path <url>}`, because `webapp-request-paths-are-served`
+   `^{:http/external-path <url>}`, because `webapp-request-paths-are-served`
    would otherwise report a path this store genuinely does not serve and its
    escape is a marker on a form nobody may hand-edit — the next generation drops
    it silently. Generation knows where the contract came from, so generation
@@ -923,7 +923,7 @@
                         pairs)
         meta*     (str "^{:generated \"" endpoint "\""
                        (when external
-                         (str " :web/external-path \"generated from the contract"
+                         (str " :http/external-path \"generated from the contract"
                               " published at " external "\""))
                        "}")]
     (str "(defn " meta* " ^:export " base "-request\n"

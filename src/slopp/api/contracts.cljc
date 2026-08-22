@@ -101,7 +101,7 @@
    [:exported? {:doc "true when the form is part of its module's public surface"} :boolean]])
 
 (def token
-  "One syntax token: `[\"keyword\" \":web/path\"]`.
+  "One syntax token: `[\"keyword\" \":http/path\"]`.
 
   A PAIR, not markup. The server walks the CST it already holds and sends
   classes and text; the client turns them into elements. That is the line the
@@ -116,7 +116,7 @@
   "`GET /api/change/:range` — what a caller SENDS.
 
   Only the path segment. Declared for the reason [[form-request]] gives at
-  length: `:web/request` is what the caller sends, and a generated wrapper
+  length: `:rest/request` is what the caller sends, and a generated wrapper
   whose params map has no entry for `:range` cannot address the endpoint at
   all. slopp-ui reported this as one document carrying two conventions, and
   they were right — `form` declared its parameter and four others did not."
@@ -161,7 +161,7 @@
 
   `:id` is interpolated into the path; `:view` and `:depth` travel as query
   parameters, and nothing here says so — the generated client reads the
-  METHOD. `:web/request` means what the caller sends, and a GET sends a query
+  METHOD. `:rest/request` means what the caller sends, and a GET sends a query
   string for the same reason a POST sends a body.
 
   It exists because without it the generated wrapper takes a params map and

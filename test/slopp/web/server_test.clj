@@ -20,13 +20,13 @@
               server as its far side — routing this through the client would
               close the loop and let a symmetric bug pass both."}
   jdk-adapter-serves-the-pipeline
-  (let [ctx {:web/routes [{:handler (fn [req] {:status 200
-                                               :body {:got (:web/reads req)}})
+  (let [ctx {:http/routes [{:handler (fn [req] {:status 200
+                                               :body {:got (:http/reads req)}})
                            :method :get :path "/u/:id" :auth :public
-                           :web/reads {:user [:user/by-id [:path-params :id]]}}
+                           :http/reads {:user [:user/by-id [:path-params :id]]}}
                           {:handler (fn [_] {:status 201 :body {:ok true}})
                            :method :post :path "/u" :auth :authenticated}]
-             :web/read-performers {:user/by-id (fn [_ id] {:user/id id})}}
+             :http/read-performers {:user/by-id (fn [_ id] {:user/id id})}}
         srv (jdk/start! ctx {:host "127.0.0.1" :port 0})
         base (str "http://127.0.0.1:" (:port srv))
         http (java.net.http.HttpClient/newHttpClient)
@@ -60,9 +60,9 @@
               a second reason not to route this through the port."}
   jdk-adapter-caps-the-request-body
   ;; review W8: an over-cap POST body must get 413, not buffer unbounded.
-  (let [ctx {:web/routes [{:handler (fn [_] {:status 201 :body {:ok true}})
+  (let [ctx {:http/routes [{:handler (fn [_] {:status 201 :body {:ok true}})
                            :method :post :path "/u" :auth :public}]
-             :web/max-body-bytes 32}
+             :http/max-body-bytes 32}
         srv (jdk/start! ctx {:host "127.0.0.1" :port 0})
         base (str "http://127.0.0.1:" (:port srv))
         http (java.net.http.HttpClient/newHttpClient)

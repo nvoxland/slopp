@@ -200,11 +200,11 @@
         st (first (store/record-module-platform st "shop.contracts" :cljc))
         st (store/ingest st 'shop.api
                          (str "(ns shop.api)\n\n"
-                              "(defn ^{:web/method :post :web/path \"/api/orders\""
-                              " :web/request shop.contracts/order :web/response shop.contracts/order}"
+                              "(defn ^{:http/method :post :http/path \"/api/orders\""
+                              " :rest/request shop.contracts/order :rest/response shop.contracts/order}"
                               " create-order [req] req)\n\n"
-                              "(defn ^{:web/method :get :web/path \"/api/orders/:id\""
-                              " :web/response shop.contracts/order} get-order [req] req)\n"))
+                              "(defn ^{:http/method :get :http/path \"/api/orders/:id\""
+                              " :rest/response shop.contracts/order} get-order [req] req)\n"))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
     (testing "one wrapper per endpoint; mutating verbs get a ! suffix"
       (is (= '[create-order! get-order] (mapv :fn-name wrappers)))
@@ -216,9 +216,9 @@
       ;; convention with a double bang is it fighting the house style.
       (let [st2 (store/ingest st 'shop.api2
                               (str "(ns shop.api2)\n\n"
-                                   "(defn ^{:web/method :post :web/path \"/api/pay\""
-                                   " :web/request shop.contracts/order"
-                                   " :web/response shop.contracts/order}"
+                                   "(defn ^{:http/method :post :http/path \"/api/pay\""
+                                   " :rest/request shop.contracts/order"
+                                   " :rest/response shop.contracts/order}"
                                    " pay! [req] req)\n"))
             names (mapv :fn-name (:wrappers (cljs/client-wrapper-specs st2)))]
         (is (some #{'pay!} names) (pr-str names))
@@ -227,7 +227,7 @@
       (is (= 'shop.contracts/order (get-in (first wrappers) [:request :sym])))
       (is (= 'shop.contracts/order (get-in (first wrappers) [:response :sym])))
       (is (= :none (get-in (second wrappers) [:request :kind]))
-          "this GET DECLARES no :web/request — :none because there is none"))
+          "this GET DECLARES no :rest/request — :none because there is none"))
     (testing "a GET that DOES declare a request keeps it"
       ;; The assertion above had the right value for the wrong reason, and the
       ;; difference is what shipped a broken client: with no declaration on the
@@ -240,9 +240,9 @@
       ;; hand-rolled fetch `direct-http` refuses.
       (let [st3 (store/ingest st 'shop.api3
                               (str "(ns shop.api3)\n\n"
-                                   "(defn ^{:web/method :get :web/path \"/api/search\""
-                                   " :web/request shop.contracts/order"
-                                   " :web/response shop.contracts/order}"
+                                   "(defn ^{:http/method :get :http/path \"/api/search\""
+                                   " :rest/request shop.contracts/order"
+                                   " :rest/response shop.contracts/order}"
                                    " search [req] req)\n"))
             spec (first (filter #(= 'search (:fn-name %))
                                 (:wrappers (cljs/client-wrapper-specs st3))))]
@@ -263,8 +263,8 @@
                ;; platform LEFT :jvm — a jvm-only schema cannot ship to the client
                (store/ingest 'shop.api
                              (str "(ns shop.api)\n\n"
-                                  "(defn ^{:web/method :post :web/path \"/api/orders\""
-                                  " :web/request shop.contracts/order :web/response shop.contracts/order}"
+                                  "(defn ^{:http/method :post :http/path \"/api/orders\""
+                                  " :rest/request shop.contracts/order :rest/response shop.contracts/order}"
                                   " create-order [req] req)\n")))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
     (testing "an endpoint whose schema ns is not :cljc becomes a problem; its wrapper is skipped"
@@ -324,8 +324,8 @@
       (ops/module-platform! sess "shopg.contracts" "cljc" :prompt "shared contract")
       (ops/ingest! sess 'shopg.api
                    (str "(ns shopg.api)\n\n"
-                        "(defn ^{:web/method :post :web/path \"/api/orders\""
-                        " :web/request shopg.contracts/order :web/response shopg.contracts/order}"
+                        "(defn ^{:http/method :post :http/path \"/api/orders\""
+                        " :rest/request shopg.contracts/order :rest/response shopg.contracts/order}"
                         " create-order \"Create an order.\" [req] req)\n"))
       (let [r (cljs/generate-client! sess :ns 'shopg.client.api)]
         (testing "one wrapper per endpoint, written into a stored :cljs namespace"
@@ -345,19 +345,19 @@
       (finally (ops/close! sess)))))
 
 (deftest client-wrapper-specs-honors-the-client-opt-out
-  ;; Dogfood finding: an HTML page is a :web/path form like any other, so
+  ;; Dogfood finding: an HTML page is a :http/path form like any other, so
   ;; generate_client emitted a typed fetch wrapper for it — one whose
   ;; (.json resp) can never succeed on HTML. Sniffing the response schema would
   ;; be the wrong fix (:string is a legitimate JSON response), so the endpoint
-  ;; declares it: ^{:web/client false} opts out of client generation.
+  ;; declares it: ^{:rest/client false} opts out of client generation.
   (let [st (-> (store/empty-store)
                (store/ingest 'pg.api
                              (str "(ns pg.api)\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/\" :web/auth :public"
-                                  " :web/response :string :web/client false}"
+                                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public"
+                                  " :rest/response :string :rest/client false}"
                                   " home \"The page.\" [r] r)\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/api/x\" :web/auth :public"
-                                  " :web/response :map} data \"Data.\" [r] r)\n")))
+                                  "(defn ^{:http/method :get :http/path \"/api/x\" :http/auth :public"
+                                  " :rest/response :map} data \"Data.\" [r] r)\n")))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
     (testing "the page opts out; the JSON endpoint still gets its wrapper"
       (is (= '[data] (mapv :fn-name wrappers))))
@@ -642,9 +642,9 @@
       (ops/module-platform! sess "shopf.contracts" "cljc" :prompt "shared contract")
       (ops/ingest! sess 'shopf.api
                    (str "(ns shopf.api)\n\n"
-                        "(defn ^{:web/method :post :web/path \"/api/orders\""
-                        " :web/request shopf.contracts/order"
-                        " :web/response shopf.contracts/order}"
+                        "(defn ^{:http/method :post :http/path \"/api/orders\""
+                        " :rest/request shopf.contracts/order"
+                        " :rest/response shopf.contracts/order}"
                         " create-order \"Create an order.\" [req] req)\n"))
       (testing "the default is derived from the store, not a placeholder"
         (let [r (cljs/generate-client! sess)]
@@ -699,7 +699,7 @@
   ;; rule, correctly — so hand-rolling a fetch past the generated client is
   ;; precisely the workaround a typed client exists to prevent.
   ;;
-  ;; No new declaration for this. `:web/request` already means "what the caller
+  ;; No new declaration for this. `:rest/request` already means "what the caller
   ;; SENDS"; how it travels follows from the METHOD, which the contract already
   ;; carries. A body verb keeps sending a body; a GET sends a query string.
   (let [inline (fn [s] {:kind :inline :schema s})
@@ -775,9 +775,9 @@
         st     (first (store/record-module-platform st "shop.contracts" :cljc))
         st     (store/ingest st 'shop.api
                              (str "(ns shop.api)\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/api/form/:id\""
-                                  " :web/request shop.contracts/q"
-                                  " :web/response shop.contracts/q}"
+                                  "(defn ^{:http/method :get :http/path \"/api/form/:id\""
+                                  " :rest/request shop.contracts/q"
+                                  " :rest/response shop.contracts/q}"
                                   " form [req] req)\n"))
         local  (first (filter #(= 'form (:fn-name %))
                               (:wrappers (cljs/client-wrapper-specs st))))
@@ -952,7 +952,7 @@
       ;; the escape stays a declaration and nothing is hand-edited.
       (let [far (cljs/render-request-ns 'shop.client.api wrappers
                                         "http://pub.test/contract")]
-        (is (= 3 (count (re-seq #":web/external-path" far)))
+        (is (= 3 (count (re-seq #":http/external-path" far)))
             (str "every builder for somebody else's API must carry it, or the"
                " advisory reports the ones that did not: " far))
         (is (re-find #"http://pub\.test/contract" far)
@@ -982,8 +982,8 @@
       (ops/module-platform! sess "shopw.contracts" :cljc :prompt "shared with the browser")
       (ops/ingest! sess 'shopw.api
                    (str "(ns shopw.api)\n\n"
-                        "(defn ^{:web/method :get :web/path \"/api/orders/:id\"\n"
-                        "        :web/auth :public :web/response shopw.contracts/order}\n"
+                        "(defn ^{:http/method :get :http/path \"/api/orders/:id\"\n"
+                        "        :http/auth :public :rest/response shopw.contracts/order}\n"
                         "  get-order \"G.\" [_] {:status 200 :body {}})\n"))
 
       (testing "without webapp, generation still emits the :cljs performer"
@@ -1100,8 +1100,8 @@
       (ops/module-platform! sess "shopz.contracts" :cljc :prompt "shared")
       (ops/ingest! sess 'shopz.api
                    (str "(ns shopz.api)\n\n"
-                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
-                        "        :web/auth :public :web/response shopz.contracts/project}\n"
+                        "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                        "        :http/auth :public :rest/response shopz.contracts/project}\n"
                         "  things \"T.\" [_] {:status 200 :body {}})\n"))
 
       (testing "generating into a name whose DERIVED sibling is hand-written is refused"
@@ -1161,8 +1161,8 @@
       (ops/ingest! sess 'shopv.views (str "(ns shopv.views)\n\n(defn v \"V.\" [] [:p])\n"))
       (ops/ingest! sess 'shopv.api
                    (str "(ns shopv.api)\n\n"
-                        "(defn ^{:web/method :get :web/path \"/api/things\"\n"
-                        "        :web/auth :public :web/response :string}\n"
+                        "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                        "        :http/auth :public :rest/response :string}\n"
                         "  things \"T.\" [_] {:status 200 :body \"[]\"})\n"))
 
       (testing "without webapp the default is unchanged — no entry, no cycle"

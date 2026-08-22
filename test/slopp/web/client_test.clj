@@ -61,7 +61,7 @@
         ;; passes through both untouched, which is what lets the assertions below
         ;; be exact instead of approximate.
         (let [text (fn [status body]
-                     {:web/raw true
+                     {:http/raw true
                       :status  status
                       :body    body
                       :headers {"Content-Type" "text/plain"}})]
@@ -146,11 +146,11 @@
        "jdk http transport"
        (fn [routes]
          (let [s    (slopp.web/serve!
-                     {:web/namespaces []
-                      :web/routes (vec (for [[[method path] handler] routes]
+                     {:http/namespaces []
+                      :http/routes (vec (for [[[method path] handler] routes]
                                          {:method method :path path
                                           :auth :public :handler handler}))
-                      :web/host "127.0.0.1" :web/port 0})
+                      :http/host "127.0.0.1" :http/port 0})
                dead (let [ss (java.net.ServerSocket. 0)
                           p  (.getLocalPort ss)]
                       (.close ss)

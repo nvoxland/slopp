@@ -8,7 +8,7 @@
   declaration obliges, and what a declaration's consequences are worth saying
   out loud.
 
-  That last one is a genre of its own and worth naming: `:web/client-routes` changes
+  That last one is a genre of its own and worth naming: `:webapp/client-routes` changes
   every status code under a prefix from 404 to 200, so the test asserts that
   slopp SAYS so once, and stops. A consequence nobody states is one somebody
   discovers."
@@ -18,20 +18,20 @@
 
 (deftest routes-derive-from-stored-nodes
   (let [src (str "(ns shop.api)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/api/users/:id\"\n"
-                 "        :web/auth [:group \"admin\"]\n"
-                 "        :web/reads {:user [:user/by-id [:path-params :id]]}\n"
+                 "(defn ^{:http/method :get :http/path \"/api/users/:id\"\n"
+                 "        :http/auth [:group \"admin\"]\n"
+                 "        :http/reads {:user [:user/by-id [:path-params :id]]}\n"
                  "        :malli/schema [:=> [:cat :map] :map]\n"
-                 "        :web/response :map} get-user \"U.\" [req] req)\n\n"
-                 "(defn ^{:web/method :post :web/path \"/api/users\"\n"
-                 "        :web/auth :authenticated\n"
-                 "        :web/effects [:user/insert]} create-user \"C.\" [req] req)\n\n"
-                 "(defn ^{:web/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n\n"
-                 "(defn ^{:web/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n\n"
+                 "        :rest/response :map} get-user \"U.\" [req] req)\n\n"
+                 "(defn ^{:http/method :post :http/path \"/api/users\"\n"
+                 "        :http/auth :authenticated\n"
+                 "        :http/effects [:user/insert]} create-user \"C.\" [req] req)\n\n"
+                 "(defn ^{:http/effect :user/insert} insert-user! \"I.\" [ctx row] row)\n\n"
+                 "(defn ^{:http/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n\n"
                  "(defn plain \"P.\" [x] x)\n")
         s0  (store/ingest (store/empty-store) 'shop.api src)
         on  (first (store/record-config-put s0 "capabilities" :manifest "http.enabled" "true"))]
-    (testing "endpoints: every :web/path form, read off the stored node"
+    (testing "endpoints: every :http/path form, read off the stored node"
       (let [eps (rules.http/endpoints s0)
             by-path (fn [p] (some #(when (= p (:path %)) %) eps))]
         (is (= 2 (count eps)))
@@ -39,15 +39,15 @@
           (is (= :get (:method e)))
           (is (= 'shop.api/get-user (:handler e)))
           (is (= [:group "admin"] (:auth e)))
-          (is (= {:user [:user/by-id [:path-params :id]]} (:web/reads e)))
+          (is (= {:user [:user/by-id [:path-params :id]]} (:http/reads e)))
           (is (true? (:schema? e))))
         (let [e (by-path "/api/users")]
           (is (= :post (:method e)))
-          (is (= [:user/insert] (:web/effects e)))
+          (is (= [:user/insert] (:http/effects e)))
           (is (not (:schema? e))))))
     (testing "performers: the app-defined effect/read vocabulary"
-      (is (= {:user/insert 'shop.api/insert-user!} (rules.http/performers s0 :web/effect)))
-      (is (= {:user/by-id 'shop.api/user-by-id} (rules.http/performers s0 :web/read))))
+      (is (= {:user/insert 'shop.api/insert-user!} (rules.http/performers s0 :http/effect)))
+      (is (= {:user/by-id 'shop.api/user-by-id} (rules.http/performers s0 :http/read))))
     (testing "routes-report is empty-and-says-why until http.enabled"
       (is (false? (:enabled (rules.http/routes-report s0))))
       (is (empty? (:routes (rules.http/routes-report s0)))))
@@ -60,7 +60,7 @@
     (testing "a test namespace's endpoint-shaped form is a fixture, not surface"
       (let [s2 (store/ingest on 'shop.api-test
                              (str "(ns shop.api-test)\n\n"
-                                  "(defn ^{:web/method :get :web/path \"/fixture\"} fx \"F.\" [req] req)\n"))]
+                                  "(defn ^{:http/method :get :http/path \"/fixture\"} fx \"F.\" [req] req)\n"))]
         (is (= 2 (count (:routes (rules.http/routes-report s2)))))))))
 
 (deftest ^:external web-gates-ride-the-write-path
@@ -69,21 +69,21 @@
       (ops/ingest! sess 'shop.api "(ns shop.api)\n\n(defn seed \"S.\" [x] x)\n")
       (testing "before opting in, an endpoint-shaped form lands ungated (the adoption story)"
         (let [r (ops/add-form! sess 'shop.api
-                               "(defn ^{:web/method :get :web/path \"/pre\"} pre \"P.\" [req] req)"
+                               "(defn ^{:http/method :get :http/path \"/pre\"} pre \"P.\" [req] req)"
                                :prompt "pre-optin endpoint")]
           (is (nil? (:error r)) (pr-str r))))
       (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
                         :prompt "opt into HTTP")
-      (testing "an endpoint with no :web/auth is refused with teaching, and never lands"
+      (testing "an endpoint with no :http/auth is refused with teaching, and never lands"
         (let [r (ops/add-form! sess 'shop.api
-                               "(defn ^{:web/method :get :web/path \"/naked\"} naked \"N.\" [req] req)"
+                               "(defn ^{:http/method :get :http/path \"/naked\"} naked \"N.\" [req] req)"
                                :prompt "endpoint without auth")]
-          (is (re-find #":web/auth" (str (:error r))) (pr-str r))
+          (is (re-find #":http/auth" (str (:error r))) (pr-str r))
           (is (nil? (store/form-named (:store @sess) 'shop.api 'naked)))))
       (testing "with a declared policy and response contract it lands, and the route reports"
         (let [r (ops/add-form! sess 'shop.api
-                               (str "(defn ^{:web/method :get :web/path \"/api/ping\""
-                                    " :web/auth :public :web/response :map} ping \"P.\" [req] req)")
+                               (str "(defn ^{:http/method :get :http/path \"/api/ping\""
+                                    " :http/auth :public :rest/response :map} ping \"P.\" [req] req)")
                                :prompt "a public endpoint")]
           (is (nil? (:error r)) (pr-str r))
           (let [rep (rules.http/routes-report (:store @sess))]
@@ -102,7 +102,7 @@
                  "(defn todo-form \"F.\" []\n"
                  "  [:form {:action \"/todos\" :method \"post\"} [:button \"go\"]])\n\n"
                  "(defn dyn \"D.\" [req] [:a {:href (:uri req)} \"d\"])\n\n"
-                 "(defn ^{:web/external-path \"nginx serves it\"} ext-link \"E.\" []\n"
+                 "(defn ^{:http/external-path \"nginx serves it\"} ext-link \"E.\" []\n"
                  "  [:a {:href \"/behind-nginx\"} \"x\"])\n")
         s    (store/ingest (store/empty-store) 'shop.ui src)
         s    (store/ingest s 'shop.ui-test
@@ -119,12 +119,12 @@
              (of :prefix))))
     (testing "a dynamic value is NAMED, never counted clean"
       (is (= '[shop.ui/dyn] (mapv :form (filter #(= :unresolved (:kind %)) refs)))))
-    (testing "^{:web/external-path} discharges the form's refs; test namespaces are fixtures"
+    (testing "^{:http/external-path} discharges the form's refs; test namespaces are fixtures"
       (is (not-any? #(#{'shop.ui/ext-link 'shop.ui-test/fx} (:form %)) refs)))))
 
 (deftest dangling-route-refs-join-declared-routes-and-static-mounts
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/todos\" :web/auth :public} todos-page \"T.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/todos\" :http/auth :public} todos-page \"T.\" [req]\n"
                  "  [:div [:a {:href \"/todos\"} \"self\"]\n"
                  "        [:a {:href \"/nowhere\"} \"bad\"]\n"
                  "        [:a {:href \"/assets/app.css\"} \"css\"]\n"
@@ -132,7 +132,7 @@
                  "        [:a {:href (str \"/todo/\" 7)} \"one\"]\n"
                  "        [:a {:href (str \"/gone/\" 7)} \"prefix-bad\"]\n"
                  "        [:a {:href (:uri req)} \"dyn\"]])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/todo/:id\" :web/auth :public} todo-page \"O.\" [req] req)\n")
+                 "(defn ^{:http/method :get :http/path \"/todo/:id\" :http/auth :public} todo-page \"O.\" [req] req)\n")
         s (store/ingest (store/empty-store) 'shop.ui src)
         s (first (store/record-config-put s "capabilities" :manifest "http.enabled" "true"))
         s (first (store/record-config-put s "capabilities" :manifest "http.static./assets" "public"))
@@ -160,7 +160,7 @@
               could not see it made that advice impossible to follow: the
               bundle every page loads read as a dangling link."
       (let [src2 (str "(ns shop.doc)\n\n"
-                      "(defn ^{:web/method :get :web/path \"/\" :web/auth :public} page \"P.\" [req]\n"
+                      "(defn ^{:http/method :get :http/path \"/\" :http/auth :public} page \"P.\" [req]\n"
                       "  [:html [:script {:src \"/assets/cljs/main.js\"}]])\n")
             s2 (store/ingest s 'shop.doc src2)
             s2 (first (store/record-artifact
@@ -172,9 +172,9 @@
 
 (deftest query-routes-carries-rendered-by
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:web/method :get :web/path \"/todos\" :web/auth :public} todos-page \"T.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/todos\" :http/auth :public} todos-page \"T.\" [req]\n"
                  "  [:div [:a {:href \"/todos\"} \"self\"] [:a {:href (str \"/todo/\" 7)} \"one\"]])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/todo/:id\" :web/auth :public} todo-page \"O.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/todo/:id\" :http/auth :public} todo-page \"O.\" [req]\n"
                  "  [:a {:href \"/todos\"} \"back\"])\n")
         s (store/ingest (store/empty-store) 'shop.ui src)
         s (first (store/record-config-put s "capabilities" :manifest "http.enabled" "true"))
@@ -191,7 +191,7 @@
     (try
       (ops/ingest! sess 'ui.core
                    (str "(ns ui.core)\n\n"
-                        "(defn ^{:web/method :get :web/path \"/home\" :web/auth :public :web/response :map} home \"H.\" [req]\n"
+                        "(defn ^{:http/method :get :http/path \"/home\" :http/auth :public :rest/response :map} home \"H.\" [req]\n"
                         "  [:a {:href \"/nowhere\"} \"x\"])\n"))
       (testing "inert until http.enabled"
         (let [r (external/done! sess :label "pre-optin")]
@@ -207,7 +207,7 @@
               (pr-str (:findings r)))))
       (testing "adding the route discharges"
         (ops/add-form! sess 'ui.core
-                       "(defn ^{:web/method :get :web/path \"/nowhere\" :web/auth :public :web/response :map} nowhere \"N.\" [req] req)"
+                       "(defn ^{:http/method :get :http/path \"/nowhere\" :http/auth :public :rest/response :map} nowhere \"N.\" [req] req)"
                        :prompt "serve the missing route")
         (let [r (external/done! sess :label "served")]
           (is (empty? (get-in r [:findings :http-dangling-route-refs]))
@@ -235,24 +235,24 @@
 
 (deftest routes-surface-the-declared-contract
   ;; D-web-contracts dogfood finding: the endpoint-schema gate makes
-  ;; :web/request / :web/response MANDATORY, but query_surface computed :schema?
+  ;; :rest/request / :rest/response MANDATORY, but query_surface computed :schema?
   ;; from :malli/schema — a DIFFERENT key — so every contract-carrying endpoint
   ;; reported :schema? false. What query_surface shows must be what the gate
   ;; enforces.
   (let [s   (store/ingest (store/empty-store) 'rc.api
                           (str "(ns rc.api)\n\n"
-                               "(defn ^{:web/method :post :web/path \"/o\" :web/auth :public"
-                               " :web/request rc.c/new :web/response rc.c/one}"
+                               "(defn ^{:http/method :post :http/path \"/o\" :http/auth :public"
+                               " :rest/request rc.c/new :rest/response rc.c/one}"
                                " make \"M.\" [r] r)\n\n"
-                               "(defn ^{:web/method :get :web/path \"/bare\" :web/auth :public}"
+                               "(defn ^{:http/method :get :http/path \"/bare\" :http/auth :public}"
                                " bare \"B.\" [r] r)\n"))
         by  (into {} (map (juxt :name identity)) (rules.http/endpoints s))]
     (testing "the declared contract rides the route row"
-      (is (= 'rc.c/new (:web/request (by 'make))))
-      (is (= 'rc.c/one (:web/response (by 'make))))
+      (is (= 'rc.c/new (:rest/request (by 'make))))
+      (is (= 'rc.c/one (:rest/response (by 'make))))
       (is (true? (:schema? (by 'make)))))
     (testing "an endpoint with no contract reads as unschema'd"
-      (is (nil? (:web/response (by 'bare))))
+      (is (nil? (:rest/response (by 'bare))))
       (is (false? (:schema? (by 'bare)))))))
 
 (deftest route-refs-only-read-hiccup-attribute-position
@@ -260,7 +260,7 @@
                  "(defn steps \"S.\" [x]\n"
                  "  [{:op :add :action :replace}\n"
                  "   {:action \"action\" :method :get}])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/p\" :web/auth :public} page \"P.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/p\" :http/auth :public} page \"P.\" [req]\n"
                  "  [:div [:a {:href \"/nowhere\"} \"bad\"]\n"
                  "        [:form {:action (:uri req) :method \"post\"} \"dyn\"]])\n")
         s (store/ingest (store/empty-store) 'plan.core src)
@@ -280,7 +280,7 @@
                  "  [:step {:action :replace :name x}])\n\n"
                  "(defn widget \"W.\" [x]\n"
                  "  [:div {:href \"/not-a-link\"} x])\n\n"
-                 "(defn ^{:web/method :get :web/path \"/q\" :web/auth :public} page \"P.\" [req]\n"
+                 "(defn ^{:http/method :get :http/path \"/q\" :http/auth :public} page \"P.\" [req]\n"
                  "  [:div [:a.nav#top {:href \"/styled\"} \"sugar\"]\n"
                  "        [:link {:href \"/site.css\"}]\n"
                  "        [:form {:action (:uri req) :method \"post\"} \"dyn\"]])\n")
@@ -301,9 +301,9 @@
 (deftest tests-are-joined-to-the-endpoints-whose-paths-they-exercise
   (let [s (store/ingest (store/empty-store) 'shop.api
                         (str "(ns shop.api)\n\n"
-                             "(defn ^{:web/method :get :web/path \"/todos\" :web/auth :public} todos \"T.\" [req] req)\n\n"
-                             "(defn ^{:web/method :get :web/path \"/todo/:id\" :web/auth :public} one \"O.\" [req] req)\n\n"
-                             "(defn ^{:web/method :post :web/path \"/todos\" :web/auth :public} add! \"A.\" [req] req)\n"))
+                             "(defn ^{:http/method :get :http/path \"/todos\" :http/auth :public} todos \"T.\" [req] req)\n\n"
+                             "(defn ^{:http/method :get :http/path \"/todo/:id\" :http/auth :public} one \"O.\" [req] req)\n\n"
+                             "(defn ^{:http/method :post :http/path \"/todos\" :http/auth :public} add! \"A.\" [req] req)\n"))
         s (store/ingest s 'shop.api-test
                         (str "(ns shop.api-test)\n\n"
                              "(deftest listing (handle! ctx {:request-method :get :uri \"/todos\"}))\n\n"
@@ -332,8 +332,8 @@
   ;; The gate that should have failed `done` never saw it.
   (let [st (store/ingest (store/empty-store) 'sr.pages
                          (str "(ns sr.pages)\n"
-                              "(defn ^{:web/method :get :web/path \"/real\""
-                              "        :web/auth :public :web/response :string}\n"
+                              "(defn ^{:http/method :get :http/path \"/real\""
+                              "        :http/auth :public :rest/response :string}\n"
                               "  page [_req]\n"
                               "  [:html [:head\n"
                               "    [:script {:src \"/nowhere/main.js\"}]\n"
@@ -355,7 +355,7 @@
             "a src pointing at a declared endpoint is served, like any href")))))
 
 (deftest client-routes-under-a-declared-prefix-are-served
-  ;; `:web/client-routes` says a document serves client routes under a prefix, so a link
+  ;; `:webapp/client-routes` says a document serves client routes under a prefix, so a link
   ;; to /store/form/f1 IS served even though no endpoint declares that path.
   ;; The gate has to know, or every in-app link in a client-routed app reads
   ;; as dangling and the finding becomes noise someone learns to ignore.
@@ -365,9 +365,9 @@
   ;; given up the only thing it does.
   (let [st (store/ingest (store/empty-store) 'sp.pages
                          (str "(ns sp.pages)\n"
-                              "(defn ^{:web/method :get :web/path \"/\""
-                              "        :web/auth :public :web/response :string\n"
-                              "        :web/client-routes [\"/store\"]}\n"
+                              "(defn ^{:http/method :get :http/path \"/\""
+                              "        :http/auth :public :rest/response :string\n"
+                              "        :webapp/client-routes [\"/store\"]}\n"
                               "  app [_req]\n"
                               "  [:html [:body\n"
                               "    [:a {:href \"/store/form/f1\"} \"a client route\"]\n"
@@ -375,7 +375,7 @@
         {:keys [dangling]} (rules.http/dangling-route-refs st)
         paths (set (map :path dangling))]
     (testing "the endpoint row carries the declared prefixes, so a reader sees them"
-      (is (= ["/store"] (:web/client-routes (first (rules.http/endpoints st))))))
+      (is (= ["/store"] (:webapp/client-routes (first (rules.http/endpoints st))))))
     (testing "a client route under the prefix is served by the fallback"
       (is (not (contains? paths "/store/form/f1")) (pr-str dangling)))
     (testing "a path outside every prefix still dangles"
@@ -384,11 +384,11 @@
 (deftest a-client-router-path-is-not-somebody-elses-server
   ;; Friction 13, measured on slopp-ui: view forms render `/store/ns/foo`, which
   ;; no SERVER route matches, so the dangling-route check flagged them. The only
-  ;; escape was `^{:web/external-path}`, and it discharged the check while filing
+  ;; escape was `^{:http/external-path}`, and it discharged the check while filing
   ;; a FALSE statement — the crossings inventory then reported those forms as
   ;; leaving for "somebody else's server".
   ;;
-  ;; The fix at the time was a second marker, `^:web/client-path`: same
+  ;; The fix at the time was a second marker, `^:webapp/client-path`: same
   ;; discharge, truthful category. Teaching the check to SEE the prefixing was
   ;; the alternative and could not be done, because the mount point arrived
   ;; through an ordinary function call.
@@ -410,7 +410,7 @@
         paths (set (map :path (:dangling found)))]
 
     (testing "a client route resolves with no marker at all"
-      ;; what thirteen identical `^:web/client-path` sentences used to buy
+      ;; what thirteen identical `^:webapp/client-path` sentences used to buy
       (is (not (contains? paths "/store/ns/shop.core"))
           (pr-str (:dangling found))))
 
@@ -428,30 +428,30 @@
           "an app that must mark its own screens as foreign will mark them wrong"))))
 
 (deftest serving-namespaces-derive-from-the-store-not-a-hand-kept-list
-  ;; `:web/namespaces` is the one REQUIRED opt on serve!, and `web/context`'s
-  ;; own docstring warns that "a :web/namespaces list missing half the app
+  ;; `:http/namespaces` is the one REQUIRED opt on serve!, and `web/context`'s
+  ;; own docstring warns that "a :http/namespaces list missing half the app
   ;; assembles happily and answers". A hand-kept list of what to serve IS
   ;; that defect, held by every app. The store already knows: endpoint rows
   ;; carry :ns, and the performer vocabularies carry qualified syms.
   (let [api   (str "(ns shop.api)\n\n"
-                   "(defn ^{:web/method :get :web/path \"/api/users/:id\"\n"
-                   "        :web/auth :authenticated\n"
-                   "        :web/reads {:user [:user/by-id [:path-params :id]]}\n"
+                   "(defn ^{:http/method :get :http/path \"/api/users/:id\"\n"
+                   "        :http/auth :authenticated\n"
+                   "        :http/reads {:user [:user/by-id [:path-params :id]]}\n"
                    "        :malli/schema [:=> [:cat :map] :map]\n"
-                   "        :web/response :map} get-user \"U.\" [req] req)\n")
+                   "        :rest/response :map} get-user \"U.\" [req] req)\n")
         ;; the performer lives in ANOTHER namespace — this is the one a hand
         ;; list forgets, and omitting it is not a quiet degradation: context
-        ;; throws :web/missing-performers because the route above promises a
+        ;; throws :http/missing-performers because the route above promises a
         ;; read nothing listed can serve.
         data  (str "(ns shop.data)\n\n"
-                   "(defn ^{:web/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n"
-                   "(defn ^{:web/effect :user/insert} insert! \"I.\" [ctx row] row)\n")
+                   "(defn ^{:http/read :user/by-id} user-by-id \"R.\" [ctx id] id)\n"
+                   "(defn ^{:http/effect :user/insert} insert! \"I.\" [ctx row] row)\n")
         ui    (str "(ns shop.ui)\n\n"
-                   "(defn ^{:web/method :get :web/path \"/users\"\n"
-                   "        :web/response :hiccup} users-page \"P.\" [req] [:div])\n")
+                   "(defn ^{:http/method :get :http/path \"/users\"\n"
+                   "        :rest/response :hiccup} users-page \"P.\" [req] [:div])\n")
         plain (str "(ns shop.util)\n\n(defn helper \"H.\" [x] x)\n")
         fixt  (str "(ns shop.api-test)\n\n"
-                   "(defn ^{:web/method :get :web/path \"/fixture\"} fx \"F.\" [req] req)\n")
+                   "(defn ^{:http/method :get :http/path \"/fixture\"} fx \"F.\" [req] req)\n")
         s     (-> (store/empty-store)
                   (store/ingest 'shop.api api)
                   (store/ingest 'shop.data data)
@@ -492,15 +492,15 @@
 
 (deftest the-app-declares-its-context-builder-with-a-marker
   ;; The managed app server writes the `serve!` call, so it needs to know how
-  ;; to build `:web/perform-ctx` — the map a handler receives as `:web/deps`
+  ;; to build `:http/perform-ctx` — the map a handler receives as `:http/deps`
   ;; and every performer receives as its first argument. It is app-specific
   ;; by definition (a registry, a pool, a database handle), so the app has to
   ;; say, and a MARKER is how everything else in this framework is addressed.
   ;;
   ;; A marker rather than a capability naming a qualified symbol, for a
   ;; reason slopp-ui named: a marker makes a GATE possible. Both halves are
-  ;; then visible in the store — handlers that take `:web/deps`, and whether
-  ;; anything claims to build it — so "this store takes :web/deps and
+  ;; then visible in the store — handlers that take `:http/deps`, and whether
+  ;; anything claims to build it — so "this store takes :http/deps and
   ;; declares no builder" can refuse at the WRITE instead of 500ing in a
   ;; browser. A capability is a string in config, checkable at boot, which is
   ;; later and weaker.
@@ -512,7 +512,7 @@
   ;; suggestion.
   (let [ns-src (fn [body] (str "(ns app.system)\n\n" body))
         one    (store/ingest (store/empty-store) 'app.system
-                             (ns-src (str "(defn ^{:web/context true} deps \"D.\""
+                             (ns-src (str "(defn ^{:http/context true} deps \"D.\""
                                           " [] {:registry (atom {})})\n")))]
     (testing "the marked var, fully qualified — the generated serve call has
               to name it from another image"
@@ -525,7 +525,7 @@
               running on the deps it did not mean"
       (let [two (store/ingest one 'app.other
                               (str "(ns app.other)\n\n"
-                                   "(defn ^{:web/context true} deps \"D.\" [] {})\n"))]
+                                   "(defn ^{:http/context true} deps \"D.\" [] {})\n"))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"(?i)one"
                               (rules.http/context-builder two)))))))
 
@@ -619,21 +619,21 @@
                                  "        [:total {:description \"hits before the limit\"} :int]])\n"))
               (store/ingest 'dc.api
                             (str "(ns dc.api (:require [dc.contracts :as c]))\n\n"
-                                 "(defn ^{:web/method :get :web/path \"/l\" :web/auth :public"
-                                 " :web/response c/listing} listing \"L.\" [r] r)\n\n"
-                                 "(defn ^{:web/method :get :web/path \"/i\" :web/auth :public"
-                                 " :web/response [:map [:ok {:doc \"it worked\"} :boolean]"
+                                 "(defn ^{:http/method :get :http/path \"/l\" :http/auth :public"
+                                 " :rest/response c/listing} listing \"L.\" [r] r)\n\n"
+                                 "(defn ^{:http/method :get :http/path \"/i\" :http/auth :public"
+                                 " :rest/response [:map [:ok {:doc \"it worked\"} :boolean]"
                                  " [:why :string]]} inline \"I.\" [r] r)\n")))
         by (group-by :endpoint (rules.http/undocumented-contract-fields s))]
     (testing "a schema named through an alias is RESOLVED and walked — and the
               walk follows :sequential into the second named schema, which is
               where slopp's own worst case lives (:gaps on /api/modules is four
               bare ints nested one level down)"
-      (is (= [{:endpoint 'dc.api/listing :schema :web/response
+      (is (= [{:endpoint 'dc.api/listing :schema :rest/response
                :fields [[:rows] [:rows :loc]]}]
              (by 'dc.api/listing))))
     (testing "an inline schema is walked the same way"
-      (is (= [{:endpoint 'dc.api/inline :schema :web/response
+      (is (= [{:endpoint 'dc.api/inline :schema :rest/response
                :fields [[:why]]}]
              (by 'dc.api/inline))))
     (testing "BOTH spellings count as prose — :doc is preferred and :description
@@ -652,8 +652,8 @@
       (let [built (-> (store/empty-store)
                       (store/ingest 'db.api
                                     (str "(ns db.api)\n\n"
-                                         "(defn ^{:web/method :get :web/path \"/b\" :web/auth :public"
-                                         " :web/response [:map [:total {:doc (str \"hits before\""
+                                         "(defn ^{:http/method :get :http/path \"/b\" :http/auth :public"
+                                         " :rest/response [:map [:total {:doc (str \"hits before\""
                                          " \" the limit\")} :int]]} b \"B.\" [r] r)\n")))]
         (is (= [] (vec (rules.http/undocumented-contract-fields built))))))
     (testing "a fully documented contract reports NOTHING — without this every
@@ -661,8 +661,8 @@
       (let [ok (-> (store/empty-store)
                    (store/ingest 'dd.api
                                  (str "(ns dd.api)\n\n"
-                                      "(defn ^{:web/method :get :web/path \"/d\" :web/auth :public"
-                                      " :web/response [:map [:n {:doc \"how many\"} :int]]}"
+                                      "(defn ^{:http/method :get :http/path \"/d\" :http/auth :public"
+                                      " :rest/response [:map [:n {:doc \"how many\"} :int]]}"
                                       " d \"D.\" [r] r)\n")))]
         (is (= [] (vec (rules.http/undocumented-contract-fields ok))))))
     (testing "the finding teaches the fix as a literal form, and says which
@@ -691,16 +691,16 @@
                                  "  [:map [:rows [:sequential row]] [:arc [:sequential :any]]])\n"))
               (store/ingest 'uc.api
                             (str "(ns uc.api (:require [uc.contracts :as c]))\n\n"
-                                 "(defn ^{:web/method :get :web/path \"/l\" :web/auth :public"
-                                 " :web/response c/listing} listing \"L.\" [r] r)\n\n"
-                                 "(defn ^{:web/method :get :web/path \"/k\" :web/auth :public"
-                                 " :web/response [:map [:ok :boolean]]} ok \"K.\" [r] r)\n")))
+                                 "(defn ^{:http/method :get :http/path \"/l\" :http/auth :public"
+                                 " :rest/response c/listing} listing \"L.\" [r] r)\n\n"
+                                 "(defn ^{:http/method :get :http/path \"/k\" :http/auth :public"
+                                 " :rest/response [:map [:ok :boolean]]} ok \"K.\" [r] r)\n")))
         by (into {} (map (juxt :endpoint identity))
                  (rules.http/unconstrained-contract-fields s))]
     (testing "a bare :map nested behind a named schema is found, with the PATH
               that reaches it — and so is a bare :any, tagged so the teach can
               tell a field that lies from one that abstains"
-      (is (= {:endpoint 'uc.api/listing :schema :web/response
+      (is (= {:endpoint 'uc.api/listing :schema :rest/response
               :fields [{:path [:rows :body] :declares :map}
                        {:path [:arc] :declares :any}]}
              (by 'uc.api/listing))))
@@ -751,14 +751,14 @@
   (let [mk (fn [extra resp]
              (store/ingest (store/empty-store) 'uw.api
                            (str "(ns uw.api)\n\n"
-                                "(defn ^{:web/method :get :web/path \"/p\""
-                                " :web/auth :public" extra
-                                " :web/response " resp "} proxy \"P.\" [r] r)\n")))
+                                "(defn ^{:http/method :get :http/path \"/p\""
+                                " :http/auth :public" extra
+                                " :rest/response " resp "} proxy \"P.\" [r] r)\n")))
         plain (mk "" ":any")
-        proxy (mk (str " :web/unconstrained-ok \"a proxy: the response IS whatever"
+        proxy (mk (str " :rest/unconstrained-ok \"a proxy: the response IS whatever"
                        " the project sent, forwarded byte for byte\"")
                   ":any")
-        stale (mk " :web/unconstrained-ok \"no longer true\"" "[:map [:id :string]]")]
+        stale (mk " :rest/unconstrained-ok \"no longer true\"" "[:map [:id :string]]")]
 
     (testing "without the marker it still fires — the finding is TRUE"
       (is (seq (rules.rest/rest-unconstrained-contract-check nil plain nil))))
@@ -774,7 +774,7 @@
         (is (re-find #"unconstrained-ok" (str (:teach (first f)))) (pr-str f))))))
 
 (deftest a-link-to-a-declared-CLIENT-route-needs-no-escape
-  ;; `^:web/client-path` existed because this check could not see the prefixing:
+  ;; `^:webapp/client-path` existed because this check could not see the prefixing:
   ;;
   ;;   teaching the check to SEE the prefixing is not possible in general,
   ;;   because the base arrives through an ordinary function call
@@ -813,7 +813,7 @@
                (pr-str found))))))
 
 (deftest a-PREFIX-literal-resolves-against-a-client-route-pattern
-  ;; The shape that decides whether retiring `^:web/client-path` helps anybody.
+  ;; The shape that decides whether retiring `^:webapp/client-path` helps anybody.
   ;; slopp-ui counted their own links: 6 whole literals, ~18 PREFIX literals
   ;; inside `(str …)`, 2 with no literal at all. The dominant shape is
   ;;

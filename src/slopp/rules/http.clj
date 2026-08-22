@@ -16,15 +16,15 @@
   **The recurring difficulty is that a rendered path is not a call.** A link is a
   string; nothing resolves it, so a typo and a legitimate handoff are the same
   token. Everything here that classifies one — `:exact`/`:prefix`/`:unresolved`,
-  and the `:web/external-path` escape that survives it — is an attempt to
+  and the `:http/external-path` escape that survives it — is an attempt to
   keep those apart, and each distinction was added because collapsing it made a
   report state something false. Prefer adding a category over widening one."
   (:require [slopp.project.capabilities :as capabilities]
             [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs] [slopp.rules.webapp :as rules.webapp]))
 
 (defn endpoints
-  "Every declared endpoint in the store — a `:web/path` form's route row:
-  `{:handler :ns :name :form-id :method :path :auth :web/effects :web/reads
+  "Every declared endpoint in the store — a `:http/path` form's route row:
+  `{:handler :ns :name :form-id :method :path :auth :http/effects :http/reads
   :schema? :effectful?}` (slopp's own vocabulary keys stay namespaced —
   the same rule the request envelope follows). Built on the SAME traversal
   the write gates check (`modules/web-endpoint-rows`), so what query_surface
@@ -35,29 +35,29 @@
            :ns        ns
            :name      name
            :form-id   form-id
-           :method    (:web/method meta)
-           :path      (str (:web/path meta))
-           :auth      (:web/auth meta)
-           :web/effects (:web/effects meta)
-           :web/reads   (:web/reads meta)
+           :method    (:http/method meta)
+           :path      (str (:http/path meta))
+           :auth      (:http/auth meta)
+           :http/effects (:http/effects meta)
+           :http/reads   (:http/reads meta)
            ;; the CONTRACT the endpoint-schema gate enforces (D-web-contracts) —
            ;; this used to read :malli/schema, a different key, so every
            ;; contract-carrying endpoint reported :schema? false
-           :web/request  (:web/request meta)
-           :web/response (:web/response meta)
+           :rest/request  (:rest/request meta)
+           :rest/response (:rest/response meta)
            ;; the client-route prefixes this document also answers for, when it
            ;; declares any. Surfaced rather than expanded into synthetic
            ;; catch-all rows: query_surface should show what the author
            ;; DECLARED, and three `/store/*client-path` rows would read as
            ;; surface nobody wrote.
-           :web/client-routes   (:web/client-routes meta)
-           :schema?   (contains? meta :web/response)
-           :effectful? (boolean (:web/effectful meta))})
+           :webapp/client-routes   (:webapp/client-routes meta)
+           :schema?   (contains? meta :rest/response)
+           :effectful? (boolean (:http/effectful meta))})
         (edit.http/web-endpoint-rows store)))
 
 (defn performers
-  "The app-defined performer vocabulary for `marker-key` (`:web/effect` or
-  `:web/read`): {kind → performer qsym}. Delegates to the SAME derivation
+  "The app-defined performer vocabulary for `marker-key` (`:http/effect` or
+  `:http/read`): {kind → performer qsym}. Delegates to the SAME derivation
   the undeclared-effect gate checks (`modules/web-performers`)."
   [store marker-key]
   (edit.http/web-performers store marker-key))
@@ -140,19 +140,19 @@
        [(symbol (str nsx) (str (:name e))) (request-literals sx)]))))
 
 (defn ^:export context-builder
-  "The qsym of this store's `^{:web/context true}` fn — the zero-arg builder
-  of `:web/perform-ctx` — or nil when the app declares none.
+  "The qsym of this store's `^{:http/context true}` fn — the zero-arg builder
+  of `:http/perform-ctx` — or nil when the app declares none.
 
   The managed app server WRITES the `serve!` call, so it has to know how to
-  build the context a handler receives as `:web/deps` and every performer
+  build the context a handler receives as `:http/deps` and every performer
   receives as its first argument. That map is app-specific by definition (a
   registry, a pool, a connection), so the app must say — and a marker is how
   everything else in this framework is addressed.
 
   **A marker rather than a capability naming a qualified symbol.** A marker
   makes a GATE possible: both halves are then visible in the store — handlers
-  destructuring `:web/deps`, and whether anything claims to build it — so
-  \"this store takes `:web/deps` and declares no builder\" refuses at the WRITE
+  destructuring `:http/deps`, and whether anything claims to build it — so
+  \"this store takes `:http/deps` and declares no builder\" refuses at the WRITE
   rather than 500ing in a browser. That gate is
   `slopp.edit.web/http-undeclared-context`, and it is why this is a marker;
   a capability is a string in config, checkable for resolvability at boot,
@@ -176,15 +176,15 @@
   (let [found (edit.http/web-context-builders store)]
     (when (seq found)
       (when (next found)
-        (throw (ex-info (str "a store declares exactly ONE ^{:web/context true}"
+        (throw (ex-info (str "a store declares exactly ONE ^{:http/context true}"
                              " builder; this one has " (count found) ": "
                              (str/join ", " found))
-                        {:web/context-builders (vec found)})))
+                        {:http/context-builders (vec found)})))
       (first found))))
 
 (defn ^:export serving-namespaces
   "Every namespace that must be scanned to serve this store's web surface —
-  the derived answer to `serve!`'s `:web/namespaces`, sorted.
+  the derived answer to `serve!`'s `:http/namespaces`, sorted.
 
   The union of two things the store already knows: the namespaces owning
   endpoint rows (`endpoints`), and the namespaces of the performer vars
@@ -193,13 +193,13 @@
   endpoint-shaped form is a fixture, and serving it would mount a fake
   endpoint on the real app.
 
-  Why derived rather than declared: `:web/namespaces` is the one REQUIRED
+  Why derived rather than declared: `:http/namespaces` is the one REQUIRED
   opt on `serve!`, and `web/context`'s own docstring warns that \"a
-  `:web/namespaces` list missing half the app assembles happily and
+  `:http/namespaces` list missing half the app assembles happily and
   answers\". A hand-kept list of what to serve IS that defect, held by every
   app that serves. The forgettable entry is a PERFORMER-only namespace: a
-  route promising `:web/reads {:user [:user/by-id …]}` whose performer lives
-  next door assembles into a context that throws `:web/missing-performers`,
+  route promising `:http/reads {:user [:user/by-id …]}` whose performer lives
+  next door assembles into a context that throws `:http/missing-performers`,
   and the list is the only place that could have been wrong.
 
   Store-side on purpose. `slopp.web` requires nothing but `slopp.web.*` and
@@ -208,7 +208,7 @@
   server, and baked into the main `build!` emits."
   [store]
   (->> (concat (map :ns (endpoints store))
-               (->> [:web/effect :web/read]
+               (->> [:http/effect :http/read]
                     (mapcat #(vals (performers store %)))
                     (keep namespace)
                     (map symbol)))
@@ -270,7 +270,7 @@
 
 (defn http-public-mutation-check
   "Done-advisory (D-web): a CHANGED endpoint whose policy is :public and
-   which declares `:web/effects` kinds — a publicly-writable surface should
+   which declares `:http/effects` kinds — a publicly-writable surface should
    be a decision someone made, not an omission. Fires per form with the
    declared kinds; inert until the store opts into HTTP (http.enabled).
    v1 reads the DECLARATION; a public endpoint mutating without declaring
@@ -280,12 +280,12 @@
     (vec (keep (fn [fid]
                  (when-let [e (store/form-by-id st* fid)]
                    (let [m (edit.http/web-name-meta e)]
-                     (when (and (:web/path m)
-                                (= :public (:web/auth m))
-                                (seq (:web/effects m)))
+                     (when (and (:http/path m)
+                                (= :public (:http/auth m))
+                                (seq (:http/effects m)))
                        {:form (symbol (str (store/ns-of-form-id st* fid))
                                       (str (:name e)))
-                        :web/effects (vec (:web/effects m))}))))
+                        :http/effects (vec (:http/effects m))}))))
                changed))))
 
 (defn- schema-prose?
@@ -381,7 +381,7 @@
     :else nil))
 
 (defn undocumented-contract-fields
-  "Every field of every declared `:web/request` / `:web/response` schema in
+  "Every field of every declared `:rest/request` / `:rest/response` schema in
   `store` that says nothing about what it IS — `[{:endpoint :schema :fields}]`,
   one row per endpoint per schema key, `:fields` being the entry PATHS.
 
@@ -398,7 +398,7 @@
   (let [resolve-sym (schema-resolver store)]
     (vec
      (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
-           k     [:web/request :web/response]
+           k     [:rest/request :rest/response]
            :let  [schema (get meta k)
                   from   [ns name]
                   fields (when schema
@@ -435,7 +435,7 @@
   population. A field one of them can see and the other cannot would be a gap
   neither reports.
 
-  An empty `:path` means the schema ITSELF is unconstrained: `:web/response :map`
+  An empty `:path` means the schema ITSELF is unconstrained: `:rest/response :map`
   publishes an endpoint that promises a map and nothing else."
   [resolve-sym from schema path seen]
   (if-let [k (unconstrained schema)]
@@ -459,7 +459,7 @@
       :else nil)))
 
 (defn unconstrained-contract-fields
-  "Every position in a declared `:web/request` / `:web/response` schema that
+  "Every position in a declared `:rest/request` / `:rest/response` schema that
   constrains NOTHING — `[{:endpoint :schema :fields}]`, each field
   `{:path [...] :declares :map|:any}`.
 
@@ -480,7 +480,7 @@
   (let [resolve-sym (schema-resolver store)]
     (vec
      (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
-           k     [:web/request :web/response]
+           k     [:rest/request :rest/response]
            :let  [schema (get meta k)
                   fields (when schema
                            (vec (distinct (unconstrained-paths resolve-sym [ns name]
@@ -575,11 +575,11 @@
   property) — correct on every branch, after every merge, at any revision.
   Test namespaces are fixtures.
 
-  **One marker skips a form whole:** `^{:web/external-path \"why\"}` — the target
+  **One marker skips a form whole:** `^{:http/external-path \"why\"}` — the target
   is served by something OUTSIDE this store (nginx, another service). A genuine
   crossing, honest about being one.
 
-  **`^:web/client-path` is RETIRED, and how it died is worth the paragraph.** It
+  **`^:webapp/client-path` is RETIRED, and how it died is worth the paragraph.** It
   meant *the literal is this app's own client-router key, and nothing serves it
   as written* — true, and unfixable at the time for the reason recorded here:
   *teaching the check to SEE the prefixing is not possible in general, because
@@ -605,7 +605,7 @@
          :when (:name e)
          :let [sx (try (n/sexpr (:node e)) (catch Exception _ nil))
                mt (when (seq? sx) (meta (second sx)))]
-         :when (and sx (not (:web/external-path mt)))
+         :when (and sx (not (:http/external-path mt)))
          ref (link-refs sx)]
      (assoc ref :form (symbol (str nsx) (str (:name e)))))))
 
@@ -634,8 +634,8 @@
       {:enabled true
        :routes (mapv #(if-let [r (renders %)] (assoc % :rendered-by r) %)
                      (endpoints store))
-       :effect-kinds (set (keys (performers store :web/effect)))
-       :read-kinds (set (keys (performers store :web/read)))})))
+       :effect-kinds (set (keys (performers store :http/effect)))
+       :read-kinds (set (keys (performers store :http/read)))})))
 
 (defn dangling-route-refs
   "`ui-route-refs` joined against what the store actually serves: declared
@@ -663,12 +663,12 @@
                                             (str file-prefix "/"
                                                  (subs path (inc (count url-prefix))))))))
                              mounts))
-        ;; a document declaring :web/client-routes answers for client routes BELOW each
+        ;; a document declaring :webapp/client-routes answers for client routes BELOW each
         ;; prefix, so a link to /store/form/f1 is served even though no
         ;; endpoint declares that path. Scoped, exactly as the fallback rows
         ;; are: a path outside every prefix still dangles, which is the half
         ;; of this that keeps the gate worth having.
-        client-route-prefixes (into #{} (mapcat :web/client-routes) routes)
+        client-route-prefixes (into #{} (mapcat :webapp/client-routes) routes)
         client-route? (fn [path]
                         (some #(str/starts-with? path (str % "/")) client-route-prefixes))
         ;; the fourth source of served paths, after endpoints, static mounts and
@@ -677,7 +677,7 @@
         ;; the way to the DOM — so it resolves against the patterns the app
         ;; declared rather than against anything the server serves.
         ;;
-        ;; This is what retires `^:web/client-path`, whose whole justification
+        ;; This is what retires `^:webapp/client-path`, whose whole justification
         ;; was that neither half existed: the prefixing was an app's own function
         ;; call, and the table was a closure.
         ;;
@@ -725,7 +725,7 @@
    declared route or static mount serves — the UI nil-pun: it ships and
    404s. Fires STORE-WIDE, like dead surface, because deleting a route
    dangles an UNCHANGED form's link. Inert until http.enabled. The
-   `^{:web/external-path \\\"why\\\"}` marker on the rendering form discharges.
+   `^{:http/external-path \\\"why\\\"}` marker on the rendering form discharges.
 
    Dynamic (`:unresolved`) refs ride along as `:severity :info` findings:
    listed at done, never status-flipping. They used to be omitted entirely

@@ -56,7 +56,7 @@
   than a copied literal.
 
   Both halves of a request live here. `slopp.api.endpoints` declares the
-  `/api/*` routes; `slopp.api.reads` declares the `:web/read` performers they resolve
+  `/api/*` routes; `slopp.api.reads` declares the `:http/read` performers they resolve
   through. Reads are addressed by VOCABULARY rather than by var, so an
   endpoint names a KIND and the performer for it is found — but that also
   means a list carrying only one of the two namespaces answers 500 rather
@@ -142,10 +142,10 @@
   [session port]
   (stop!)
   (try
-    (let [srv (slopp.web/serve! {:web/namespaces served-namespaces
-                           :web/host "127.0.0.1"
-                           :web/port port
-                           :web/perform-ctx {:session session
+    (let [srv (slopp.web/serve! {:http/namespaces served-namespaces
+                           :http/host "127.0.0.1"
+                           :http/port port
+                           :http/perform-ctx {:session session
                                            :served-namespaces served-namespaces}})
           p   (:port srv)
           url (str "http://127.0.0.1:" p "/")]

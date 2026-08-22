@@ -132,17 +132,17 @@
   ;; a whole API's worth of undischargeable rows at the top of a triage list is
   ;; how a reviewer learns to skim past :unused.
   ;;
-  ;; A `:web/path` form declares itself an entry point; that is what `-main` and
+  ;; A `:http/path` form declares itself an entry point; that is what `-main` and
   ;; `^:entry-point` already mean here, so this is the same rule recognising one
   ;; more way of saying it.
   (let [st (-> (store/empty-store)
                (store/ingest 'ep.api
                              (str "(ns ep.api \"Fixture: an app's web surface.\")\n"
-                                  "(defn ^{:web/method :get :web/path \"/api/things\"\n"
-                                  "        :web/auth :public\n"
-                                  "        :web/reads {:things [:ep/things []]}} things \"T.\" [req]\n"
-                                  "  {:status 200 :body (:things (:web/reads req))})\n"
-                                  "(defn ^{:web/read :ep/things} things-read \"R.\" [ctx _] [])\n"
+                                  "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                                  "        :http/auth :public\n"
+                                  "        :http/reads {:things [:ep/things []]}} things \"T.\" [req]\n"
+                                  "  {:status 200 :body (:things (:http/reads req))})\n"
+                                  "(defn ^{:http/read :ep/things} things-read \"R.\" [ctx _] [])\n"
                                   "(defn orphan \"O.\" [x] x)\n")))
         r   (review/review-scan (atom {:store st :test-map {}}))
         row (fn [q] (first (filter #(= q (:form %)) (:top r))))]
@@ -179,10 +179,10 @@
                (store/ingest 'ag.api
                              (str "(ns ag.api \"Fixture: every way a form stays alive.\")\n"
                                   ;; the framework calls these — no in-store caller, ever
-                                  "(defn ^{:web/method :get :web/path \"/api/x\"\n"
-                                  "        :web/auth :public} endpoint \"E.\" [req] {:status 200})\n"
-                                  "(defn ^{:web/read :ag/thing} performer \"P.\" [ctx _] [])\n"
-                                  "(defn ^{:web/effect :ag/do} effector \"F.\" [ctx _] nil)\n"
+                                  "(defn ^{:http/method :get :http/path \"/api/x\"\n"
+                                  "        :http/auth :public} endpoint \"E.\" [req] {:status 200})\n"
+                                  "(defn ^{:http/read :ag/thing} performer \"P.\" [ctx _] [])\n"
+                                  "(defn ^{:http/effect :ag/do} effector \"F.\" [ctx _] nil)\n"
                                   ;; declared alive by hand
                                   "(defn ^:entry-point cli \"C.\" [] :ok)\n"
                                   "(defn ^{:unused-ok \"kept for downstream\"} spare \"S.\" [] :ok)\n"
