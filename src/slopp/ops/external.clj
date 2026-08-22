@@ -971,6 +971,15 @@ client-deps (merge (:client-deps st) (:client provided))
   nothing about that, so `done` and `full_check` could not be split into
   their phases and the cost had to be inferred from delta gaps.
 
+  A sharded run also carries `:cost` ([[testrun/shard-cost]]): the build, the
+  per-shard wall times, and the FLOOR — the fastest shard, which ran the least
+  work and still paid a whole boot, so no narrowed run goes below it. That
+  turns whether `{affected true}` would help into a reading instead of a
+  guess. It is here because the guess was made and published: the skill said
+  `affected` was the gear to reach for by default, and the measurement said
+  full = 1297 tests in ~223s against affected = 839 in ~229s. The number was
+  always available and never decomposed.
+
   Every runner is BOUNDED (testrun/run-cmd!) — a hung ^:external test used
   to wedge done! and the milestone gate forever. A green summary is only
   trusted when the JVM also exited zero: a runner that printed green then
@@ -1029,7 +1038,12 @@ client-deps (merge (:client-deps st) (:client provided))
                       "slopp-external"
                       (make-array java.nio.file.attribute.FileAttribute 0)))]
         (try
-          (let [b (build! session dir)]
+          (let [tb       (System/currentTimeMillis)
+                b        (build! session dir)
+                ;; materializing the store is a FIXED cost this tier pays before
+                ;; any test runs, so it belongs in the breakdown rather than
+                ;; inside the number narrowing is judged against
+                build-ms (- (System/currentTimeMillis) tb)]
             (if (:error b)
               (stamp b)
               (let [result
@@ -1051,20 +1065,23 @@ client-deps (merge (:client-deps st) (:client provided))
                                      (mapv (fn [g] {:nses g})
                                            (testrun/balance-shards (:store @session)
                                                                    shard-nses par)))
-                            runs   (mapv (fn [grp] (future (testrun/run-shard! alias dir
-                                                                              (:nses grp) (:only grp))))
-                                         shards)
+                            ;; each shard carries its OWN wall time, because the
+                            ;; spread between the fastest and the slowest is what
+                            ;; says whether narrowing this tier could help — see
+                            ;; [[testrun/shard-cost]]
+                            timed  (fn [grp]
+                                     (let [s (System/currentTimeMillis)
+                                           o (testrun/run-shard! alias dir
+                                                                 (:nses grp) (:only grp))]
+                                       (assoc o :ms (- (System/currentTimeMillis) s))))
+                            runs   (mapv (fn [grp] (future (timed grp))) shards)
                             outs0  (mapv deref runs)
                             ;; a shard with NO parseable summary is a JVM-level death
                             ;; (fork pressure, OOM) — test failures PARSE. Retry those
                             ;; shards once, SERIALLY, off the concurrent storm.
                             dead?  (fn [o] (nil? (testrun/parse-test-summary
                                                   (str (:out o) "\n" (:err o)))))
-                            outs   (mapv (fn [grp o]
-                                           (if (dead? o)
-                                             (testrun/run-shard! alias dir
-                                                                 (:nses grp) (:only grp))
-                                             o))
+                            outs   (mapv (fn [grp o] (if (dead? o) (timed grp) o))
                                          shards outs0)
                             retries (count (filter dead? outs0))
                             out    (str/join "\n" (map #(str (:out %) "\n" (:err %)) outs))
@@ -1092,7 +1109,10 @@ client-deps (merge (:client-deps st) (:client provided))
                                                           :else       :green)}
                                            merged
                                            (when aff {:affected aff})
-                                           (when (pos? retries) {:shard-retries retries}))
+                                           (when (pos? retries) {:shard-retries retries})
+                                           (when-let [c (testrun/shard-cost
+                                                         build-ms (keep :ms outs))]
+                                             {:cost c}))
                               (and (not red?) (pos? exit))
                               (assoc :note (str "summaries parsed green but a runner"
                                                 " JVM exited nonzero — not trusting"

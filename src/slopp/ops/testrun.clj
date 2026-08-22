@@ -243,6 +243,69 @@
         shards (balance-shards store (keys by-ns) n)]
     (filterv seq (mapv #(vec (mapcat by-ns %)) shards))))
 
+(defn ^{:export "slopp.verification"} shard-cost
+  "The external tier's cost broken into the parts that decide whether NARROWING
+  it would help — or nil when there were no shards to measure.
+
+  `:ms` alone says the tier was slow. It cannot say whether that is tests or
+  JVM boots, so it cannot answer the only question anyone asks of it: *would
+  `{affected true}` save me anything?*
+
+  **The FASTEST shard is the floor.** It ran the least work and still paid a
+  whole `clojure -M` boot plus dependency resolution, and no narrowed run goes
+  below one of those. So `slowest - fastest` is the most any narrowing can
+  ever return, and it is readable without instrumenting the runner at all.
+
+  A single shard reports a ceiling of ZERO rather than a saving: one shard is
+  one boot, and there is nothing for narrowing to remove.
+
+  Written because the guess was made and published before the measurement. The
+  skill said `{affected true}` was the gear to reach for by default; measured
+  on this store, full = 1297 external tests in ~223s and affected = 839 in
+  ~229s — no saving, because the cost is four fresh JVMs rather than the tests
+  inside them. A number nobody can decompose invites exactly that guess."
+  [build-ms shard-ms]
+  (when (seq shard-ms)
+    (let [sorted  (vec (sort shard-ms))
+          floor   (first sorted)
+          slowest (peek sorted)
+          ceiling (- slowest floor)
+          secs    (fn [ms] (format "%.1fs" (/ (double ms) 1000.0)))
+          ;; IMBALANCE is a different saving from narrowing, and the two want
+          ;; opposite remedies. The tier costs its slowest shard, so a run whose
+          ;; shards finish far apart is paying for the spread rather than for
+          ;; the work — and running FEWER tests does not address that at all.
+          ;; Measured here the day this landed: [43.6s 131.7s 135.8s 217.5s],
+          ;; roughly 85s per run lost to the spread, on every full_check and
+          ;; every milestone.
+          others  (butlast sorted)
+          mean    (when (seq others) (/ (double (reduce + others)) (count others)))
+          uneven? (boolean (and mean (> slowest (* 1.5 mean))))]
+      {:build-ms build-ms
+       :shards   (count sorted)
+       :shard-ms sorted
+       :floor-ms floor
+       :slowest-ms slowest
+       :narrowing-ceiling-ms ceiling
+       :unbalanced? uneven?
+       :note (str "this tier costs its SLOWEST shard (" (secs slowest) "), not the sum."
+                  " The FASTEST (" (secs floor) ") is one JVM boot plus dependency"
+                  " resolution, which EVERY run pays — narrowed or not. So narrowing"
+                  (if (zero? ceiling)
+                    " cannot return anything here: one shard is one boot."
+                    (str " can return at most " (secs ceiling) " of it, and only when"
+                         " your changes are local enough to drop whole test"
+                         " namespaces. Reach for {affected true} on a LOCAL episode;"
+                         " a change to a core namespace is reachable from nearly"
+                         " everything and narrows to almost the same set."))
+                  (when uneven?
+                    (str " The shards are UNBALANCED (" (secs floor) "…"
+                         (secs slowest) "): this tier costs its slowest, so it is"
+                         " paying for the SPREAD rather than for the work, and"
+                         " running fewer tests does not address that — an even"
+                         " split would land it near " (secs (long mean)) "."))
+                  " Materializing the project cost " (secs build-ms) " on top.")})))
+
 (defn ^{:export "slopp.verification"} run-shard!
   "Shell one test shard: a fresh `clojure -M<alias>` over `grp`'s namespaces
   in the materialized `dir`, bounded by `shard-timeout-ms` via `run-cmd!`.

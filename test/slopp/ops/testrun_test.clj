@@ -173,3 +173,54 @@
                              :failing [{:test "t" :detail "a"}
                                        {:test "t" :detail "b"}
                                        {:test "t" :detail "c"}]})))))))
+
+(deftest the-external-tiers-cost-says-what-NARROWING-could-save
+  ;; `:ms` alone says the tier was slow. It cannot say whether that is tests or
+  ;; JVM boots, so it cannot answer the only question anyone asks of it: would
+  ;; `{affected true}` help?
+  ;;
+  ;; I guessed WRONG on exactly this, in the skill, in writing. Measured after:
+  ;; full = 1297 external tests in ~223s, affected = 839 in ~229s. No saving,
+  ;; because the cost is four fresh JVMs rather than the tests inside them.
+  ;;
+  ;; The FASTEST shard is the honest floor. It ran the least work and still paid
+  ;; a full boot plus dependency resolution, and no narrowed run goes below one
+  ;; of those — so `slowest - fastest` is the most narrowing can ever return,
+  ;; and it is visible without instrumenting the runner.
+  (testing "the floor is the fastest shard, and the tier costs the slowest"
+    (let [c (testrun/shard-cost 8000 [58000 201000 217000 190000])]
+      (is (= 8000 (:build-ms c)))
+      (is (= 4 (:shards c)))
+      (is (= 58000 (:floor-ms c)) "the fastest shard still paid a whole boot")
+      (is (= 217000 (:slowest-ms c)))
+      (is (= 159000 (:narrowing-ceiling-ms c))
+          "slowest minus floor — the most any narrowing can return")))
+
+  (testing "the note says it in words, because a number invites the wrong guess"
+    (let [n (:note (testrun/shard-cost 8000 [58000 217000]))]
+      (is (re-find #"(?i)boot" n) n)
+      (is (re-find #"(?i)narrow" n) n)))
+
+  (testing "a single shard has no spread, and says so rather than implying a saving"
+    (let [c (testrun/shard-cost 5000 [120000])]
+      (is (= 0 (:narrowing-ceiling-ms c))
+          "one shard is one boot: there is nothing for narrowing to remove")))
+
+  (testing "an UNBALANCED run says so, because that is a different saving"
+    ;; measured on this store the day the breakdown landed:
+    ;; [43.6s 131.7s 135.8s 217.5s]. The tier costs its slowest shard, so ~85s
+    ;; per run is lost to the spread — on every full_check and every milestone —
+    ;; and no amount of narrowing addresses it. Two different remedies, and a
+    ;; single number recommended neither.
+    (let [c (testrun/shard-cost 200 [43615 131743 135795 217519])]
+      (is (true? (:unbalanced? c)) (pr-str c))
+      (is (re-find #"(?i)unbalanced|spread" (:note c)) (:note c))))
+
+  (testing "an EVEN run does not cry imbalance"
+    (let [c (testrun/shard-cost 200 [120000 124000 119000 122000])]
+      (is (not (:unbalanced? c)) (pr-str c))))
+
+  (testing "no shards at all is nil, not a map of zeroes"
+    ;; an early exit (build failure, nothing selected) has no cost to report,
+    ;; and a zeroed map would read as a measurement
+    (is (nil? (testrun/shard-cost 5000 [])))))
