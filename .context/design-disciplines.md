@@ -3071,3 +3071,42 @@ worth keeping: they held the migration, the migration deserved holding for an
 unrelated reason, and nothing in the outcome would ever have said so. A correct
 decision reached by false reasoning leaves no evidence to correct — so the
 reasoning has to be stated where someone can check it, not just the conclusion.
+
+## Evidence produced BY a claim cannot support it — check for a record that PREDATES the attribution
+
+Two attributions in one form, searched the same way, came out opposite, and the
+difference is the discipline.
+
+**The one that went.** A test comment read "slopp-ui's finding, 2026-07-31".
+Asked, that store searched its own `ideas/`, the shared mailbox, and its git
+history: nothing. The comment was the only source for its own attribution. It
+had survived because it was plausible and nobody could cheaply check it —
+which is exactly how the retired `deps.edn` and framework-declaration claims
+survived in their `AGENTS.md`. Replaced with **ORIGIN NOT RECORDED** and the
+reason, because that tells the next reader not to go looking; a name would
+have sent them on the same search.
+
+**The one that stayed.** A quoted sentence in the same form credited the same
+store. There the record exists and is DATED: their `ideas/` file carrying the
+sentence, in the same argument, committed thirteen minutes before the message
+quoting it.
+
+**What makes the second real is not that a record exists.** A later message of
+theirs uses the sentence in their own prose — ten hours after reading the
+quote. Stopping there would have "confirmed" authorship with a document
+downstream of the claim it was meant to support: the guard's failure mode one
+layer along, a credit surviving because the evidence for it was produced BY the
+credit.
+
+So the check is not *is there a record?* but **is there a record that could not
+have come from the claim?** Only an artifact that predates the attribution, and
+so cannot have been influenced by it, settles anything.
+
+**And the search has to be wider than the obvious channel.** The deciding
+artifact was in `ideas/`, not the mailbox. A mailbox-only search would have
+found the quote and the later echo and concluded the credit was circular — the
+wrong answer, reached by a method that looks correct.
+
+The same shape as the population controls this codebase already runs: a scan
+that reaches SOMETHING has not shown it reached everything, and a record that
+agrees with a claim has not shown it is independent of it.

@@ -132,7 +132,7 @@ assets](running.md#static-assets).
 ## Seeing it
 
 ```clj
-query_eval "(slopp.web/handle! (slopp.web/context {:http/namespaces ['shop.ui]})
+query_eval "(slopp.http/handle! (slopp.http/context {:http/namespaces ['shop.ui]})
                                {:request-method :get :uri \"/orders\"})"
 ```
 

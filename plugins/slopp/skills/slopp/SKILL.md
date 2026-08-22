@@ -343,8 +343,50 @@ walkable, they just stop being on anybody's way forward.
 | Several changes, one reason | just make the writes one at a time — episodes group them for you; interim reds/`:carried-errors` are normal until `done` |
 | Rename ONE form | `edit_rename` (def + all references, shadow-safe); its result lists leftover prose `:mentions` |
 | Rename a namespace ALIAS (`[a.b :as old]` -> `:as new`) | `ns_realias {ns old new}` — the `:as` in the ns form AND every `old/sym` in that namespace's bodies, one verified write. **There is no hand route**, and that is why this is a tool rather than two edits: between the two writes the ns form and the bodies disagree about the qualifier and the namespace does not load, so the alternative is the add-both / migrate / drop dance. **Reach for it right after `ns_rename`**, which rewrites namespaces and walks straight past the `:as` — the moved code keeps being called by its old module's name, and the day that name gets REUSED the alias starts pointing at a real, different module, which is worse than one naming nothing. You do not have to spot them: the rename lists them under `:left-behind :alias`, each with the `:suggest` to pass here. Scoped to one namespace by design: an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift and there is no store-wide version. A BARE `old` is left alone — only `old/x` is the qualifier, and the same spelling is routinely a local or a parameter three tokens away. Read `:sites` (0 means the alias was unused, not that nothing happened) and `:left-behind` |
-| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. Whole-word only, so `region-ish` survives a `region` sweep. **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
-| Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **Read `:requalified` and `:left-behind`; absence of either means checked-and-none.** `:requalified` is the half of the diff that is not a text substitution, and worth an eye for that reason alone. `:left-behind` is the half the tool DECLINED: changing the key's NAME (`:a/x` -> `:a/y`) rather than its qualifier cannot be applied to a destructuring, because the symbol is a LOCAL BINDING the body reads — so sweep the qualifier and rename the name as two steps, or finish the named forms by hand. A stranded destructuring presents as nil arriving silently rather than as an error, so the only tests that can catch one are the ones exercising the value END-TO-END — which for a session, a projection or a subprocess means `^:external`, and those are exactly the ones a write DEFERS. Do not read the write's green as coverage here |
+| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. **A bare name is swept as a CONCEPT, so its compounds travel with it** — `region` reaches `region-fee`, `region-fees` and `region-t`, which is what makes this one intent rather than a list of renames. Only letters end the name, so `regional` is untouched but `region-ish` is NOT: if you meant the narrower thing, sweep the compound. (A qualified KEYWORD is bounded differently -- see the row below.) **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
+| Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **A keyword is bounded as a whole TOKEN**, so `-`, digits and `_` end it and sweeping `:a/x` leaves `:a/x-ray` alone — the opposite of the bare-name row above, because `:a/x-ray` is a different marker, usually read by a different rule. **Realias when the alias carries the RENAMED segment, not when it merely sits
+under it.** After renaming `a.web.*` to `a.http.*`, an alias `web.client` for
+`a.http.client` is now a lie and wants `ns_realias`; an alias `client` for the
+same namespace is a last-segment name that stayed accurate and must be left
+alone. Renaming the second kind is churn that makes every call site lie about
+nothing. `full_check`'s `:alias-drift` reports both, so read it as a worklist
+rather than a to-do list.
+
+**A store can be immune to a rename's MECHANISM and still be broken by its
+RESULT.** Those are independent questions and the first is the easy one, so it
+is the one that gets checked. "A sweep run in that store renames none of its
+namespaces" is about the mechanism; "that store requires the namespaces you
+renamed" is about the result, and a consumer of a framework family is normally
+in the second case while looking safe in the first. When you rename anything
+consumers require, ask what BREAKS for them, not what the tool would do there —
+and say which of the two you checked, because the sentence reads the same
+either way.
+
+**A NAMESPACE rename does not reach the spellings that are not the name.** A
+sweep matches the dotted token, so three shapes survive it, and each one fails
+only when something is BUILT or LOADED — never at the write:
+
+- **slash paths** — `slopp/web/css.clj` in a vendoring manifest or a resource
+  lookup. Sweep the slash form as its own pass (`slopp/web` → `slopp/http`);
+  the letter boundary still protects `slopp/webapp`.
+- **a bare directory segment** — `(io/file parent "web")`, where the segment
+  alone carries the name.
+- **a path spelled as separate arguments** — `(io/file dir "src" "slopp" "web"
+  "css.clj")`. Nothing can match this; only a build that loads the tree finds it.
+
+All three were found here by the external suite, after a green done and a green
+whole-store lint. **Run the tier that actually builds and loads something before
+believing a rename is finished.**
+
+**Verify a family migration by RECONCILING, not by inspecting.** Take a census
+before you start (how many occurrences, across how many names), then check the
+after-counts balance: moved + deliberately-held = the original total, and every
+name in the result is one you expected. Checking "the pairs that look risky"
+cannot be trusted, because the pairs you enumerate are the ones you already
+thought of — and a sweep that eats a short name into a long one necessarily
+produces a name OUTSIDE the expected set, which reconciliation catches without
+your having to guess where. Its honest limit: a corruption that preserved every
+count and produced a name already in your expected set would pass. **Order a family migration so the CONSTITUTIVE marker goes LAST**: the one that declares the thing (`:http/path` declares an endpoint) turns every form into a half-migrated endpoint the moment it moves, and the per-endpoint gates then fire on the siblings that have not moved yet. Sweep the describing markers first and the refusal never happens -- it reads like a missing declaration, and the obvious fix (adding the missing marker by hand) is wrong. **Read `:requalified` and `:left-behind`; absence of either means checked-and-none.** `:requalified` is the half of the diff that is not a text substitution, and worth an eye for that reason alone. `:left-behind` is the half the tool DECLINED: changing the key's NAME (`:a/x` -> `:a/y`) rather than its qualifier cannot be applied to a destructuring, because the symbol is a LOCAL BINDING the body reads — so sweep the qualifier and rename the name as two steps, or finish the named forms by hand. A stranded destructuring presents as nil arriving silently rather than as an error, so the only tests that can catch one are the ones exercising the value END-TO-END — which for a session, a projection or a subprocess means `^:external`, and those are exactly the ones a write DEFERS. Do not read the write's green as coverage here |
 | Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep REWRITES these now and names them under `:patterns-rewritten`; a row under `:left-behind :via :regex` is the residue it could not reach, and is a finding. Measured at seven in one wave before this was automated, two of which survived three green done-points), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
 | Extract helper / move forms to another ns | `edit_extract` / `edit_move_forms` (new OR existing target; callers everywhere rewritten; `export: true` for a deep target with outside callers). **Propose the cluster you want and let it close the set for you** — it refuses a two-way split and NAMES the forms that would leave a cycle ("the moved set calls [x y] (staying)"). Add those and retry. Guessing the seam leaves a cycle; the refusal IS the analysis. `export: true` WIDENS per var — a var already `^:export` keeps its level without the flag, so you never pass it just to restate something already true, and passing it does not silently widen the rest. Read `:export-not-landed` on the result: the move checks its own POSTCONDITION against the committed store and names the VAR, so a planned export the store did not actually get is reported rather than discovered later. **And read `:shadowed`, which is the one finding a green write does not cover** — refs INTO the target go bare, so a moved form that binds a LOCAL of that name now calls the local: it compiles, the suite passes, and the behaviour changed |
 | Regroup whole namespaces under one prefix | `module_extract {namespaces to}` — the MODULE-grain move, for a namespace that grew into its own component or a set that wants one owning prefix. Each named ns takes its subtree and `-test` sibling. **`dry-run` first, always**: going from two segments to three makes a namespace package-private, so every outside caller breaks at once, and the plan is the only place you see WHICH vars must be hoisted and WHICH CALLERS force each. The write order is the design — hoist (`^:export`), then rename, then declare the edges the moved store actually references — so no intermediate state is one the gate would refuse. Refuses a regroup that would leave a production cycle; a `-test` back-edge is not one |
@@ -1484,7 +1526,7 @@ Where it does apply, three things worth knowing:
 `http.port` pins the address; unset, it is derived from the store dir so two
 projects on one machine never collide.
 
-**The runtime underneath: `slopp.web`.** `(web/serve! {:http/namespaces
+**The runtime underneath: `slopp.http`.** `(web/serve! {:http/namespaces
 ['my.api] :http/port 8080})` scans the namespaces' var metadata (the same
 contract the gates enforced) and serves on http-kit (`:http/adapter :jdk` =
 zero-dep fallback) — that is what a deployed build calls, and what the dev
@@ -1515,15 +1557,15 @@ a `:http/public` allowlist, anything else is a generic 500 (detail logged, not
 returned); request bodies are capped (default 1 MiB — thread
 `:http/max-body-bytes` from the `http.max-body-bytes` capability into
 `serve!`); the static asset reader contains paths under its root. Auth: static
-passwords are salted PBKDF2 (`slopp.web.auth/hash-password` — mint one with
-`query_eval`, it is not on the `slopp.web` facade), bearer and
+passwords are salted PBKDF2 (`slopp.http.auth/hash-password` — mint one with
+`query_eval`, it is not on the `slopp.http` facade), bearer and
 password compares are constant-time, and **OIDC requires a configured
 `http.auth.oidc.audience`** — an unset audience denies every token (a resource
 server must not accept cross-audience tokens). Row-level authz is still yours:
 slopp does not taint-track a handler returning another tenant's rows.
 
 **HTML pages are hiccup — store forms, not template files (D-web-html).** A
-page or component is a `defn` returning hiccup data; `slopp.web.html/render`
+page or component is a `defn` returning hiccup data; `slopp.http.html/render`
 serializes it (hiccup 2.x underneath, escape-by-default), `html-response`
 wraps it as a `text/html` RING map, and `page` is the full-document shell
 (`{:html/title … :html/lang … :html/head […]}` + body — doctype and charset
@@ -1560,7 +1602,7 @@ The rules that matter:
   request); pin one rendered string per component. Under `--live`, an
   edited page hot-serves — browser F5, no build step.
 
-**CSS is garden — the same story for stylesheets (`slopp.web.css`).** A
+**CSS is garden — the same story for stylesheets (`slopp.http.css`).** A
 stylesheet is a `defn` GET endpoint returning `css-response`; rules are
 garden data (`[:main {:margin "0 auto"}]`, nested `[:main [:a {…}]]`,
 `garden.stylesheet/at-media` for `@media`). `render` serializes minified
@@ -1931,7 +1973,7 @@ they don't — a UI in its own project, two services, anything across a process
 boundary — the producer publishes its shape and the consumer generates from
 that. Neither store reads the other.
 
-- **Producer: serve `slopp.web.contract/contract-document`.** It takes your
+- **Producer: serve `slopp.http.contract/contract-document`.** It takes your
   served namespace list and returns `{:slopp/contract-version 1 :endpoints […]}`
   — method, path, name, the handler's QUALIFIED symbol, its docstring, and the
   request/response schemas as VALUES. Serve it as EDN with `:http/raw true` and
@@ -1974,7 +2016,7 @@ that. Neither store reads the other.
 **If your store declares `io.github.nvoxland/slopp-web`, your DECLARATION is
 the version you run — not the slopp hosting you.** The slopp process carries
 `slopp/web/**` inside its own jar, and the declared coord still wins: tests,
-`query_eval` and your server all load the pinned release. So a `slopp.web` fix
+`query_eval` and your server all load the pinned release. So a `slopp.http` fix
 in a newer slopp does not reach you until that release is republished and you
 `deps_add` it (then `restart` — a hot `deps_add` cannot displace an
 already-loaded namespace). Nothing warns you when the pin is behind, so treat
@@ -2015,7 +2057,7 @@ as a call chain:
 (require '[slopp.cljnx :as cljnx])
 
 ;; a SERVED app — its own ctx, through http's adapter
-(def s (cljnx/open! (slopp.web/driver ctx)))
+(def s (cljnx/open! (slopp.http/driver ctx)))
 ;; a BROWSER app — the same contract, through webapp's
 (def s (cljnx/open! (webapp/driver (webapp/wiring app))))
 
@@ -2085,7 +2127,7 @@ them); a closure can only say `click (fn)`. `detail "prose"` drops every tag
 and keeps the words, unescaped.
 
 **A server-rendered app declares nothing.** `visit!` goes through
-`slopp.web.dispatch/handle!`, so it is a real request down the real pipeline —
+`slopp.http.dispatch/handle!`, so it is a real request down the real pipeline —
 routing, auth policy, declared reads, the handler, effects. A page that 401s
 here 401s when served, which is the point of driving dispatch rather than
 calling a handler. Urls behave like a browser's: `/search?q=web` delivers a

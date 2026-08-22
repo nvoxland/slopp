@@ -1,6 +1,6 @@
 # Running and shipping
 
-`slopp.web` is the runtime half. It reads the same var metadata the write gates
+`slopp.http` is the runtime half. It reads the same var metadata the write gates
 enforced, so there is no second description of the surface to keep in sync.
 
 ## While you work, slopp can serve it for you
@@ -128,7 +128,7 @@ because the framework is what fetched those reads.
 ## Seeing a page without starting anything
 
 ```clj
-query_eval "(slopp.web/handle! (slopp.web/context {:http/namespaces ['shop.ui]})
+query_eval "(slopp.http/handle! (slopp.http/context {:http/namespaces ['shop.ui]})
                                {:request-method :get :uri \"/orders\"})"
 ```
 
@@ -204,7 +204,7 @@ Three ways to run the result:
     A store that declares `io.github.nvoxland/slopp-web` runs **that** version,
     including under `java -jar slopp.jar` — the slopp process carries
     `slopp/web/**` in its own jar, and the declared coord still wins. So a fix
-    to `slopp.web` in a newer slopp does not reach your app until the slim
+    to `slopp.http` in a newer slopp does not reach your app until the slim
     artifact is republished and you `deps_add` the new version. No surface
     reports that your pin is behind.
 

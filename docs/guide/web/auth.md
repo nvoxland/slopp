@@ -48,7 +48,7 @@ projected into git. The capabilities gate refuses a credential literal.
 Generate a password hash with the store's own image rather than pasting one in:
 
 ```clj
-query_eval "(slopp.web.auth/hash-password \"correct horse battery staple\")"
+query_eval "(slopp.http.auth/hash-password \"correct horse battery staple\")"
 ```
 
 `query_capabilities` is the authority on the full key list, including families

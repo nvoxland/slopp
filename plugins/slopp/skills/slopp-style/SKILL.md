@@ -153,7 +153,7 @@ Two rules keep it honest, and both are load-bearing:
   adapter it exercises. A contract written per-consumer encodes that consumer's
   misunderstanding and drifts immediately.
 
-**slopp ships `slopp.web.client` as the worked example** — `request` over a
+**slopp ships `slopp.http.client` as the worked example** — `request` over a
 socket, `fake-requester` in memory, both passing `requester-contract`. Use it
 instead of building an `HttpClient`; you get the fake and the contract for free.
 Its request map is `{:http/method :http/url :http/headers :http/body}` and it

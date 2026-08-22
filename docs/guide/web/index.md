@@ -35,8 +35,8 @@ The shape of it:
   under a declared platform, portable logic in `.cljc` gets the JVM oracle for
   free, and the typed `fetch` client is generated from the endpoint contracts
   rather than written twice.
-- **[Running and shipping](running.md)** -- `slopp.web/serve!` for a port,
-  `slopp.web/handle!` for a portless test of the entire pipeline, and
+- **[Running and shipping](running.md)** -- `slopp.http/serve!` for a port,
+  `slopp.http/handle!` for a portless test of the entire pipeline, and
   `build` for a jar or a native binary that carries its own assets.
 
 The design centre is a third-party application, not slopp's own endpoints.

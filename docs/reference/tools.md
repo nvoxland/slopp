@@ -150,7 +150,7 @@ lives somewhere else — a UI in its own project, another service, anything acro
 a process boundary — the producer publishes its shape and the consumer generates
 from that. Neither store reads the other.
 
-The producer serves `slopp.web.contract/contract-document` over its own
+The producer serves `slopp.http.contract/contract-document` over its own
 namespace list:
 
 ```clojure
@@ -170,7 +170,7 @@ points at the wrong one while looking right.
 
 as EDN (`:http/raw true`, `Content-Type: application/edn`), on an endpoint marked
 `^{:rest/client false}` — describing the wrappers needs no wrapper. It lives in
-`slopp.web`, so it ships in the `slopp-web` slim jar and any app can publish.
+`slopp.http`, so it ships in the `slopp-web` slim jar and any app can publish.
 
 The consumer then runs:
 

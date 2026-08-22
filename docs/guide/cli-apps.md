@@ -153,7 +153,7 @@ slopp vendors the framework source into the built tree — `slopp/cli.clj` and
 self-contained.
 
 **Only the capabilities you use.** A cli app gets no `slopp/web/**` and none of
-the HTTP framework's dependencies, so `(require 'slopp.web)` in it fails. What
+the HTTP framework's dependencies, so `(require 'slopp.http)` in it fails. What
 slopp vendors follows what your code actually reaches for — its requires and its
 entry markers — rather than what your config enables, which is deliberate: a
 project part-way through a config migration still boots, and its tools can still
