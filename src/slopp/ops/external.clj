@@ -236,16 +236,23 @@ client-deps (merge (:client-deps st) (:client provided))
       (and entry? (get-in st [:namespaces 'native.main]))
       {:error "a store namespace named native.main collides with the generated launcher"}
 
-      ;; the same collision on the browser side, and the silent version is worse
-      ;; than the cli one: two entries both MOUNT, so the app runs twice over one
-      ;; element and the second render loop is one nobody declared
+      ;; the same collision on the browser side: the name and the file path
+      ;; are the generator's, so a store namespace called this one renders over
+      ;; the entry slopp writes.
+      ;;
+      ;; This is NOT how a store says it owns its browser entry — that is
+      ;; `own-mount-nses` below, which reads the mounting CALL. Asking the
+      ;; name was once the whole guard, and it caught only the generator
+      ;; colliding with itself: a hand-written entry is named whatever its
+      ;; author named it, so every other name got a silent second mount.
       (and (capabilities/enabled? st "webapp")
            (seq (rules.webapp/page-rows st))
            (get-in st [:namespaces 'native.client]))
       {:error (str "a store namespace named native.client collides with the"
-                   " generated browser entry — both would mount this app over"
-                   " the same element, and the second render loop is one"
-                   " nobody declared. Rename yours; slopp writes this one.")}
+                   " generated browser entry — the name and the path"
+                   " cljs-src/native/client.cljs are slopp's. Rename yours."
+                   " To own the browser entry instead, keep the form that"
+                   " calls dom/mount! and slopp generates nothing.")}
 
       
 
@@ -261,36 +268,44 @@ client-deps (merge (:client-deps st) (:client provided))
 
       :else
       (let [unpruned (clear-source-roots! target)
-              ;; NO BROWSER ENTRY IS EMITTED, and the reason is a design fork
-              ;; rather than an omission — see `build/webapp-launcher-source`,
-              ;; which is written, tested, and still has no caller.
+              ;; exactly one page row, because the marker's own gate allows
+              ;; only one — and a store declaring none would get an entry
+              ;; mounting nothing
+              page-rows (when (capabilities/enabled? st "webapp")
+                          (rules.webapp/page-rows st))
+
+              ;; …and nothing generated when the store MOUNTS THE APP ITSELF.
+              ;; Two mounts over one element is a page that renders twice, and
+              ;; it is invisible downstream: a bundle with two mounts compiles
+              ;; exactly as clean as one with one, so `compile_client` reports
+              ;; success either way. Reported by a store that compiled the
+              ;; artifact and counted the bootstraps.
               ;;
-              ;; It was wired here for one milestone and reverted. `^:app/entry`
-              ;; is the only marker naming a browser app's entry fn, and for a
-              ;; webapp app that fn MUST return a DRIVER: `slopp.cljnx/open!`
-              ;; accepts `{:state :view :navigate :dispatch :boot}` and refuses
-              ;; anything else, so a page returning the wiring declaration cannot
-              ;; be opened headlessly at all. `dom/mount!` needs the DECLARATION
-              ;; and `wiring` refuses a driver's keys. One marker, two consumers,
-              ;; incompatible shapes — pinned by
-              ;; `webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry`.
-              ;;
-              ;; Caught by the consuming app before adopting it, and my own
-              ;; fixture had hidden it: its `^:app/entry` returned a raw
-              ;; declaration, which `screen` refuses — so the test proved the
-              ;; file gets written and nothing about whether an app can use it.
+              ;; This is also the store SAYING it owns its browser entry —
+              ;; which some must, for reasons the generated one cannot meet
+              ;; (a contract check that reaches `:external`, a `:boot` that
+              ;; reads the DOM). Owning a mount IS the declaration, so there
+              ;; is no second setting to keep in agreement with it.
+              own-mounts (when (seq page-rows) (rules.webapp/own-mount-nses st))
+
               client-entry
-              (let [rows (when (capabilities/enabled? st "webapp")
-                           (rules.webapp/page-rows st))]
-                ;; exactly one, because the marker's own gate allows only one —
-                ;; and a store declaring none would get an entry mounting
-                ;; nothing
-                (when (= 1 (count rows))
-                  (let [{:keys [page closure]} (first rows)
-                        f (io/file target "cljs-src" "native" "client.cljs")]
-                    (io/make-parents f)
-                    (spit f (build/webapp-launcher-source page closure))
-                    "cljs-src/native/client.cljs")))]
+              (when (and (= 1 (count page-rows)) (empty? own-mounts))
+                (let [{:keys [page closure]} (first page-rows)
+                      f (io/file target "cljs-src" "native" "client.cljs")]
+                  (io/make-parents f)
+                  (spit f (build/webapp-launcher-source page closure))
+                  "cljs-src/native/client.cljs"))
+
+              ;; said out loud, because the other failure is the quiet one: a
+              ;; store expecting a generated entry and getting none should not
+              ;; have to diff the tree to find out
+              client-entry-skipped
+              (when (and (= 1 (count page-rows)) (seq own-mounts))
+                (str "no browser entry generated: "
+                     (str/join ", " own-mounts)
+                     " already mounts this app, and a second mount over the"
+                     " same element renders it twice. Delete the hand-written"
+                     " mount to take the generated entry."))]
           (doseq [ns-sym (keys (:namespaces st))]
     (let [file (io/file target (store.render/source-path ns-sym
                                                    (store/platform-for st ns-sym)
@@ -376,7 +391,9 @@ client-deps (merge (:client-deps st) (:client provided))
                           ;; set — say so, because the whole failure mode is
                           ;; that nothing does
                           unpruned (assoc :unpruned unpruned)
-                          client-entry (assoc :client-entry client-entry)))
+                          client-entry (assoc :client-entry client-entry)
+                          client-entry-skipped
+                          (assoc :client-entry-skipped client-entry-skipped)))
             entry?
             (assoc :native
                    ;; the binary's name is ALSO the program's name in usage, and
@@ -1811,10 +1828,25 @@ client-deps (merge (:client-deps st) (:client provided))
                   ;; request to record a red state as a milestone, and a milestone
                   ;; naming work the branch does not contain is not honest, it is
                   ;; unreadable.
-                  (branch/land-thread! session)
-                  (merge {:commit (:id @v) :target target :status status
-                          :description description}
-                         result-extra)))]
+                  (let [land (branch/land-thread! session)
+                        ;; A REFUSED land is the one case the milestone must not
+                        ;; smooth over. The delta is recorded by now, but it was
+                        ;; recorded onto the same thread the work is stranded on,
+                        ;; so nothing reached the branch — and returning
+                        ;; `:status :green` for that is the failure observed on
+                        ;; `d32474`: the branch did not contain what the
+                        ;; milestone named, and everything downstream reads the
+                        ;; stamp rather than the branch.
+                        ;;
+                        ;; The value used to be discarded here, which is the
+                        ;; whole mechanism: a `{:landed false :reason …}` was
+                        ;; indistinguishable from a landing that worked.
+                        refused? (false? (:landed land))]
+                    (cond-> (merge {:commit (:id @v) :target target
+                                    :status (if refused? :unlanded status)
+                                    :description description}
+                                   result-extra)
+                      land (assoc :land land)))))]
     (cond
       (str/blank? (str description))
       {:error "a commit point needs a human-facing :description"}

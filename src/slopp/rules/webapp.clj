@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
@@ -725,6 +725,39 @@
                         " now. If this namespace is a browser-only binding with"
                         " no portable form, that is a real answer — and worth"
                         " being a deliberate one rather than a leftover.")}))))
+
+(defn ^:export own-mount-nses
+  "The store namespaces that MOUNT this app themselves — every namespace
+  containing a call to `slopp.webapp.dom/mount!` — sorted, `[]` when none.
+
+  This is what decides whether `build!` generates a browser entry: generating
+  one beside a store's own produces a bundle that mounts twice over the same
+  element, and a double mount compiles exactly as clean as a single one, so
+  nothing downstream can report it. The only symptom is a page that renders
+  twice.
+
+  **The signal is the CALL, and the two cheaper answers are both wrong.** By
+  namespace NAME — the guard this replaced, which asked whether the store had
+  a namespace called `native.client` — only ever caught the generator
+  colliding with itself; a store's own entry is named whatever the store names
+  it, so every other name passed clean. By REQUIRE, it would be wrong the
+  other way: `slopp.webapp.dom` also publishes `click-data` and `typed-value`,
+  which an event handler reads without mounting anything, and that store would
+  silently lose the generation the capability exists to give it.
+
+  So aliases are resolved by the ANALYZER rather than matched as text, and the
+  string test is only a prefilter — a namespace that never names
+  `slopp.webapp.dom` cannot resolve a call to it, so it is skipped before the
+  analysis it would only fail."
+  [st]
+  (vec (sort (for [n     (keys (:namespaces st))
+                   :let  [src (store.render/render-ns st n)]
+                   :when (str/includes? src "slopp.webapp.dom")
+                   :when (some (fn [u]
+                                 (and (= 'slopp.webapp.dom (:to u))
+                                      (= 'mount! (:name u))))
+                               (:var-usages (analyze/analyze src)))]
+               n))))
 
 (defn ^:export page-rows
   "Every `^:app/entry` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —

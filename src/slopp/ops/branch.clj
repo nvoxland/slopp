@@ -464,14 +464,31 @@
   [session]
   (let [conn (:db @session)
         line (engine/session-line session)
-        row  (when conn (first (filter #(= line (:id %)) (db/lines conn))))]
-    (when (= "thread" (:kind row))
+        row  (when conn (first (filter #(= line (:id %)) (db/lines conn))))
+        ;; The session names a line the registry does not have. Every other
+        ;; quiet outcome here returns nil, and this one used to as well —
+        ;; which is how work went missing twice in one wave: `done!` assocs
+        ;; `:land` only when it is truthy, so a session that could not find
+        ;; its thread reported a clean green with no `:land` key, exactly the
+        ;; shape of a done with nothing to land.
+        lost (boolean (and conn line (nil? row)))]
+    (when (or lost (= "thread" (:kind row)))
       (let [branch-id (engine/session-branch-line session)
             branch-nm (:branch @session)]
         (loop [reconciled nil, tries 0, rebase nil]
           (let [bh (db/line-head conn branch-id)
                 th (db/line-head conn line)]
             (cond
+              lost
+              {:landed false
+               :reason (str "this session is on thread " line ", which is not in"
+                            " the store's line registry — nothing can be landed"
+                            " from it. The writes made on it are in the journal"
+                            " but are NOT on " branch-nm ". Restart the slopp"
+                            " server so it re-reads the registry, then re-apply"
+                            " the writes made since the last successful done;"
+                            " `query_changes` names them.")}
+
               (= th bh)
               nil
 

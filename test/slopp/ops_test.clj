@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1896,4 +1896,84 @@
 
         (testing "and the result SAYS it emitted one"
           (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-store-that-mounts-its-OWN-browser-entry-gets-no-second-one
+  ;; Reported by a consuming store, which compiled the bundle and COUNTED the
+  ;; mounts rather than reasoning about them: two top-level bootstraps, its own
+  ;; and a generated one, over the same element.
+  ;;
+  ;; The guard this replaces asked whether a namespace was NAMED `native.client`.
+  ;; That is the collision the generator can cause with itself, not the one that
+  ;; happens: a store's hand-written entry is called whatever the store calls it,
+  ;; and every other name passed clean. Nothing downstream could catch it either
+  ;; — a bundle with two mounts compiles exactly as clean as one with one, so
+  ;; `compile_client` reported success and the only symptom was a page rendering
+  ;; twice.
+  ;;
+  ;; So the signal is BEHAVIOUR: a store form that calls `dom/mount!` already
+  ;; mounts this app, whatever its namespace is called.
+  (let [app  (str "(ns shop.ui\n"
+                  "  (:require [slopp.webapp :as webapp]))\n\n"
+                  "(defn things \"The list.\" [s]\n"
+                  "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
+                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                  "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
+                  "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                  "(defn ^:app/entry app \"The application.\" []\n"
+                  "  {:webapp/state  (atom {})\n"
+                  "   :webapp/routes [[\"/things\" things]]})\n")
+        ;; the hand-written entry, named ANYTHING but native.client — which is
+        ;; the whole point, since that is the only name the old guard knew
+        own  (str "(ns shop.client.app\n"
+                  "  (:require [slopp.webapp.dom :as dom]\n"
+                  "            [shop.ui :as ui]))\n\n"
+                  "(defn ^:export main \"Mount the app.\" []\n"
+                  "  (dom/mount! (ui/app)))\n")
+        dir  (str (System/getProperty "java.io.tmpdir")
+                  "/slopp-own-entry-" (System/nanoTime))
+        sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                        :prompt "a browser app")
+      (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
+      (swap! sess update :store store/ingest 'shop.ui app)
+      (ops/module-platform! sess "shop.client.app" :cljs :prompt "a browser entry is cljs")
+      (swap! sess update :store store/ingest 'shop.client.app own)
+
+      (testing "the fixture declares an entry AND mounts it by hand"
+        ;; population control, both halves: without the entry there is nothing
+        ;; to generate, and without the hand-written mount there is no collision
+        ;; — either way every assertion below would pass by describing nothing
+        (let [st (:store @sess)]
+          (is (= 1 (count (rules.webapp/page-rows st)))
+              (pr-str (rules.webapp/page-rows st)))
+          ;; checked against the RENDERED source rather than through the
+          ;; detection this test is about, which would be circular — and the
+          ;; reference graph cannot answer it at all: `refs` records only
+          ;; edges whose target is IN the store, and `slopp.webapp.dom` is
+          ;; framework, vendored at build. That was the first signal tried
+          ;; here, and it reported an empty graph for a fixture that plainly
+          ;; mounts.
+          (is (str/includes? (store.render/render-ns st 'shop.client.app) "dom/mount!")
+              "the fixture does not actually mount, so there is no collision")))
+
+      (let [r (external/build! sess dir)]
+        (is (nil? (:error r)) (pr-str r))
+
+        (testing "no second entry is generated beside the store's own"
+          (is (nil? (:client-entry r))
+              (str "a second browser entry was generated beside the store's"
+                   " own mount — this bundle double-mounts: "
+                   (pr-str (:client-entry r))))
+          (is (not (.exists (io/file dir "cljs-src" "native" "client.cljs")))
+              "the generated launcher file was written anyway"))
+
+        (testing "and the build SAYS so, because a silent non-emission is the other failure"
+          ;; the store that asked for a generated entry and got none must not
+          ;; have to diff the tree to find out
+          (is (string? (:client-entry-skipped r)) (pr-str r))
+          (is (str/includes? (str (:client-entry-skipped r)) "shop.client.app")
+              (str "the reason does not name the form that already mounts: "
+                   (pr-str (:client-entry-skipped r))))))
       (finally (ops/close! sess)))))

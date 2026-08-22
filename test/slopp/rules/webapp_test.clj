@@ -766,3 +766,41 @@
                             [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (empty? (:unreadable (rules.webapp/webapp-report clean)))
             (pr-str (:unreadable (rules.webapp/webapp-report clean))))))))
+
+(deftest a-store-that-MOUNTS-is-the-one-that-calls-mount-not-the-one-that-requires-dom
+  ;; The signal behind the generated browser entry: `build!` must not emit a
+  ;; second mount beside a store's own. What counts as "its own" has to be the
+  ;; CALL, and the two cheap approximations are both wrong in a way that costs
+  ;; something real.
+  ;;
+  ;; By NAMESPACE NAME (the guard this replaced): only `native.client` counted,
+  ;; so every store whose entry is called anything else got a silent second
+  ;; mount — which is how this arrived, from a store that compiled the bundle
+  ;; and counted two bootstraps.
+  ;;
+  ;; By REQUIRE: `slopp.webapp.dom` also publishes `click-data` and
+  ;; `typed-value`, which an event handler reads without mounting anything.
+  ;; That store would be told it owns an entry it never wrote, and silently
+  ;; lose the generation the capability exists to give it.
+  (let [mounts  (str "(ns shop.client.app\n"
+                     "  (:require [slopp.webapp.dom :as dom]\n"
+                     "            [shop.ui :as ui]))\n\n"
+                     "(defn ^:export main \"Mount it.\" [] (dom/mount! (ui/app)))\n")
+        ;; requires the SAME namespace, mounts nothing
+        reads   (str "(ns shop.client.handlers\n"
+                     "  (:require [slopp.webapp.dom :as dom]))\n\n"
+                     "(defn on-click \"The clicked row.\" [e] (:id (dom/click-data e)))\n")
+        st-of   (fn [n src] (-> (store/empty-store) (store/ingest n src)))]
+    (testing "a form CALLING dom/mount! is a store that mounts its own app"
+      (is (= '[shop.client.app]
+             (rules.webapp/own-mount-nses (st-of 'shop.client.app mounts)))))
+
+    (testing "requiring dom for something else is NOT mounting"
+      ;; the precision that makes this safe to act on: get it wrong here and
+      ;; an app that writes no ClojureScript stops getting an entry, which is
+      ;; the capability's whole promise
+      (is (= [] (rules.webapp/own-mount-nses (st-of 'shop.client.handlers reads)))))
+
+    (testing "a store that does neither has nothing to collide with"
+      (is (= [] (rules.webapp/own-mount-nses
+                 (st-of 'shop.plain "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")))))))

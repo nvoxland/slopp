@@ -7,7 +7,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
             [slopp.mcp]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.ops.branch :as branch]))
 
 (def seed
   (str "(ns cm.core (:require [clojure.test :refer [deftest is]]))\n"
@@ -191,4 +191,46 @@
           (is (= :red (:status r)) (pr-str (dissoc r :test :findings)))
           (is (:error r) (pr-str (dissoc r :test :findings)))
           (is (empty? (ops/query-commits sess)) "no green milestone was minted")))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-milestone-cannot-report-GREEN-when-its-own-land-was-refused
+  ;; Observed on `d32474`: a milestone recorded `:status :green` while its land
+  ;; had been refused, so the branch did not contain the work the milestone
+  ;; names. The skill promises the opposite — "commit_point lands too, so a
+  ;; milestone always names a branch that contains what it milestones" — and
+  ;; everything downstream reads the stamp rather than the branch.
+  ;;
+  ;; The mechanism is one discarded value: `commit-point!` called
+  ;; `(branch/land-thread! session)` for its effect and dropped the result, so
+  ;; a `{:landed false :reason …}` was indistinguishable from a landing that
+  ;; worked. That is exactly what is injected here — the refusal is the one
+  ;; `land-thread!` genuinely returns when a branch moved underneath and the
+  ;; rebase conflicts.
+  ;;
+  ;; `:force` because the gate is not what is under test: forcing skips the
+  ;; external suite and still lands, and the comment on that land says it is
+  ;; unconditional *because* a milestone naming work the branch does not
+  ;; contain is not honest, it is unreadable.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'cm.core seed)
+      (let [r (with-redefs [branch/land-thread!
+                            (fn [_] {:landed false
+                                     :reason "main moved while you worked, and rebasing onto it conflicts"})]
+                (external/commit-point! sess "a milestone whose work never reached the branch"
+                                        :force true))]
+        (testing "the refusal reaches the caller"
+          (is (some? (:land r))
+              (str "the milestone dropped its land result, so a branch missing"
+                   " the work it names still reports as a milestone: "
+                   (pr-str r)))
+          (is (false? (:landed (:land r))) (pr-str (:land r))))
+
+        (testing "and the milestone does not read as green"
+          ;; the stamp is what everything downstream trusts, so it is the thing
+          ;; that must not lie — a refusal recorded as :green is worse than a
+          ;; refusal to record
+          (is (not= :green (:status r))
+              (str "recorded :green for a milestone whose land was refused: "
+                   (pr-str (select-keys r [:status :land :commit]))))))
       (finally (ops/close! sess)))))

@@ -341,3 +341,68 @@
                      produced two independent logs instead"))))
           (finally (.close conn))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-session-that-cannot-FIND-its-thread-says-so-instead-of-landing-quietly
+  ;; Hit twice in one wave, and both times the recovery was a server restart
+  ;; and a re-application of orphaned deltas. The session's line and the store's
+  ;; line registry disagree: `land-thread!` looks its line up in `db/lines`,
+  ;; finds no row, and falls out of `(when (= "thread" (:kind row)) …)`
+  ;; returning nil.
+  ;;
+  ;; nil is ALSO what it correctly returns for an ephemeral session, a session
+  ;; not on a thread, and a thread nobody wrote to. So `done!` — which only
+  ;; assocs `:land` when the value is truthy — reported a green verdict with no
+  ;; `:land` key at all, which is exactly the shape of a done that had nothing
+  ;; to land. The work stayed on a thread nobody could reach, and the verdict
+  ;; said everything was fine.
+  ;;
+  ;; The bar: a broken invariant must not share a return value with an ordinary
+  ;; quiet outcome.
+  (let [dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-lostthread-" (System/nanoTime))]
+    (try
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "lost"})]
+        (ops/ingest! sess 'lost.core seed)
+
+        (testing "the session lands normally while its thread is findable"
+          ;; population control: without this the assertions below could pass
+          ;; against a session that was never able to land in the first place
+          (is (= "main" (:landed (branch/land-thread! sess)))))
+
+        (ops/edit-replace! sess 'lost.core 'f "(defn f [x] (+ x 99))"
+                           :prompt "work that must not be lost")
+
+        ;; the disagreement, made directly: the session names a line the
+        ;; registry does not have. This is the state observed twice, reached
+        ;; here in one write instead of by whatever race produces it.
+        (swap! sess assoc :line "00000000-0000-0000-0000-000000000000")
+
+        (let [r (branch/land-thread! sess)]
+          (testing "landing REPORTS the broken invariant"
+            (is (some? r)
+                (str "land-thread! returned nil for a session whose line is"
+                     " not in the registry — indistinguishable from having"
+                     " nothing to land, which is how the work went missing"))
+            (is (false? (:landed r)) (pr-str r))
+            (is (string? (:reason r)) (pr-str r)))
+
+          (testing "and DONE cannot report this as fine, which is where an agent reads it"
+            ;; the end of the failure that actually happened: the tests were
+            ;; green and the verdict said so, and nothing in the result said
+            ;; the work was still sitting on an unreachable thread.
+            ;;
+            ;; Deliberately NOT asserting which way it comes out. Recording the
+            ;; boundary delta on a line that is not there throws from the
+            ;; append, so today this is loud rather than reported — and the
+            ;; property worth pinning is the one that was violated: a session
+            ;; that cannot land must not come back looking like a done with
+            ;; nothing to land. Pinning the throw instead would freeze a
+            ;; diagnostic that deserves to improve.
+            (let [outcome (try {:result (external/done! sess :label "nowhere to land")}
+                               (catch Exception e {:threw (or (.getMessage e) "throw")}))]
+              (is (or (some? (:threw outcome))
+                      (false? (:landed (:land (:result outcome)))))
+                  (str "done reported a verdict that reads as clean for work"
+                       " that cannot land: "
+                       (pr-str (select-keys (:result outcome) [:land :done :findings]))))))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
