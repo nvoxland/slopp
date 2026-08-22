@@ -1000,3 +1000,41 @@
           (is (contains? (:namespaces st) 'a.http) (pr-str (keys (:namespaces st))))
           (is (not (contains? (:namespaces st) 'a.web)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-dry-runs-STRING-hits-show-what-they-matched
+  ;; `:in-strings` is the one bucket a sweep asks a human to read, because
+  ;; sweeping prose is intended and rewriting a dated artifact is not. It listed
+  ;; form NAMES only, so "review first" meant opening each form — thirty of them
+  ;; on the wave that added this. I read the list, approved it, and swept a
+  ;; frozen July manifest into a claim about a past that never happened; the
+  ;; consuming store hit the same bucket and did open each one, which is the
+  ;; only reason theirs survived.
+  ;;
+  ;; A name cannot be triaged. The matched TEXT can: "the code lives under
+  ;; a.web" is prose that should move, and a captured manifest is not, and the
+  ;; difference is visible in one line.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ds.core "(ns ds.core)\n\n(defn f \"F.\" [x] x)\n")
+      (ops/ingest! sess 'ds.note
+                   (str "(ns ds.note)\n\n"
+                        "(def prose \"the code lives under ds.core today\")\n\n"
+                        "(def frozen \"snapshot 2026-07: ds.core was the whole thing\")\n"))
+
+      (let [r (ops/rename-sweep! sess "ds.core" "ds.moved"
+                                 :prompt "preview" :dry-run true)
+            rows (:in-strings r)]
+        (testing "the string hits are there to review"
+          ;; population control: an empty bucket would satisfy every assertion
+          ;; below by describing nothing
+          (is (= 2 (count rows)) (pr-str r)))
+
+        (testing "and each one SHOWS the text it matched, so it can be triaged in place"
+          (is (every? (comp seq str :match) rows)
+              (str "a review bucket that names forms without showing what matched"
+                   " cannot be reviewed without opening each one: " (pr-str rows)))
+          (is (some #(re-find #"the code lives under" (str (:match %))) rows)
+              (pr-str rows))
+          (is (some #(re-find #"snapshot 2026-07" (str (:match %))) rows)
+              (pr-str rows))))
+      (finally (ops/close! sess)))))

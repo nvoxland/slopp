@@ -4516,9 +4516,30 @@ recompiled (engine/after-write! session ns-sym)]
               dry-run
               (let [classify (fn [{:keys [ns name]}]
                                (let [src (n/string (:node (store/form-named
-                                                           (:store @session) ns name)))]
-                                 {:form (symbol (str ns) (str name))
-                                  :strings? (refactor/match-in-strings? src pat)}))
+                                                           (:store @session) ns name)))
+                                     s?  (refactor/match-in-strings? src pat)
+                                     ;; SHOW the matched text, not just the form
+                                     ;; name. This is the one bucket a sweep asks
+                                     ;; a human to read, and a list of names
+                                     ;; cannot be triaged — reviewing it meant
+                                     ;; opening each form, so on a wave with
+                                     ;; thirty hits it was read as a count and
+                                     ;; approved. A frozen manifest went through
+                                     ;; that review and was rewritten into a claim
+                                     ;; about a past that never happened. One line
+                                     ;; separates "prose describing the name",
+                                     ;; which should move, from a dated artifact,
+                                     ;; which must not.
+                                     line (when s?
+                                            (when-let [l (first (filter #(re-find pat %)
+                                                                        (str/split-lines src)))]
+                                              (let [t (str/trim l)]
+                                                (if (> (count t) 120)
+                                                  (str (subs t 0 117) "…")
+                                                  t))))]
+                                 (cond-> {:form (symbol (str ns) (str name))
+                                          :strings? s?}
+                                   line (assoc :match line))))
                     rows'    (mapv classify steps)
                     left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
                                           (sweep-patterns-left-behind st from pat)))

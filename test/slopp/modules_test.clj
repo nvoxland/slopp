@@ -2294,3 +2294,39 @@
                  " component: " (pr-str reaches) ". Every such require has to"
                  " ship with it, and a capability's namespace cannot — a store"
                  " that uses http is handed no slopp.webapp source at all."))))))
+
+(deftest a-visibility-refusal-says-when-it-could-not-FIND-the-callee
+  ;; Both states arrive at the gate as `:to-export nil`, and the message assumed
+  ;; the first: "mark <target> ^:export in its defn". That is advice you cannot
+  ;; take when there is no defn, and advice already taken when the var IS
+  ;; exported and something else stopped the lookup.
+  ;;
+  ;; Measured at about an hour on the wave that added this. A rename had left
+  ;; one form ANONYMOUS — source intact, `:name` gone — so `export-level` looked
+  ;; the var up BY NAME, found nothing, and returned nil. The refusal then named
+  ;; an exported var and told me to export it, pointing at a caller and a rule
+  ;; that were both fine. The one fact that would have collapsed the hunt —
+  ;; "there is no form of that name here" — was known at the row and thrown away.
+  (let [viol (fn [rows] (seq (edit.modules/module-violations {} rows)))
+        base {:from-ns 'b.user :from-var 'f :to 'a.pub.deep :to-name 'thing}]
+
+    (testing "a genuinely package-private callee still teaches the export dial"
+      (let [[v] (viol [base])]
+        (is (= :visibility (:rule v)) (pr-str v))
+        (is (re-find #"\^:export" (:error v)) (:error v))))
+
+    (testing "but a callee the store cannot find says THAT, and does not ask for a dial"
+      (let [[v] (viol [(assoc base :to-missing? true)])]
+        (is (= :visibility (:rule v)) (pr-str v))
+        (is (re-find #"(?i)no form named|cannot find|not a form" (:error v))
+            (str "the refusal told me to export a var it could not find: " (:error v)))
+        (is (not (re-find #"mark .* \^:export in its defn" (:error v)))
+            (str "it still asks for a dial on a var that has no defn to carry one: "
+                 (:error v)))))
+
+    (testing "and the callee is NAMED in the message either way"
+      ;; the write path built rows without :to-name, so every refusal from it
+      ;; printed the bare namespace — which made the message look like evidence
+      ;; that the row had lost the name, when the row never carried it
+      (is (re-find #"a\.pub\.deep/thing" (:error (first (viol [base]))))
+          (:error (first (viol [base])))))))

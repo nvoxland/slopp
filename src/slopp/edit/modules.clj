@@ -176,7 +176,7 @@
   ([manifest test-manifest rows]
    (when manifest
      (->> (distinct rows)
-          (keep (fn [{:keys [from-ns from-var to to-name to-export]}]
+          (keep (fn [{:keys [from-ns from-var to to-name to-export to-missing?]}]
                   (let [caller-mod (module-of from-ns)
                         ;; fold -test so a spec shares its subject package's prefix (deep helpers
                         ;; stay testable); edges already fold via module-of
@@ -202,13 +202,41 @@
                       (and (> (count tsegs) 2) (not visible?))
                       (cond-> {:from-ns from-ns :from-var from-var :target-ns to
                                :rule :visibility
-                               :error (if (string? to-export)
+                               :error (cond
+                                        ;; NOT FINDABLE is a different state from
+                                        ;; not exported, and both arrive here as
+                                        ;; `:to-export nil`. Asking for a dial on a
+                                        ;; var with no defn to carry one sends the
+                                        ;; author to the one place the answer is
+                                        ;; not; and when the var IS exported and
+                                        ;; something else stopped the lookup, the
+                                        ;; advice is already taken and reads as a
+                                        ;; puzzle. Cost about an hour once: a
+                                        ;; rewrite left a form ANONYMOUS, the
+                                        ;; lookup by name found nothing, and the
+                                        ;; refusal named an exported var and a
+                                        ;; caller that were both fine.
+                                        to-missing?
+                                        (str from-ns "/" from-var " calls " target
+                                             " and there is NO FORM NAMED " to-name
+                                             " in " to " — so nothing can read its"
+                                             " :export level and it is treated as"
+                                             " package-private. Either the name is"
+                                             " wrong, or that form LOST its name:"
+                                             " query_source {ns " to "} lists what is"
+                                             " actually there, and a rewrite can leave"
+                                             " a form with its source intact and its"
+                                             " name gone.")
+
+                                        (string? to-export)
                                         (str from-ns "/" from-var " calls " target
                                              " which is exported only within "
                                              to-export ".* — call"
                                              " it from inside that subtree, raise its"
                                              " :export level, or use " tmod "'s public"
                                              " surface")
+
+                                        :else
                                         (str from-ns "/" from-var " calls " target
                                              " which is package-private to " parent
                                              ".* (recursive visibility) — call " tmod
@@ -316,8 +344,21 @@
     (let [rows (for [r (refs/ns-refs candidate ns-sym)
                      :when (and (= form-name (:from-var r))
                                 (not= :declared (:via r)))]
+                 ;; `:to-name` because the message names the callee and this
+                 ;; path used to drop it, so every write-path refusal printed a
+                 ;; bare namespace — which reads like evidence the row lost the
+                 ;; name, when the row simply never carried it.
+                 ;;
+                 ;; `:to-missing?` because "not exported" and "not findable"
+                 ;; both reach the rule as `:to-export nil` and want opposite
+                 ;; advice.
                  {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
-                  :to-export (export-level candidate (:to-ns r) (:to-name r))})]
+                  :to-name (:to-name r)
+                  :to-export (export-level candidate (:to-ns r) (:to-name r))
+                  :to-missing? (boolean
+                                (and (:to-name r)
+                                     (nil? (store/form-named candidate (:to-ns r)
+                                                             (:to-name r)))))})]
       (when-let [vs (store-violations candidate rows)]
         (str/join "; " (map :error vs))))))
 
@@ -329,8 +370,15 @@
   (when-let [_ (modules-manifest candidate)]
     (let [rows (for [r (refs/ns-refs candidate ns-sym)
                      :when (not= :declared (:via r))]
+                 ;; same row shape as [[module-refusal]], and for the same two
+                 ;; reasons: name the callee, and say when it could not be found
                  {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
-                  :to-export (export-level candidate (:to-ns r) (:to-name r))})]
+                  :to-name (:to-name r)
+                  :to-export (export-level candidate (:to-ns r) (:to-name r))
+                  :to-missing? (boolean
+                                (and (:to-name r)
+                                     (nil? (store/form-named candidate (:to-ns r)
+                                                             (:to-name r)))))})]
       (when-let [vs (store-violations candidate rows)]
         (str/join "; " (map :error vs))))))
 
