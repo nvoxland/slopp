@@ -736,3 +736,46 @@
       (is (= 'marked (store/form-symbol (p/parse-string "^:export (defn marked [] 1)"))))
       (is (nil? (store/form-symbol (p/parse-string "(println \"hi\")")))
           "an anonymous top-level still has no symbol"))))
+
+(deftest what-a-form-DEFINES-is-readable-without-reading-its-body
+  ;; Sibling of `a-form-whose-BODY-cannot-be-READ-still-reports-its-name`, and
+  ;; the reason that one was not enough: `form-symbol` and `form-symbols` are
+  ;; two functions on the same replay path, one letter apart, and BOTH sexpr'd
+  ;; the whole form to read a head and a name. Fixing the singular changed
+  ;; nothing observable — the projection died in the same place with the same
+  ;; message, from the plural.
+  ;;
+  ;; **That identical symptom is the finding.** A partial fix on a two-call-site
+  ;; defect is indistinguishable from no fix, and the unchanged error reads as
+  ;; "the fix did not reach this process" when it means "the fix was
+  ;; incomplete". One costs a rebuild and a wrong diagnosis; the other costs a
+  ;; second grep for call sites.
+  ;;
+  ;; The plural has a REAL reason to look past the name — a defprotocol defines
+  ;; each of its method vars — so the rule is not "never look further", it is
+  ;; look only where the HEAD says you must.
+  (let [malformed (p/parse-string "(def broken {:a})")]
+
+    (testing "the fixture is genuinely unreadable — the control, not decoration"
+      ;; rewrite-clj's parser is LENIENT where the reader is not: it builds a
+      ;; map node with an odd child count, which is the only way such a node
+      ;; exists at all. If it ever starts refusing this at parse time, the case
+      ;; moves and every assertion below would pass for the wrong reason
+      (is (thrown? Exception (n/sexpr malformed))))
+
+    (testing "a def whose body cannot be read still says what it defines"
+      (is (= #{'broken} (store/form-symbols malformed))))
+
+    (testing "and the heads that define MORE than their name still do"
+      ;; the reason the plural exists: a fix that read only two children would
+      ;; silently stop reporting these, and a var with no form is invisible to
+      ;; every name-keyed tool — the defect this fn was written to end
+      (is (= #{'R '->R 'map->R} (store/form-symbols (p/parse-string "(defrecord R [x])"))))
+      (is (= #{'T '->T} (store/form-symbols (p/parse-string "(deftype T [x])"))))
+      (is (= #{'P 'm 'n}
+             (store/form-symbols (p/parse-string "(defprotocol P (m [this]) (n [this]))")))))
+
+    (testing "and what defines nothing still defines nothing"
+      (is (= #{} (store/form-symbols (p/parse-string "(defmethod area :square [s] 1)"))))
+      (is (= #{} (store/form-symbols (p/parse-string "(println \"hi\")"))))
+      (is (= #{'marked} (store/form-symbols (p/parse-string "^:export (def marked 1)")))))))

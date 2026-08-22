@@ -1222,24 +1222,53 @@
     invisible to `form-named`, to `:covered`, and to the unused-public gate.
 
   Syntactic, per head — deliberately not kondo. This runs per form on every
-  ingest and replay, where a kondo pass would cost ~285ms on a large namespace."
+  ingest and replay, where a kondo pass would cost ~285ms on a large namespace.
+
+  **It reads only where the HEAD says it must**, and that is the same
+  robustness property `form-symbol` states, arrived at the hard way. Both used
+  to sexpr the WHOLE form to get a head and a name; rewrite-clj's parser is
+  LENIENT where the reader is not, so a body it accepted and the reader would
+  not — a map node with an odd child count — threw `No value supplied for key`
+  out of a form neither function looks past. Fixing the singular alone changed
+  nothing observable, because these two sit on the same replay path one letter
+  apart: **a partial fix on a two-call-site defect is indistinguishable from no
+  fix.**
+
+  Not \"never look further\" — `defprotocol` genuinely defines its method vars,
+  and a version that stopped reporting them would silently drop real public
+  vars from every name-keyed tool, which is the defect above. So the head is
+  read first, a non-def head bails, and only `defprotocol` walks its rest. What
+  remains is one narrow window — a malformed defprotocol BODY — instead of
+  every malformed form in the journal's history."
   [node]
   (if (= :meta (n/tag node))
     (some-> (last (filter n/sexpr-able? (n/children node))) form-symbols)
-    (let [s (when (and (n/sexpr-able? node) (= :list (n/tag node))) (n/sexpr node))
-          [head nm] (when (seq? s) s)]
-      (if-not (and (seq s) (symbol? head) (symbol? nm))
-        #{}
-        (if (simple-def-heads head)
-          #{nm}
-          (case head
-            defrecord #{nm (symbol (str "->" nm)) (symbol (str "map->" nm))}
-            deftype   #{nm (symbol (str "->" nm))}
-            defprotocol (into #{nm}
-                              (keep (fn [x] (when (and (seq? x) (symbol? (first x)))
-                                              (first x))))
-                              (drop 2 s))
-            #{}))))))
+    (if-not (and (n/sexpr-able? node) (= :list (n/tag node)))
+      #{}
+      (let [kids (filter n/sexpr-able? (n/children node))
+            ;; the head decides whether anything below is worth reading, so it
+            ;; is read from a TOKEN and nothing else — a head that is not a
+            ;; plain symbol defines nothing whatever its body says
+            head (let [k (first kids)] (when (and k (= :token (n/tag k))) (n/sexpr k)))]
+        (if-not (symbol? head)
+          #{}
+          (let [nm (some-> (second kids) n/sexpr)]
+            (if-not (symbol? nm)
+              #{}
+              (if (simple-def-heads head)
+                #{nm}
+                (case head
+                  defrecord #{nm (symbol (str "->" nm)) (symbol (str "map->" nm))}
+                  deftype   #{nm (symbol (str "->" nm))}
+                  ;; the ONE head that has to read past the name, and the reason
+                  ;; this is not simply "read two children"
+                  defprotocol (into #{nm}
+                                    (keep (fn [k]
+                                            (let [x (n/sexpr k)]
+                                              (when (and (seq? x) (symbol? (first x)))
+                                                (first x)))))
+                                    (drop 2 kids))
+                  #{})))))))))
 
 (defn apply-changeset
   "Coordinated multi-form edit (e.g. rename): replace several forms' nodes —
