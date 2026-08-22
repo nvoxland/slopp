@@ -532,6 +532,18 @@
         (with-redefs [external/external-slice-cap 10]
           (let [r (external/done! sess :label "wide hub" :agent "t")]
             (is (nil? (:external r)) "above the cap, nothing runs")
+            (testing "and the VERDICT says the tier did not run, not only :external-pending"
+              ;; the failure this closes: `:test-status` comes back `:green` and
+              ;; `:scope` reads exactly as it does when the impacted slice DID
+              ;; run, so the two cases are indistinguishable at the place an
+              ;; agent actually looks. The broader the change, the likelier the
+              ;; deferral — so a sweeping edit gets LESS external evidence than
+              ;; a narrow one, and nothing said so. Hit four times in one
+              ;; session before it was noticed.
+              (is (re-find #"(?i)did not run at all|no \^:external test"
+                           (str (get-in r [:findings :scope])))
+                  (str "a deferred tier reads like a covered one: "
+                       (get-in r [:findings :scope]))))
             (is (<= 41 (get-in r [:findings :external-pending :count]))
                 (pr-str (:findings r)))
             (is (seq (get-in r [:findings :external-pending :tests]))))))

@@ -1410,7 +1410,25 @@ client-deps (merge (:client-deps st) (:client provided))
                 " way: done puts every impacted ^:external test in ONE serial"
                 " JVM and full_check shards across four, so a pair that fails"
                 " only TOGETHER fails HERE and can pass there — a red done"
-                " beside a green full_check is not done being wrong")}
+                " beside a green full_check is not done being wrong"
+                ;; and SAY when the tier ran nothing. Above the cap `iso` is a
+                ;; :pending marker and no ^:external test executes — but the
+                ;; status still comes back :green and this sentence read exactly
+                ;; as it does when the impacted slice DID run, so the two cases
+                ;; were indistinguishable where an agent actually looks.
+                ;;
+                ;; The inversion is the point: the BROADER the change the
+                ;; likelier the deferral, so a sweeping edit earns LESS external
+                ;; evidence than a narrow one. Unstated, that is a green growing
+                ;; weaker exactly as the work grows riskier.
+                (when-let [p (:pending iso)]
+                  (str ". AND NO ^:external TEST RAN AT ALL this time: the "
+                       (:count p) " impacted ones were deferred, so the green"
+                       " above is the in-image suite only. This gets MORE likely"
+                       " as a change gets broader, not less — once the impacted"
+                       " set approaches the whole suite there is nothing for"
+                       " narrowing to save. `full_check` is not optional here;"
+                       " it is the only external evidence this episode can get.")))}
     ;; ADVISORY, and named as such: kondo findings slopp's config
     ;; deliberately does not block on, because each is routinely true of a
     ;; form mid-edit. Listed so the agent can judge them, never counted.
