@@ -442,3 +442,46 @@
       (let [srv (slopp.web/serve! {:web/namespaces ['slopp.web-test] :web/port 0})]
         (try (is (map? srv))
              (finally (slopp.web/stop! srv)))))))
+
+(deftest a-served-app-becomes-a-DRIVER-the-fake-browser-can-open
+  ;; D-cljnx, wave 1. `slopp.cljnx/open!` branches on `:web/routes` and
+  ;; performs the request itself, which is the http ADAPTER inlined into the
+  ;; fake browser — the reason `screen` sits inside http's namespace family and
+  ;; cannot reach `slopp.webapp` (vendoring is per family, so an http-only
+  ;; store has no webapp source at all).
+  ;;
+  ;; Named here instead, beside `handle!`, as the mirror of `webapp/driver`:
+  ;; ONE neutral contract, two producers, each owned by the capability whose
+  ;; code it needs.
+  (let [ctx    (slopp.web/context
+                {:web/routes [{:method  :get :path "/hi" :auth :public
+                               :handler (fn [_req]
+                                          {:status 200 :body [:main [:h1 "hello"]]})}]})
+        driver (slopp.web/driver ctx)]
+
+    (testing "the driver answers a PATH with a document"
+      (is (fn? (:document driver))
+          "no :document — nothing would render a served page headlessly")
+      (is (= [:main [:h1 "hello"]] ((:document driver) "/hi"))))
+
+    (testing "and it is a real request down the real pipeline, so a path
+              nothing serves says so rather than rendering blank"
+      ;; the property `open!`'s ctx branch had, and the reason it drove
+      ;; `dispatch/handle!` rather than calling a handler: a 404 that read as
+      ;; an empty screen sends a reader looking for a rendering bug in a
+      ;; handler that was never reached
+      (let [doc ((:document driver) "/nope")]
+        (is (vector? doc))
+        (is (re-find #"404" (pr-str doc)) (pr-str doc))))
+
+    (testing "the query string is SPLIT the way a browser sends it"
+      ;; `:uri` never carries the `?`; measured as `/search?q=web` 404ing on a
+      ;; mounted route, so every pagination link read as a broken route
+      (let [seen (atom nil)
+            c2   (slopp.web/context
+                  {:web/routes [{:method :get :path "/s" :auth :public
+                                 :handler (fn [req]
+                                            (reset! seen (select-keys req [:uri :query-string]))
+                                            {:status 200 :body [:p "ok"]})}]})]
+        ((:document (slopp.web/driver c2)) "/s?q=web")
+        (is (= {:uri "/s" :query-string "q=web"} @seen))))))

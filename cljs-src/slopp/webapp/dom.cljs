@@ -66,7 +66,7 @@
   interpreter receives what the reader typed and never sees an event of any
   shape — so neither driver's event can be right while the other's is wrong.
 
-  `slopp.web.screen/fill!` states the same rule from the other side, as advice
+  `slopp.cljnx/fill!` states the same rule from the other side, as advice
   to an app author: *your `:cljs` dispatcher turns the event into a scalar, and
   your `:cljc` interpreter never sees an event.* Every app followed it by hand
   or did not. Here it is structural — the framework owns the dispatcher, so
@@ -188,7 +188,7 @@
   it named a caller that did not exist, and a justification asserting a caller
   is exactly what stops anyone looking for one. Wiring the generator into
   build! then failed for a reason worth recording here — `^:web/page` returns a
-  DRIVER for slopp.web.screen/open!, and this function needs the wiring
+  DRIVER for slopp.cljnx/open!, and this function needs the wiring
   DECLARATION, so a generated (mount! (page)) refuses at page load. Pinned by
   webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry."}
   mount!

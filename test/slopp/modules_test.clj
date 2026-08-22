@@ -2232,3 +2232,57 @@
                " own family, and the fix is real work in a consumer's repo:"
                " there is no lib to add, because the compiler is where it"
                " lives")))))
+
+(deftest ^:external
+  ^{:correspondence "the fake browser an author is TOLD to drive with vs the set slopp actually vendors — the same claim no-rule-names-a-namespace-that-does-not-ship makes for catalog prose, for a namespace that catalog prose does not carry"}
+  the-fake-browser-SHIPS-because-both-the-skill-and-a-gate-name-it
+  ;; D-cljnx. `slopp.cljnx` used to be `slopp.web.screen`, which shipped by
+  ;; COINCIDENCE OF NAMING: it sat under http's `:ns-prefix`, so the vendor
+  ;; glob covered it. Moving it out of that family is exactly the moment the
+  ;; coincidence stops holding, and nothing else would have said so — it has
+  ;; no capability row, so `shipping-families` cannot see it.
+  ;;
+  ;; Its sibling guard cannot see it either, and the reason is worth stating
+  ;; rather than assuming: that one scans `rule-catalog`'s :teach and :escape
+  ;; FIELDS, while `edit.webapp/webapp-page-unreachable` builds its teaching
+  ;; inside the function and returns it. Same class of defect — an author told
+  ;; to use a namespace they were never handed — carried by a different
+  ;; vehicle, and the field scan is blind to it.
+  (let [common (set (map str (keys capabilities/shipping-common)))]
+
+    (testing "there is a population — the scan reached the real declaration"
+      ;; two empty sets compare equal, and this whole test is a membership check
+      (is (< 1 (count common))
+          (str "shipping-common has fewer members than the two it has carried"
+               " since it was named — the scan is reading the wrong var")))
+
+    (testing "every namespace of the fake browser is vendored to every store"
+      ;; all three, not just the face: a consumer handed `slopp.cljnx` alone
+      ;; gets a namespace whose requires do not resolve, which is the failure
+      ;; framework-injection was built to end (\"the framework landed intact
+      ;; and failed INSIDE itself\")
+      (doseq [n ["slopp.cljnx" "slopp.cljnx.hiccup" "slopp.cljnx.render"]]
+        (is (contains? common n)
+            (str n " is vendored to nobody. A consuming store's tests drive"
+                 " their app through it, the webapp page gate's teaching names"
+                 " it, and the shipped skill tells an author to open a screen"
+                 " with it — none of which is possible if the namespace is not"
+                 " there."))))
+
+    (testing "and it reaches back into slopp for nothing"
+      ;; the property that makes it shippable at all, and the one the move was
+      ;; FOR: both adapters are named now, so the driver knows no app type and
+      ;; needs neither capability's code
+      (let [reaches (->> (for [n '[slopp.cljnx slopp.cljnx.hiccup slopp.cljnx.render]
+                               r (slopp.store/ns-require-libs
+                                  (slopp.ops.external/built-store) n)
+                               :let [s (str r)]
+                               :when (and (str/starts-with? s "slopp.")
+                                          (not (str/starts-with? s "slopp.cljnx")))]
+                           s)
+                         distinct sort vec)]
+        (is (= [] reaches)
+            (str "the fake browser requires slopp code outside its own"
+                 " component: " (pr-str reaches) ". Every such require has to"
+                 " ship with it, and a capability's namespace cannot — a store"
+                 " that uses http is handed no slopp.webapp source at all."))))))

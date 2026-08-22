@@ -126,7 +126,7 @@
    {:kind       :app/headless-entry
     :leaves     "the whole application as data — state, a route TABLE, the
                  screens its rows name, and the handlers sitting in its tree"
-    :to         "slopp.web.screen's driver, which opens it on a JVM and
+    :to         "slopp.cljnx's driver, which opens it on a JVM and
                  presses things"
     :markers    #{:web/page}
     :checked-by "webapp-page-unreachable refuses an entry that is not a public

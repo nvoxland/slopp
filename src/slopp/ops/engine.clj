@@ -105,7 +105,7 @@
   legitimately use another.
 
   **USES is not only REQUIRING.** A `^:web/page` app is opened by
-  `slopp.web.screen`, which slopp calls on the app's BEHALF, so the app's own
+  `slopp.cljnx`, which slopp calls on the app's BEHALF, so the app's own
   code may name none of the framework. **For `cli` this is the ONLY signal**:
   with a generated entry an app writes commands and slopp writes the launcher,
   so nothing in the store ever requires `slopp.cli`. The markers come from the

@@ -315,7 +315,7 @@
 
   **`:cljc` despite being about a DOM node**, which is the interesting part.
   `nil?` is not a platform question — unlike \"is this an atom\", which is why
-  that check lives one platform down in `slopp.web.screen/open!`. So the element
+  that check lives one platform down in `slopp.cljnx/open!`. So the element
   crosses this boundary as an OPAQUE value, nothing here asks what it is, and
   the refusal a browser app depends on is an ordinary in-image test.
 
@@ -799,7 +799,7 @@
   **What it does NOT check is that `:webapp/state` is an ATOM**, and that is the
   `slopp.lang` lesson rather than an omission: asking what a thing IS differs by
   platform, D3 denies the reader conditional that would branch, and this
-  namespace compiles to both. So the kind check lives in `slopp.web.screen/open!`,
+  namespace compiles to both. So the kind check lives in `slopp.cljnx/open!`,
   which is `:clj` and can ask — one platform down, where the answer exists."
   [app]
   (let [known   #{:webapp/state :webapp/base :webapp/routes :webapp/chrome
@@ -1457,7 +1457,7 @@
   identically, so it is one function and not two.
 
   **Two callers and they must not differ.** [[start!]] is what the browser entry
-  runs; `(:boot (driver app))` is what `slopp.web.screen/open!` runs. When only
+  runs; `(:boot (driver app))` is what `slopp.cljnx/open!` runs. When only
   the first started session loads, a declaration that worked in a page was
   invisible to every headless drive — which is the ONE difference this
   capability exists to prevent, arriving in the change that closed the previous
@@ -1490,7 +1490,7 @@
   driver
   "The headless DRIVER's map, derived from the app's own wiring.
 
-  `slopp.web.screen/open!` takes `{:state :view :navigate :dispatch :boot}`.
+  `slopp.cljnx/open!` takes `{:state :view :navigate :dispatch :boot}`.
   That is not the same map as [[wiring]], and it should not be: **the wiring is
   what an app IS, and this is what a DRIVER needs.** Different levels, so the
   answer is a derivation rather than making either learn the other's shape.
@@ -1580,7 +1580,7 @@
   asymmetry is the honest one: a session load has no address, so there are no
   captures to hand it, and what it does need is whatever boot established.
 
-  **Read-call-write, never inside `swap!`**, matching `slopp.web.screen/open!`
+  **Read-call-write, never inside `swap!`**, matching `slopp.cljnx/open!`
   exactly. Boot is the app's own code; `swap!` demands a pure function and may
   retry, and an entry point is neither.
 

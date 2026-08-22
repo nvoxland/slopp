@@ -212,3 +212,49 @@
   (case (:web/adapter srv)
     :http-kit (httpkit/stop! srv)
     :jdk (jdk/stop! srv)))
+
+(defn ^:export driver
+  "This served app as a DRIVER — what the fake browser needs, derived from the
+  context you already serve.
+
+  The mirror of `slopp.webapp/driver`, and the pair is the design: ONE neutral
+  driving contract, two producers, each owned by the capability whose code it
+  needs. A server-rendered app's driver needs the dispatcher; a browser app's
+  needs the client loop; and the fake browser needs neither, which is what lets
+  it belong to nobody.
+
+  It used to be a branch INSIDE the fake browser — `open!` took a ctx and
+  `visit!` performed the request. That put http's adapter in a namespace that
+  also has to drive browser apps, and vendoring is per FAMILY: an http-only
+  store is handed no `slopp.webapp` source at all, so the reverse dependency
+  could never be written and the two adapters could never sit together. Naming
+  this one moves the dependency to the side that can hold it.
+
+  `:document` is `(fn [path] hiccup)` and it is a REAL request down the real
+  pipeline — routing, auth policy, declared reads, the handler, effects — so a
+  page that 401s here 401s when served. A non-hiccup body is rendered as its
+  STATUS and its data rather than as a blank page: a 404 that read as an empty
+  screen sends a reader looking for a rendering bug in a handler that was never
+  reached.
+
+  **The url is split the way a browser SENDS one**, which is this adapter's
+  business rather than the fake browser's: `:uri` never carries the `?`, the
+  query string arrives as `:query-string`, and a `#fragment` never reaches the
+  wire at all. Measured as `/search?q=web` 404ing on a mounted route, so every
+  pagination link read as a broken route.
+
+  A ctx carrying a page half — `:state` and `:view` for a mounted document that
+  also has client logic — hands both through, so an app that is both is opened
+  as both."
+  [ctx]
+  (assoc (select-keys ctx [:state :view :navigate :dispatch :boot])
+         :document
+         (fn [path]
+           (let [base     (first (str/split path #"#" 2))
+                 [uri qs] (str/split base #"\?" 2)
+                 resp     (dispatch/handle! ctx (cond-> {:request-method :get :uri uri}
+                                                  qs (assoc :query-string qs)))
+                 body     (:body resp)]
+             (if (vector? body)
+               body
+               [:div [:p (str "HTTP " (:status resp))] [:pre (pr-str body)]])))))

@@ -456,8 +456,8 @@
 
   Membership is narrow on purpose — a namespace belongs here when slopp's own
   rules tell an author to USE it, because a rule whose discharge names a
-  namespace the author does not have is a rule that cannot be discharged. Both
-  members arrived that way:
+  namespace the author does not have is a rule that cannot be discharged. Every
+  member arrived that way:
 
   - `slopp.lang` — D3.1: the dialect denies reader conditionals and owes the
     author the portable call instead, so a shipped family may require it.
@@ -466,13 +466,31 @@
     shipped skill states the rule that every cache goes through it. It was
     documented as a day-one rule and vendored NOWHERE, which is exactly the
     failure `no-rule-names-a-namespace-that-does-not-ship` now watches for.
+  - `slopp.cljnx` and its two halves — the fake browser. The skill tells every
+    author to open a screen with it, and `edit.webapp/webapp-page-unreachable`
+    refuses a page it could not open, naming it. **It shipped by COINCIDENCE OF
+    NAMING until D-cljnx**: as `slopp.web.screen` it sat under http's
+    `:ns-prefix`, so the vendor glob covered it — and covered it only for
+    stores that use http, while a `cli` store driving no screens is not the
+    population that mattered. Being named here is the first time its shipping
+    is a decision rather than a side effect.
 
-  Both are self-contained — zero requires between them — which is what makes
-  shipping them a copy rather than a dependency graph. THE derivation two
-  readers consume: `build.clj` files these under `\"_\"`, and the leak guard
-  permits a family namespace to reach them."
-  '{slopp.lang  "slopp/lang.cljc"
-    slopp.cache "slopp/cache.clj"})
+  **What every member has in common is what makes shipping them a COPY rather
+  than a dependency graph: none reaches back into slopp.** `slopp.lang` and
+  `slopp.cache` have zero requires at all; the cljnx three require each other
+  and `clojure.string` and nothing else. That is a property to check rather
+  than assume when adding a member — a namespace here that required a
+  capability's code would land in a store that does not have it, which is the
+  failure `framework-injection` describes as the framework arriving intact and
+  failing inside itself.
+
+  THE derivation two readers consume: `build.clj` files these under `\"_\"`, and
+  the leak guard permits a family namespace to reach them."
+  '{slopp.lang         "slopp/lang.cljc"
+    slopp.cache        "slopp/cache.clj"
+    slopp.cljnx        "slopp/cljnx.clj"
+    slopp.cljnx.hiccup "slopp/cljnx/hiccup.clj"
+    slopp.cljnx.render "slopp/cljnx/render.clj"})
 
 (defn ^:export shipping-families
   "`{capability ns-prefix}` for every capability that SHIPS a namespace family

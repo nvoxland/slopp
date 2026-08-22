@@ -1,8 +1,8 @@
-(ns slopp.web.screen.hiccup
+(ns slopp.cljnx.hiccup
   "Reading hiccup as a STRUCTURE — the accessors every framework reader needs
   and none should own.
 
-  `slopp.web.screen` both renders a tree for a reader and walks one to find
+  `slopp.cljnx` both renders a tree for a reader and walks one to find
   the node a click or a fill names. All of its questions come through here —
   what is this element's tag ([[tag]], sugar parsed), what are its attributes
   ([[attrs]], sugar merged), what are its children ([[kids]], seqs flattened,

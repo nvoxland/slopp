@@ -2,7 +2,7 @@
   "The `screen` TOOL — opening this store's app and driving it, so an agent can
   look at a screen with no code written and no browser opened.
 
-  The framework half is `slopp.web.screen`, which SHIPS: any project can open a
+  The framework half is `slopp.cljnx`, which SHIPS: any project can open a
   page, click, fill and read. This is the half that does not ship — finding the
   app's `^:web/page` entry and running the driving where the app's vars live,
   which is slopp's own tooling and belongs beside `slopp.webdev.live`.
@@ -12,7 +12,7 @@
   served app can be behind, and `session_brief`'s `:app {:behind N}` is the
   surface for that question instead.
 
-  Deliberately thin. The steps travel as EDN and `slopp.web.screen/drive!`
+  Deliberately thin. The steps travel as EDN and `slopp.cljnx/drive!`
   interprets them, so the tool and a test run the same interpreter rather than
   two producers of one behaviour."
   (:require [slopp.image.repl :as repl]))
@@ -33,7 +33,7 @@
   a store-side scan would answer for source the image may not have reloaded.
 
   Deliberately THIN: the steps travel as EDN and
-  [[slopp.web.screen/drive!]] interprets them. A generated call chain would be
+  [[slopp.cljnx/drive!]] interprets them. A generated call chain would be
   a second producer of the driving behaviour, free to drift from the one a
   test exercises — which is why `:trace` drives ONE session one step at a
   time through the same `drive!` rather than unrolling a loop of its own. Not
@@ -52,25 +52,38 @@
          "                      :when (:web/page (meta v))] v))]"
          "  (if-not pv"
          "    {:error \"no ^:web/page in this store — mark the zero-arg fn that"
-         " builds your app (a :web/routes ctx, or {:state :view}) and slopp can"
-         " open it; nothing else has to change\"}"
+         " builds your app (a :web/routes ctx, a :webapp/routes declaration, or"
+         " {:state :view}) and slopp can open it; nothing else has to change\"}"
          ;; fully qualified, NOT an alias: a `require` inside this form runs at
          ;; runtime while the body compiles at read time, so an :as here is a
          ;; "No such namespace" every time.
          "    (try"
-         "      (let [open  (requiring-resolve 'slopp.web.screen/open!)"
-         "            drive (requiring-resolve 'slopp.web.screen/drive!)"
-         "            text  (requiring-resolve 'slopp.web.screen/text)"
+         "      (let [open  (requiring-resolve 'slopp.cljnx/open!)"
+         "            drive (requiring-resolve 'slopp.cljnx/drive!)"
+         "            text  (requiring-resolve 'slopp.cljnx/text)"
+         ;; the fake browser takes ONE contract and knows no app type, so the
+         ;; entry's own shape decides which capability derives it. Resolved
+         ;; INSIDE the branch: a store using http is vendored no
+         ;; `slopp.webapp` source at all, so resolving both up front would
+         ;; throw on exactly the app type that has always worked here.
+         "            as-page (fn [v]"
+         "                      (cond"
+         "                        (:web/routes v)"
+         "                        ((requiring-resolve 'slopp.web/driver) v)"
+         "                        (:webapp/routes v)"
+         "                        ((requiring-resolve 'slopp.webapp/driver)"
+         "                         ((requiring-resolve 'slopp.webapp/wiring) v))"
+         "                        :else v))"
          "            steps " (pr-str (vec steps))
          "            shot  (fn [s] (text s " (pr-str region) " " shot-opts "))]"
          (if trace
-           (str "        (let [s (open ((var-get pv)))]"
+           (str "        (let [s (open (as-page ((var-get pv))))]"
                 "          {:screens (mapv (fn [step]"
                 "                            (drive s [step])"
                 "                            {:step step :screen (shot s)})"
                 "                          steps)"
                 "           :entry (str pv)}))")
-           (str "        {:screen (shot (drive (open ((var-get pv))) steps))"
+           (str "        {:screen (shot (drive (open (as-page ((var-get pv)))) steps))"
                 "         :entry (str pv)})"))
          "      (catch Throwable e"
          "        {:error (clojure.string/join \" <- \""

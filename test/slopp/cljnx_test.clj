@@ -1,4 +1,4 @@
-(ns slopp.web.screen-test
+(ns slopp.cljnx-test
   "Cover for the readout — and the tests are the decisions, not the plumbing.
 
   Every case here is a real view bug that got past a careful reviewer's own
@@ -11,7 +11,7 @@
   its failure mode is a green suite over a blank page."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [slopp.web.screen :as web.screen] [slopp.web.screen.hiccup :as hiccup] [slopp.webapp :as webapp]))
+            [slopp.cljnx :as cljnx] [slopp.cljnx.hiccup :as hiccup] [slopp.webapp :as webapp] [slopp.web :as slopp.web]))
 
 (deftest a-block-never-glues-to-the-text-around-it
   ;; THE founding bug, and the reason a naive flatten is not merely uglier but
@@ -22,39 +22,39 @@
   ;; served page for as long as that sentence existed.
   (testing "a heading owns its line, and carries its level as a real tag"
     (is (= "<h1>code</h1>\n3 modules, 4 namespaces"
-           (web.screen/of [:div [:h1 "code"] [:p "3 modules, 4 namespaces"]]))))
+           (cljnx/of [:div [:h1 "code"] [:p "3 modules, 4 namespaces"]]))))
   (testing "inline tags DO join the line — the split is by tag, not by nesting"
     (is (= "the store has 12 forms"
-           (web.screen/of [:p "the store has " [:strong "12"] " forms"]))))
+           (cljnx/of [:p "the store has " [:strong "12"] " forms"]))))
   (testing "an unknown tag starts a line rather than joining one"
     ;; the safe direction: over-separated is readable, silently glued is not
-    (is (= "one\ntwo" (web.screen/of [:div [:whatever "one"] [:aside "two"]])))))
+    (is (= "one\ntwo" (cljnx/of [:div [:whatever "one"] [:aside "two"]])))))
 
 (deftest what-a-reader-cannot-afford-to-lose
   (testing "a seq child is a FRAGMENT, and dropping it reads as an empty section"
     ;; three spellings, all ordinary hiccup, all meaning the same thing
     (is (= "<ul slopp:count=\"2\">\n  <li>a</li>\n  <li>b</li>\n</ul>"
-           (web.screen/of (into [:ul] (for [x ["a" "b"]] [:li x])))))
-    (is (= "a\nb" (web.screen/of [:div (for [x ["a" "b"]] [:p x])])))
-    (is (= "a\nb" (web.screen/of [:div (list (list [:p "a"] [:p "b"]))]))))
+           (cljnx/of (into [:ul] (for [x ["a" "b"]] [:li x])))))
+    (is (= "a\nb" (cljnx/of [:div (for [x ["a" "b"]] [:p x])])))
+    (is (= "a\nb" (cljnx/of [:div (list (list [:p "a"] [:p "b"]))]))))
 
   (testing "an :href always travels — where a thing points is half of every check"
-    (is (= "<a href=\"/store\">Code</a>" (web.screen/of [:p [:a {:href "/store"} "Code"]]))))
+    (is (= "<a href=\"/store\">Code</a>" (cljnx/of [:p [:a {:href "/store"} "Code"]]))))
 
   (testing "a :class NEVER travels — style is a claim a text readout cannot honour"
     ;; the overlay story lives in the svg census below, where class is
     ;; capability vocabulary rather than styling; everywhere else dropping it
     ;; is what makes sugar verifiable (:h1.big ≡ [:h1 {:class \"big\"}])
-    (is (= "x" (web.screen/of [:p [:span {:class "tint-3"} "x"]]))))
+    (is (= "x" (cljnx/of [:p [:span {:class "tint-3"} "x"]]))))
 
   (testing "a list is COUNTED, and the tool's cap is a machine-visible tag"
     (let [big (into [:ul] (for [i (range 32)] [:li (str "row " i)]))]
-      (is (= "<ul slopp:count=\"32\">" (first (web.screen/lines big {:list-head 3})))
+      (is (= "<ul slopp:count=\"32\">" (first (cljnx/lines big {:list-head 3})))
           "32 rows is a wall a reader skims; the count is one line they cannot")
       (is (= ["  <slopp:elided count=\"29\"/>" "</ul>"]
-             (vec (take-last 2 (web.screen/lines big {:list-head 3}))))
+             (vec (take-last 2 (cljnx/lines big {:list-head 3}))))
           "the truncation is a TAG, so an assertion can never be eaten silently")
-      (is (= 34 (count (web.screen/lines big)))
+      (is (= 34 (count (cljnx/lines big)))
           "and the TEST path elides nothing by default — a test's tokens are cheap, its false failure is not")))
 
   (testing "an svg is censused by CLASS and never descended"
@@ -64,8 +64,8 @@
              [:path {:class "module-link"} "M 0 0 C 12 40, 88 60, 88 100"]
              [:g {:class "gap-w0"}] [:g {:class "gap-w0"}] [:g {:class "gap-w4"}]]]
       (is (= "<svg class=\"module-graph\">2 gap-w0, 1 gap-w4, 1 module-link</svg>"
-             (web.screen/of g)))
-      (is (not (re-find #"88 100" (web.screen/of g)))
+             (cljnx/of g)))
+      (is (not (re-find #"88 100" (cljnx/of g)))
           "coordinates are a screen of context that answers nothing"))))
 
 (deftest a-region-that-is-not-there-REFUSES
@@ -83,12 +83,12 @@
                  [:svg {:class "module-graph"} [:g {:class "gap-w4"}]]]]]
     (testing "a region scopes to its own lines and nothing else"
       (is (= ["<h1>code</h1>" "<svg class=\"module-graph\">1 gap-w4</svg>"]
-             (mapv str/triml (web.screen/lines screen {:region "main"}))))
+             (mapv str/triml (cljnx/lines screen {:region "main"}))))
       (is (= ["<a href=\"/\">Review</a>"]
-             (mapv str/triml (web.screen/lines screen {:region "nav"})))))
+             (mapv str/triml (cljnx/lines screen {:region "nav"})))))
 
     (testing "a region that is not on the screen THROWS, and names the ones that are"
-      (let [e (try (web.screen/lines screen {:region "sidebar"}) nil
+      (let [e (try (cljnx/lines screen {:region "sidebar"}) nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e) "a missing region is a finding, never an empty scope")
         (is (str/includes? (ex-message e) "regions present: nav, main")
@@ -98,13 +98,13 @@
       (let [dup [:div
                  [:section {:data-region "card"} [:p "first"]]
                  [:section {:data-region "card"} [:p "second"]]]
-            e   (try (web.screen/lines dup {:region "card"}) nil
+            e   (try (cljnx/lines dup {:region "card"}) nil
                      (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e) "silently taking the first lets an assertion pass against the wrong pane")
         (is (str/includes? (ex-message e) "2 regions"))))
 
     (testing "and a screen with no regions at all says THAT, not the same message"
-      (let [e (try (web.screen/lines [:div [:p "x"]] {:region "main"}) nil
+      (let [e (try (cljnx/lines [:div [:p "x"]] {:region "main"}) nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (str/includes? (ex-message e) ":data-region")
             "an app that has never addressed a pane needs the mechanism, not a list")))))
@@ -127,20 +127,20 @@
                         [:div
                          [:p (str "n=" (:n s))]
                          [:button {:on-click #(swap! state update :n inc)} "Add"]])}
-        b     (web.screen/open! page)]
+        b     (cljnx/open! page)]
     (testing "the document renders from state before anything happens"
       ;; the <button> tag is the readout saying the button is a button — a
       ;; reader deciding what to do next could not otherwise tell it from a
       ;; paragraph
       (is (= "n=0\n<button slopp:on=\"click (fn)\">Add</button>"
-             (web.screen/of (web.screen/tree b)))))
+             (cljnx/of (cljnx/tree b)))))
     (testing "a click fires the app's handler and the document changes"
-      (web.screen/click! b "Add")
+      (cljnx/click! b "Add")
       (is (= "n=1\n<button slopp:on=\"click (fn)\">Add</button>"
-             (web.screen/of (web.screen/tree b))))
-      (web.screen/click! b "Add")
+             (cljnx/of (cljnx/tree b))))
+      (cljnx/click! b "Add")
       (is (= "n=2\n<button slopp:on=\"click (fn)\">Add</button>"
-             (web.screen/of (web.screen/tree b)))
+             (cljnx/of (cljnx/tree b)))
           "and the session KEEPS state, the way a browser does between clicks"))))
 
 (deftest following-a-link-is-what-clicking-one-means
@@ -155,14 +155,14 @@
                            [:div
                             [:h1 (:at s)]
                             [:a {:href "/store"} "Code"]])}
-        b     (web.screen/open! page)]
+        b     (cljnx/open! page)]
     (testing "an href with no handler navigates through the app's own :navigate"
-      (web.screen/click! b "Code")
+      (cljnx/click! b "Code")
       (is (= "<h1>/store</h1>\n<a href=\"/store\">Code</a>"
-             (web.screen/of (web.screen/tree b)))))
+             (cljnx/of (cljnx/tree b)))))
     (testing "and a link can be clicked by its address as well as its label"
-      (web.screen/visit! b "/")
-      (web.screen/click! b "/store")
+      (cljnx/visit! b "/")
+      (cljnx/click! b "/store")
       (is (= "/store" (:at @state))))))
 
 (deftest a-click-that-cannot-be-honest-REFUSES
@@ -178,26 +178,26 @@
                         [:button {:on-click (fn [_])} "Delete"]
                         [:button {:on-click (fn [_])} "Delete"]
                         [:a {:href "/only"} "Go"]])}
-        b    (web.screen/open! page)
+        b    (cljnx/open! page)
         msg  (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
     (testing "nothing says it — and the answer is what CAN be clicked"
-      (let [m (msg #(web.screen/click! b "Nope"))]
+      (let [m (msg #(cljnx/click! b "Nope"))]
         (is (str/includes? m "nothing on this screen says"))
         (is (str/includes? m "Delete")
             "the list is the answer to the question behind the mistake")))
 
     (testing "it is on the screen but nothing over it handles a click"
-      (is (str/includes? (msg #(web.screen/click! b "Save"))
+      (is (str/includes? (msg #(cljnx/click! b "Save"))
                          "neither it nor anything above it handles a click")
           "a different bug from 'not found', and it must not read as one"))
 
     (testing "two distinct controls say it — picking one is a guess"
-      (is (str/includes? (msg #(web.screen/click! b "Delete"))
+      (is (str/includes? (msg #(cljnx/click! b "Delete"))
                          "picking one of them is a guess")))
 
     (testing "and a page with no :navigate refuses a visit rather than rendering nothing"
-      (is (str/includes? (msg #(web.screen/visit! b "/x"))
-                         "declares neither :navigate nor :web/routes")))))
+      (is (str/includes? (msg #(cljnx/visit! b "/x"))
+                         "declares neither :navigate nor :document")))))
 
 (deftest a-server-rendered-app-needs-no-page-declaration-at-all
   ;; The case slopp.web is actually built for, and it must not be the awkward
@@ -206,11 +206,16 @@
   ;; is already callable in-process, and the browser should USE them rather
   ;; than ask an app to restate what the framework knows.
   ;;
-  ;; So `open` takes the app's own ctx — the same map `slopp.web/serve!` runs
-  ;; on — and a visit is a REAL request through the REAL pipeline. `:auth
-  ;; :public` is here because that pipeline is default-deny and this fixture
-  ;; would otherwise 401: the browser inherits every guarantee the served app
-  ;; has, which is the argument for driving dispatch instead of the handler.
+  ;; So the app's own ctx — the same map `slopp.web/serve!` runs on — becomes a
+  ;; driver through `slopp.web/driver`, and a visit is a REAL request through
+  ;; the REAL pipeline. `:auth :public` is here because that pipeline is
+  ;; default-deny and this fixture would otherwise 401: the browser inherits
+  ;; every guarantee the served app has, which is the argument for driving
+  ;; dispatch instead of the handler.
+  ;;
+  ;; The wrapping call is the whole of what an app writes, and it is deliberate
+  ;; rather than ceremony: the fake browser knows no app type, so http supplies
+  ;; its own adapter exactly as `webapp` supplies its.
   (let [page (fn [body] {:status 200 :body body})
         ctx  {:web/routes
               [{:method :get :path "/" :auth :public :handler
@@ -219,24 +224,24 @@
                 (fn [_] (page [:div [:h1 "About"]]))}
                {:method :get :path "/secret" :auth :authenticated :handler
                 (fn [_] (page [:div [:h1 "Secret"]]))}]}
-        b    (web.screen/open! ctx)]
+        b    (cljnx/open! (slopp.web/driver ctx))]
     (testing "visiting a mounted path renders that page"
-      (web.screen/visit! b "/")
+      (cljnx/visit! b "/")
       (is (= "<h1>Home</h1>\n<a href=\"/about\">About</a>"
-             (web.screen/of (web.screen/tree b)))))
+             (cljnx/of (cljnx/tree b)))))
 
     (testing "and a link goes there, through the router — no :navigate anywhere"
-      (web.screen/click! b "About")
-      (is (= "<h1>About</h1>" (web.screen/of (web.screen/tree b)))))
+      (cljnx/click! b "About")
+      (is (= "<h1>About</h1>" (cljnx/of (cljnx/tree b)))))
 
     (testing "a path the app does not mount reads as the 404 it is"
-      (web.screen/visit! b "/nope")
-      (is (str/includes? (web.screen/of (web.screen/tree b)) "404")
+      (cljnx/visit! b "/nope")
+      (is (str/includes? (cljnx/of (cljnx/tree b)) "404")
           "the status is the finding — a blank screen would read as a broken page"))
 
     (testing "and the app's own auth policy applies, because this IS the pipeline"
-      (web.screen/visit! b "/secret")
-      (is (str/includes? (web.screen/of (web.screen/tree b)) "401")
+      (cljnx/visit! b "/secret")
+      (is (str/includes? (cljnx/of (cljnx/tree b)) "401")
           "an anonymous visit to a protected page is 401 here exactly as it is served"))))
 
 (deftest the-scoped-assertion-is-the-shorter-one-to-write
@@ -252,20 +257,20 @@
                         [:main {:data-region "main"}
                          [:h1 "code"]
                          [:svg {:class "module-graph"} [:g {:class "gap-w4"}]]]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "the page, when the page is what you mean"
-      (is (str/includes? (web.screen/text b) "<a href=\"/\">Review</a>")))
+      (is (str/includes? (cljnx/text b) "<a href=\"/\">Review</a>")))
 
     (testing "one region, in one argument — and it comes back dedented"
       (is (= "<h1>code</h1>\n<svg class=\"module-graph\">1 gap-w4</svg>"
-             (web.screen/text b "main")))
-      (is (= "<a href=\"/\">Review</a>" (web.screen/text b "nav"))))
+             (cljnx/text b "main")))
+      (is (= "<a href=\"/\">Review</a>" (cljnx/text b "nav"))))
 
     (testing "options still reach through — the overlay case is the census's job"
-      (is (str/includes? (web.screen/text b "main" {:detail :prose}) "code")))
+      (is (str/includes? (cljnx/text b "main" {:detail :prose}) "code")))
 
     (testing "and a region that is not there refuses rather than scoping to nothing"
-      (is (thrown? clojure.lang.ExceptionInfo (web.screen/text b "sidebar"))))))
+      (is (thrown? clojure.lang.ExceptionInfo (cljnx/text b "sidebar"))))))
 
 (deftest prose-drops-the-structure-and-keeps-the-sentences
   ;; Most assertions are "does it say X", and they pay for addresses, counts,
@@ -296,24 +301,24 @@
                   "svg module-graph\n"
                   "row 0\nrow 1\nrow 2\n"
                   "+3 more")
-             (web.screen/of page {:detail :prose :list-head 3}))))
+             (cljnx/of page {:detail :prose :list-head 3}))))
 
     (testing "a block still owns its line — this is not the flatten"
-      (is (not (str/includes? (web.screen/of page {:detail :prose})
+      (is (not (str/includes? (cljnx/of page {:detail :prose})
                               "code 3 modules"))
           "a wrong sentence in a run-on line is invisible, which is the whole point"))
 
     (testing "the truncation still SAYS so when a cap is asked for"
-      (is (str/includes? (web.screen/of page {:detail :prose :list-head 3}) "+3 more")
+      (is (str/includes? (cljnx/of page {:detail :prose :list-head 3}) "+3 more")
           "a cap that went quiet would be a report lying about its own scope"))
 
     (testing "an svg still marks its place, in words, so a picture does not read as nothing"
-      (is (str/includes? (web.screen/of page {:detail :prose}) "svg module-graph"))
-      (is (not (str/includes? (web.screen/of page {:detail :prose}) "<svg"))
+      (is (str/includes? (cljnx/of page {:detail :prose}) "svg module-graph"))
+      (is (not (str/includes? (cljnx/of page {:detail :prose}) "<svg"))
           "prose is unescaped, so brackets here would be v1's flaw surviving"))
 
     (testing "and it composes with region scoping"
-      (is (str/starts-with? (web.screen/of page {:detail :prose :region "main"}) "code")))))
+      (is (str/starts-with? (cljnx/of page {:detail :prose :region "main"}) "code")))))
 
 (deftest what-can-be-clicked-says-so
   ;; An agent looking at a screen is usually deciding what to do NEXT, and
@@ -331,14 +336,14 @@
                   "<button slopp:on=\"click (fn)\">Add</button>\n"
                   "<a href=\"/store\">Code</a>\n"
                   "<div slopp:on=\"click (fn)\">Card</div>")
-             (web.screen/of page))))
+             (cljnx/of page))))
 
     (testing "an unprefixed attr was on the page; the derived one is slopp:*"
-      (is (not (str/includes? (web.screen/of page) "slopp:on=\"click (fn)\" href"))
+      (is (not (str/includes? (cljnx/of page) "slopp:on=\"click (fn)\" href"))
           "href is the page's own fact and never doubles as the derived annotation"))
 
     (testing "prose stays prose"
-      (is (= "Save\nAdd\nCode\nCard" (web.screen/of page {:detail :prose}))
+      (is (= "Save\nAdd\nCode\nCard" (cljnx/of page {:detail :prose}))
           ":prose answers 'does it say X' and pays for nothing else"))))
 
 (deftest typing-into-a-field-runs-the-apps-own-handler
@@ -356,21 +361,21 @@
                          [:input {:placeholder "Filter"
                                   :on-change #(swap! state assoc :q (:value %))}]
                          [:p (str "showing " (:q s))]])}
-        b     (web.screen/open! page)]
+        b     (cljnx/open! page)]
     (testing "the handler receives the value as DATA and the document changes"
-      (web.screen/fill! b "Filter" "store")
-      (is (str/includes? (web.screen/of (web.screen/tree b)) "showing store")))
+      (cljnx/fill! b "Filter" "store")
+      (is (str/includes? (cljnx/of (cljnx/tree b)) "showing store")))
 
     (testing "a field that is not there refuses, and says what can be filled"
-      (let [m (try (web.screen/fill! b "Nope" "x") nil
+      (let [m (try (cljnx/fill! b "Nope" "x") nil
                    (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (str/includes? m "Filter")
             "the list is the answer to the question behind the mistake")))
 
     (testing "and a field with no :on-change is a different bug from a missing one"
-      (let [b2 (web.screen/open! {:state (atom {})
+      (let [b2 (cljnx/open! {:state (atom {})
                              :view (fn [_] [:input {:placeholder "Inert"}])})
-            m  (try (web.screen/fill! b2 "Inert" "x") nil
+            m  (try (cljnx/fill! b2 "Inert" "x") nil
                     (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (str/includes? m "no :on-change"))))))
 
@@ -398,13 +403,13 @@
                   "  <input placeholder=\"Inert\"/>\n"
                   "  <textarea name=\"notes\" slopp:on=\"change (fn)\"/>\n"
                   "</form>")
-             (web.screen/of page))))
+             (cljnx/of page))))
 
     (testing "an inert field shows WITHOUT slopp:on — that is the finding, not a gap"
-      (is (str/includes? (web.screen/of page) "<input placeholder=\"Inert\"/>")))
+      (is (str/includes? (cljnx/of page) "<input placeholder=\"Inert\"/>")))
 
     (testing "and prose keeps the field's name but drops the tags"
-      (is (= "Filter\nemail\nAgree\nInert\nnotes" (web.screen/of page {:detail :prose}))))))
+      (is (= "Filter\nemail\nAgree\nInert\nnotes" (cljnx/of page {:detail :prose}))))))
 
 (deftest a-handler-runs-whichever-idiom-the-tree-uses
   ;; CHECKED against both libraries rather than inferred from one app, because
@@ -428,13 +433,13 @@
                             [:button {:on-click #(swap! state update :n inc)} "Reagent"]
                             [:button {:on {:click #(swap! state update :n inc)}} "Fn"]
                             [:button {:on {:click [:like-video 7]}} "Data"]])}
-        b     (web.screen/open! page)]
+        b     (cljnx/open! page)]
     (testing "a Reagent-style function on the element"
-      (web.screen/click! b "Reagent")
+      (cljnx/click! b "Reagent")
       (is (= 1 (:n @state))))
 
     (testing "a function under Replicant's :on map"
-      (web.screen/click! b "Fn")
+      (cljnx/click! b "Fn")
       (is (= 2 (:n @state))))
 
     (testing "DATA under :on reaches dispatch VERBATIM, with no event invented"
@@ -444,7 +449,7 @@
       ;; so a handler reading (:value e) would have passed here and done
       ;; nothing in a browser. A test that green-lights production breakage is
       ;; worse than no test.
-      (web.screen/click! b "Data")
+      (cljnx/click! b "Data")
       (is (= [[:like-video 7] nil] (last @seen))
           "the action verbatim — it is what a dispatcher switches on — and no value for a click"))
 
@@ -452,13 +457,13 @@
       (is (= (str "<button slopp:on=\"click (fn)\">Reagent</button>\n"
                   "<button slopp:on=\"click (fn)\">Fn</button>\n"
                   "<button slopp:on=\"click :like-video 7\">Data</button>")
-             (web.screen/of (web.screen/tree b)))
+             (cljnx/of (cljnx/tree b)))
           "a serializable action is the only handler shape a readout can report — scalar args included, since they are what tells two controls apart"))
 
     (testing "data with no :dispatch declared REFUSES, naming the gap"
-      (let [b2 (web.screen/open! {:state (atom {})
+      (let [b2 (cljnx/open! {:state (atom {})
                              :view  (fn [_] [:button {:on {:click [:boom]}} "X"])})
-            m  (try (web.screen/click! b2 "X") nil
+            m  (try (cljnx/click! b2 "X") nil
                     (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (str/includes? m ":dispatch")
             "silently doing nothing would be a click that reported success and changed nothing")))))
@@ -480,13 +485,13 @@
                             [:input {:placeholder "Replicant" :value (:r s)
                                      :on {:input #(swap! state assoc :r (:value %))}}]
                             [:input {:placeholder "Data" :on {:input [:search]}}]])}
-        b     (web.screen/open! page)]
+        b     (cljnx/open! page)]
     (testing "Reagent's :on-change"
-      (web.screen/fill! b "Reagent" "abc")
+      (cljnx/fill! b "Reagent" "abc")
       (is (= "abc" (:q @state))))
 
     (testing "Replicant's :on {:input …} as a function"
-      (web.screen/fill! b "Replicant" "xyz")
+      (cljnx/fill! b "Replicant" "xyz")
       (is (= "xyz" (:r @state))))
 
     (testing "and as DATA — the action verbatim, the typed text as a SCALAR"
@@ -494,14 +499,14 @@
       ;; behind (.. e -target -value), which is interop and cannot run on a JVM.
       ;; A handler written against an invented {:value v} would pass here and do
       ;; nothing in a browser, and that direction is the one worth refusing.
-      (web.screen/fill! b "Data" "q")
+      (cljnx/fill! b "Data" "q")
       (is (= [[:search] "q"] @seen)))
 
     (testing "all three show as fillable, under the event name each one wrote"
       (is (= (str "<input placeholder=\"Reagent\" value=\"abc\" slopp:on=\"change (fn)\"/>\n"
                   "<input placeholder=\"Replicant\" value=\"xyz\" slopp:on=\"input (fn)\"/>\n"
                   "<input placeholder=\"Data\" slopp:on=\"input :search\"/>")
-             (web.screen/of (web.screen/tree b)))))))
+             (cljnx/of (cljnx/tree b)))))))
 
 (deftest a-navigate-that-touches-its-own-atom-does-not-LIVELOCK
   ;; The bug slopp-ui hit, and it took a measurement from them to find because
@@ -535,13 +540,13 @@
               :navigate (fn [_ path]
                           (swap! st #(-> % (update :n inc) (assoc :at path)))
                           @st)}
-        s    (web.screen/open! page)
-        f    (future (web.screen/visit! s "/store") :done)]
+        s    (cljnx/open! page)
+        f    (future (cljnx/visit! s "/store") :done)]
     (is (= :done (deref f 3000 :TIMED-OUT))
         "a :navigate that touches its own atom livelocked inside swap! — it presents as a hang, and a hang has no message")
     (is (= 1 (:n @st))
         "and it ran ONCE: a retry loop would have incremented this a great many times")
-    (is (= "at=/store n=1" (web.screen/of (web.screen/tree s)))
+    (is (= "at=/store n=1" (cljnx/of (cljnx/tree s)))
         "and the navigation actually happened")))
 
 (deftest an-action-shows-the-arguments-that-DISTINGUISH-it
@@ -567,7 +572,7 @@
                   "<button slopp:on=\"click :docs/all false\">collapse all</button>\n"
                   "<button slopp:on=\"click :like-video …\">Like</button>\n"
                   "<button slopp:on=\"click :save\">Save</button>")
-             (web.screen/of (web.screen/tree (web.screen/open! page))))))))
+             (cljnx/of (cljnx/tree (cljnx/open! page))))))))
 
 (deftest the-structured-format-is-text-with-a-whitelisted-tag-channel
   ;; v2 contract, settled 2026-08-05: plain text stays plain; a tag keeps its
@@ -585,7 +590,7 @@
               [:ul (for [i (range 5)] [:li (str "row " i)])]
               [:button {:disabled true :on {:click [:orders/expand true]}} "expand all"]
               [:svg {:class "chart"} [:path.bar] [:path.bar]]]
-        s (web.screen/of view)]
+        s (cljnx/of view)]
     (testing "headings are real tags, not markdown"
       (is (str/includes? s "<h1>orders</h1>")))
     (testing "inline emphasis is text only — strong/em/span carry no brackets"
@@ -606,8 +611,8 @@
       (is (str/includes? s "<slopp:region name=\"main\">"))
       (is (str/includes? s "</slopp:region>")))
     (testing "class and id never reach the output, so sugar and plain spellings render identically"
-      (is (= (web.screen/of [:div [:h1.big "t"]])
-             (web.screen/of [:div [:h1 {:class "big"} "t"]]))))))
+      (is (= (cljnx/of [:div [:h1.big "t"]])
+             (cljnx/of [:div [:h1 {:class "big"} "t"]]))))))
 
 (deftest page-text-that-looks-like-syntax-cannot-be-confused-with-it
   ;; The old format's markers were plain text, so a page containing "# xyz" or
@@ -615,7 +620,7 @@
   ;; SOURCE, a domain made of #, [...] and angle brackets. v2 escapes & < > in
   ;; every text node and attr value; the only raw angle brackets in the output
   ;; are the reader's own tag channel.
-  (let [s (web.screen/of [:div
+  (let [s (cljnx/of [:div
                       [:p "# xyz"]
                       [:p "grep for [click] in the source"]
                       [:p "a < b & c > d"]
@@ -631,7 +636,7 @@
       (is (str/includes? s "</pre>"))
       (is (not (str/includes? s "(defn f [] \"<ul>\")"))))
     (testing "a multi-line pre yields one real line per source line"
-      (let [ls (mapv str/triml (web.screen/lines [:div [:pre "line1\nline2"]]))]
+      (let [ls (mapv str/triml (cljnx/lines [:div [:pre "line1\nline2"]]))]
         (is (= ["<pre>" "line1" "line2" "</pre>"] ls))))))
 
 (deftest clicking-behaves-like-a-browser-not-a-matcher
@@ -652,18 +657,18 @@
                      :dispatch (fn [a _] (swap! hits conj a))})]
     (testing "a click on text inside a handled ancestor bubbles to it"
       (reset! hits [])
-      (web.screen/click! (web.screen/open! (page)) "Open")
+      (cljnx/click! (cljnx/open! (page)) "Open")
       (is (= [[:open-card]] @hits)))
     (testing "a disabled control refuses and runs nothing — production would not fire it"
       (reset! hits [])
-      (let [e (try (web.screen/click! (web.screen/open! (page)) "Save") nil
+      (let [e (try (cljnx/click! (cljnx/open! (page)) "Save") nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e))
         (is (str/includes? (ex-message e) "disabled"))
         (is (= [] @hits))))
     (testing "aria-label addresses an icon-only control"
       (reset! hits [])
-      (web.screen/click! (web.screen/open! (page)) "close")
+      (cljnx/click! (cljnx/open! (page)) "close")
       (is (= [[:close]] @hits)))))
 
 (deftest the-tree-is-read-the-way-the-libraries-run-it
@@ -675,25 +680,25 @@
   ;; And the label a screen shows is byte-identical to the label a click
   ;; accepts, because both come from the ONE text function.
   (testing "a fragment splices its children into the sentence"
-    (is (= "a x b" (web.screen/of [:p "a " [:<> [:b "x"]] " b"]))))
+    (is (= "a x b" (cljnx/of [:p "a " [:<> [:b "x"]] " b"]))))
   (testing "a component vector is called, as the libraries call it"
-    (is (= "hello" (web.screen/of [:div [(fn [t] [:p t]) "hello"]]))))
+    (is (= "hello" (cljnx/of [:div [(fn [t] [:p t]) "hello"]]))))
   (testing "a form-2 component's returned render fn runs with the same args"
-    (is (= "hi" (web.screen/of [:div [(fn [_] (fn [t] [:p t])) "hi"]]))))
+    (is (= "hi" (cljnx/of [:div [(fn [_] (fn [t] [:p t])) "hi"]]))))
   (testing "sugar id is an attr, so a sugared field is addressable and shown"
     (let [got (atom nil)
-          ss  (web.screen/open! {:state (atom {})
+          ss  (cljnx/open! {:state (atom {})
                             :view (fn [_] [:div [:input#q {:on {:input [:q/set]}}]])
                             :dispatch (fn [_ v] (reset! got v))})]
-      (is (str/includes? (web.screen/text ss nil) "<input id=\"q\""))
-      (web.screen/fill! ss "q" "web")
+      (is (str/includes? (cljnx/text ss nil) "<input id=\"q\""))
+      (cljnx/fill! ss "q" "web")
       (is (= "web" @got))))
   (testing "the shown label IS the clickable label"
     (let [n  (atom 0)
-          ss (web.screen/open! {:state n
+          ss (cljnx/open! {:state n
                            :view (fn [_] [:div [:button {:on-click (fn [_] (swap! n inc))} "foo" [:span "bar"]]])})]
-      (is (str/includes? (web.screen/text ss nil) ">foobar</button>"))
-      (web.screen/click! ss "foobar")
+      (is (str/includes? (cljnx/text ss nil) ">foobar</button>"))
+      (cljnx/click! ss "foobar")
       (is (= 1 @n)))))
 
 (deftest a-script-step-that-cannot-run-says-which-and-why
@@ -710,22 +715,22 @@
                          :dispatch (fn [a v] (swap! seen conj [a v]))})
         msg  (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
     (testing "a typo'd step names ITS keys and the step vocabulary"
-      (let [m (msg #(web.screen/drive! (web.screen/open! (page (atom []))) [{:vist "/x"}]))]
+      (let [m (msg #(cljnx/drive! (cljnx/open! (page (atom []))) [{:vist "/x"}]))]
         (is (some? m) "a raw ClassCastException is not a refusal")
         (is (str/includes? m ":visit, :click or :fill"))
         (is (str/includes? m ":vist") "the offending step's own keys, not the script's")))
     (testing "a step naming two actions refuses — running one silently is a guess"
-      (let [m (msg #(web.screen/drive! (web.screen/open! (page (atom []))) [{:visit "/a" :click "Go"}]))]
+      (let [m (msg #(cljnx/drive! (cljnx/open! (page (atom []))) [{:visit "/a" :click "Go"}]))]
         (is (str/includes? m "one action"))))
     (testing "a :fill step with no :value refuses — typing nothing is not a step"
-      (let [m (msg #(web.screen/drive! (web.screen/open! (page (atom []))) [{:fill "q"}]))]
+      (let [m (msg #(cljnx/drive! (cljnx/open! (page (atom []))) [{:fill "q"}]))]
         (is (str/includes? m ":value"))))
     (testing "steps that are not maps refuse readably"
-      (let [m (msg #(web.screen/drive! (web.screen/open! (page (atom []))) "hi"))]
+      (let [m (msg #(cljnx/drive! (cljnx/open! (page (atom []))) "hi"))]
         (is (str/includes? m "steps"))))
     (testing "a good script runs in order and returns the session"
       (let [seen (atom [])
-            s    (web.screen/drive! (web.screen/open! (page seen))
+            s    (cljnx/drive! (cljnx/open! (page seen))
                                 [{:fill "q" :value "web"} {:click "Go"}])]
         (is (= [[[:q/set] "web"] [[:go] nil]] @seen))
         (is (some? s))))))
@@ -738,18 +743,29 @@
   ;; wired. Validation belongs at the constructor, where the mistake was made.
   (let [msg (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
     (testing "a page missing a required key is refused, naming it"
-      (is (str/includes? (msg #(web.screen/open! {:view (fn [_] [:div])})) ":state"))
-      (is (str/includes? (msg #(web.screen/open! {:state (atom {})})) ":view")))
+      (is (str/includes? (msg #(cljnx/open! {:view (fn [_] [:div])})) ":state"))
+      (is (str/includes? (msg #(cljnx/open! {:state (atom {})})) ":view")))
     (testing "an unknown page key is refused — a typo'd :view is a blank page otherwise"
-      (let [m (msg #(web.screen/open! {:state (atom {}) :vew (fn [_] [:div])}))]
+      (let [m (msg #(cljnx/open! {:state (atom {}) :vew (fn [_] [:div])}))]
         (is (some? m))
         (is (str/includes? m ":vew"))))
     (testing ":state must be something deref-and-reset can drive"
-      (is (str/includes? (msg #(web.screen/open! {:state {} :view (fn [_] [:div])})) "atom")))
-    (testing "a ctx passes through untouched — its shape is slopp.web's business"
-      (is (some? (web.screen/open! {:web/routes []})))
-      (is (some? (web.screen/open! {:web/routes [] :state (atom {}) :view (fn [_] [:div])}))
-          "an app may be both, and the ctx's other keys are not page typos"))))
+      (is (str/includes? (msg #(cljnx/open! {:state {} :view (fn [_] [:div])})) "atom")))
+    (testing "a served ctx is REFUSED, and the refusal names the one call that
+              turns it into a page"
+      ;; D-cljnx: it used to pass through untouched, and `visit!` performed the
+      ;; request itself. That is http's adapter living inside the fake browser,
+      ;; which is what stopped a browser app's entry ever reaching it — so the
+      ;; ctx shape leaves rather than being tolerated beside the new one
+      (let [m (msg #(cljnx/open! {:web/routes []}))]
+        (is (some? m) "a ctx is no longer a page and must not be accepted as one")
+        (is (str/includes? m "slopp.web/driver")
+            "the refusal has to carry the migration; the author typo'd nothing"))
+      (is (str/includes? (msg #(cljnx/open! {:web/routes [] :state (atom {})
+                                                  :view (fn [_] [:div])}))
+                         "slopp.web/driver")
+          "an app that is BOTH still enters through its capability's driver,
+           which carries the page half through"))))
 
 (deftest a-url-is-split-the-way-a-browser-sends-it
   ;; Review F3: visit! passed the raw path as :uri, and Ring's :uri never
@@ -760,29 +776,29 @@
                (fn [req] {:status 200
                           :body [:div [:h1 "Search"]
                                  [:p (or (:query-string req) "none")]]})}]}
-        b   (web.screen/open! ctx)]
+        b   (cljnx/open! (slopp.web/driver ctx))]
     (testing "query params reach the handler as :query-string, not a 404"
-      (web.screen/visit! b "/search?q=web")
-      (let [s (web.screen/of (web.screen/tree b))]
+      (cljnx/visit! b "/search?q=web")
+      (let [s (cljnx/of (cljnx/tree b))]
         (is (str/includes? s "Search"))
         (is (str/includes? s "q=web"))))
     (testing "a fragment is never sent — a browser strips it before the wire"
-      (web.screen/visit! b "/search#top")
-      (is (str/includes? (web.screen/of (web.screen/tree b)) "none"))))
+      (cljnx/visit! b "/search#top")
+      (is (str/includes? (cljnx/of (cljnx/tree b)) "none"))))
 
   (let [page {:state (atom {:at "/"})
               :navigate (fn [s p] (assoc s :at p))
               :view  (fn [s] [:div [:h1 (:at s)]
                               [:a {:href "https://example.com"} "Docs"]
                               [:a {:href "#top"} "Top"]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "an external url refuses — a headless session has nowhere to go"
-      (let [m (try (web.screen/click! b "Docs") nil
+      (let [m (try (cljnx/click! b "Docs") nil
                    (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (some? m) "handing https://… to a client router is wrong for both sides")
         (is (str/includes? m "leaves the app"))))
     (testing "a fragment-only href is a scroll, which is a no-op here"
-      (web.screen/click! b "Top")
+      (cljnx/click! b "Top")
       (is (= "/" (:at @(:state (:app @b)))) "no navigation happened, and nothing threw"))))
 
 (deftest a-handler-arity-is-read-off-the-function-correctly
@@ -793,21 +809,21 @@
   ;; signature mismatch the reflection was chosen to avoid.
   (testing "a variadic handler receives the event"
     (let [got (atom ::never)
-          b   (web.screen/open! {:state (atom {})
+          b   (cljnx/open! {:state (atom {})
                             :view  (fn [_] [:button {:on-click (fn [e & _more] (reset! got e))} "Go"])})]
-      (web.screen/click! b "Go")
+      (cljnx/click! b "Go")
       (is (map? @got))))
   (testing "a with-meta wrapped handler receives the event"
     (let [got (atom ::never)
-          b   (web.screen/open! {:state (atom {})
+          b   (cljnx/open! {:state (atom {})
                             :view  (fn [_] [:button {:on-click (with-meta (fn [e] (reset! got e)) {:why "meta"})} "Go"])})]
-      (web.screen/click! b "Go")
+      (cljnx/click! b "Go")
       (is (map? @got))))
   (testing "the zero-arg shorthand still runs"
     (let [n (atom 0)
-          b (web.screen/open! {:state n
+          b (cljnx/open! {:state n
                           :view  (fn [_] [:button {:on-click #(swap! n inc)} "Go"])})]
-      (web.screen/click! b "Go")
+      (cljnx/click! b "Go")
       (is (= 1 @n)))))
 
 (deftest filling-a-select-is-choosing-an-option
@@ -826,18 +842,18 @@
                             [:option {:value "name"} "By name"]
                             [:option {:value "age"} "By age"]]
                            [:input {:type "checkbox" :name "agree" :on {:change [:agree/set]}}]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "choosing an option a select carries dispatches its value"
-      (web.screen/fill! b "sort" "age")
+      (cljnx/fill! b "sort" "age")
       (is (= [[:sort/set] "age"] @seen)))
     (testing "a value no option carries refuses, listing the choices"
-      (let [m (try (web.screen/fill! b "sort" "created") nil
+      (let [m (try (cljnx/fill! b "sort" "created") nil
                    (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (some? m) "a browser cannot produce this value, so a test must not")
         (is (str/includes? m "name"))
         (is (str/includes? m "age"))))
     (testing "a checkbox takes its checked state as a boolean"
-      (web.screen/fill! b "agree" true)
+      (cljnx/fill! b "agree" true)
       (is (= [[:agree/set] true] @seen)))))
 
 (deftest the-pages-own-not-a-control-statements-are-honoured
@@ -859,17 +875,17 @@
                                 :aria-hidden "true" :tabindex "-1"}
                             [:pre "(defn rate [w z] …)"]]
                            [:button {:inert true :on {:click [:never]}} "Frozen"]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "an aria-hidden duplicate does not make a click ambiguous"
-      (web.screen/visit! b "/")
-      (web.screen/click! b "/store/form/f1")
+      (cljnx/visit! b "/")
+      (cljnx/click! b "/store/form/f1")
       (is (= "/store/form/f1" (:path @b))
           "one user-reachable control answers, exactly as in a browser"))
     (testing "the readout shows the statement, so a reader can tell the two apart"
-      (is (str/includes? (web.screen/text b nil) "aria-hidden=\"true\"")))
+      (is (str/includes? (cljnx/text b nil) "aria-hidden=\"true\"")))
     (testing "an inert control refuses like a disabled one — a browser delivers no events to it"
       (reset! hits [])
-      (let [e (try (web.screen/click! b "Frozen") nil
+      (let [e (try (cljnx/click! b "Frozen") nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e))
         (is (str/includes? (ex-message e) "inert"))
@@ -882,17 +898,17 @@
   ;; never surfaces and the test checks something its author did not choose.
   (let [v [:div [:main {:data-region "main"} [:p "hello"]]]]
     (testing "an unknown option refuses, naming it and the vocabulary"
-      (let [e (try (web.screen/lines v {:detial :prose}) nil
+      (let [e (try (cljnx/lines v {:detial :prose}) nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e) "a guessed default is a wrong answer reported as success")
         (is (str/includes? (ex-message e) ":detial"))
         (is (str/includes? (ex-message e) ":detail"))))
     (testing "the removed :attrs option refuses too — it silently ignored"
-      (is (thrown? clojure.lang.ExceptionInfo (web.screen/lines v {:attrs #{:class}}))))
+      (is (thrown? clojure.lang.ExceptionInfo (cljnx/lines v {:attrs #{:class}}))))
     (testing "a :detail value outside its two words refuses"
-      (is (thrown? clojure.lang.ExceptionInfo (web.screen/lines v {:detail :porse}))))
+      (is (thrown? clojure.lang.ExceptionInfo (cljnx/lines v {:detail :porse}))))
     (testing "the valid vocabulary still passes"
-      (is (= "hello" (web.screen/of v {:detail :prose :region "main" :list-head 3}))))))
+      (is (= "hello" (cljnx/of v {:detail :prose :region "main" :list-head 3}))))))
 
 (deftest within-scopes-text-to-the-element-a-click-would-own
   ;; slopp-ui's ask: region is pane-grain, so a question about one ROW meant
@@ -911,30 +927,30 @@
                           [:a {:href "/store/form/f1"} "rate"] " " [:span "[kg zone]"]]
                          [:li {:on {:click [:open :band]}}
                           [:a {:href "/store/form/f2"} "band-for"] " " [:span "[kg]"]]]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "the subtree of the OWNING element — the row, not just the anchor"
-      (is (= "rate [kg zone]" (web.screen/text b nil {:within "rate" :detail :prose}))))
+      (is (= "rate [kg zone]" (cljnx/text b nil {:within "rate" :detail :prose}))))
     (testing "addressable by href too, exactly like a click"
-      (is (str/includes? (web.screen/text b nil {:within "/store/form/f2"}) "band-for")))
+      (is (str/includes? (cljnx/text b nil {:within "/store/form/f2"}) "band-for")))
     (testing "it composes with a region, and misses refuse listing what IS addressable"
-      (is (= "rate [kg zone]" (web.screen/text b "main" {:within "rate" :detail :prose})))
-      (let [e (try (web.screen/text b nil {:within "nope"}) nil
+      (is (= "rate [kg zone]" (cljnx/text b "main" {:within "rate" :detail :prose})))
+      (let [e (try (cljnx/text b nil {:within "nope"}) nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e))
         (is (str/includes? (ex-message e) "rate")
             "the list is the answer to the question behind the mistake"))))
 
   (testing "a disabled control can still be LOOKED at — the act-gates are the click's, not the address's"
-    (let [b (web.screen/open! {:state (atom {})
+    (let [b (cljnx/open! {:state (atom {})
                           :view (fn [_] [:div [:button {:disabled true :on-click (fn [_])} "Save"]])})]
-      (is (str/includes? (web.screen/text b nil {:within "Save"}) "Save"))))
+      (is (str/includes? (cljnx/text b nil {:within "Save"}) "Save"))))
 
   (testing "aria-hidden content STAYS in text — it hides nothing visually, and a readout shows the screen"
     ;; decided on purpose (slopp-ui's flag): the click set and the text set
     ;; answer different questions and are allowed to differ. A sighted reader
     ;; sees that span; a readout claiming to show the screen must too.
-    (is (= "decorative" (web.screen/of [:p [:span {:aria-hidden "true"} "decorative"]] {:detail :prose})))
-    (is (str/includes? (web.screen/of [:div [:p "real"] [:span {:aria-hidden "true"} "decorative"]])
+    (is (= "decorative" (cljnx/of [:p [:span {:aria-hidden "true"} "decorative"]] {:detail :prose})))
+    (is (str/includes? (cljnx/of [:div [:p "real"] [:span {:aria-hidden "true"} "decorative"]])
                        "decorative"))))
 
 (deftest a-page-declares-what-runs-at-boot-and-open-runs-it
@@ -951,15 +967,15 @@
     (let [page {:state (atom {:projects {:status :absent}})
                 :boot  (fn [s] (assoc s :projects {:status :loading}))
                 :view  (fn [s] [:div [:p (name (get-in s [:projects :status]))]])}
-          b    (web.screen/open! page)]
-      (is (= "loading" (web.screen/text b nil {:detail :prose}))
+          b    (cljnx/open! page)]
+      (is (= "loading" (cljnx/text b nil {:detail :prose}))
           "the screen shows the app ASKED — its loading state, not an absence")))
   (testing "a page without :boot is unchanged"
-    (let [b (web.screen/open! {:state (atom {}) :view (fn [_] [:p "hi"])})]
-      (is (= "hi" (web.screen/text b nil {:detail :prose})))))
+    (let [b (cljnx/open! {:state (atom {}) :view (fn [_] [:p "hi"])})]
+      (is (= "hi" (cljnx/text b nil {:detail :prose})))))
   (testing "a :boot that is not callable refuses at open"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #":boot"
-                          (web.screen/open! {:state (atom {}) :view (fn [_] [:p "x"]) :boot 42})))))
+                          (cljnx/open! {:state (atom {}) :view (fn [_] [:p "x"]) :boot 42})))))
 
 (deftest a-select-speaks-in-both-modes
   ;; slopp-ui's pair, from their real project switcher. A: prose rendered the
@@ -975,15 +991,15 @@
                  [:option {:value "/a"} "slopp2"]
                  [:option {:value "/b" :disabled true} "older — not running"]]]]
     (testing "prose shows what a browser shows: the selected option's label, first by default"
-      (is (= "slopp2" (web.screen/of v {:detail :prose}))))
+      (is (= "slopp2" (cljnx/of v {:detail :prose}))))
     (testing "an explicitly selected option wins"
       (is (= "older — not running"
-             (web.screen/of [:div [:select {}
+             (cljnx/of [:div [:select {}
                                [:option {:value "/a"} "slopp2"]
                                [:option {:value "/b" :selected true} "older — not running"]]]
                         {:detail :prose}))))
     (testing "disabled renders on an option, so listed-and-disabled is assertable"
-      (is (str/includes? (web.screen/of v)
+      (is (str/includes? (cljnx/of v)
                          "<option value=\"/b\" disabled>older — not running</option>")))))
 
 (deftest every-page-tag-renders-through-one-attr-route
@@ -997,17 +1013,17 @@
   ;; and a branch cannot hand-build page attrs at all. Pinned here on the
   ;; tags whose private lists dropped the trio.
   (testing "an img carries the page's not-a-control statement like every control does"
-    (is (str/includes? (web.screen/of [:div [:img {:alt "chart" :aria-hidden "true"}]])
+    (is (str/includes? (cljnx/of [:div [:img {:alt "chart" :aria-hidden "true"}]])
                        "<img alt=\"chart\" aria-hidden=\"true\"/>")))
   (testing "an option carries it too — no tag is outside the rule"
     (is (str/includes?
-         (web.screen/of [:div [:select {}
+         (cljnx/of [:div [:select {}
                            [:option {:value "/a" :aria-hidden "true"} "ghost"]]])
          "<option value=\"/a\" aria-hidden=\"true\">ghost</option>")))
   (testing "the trio renders in one order everywhere — block and inline paths agree"
-    (let [block  (web.screen/of [:div [:div {:aria-label "card" :inert true
+    (let [block  (cljnx/of [:div [:div {:aria-label "card" :inert true
                                          :on {:click [:open]}} [:p "body"]]])
-          inline (web.screen/of [:p "see " [:span {:aria-label "card" :inert true
+          inline (cljnx/of [:p "see " [:span {:aria-label "card" :inert true
                                                :on {:click [:open]}} "this"]])]
       (is (str/includes? block  "aria-label=\"card\" inert slopp:on=\"click :open\""))
       (is (str/includes? inline "aria-label=\"card\" inert slopp:on=\"click :open\""))))
@@ -1018,16 +1034,16 @@
   ;; control, rendered as inert words, in the mode whose whole contract is
   ;; that an unprefixed tag means something you can act on.
   (testing "a heading is a page tag — a clickable one says so"
-    (is (str/includes? (web.screen/of [:div [:h2 {:aria-label "sect" :on {:click [:fold]}} "Title"]])
+    (is (str/includes? (cljnx/of [:div [:h2 {:aria-label "sect" :on {:click [:fold]}} "Title"]])
                        "<h2 aria-label=\"sect\" slopp:on=\"click :fold\">Title</h2>")))
   (testing "a table is a page tag"
-    (is (str/includes? (web.screen/of [:table {:aria-label "index"} [:tr [:td "a"]]])
+    (is (str/includes? (cljnx/of [:table {:aria-label "index"} [:tr [:td "a"]]])
                        "<table aria-label=\"index\">")))
   (testing "a pre is a page tag"
-    (is (str/includes? (web.screen/of [:div [:pre {:aria-label "src"} "code"]])
+    (is (str/includes? (cljnx/of [:div [:pre {:aria-label "src"} "code"]])
                        "<pre aria-label=\"src\">")))
   (testing "and a cell, which is where the class was reported from"
-    (is (str/includes? (web.screen/of [:table [:tr [:td {:aria-label "n"} "11"]]])
+    (is (str/includes? (cljnx/of [:table [:tr [:td {:aria-label "n"} "11"]]])
                        "<td aria-label=\"n\">11</td>"))))
 
 (deftest a-plain-html-FORM-is-a-control-because-a-browser-says-so
@@ -1059,36 +1075,36 @@
                            [:input {:type "search" :name "q"
                                     :placeholder "search this store"}]
                            [:button {:type "submit"} "search"]])}
-        b    (web.screen/open! page)]
+        b    (cljnx/open! page)]
     (testing "a NAMED field inside a form is fillable, handler or not"
       ;; its value has nowhere to go until submit, which is not the same
       ;; statement as "typing into it can change nothing"
-      (web.screen/fill! b "search this store" "kg zone"))
+      (cljnx/fill! b "search this store" "kg zone"))
 
     (testing "the submit button is a control, and submitting NAVIGATES"
-      (web.screen/click! b "search")
+      (cljnx/click! b "search")
       (is (= "/store/search?q=kg+zone" (:path @b))
           (str "action + the named fields serialised by method — a browser's"
                " own behaviour, needing no cooperation from the app: "
                (pr-str (:path @b)))))
 
     (testing "the field's own :value is the default when nothing was typed"
-      (let [c (web.screen/open!
+      (let [c (cljnx/open!
                {:state (atom {}) :navigate (fn [st p] (assoc st :went p))
                 :view (fn [_] [:form {:action "/f"}
                                [:input {:name "kind" :value "form"}]
                                [:button {:type "submit"} "go"]])})]
-        (web.screen/click! c "go")
+        (cljnx/click! c "go")
         (is (= "/f?kind=form" (:path @c)))))
 
     (testing "a value with characters a URL cannot carry is encoded"
-      (let [d (web.screen/open!
+      (let [d (cljnx/open!
                {:state (atom {}) :navigate (fn [st p] (assoc st :went p))
                 :view (fn [_] [:form {:action "/f"}
                                [:input {:name "q" :placeholder "q"}]
                                [:button {:type "submit"} "go"]])})]
-        (web.screen/fill! d "q" "a&b=c")
-        (web.screen/click! d "go")
+        (cljnx/fill! d "q" "a&b=c")
+        (cljnx/click! d "go")
         (is (= "/f?q=a%26b%3Dc" (:path @d))
             (str "or the app receives a query string it did not send: "
                  (pr-str (:path @d))))))))
@@ -1127,21 +1143,21 @@
   ;; fix is page-tag rather than a special case for <a>.
   (testing "an anchor in a cell survives, exactly as the same anchor in an <li> does"
     (let [link [:a {:href "/store/ns/demo.core"} "demo.core"]
-          cell (web.screen/of [:table [:tr [:td link]]])
-          item (web.screen/of [:ul [:li link]])]
+          cell (cljnx/of [:table [:tr [:td link]]])
+          item (cljnx/of [:ul [:li link]])]
       (is (str/includes? item "<a href=\"/store/ns/demo.core\">demo.core</a>"))
       (is (str/includes? cell "<a href=\"/store/ns/demo.core\">demo.core</a>"))))
   (testing "a cell is a page tag, so the capability statements ride it too"
     (is (str/includes?
-         (web.screen/of [:table [:tr [:td {:aria-label "forms" :on {:click [:sort]}} "11"]]])
+         (cljnx/of [:table [:tr [:td {:aria-label "forms" :on {:click [:sort]}} "11"]]])
          "<td aria-label=\"forms\" slopp:on=\"click :sort\">11</td>")))
   (testing "a plain row is still ONE line — the wide-table readout is the point"
     (is (str/includes?
-         (web.screen/of [:table [:tr [:td "demo.core"] [:td "11"]]])
+         (cljnx/of [:table [:tr [:td "demo.core"] [:td "11"]]])
          "<tr><td>demo.core</td><td>11</td></tr>")))
   (testing "prose still reads a row as its words"
     (is (str/includes?
-         (web.screen/of [:table [:tr [:td [:a {:href "/x"} "demo.core"]] [:td "11"]]]
+         (cljnx/of [:table [:tr [:td [:a {:href "/x"} "demo.core"]] [:td "11"]]]
                     {:detail :prose})
          "demo.core 11"))))
 
@@ -1166,18 +1182,18 @@
                        [:h4 link] [:h5 link] [:h6 link]
                        [:table [:tr [:td link]]]
                        [:table [:tr [:th link]]]]]
-      (is (str/includes? (web.screen/of [:div container])
+      (is (str/includes? (cljnx/of [:div container])
                          "<a href=\"/x\">quote</a>")
           (str "dropped inside " (pr-str (first container))))))
   (testing "a control inside a heading keeps what it DOES, not just its label"
     ;; strictly worse than the inert-heading case: not a control rendered
     ;; inert, a control that is absent from the readout altogether
-    (is (str/includes? (web.screen/of [:div [:h2 [:button {:on {:click [:go]}} "toggle"]]])
+    (is (str/includes? (cljnx/of [:div [:h2 [:button {:on {:click [:go]}} "toggle"]]])
                        "<button slopp:on=\"click :go\">toggle</button>")))
   (testing "and the text joining that slopp-ui #31 fixed still holds"
     ;; a heading whose children carry nothing actionable still reads as one
     ;; sentence — descending must not become a reason to split the line
-    (is (str/includes? (web.screen/of [:div [:h2 "quote" " " [:small "demo.order"]]])
+    (is (str/includes? (cljnx/of [:div [:h2 "quote" " " [:small "demo.order"]]])
                        "<h2>quote demo.order</h2>"))))
 
 (deftest a-BLOCK-child-breaks-the-line-whatever-container-it-is-in
@@ -1190,7 +1206,7 @@
   ;; One root cause under three symptoms: inline-ness was decided by the TAG,
   ;; and it is a property of the SUBTREE. `[:span "a" [:p "b"]]` is
   ;; inline-tagged and is not inline.
-  (let [l (fn [v] (mapv str/triml (web.screen/lines v)))]
+  (let [l (fn [v] (mapv str/triml (cljnx/lines v)))]
     (testing "a label whose children are all inline is still ONE line — the
               common case, and the control this whole change has to preserve"
       (is (= ["<label>q · string</label>"]
@@ -1242,7 +1258,7 @@
   ;; Their nav rail is the ordinary whole-row-is-a-link pattern — an `<a>`
   ;; around a block — so every row printed markup. Two of their assertions were
   ;; the only thing that noticed.
-  (let [p (fn [v] (mapv str/triml (web.screen/lines v {:detail :prose})))]
+  (let [p (fn [v] (mapv str/triml (cljnx/lines v {:detail :prose})))]
     (testing "an inline tag with INLINE children is words, as it always was"
       (is (= ["web 1 ns"]
              (p [:a {:href "/x"} [:span "web"] " " [:span "1 ns"]]))))
@@ -1295,14 +1311,14 @@
                  :webapp/base   "/p/x"
                  :webapp/routes [["/things"     things]
                                  ["/things/:id" thing]]})
-        s      (web.screen/open! (webapp/driver app))]
+        s      (cljnx/open! (webapp/driver app))]
 
     (testing "a reader visits the url they would actually type"
       ;; the FULL url, mount point included — which is what is in the address
       ;; bar. A headless drive that visited app-relative paths would exercise a
       ;; url no browser ever produces
-      (web.screen/visit! s "/p/x/things")
-      (is (re-find #"Things" (web.screen/text s)) (web.screen/text s)))
+      (cljnx/visit! s "/p/x/things")
+      (is (re-find #"Things" (cljnx/text s)) (cljnx/text s)))
 
     (testing "the rendered link carries the mount point"
       (is (re-find #"/p/x/things/42" (pr-str ((:webapp/view app) @state)))
@@ -1312,14 +1328,14 @@
       ;; the whole point: the href the render produced is one the navigation
       ;; understands. If prefix and strip disagree by a character, this is the
       ;; assertion that says so
-      (web.screen/click! s "Anvil")
-      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s))
+      (cljnx/click! s "Anvil")
+      (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s))
       (is (= thing (:render (:screen @state)))))
 
     (testing "a url outside the mount point routes nowhere"
       ;; `/things` is not a url under `/p/x`, and treating it as one would mean
       ;; guessing that a foreign path was meant to be ours
-      (web.screen/visit! s "/things")
+      (cljnx/visit! s "/things")
       (is (= thing (:render (:screen @state)))
           "the app must not have moved for a url that was never its own"))))
 
@@ -1394,27 +1410,27 @@
                                           (ok :saved)
                                           (reset! pending ok)))
                   :webapp/leave!      (fn [u] (swap! left conj u))})
-        s       (web.screen/open! (webapp/driver app))]
+        s       (cljnx/open! (webapp/driver app))]
 
     (testing "the loading state renders while the load is out, chrome and all"
-      (web.screen/visit! s "/p/demo/things")
-      (is (re-find #"(?i)loading" (web.screen/text s)) (web.screen/text s))
-      (is (re-find #"Things" (web.screen/text s))
+      (cljnx/visit! s "/p/demo/things")
+      (is (re-find #"(?i)loading" (cljnx/text s)) (cljnx/text s))
+      (is (re-find #"Things" (cljnx/text s))
           "the nav rail stays up, which is why chrome places the load state"))
 
     (testing "and the screen renders when the answer lands"
       (@pending [{:id "42" :name "Anvil"}])
-      (is (re-find #"Anvil" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"Anvil" (cljnx/text s)) (cljnx/text s)))
 
     (testing "a link carries the mount point, and clicking it routes"
-      (web.screen/click! s "Anvil")
+      (cljnx/click! s "Anvil")
       ;; the new screen is :loading until ITS request answers — navigating runs
       ;; the :main load again, and the framework will not call a screen against
       ;; data that has not arrived. Answering it here is what a server does
-      (is (re-find #"(?i)loading" (web.screen/text s))
+      (is (re-find #"(?i)loading" (cljnx/text s))
           "a screen must not render against the PREVIOUS screen's data")
       (@pending nil)
-      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s)))
 
     (testing "each screen asked for its OWN url, decided in :cljc"
       ;; the half that used to live in a browser: WHICH endpoint a url calls.
@@ -1430,11 +1446,11 @@
       ;; the shape that used to force an app into :cljs — `(.. e -target -value)`
       ;; in a hand-written dispatcher — is the framework's now, so the app's
       ;; interpreter never sees an event of any kind
-      (web.screen/fill! s "note" "hello")
+      (cljnx/fill! s "note" "hello")
       (is (= "hello" (:draft @state)) (pr-str @state)))
 
     (testing "an effectful control makes the request the app DERIVED"
-      (web.screen/click! s "Save")
+      (cljnx/click! s "Save")
       (is (= {:webapp/method      :put
               :webapp/path        "/p/demo/api/things/:id"
               :webapp/path-params {:id "42"}
@@ -1448,5 +1464,46 @@
                " endpoint rather than as a missing prefix")))
 
     (testing "and a leaving control hands the page back to the browser"
-      (web.screen/click! s "Switch")
+      (cljnx/click! s "Switch")
       (is (= ["/p/other"] @left) (pr-str @left)))))
+
+(deftest the-fake-browser-drives-ONE-contract-and-knows-no-app-type
+  ;; D-cljnx, wave 1. The driving contract is now neutral: `:document` is how a
+  ;; path becomes a screen, wherever the screen came from. `slopp.web/driver`
+  ;; produces it from a served ctx, `slopp.webapp/driver` from a browser app's
+  ;; wiring, and this namespace knows about neither — which is what lets it
+  ;; leave http's family and become `cljnx`.
+  (let [visited (atom [])]
+
+    (testing "a :document-only app needs no state and no view"
+      ;; the server-rendered case, which used to require this namespace to
+      ;; carry `:web/routes` and call the dispatcher itself
+      (let [s (cljnx/open! {:document (fn [path]
+                                             (swap! visited conj path)
+                                             [:main [:h1 (str "at " path)]])})]
+        (cljnx/visit! s "/store")
+        (is (= ["/store"] @visited)
+            "the document producer was never asked for the path")
+        (is (re-find #"at /store" (cljnx/text s nil {:detail :prose})))))
+
+    (testing "the PATH arrives verbatim — splitting it is the producer's job"
+      ;; a client router wants the query string; an http adapter strips it
+      ;; before it reaches the wire. Neither decision belongs here
+      (let [s (cljnx/open! {:document (fn [p] [:main [:p p]])})]
+        (cljnx/visit! s "/search?q=kg+zone")
+        (is (re-find #"/search\?q=kg\+zone"
+                     (cljnx/text s nil {:detail :prose})))))
+
+    (testing "a served CONTEXT is refused, and the refusal names its producer"
+      ;; no compatibility shim: a ctx is no longer a shape this namespace
+      ;; knows, and a silent acceptance would put http's adapter back
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"slopp\.web/driver"
+           (cljnx/open! {:web/routes [{:method :get :path "/x"}]}))))
+
+    (testing "and an app that declares NEITHER a view nor a document refuses"
+      ;; an app with no way to produce a screen is a mistake worth hearing
+      ;; about at the constructor, where the mistake was made
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i):view|:document"
+           (cljnx/open! {:state (atom {})}))))))

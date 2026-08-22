@@ -259,7 +259,7 @@ client-deps (merge (:client-deps st) (:client provided))
               ;;
               ;; It was wired here for one milestone and reverted. `^:web/page`
               ;; is the only marker naming a browser app's entry fn, and for a
-              ;; webapp app that fn MUST return a DRIVER: `slopp.web.screen/open!`
+              ;; webapp app that fn MUST return a DRIVER: `slopp.cljnx/open!`
               ;; accepts `{:state :view :navigate :dispatch :boot}` and refuses
               ;; anything else, so a page returning the wiring declaration cannot
               ;; be opened headlessly at all. `dom/mount!` needs the DECLARATION

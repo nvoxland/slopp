@@ -1,6 +1,6 @@
-(ns slopp.web.screen.render
+(ns slopp.cljnx.render
   "Turning a hiccup tree into lines — the machinery behind
-  [[slopp.web.screen/of]], and none of it API.
+  [[slopp.cljnx/of]], and none of it API.
 
   THE INVARIANT, stated once so it outlives the current marker set: **every
   marker structured mode emits lives inside `<…>`, and `<` `>` `&` are escaped
@@ -18,11 +18,11 @@
   and which dissolve into text, why a list is counted before it is capped, why
   an `<svg>` is censused by CLASS and never descended.
 
-  Separate from the face so `slopp.web.screen` stays a surface a reader can
+  Separate from the face so `slopp.cljnx` stays a surface a reader can
   take in — this is the largest thing in the feature and the least often looked
   at."
   (:require [clojure.string :as str]
-            [slopp.web.screen.hiccup :as hiccup]))
+            [slopp.cljnx.hiccup :as hiccup]))
 
 (defn escape
   "Page text made inert: `&` `<` `>` escaped, HTML-style.
@@ -82,7 +82,7 @@
   must render identically, and they can only be seen to when class reaches no
   output.
 
-  Fields keep every attr [[slopp.web.screen/fill!]] addresses by — what you
+  Fields keep every attr [[slopp.cljnx/fill!]] addresses by — what you
   see is always something you can drive. Consumed ONLY by [[page-tag]]; a
   branch building pairs by hand is the defect this layout exists to end."
   {:a        [:href]

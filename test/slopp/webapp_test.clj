@@ -6,7 +6,7 @@
   wiring on a JVM. A test that needed a bundle would prove the opposite."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.webapp :as webapp]
-            [slopp.web.screen :as web.screen] [clojure.string :as str]))
+            [slopp.cljnx :as cljnx] [clojure.string :as str]))
 
 (deftest a-DYNAMIC-page-can-be-READ-without-a-browser-or-a-compile
   ;; The standing constraint on this whole wave, asserted rather than described:
@@ -53,7 +53,7 @@
                                        (swap! asked conj url)
                                        (ok (when (= "/api/things" url)
                                              [{:name "Anvil"} {:name "Rope"}]))))})
-        s      (web.screen/open! (webapp/driver app))]
+        s      (cljnx/open! (webapp/driver app))]
 
     (testing "the derived driver is the shape the fake browser accepts"
       ;; if this drifts, every assertion below fails in a way that looks like
@@ -63,8 +63,8 @@
           (pr-str (keys (webapp/driver app)))))
 
     (testing "visiting a client route renders what the app would show"
-      (web.screen/visit! s "/things")
-      (let [t (web.screen/text s)]
+      (cljnx/visit! s "/things")
+      (let [t (cljnx/text s)]
         (is (re-find #"Catalogue" t) t)
         (is (re-find #"Anvil" t) t)
         (is (re-find #"Rope" t) t)))
@@ -78,16 +78,16 @@
       (is (= ["/api/things"] @asked) (pr-str @asked)))
 
     (testing "a second navigation re-routes and re-renders through the same loop"
-      (web.screen/visit! s "/things/42")
-      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s))
+      (cljnx/visit! s "/things/42")
+      (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s))
       ;; a capture arrives as the TEXT that was in the url — the framework does
       ;; not guess that "42" wanted to be a number, because a slug and an id
       ;; live in the same slot and only the app knows which this is
       (is (= ["/api/things" "/api/things/42"] @asked) (pr-str @asked)))
 
     (testing "an unrouted path is the app's own nowhere, not an exception"
-      (web.screen/visit! s "/nope")
-      (is (re-find #"Nowhere" (web.screen/text s)) (web.screen/text s)))))
+      (cljnx/visit! s "/nope")
+      (is (re-find #"Nowhere" (cljnx/text s)) (cljnx/text s)))))
 
 (deftest a-load-that-has-not-been-ASKED-is-not-a-load-that-answered-NIL
   ;; slopp-ui caught this on the first read, and half their diagnosis applied.
@@ -950,40 +950,40 @@
                 :webapp/routes [["/things"     things]
                                 ["/things/:id" thing]]
                 :webapp/chrome (fn [_s inner] [:main [:h1 "Catalogue"] inner])})
-        s     (web.screen/open! (webapp/driver app))]
+        s     (cljnx/open! (webapp/driver app))]
 
     (testing "the app declares no :webapp/view — slopp derives it"
       (is (fn? (:webapp/view app))
           "the driver still needs one; what changed is who writes it"))
 
     (testing "visiting a route renders that screen INSIDE the app's chrome"
-      (web.screen/visit! s "/things")
-      (let [t (web.screen/text s)]
+      (cljnx/visit! s "/things")
+      (let [t (cljnx/text s)]
         (is (re-find #"Catalogue" t) t)
         (is (re-find #"Anvil" t) t)))
 
     (testing "and the matched row's captures reach the screen it points at"
-      (web.screen/visit! s "/things/42")
-      (is (re-find #"Thing 42" (web.screen/text s)) (web.screen/text s)))
+      (cljnx/visit! s "/things/42")
+      (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s)))
 
     (testing "an unrouted path renders NOT-FOUND, never a blank pane"
       ;; the failure this closes: with routes as data slopp KNOWS nothing
       ;; matched, so rendering nothing is a choice rather than an accident — and
       ;; a blank pane at a plausible url is indistinguishable from a screen
       ;; whose content is empty
-      (web.screen/visit! s "/nope")
-      (is (seq (str/trim (web.screen/text s)))
+      (cljnx/visit! s "/nope")
+      (is (seq (str/trim (cljnx/text s)))
           "an unmatched path rendered nothing at all"))
 
     (testing "and the app can say what not-found LOOKS like"
-      (let [s2 (web.screen/open!
+      (let [s2 (cljnx/open!
                 (webapp/driver
                  (webapp/wiring
                   {:webapp/state     (atom {})
                    :webapp/routes    [["/things" things]]
                    :webapp/not-found (fn [_s] [:p "Nowhere"])})))]
-        (web.screen/visit! s2 "/nope")
-        (is (re-find #"Nowhere" (web.screen/text s2)) (web.screen/text s2))))
+        (cljnx/visit! s2 "/nope")
+        (is (re-find #"Nowhere" (cljnx/text s2)) (cljnx/text s2))))
 
     (testing "declaring :webapp/view is REFUSED, and the message says why"
       ;; no back-compat: a hand-written view is the thing that made `:screen` a
@@ -1240,22 +1240,22 @@
                 :webapp/call   (fn [request ok _err]
                                  (swap! calls conj request)
                                  (ok {:name "Anvil"}))})
-        s     (web.screen/open! (webapp/driver app))]
+        s     (cljnx/open! (webapp/driver app))]
 
     (testing "the screen's own :request decides the call, and it is a finished URL"
-      (web.screen/visit! s "/things/42")
+      (cljnx/visit! s "/things/42")
       (is (= 1 (count @calls)) "the screen asked for its data exactly once")
       (is (= "/api/things/42" (webapp/request-url (first @calls)))
           "the params the route captured are the ones the request substitutes")
-      (is (re-find #"Thing Anvil" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"Thing Anvil" (cljnx/text s)) (cljnx/text s)))
 
     (testing "a screen that declares NO request never waits for one"
       ;; not the same as a request that answers nil: there is nothing in
       ;; flight, so a load state would be a lie and a spinner would never end
       (reset! calls [])
-      (web.screen/visit! s "/things")
+      (cljnx/visit! s "/things")
       (is (= [] @calls) "a screen with no request made one anyway")
-      (is (re-find #"asks for nothing" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"asks for nothing" (cljnx/text s)) (cljnx/text s)))
 
     (testing "a bare fn is still a screen — the shorthand for exactly that case"
       (is (fn? plain)))
@@ -1271,9 +1271,9 @@
                                              :request (fn [_] {:webapp/path "/api/thing"})
                                              :derive  (fn [v] (str "derived:" (:name v)))}]]
                   :webapp/call   (fn [_rq ok _err] (ok {:name "Anvil"}))})
-            s2  (web.screen/open! (webapp/driver app))]
-        (web.screen/visit! s2 "/thing")
-        (is (re-find #"derived:Anvil" (web.screen/text s2)) (web.screen/text s2))))
+            s2  (cljnx/open! (webapp/driver app))]
+        (cljnx/visit! s2 "/thing")
+        (is (re-find #"derived:Anvil" (cljnx/text s2)) (cljnx/text s2))))
 
     (testing "a screen map with no :render is REFUSED"
       ;; the shape that made maps refusable in the first place: a map is
@@ -1452,21 +1452,21 @@
                 {:webapp/state  state
                  :webapp/routes [["/thing" screen]]
                  :webapp/call   (fn [_rq ok _err] (ok @answer))})
-        s      (web.screen/open! (webapp/driver app))]
+        s      (cljnx/open! (webapp/driver app))]
 
     (testing "an answer the screen accepts is derived and rendered"
-      (web.screen/visit! s "/thing")
+      (cljnx/visit! s "/thing")
       (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
-      (is (re-find #"got Anvil" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"got Anvil" (cljnx/text s)) (cljnx/text s)))
 
     (testing "an answer it REJECTS becomes :failed, carrying the check's message"
       (reset! answer {:name "Anvil"})
-      (web.screen/visit! s "/thing")
+      (cljnx/visit! s "/thing")
       (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
       (is (= "contract violation: :ok is missing"
              (get-in @state [:loads :main :error]))
           (pr-str @state))
-      (is (re-find #"contract violation" (web.screen/text s)) (web.screen/text s)))
+      (is (re-find #"contract violation" (cljnx/text s)) (cljnx/text s)))
 
     (testing "and :derive never runs on an answer that was rejected"
       ;; deriving from a value the screen just refused is work on data nobody
@@ -1730,7 +1730,7 @@
                  :webapp/call          (fn [rq ok _err]
                                          (swap! called conj (webapp/request-url rq))
                                          (ok {:names "web ops"}))})
-        s      (web.screen/open! (webapp/driver app))]
+        s      (cljnx/open! (webapp/driver app))]
 
     (testing "opening the driver starts the session load, as a page load does"
       (is (= ["/p/demo/api/modules"] @called)
@@ -1746,13 +1746,13 @@
       ;; the assertion the consuming app could not make: sixteen of their
       ;; screens render a nav rail out of a session load, and every one of them
       ;; was empty under the driver
-      (web.screen/visit! s "/p/demo/code")
-      (is (re-find #"web ops" (web.screen/text s)) (web.screen/text s)))
+      (cljnx/visit! s "/p/demo/code")
+      (is (re-find #"web ops" (cljnx/text s)) (cljnx/text s)))
 
     (testing "and it is started ONCE, not again on every navigation"
       ;; the load survives `arrive` by being declared, so re-fetching it per
       ;; navigation would be the silent retry loop this model removed
-      (web.screen/visit! s "/p/demo/code")
+      (cljnx/visit! s "/p/demo/code")
       (is (= 1 (count @called)) (pr-str @called)))))
 
 (deftest a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry
@@ -1763,7 +1763,7 @@
   ;; the only marker naming a browser app's entry fn, and it is asked for two
   ;; incompatible things:
   ;;
-  ;;   slopp.web.screen/open!   {:state :view :navigate :dispatch :boot}
+  ;;   slopp.cljnx/open!   {:state :view :navigate :dispatch :boot}
   ;;   slopp.webapp.dom/mount!  the WIRING DECLARATION
   ;;
   ;; A page that serves one refuses at the other, so a generated entry calling
@@ -1795,7 +1795,7 @@
       (is (map? (webapp/wiring declared)))
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"(?i)unknown page key"
-           (web.screen/open! declared))))
+           (cljnx/open! declared))))
 
     (testing "so the two are not one wiring entered twice — they are two SHAPES"
       ;; the consuming app's sentence, and it is the thing to settle before a

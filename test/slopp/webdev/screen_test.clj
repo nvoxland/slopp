@@ -2,7 +2,7 @@
   "End-to-end cover for the `screen` tool: a real store, a real image, the
   app's own handlers, and a readable answer.
 
-  Everything below `slopp.web.screen` is unit-tested against hiccup literals,
+  Everything below `slopp.cljnx` is unit-tested against hiccup literals,
   which is right and proves nothing about the part that actually breaks — that
   the entry is findable, that the framework is on the image's classpath, and
   that a script survives crossing into another JVM as data. Those are the
@@ -13,7 +13,7 @@
             [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.ops.external :as external]
-            [slopp.webdev.screen :as webdev.screen] [clojure.java.io :as io] [slopp.kernel.boot :as boot] [rewrite-clj.parser :as p] [slopp.store :as store] [rewrite-clj.node :as n]))
+            [slopp.webdev.screen :as webdev.screen] [clojure.java.io :as io] [slopp.kernel.boot :as boot] [rewrite-clj.parser :as p] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.project.capabilities :as capabilities]))
 
 (deftest ^:external an-agent-can-look-at-a-screen-without-writing-code
   ;; The end of the loop this feature exists to close: a real store, a real
@@ -43,36 +43,37 @@
                       (for [f (file-seq web-dir)
                             :when (and (.isFile f) (.endsWith (.getName f) ".clj"))]
                         [(str "slopp/web/" (subs (.getPath f) prefix)) (slurp f)]))
-        ;; ...plus what the framework requires from OUTSIDE its own subtree.
-        ;; The derivation above reads slopp/web/** and stops, which is the
-        ;; same assumption a hand-kept list makes — that the framework IS the
-        ;; subtree — so it went stale the day slopp.web.router started calling
-        ;; slopp.lang, and vendored a router that cannot load. Production has
-        ;; this right (build.clj's slim file-set names slopp/lang.cljc); this
-        ;; is the test's SECOND derivation of the same fact, and the two
-        ;; disagreed. Following the requires is what keeps them agreeing:
-        ;; a .cljc wins over a .clj, because that is the one slopp.lang is.
-        ;; the out-of-subtree half, filed under "_" the way build.clj files it:
-        ;; slopp.lang belongs to the SYNTAX rather than to any one capability,
-        ;; so it vendors alongside every family
+        ;; ...plus the "_" half, filed the way build.clj files it: the
+        ;; namespaces belonging to every capability rather than to one.
+        ;;
+        ;; **Read off `capabilities/shipping-common`, the SAME list production
+        ;; reads**, and that is the whole point of this binding. It used to
+        ;; scan `subtree`'s requires with a regex, and the comment here treated
+        ;; that as a virtue — a second derivation that keeps the first honest.
+        ;; It is not one. A second derivation agrees until it does not, and
+        ;; this one stopped agreeing the moment a member arrived that nothing
+        ;; under slopp/web/** requires.
+        ;;
+        ;; `slopp.cljnx` is exactly that member: the fake browser ships to
+        ;; every store and is required by no framework namespace, because slopp
+        ;; opens an app with it on the app's BEHALF. The scan therefore
+        ;; vendored none of it and the tool died on "Could not locate
+        ;; slopp/cljnx.clj" — in the one test whose whole subject is the tool
+        ;; working in a store that has only what slopp handed it.
+        ;;
+        ;; A collapse beats a check: one list, and this reads it.
         syntax  (into {}
-                      (for [nm (distinct
-                                (map second
-                                     (mapcat #(re-seq #"\[slopp\.([a-z][a-z0-9.*+!?<>=_-]*)" %)
-                                             (vals subtree))))
-                            :when (not (str/starts-with? nm "web"))
-                            :let [base (str "slopp/" (str/replace nm "." "/"))
-                                  hit  (some (fn [ext]
-                                               (when-let [u (io/resource (str base ext))]
-                                                 [(str base ext) u]))
-                                             [".cljc" ".clj"])]
-                            :when hit]
-                        [(first hit) (slurp (second hit))]))
+                      (for [[_ path] capabilities/shipping-common
+                            :let [u (io/resource path)]
+                            :when u]
+                        [path (slurp u)]))
         fw      (merge subtree syntax)]
-    (is (contains? fw "slopp/web/screen.clj")
+    (is (contains? fw "slopp/web/dispatch.clj")
         "the derivation found the framework — an empty file map vendors nothing and every assertion below would fail for the wrong reason")
     (is (contains? fw "slopp/lang.cljc")
         "and its out-of-subtree deps: slopp.web.router calls slopp.lang, which ships WITH the framework and does not live under it")
+    (is (contains? fw "slopp/cljnx.clj")
+        "the fake browser is what this tool DRIVES with, and nothing under slopp/web/** requires it — so a derivation that follows requires cannot find it")
     ;; and its DEPS, for the same reason and with the same cause: vendoring
     ;; copies SOURCE and discards the pom, so the framework's own requires have
     ;; to arrive separately. Production derives this list at build time into
@@ -98,7 +99,7 @@
                             "(defn ^:web/page page \"P.\" [] {:state state :view view})\n"))
           ;; the MARKER is what makes this store a framework user: its own code
           ;; requires nothing from slopp.web, and slopp opens it with
-          ;; slopp.web.screen on its behalf
+          ;; slopp.cljnx on its behalf
           (ops/restart! sess)
 
           (testing "a bare look renders the v2 screen, and names the entry it used"
@@ -194,7 +195,7 @@
             "single-step drives on one session: no second interpreter, and no re-run of non-idempotent effects")))))
 
 (deftest ^:external
-  ^{:correspondence "every form in slopp.web.screen.render that OPENS a page tag vs page-tag, the single attr route its own docstring calls 'deliberately the only route' — a branch building \"<\" (name t) \">\" by hand drops the capability trio and slopp:on silently, which is how a clickable <h2> rendered as inert text"}
+  ^{:correspondence "every form in slopp.cljnx.render that OPENS a page tag vs page-tag, the single attr route its own docstring calls 'deliberately the only route' — a branch building \"<\" (name t) \">\" by hand drops the capability trio and slopp:on silently, which is how a clickable <h2> rendered as inert text"}
   no-form-in-the-renderer-opens-a-page-tag-by-hand
   ;; `page-tag`'s docstring asserts it is "deliberately the only route, so a
   ;; branch cannot hand-build page attrs and drift from the whitelist", and
@@ -245,16 +246,16 @@
           "the sanctioned builders compose the tag, which is the point"))
     (testing "there is a population — the scan reached real source"
       (let [strs (mapcat #(filter string? (tree-seq coll? seq (body %)))
-                         (store/forms st 'slopp.web.screen.render))]
+                         (store/forms st 'slopp.cljnx.render))]
         (is (< 50 (count strs))
             (str "an empty scan and a clean renderer are the same output —"
                  " measured 83 here, so this catches built-store reaching"
                  " nothing rather than tracking the renderer's size"))))
     (testing "no form in the renderer opens a page tag by hand"
-      (doseq [f (store/forms st 'slopp.web.screen.render)
+      (doseq [f (store/forms st 'slopp.cljnx.render)
               :when (:name f)]
         (is (= [] (opens (body f)))
-            (str "slopp.web.screen.render/" (:name f)
+            (str "slopp.cljnx.render/" (:name f)
                  " builds a page tag by hand, so every capability attr"
                  " (aria-label / aria-hidden / inert) and slopp:on it should"
                  " carry is dropped — render it through page-tag"))))))

@@ -134,7 +134,7 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-FUNCTION-handler-on-an-input-refuses-at-the-write
-  ;; `slopp.web.screen/fill!` already states this, as a paragraph an author
+  ;; `slopp.cljnx/fill!` already states this, as a paragraph an author
   ;; reads or does not:
   ;;
   ;;   A FUNCTION handler on an input cannot be portable … in a browser it

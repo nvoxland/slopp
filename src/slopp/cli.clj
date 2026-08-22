@@ -130,7 +130,7 @@
   gives the second call the first call's output too. Build a fresh one per
   invocation. Resetting between runs would be easier to use and would make this
   a fake that lies about the thing it stands in for — the same reason
-  `slopp.web.screen` refuses to keep a session between scripts.
+  `slopp.cljnx` refuses to keep a session between scripts.
 
   Exactness is why the cli port is a better fake than the HTTP one — a stream
   of characters can be reproduced completely, where a network can only be

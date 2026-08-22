@@ -27,7 +27,7 @@
 
 (defn ^:export ^{:rule/applies-to :production} webapp-page-unreachable
   "The headless-review gate (D-web): a `^:web/page` entry — the fn
-  `slopp.web.screen` opens an app through — must be one slopp can actually
+  `slopp.cljnx` opens an app through — must be one slopp can actually
   call AND FIND. Returns a teaching string, or nil when clean. Five ways it
   cannot be:
 
@@ -158,7 +158,7 @@
   function. Returns a teaching string, or nil when clean.
 
   **This is the one place slopp's own tools lie, and the gate exists to close
-  that.** Headless, `slopp.web.screen/fill!` hands a function handler a
+  that.** Headless, `slopp.cljnx/fill!` hands a function handler a
   best-effort `{:value v :target {:value v}}`. In a browser, replicant hands the
   same function a real DOM event, whose value lives behind `(.. e -target
   -value)` — interop, which cannot run on a JVM at all. A handler written
