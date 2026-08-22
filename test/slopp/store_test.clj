@@ -14,7 +14,7 @@
   SURVIVES a round trip through the log alone. `replay-delta` is the honest
   oracle for that, and a new op earns its place by replaying."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render]))
+            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [rewrite-clj.node :as n]))
 
 (def src "(ns foo)\n\n(defn add [x y]\n  (+ x y))\n\n;; a comment\n(def z 1)\n")
 
@@ -702,3 +702,37 @@
         (is (= [(:id one)] (mapv :id (store/forms-named st 'nn.core (:id one)))))))
     (testing "a real name is unaffected"
       (is (= '[named] (mapv :name (store/forms-named st 'nn.core 'named)))))))
+
+(deftest a-form-whose-BODY-cannot-be-READ-still-reports-its-name
+  ;; The journal is HISTORY, and history can hold a form that does not parse:
+  ;; `rename_sweep` once wrote a string literal back with its `\"` escapes
+  ;; stripped, and the group write path runs no per-form gate to refuse it.
+  ;; A later delta repaired it, so the STORE was clean — and every projection
+  ;; of the journal still died, because replay re-reads the damaged version.
+  ;;
+  ;; It died in `form-symbol`, which needs the HEAD and the NAME and was
+  ;; sexpr-ing the entire form to get them. rewrite-clj's parser is lenient
+  ;; where the reader is not — it will happily build a map node with an odd
+  ;; number of children — so `(n/sexpr whole-form)` throws "No value supplied
+  ;; for key" from a body this function never looks at.
+  (let [malformed (p/parse-string "(def broken {:a})")]
+
+    (testing "the fixture is genuinely unreadable — otherwise this proves nothing"
+      ;; the positive control, and it is the whole test: if rewrite-clj ever
+      ;; starts refusing this at PARSE time, the case moves and the assertion
+      ;; below would pass for the wrong reason
+      (is (thrown? Exception (n/sexpr malformed))
+          "the parser accepted a map node with an odd child count, which is
+           what makes this class reachable at all"))
+
+    (testing "and its name is still readable, because only the head and the
+              name are needed to know one"
+      (is (= 'broken (store/form-symbol malformed))))
+
+    (testing "a well-formed neighbour in the same run is unaffected"
+      ;; the third clause: a red caused deliberately proves the assertion is
+      ;; wired to the subject only if something else was green at that moment
+      (is (= 'fine (store/form-symbol (p/parse-string "(def fine {:a 1})"))))
+      (is (= 'marked (store/form-symbol (p/parse-string "^:export (defn marked [] 1)"))))
+      (is (nil? (store/form-symbol (p/parse-string "(println \"hi\")")))
+          "an anonymous top-level still has no symbol"))))

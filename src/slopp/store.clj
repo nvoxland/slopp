@@ -155,15 +155,33 @@
   "The symbol a top-level form defines, or nil (anonymous/effectful top-levels).
   Sees through leading metadata (`^:unsafe`, `^{:integration true}`, …) so a
   marked form stays NAMED and addressable — without this, a `^:unsafe (defn …)`
-  is a `:meta` node and would be anonymous."
+  is a `:meta` node and would be anonymous.
+
+  **It reads the HEAD and the NAME, never the whole form**, and that is a
+  robustness property rather than a micro-optimisation. rewrite-clj's parser is
+  LENIENT where Clojure's reader is not — it will build a map node with an odd
+  number of children — so `(sexpr whole-form)` can throw `No value supplied for
+  key` from a body this function does not look at.
+
+  That is not hypothetical and the failure was remote from the cause: a
+  `rename_sweep` wrote a string literal back with its `\\\"` escapes stripped, a
+  later delta repaired the form, and the STORE was clean — while every
+  projection of the journal still died, because replay re-reads the version as
+  it stood. **The journal is HISTORY, and history can hold a form that does not
+  parse**; nothing downstream of a repair can un-write the delta that broke it.
+  Reading two children rather than the tree is what makes replay survive its
+  own past."
   [node]
   (when (n/sexpr-able? node)
     (if (= :meta (n/tag node))
       (some-> (last (filter n/sexpr-able? (n/children node))) form-symbol)
       (when (= :list (n/tag node))
-        (let [s (n/sexpr node)]
-          (when (and (seq s) (symbol? (first s)) (contains? def-heads (first s)))
-            (let [nm (second s)]
+        ;; only the first two readable children — the head that says whether
+        ;; this defines anything, and the name it defines
+        (let [kids (filter n/sexpr-able? (n/children node))
+              head (some-> (first kids) n/sexpr)]
+          (when (and (symbol? head) (contains? def-heads head))
+            (let [nm (some-> (second kids) n/sexpr)]
               (when (symbol? nm) nm))))))))
 
 (defn name-of-source
