@@ -12,14 +12,14 @@
   drift: a second text function made the screen name a button the click could
   not press.
 
-  Not `slopp.web.html`, which is the other direction: that one turns hiccup
+  Not `slopp.http.html`, which is the other direction: that one turns hiccup
   into a string for a browser and never reads it back."
   (:require [clojure.string :as str]))
 
 (defn- sugar
   "Split a possibly-sugared tag keyword: `:input.search#q` → `[:input \"q\" (\"search\")]`.
 
-  Hiccup's id/class shorthand is not an extension — `slopp.web.html/render`
+  Hiccup's id/class shorthand is not an extension — `slopp.http.html/render`
   accepts it, so views legal in this framework use it. A reader that compares
   raw keywords sees `:input.search` as an unknown tag: the review measured a
   classed search box rendering as NOTHING while `fill!` (which reads attrs, not

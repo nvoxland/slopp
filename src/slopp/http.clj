@@ -1,5 +1,5 @@
-(ns slopp.web
-  "The ONE namespace a web app requires — everything else under `slopp.web`
+(ns slopp.http
+  "The ONE namespace a web app requires — everything else under `slopp.http`
   is reached through here.
 
   Six functions, and the split between them is the point:
@@ -29,9 +29,9 @@
   `io.github.nvoxland/slopp-web` jar. A require of `slopp.store` from anywhere
   under here would pass every test in this repo and break at a USER's require
   time."
-  (:require [slopp.web.routes :as routes]
-            [slopp.web.dispatch :as dispatch]
-            [slopp.web.server.jdk :as jdk] [slopp.web.server.httpkit :as httpkit] [clojure.string :as str]))
+  (:require [slopp.http.routes :as routes]
+            [slopp.http.dispatch :as dispatch]
+            [slopp.http.server.jdk :as jdk] [slopp.http.server.httpkit :as httpkit] [clojure.string :as str]))
 
 (defn enforce
   "In-handler guard for what route policy can't see (row-level authz: is

@@ -1,6 +1,6 @@
-(ns slopp.web.html
+(ns slopp.http.html
   "Pure hiccup→HTML rendering: escape-by-default (via hiccup 2.x, contract
-  pinned by the SECURITY tests in slopp.web.html-test), validated tag and
+  pinned by the SECURITY tests in slopp.http.html-test), validated tag and
   attribute names (hiccup renders crafted names VERBATIM — an injection door
   escaping does not cover), refused javascript:/data: URLs, and
   [:html/raw s] as the single raw-HTML door."
@@ -84,7 +84,7 @@
 
 (defn ^:export render
   "Hiccup data → HTML string. Text and attribute values escape by default
-  (the hiccup 2.x contract, pinned by slopp.web.html-test); tag and
+  (the hiccup 2.x contract, pinned by slopp.http.html-test); tag and
   attribute names are validated; javascript:/data: URLs in
   href/src/action/formaction are refused; [:html/raw s] is the one
   raw-HTML door."

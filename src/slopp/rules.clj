@@ -649,7 +649,7 @@
    The rule is the reaches/is distinction made enforceable. A form that builds
    a `java.net.http.HttpClient`, or `slurp`s an `http(s)://` literal, IS the
    reaching — and raw reaching belongs in a declared ADAPTER, not scattered
-   through callers. Everything else goes through `slopp.web.client/request`,
+   through callers. Everything else goes through `slopp.http.client/request`,
    which arrives as a parameter and therefore has a fake, a contract suite, and
    two adapters that must agree.
 
@@ -709,7 +709,7 @@
                              (if client?
                                "it builds a java.net.http.HttpClient"
                                "it slurps an http(s):// url")
-                             ". Call slopp.web.client/request instead, taking it"
+                             ". Call slopp.http.client/request instead, taking it"
                              " as a parameter so callers can pass"
                              " client/fake-requester; you inherit its contract"
                              " suite and its fake. If this form IS an adapter,"

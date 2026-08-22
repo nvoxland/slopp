@@ -36,7 +36,7 @@
         ;; dispatcher validates every request and response against the schema
         ;; the client ships. It does not, and never did: `handle!` never reads
         ;; :rest/request or :rest/response, and no namespace in the shipped
-        ;; slopp.web family requires malli at all.
+        ;; slopp.http family requires malli at all.
         ;;
         ;; So the test asserted the field was FILLED IN rather than that it was
         ;; TRUE, which is the only thing a test over prose can check — and it

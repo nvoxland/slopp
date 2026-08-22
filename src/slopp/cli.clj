@@ -24,8 +24,8 @@
   gets and what a script pipes, and it stays assertable with no process because
   `fake-context` captures it.
 
-  **It mirrors `slopp.web` deliberately.** `context` builds an invocation from
-  declared namespaces the way `slopp.web/context` builds a request pipeline;
+  **It mirrors `slopp.http` deliberately.** `context` builds an invocation from
+  declared namespaces the way `slopp.http/context` builds a request pipeline;
   `run` is `handle!`; `commands-in` is `performers-from-namespaces`. An author
   who has met one should recognise the other, and the shapes that are the same
   should look the same.
@@ -40,7 +40,7 @@
   "Every command declared in `ns-syms`, as `{name command-map}`.
 
   The vocabulary is DERIVED from `:cli/command` markers on vars, never
-  registered — the same choice `slopp.web.routes/performers-from-namespaces`
+  registered — the same choice `slopp.http.routes/performers-from-namespaces`
   makes for effect kinds, down to a namespace that is not loaded contributing
   nothing rather than throwing. Adding a command is writing one `defn`; there
   is no list to also remember, which removes this codebase's most frequent bug
@@ -153,7 +153,7 @@
   process see the same answer and only the process acts on it. The generated
   launcher is the one place `System/exit` is called.
 
-  **Order is the guarantee**, exactly as it is in `slopp.web.dispatch/handle!`:
+  **Order is the guarantee**, exactly as it is in `slopp.http.dispatch/handle!`:
 
   1. no command named → LIST what this program can do. A bare invocation is a
      question, and a usage error alone makes the reader run a second command to

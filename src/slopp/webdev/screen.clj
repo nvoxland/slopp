@@ -44,7 +44,7 @@
   The catch renders the CAUSE CHAIN, conditional separator and all, in parity
   with `slopp.read.query/cause-chain` — the two cannot be one fn because this
   code runs in a user's image where the only slopp on the classpath is the
-  vendored `slopp.web.*`, but they must not drift: a message-less cause with
+  vendored `slopp.http.*`, but they must not drift: a message-less cause with
   a trailing colon is how parity dies one cosmetic notch at a time."
   [steps {:keys [region detail list-head trace]}]
   (let [shot-opts (pr-str {:detail detail :list-head list-head})]

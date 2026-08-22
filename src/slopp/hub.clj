@@ -21,7 +21,7 @@
   is where drift between the two copies surfaces."
   (:require [clojure.string :as str]
             [cheshire.core :as json]
-            [slopp.project.capabilities :as capabilities] [slopp.web.client :as web.client]))
+            [slopp.project.capabilities :as capabilities] [slopp.http.client :as http.client]))
 
 (def default-beat-ms
   "How often to check in when the hub has not said otherwise.
@@ -119,7 +119,7 @@
   A body that will not parse still degrades to nil rather than throwing; the
   status is what makes a refusal a refusal.
 
-  The transport arrives as a PARAMETER — `slopp.web.client/request` in
+  The transport arrives as a PARAMETER — `slopp.http.client/request` in
   production, a fake in tests. That is what makes the loop above checkable
   without a socket, and it is safe to fake precisely because both adapters pass
   `requester-contract`. Note how little is left here once the transport goes:
@@ -159,7 +159,7 @@
 (defn ^:export start!
   "Begin beating `(payload-fn)` to the hub at `hub-url`, and return a handle
   for [[stop!]]. `on-answer` is called with the hub's reply after every beat.
-  `requester` is the transport — [[slopp.web.client/request]] by default, a
+  `requester` is the transport — [[slopp.http.client/request]] by default, a
   fake in tests.
 
   The FIRST beat goes out immediately: a project that only appeared one
@@ -200,7 +200,7 @@
   is covered once, by `requester-contract`, against both adapters; the loop is
   covered here at memory speed."
   ([hub-url payload-fn] (start! hub-url payload-fn (fn [_])))
-  ([hub-url payload-fn on-answer] (start! hub-url payload-fn on-answer web.client/request))
+  ([hub-url payload-fn on-answer] (start! hub-url payload-fn on-answer http.client/request))
   ([hub-url payload-fn on-answer requester]
    (let [running (atom true)
          thread  (doto (Thread. ^Runnable

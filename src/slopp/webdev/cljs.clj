@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.web.client :as web.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -470,7 +470,7 @@
   "The generated-client plan for a PUBLISHED contract — the remote twin of
    [[client-wrapper-specs]], which reads the local store instead.
 
-   `document` is what `slopp.web.contract/contract-document` serves;
+   `document` is what `slopp.http.contract/contract-document` serves;
    `contracts-ns` is where the schemas will be defined in THIS store. Returns
    `{:defs [{:name :schema}] :wrappers [spec …] :problems [p …]}`, where the
    wrapper specs are the shape [[render-client-ns]] already renders — so
@@ -478,7 +478,7 @@
    kind of namespace.
 
    Schemas arrive as VALUES, because the publisher's var names did not survive
-   evaluation (see `slopp.web.contract`). So each is re-named from its
+   evaluation (see `slopp.http.contract`). So each is re-named from its
    ENDPOINT — `things` → `things-response`, `create!` → `create-request` — and
    the bang stays on the wrapper, where it describes the call, rather than
    leaking into a schema's name.
@@ -564,11 +564,11 @@
    why the contract is EDN rather than JSON, where `:string` and \"string\"
    would arrive indistinguishable.
 
-   `requester` is the transport — [[slopp.web.client/request]] by default. The
+   `requester` is the transport — [[slopp.http.client/request]] by default. The
    part worth testing is the paragraph above: that what comes back is READ and
    not evaluated, and that a non-200 fails rather than being parsed as if it
    were a contract. Neither needs a socket."
-  ([url] (fetch-contract url web.client/request))
+  ([url] (fetch-contract url http.client/request))
   ([url requester]
    (let [{:http/keys [status body]}
          (requester {:http/method  :get

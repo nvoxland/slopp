@@ -16,7 +16,7 @@
   in-image value instead is wrong in both directions, which the response
   docstring records with the measurements.
 
-  Neighbours: `slopp.web.dispatch` calls these through the context and never
+  Neighbours: `slopp.http.dispatch` calls these through the context and never
   requires this namespace — which is what keeps malli out of an HTML app that
   enabled no typed API."
   (:require [malli.core :as m]

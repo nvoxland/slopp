@@ -27,7 +27,7 @@
   ;; build.clj generates INTO THE JAR. A test JVM running from a materialized
   ;; tree has no such resource, so the real fn answers nil and nothing would
   ;; ever vendor. `a-framework-using-store-survives-a-RESTART` redefs it for
-  ;; the same reason; this one supplies the REAL slopp/web sources, DERIVED
+  ;; the same reason; this one supplies the REAL slopp/http sources, DERIVED
   ;; from the classpath rather than hand-listed — a hand-kept file list goes
   ;; stale the first time a namespace is added, which this store learned twice
   ;; this week.
@@ -36,13 +36,13 @@
   ;; classpath dir that did not exist at launch — so the app is ingested and
   ;; THEN the image is restarted. A real session gets that ordering for free,
   ;; because the store already holds the app when it opens.
-  (let [web-clj (io/file (.toURI (io/resource "slopp/web.clj")))
-        web-dir (io/file (.getParentFile web-clj) "web")
+  (let [web-clj (io/file (.toURI (io/resource "slopp/http.clj")))
+        web-dir (io/file (.getParentFile web-clj) "http")
         prefix  (inc (count (.getPath web-dir)))
-        subtree (into {"slopp/web.clj" (slurp web-clj)}
+        subtree (into {"slopp/http.clj" (slurp web-clj)}
                       (for [f (file-seq web-dir)
                             :when (and (.isFile f) (.endsWith (.getName f) ".clj"))]
-                        [(str "slopp/web/" (subs (.getPath f) prefix)) (slurp f)]))
+                        [(str "slopp/http/" (subs (.getPath f) prefix)) (slurp f)]))
         ;; ...plus the "_" half, filed the way build.clj files it: the
         ;; namespaces belonging to every capability rather than to one.
         ;;
@@ -52,7 +52,7 @@
         ;; that as a virtue — a second derivation that keeps the first honest.
         ;; It is not one. A second derivation agrees until it does not, and
         ;; this one stopped agreeing the moment a member arrived that nothing
-        ;; under slopp/web/** requires.
+        ;; under slopp/http/** requires.
         ;;
         ;; `slopp.cljnx` is exactly that member: the fake browser ships to
         ;; every store and is required by no framework namespace, because slopp
@@ -68,12 +68,12 @@
                             :when u]
                         [path (slurp u)]))
         fw      (merge subtree syntax)]
-    (is (contains? fw "slopp/web/dispatch.clj")
+    (is (contains? fw "slopp/http/dispatch.clj")
         "the derivation found the framework — an empty file map vendors nothing and every assertion below would fail for the wrong reason")
     (is (contains? fw "slopp/lang.cljc")
-        "and its out-of-subtree deps: slopp.web.router calls slopp.lang, which ships WITH the framework and does not live under it")
+        "and its out-of-subtree deps: slopp.http.router calls slopp.lang, which ships WITH the framework and does not live under it")
     (is (contains? fw "slopp/cljnx.clj")
-        "the fake browser is what this tool DRIVES with, and nothing under slopp/web/** requires it — so a derivation that follows requires cannot find it")
+        "the fake browser is what this tool DRIVES with, and nothing under slopp/http/** requires it — so a derivation that follows requires cannot find it")
     ;; and its DEPS, for the same reason and with the same cause: vendoring
     ;; copies SOURCE and discards the pom, so the framework's own requires have
     ;; to arrive separately. Production derives this list at build time into
@@ -98,7 +98,7 @@
                             "   [:p (str \"q=\" (:q s) \" n=\" (:n s))]])\n\n"
                             "(defn ^:app/entry page \"P.\" [] {:state state :view view})\n"))
           ;; the MARKER is what makes this store a framework user: its own code
-          ;; requires nothing from slopp.web, and slopp opens it with
+          ;; requires nothing from slopp.http, and slopp opens it with
           ;; slopp.cljnx on its behalf
           (ops/restart! sess)
 
@@ -215,7 +215,7 @@
   ;;
   ;; It lives HERE rather than beside its subject because it is store ANALYSIS
   ;; of web rendering — tooling genre, the same reasoning that moved web-only
-  ;; rules out of generic `slopp.rules` into `slopp.rules.web`. `slopp.web` is
+  ;; rules out of generic `slopp.rules` into `slopp.rules.web`. `slopp.http` is
   ;; layer 0 and `the-web-framework-never-reaches-back-into-slopp` holds the
   ;; whole subtree there; putting this beside its subject cost two test-only
   ;; edges out of that module, which is a worse trade than the distance.

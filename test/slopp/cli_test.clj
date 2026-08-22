@@ -138,7 +138,7 @@
 
 (deftest the-command-vocabulary-is-derived-from-markers
   ;; Adding a command is writing ONE defn. There is no list to add it to, which
-  ;; is the same choice `slopp.web.routes/performers-from-namespaces` makes for
+  ;; is the same choice `slopp.http.routes/performers-from-namespaces` makes for
   ;; effect kinds and for the same reason: a registry beside the definitions is
   ;; a second place to keep in step, and this codebase's most frequent bug is a
   ;; registry that drifted from its consumer.

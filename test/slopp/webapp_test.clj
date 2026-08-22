@@ -374,7 +374,7 @@
 
     (testing "by DEFAULT the effect entry dies with the address"
       (let [[state app] (mk nil)]
-        (swap! state assoc :call {:params {:m "slopp.web"}})
+        (swap! state assoc :call {:params {:m "slopp.http"}})
         (webapp/navigate! app "/search" false)
         (is (nil? (:call @state))
             (str "a form typed to the old endpoint must not claim the new one"
@@ -1772,7 +1772,7 @@
   ;; performed the request itself, so http's adapter lived inside the namespace
   ;; that also has to drive browser apps — and vendoring is per FAMILY, so the
   ;; second adapter could never join the first. Naming both adapters
-  ;; (`slopp.web/driver`, `slopp.webapp/driver`) and deriving through one
+  ;; (`slopp.http/driver`, `slopp.webapp/driver`) and deriving through one
   ;; public `cljnx/driver-for` dissolves it.
   ;;
   ;; So the DECLARATION is the one value and both entries derive from it. What

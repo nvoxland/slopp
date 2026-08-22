@@ -1,4 +1,4 @@
-(ns slopp.web.auth-test
+(ns slopp.http.auth-test
   "Identity, and the config that produces it.
 
   Two halves that fail differently. The first is CONFIG PARSING — the
@@ -20,7 +20,7 @@
   matters is usually the one expecting anonymity, because an auth check that
   silently accepts is indistinguishable from one that works."
   (:require [clojure.test :refer [deftest testing is]]
-            [slopp.web.auth :as auth]
+            [slopp.http.auth :as auth]
             [cheshire.core]))
 
 (deftest providers-resolve-identity

@@ -1,9 +1,9 @@
-(ns slopp.web.client
+(ns slopp.http.client
   "The one way slopp code talks TO an HTTP server — the client half of
-  `slopp.web`, whose other half serves.
+  `slopp.http`, whose other half serves.
 
   It exists because three namespaces were each building their own
-  `java.net.http.HttpClient` (`slopp.hub`, `slopp.web.jwks`, and the client
+  `java.net.http.HttpClient` (`slopp.hub`, `slopp.http.jwks`, and the client
   compiler now called `slopp.webdev.cljs`), which made all three untestable
   for the same reason and none of them testable by the same fix. The transport
   is identical in all three; only the POLICY differs, and policy is the part
@@ -15,7 +15,7 @@
 
   **Neither adapter is trustworthy alone.** What makes the fake a claim about
   the world rather than about itself is `requester-contract` in
-  `slopp.web.client-test`: one suite, both adapters, the real one over a real
+  `slopp.http.client-test`: one suite, both adapters, the real one over a real
   socket in the `^:external` tier and the fake in-image for free. A fake that
   drifts fails the suite it shares.
 
@@ -64,7 +64,7 @@
   decide a 404 is an error, does not parse the body, does not retry, does not
   log. Every caller in this store wants something different from a non-2xx —
   the heartbeat treats a 400 as a drift alarm and a connection failure as the
-  ordinary case, `slopp.web.jwks/fetch-jwks!` throws on both,
+  ordinary case, `slopp.http.jwks/fetch-jwks!` throws on both,
   `slopp.webdev.cljs/fetch-contract` throws and then reads EDN. Push any one of
   those in here and the other two have to unpick it.
 
@@ -86,7 +86,7 @@
   as it should be.
 
   [[fake-requester]] is the in-memory adapter of this same port, and
-  `requester-contract` in `slopp.web.client-test` is the suite they both pass."
+  `requester-contract` in `slopp.http.client-test` is the suite they both pass."
   [req]
   (let [{:http/keys [method url headers body timeout-ms]} req
         publisher (if body
@@ -133,7 +133,7 @@
 
   `routes` is `{[method path] handler}`, where `handler` takes a ring-ish
   `{:method :path :headers :body}` and answers a ring-ish `{:status :body
-  :headers}` — the same shape `slopp.web/serve!` handlers speak, so a test can
+  :headers}` — the same shape `slopp.http/serve!` handlers speak, so a test can
   move a far side between the fake and a real server without rewriting it.
 
   Three behaviours are load-bearing, and all three are pinned by the contract
@@ -150,7 +150,7 @@
     \"x-probe\"])` pass in one run and fail in the other.
 
   What this does NOT model is the far side's own parsing: a real
-  `slopp.web/serve!` decodes a JSON body into a map before the handler sees it,
+  `slopp.http/serve!` decodes a JSON body into a map before the handler sees it,
   and this hands the handler the string the caller sent. That is the SERVER's
   behaviour, not the transport's — a different server need not do it — so the
   contract suite deliberately does not pin it, and a test that depends on the

@@ -1,10 +1,10 @@
-(ns slopp.web.html-test
-  "SECURITY tests: these pin the rendering contract of slopp.web.html — the
+(ns slopp.http.html-test
+  "SECURITY tests: these pin the rendering contract of slopp.http.html — the
   wrapper's refusals AND the hiccup dep's escaping behavior. A red here on a
   hiccup upgrade means the escaping contract changed underneath us; treat it
   as a security event, not a formatting nit."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.html :as html]))
+            [slopp.http.html :as html]))
 
 (deftest text-escaping-blocks-injection
   (testing "SECURITY: text children are escaped by default"

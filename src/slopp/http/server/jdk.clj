@@ -1,7 +1,7 @@
-(ns slopp.web.server.jdk
+(ns slopp.http.server.jdk
   "The zero-dependency adapter: `com.sun.net.httpserver`, already in the JDK.
 
-  Same contract as `slopp.web.server.httpkit` — own the socket and the wire
+  Same contract as `slopp.http.server.httpkit` — own the socket and the wire
   encoding, own nothing else. Request in, `dispatch/handle!`, JSON out unless
   the response says `:http/raw`. Port 0 binds ephemeral and the return carries
   the real number.
@@ -16,7 +16,7 @@
 
   Not the default — http-kit is (`serve!`'s `:http/adapter` defaults to
   `:http-kit`). Reach for `:jdk` when the dependency is the problem."
-  (:require [slopp.web.dispatch :as dispatch]
+  (:require [slopp.http.dispatch :as dispatch]
             [cheshire.core :as json] [clojure.string :as str])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress]))
@@ -60,7 +60,7 @@
     (.sendResponseHeaders ex status (alength bs))
     (doto (.getResponseBody ex) (.write bs) (.close))))
 
-(defn ^{:export "slopp.web"} start!
+(defn ^{:export "slopp.http"} start!
   "Serve `ctx` (the dispatch context — routes + performers) on
   {:host :port}: ONE catch-all handler doing request-map →
   `dispatch/handle!` → JSON. Port 0 binds ephemeral; the returned
@@ -90,7 +90,7 @@
     (.start server)
     {:server server :port (.getPort (.getAddress server))}))
 
-(defn ^{:export "slopp.web"} stop!
+(defn ^{:export "slopp.http"} stop!
   "Stop a `start!` return immediately. The handle is OPAQUE (a live
   HttpServer) — read in the body, not destructured: it is not a
   schema-shaped boundary map."

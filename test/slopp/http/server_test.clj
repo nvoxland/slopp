@@ -1,22 +1,22 @@
-(ns slopp.web.server-test
+(ns slopp.http.server-test
   "The JDK server adapter's own behaviour — the parts that are the ADAPTER's
   rather than the pipeline's: what it does with a request map off a real
   exchange, and what it does with a body too big to accept.
 
-  `slopp.web-test` covers the facade across both adapters; this covers what
+  `slopp.http-test` covers the facade across both adapters; this covers what
   only the jdk one can get wrong.
 
   Like those, its tests carry their own client under `^{:adapter \"http — …\"}`
-  rather than going through `slopp.web.client`. The reason is in
-  `slopp.web-test`'s docstring: the client's contract suite runs against this
+  rather than going through `slopp.http.client`. The reason is in
+  `slopp.http-test`'s docstring: the client's contract suite runs against this
   server, so the server's tests must not run against that client."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.server.jdk :as jdk]
+            [slopp.http.server.jdk :as jdk]
             [cheshire.core :as json]))
 
 (deftest ^:external ^{:adapter "http — independent client on purpose; see
               web-test/serve-round-trips-the-facade. This namespace tests the
-              SERVER adapter, and slopp.web.client's own contract uses that
+              SERVER adapter, and slopp.http.client's own contract uses that
               server as its far side — routing this through the client would
               close the loop and let a symmetric bug pass both."}
   jdk-adapter-serves-the-pipeline

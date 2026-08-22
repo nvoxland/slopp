@@ -353,7 +353,7 @@
   over one table: a `:seg` captures one segment, a trailing `*rest` captures the
   remainder, precedence is fewest-captures-wins so adding a route can never
   steal an existing one, and a trailing slash is tolerated because a browser
-  produces both. Two implementations rather than one, because `slopp.web.router`
+  produces both. Two implementations rather than one, because `slopp.http.router`
   ships in the `http` family and this ships in `webapp`: a store may vendor
   either without the other, so a require across them is a load failure in
   whichever store has one half. The agreement is asserted instead.

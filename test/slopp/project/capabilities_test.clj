@@ -163,7 +163,7 @@
   ;; no registry governs returns nil for the trivial reason and would have
   ;; gone on passing forever while measuring nothing.)
   ;;
-  ;; The registry default was the duplicate: `slopp.web/serve!` ALREADY
+  ;; The registry default was the duplicate: `slopp.http/serve!` ALREADY
   ;; defaults `:http/port` to 8080, so declaring it again here resolved
   ;; "unset" into "8080" one layer too early — early enough that the dev
   ;; server's own derivation could no longer be told apart from a pin.
@@ -239,7 +239,7 @@
   ;; violation — 14 of 19 entries were one type's, and 8 of those sat under
   ;; `auth.` and `groups.`, names that claim to be generic project settings.
   ;; Measured before renaming them: every reader was
-  ;; `slopp.web.auth/config-from-values` or a write gate belonging to that
+  ;; `slopp.http.auth/config-from-values` or a write gate belonging to that
   ;; type. Nothing generic read them.
   ;;
   ;; The invariant is the key's FIRST SEGMENT, not a declared `:owner` field,
@@ -389,7 +389,7 @@
                 (map :capability capabilities/capability-catalog)))))
 
 (deftest a-capability-declares-the-family-it-ships-and-the-markers-that-use-it
-  ;; Three places currently hardcode `slopp.web` and `^:app/entry`:
+  ;; Three places currently hardcode `slopp.http` and `^:app/entry`:
   ;; `ops.engine/framework-injection`'s `web?`, `build.clj`'s vendor glob, and
   ;; `modules-test/the-web-framework-never-reaches-back-into-slopp`'s `ships?`.
   ;; Each was right for one app type and none of them can see a second.
@@ -399,8 +399,8 @@
   ;; separate edits somebody has to remember.
   (testing "a shipping capability names its namespace family"
     (is (= "slopp.cli" (:ns-prefix (capabilities/capability "cli"))))
-    (is (= "slopp.web" (:ns-prefix (capabilities/capability "http")))
-        "http's family is still spelled slopp.web — the framework namespaces have not moved"))
+    (is (= "slopp.http" (:ns-prefix (capabilities/capability "http")))
+        "http's family is still spelled slopp.http — the framework namespaces have not moved"))
   (testing "and the markers that mean an app USES it without requiring it"
     ;; the condition `framework-injection` calls uses-not-merely-requires. A
     ;; `^:app/entry` app is opened by slopp on its behalf; a cli app with a
@@ -411,7 +411,7 @@
     ;; and :http/path, which was MISSING until a rest app was built. :app/entry
     ;; covers the app slopp OPENS on its behalf; it misses the app slopp
     ;; SERVES. An endpoint's serve! call is generated, so a store can declare a
-    ;; whole API, never name slopp.web, and have the framework vendor nothing
+    ;; whole API, never name slopp.http, and have the framework vendor nothing
     ;; into its built tree — which is exactly what happened the first time a
     ;; tree was built from endpoints alone.
     (is (some #{:http/path} (:entry-markers (capabilities/capability "http")))
@@ -463,6 +463,6 @@
     ;; the catalog while silently reaching none of its three readers. rest
     ;; joined it by being added to the table and nothing else — which is the
     ;; property this catalog was restructured for.
-    (is (= {"cli" "slopp.cli" "http" "slopp.web" "rest" "slopp.rest"
+    (is (= {"cli" "slopp.cli" "http" "slopp.http" "rest" "slopp.rest"
             "webapp" "slopp.webapp"}
            (capabilities/shipping-families)))))

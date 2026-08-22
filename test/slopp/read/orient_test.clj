@@ -200,7 +200,7 @@
   ;; The card is the right vehicle at the right moment — every query_slice
   ;; returns one for each callee — and a 90-char cut destroyed what it was
   ;; carrying. The real example, in front of me while I wrote a broken
-  ;; stylesheet: slopp.web.css/render's card read
+  ;; stylesheet: slopp.http.css/render's card read
   ;;
   ;;   "Garden rules → a minified CSS string. Every string in the rule data — a"
   ;;

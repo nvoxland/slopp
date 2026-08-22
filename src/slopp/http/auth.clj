@@ -1,4 +1,4 @@
-(ns slopp.web.auth
+(ns slopp.http.auth
   "Identity POLICY: turn a request into `{:http/sub :http/groups :http/provider}`
   or nil, for each provider slopp ships — static users, bearer tokens, a
   trusted proxy header, and the resource-server half of OIDC.
@@ -7,9 +7,9 @@
   protecting, and it is why the tier is `:internal`: `verify-jwt` is handed
   `:jwks` as data, `now` and `getenv` arrive as injected seams with real
   defaults, and the tests pass static keys rather than reaching an identity
-  provider. `slopp.web.jwks` holds the one form that used to break it.
+  provider. `slopp.http.jwks` holds the one form that used to break it.
 
-  `slopp.web.dispatch` is the caller — identity resolves BEFORE routing, so a
+  `slopp.http.dispatch` is the caller — identity resolves BEFORE routing, so a
   policy decision is never made against a handler that already ran. Anonymous
   is nil rather than an error; default-deny at the policy layer is what turns
   that into a 401."

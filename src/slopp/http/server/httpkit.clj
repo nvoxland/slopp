@@ -1,4 +1,4 @@
-(ns slopp.web.server.httpkit
+(ns slopp.http.server.httpkit
   "The production adapter (D-web §9): http-kit — ring-compatible,
   WebSocket-capable, proven under native-image.
 
@@ -13,13 +13,13 @@
   Everything ABOVE this line is pure and testable without a port; everything
   below is somebody else's library. That is what makes the adapter a VALUE —
   `serve!` picks one by keyword, so the server library is a config choice
-  rather than a rewrite. `slopp.web.server.jdk` is the same contract with no
+  rather than a rewrite. `slopp.http.server.jdk` is the same contract with no
   dependency, and the two agreeing is the point.
 
   Body size is capped from the context (`:http/max-body-bytes`, 1 MiB by
   default) and answered 413, because an unbounded slurp is bounded only by
   heap — the same guard, from the same shared reader, in both adapters."
-  (:require [slopp.web.dispatch :as dispatch]
+  (:require [slopp.http.dispatch :as dispatch]
             [org.httpkit.server :as hk]
             [cheshire.core :as json]
             [clojure.string :as str]))
@@ -38,7 +38,7 @@
                      (try (json/parse-string body true)
                           (catch Exception _ body)))))))
 
-(defn ^{:export "slopp.web"} start!
+(defn ^{:export "slopp.http"} start!
   "Serve `ctx` (the dispatch context) via http-kit on {:host :port} — the
   production default adapter (ring-compatible, WebSocket-capable,
   native-image proven). Port 0 binds ephemeral; the returned
@@ -67,7 +67,7 @@
                 {:ip (str host) :port (int port) :legacy-return-value? false})]
     {:server server :port (hk/server-port server)}))
 
-(defn ^{:export "slopp.web"} stop!
+(defn ^{:export "slopp.http"} stop!
   "Stop a `start!` return. The handle is OPAQUE (a live http-kit server) —
   read in the body, not destructured."
   [srv]

@@ -165,9 +165,9 @@
         provided (client-build-deps st)
         ;; `session/image-deps` adds what the VENDORED framework requires — the
         ;; build path has the identical hole the image did, and for the identical
-        ;; reason: the tree gets slopp/web/** and the pom that used to supply
+        ;; reason: the tree gets slopp/http/** and the pom that used to supply
         ;; garden/hiccup/cheshire/http-kit is gone. A built app would fail inside
-        ;; slopp.web.css exactly as an image did.
+        ;; slopp.http.css exactly as an image did.
         deps     (merge (engine/image-deps st) (:runtime provided))
 client-deps (merge (:client-deps st) (:client provided))
         has-tests? (boolean (or (some store.render/test-ns? (keys (:namespaces st)))
@@ -1584,7 +1584,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; addressed by changed FORM IDS and sweep-store! builds its
         ;; whole-store population the same way, so a namespace with zero
         ;; forms is in neither and no rule can reach it however it is
-        ;; written. slopp.web-rules-test survived two days and a green
+        ;; written. slopp.http-rules-test survived two days and a green
         ;; check here after the R6 rules move emptied it.
         husks (read.modules/empty-namespaces st)
         aliasdrift (read.modules/alias-drift st)

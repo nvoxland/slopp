@@ -1,13 +1,13 @@
-(ns slopp.web.contract-test
+(ns slopp.http.contract-test
   "Tests for contract publishing, with endpoint fixtures of its own.
 
-  The fixtures live here rather than in `slopp.web-test` because that
+  The fixtures live here rather than in `slopp.http-test` because that
   namespace's facade test asserts its own exact route COUNT — so an endpoint
   added there reds an unrelated passing test, which is how this namespace came
   to exist. A test namespace whose subject is `from-namespaces` traversal needs
   to own its route set."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.contract :as web.contract]))
+            [slopp.http.contract :as http.contract]))
 
 (defn ^{:http/method :get :http/path "/c/things" :http/auth :public
         :rest/response [:map [:things [:sequential :string]]]}
@@ -54,7 +54,7 @@
   {:status 200 :body {:secret "s"}})
 
 (deftest a-contract-publishes-the-typed-surface-and-nothing-else
-  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
 
     (testing "the document names its own version, so a consumer can refuse one it doesn't know"
@@ -99,13 +99,13 @@
   ;; :doc, because the prose already exists. Every handler here opens with
   ;; `GET <path> — what it is`; it was written for the API's reader and it
   ;; stopped at the process boundary, because a docstring is not a value.
-  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))
         things  (by-addr [:get "/c/things"])]
 
     (testing "the handler's QUALIFIED symbol — a name a consumer can resolve"
-      (is (= 'slopp.web.contract-test/c-list (:handler things)))
-      (is (= 'slopp.web.contract-test/c-create! (:handler (by-addr [:post "/c/things"])))))
+      (is (= 'slopp.http.contract-test/c-list (:handler things)))
+      (is (= 'slopp.http.contract-test/c-create! (:handler (by-addr [:post "/c/things"])))))
 
     (testing ":name stays exactly as it was — the client generator names its
               wrapper from it, and this is additive"
@@ -142,7 +142,7 @@
   ;; `http-auth-refusal` gate refuses an endpoint that declares none. So unlike
   ;; `:request`, this key can never be nil-because-unknown, and a consumer
   ;; never has to tell "public" from "nobody said".
-  (let [doc     (web.contract/contract-document ['slopp.web.contract-test])
+  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
     (testing ":public travels as itself"
       (is (= :public (:auth (by-addr [:get "/c/things"])))))

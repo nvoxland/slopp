@@ -27,7 +27,7 @@
   incomplete, and reloading a browser into a red half-written state trains
   the author to ignore it."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.web :as slopp.web]))
+            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http]))
 
 (defn ^:export self-served?
   "Whether the calling process ALREADY serves everything `store` would —
@@ -178,7 +178,7 @@
   classpath and fail (`image/load-ns!` marks `*loaded-libs*` for exactly this
   reason).
 
-  **`slopp.web` is seeded when the STORE holds it.** slopp's own store does;
+  **`slopp.http` is seeded when the STORE holds it.** slopp's own store does;
   an ordinary app gets the framework from its declared `slopp-web` coord,
   already on the child's classpath. Both must work without the app saying
   which, so this asks the store rather than requiring an answer — and its
@@ -186,7 +186,7 @@
   [store]
   (let [builder (rules.http/context-builder store)
         seeds   (cond-> (set (rules.http/serving-namespaces store))
-                  (contains? (:namespaces store) 'slopp.web) (conj 'slopp.web)
+                  (contains? (:namespaces store) 'slopp.http) (conj 'slopp.http)
                   ;; the context builder is NOT part of the served surface —
                   ;; it declares no route and performs no kind — so nothing
                   ;; else pulls its namespace in, and the generated call would
@@ -196,7 +196,7 @@
     (filterv want (store/ns-dependency-order store))))
 
 (def ^:export unserved-options
-  "Options `slopp.web/serve!` and `slopp.web/context` accept that the generated
+  "Options `slopp.http/serve!` and `slopp.http/context` accept that the generated
   call deliberately does NOT carry, and why each is missing.
 
   This exists so the gap is CLASSIFIED rather than merely absent, and
@@ -337,15 +337,15 @@
                   (assoc :http/perform-ctx (list builder))
                   mounts
                   (assoc :http/routes
-                         (list 'slopp.web.static/mount-routes
+                         (list 'slopp.http.static/mount-routes
                                mounts
-                               (list 'slopp.web.static/file-or-resource-reader
+                               (list 'slopp.http.static/file-or-resource-reader
                                      (:static-dir plan)))))]
     (pr-str (list* 'do
-                   (list 'require ''slopp.web)
+                   (list 'require ''slopp.http)
                    (concat
                     (when mounts
-                      [(list 'require ''slopp.web.static)])
+                      [(list 'require ''slopp.http.static)])
                     ;; the child resolves slopp.rest/validating only if it
                     ;; REQUIRED the namespace. A qualified symbol in the opts
                     ;; would look right and throw at serve time — the same trap
@@ -355,7 +355,7 @@
                       [(list 'require ''slopp.rest)])
                     (when builder
                       [(list 'require (list 'quote (symbol (namespace builder))))])
-                    [(list :port (list 'slopp.web/serve! opts))])))))
+                    [(list :port (list 'slopp.http/serve! opts))])))))
 
 (defn- boot!
   "Bring up an app image for `store` and load its web surface into it —
@@ -432,7 +432,7 @@
 
   **The diagnosis is the framework's, the next step is this caller's.** Only
   what to DO about a taken port differs between listeners, and only this one
-  can say `http.port` — `slopp.web` also serves operators who set the port some
+  can say `http.port` — `slopp.http` also serves operators who set the port some
   other way, and the UI listener's answer is a different number entirely. So
   `framework/bind-diagnosis` writes the shared half and each caller appends
   its own, rather than three listeners each recognising the failure and
@@ -447,7 +447,7 @@
   `raw` is TEXT, not a Throwable: it crossed an nREPL wire from the child
   image, which is why the recogniser takes both representations."
   [port raw]
-  (if-let [d (slopp.web/bind-diagnosis port raw)]
+  (if-let [d (slopp.http/bind-diagnosis port raw)]
     (str d " — free it, or set http.port to another")
     (str "the app image would not serve on port " port ": " raw)))
 

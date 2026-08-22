@@ -7,7 +7,7 @@
   the blue/green swap need a real image and are `^:external`."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.web.client :as web.client] [slopp.web :as slopp.web] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.read.orient :as orient]))
+            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.read.orient :as orient]))
 
 (deftest a-serve-plan-is-derived-from-the-store
   (let [src (str "(ns shop.api)\n\n"
@@ -82,13 +82,13 @@
       (is (< (.indexOf ^java.util.List order 'shop.db)
              (.indexOf ^java.util.List order 'shop.api))))
     (testing "the framework loads from the store when the store is where it lives"
-      ;; slopp's own store HOLDS slopp.web; an ordinary app gets it from the
+      ;; slopp's own store HOLDS slopp.http; an ordinary app gets it from the
       ;; declared slopp-web coord, already on the child's classpath. Neither
       ;; case may require the app to say which.
-      (let [with-fw (store/ingest s 'slopp.web "(ns slopp.web)\n(defn serve! \"S.\" [o] o)\n")]
-        (is (some #{'slopp.web} (live/load-order with-fw)))))
+      (let [with-fw (store/ingest s 'slopp.http "(ns slopp.http)\n(defn serve! \"S.\" [o] o)\n")]
+        (is (some #{'slopp.http} (live/load-order with-fw)))))
     (testing "and its absence from the store is not an error"
-      (is (not (some #{'slopp.web} order))))
+      (is (not (some #{'slopp.http} order))))
     (testing "a store with no web surface loads nothing"
       (is (= [] (live/load-order (store/empty-store)))))))
 
@@ -109,7 +109,7 @@
               :max-body-bytes 2048
               :context-builder 'shop.system/deps}
         form (edn/read-string (live/serve-code plan))
-        read (nth form 3)                       ; (:port (slopp.web/serve! …))
+        read (nth form 3)                       ; (:port (slopp.http/serve! …))
         call (second read)]
     (testing "the app's CONTEXT is built by the declared builder and passed in"
       ;; not quoted — this one is a CALL, which is why the opts can no longer
@@ -140,7 +140,7 @@
       (is (= :port (first read))))))
 
 (def fake-web-src
-  "A stand-in `slopp.web` for the app-image test, as store source.
+  "A stand-in `slopp.http` for the app-image test, as store source.
 
   It is FAKED for the same reason `api-test/a-built-web-app-RUNS-outside-slopp-entirely`
   fakes it: this suite runs from a checkout where `boot/framework-files` is
@@ -151,7 +151,7 @@
   the address the plan derived, answers over HTTP, reports the BOUND port,
   and reaches the app's own code through `resolve` (so a page can only be
   served if the store's namespaces really loaded into that image). Routing
-  is `slopp.web`'s job and is tested in `slopp.web-test`; nothing here
+  is `slopp.http`'s job and is tested in `slopp.http-test`; nothing here
   stands in for it. Zero deps on purpose: the child image carries only the
   store's own manifest, which for this fixture is empty.
 
@@ -159,11 +159,11 @@
   the managed server's failures have all been options that never crossed,
   and an option is only observably carried if something on the far side can
   be asked about it."
-  (str "(ns slopp.web\n"
+  (str "(ns slopp.http\n"
        ;; the real framework ships these as one vendored family on the
        ;; child's classpath; here they are store namespaces, so the sibling
        ;; is only loaded if something makes it REACHABLE
-       "  (:require [slopp.web.static])\n"
+       "  (:require [slopp.http.static])\n"
        "  (:import [com.sun.net.httpserver HttpServer HttpHandler]\n"
        "           [java.net InetSocketAddress]))\n"
        "\n"
@@ -186,7 +186,7 @@
        "    {:port (.getPort (.getAddress srv))}))\n"))
 
 (def fake-static-src
-  "A stand-in `slopp.web.static` for the app-image test, as store source.
+  "A stand-in `slopp.http.static` for the app-image test, as store source.
 
   Faked for the same reason as [[fake-web-src]] — nothing is vendored in a
   checkout — but this one has to do REAL WORK to be worth anything. The
@@ -198,7 +198,7 @@
 
   The real pair is tested in `web-test/static-mounts-serve-raw-bytes`;
   nothing here stands in for routing or for content-type resolution."
-  (str "(ns slopp.web.static)\n"
+  (str "(ns slopp.http.static)\n"
        "\n"
        "(defn file-or-resource-reader \"R.\" [root]\n"
        "  (fn [path]\n"
@@ -218,15 +218,15 @@
   ;; derived from what is already there.
   ;;
   ;; Driven through `client/request` rather than a raw slurp. `:direct-http`
-  ;; asks for exactly that, and unlike `slopp.web-test`'s round-trips this
-  ;; test has no reason to want an INDEPENDENT client: slopp.web.client is
+  ;; asks for exactly that, and unlike `slopp.http-test`'s round-trips this
+  ;; test has no reason to want an INDEPENDENT client: slopp.http.client is
   ;; not what is under test here, so using it is not circular.
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-app"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
         s    (-> (store/empty-store)
-                 (store/ingest 'slopp.web fake-web-src)
-                 (store/ingest 'slopp.web.static fake-static-src)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
                  (store/ingest 'demo.app
                                (str "(ns demo.app)\n\n"
                                     "(defn greeting \"G.\" [] \"hello from the store\")\n\n"
@@ -247,7 +247,7 @@
         ;; failure is a url that is reported and a port that is bound
         (is (= (:port (live/serve-plan s dir)) (:port r)))
         (is (= (str "http://127.0.0.1:" (:port r) "/") (:url r))))
-      (let [body (:http/body (web.client/request {:http/url (:url r)
+      (let [body (:http/body (http.client/request {:http/url (:url r)
                                               :http/timeout-ms 5000}))]
         (testing "the DERIVED namespace list is what crossed into the image"
           (is (str/includes? body "demo.app")))
@@ -272,7 +272,7 @@
               server — there is no half-stopped state to leak a port"
       (is (= :unreachable
              (:http/error
-              (ex-data (try (web.client/request {:http/url (:url r)
+              (ex-data (try (http.client/request {:http/url (:url r)
                                              :http/timeout-ms 5000})
                             (catch clojure.lang.ExceptionInfo e e)))))))))
 
@@ -285,8 +285,8 @@
                    "slopp-refresh"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
         base (-> (store/empty-store)
-                 (store/ingest 'slopp.web fake-web-src)
-                 (store/ingest 'slopp.web.static fake-static-src)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
                  (#(first (store/record-config-put % "capabilities" :manifest
                                                    "http.enabled" "true"))))
         app  (fn [greeting]
@@ -297,7 +297,7 @@
                                   "        :malli/schema [:=> [:cat :map] :map]\n"
                                   "        :rest/response :map} hi \"H.\" [req] {:ok true})\n")))
         sess (atom {})
-        body (fn [r] (:http/body (web.client/request {:http/url (:url r)
+        body (fn [r] (:http/body (http.client/request {:http/url (:url r)
                                                   :http/timeout-ms 5000})))]
     (try
       (let [v1 (live/refresh! sess (app "version one") dir)]
@@ -378,8 +378,8 @@
                    "slopp-app"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
         s    (-> (store/empty-store)
-                 (store/ingest 'slopp.web fake-web-src)
-                 (store/ingest 'slopp.web.static fake-static-src)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
                  (store/ingest 'demo.app
                                (str "(ns demo.app)\n\n"
                                     "(defn ^{:http/method :get :http/path \"/hi\"\n"
@@ -447,7 +447,7 @@
                              (keyword (namespace entry) (name s))))))
         ;; serve! reads the address options and hands the whole map to
         ;; context, which reads the rest. Both, because either alone is half.
-        accepted  (into (opt-keys #'slopp.web/serve!) (opt-keys #'slopp.web/context))
+        accepted  (into (opt-keys #'slopp.http/serve!) (opt-keys #'slopp.http/context))
                 ;; every option it COULD carry, so the plan has to exercise them all —
         ;; a plan missing :static made :http/routes look ungenerated and let the
         ;; stale "deliberately dropped" entry survive the change that generated it
@@ -504,12 +504,12 @@
       (is (str/includes? code "file-or-resource-reader"))
       (is (str/includes? code "/tmp/slopp-static-probe")))
     (testing "and the namespace providing both is REQUIRED in the child"
-      ;; Asserting the substring "slopp.web.static" passes on the qualified
+      ;; Asserting the substring "slopp.http.static" passes on the qualified
       ;; symbol alone, so the first version of this went green while the
       ;; generated code would still have thrown at runtime — the child had
       ;; the symbol and not the namespace. Match the require FORM.
-      (is (str/includes? code "(require (quote slopp.web.static))")
-          "the child resolves slopp.web.static/mount-routes only if it required it"))
+      (is (str/includes? code "(require (quote slopp.http.static))")
+          "the child resolves slopp.http.static/mount-routes only if it required it"))
     (testing "a plan with no mounts generates no routes key at all"
       (is (not (str/includes? (live/serve-code (dissoc plan :static :static-dir))
                               "mount-routes"))
@@ -549,8 +549,8 @@
                    "slopp-app-static"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
         s    (-> (store/empty-store)
-                 (store/ingest 'slopp.web fake-web-src)
-                 (store/ingest 'slopp.web.static fake-static-src)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
                  (store/ingest 'demo.app
                                (str "(ns demo.app)\n\n"
                                     "(defn greeting \"G.\" [] \"hello\")\n"))
@@ -564,7 +564,7 @@
         r    (live/start! sess s dir)]
     (try
       (is (:serving? r) (str "start! did not serve: " (:reason r)))
-      (let [body (:http/body (web.client/request {:http/url (:url r)
+      (let [body (:http/body (http.client/request {:http/url (:url r)
                                               :http/timeout-ms 5000}))]
         (testing "the mount the store declared reached the child as a route"
           (is (str/includes? body ":mounted \"/assets\"") body))

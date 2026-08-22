@@ -586,8 +586,8 @@
   ;; This is not compatibility: the old shape is still refused. It is the
   ;; difference between a refusal and a crash inside a destructure.
   (testing "the capability-keyed shape passes through untouched"
-    (is (= {"http" ["slopp/web.clj"]}
-           (boot/by-capability {"http" ["slopp/web.clj"]} "framework-files.edn"))))
+    (is (= {"http" ["slopp/http.clj"]}
+           (boot/by-capability {"http" ["slopp/http.clj"]} "framework-files.edn"))))
 
   (testing "nil and empty pass through — a checkout has no manifest at all"
     ;; the common case, and it must stay silent: `clojure -M` and a materialized
@@ -596,7 +596,7 @@
     (is (= {} (boot/by-capability {} "framework-files.edn"))))
 
   (testing "the pre-capability FLAT LIST refuses, and names the remedy"
-    (let [e (try (boot/by-capability ["slopp/lang.cljc" "slopp/web.clj"]
+    (let [e (try (boot/by-capability ["slopp/lang.cljc" "slopp/http.clj"]
                                      "framework-files.edn")
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (instance? clojure.lang.ExceptionInfo e)

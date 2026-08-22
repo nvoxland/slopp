@@ -617,7 +617,7 @@
   ;; Measured before fixing: EIGHT production namespaces in this store are
   ;; documented and read as undocumented — slopp.cache, slopp.api.contracts,
   ;; slopp.store.fields, slopp.mcp.tools, slopp.rules.catalog,
-  ;; slopp.store.semver, slopp.web.routes, slopp.image.currency. Every surface
+  ;; slopp.store.semver, slopp.http.routes, slopp.image.currency. Every surface
   ;; that shows a namespace's purpose was showing them blank.
   (let [doc-of #(store/form-docstring
                  (:node (first (store/forms (store/ingest (store/empty-store) 'd.x %) 'd.x))))]

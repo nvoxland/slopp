@@ -869,8 +869,8 @@
   ;; the longer form IS rewritten, into a name nobody defines.
   ;;
   ;; A DOT stays permissive on purpose, because that is what makes a
-  ;; namespace-family sweep work: `slopp.web` → `slopp.http` has to reach
-  ;; `slopp.web.dispatch`. Letters already bounded it (`slopp.webapp` survives
+  ;; namespace-family sweep work: `slopp.http` → `slopp.http` has to reach
+  ;; `slopp.http.dispatch`. Letters already bounded it (`slopp.webapp` survives
   ;; because `a` is a letter); `-` and digits were the gap.
   ;;
   ;; Nonsense names on purpose, per [[sweep-requalifies-keys-destructuring]]:
@@ -897,4 +897,50 @@
         (testing "nor did a name continuing in a DIGIT"
           (is (clojure.string/includes? src ":zpfx/cli2") src)
           (is (not (clojure.string/includes? src ":zrest/cli2")) src)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-rename-that-rewrites-a-forms-PROSE-leaves-it-still-NAMED
+  ;; `qualified-mention-changeset` rewrites a renamed namespace where it appears
+  ;; inside STRING LITERALS — docstrings, teaching text, error messages — so a
+  ;; rename does not leave its own documentation pointing at an address that no
+  ;; longer resolves. It ended in a bare `z/root`, which wraps the result in a
+  ;; `:forms` node.
+  ;;
+  ;; `form-symbol` refuses a `:forms` wrapper deliberately, so the rewritten
+  ;; form came back ANONYMOUS: the store kept its source and lost its name.
+  ;; `rewrite-symbols` unwraps for exactly this reason and says so in its
+  ;; docstring; this sibling did not. The same second-call-site shape the
+  ;; escape-stripping bug had.
+  ;;
+  ;; What it cost: slopp's own `rules.catalog/rule-catalog` names
+  ;; `slopp.http.client` in a `:teach` string. Renaming that family anonymised
+  ;; the catalog, so `export-level` — which looks the var up BY NAME — returned
+  ;; nil for it, every caller read as calling a package-private var, and a
+  ;; whole-store rename died on a visibility refusal naming a rule that was
+  ;; never the problem.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pm.target "(ns pm.target)\n\n(defn thing \"T.\" [] 1)\n")
+      (ops/ingest! sess 'pm.core
+                   (str "(ns pm.core)\n\n"
+                        "(def ^:export catalog\n"
+                        "  \"The catalog. Discharge it by calling pm.target/thing.\"\n"
+                        "  [{:teach \"call pm.target/thing\"}])\n"))
+
+      (testing "the fixture names the target in PROSE only"
+        ;; population control: if the mention were a real reference the
+        ;; positional changeset would handle it and this pass never runs
+        (let [st (:store @sess)]
+          (is (some? (store/form-named st 'pm.core 'catalog)) "fixture: named before")))
+
+      (ops/ns-rename! sess "pm.target" "pm.moved" :prompt "rename the mentioned ns")
+
+      (let [st (:store @sess)]
+        (testing "the prose moved"
+          (is (clojure.string/includes? (query/query-source sess 'pm.core) "pm.moved/thing")))
+        (testing "and the form that merely MENTIONED it is still NAMED"
+          (is (some? (store/form-named st 'pm.core 'catalog))
+              (str "the form lost its name to the rewrite — every lookup BY NAME"
+                   " now misses it, including the module system's export check."
+                   " forms: " (pr-str (mapv :name (store/forms st 'pm.core)))))))
       (finally (ops/close! sess)))))

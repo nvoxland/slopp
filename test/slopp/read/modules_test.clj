@@ -331,7 +331,7 @@
   ;; and the outline all list its forms. What no tool can derive is why the
   ;; namespace exists, what to expect inside it, and how it relates to its
   ;; neighbours. That is the whole content of an ns docstring, and 100 of
-  ;; slopp's own 177 namespaces had none — including slopp.web.css, whose
+  ;; slopp's own 177 namespaces had none — including slopp.http.css, whose
   ;; unstated garden conventions cost a shipped bug.
   (let [with (store/ingest (store/empty-store) 'app.good
                            (str "(ns app.good\n"
@@ -480,7 +480,7 @@
    `slopp.rt` to `slopp.kernel.rt` — names a module that `module-of` can
    never yield. It is not merely dated then, it is invalid. Both sweeps of
    the kernel move hit this form and both were reverted."
-  {"slopp.api"   ["slopp.boot" "slopp.edit" "slopp.image" "slopp.index" "slopp.store" "slopp.web"]
+  {"slopp.api"   ["slopp.boot" "slopp.edit" "slopp.image" "slopp.index" "slopp.store" "slopp.http"]
    "slopp.bench" ["slopp.api" "slopp.mcp" "slopp.store"]
    "slopp.boot"  []
    "slopp.cache" []
@@ -488,12 +488,12 @@
    "slopp.git"   ["slopp.store"]
    "slopp.image" ["slopp.rt" "slopp.store"]
    "slopp.index" ["slopp.cache" "slopp.image"]
-   "slopp.mcp"   ["slopp.api" "slopp.git" "slopp.store" "slopp.sync" "slopp.http-api" "slopp.web"]
+   "slopp.mcp"   ["slopp.api" "slopp.git" "slopp.store" "slopp.sync" "slopp.http-api" "slopp.http"]
    "slopp.rt"    []
    "slopp.store" ["slopp.cache"]
    "slopp.sync"  ["slopp.api" "slopp.boot" "slopp.git" "slopp.store"]
-   "slopp.http-api"    ["slopp.api" "slopp.edit" "slopp.store" "slopp.web"]
-   "slopp.web"   []})
+   "slopp.http-api"    ["slopp.api" "slopp.edit" "slopp.store" "slopp.http"]
+   "slopp.http"   []})
 
 (deftest substrate-on-a-real-manifest-names-the-foundation-and-nothing-else
   ;; The names here are the DATED ones `slopp-production` carries and must
@@ -502,7 +502,7 @@
   (let [band  (read.modules/substrate slopp-production)
         edges (for [[m ds] slopp-production d ds] [m d])]
     (testing "the foundation is the three widely-used sinks plus the store hub"
-      (is (= #{"slopp.boot" "slopp.cache" "slopp.web" "slopp.store"} band)))
+      (is (= #{"slopp.boot" "slopp.cache" "slopp.http" "slopp.store"} band)))
     (testing "store is banded despite an outgoing edge — everyone calls it, it calls almost nothing"
       (is (contains? band "slopp.store")))
     (testing "rt is a sink but NOT foundation: its one edge from image is the informative kind"
@@ -664,7 +664,7 @@
   ;; The empty-namespace exemption asserted in
   ;; a-namespace-has-to-say-what-it-is-for is CORRECT — a namespace someone
   ;; just created has nothing to describe yet. It is also why
-  ;; slopp.web-rules-test survived two days and a green full_check after the
+  ;; slopp.http-rules-test survived two days and a green full_check after the
   ;; R6 rules move carried its tests to slopp.rules.web-test.
   ;;
   ;; The exemption is the second reason it was invisible. The first is

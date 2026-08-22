@@ -73,7 +73,7 @@
    drift; a function that declares `{:throws [[:map …]]}` has said in advance
    that it signals failure by throwing, so calling it with generated inputs and
    reporting the throw as drift is the checker misreading a declaration it now
-   has access to. `slopp.web.client/request` had to give up its schema entirely
+   has access to. `slopp.http.client/request` had to give up its schema entirely
    for exactly this reason before `:throws` existed.
 
    An EMPTY `:throws` is still checked, and that asymmetry is the point: `[]`

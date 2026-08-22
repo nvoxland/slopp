@@ -6,7 +6,7 @@
             [malli.core :as m]
             [slopp.store :as store]
             [slopp.hub :as hub]
-            [slopp.web :as slopp.web] [slopp.web.client :as web.client] [cheshire.core :as json] [clojure.string :as str]))
+            [slopp.http :as slopp.http] [slopp.http.client :as http.client] [cheshire.core :as json] [clojure.string :as str]))
 
 (deftest a-beat-says-who-and-where-and-nothing-it-does-not-know
   (let [named (assoc-in (store/empty-store) [:config "capabilities" :values]
@@ -40,7 +40,7 @@
   ;; with a deliberately tiny `:beat-ms`, and a second beat arriving quickly
   ;; is the observable proof the project took the number from the wire.
   (let [seen (atom [])
-        srv  (slopp.web/serve!
+        srv  (slopp.http/serve!
               {:http/namespaces []
                :http/routes
                [{:method :post :path "/api/register" :auth :public
@@ -75,7 +75,7 @@
         (testing "a clean shutdown deregisters instead of leaving a row to go
                   stale on its own"
           (is (wait (fn [] (some (fn [e] (= [:deregister] e)) @seen))))))
-      (finally (slopp.web/stop! srv)))))
+      (finally (slopp.http/stop! srv)))))
 
 (deftest the-hub-sets-the-interval-and-the-project-obeys-it
   ;; The split removed the shared constant. `beat-ms` lived in
@@ -128,7 +128,7 @@
   ;; Every beat, not just the first: a hub that goes away must make the address
   ;; go away too, or this is the same stale-claim bug one layer along.
   (let [answers (atom [])
-        srv (slopp.web/serve!
+        srv (slopp.http/serve!
              {:http/namespaces []
               :http/routes
               [{:method :post :path "/api/register" :auth :public
@@ -154,7 +154,7 @@
           (finally (hub/stop! hb))))
       (testing "a hub that stops answering reports nil, so the address it
                 supported stops being claimed"
-        (slopp.web/stop! srv)
+        (slopp.http/stop! srv)
         (reset! answers [])
         (let [hb (hub/start! url (constantly me) #(swap! answers conj %))]
           (try
@@ -162,7 +162,7 @@
             (is (every? nil? @answers) (pr-str @answers))
             (is (nil? (hub/hub-address url (last @answers))))
             (finally (hub/stop! hb)))))
-      (finally (slopp.web/stop! srv)))))
+      (finally (slopp.http/stop! srv)))))
 
 (deftest ^:external a-hub-that-REFUSES-the-beat-is-not-a-hub-that-is-absent
   ;; `post!` returned nil for a refused connection AND for a 4xx, so "no hub is
@@ -178,7 +178,7 @@
   ;; the whole drift-detection story is "the hub 400s and we say so" — and if we
   ;; swallow the 400, there is no story at all.
   (let [refuse (fn [status body]
-                 (slopp.web/serve!
+                 (slopp.http/serve!
                   {:http/namespaces []
                    :http/routes [{:method :post :path "/api/register" :auth :public
                                  :handler (fn [_] {:status status :body body})}]
@@ -206,7 +206,7 @@
                     (str "the hub's explain must survive the trip, or drift is"
                          " undiagnosable from this side: " (pr-str a))))
               (finally (hub/stop! hb))))
-          (finally (slopp.web/stop! srv)))))
+          (finally (slopp.http/stop! srv)))))
     (testing "and a refusal yields NO address — we are not registered, so there
               is no page to hand anyone"
       (is (nil? (hub/hub-address "http://127.0.0.1:7359/" (last @answers)))))
@@ -266,7 +266,7 @@
               the hub asked for — 20ms, where the compiled-in default is ten
               seconds, so a second beat at all is proof it came from the wire"
       (let [hb (hub/start! hub (constantly me) #(swap! answers conj %)
-                            (web.client/fake-requester hub routes))]
+                            (http.client/fake-requester hub routes))]
         (try
           (is (wait (fn [] (<= 2 (beats)))))
           (is (str/includes? (second (first @seen)) "toy")
@@ -278,7 +278,7 @@
         (is (wait (fn [] (some (fn [e] (= [:deregister] e)) @seen))))))
     (testing "a hub that REFUSES is not a hub that is absent — the distinction
               the whole port exists to keep, checked here without a socket"
-      (let [refusing (web.client/fake-requester
+      (let [refusing (http.client/fake-requester
                       hub {[:post "/api/register"]
                            (fn [_] {:status 400
                                     :body (json/generate-string
@@ -298,7 +298,7 @@
     (testing "an ABSENT hub is a quiet nil — nobody has to run one"
       (let [got (atom [])
             hb  (hub/start! hub (constantly me) #(swap! got conj %)
-                             (web.client/fake-requester "http://elsewhere.test/" {}))]
+                             (http.client/fake-requester "http://elsewhere.test/" {}))]
         (try
           (is (wait (fn [] (seq @got))))
           (is (nil? (last @got)) (pr-str @got))
@@ -308,7 +308,7 @@
       (reset! seen [])
       (let [hb (hub/start! hub (constantly me)
                             (fn [_] (throw (ex-info "callers break" {})))
-                            (web.client/fake-requester hub routes))]
+                            (http.client/fake-requester hub routes))]
         (try
           (is (wait (fn [] (<= 2 (beats))))
               "the loop kept registering despite the callback throwing every time")
@@ -344,7 +344,7 @@
         ;; request is ever made — a bug entirely on our side of the wire
         hb    (hub/start! hub (constantly {:name (fn [] :not-serialisable)})
                            #(swap! got conj %)
-                           (web.client/fake-requester hub routes))]
+                           (http.client/fake-requester hub routes))]
     (try
       (is (wait (fn [] (seq @got))))
       (let [a (last @got)]

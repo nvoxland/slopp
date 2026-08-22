@@ -1,11 +1,11 @@
-(ns slopp.web.css-test
-  "SECURITY + contract tests for slopp.web.css. Garden renders selector and
+(ns slopp.http.css-test
+  "SECURITY + contract tests for slopp.http.css. Garden renders selector and
   value strings VERBATIM, so an interpolated string is a CSS-injection door
   (a `}` breaks out of the block, `<` breaks out if the CSS is ever inlined
   in <style>). These pin both the refusal and garden 1.3.10's rendering."
   (:require [clojure.test :refer [deftest is testing]]
             [garden.stylesheet :as gs]
-            [slopp.web.css :as css]))
+            [slopp.http.css :as css]))
 
 (deftest value-breakout-is-refused
   (testing "SECURITY: a } in a value cannot break out of the declaration block"

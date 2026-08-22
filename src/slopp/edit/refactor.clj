@@ -151,6 +151,28 @@
           (#{:quote :syntax-quote} (z/tag up)) true
           :else                                (recur (z/up up)))))
 
+(defn- unwrap-forms
+  "`root` with a `z/root` `:forms` wrapper removed — the single form it holds.
+
+  **Every zipper rewrite that returns a NODE owes this.** `z/root` wraps its
+  result in a `:forms` node, and `store/form-symbol` refuses a `:forms` wrapper
+  deliberately (a wrapper may hold several top-level forms, so the name is
+  genuinely ambiguous). A pass that forgets to unwrap therefore hands back a
+  form the store keeps the SOURCE of and loses the NAME of — anonymous, and
+  silent, because the rendered text is identical.
+
+  It was written inline in [[rewrite-symbols]] and missing from
+  [[qualified-mention-changeset]], which is the prose pass. slopp's own
+  `rules.catalog/rule-catalog` names a namespace in a `:teach` string, so
+  renaming that family anonymised the catalog; `export-level` looks a var up BY
+  NAME, returned nil, and every caller of it read as calling a package-private
+  var. A whole-store rename then died on a visibility refusal naming a rule
+  that was never the problem."
+  [root]
+  (if (= :forms (n/tag root))
+    (or (first (filter n/sexpr-able? (n/children root))) root)
+    root))
+
 (defn rewrite-symbols
   "Zipper-walk `node`, replacing symbol tokens via `f` (sym → sym|nil).
   Returns the (possibly identical) node. z/root wraps its result in a
@@ -183,10 +205,7 @@
                 zl)
            nxt (z/next zl)]
        (if (z/end? nxt)
-         (let [root (z/root zl)]
-           (if (= :forms (n/tag root))
-             (or (first (filter n/sexpr-able? (n/children root))) root)
-             root))
+         (unwrap-forms (z/root zl))
          (recur nxt))))))
 
 (defn ns-sym-mapper
@@ -1700,7 +1719,8 @@
                                                (string? (z/sexpr zl))
                                                (not= (z/sexpr zl) (fix (z/sexpr zl)))))
                                  (fn [zl] (z/replace zl (n/string-node (escape-literal (fix (z/sexpr zl)))))))
-                                z/root)]
+                                z/root
+                                unwrap-forms)]
                 :when  (not= (n/string out) (n/string node))]
             [(:id e) out]))))
 
@@ -2016,8 +2036,8 @@
     `mcp-test/rename-sweep-is-one-intent`. So only letters end the name.
 
   A DOT ends nothing in either case, and that is deliberate: a family rename
-  has to reach through it, so `slopp.web` → `slopp.http` moves
-  `slopp.web.dispatch` while `slopp.webapp` is already safe on the letter."
+  has to reach through it, so `slopp.http` → `slopp.http` moves
+  `slopp.http.dispatch` while `slopp.webapp` is already safe on the letter."
   [from]
   (if (str/starts-with? (str from) ":") "A-Za-z0-9_-" "A-Za-z"))
 

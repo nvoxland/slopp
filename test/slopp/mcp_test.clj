@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.web.client :as web.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -1522,7 +1522,7 @@
         (let [r (edn/read-string (call! sess "ui_serve" {:port 0}))]
           (is (pos? (:port r)) (pr-str r))
           (is (= (str "http://127.0.0.1:" (:port r) "/") (:url r)))
-          (is (re-find #"us\.only" (:http/body (web.client/request
+          (is (re-find #"us\.only" (:http/body (http.client/request
                                     {:http/url (str (:url r) "api/namespaces")})))
               "the served session is THIS one — a fresh session would not have
                us.only. Asserted against the API rather than the document,

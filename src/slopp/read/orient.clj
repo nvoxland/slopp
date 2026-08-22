@@ -36,7 +36,7 @@
   shows.
 
   Replaces a raw character cut, which ended mid-word and produced fragments
-  that look like content: `slopp.web.css/render`'s card used to read
+  that look like content: `slopp.http.css/render`'s card used to read
   \"Garden rules → a minified CSS string. Every string in the rule data — a\".
   A trailing fragment is worse than a clean stop, because it reads as though
   the thought finished.

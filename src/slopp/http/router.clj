@@ -1,10 +1,10 @@
-(ns slopp.web.router
+(ns slopp.http.router
   "Reading a URL, and nothing else. The two halves of one — match the PATH
   against a route table, parse the QUERY STRING into data — because they are
   the same question asked of the two sides of the `?`.
 
   Pure: request data in, decision data out. No identity, no policy, no
-  handler, no socket. `slopp.web.dispatch` is what puts those in order around
+  handler, no socket. `slopp.http.dispatch` is what puts those in order around
   it; this namespace never learns they exist, which is why it is also the only
   part of the framework `slopp.api` exports (`match` carries
   `:export \"slopp.api\"` — the store's route analysis reasons about paths with

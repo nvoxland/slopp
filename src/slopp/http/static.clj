@@ -1,4 +1,4 @@
-(ns slopp.web.static
+(ns slopp.http.static
   "Serving BYTES rather than handlers: mount a URL prefix over a path prefix
   and answer whatever is under it, as a raw response the adapters write
   verbatim — no JSON wrapping, no handler var.
@@ -90,7 +90,7 @@
   CLASSPATH RESOURCE (a native binary carrying its assets via
   -H:IncludeResources). Returns {:content <bytes> :content-type <from the
   extension>} or nil. A live-store app uses a store-backed reader instead
-  (slopp.http/start-server!).
+  (the one `slopp.http/serve!` assembles).
 
   CONTAINED: the resolved file's canonical path must stay under `root`, and
   a `..` traversal segment is refused outright (review W5) — the reader

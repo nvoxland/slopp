@@ -2,7 +2,7 @@
   "Cover for the web surface's DERIVATIONS — what slopp reads off endpoint
   metadata, as opposed to what happens when a request arrives.
 
-  The runtime is `slopp.web`'s business and is tested portlessly there. Here
+  The runtime is `slopp.http`'s business and is tested portlessly there. Here
   the subject is everything derived BEFORE that: which routes a store
   declares, which URL attributes count as route references, what a contract
   declaration obliges, and what a declaration's consequences are worth saying
@@ -14,7 +14,7 @@
   discovers."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.web-test :as slopp.web-test] [clojure.string :as str] [slopp.rules.rest :as rules.rest]))
+            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.http-test :as slopp.http-test] [clojure.string :as str] [slopp.rules.rest :as rules.rest]))
 
 (deftest routes-derive-from-stored-nodes
   (let [src (str "(ns shop.api)\n\n"
@@ -485,7 +485,7 @@
   ;;
   ;; In-image and cheap: a store's :files is a plain map, so this adapter
   ;; needs no database, no session and no socket.
-  (slopp.web-test/reader-contract "store"
+  (slopp.http-test/reader-contract "store"
                             (fn [files]
                               (rules.http/store-reader (constantly {:files files})
                                                 (constantly nil)))))

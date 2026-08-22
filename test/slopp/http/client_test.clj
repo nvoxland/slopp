@@ -1,4 +1,4 @@
-(ns slopp.web.client-test
+(ns slopp.http.client-test
   "Home of `requester-contract` — the ONE suite every adapter of the HTTP
   client port must pass, and the two runs of it.
 
@@ -15,8 +15,8 @@
   \"the slow ones\"."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [slopp.web.client :as web.client]
-            [slopp.web :as slopp.web]))
+            [slopp.http.client :as http.client]
+            [slopp.http :as slopp.http]))
 
 (defn requester-contract
   "The suite EVERY requester must pass — the real transport and every fake.
@@ -46,7 +46,7 @@
   that were supposed to catch it.
 
   What this suite does NOT pin, said out loud so a green run is not read as
-  more than it is: the far side's own body PARSING. A real `slopp.web/serve!`
+  more than it is: the far side's own body PARSING. A real `slopp.http/serve!`
   decodes JSON before its handler sees it and the fake does not, so the body
   assertion below is deliberately a substring check. A caller whose logic
   depends on the parsed shape is not covered by the fake and needs a real
@@ -54,7 +54,7 @@
   [label make]
   (let [routes ;; Every far side here declares `text/plain`, and that is load-bearing rather
         ;; than tidy. A response that declares NO content type gets encoded by
-        ;; whatever is serving it — `slopp.web/serve!` JSON-encodes a bare string,
+        ;; whatever is serving it — `slopp.http/serve!` JSON-encodes a bare string,
         ;; so "pong" arrives as "\"pong\"" from a real server and as "pong" from
         ;; the fake. That difference is the SERVER's encoding, not the transport's;
         ;; pinning it would turn this suite into a test of `serve!`. Plain text
@@ -128,7 +128,7 @@
   (requester-contract
    "fake-requester"
    (fn [routes]
-     {:requester (web.client/fake-requester "http://fake.test/" routes)
+     {:requester (http.client/fake-requester "http://fake.test/" routes)
       :base-url  "http://fake.test/"
       :dead-url  "http://nobody-is-listening.test/"})))
 
@@ -145,7 +145,7 @@
       (requester-contract
        "jdk http transport"
        (fn [routes]
-         (let [s    (slopp.web/serve!
+         (let [s    (slopp.http/serve!
                      {:http/namespaces []
                       :http/routes (vec (for [[[method path] handler] routes]
                                          {:method method :path path
@@ -156,7 +156,7 @@
                       (.close ss)
                       p)]
            (reset! srv s)
-           {:requester web.client/request
+           {:requester http.client/request
             :base-url  (str "http://127.0.0.1:" (:port s) "/")
             :dead-url  (str "http://127.0.0.1:" dead "/")})))
-      (finally (some-> @srv slopp.web/stop!)))))
+      (finally (some-> @srv slopp.http/stop!)))))

@@ -1,4 +1,4 @@
-(ns slopp.web.routes-test
+(ns slopp.http.routes-test
   "Deriving a route TABLE from var metadata — `:http/method`, `:http/path` and
   their neighbours — which is how a slopp app declares its surface without a
   routing DSL. The declaration and the thing declared are one var, so there is
@@ -9,7 +9,7 @@
   That is the same behavioural change `http-client-routes-consequences` states at the
   done point — the rule tells the author once, and this holds the code to it."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.routes :as routes] [slopp.web.router :as router] [slopp.webapp :as webapp]))
+            [slopp.http.routes :as routes] [slopp.http.router :as router] [slopp.webapp :as webapp]))
 
 (defn ^{:http/method :get :http/path "/t/users/:id" :http/auth :public
         :http/reads {:user [:user/by-id [:path-params :id]]}}
@@ -46,7 +46,7 @@
 (defn ^{:unused-ok "the negative control for route discovery — it exists to be PASSED OVER by the scan, so having no caller is the property under test"} plain "Not an endpoint." [x] x)
 
 (deftest routes-derive-from-var-metadata
-  (let [rows (routes/from-namespaces ['slopp.web.routes-test])]
+  (let [rows (routes/from-namespaces ['slopp.http.routes-test])]
     (testing "endpoint vars become rows; unmarked vars don't"
       (is (= 3 (count rows)))
       (is (= #{"/t/users/:id" "/t/users" "/t/page"} (set (map :path rows)))))
@@ -58,8 +58,8 @@
         (is (var? (:handler row)))
         (is (= 200 (:status ((:handler row) {:http/reads :probe}))))))
     (testing "performers index by kind, var-callable"
-      (let [effects (routes/performers-from-namespaces ['slopp.web.routes-test] :http/effect)
-            reads   (routes/performers-from-namespaces ['slopp.web.routes-test] :http/read)]
+      (let [effects (routes/performers-from-namespaces ['slopp.http.routes-test] :http/effect)
+            reads   (routes/performers-from-namespaces ['slopp.http.routes-test] :http/read)]
         (is (var? (get effects :user/insert)))
         (is (= {:user/id "7"} ((get reads :user/by-id) {} "7")))))))
 
@@ -103,7 +103,7 @@
   ;; Carried on the row rather than re-read from var metadata per request, for
   ;; the same reason everything else here is derived once: a second reader of
   ;; the same metadata is free to disagree with the first.
-  (let [rows (routes/from-namespaces ['slopp.web.routes-test])
+  (let [rows (routes/from-namespaces ['slopp.http.routes-test])
         by   (into {} (map (juxt :path identity)) rows)]
     (testing "a typed endpoint's schemas reach the row"
       (is (= [:map [:name :string]] (:rest/request (by "/t/users"))))
@@ -134,9 +134,9 @@
   ;; implementations, and the suite is the only thing that makes the pair a pair.
   ;;
   ;; It lives HERE, on the server side, because `router/match` is exported only
-  ;; within `slopp.rules.*` — running the comparison from inside `slopp.web`
+  ;; within `slopp.rules.*` — running the comparison from inside `slopp.http`
   ;; needs no widening of that, and the module edge it does need is declared
-  ;; test-only so production code under `slopp.web` still may not cross.
+  ;; test-only so production code under `slopp.http` still may not cross.
   (let [patterns ["/" "/things" "/things/:id" "/things/:id/edit"
                   "/a/b/c" "/files/*path" "/:only"]
         paths    ["/" "/things" "/things/" "/things/42" "/things/42/edit"

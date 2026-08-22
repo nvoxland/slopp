@@ -1,11 +1,11 @@
-(ns slopp.web.contract
+(ns slopp.http.contract
   "Publishing the SHAPE of an app's own API, so something that is not this app
   can generate a typed client against it.
 
   This is what makes a client in a DIFFERENT codebase possible: the consumer
   reads a document instead of importing the producer's contracts namespace,
   and the two share no store. Everything here derives from VAR METADATA, like
-  `slopp.web.routes` next door — which is what lets it answer identically from
+  `slopp.http.routes` next door — which is what lets it answer identically from
   a live store, a jar and a native binary, and what lets it ship in the slim
   jar. Publishing a contract has to be something ANY slopp-web app can do; a
   version that only worked for an app whose code lives in a store would be the
@@ -15,7 +15,7 @@
   runtime — `^{:rest/response contracts/timeline}` is evaluated at def time, so
   a schema referenced by name inlines into every endpoint that uses it. Names
   are a source-level convenience the wire never had."
-  (:require [slopp.web.routes :as routes] [clojure.string :as str]))
+  (:require [slopp.http.routes :as routes] [clojure.string :as str]))
 
 (defn- undent
   "A docstring with its SOURCE INDENTATION removed, or nil.

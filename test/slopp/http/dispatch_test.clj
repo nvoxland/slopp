@@ -1,4 +1,4 @@
-(ns slopp.web.dispatch-test
+(ns slopp.http.dispatch-test
   "The request pipeline with no socket under it — `handle!` takes a request map
   and returns a response map, so everything between those two is checkable
   in-image: routing, auth policy, schema validation, effect interpretation, and
@@ -12,7 +12,7 @@
   does — including one that throws a bare exception leaking a filesystem path,
   because masking that is the thing being asserted."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.dispatch :as dispatch] [slopp.rest.contract :as rest.contract]))
+            [slopp.http.dispatch :as dispatch] [slopp.rest.contract :as rest.contract]))
 
 (deftest dispatch-runs-the-whole-pipeline-portlessly
   (let [performed (atom [])
@@ -169,7 +169,7 @@
   ;; :http/read-performers does, and that is not a style choice: it is what
   ;; keeps malli out of the http framework. An app serving HTML must not start
   ;; carrying a validation library because a DIFFERENT capability needs one, so
-  ;; `slopp.rest` requires malli and `slopp.web.*` still does not. The module
+  ;; `slopp.rest` requires malli and `slopp.http.*` still does not. The module
   ;; edge this test needs is declared TEST-ONLY for that reason.
   (let [ran (atom 0)
         row {:handler (fn [req] (swap! ran inc) {:status 200 :body {:got (:body req)}})

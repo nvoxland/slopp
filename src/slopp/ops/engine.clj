@@ -74,13 +74,13 @@
 
   **Per capability (part 3), and it follows USE rather than ENABLEMENT.** A
   store is handed the families it actually reaches for, so a command-line app
-  carries no `slopp/web/**` and inherits none of http's deps — a smaller tree
+  carries no `slopp/http/**` and inherits none of http's deps — a smaller tree
   and a smaller dependency surface, which is what this buys.
 
   It does NOT make the capability opt-in hold at runtime, and an earlier
   version of this docstring claimed it did. slopp-ui found the hole by tracing
   it against their own store: `used-families` keys off requires and entry
-  markers, so a store whose requires already exist still resolves `slopp.web`
+  markers, so a store whose requires already exist still resolves `slopp.http`
   with `http.enabled` false. Withholding a family from a store that neither
   requires nor marks it withholds it from the one store that was not going to
   require it.
@@ -98,7 +98,7 @@
 
   Conditions, each load-bearing in a different direction.
 
-  **USES but does not DEFINE.** slopp's own store CONTAINS `slopp.web.*`, and
+  **USES but does not DEFINE.** slopp's own store CONTAINS `slopp.http.*`, and
   `src` is the FIRST classpath entry — so vendoring there would shadow the code
   being edited with the last-shipped copy, and slopp would test its release
   instead of its working tree. Judged per family: a store may define one and
@@ -164,8 +164,8 @@
   "The dep map an image for `store` should carry: the store's own manifest plus
   what the vendored framework requires.
 
-  Vendoring hands over SOURCE, and source has requires. `slopp.web.css` needs
-  garden, `slopp.web.html` needs hiccup, the servers need cheshire and http-kit
+  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
+  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
   — all of which used to arrive transitively through the coord's pom, and all of
   which vanished with it. The files landed and then failed inside themselves.
 

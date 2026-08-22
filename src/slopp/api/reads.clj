@@ -4,16 +4,16 @@
   writes; rendering arbitrary store source through the escaper is a
   standing security exercise.
 
-  Lives in slopp.api.**, slopp's OWN webapp, and never in slopp.web.** —
-  slopp.web is the framework every user's app is built on and ships in the
+  Lives in slopp.api.**, slopp's OWN webapp, and never in slopp.http.** —
+  slopp.http is the framework every user's app is built on and ships in the
   slim jar, so an app page placed there would ride into every user's
-  application. The dependency runs slopp.api → slopp.web, never back.
+  application. The dependency runs slopp.api → slopp.http, never back.
 
   Pages hold hiccup and nothing else; the data they render is assembled by
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.web.contract :as web.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.http.contract :as http.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -87,7 +87,7 @@
   that list would invert the dependency (slopp.api.server already requires this
   namespace). It is data on the way in, like every other dep."
   [ctx _]
-  (web.contract/contract-document (:served-namespaces ctx)))
+  (http.contract/contract-document (:served-namespaces ctx)))
 
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the

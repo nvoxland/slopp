@@ -11,7 +11,7 @@
   its failure mode is a green suite over a blank page."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [slopp.cljnx :as cljnx] [slopp.cljnx.hiccup :as hiccup] [slopp.webapp :as webapp] [slopp.web :as slopp.web]))
+            [slopp.cljnx :as cljnx] [slopp.cljnx.hiccup :as hiccup] [slopp.webapp :as webapp] [slopp.http :as slopp.http]))
 
 (deftest a-block-never-glues-to-the-text-around-it
   ;; THE founding bug, and the reason a naive flatten is not merely uglier but
@@ -200,14 +200,14 @@
                          "declares neither :navigate nor :document")))))
 
 (deftest a-server-rendered-app-needs-no-page-declaration-at-all
-  ;; The case slopp.web is actually built for, and it must not be the awkward
+  ;; The case slopp.http is actually built for, and it must not be the awkward
   ;; one. A page mounted at a url, gone to directly — no SPA, no client router,
   ;; no state to speak of. The route table already exists, `dispatch/handle!`
   ;; is already callable in-process, and the browser should USE them rather
   ;; than ask an app to restate what the framework knows.
   ;;
-  ;; So the app's own ctx — the same map `slopp.web/serve!` runs on — becomes a
-  ;; driver through `slopp.web/driver`, and a visit is a REAL request through
+  ;; So the app's own ctx — the same map `slopp.http/serve!` runs on — becomes a
+  ;; driver through `slopp.http/driver`, and a visit is a REAL request through
   ;; the REAL pipeline. `:auth :public` is here because that pipeline is
   ;; default-deny and this fixture would otherwise 401: the browser inherits
   ;; every guarantee the served app has, which is the argument for driving
@@ -224,7 +224,7 @@
                 (fn [_] (page [:div [:h1 "About"]]))}
                {:method :get :path "/secret" :auth :authenticated :handler
                 (fn [_] (page [:div [:h1 "Secret"]]))}]}
-        b    (cljnx/open! (slopp.web/driver ctx))]
+        b    (cljnx/open! (slopp.http/driver ctx))]
     (testing "visiting a mounted path renders that page"
       (cljnx/visit! b "/")
       (is (= "<h1>Home</h1>\n<a href=\"/about\">About</a>"
@@ -759,11 +759,11 @@
       ;; ctx shape leaves rather than being tolerated beside the new one
       (let [m (msg #(cljnx/open! {:http/routes []}))]
         (is (some? m) "a ctx is no longer a page and must not be accepted as one")
-        (is (str/includes? m "slopp.web/driver")
+        (is (str/includes? m "slopp.http/driver")
             "the refusal has to carry the migration; the author typo'd nothing"))
       (is (str/includes? (msg #(cljnx/open! {:http/routes [] :state (atom {})
                                                   :view (fn [_] [:div])}))
-                         "slopp.web/driver")
+                         "slopp.http/driver")
           "an app that is BOTH still enters through its capability's driver,
            which carries the page half through"))))
 
@@ -776,7 +776,7 @@
                (fn [req] {:status 200
                           :body [:div [:h1 "Search"]
                                  [:p (or (:query-string req) "none")]]})}]}
-        b   (cljnx/open! (slopp.web/driver ctx))]
+        b   (cljnx/open! (slopp.http/driver ctx))]
     (testing "query params reach the handler as :query-string, not a 404"
       (cljnx/visit! b "/search?q=web")
       (let [s (cljnx/of (cljnx/tree b))]
@@ -1298,8 +1298,8 @@
   ;; ONE producer adds the prefix and ONE consumer takes it off.
   ;;
   ;; It lives here rather than beside `slopp.webapp` because `click!` is
-  ;; package-private to `slopp.web.*`, and the module edge this needs is already
-  ;; declared test-only — production code under `slopp.web` still may not reach
+  ;; package-private to `slopp.http.*`, and the module edge this needs is already
+  ;; declared test-only — production code under `slopp.http` still may not reach
   ;; `webapp`.
   (let [state  (atom {})
         things (fn [_s] [:main
@@ -1469,7 +1469,7 @@
 
 (deftest the-fake-browser-drives-ONE-contract-and-knows-no-app-type
   ;; D-cljnx, wave 1. The driving contract is now neutral: `:document` is how a
-  ;; path becomes a screen, wherever the screen came from. `slopp.web/driver`
+  ;; path becomes a screen, wherever the screen came from. `slopp.http/driver`
   ;; produces it from a served ctx, `slopp.webapp/driver` from a browser app's
   ;; wiring, and this namespace knows about neither — which is what lets it
   ;; leave http's family and become `cljnx`.
@@ -1498,7 +1498,7 @@
       ;; no compatibility shim: a ctx is no longer a shape this namespace
       ;; knows, and a silent acceptance would put http's adapter back
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"slopp\.web/driver"
+           clojure.lang.ExceptionInfo #"slopp\.http/driver"
            (cljnx/open! {:http/routes [{:method :get :path "/x"}]}))))
 
     (testing "and an app that declares NEITHER a view nor a document refuses"

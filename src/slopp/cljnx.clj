@@ -25,7 +25,7 @@
   The only structure it asks of an app is `:data-region` on its panes, which is
   markup an app already writes to address them.
 
-  It sits beside `slopp.web.html` on purpose, and the pairing is where the name
+  It sits beside `slopp.http.html` on purpose, and the pairing is where the name
   comes from: one renders hiccup for a BROWSER, this renders it for a READER.
 
   **Deliberately not `browser`**, which was the first instinct and is the one
@@ -152,7 +152,7 @@
   ([hiccup] (of hiccup nil))
   ([hiccup opts] (str/join "\n" (lines hiccup opts))))
 
-^{:unsafe "resolves slopp.webapp/slopp.web by NAME, and a static require is
+^{:unsafe "resolves slopp.webapp/slopp.http by NAME, and a static require is
   impossible here rather than merely inconvenient: this namespace ships to
   EVERY store through capabilities/shipping-common, while the two it derives
   from are vendored per FAMILY. A store using http is handed no slopp.webapp
@@ -170,7 +170,7 @@
   | the entry returned | derived by |
   |---|---|
   | a webapp DECLARATION (`:webapp/routes`) | `slopp.webapp/driver` over its wiring |
-  | a served CTX (`:http/routes`) | `slopp.web/driver` |
+  | a served CTX (`:http/routes`) | `slopp.http/driver` |
   | the contract already | itself |
 
   **There is exactly one of these, and it is public, because two would drift.**
@@ -204,7 +204,7 @@
       ((requiring-resolve 'slopp.webapp/driver) wire))
 
     (:http/routes entry)
-    ((requiring-resolve 'slopp.web/driver) entry)
+    ((requiring-resolve 'slopp.http/driver) entry)
 
     ;; already the contract — :view or :document is what produces a screen, and
     ;; open! judges the rest
@@ -235,7 +235,7 @@
   `:document` over a path, or both — and nothing else here is required.
 
   **Neither half of the contract is produced by hand.** A served app becomes
-  one through `slopp.web/driver`, which performs a real request down the real
+  one through `slopp.http/driver`, which performs a real request down the real
   pipeline; a browser app becomes one through `slopp.webapp/driver`, which runs
   the app's own client loop. Two producers, one contract, and this namespace
   depends on neither — which is what lets it be vendored to every store rather
@@ -290,7 +290,7 @@
   ;; this used to take, and the answer is one call away
   (when (:http/routes app)
     (throw (ex-info (str "this is a served CONTEXT, not a page — wrap it:"
-                         " (open! (slopp.web/driver ctx)). The fake browser no"
+                         " (open! (slopp.http/driver ctx)). The fake browser no"
                          " longer performs http's requests itself, so that the"
                          " same contract can be produced from a browser app's"
                          " wiring by slopp.webapp/driver.")
@@ -374,7 +374,7 @@
     function, deliberately not a router: which screen, which params, what to
     fetch, whether anything loads at all is the app's business. The path
     arrives VERBATIM, query string included.
-  - **`:http/routes`** — a real request through `slopp.web.dispatch/handle!`:
+  - **`:http/routes`** — a real request through `slopp.http.dispatch/handle!`:
     routing, auth policy, declared reads, the handler, effects. The url is
     split the way a browser sends it — `:uri` never carries the `?`, the
     query string arrives as `:query-string`, and a `#fragment` never reaches
@@ -446,7 +446,7 @@
       :else
       (throw (ex-info (str "this app declares neither :navigate nor :document,"
                            " so it has no urls — cannot visit " (pr-str path)
-                           ". A served app gets both from slopp.web/driver and"
+                           ". A served app gets both from slopp.http/driver and"
                            " a browser app from slopp.webapp/driver; a page"
                            " wired by hand adds :navigate (fn [state path]"
                            " state') or :document (fn [path] hiccup)")

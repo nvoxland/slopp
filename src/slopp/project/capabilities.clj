@@ -81,7 +81,7 @@
     :ns-prefix "slopp.cli" :entry-markers [:cli/command]
     :doc "a command-line shell: argument parsing, an injected stdin/stdout/stderr, and exit codes. Without it an app's main runs with no argument or stream support at all"}
    {:capability "http" :requires []
-    :ns-prefix "slopp.web" :entry-markers [:app/entry :http/path]
+    :ns-prefix "slopp.http" :entry-markers [:app/entry :http/path]
     :doc "an HTTP server: routing, static mounts, identity and authorization. Present in every store, inert until http.enabled"}
    {:capability "rest" :requires ["http"]
     :ns-prefix "slopp.rest" :entry-markers [:rest/request :rest/response]
@@ -150,7 +150,7 @@
 
   **Why a vocabulary and not a convention.** The registry was 74% one app type
   under names that did not say so — `auth.*` and `groups.*` read as generic
-  project settings while every reader of them was `slopp.web.auth` or a `web-`
+  project settings while every reader of them was `slopp.http.auth` or a `web-`
   write gate. R6 says support for an app TYPE lives under that type's name and
   the pattern must be replicable for type #2 without renaming type #1. That
   only holds if a key OUTSIDE the declared owners is refused, which is what
@@ -207,7 +207,7 @@
    {:key "http.host" :type [:string] :default "127.0.0.1"
     :doc "Bind address. Localhost by default; widen deliberately."}
    {:key "http.port" :type [:int {:min 1 :max 65535}] :default nil
-    :doc "Port the app's HTTP server binds. Unset = 8080 in production (slopp.web/serve! defaults it, so declaring 8080 here would only resolve \"unset\" a layer too early) and DERIVED from the store dir for the dev server, which is what keeps two projects on one machine from colliding. Set it to pin one address for both."}
+    :doc "Port the app's HTTP server binds. Unset = 8080 in production (slopp.http/serve! defaults it, so declaring 8080 here would only resolve \"unset\" a layer too early) and DERIVED from the store dir for the dev server, which is what keeps two projects on one machine from colliding. Set it to pin one address for both."}
    {:key "http.max-body-bytes" :type [:int {:min 1}] :default 1048576
     :doc "Largest accepted request body, bytes."}
 
@@ -469,7 +469,7 @@
   - `slopp.cljnx` and its two halves — the fake browser. The skill tells every
     author to open a screen with it, and `edit.webapp/webapp-page-unreachable`
     refuses a page it could not open, naming it. **It shipped by COINCIDENCE OF
-    NAMING until D-cljnx**: as `slopp.web.screen` it sat under http's
+    NAMING until D-cljnx**: as `slopp.http.screen` it sat under http's
     `:ns-prefix`, so the vendor glob covered it — and covered it only for
     stores that use http, while a `cli` store driving no screens is not the
     population that mattered. Being named here is the first time its shipping
@@ -499,7 +499,7 @@
   THE derivation three readers consume: the vendor glob in `build.clj`, the
   injection predicate in `slopp.ops.engine`, and the leak guard that says a
   framework namespace may not reach back into slopp. Each of those hardcoded
-  `slopp.web` before, and each was correct for one app type while being blind
+  `slopp.http` before, and each was correct for one app type while being blind
   to a second — the guard in particular went GREEN when a namespace left the
   family, because its population is derived by prefix and a departing member
   simply stops being in it.

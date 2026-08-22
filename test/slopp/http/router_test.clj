@@ -1,16 +1,16 @@
-(ns slopp.web.router-test
-  "`slopp.web.router` matching a request to a declared route: method, path
+(ns slopp.http.router-test
+  "`slopp.http.router` matching a request to a declared route: method, path
   segments, params, and the catch-all that takes a nested remainder.
 
   Layer 0 and store-blind, which is the constraint worth stating — this is the
   framework a USER's app runs on, and it knows nothing about stores. So the
   fixtures are plain route data rather than anything derived from a store, and
   they have to be: `slopp.modules-test/no-shipped-framework-family-reaches-back-into-slopp`
-  holds the whole `slopp.web.*` subtree at layer 0, and a test reaching for a
+  holds the whole `slopp.http.*` subtree at layer 0, and a test reaching for a
   store here would be the first crack in the property that lets this ship as a
   slim jar."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.web.router :as router]))
+            [slopp.http.router :as router]))
 
 (deftest routes-match-methods-paths-and-params
   (let [routes [{:method :get :path "/api/users/:id" :handler 'a/get-user}

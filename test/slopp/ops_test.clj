@@ -541,16 +541,16 @@
   (let [sess (external/open!)]
     (try
       (testing "a name slopp itself owns is created, and SAYS it will shadow"
-        ;; `slopp.web.html` rather than the `slopp.review.views` of the incident:
+        ;; `slopp.http.html` rather than the `slopp.review.views` of the incident:
         ;; that namespace does not exist here any more — the reviewer UI moved
         ;; out — and a fixture naming a namespace slopp no longer owns asserts
         ;; nothing while still passing today, because the CHECK is classpath
         ;; ownership. Pick one that is load-bearing and going nowhere.
-        (let [r (ops/create-ns! sess 'slopp.web.html :source "(ns slopp.web.html)\n")
+        (let [r (ops/create-ns! sess 'slopp.http.html :source "(ns slopp.http.html)\n")
               w (first (filter #(= :shadows-classpath-ns (:kind %)) (:warnings r)))]
           (is (nil? (:error r)) "overriding is legitimate — it must still be possible")
           (is (some? w) (pr-str r))
-          (is (re-find #"slopp\.web\.html" (str (:message w)))
+          (is (re-find #"slopp\.http\.html" (str (:message w)))
               "name it: the agent chose the name and has to know which one bites")
           (is (re-find #"(?i)shadow" (str (:message w))))))
       (testing "a dependency's namespace warns for the same reason"
@@ -611,7 +611,7 @@
   ;;
   ;; **Part 3 (capabilities): the files are keyed BY CAPABILITY and a store is
   ;; given only the families it USES.** What that buys is the payload: a
-  ;; command-line app carries no `slopp/web/**` and inherits none of http's
+  ;; command-line app carries no `slopp/http/**` and inherits none of http's
   ;; deps. What it deliberately does NOT buy is enforcement of the opt-in —
   ;; `used-families` reads requires and entry markers, not `*.enabled`, so a
   ;; store whose requires outlive its config still loads the framework. That is
@@ -620,7 +620,7 @@
   ;;
   ;; The two CONDITIONS survive, each load-bearing in a different direction:
   ;;
-  ;;   USES but does not DEFINE. slopp's own store CONTAINS slopp.web.*, so
+  ;;   USES but does not DEFINE. slopp's own store CONTAINS slopp.http.*, so
   ;;   vendoring into it would put a second copy on the classpath ahead of the
   ;;   materialized one — `src` is the FIRST entry, so the copy would win and
   ;;   slopp would test its shipped framework instead of the code being edited.
@@ -630,14 +630,14 @@
   ;;   boot for nothing.
   (let [uses  (-> (store/empty-store)
                   (store/ingest 'app.web
-                                (str "(ns app.web (:require [slopp.web :as web]))\n"
+                                (str "(ns app.web (:require [slopp.http :as web]))\n"
                                      "(defn handler \"H.\" [req] (web/handle! req))\n")))
         plain (-> (store/empty-store)
                   (store/ingest 'app.core "(ns app.core)\n(defn f [x] x)\n"))
         defines (-> (store/empty-store)
-                    (store/ingest 'slopp.web "(ns slopp.web)\n(defn handle! [r] r)\n")
+                    (store/ingest 'slopp.http "(ns slopp.http)\n(defn handle! [r] r)\n")
                     (store/ingest 'app.web
-                                  (str "(ns app.web (:require [slopp.web :as web]))\n"
+                                  (str "(ns app.web (:require [slopp.http :as web]))\n"
                                        "(defn g \"G.\" [r] (web/handle! r))\n")))
         ;; a CLI app as slopp actually generates one: commands and nothing
         ;; else. It never requires slopp.cli, because slopp writes the launcher.
@@ -646,11 +646,11 @@
                                   (str "(ns app.cmds)\n"
                                        "(defn ^{:cli/command \"add\" :cli/args [:catn]} add \"A.\" [ctx args] args)\n")))
         files {"_"    {"slopp/lang.cljc" "(ns slopp.lang)"}
-               "http" {"slopp/web.clj" "(ns slopp.web)"}
+               "http" {"slopp/http.clj" "(ns slopp.http)"}
                "cli"  {"slopp/cli.clj" "(ns slopp.cli)"}}]
     (testing "a store that USES a family is given THAT family and the syntax"
       (let [got (engine/framework-injection uses files)]
-        (is (contains? got "slopp/web.clj") (pr-str (keys got)))
+        (is (contains? got "slopp/http.clj") (pr-str (keys got)))
         (is (contains? got "slopp/lang.cljc") "the dialect's own helpers always ride")
         (is (not (contains? got "slopp/cli.clj"))
             (str "a web app must not be handed cli — vendoring everything makes"
@@ -662,7 +662,7 @@
       ;; uses-not-merely-requires condition already had this door.
       (let [got (engine/framework-injection cli-app files)]
         (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
-        (is (not (contains? got "slopp/web.clj")) (pr-str (keys got)))))
+        (is (not (contains? got "slopp/http.clj")) (pr-str (keys got)))))
     (testing "a store with no framework code at all gets nothing"
       (is (nil? (engine/framework-injection plain files))))
     (testing "and a store that DEFINES a family gets none of THAT family —
@@ -694,8 +694,8 @@
   ;; in a config file.
   (let [files '{"_"    {"slopp/fixture_syntax.cljc" "(ns slopp.fixture-syntax)\n"}
                 "cli"  {"slopp/cli.clj" "(ns slopp.cli)\n"}
-                "http" {"slopp/web.clj" "(ns slopp.web)\n(defn handle! \"H.\" [r] r)\n"
-                        "slopp/web/router.clj" "(ns slopp.web.router)\n"}}
+                "http" {"slopp/http.clj" "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"
+                        "slopp/http/router.clj" "(ns slopp.http.router)\n"}}
         ;; the "_" path is deliberately NOT slopp/lang.cljc, which is what
         ;; production files there. Vendoring writes into `src`, and `src` is the
         ;; FIRST classpath entry of the image running this test — so a stub at a
@@ -719,7 +719,7 @@
           ;; version of this test did, and never noticed, because its vendoring
           ;; assertions sat behind a branch that never ran.
           (swap! sess update :store store/ingest 'fw.app
-                 (str "(ns fw.app (:require [slopp.web :as web]))\n\n"
+                 (str "(ns fw.app (:require [slopp.http :as web]))\n\n"
                       "(defn ^:export handler \"H.\" [req] (web/handle! req))\n"))
           (is (= #{"http"} (engine/used-families (:store @sess)))
               "guard the guard: this store must USE http and nothing else, or
@@ -728,10 +728,10 @@
           (let [d  (edn/read-string (slurp (io/file dir "deps.edn")))
                 at #(io/file dir "src" %)]
             (testing "the framework is IN the tree, so the app needs no repository"
-              (is (.exists (at "slopp/web.clj")) (str "expected " (at "slopp/web.clj")))
-              (is (str/includes? (slurp (at "slopp/web.clj")) "(ns slopp.web")
+              (is (.exists (at "slopp/http.clj")) (str "expected " (at "slopp/http.clj")))
+              (is (str/includes? (slurp (at "slopp/http.clj")) "(ns slopp.http")
                   "the vendored file must be the real source, not a stub")
-              (is (.exists (at "slopp/web/router.clj"))
+              (is (.exists (at "slopp/http/router.clj"))
                   "the whole family travels, not just the facade")
               (is (.exists (at "slopp/fixture_syntax.cljc"))
                   "and \"_\" with it — the dialect's helpers belong to the syntax
@@ -771,7 +771,7 @@
   ;; (2) Vendoring copies SOURCE and discards the pom. The framework's own
   ;; requires — garden, hiccup, cheshire, http-kit — came from that pom, so the
   ;; files landed correctly and then failed INSIDE them. Reported from slopp-ui:
-  ;; "Could not locate garden/core.clj", raised at slopp.web.css.
+  ;; "Could not locate garden/core.clj", raised at slopp.http.css.
   ;;
   ;; Both stayed invisible because a store still declaring the coord got source
   ;; AND deps from ~/.m2 regardless.
@@ -782,13 +782,13 @@
   ;; moment their store was unloadable. Where a file comes from is not whether
   ;; the framework works. An earlier cut of this test used a dependency-free
   ;; fake and passed green against exactly bug (2).
-  (let [fake-web (str "(ns slopp.web (:require [garden.core :as garden]))\n"
+  (let [fake-web (str "(ns slopp.http (:require [garden.core :as garden]))\n"
                       "(defn handle! \"H.\" [r] (garden/css [:a {:x 1}]) r)\n")]
-    (with-redefs [boot/framework-files (constantly {"http" {"slopp/web.clj" fake-web}})
+    (with-redefs [boot/framework-files (constantly {"http" {"slopp/http.clj" fake-web}})
                   boot/framework-deps  (constantly '{"http" {garden/garden {:mvn/version "1.3.10"}}})]
       (let [sess (external/open!)
             vendored? (fn [] (.exists (io/file (:dir (:image @sess))
-                                               "src" "slopp" "web.clj")))]
+                                               "src" "slopp" "http.clj")))]
         (try
           ;; into the store VALUE: a store cannot ingest code requiring a
           ;; framework its current image cannot load, and priming a RUNNING
@@ -796,7 +796,7 @@
           ;; that did not exist at launch. Which is also why vendoring has to
           ;; precede process start.
           (swap! sess update :store store/ingest 'fw.app
-                 (str "(ns fw.app (:require [slopp.web :as web]))\n"
+                 (str "(ns fw.app (:require [slopp.http :as web]))\n"
                       "(defn h \"H.\" [r] (web/handle! r))\n"))
           (testing "the store really does use the framework"
             (is (some? (engine/framework-injection
@@ -832,13 +832,13 @@
   ;; trades a restart bug for a subtler one, so this asserts both. That pairing
   ;; is the actual claim the one-door change makes.
   (with-redefs [boot/framework-files
-                (constantly {"http" {"slopp/web.clj"
-                                     "(ns slopp.web)\n(defn handle! \"H.\" [r] r)\n"}})
+                (constantly {"http" {"slopp/http.clj"
+                                     "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"}})
                 boot/framework-deps (constantly nil)]
     (let [sess (external/open! {:slopp.ops/warm-spare? true})]
       (try
         (swap! sess update :store store/ingest 'sp.app
-               (str "(ns sp.app (:require [slopp.web :as web]))\n"
+               (str "(ns sp.app (:require [slopp.http :as web]))\n"
                     "(defn h \"H.\" [r] (web/handle! r))\n"))
         ;; First restart warms a spare from a store that NOW needs the framework.
         ;; The spare standing at open was warmed from an empty store and must be
@@ -1254,7 +1254,7 @@
                                 :when (and (.isFile x) (.endsWith (.getName x) ".clj"))]
                             [(str (subs top 0 (- (count top) 4)) "/" (subs (.getPath x) n))
                              (slurp x)]))))
-        http-fs (subtree "slopp/web.clj" "web")
+        http-fs (subtree "slopp/http.clj" "http")
         rest-fs (subtree "slopp/rest.clj" "rest")
         common  {"slopp/lang.cljc"  (src-of "slopp/lang.cljc")
                  "slopp/cache.clj"  (src-of "slopp/cache.clj")}
@@ -1268,7 +1268,7 @@
     ;; guard the guard: an empty family vendors nothing and every assertion
     ;; below would pass or fail for the wrong reason
     (is (contains? rest-fs "slopp/rest/contract.clj") (pr-str (keys rest-fs)))
-    (is (contains? http-fs "slopp/web/dispatch.clj") (pr-str (keys http-fs)))
+    (is (contains? http-fs "slopp/http/dispatch.clj") (pr-str (keys http-fs)))
     (is (every? some? (vals common)))
 
     (with-redefs [boot/framework-files (constantly files)
@@ -1278,9 +1278,10 @@
                                                  (make-array FileAttribute 0)))
             ;; the probe an author would write: assemble the app's own context,
             ;; attach the boundary, and call an endpoint with a bad body
-            probe (str "(require 'slopp.web 'slopp.rest 'shop.api)\n"
+            probe (str "(require 'slopp.http 'slopp.rest 'shop.api)\n"
                        "(let [ctx (slopp.rest/validating\n"
-                       "            (slopp.web/context {:http/namespaces '[shop.api]}))\n"
+                       "            (slopp.http/context {:http/namespaces '[shop.api]}))
+"
                        "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
                        "                                :body {:sku 42}})]\n"
                        "  (println :STATUS (:status r)))")]
@@ -1364,12 +1365,12 @@
   ;;
   ;; (3) The vendor boundary holds AT RUNTIME. Two families are declared and one
   ;; is USED, so a store that reaches for neither the namespaces nor the markers
-  ;; of `http` must not end up able to load `slopp.web`.
+  ;; of `http` must not end up able to load `slopp.http`.
   ;;
   ;; Note what this does and does not claim, because the first version of the
   ;; docstring next door got it wrong and slopp-ui traced it: vendoring follows
   ;; USE, not enablement. It does not stop a store whose requires already name
-  ;; `slopp.web` from loading it with `http.enabled` false — and it must not,
+  ;; `slopp.http` from loading it with `http.enabled` false — and it must not,
   ;; since that store is one mid-migration and withholding the framework would
   ;; turn a diagnosable config error into a store that cannot boot to be fixed.
   ;; What is asserted here is narrower and is the part that pays: an app gets
@@ -1377,7 +1378,7 @@
   (let [src-of (fn [p] (some-> (io/resource p) slurp))
         files  {"cli"  {"slopp/cli.clj"      (src-of "slopp/cli.clj")
                         "slopp/cli/spec.clj" (src-of "slopp/cli/spec.clj")}
-                "http" {"slopp/web.clj" "(ns slopp.web)\n(defn handle! \"H.\" [r] r)\n"}}]
+                "http" {"slopp/http.clj" "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"}}]
     ;; guard the guard: nil source vendors an empty family, and every assertion
     ;; below would then be about a tree with no framework in it
     (is (every? some? (vals (get files "cli")))
@@ -1410,7 +1411,7 @@
           (testing "the cli family is IN the tree and the http family is NOT"
             (is (.exists (io/file dir "src" "slopp" "cli" "spec.clj")))
             (is (not (.exists (io/file dir "src" "slopp" "web.clj")))
-                "vendoring every family would make (require 'slopp.web) succeed
+                "vendoring every family would make (require 'slopp.http) succeed
                  in a project that never enabled http"))
 
           (testing "and only the used family's deps are declared"
@@ -1458,7 +1459,7 @@
 
           (testing "and the vendor boundary holds at RUNTIME, not just on disk"
             (let [r (clojure.java.shell/sh
-                     "clojure" "-M" "-e" "(require 'slopp.web)" :dir dir)]
+                     "clojure" "-M" "-e" "(require 'slopp.http)" :dir dir)]
               (is (not (zero? (:exit r)))
                   (str "a store that never enabled http must not be able to load"
                        " the http framework: " (:out r) (:err r)))))
@@ -1513,8 +1514,8 @@
   (with-redefs [boot/framework-files
                 (constantly
                  {"http"
-                  {"slopp/web/css.clj"
-                   (str "(ns slopp.web.css (:require [garden.core :as garden]))\n"
+                  {"slopp/http/css.clj"
+                   (str "(ns slopp.http.css (:require [garden.core :as garden]))\n"
                         "(defn css-response \"C.\" [rules]\n"
                         "  {:status 200 :body (garden/css rules)})\n")}})
                 boot/framework-deps
@@ -1529,12 +1530,12 @@
         ;; store, which is what is under test here.
         (swap! sess update :store store/ingest 'runs.app
                (str "(ns runs.app\n"
-                    "  (:require [slopp.web.css :as css]))\n\n"
+                    "  (:require [slopp.http.css :as css]))\n\n"
                     "(defn ^:export stylesheet \"S.\" []\n"
                     "  (css/css-response [[:body {:color \"red\"}]]))\n"))
         (is (nil? (:error (external/build! sess dir))))
         (testing "the framework source is IN the tree"
-          (is (.exists (io/file dir "src" "slopp" "web" "css.clj"))))
+          (is (.exists (io/file dir "src" "slopp" "http" "css.clj"))))
         (testing "and what the framework itself requires is declared, or the
                   tree carries source it cannot load"
           (is (contains? (:deps (edn/read-string (slurp (io/file dir "deps.edn"))))

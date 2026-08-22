@@ -1,4 +1,4 @@
-(ns slopp.web.dispatch
+(ns slopp.http.dispatch
   "The request pipeline, and **the order IS the guarantee**: identity →
   route → policy → declared reads → handler → effects. A handler is
   unreachable un-authorized, and it cannot be reached by any other path,
@@ -27,7 +27,7 @@
   Query parsing happens once, here, so no app writes its own splitter — and a
   declared read addresses `[:query-params :view]` exactly as it addresses
   `[:path-params :id]`."
-  (:require [slopp.web.router :as router] [slopp.web.auth :as auth] [clojure.string :as str] [slopp.lang :as lang]))
+  (:require [slopp.http.router :as router] [slopp.http.auth :as auth] [clojure.string :as str] [slopp.lang :as lang]))
 
 (defn authorized?
   "Does `identity` ({:http/sub … :http/groups #{…}} or nil) satisfy `policy`?
@@ -78,7 +78,7 @@
   serving HTML declares neither, supplies neither, and takes exactly the path it
   always did. The validator arrives as a FUNCTION rather than being called by
   name, which is what keeps malli out of this framework — `slopp.rest` requires
-  it and `slopp.web.*` does not, so an app is never made to carry a validation
+  it and `slopp.http.*` does not, so an app is never made to carry a validation
   library because a capability it did not enable needs one.
 
   **Every carrier, not just the body.** `:rest/request` describes what the caller
@@ -193,7 +193,7 @@
             ;; governs an unexpected exception two branches down.
             check (fn [r] (if-let [err (response-violation ctx row r)]
                             (do (.println System/err
-                                          (str "slopp.web: response contract violated at "
+                                          (str "slopp.http: response contract violated at "
                                                (:method row) " " (:path row) " — " err))
                                 {:status 500 :body {:error "internal server error"}})
                             r))
@@ -235,7 +235,7 @@
                          ;; anything else is unexpected — log the detail,
                          ;; return nothing that discloses internals
                          (do (.println System/err
-                                       (str "slopp.web: unhandled "
+                                       (str "slopp.http: unhandled "
                                             (.getName (class e)) " — "
                                             (ex-message e)))
                              {:status 500 :body {:error "internal server error"}})))))]

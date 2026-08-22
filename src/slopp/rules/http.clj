@@ -1,7 +1,7 @@
 (ns slopp.rules.http
   "What the store can SAY about its own web surface, derived from the forms.
 
-  `slopp.web` is the framework an app runs on and knows nothing about stores.
+  `slopp.http` is the framework an app runs on and knows nothing about stores.
   This is the other direction: reading a store's `:web/*` metadata as data, so
   the route table, the read/effect vocabularies and the rendered link inventory
   are answerable without starting a server. The web write gates and
@@ -20,7 +20,7 @@
   keep those apart, and each distinction was added because collapsing it made a
   report state something false. Prefer adding a category over widening one."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.web.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.http.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs] [slopp.rules.webapp :as rules.webapp]))
 
 (defn endpoints
   "Every declared endpoint in the store — a `:http/path` form's route row:
@@ -202,7 +202,7 @@
   next door assembles into a context that throws `:http/missing-performers`,
   and the list is the only place that could have been wrong.
 
-  Store-side on purpose. `slopp.web` requires nothing but `slopp.web.*` and
+  Store-side on purpose. `slopp.http` requires nothing but `slopp.http.*` and
   must stay that way — it is what gets vendored into an app. So this is
   computed HERE and handed to the framework as data: directly by the dev
   server, and baked into the main `build!` emits."
@@ -258,7 +258,7 @@
   answer the same port. They have diverged before — a mount prefix written
   `public/` asks for `public//app.css`, which a filesystem normalises away and
   a manifest lookup does not — so both are held to one suite,
-  `slopp.web-test/reader-contract`. This existed as an anonymous fn inside
+  `slopp.http-test/reader-contract`. This existed as an anonymous fn inside
   `start-server!` and was therefore reachable only by booting a session and
   binding a port, which is why it had never been tested at all."
   [get-store get-blob]

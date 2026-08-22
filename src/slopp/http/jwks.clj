@@ -1,8 +1,8 @@
-(ns slopp.web.jwks
+(ns slopp.http.jwks
   "The OIDC key-fetch ADAPTER: the two HTTP GETs that turn an issuer URL into
   its JWK set.
 
-  It exists as its own namespace because `slopp.web.auth` is otherwise POLICY
+  It exists as its own namespace because `slopp.http.auth` is otherwise POLICY
   and should be able to say so. Everything there takes what it needs as data —
   `verify-jwt` receives `:jwks`, `now` and `getenv` arrive as injected seams,
   the tests pass static keys — and this one form left the process, while the
@@ -16,7 +16,7 @@
   key set it was given rather than one it fetched. That is why the split costs
   nothing at the call sites — the boundary was already in the right place, only
   the filing was wrong."
-  (:require [cheshire.core :as json] [slopp.web.client :as web.client]))
+  (:require [cheshire.core :as json] [slopp.http.client :as http.client]))
 
 (defn ^:export fetch-jwks!
   "Fetch the issuer's signing keys: GET
@@ -26,7 +26,7 @@
   static keys instead. Throws on network/parse failure — a misconfigured
   issuer should fail loudly at startup, not 401 mysteriously forever.
 
-  `requester` is the transport — [[slopp.web.client/request]] by default. What
+  `requester` is the transport — [[slopp.http.client/request]] by default. What
   is worth testing here is the TWO HOPS: that the second url is read out of the
   first document rather than guessed. That is logic, it needs no socket, and it
   used to need one anyway.
@@ -37,7 +37,7 @@
   failing as \"URI with undefined scheme\", three layers from the mistake and
   naming neither the issuer nor the 404. \"Fail loudly at startup\" was already
   the stated intent; this is the first version that does it."
-  ([issuer] (fetch-jwks! issuer web.client/request))
+  ([issuer] (fetch-jwks! issuer http.client/request))
   ([issuer requester]
    (let [GET   (fn [url]
                  (let [{:http/keys [status body]}

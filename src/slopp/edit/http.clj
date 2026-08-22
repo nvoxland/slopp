@@ -3,7 +3,7 @@
   auth policy, route collisions, the effect and context vocabulary, endpoint
   contracts, and the generated-client surface.
 
-  **Store-analysis of `:web/*` metadata — NOT the framework.** `slopp.web` is
+  **Store-analysis of `:web/*` metadata — NOT the framework.** `slopp.http` is
   what a user's app runs on, knows nothing about stores, and sits at layer 0;
   this reads a candidate store to decide whether a write may land, at write
   time. They are opposite directions and must not share a prefix.
@@ -11,7 +11,7 @@
   It lives under `slopp.edit` rather than in a module of its own for a
   mechanical reason: `module-of` is the first TWO segments, so a namespace's
   module fixes its layer, and these gates run inside the write pipeline. The
-  same fact is why the web TOOLING could not stay under `slopp.web` either.
+  same fact is why the web TOOLING could not stay under `slopp.http` either.
 
   `slopp.rules.http` is the other consumer of these primitives —
   `web-endpoint-rows`, `web-performers`, `web-context-builders` — and that
@@ -318,7 +318,7 @@
 
   Scoped to `:http/path` ENDPOINTS, not to every form naming the keyword: the
   framework's own dispatcher assigns `:http/deps` onto the request, and gating
-  that would refuse writes to slopp's `slopp.web.dispatch/handle!`.
+  that would refuse writes to slopp's `slopp.http.dispatch/handle!`.
 
   **The teaching is three clauses and stops** — what, the consequence, and the
   fix as a LITERAL FORM. A cold read (slopp-ui, hitting this unprepared and

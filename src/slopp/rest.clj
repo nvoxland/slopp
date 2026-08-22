@@ -19,11 +19,11 @@
   MEANS (`slopp.rest.contract`, argv's counterpart) under a shell that performs
   it. An author who has met one should recognise the other.
 
-  Neighbours: `slopp.web` serves; `slopp.web.contract` publishes the document a
+  Neighbours: `slopp.http` serves; `slopp.http.contract` publishes the document a
   consumer generates a client from; this enforces the same schemas at runtime,
   so the published promise and the served behaviour cannot disagree."
   (:require [slopp.rest.contract :as rest.contract]
-            [slopp.web.dispatch :as dispatch]
+            [slopp.http.dispatch :as dispatch]
             [cheshire.core :as json] [clojure.string :as str]))
 
 (defn ^:export validating
@@ -31,7 +31,7 @@
   declared contract into an enforced one.
 
   Written as a function OVER a context rather than an option to
-  `slopp.web/context` on purpose. The dispatcher must not know this namespace
+  `slopp.http/context` on purpose. The dispatcher must not know this namespace
   exists: it looks for `:rest/decode-request` and `:rest/check-response` and
   calls whatever it finds, the same way it treats `:http/read-performers`. That
   is what keeps malli here and out of the http framework, so an app serving
@@ -57,7 +57,7 @@
   thing that makes the answer true.
 
   **The e2e loop without the e2e cost**, and the framework has been owing it to
-  authors rather than paying it. `slopp.web.client/fake-requester` says in its
+  authors rather than paying it. `slopp.http.client/fake-requester` says in its
   own docstring that it does not model the server's parsing and sends you to a
   real server; `dispatch/handle!`'s teach marker told you to round-trip through
   JSON by hand. Both were correct advice about a gap. This closes it: no

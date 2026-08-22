@@ -240,7 +240,7 @@
   A SIBLING copy lives inside `slopp.webdev.screen/drive-code`'s generated
   source, and the two cannot be one. That code is evaluated in a USER's
   verification image, where the only slopp on the classpath is the vendored
-  `slopp.web.*` — nothing here is reachable. A duplicate with a reason is
+  `slopp.http.*` — nothing here is reachable. A duplicate with a reason is
   better than a false dependency, and this is the reason."
   [^Throwable e]
   (str/join " <- " (take 4 (map #(let [m (ex-message %)]

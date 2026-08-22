@@ -1,4 +1,4 @@
-(ns slopp.web.routes
+(ns slopp.http.routes
   "Where an app's shape comes from: **var metadata, read off the loaded
   namespaces.** A public var carrying `:http/path` IS a route; a var carrying
   `:http/read` or `:http/effect` IS an entry in a performer vocabulary. There is
@@ -13,7 +13,7 @@
 
   One consequence worth stating plainly, since it is silent: **a namespace
   that isn't loaded contributes nothing.** Not an error — nothing. That is why
-  `slopp.web/context` checks the assembled result against what the routes
+  `slopp.http/context` checks the assembled result against what the routes
   declare rather than trusting the namespace list it was handed.
 
   `client-route-rows` is the one place this namespace generates rather than reads, and

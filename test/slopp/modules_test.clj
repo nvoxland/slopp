@@ -1018,7 +1018,7 @@
 
 (deftest no-shipped-framework-family-reaches-back-into-slopp
   ;; A shipped family is what slopp VENDORS into a user's project: today
-  ;; `slopp.web.*` and `slopp.cli.*`, tomorrow whatever capability #3 ships.
+  ;; `slopp.http.*` and `slopp.cli.*`, tomorrow whatever capability #3 ships.
   ;; `slopp.api.*` is slopp's OWN webapp built on that framework — a peer of any
   ;; user's app. The dependency runs app -> framework and NEVER the reverse,
   ;; because a framework namespace that reaches back into slopp's core is
@@ -1027,14 +1027,14 @@
   ;;
   ;; **The families are DERIVED from the capability catalog**, and that is the
   ;; point of this rewrite. The previous version hardcoded
-  ;; `#"slopp\.web(\..*)?"` and allowed `slopp.lang` — right for one app type,
+  ;; `#"slopp\.http(\..*)?"` and allowed `slopp.lang` — right for one app type,
   ;; and silently covering nothing when a second shipped: there was no cli
   ;; counterpart, and writing one is exactly what nobody remembers. Capability
   ;; #3 is now guarded by EXISTING.
   ;;
   ;; **The derived population has a failure mode of its own**, recorded because
   ;; it already happened: a namespace that LEAVES the family stops violating the
-  ;; rule rather than breaking it. During the http rename `slopp.web.static`
+  ;; rule rather than breaking it. During the http rename `slopp.http.static`
   ;; briefly became `slopp.http.static` and this test went GREEN — the set
   ;; shrank and nothing said so. Hence named members below; a COUNT would go
   ;; stale the other way, the first time a family legitimately changes size.
@@ -1045,7 +1045,7 @@
         ;; `shipping-common` is the permitted destination, and it is NOT a
         ;; carve-out: those namespaces vendor alongside every family (build.clj files them
         ;; under "_"), so a user's app resolves a require of them exactly as it
-        ;; resolves slopp.web.html. Both earned their place by being NAMED in
+        ;; resolves slopp.http.html. Both earned their place by being NAMED in
         ;; something slopp tells an author to do: D3.1 makes slopp.lang part of
         ;; the SYNTAX (the dialect denies reader conditionals and owes the
         ;; author the portable call), and tier-refusal's escape names
@@ -1067,7 +1067,7 @@
                         :when (and (re-find #"^slopp\." (str d)) (not (ships? d)))]
                     [n d])]
     (is (seq families) "no shipping family derived — this guard would be vacuous")
-    (is (some #{'slopp.web.html} framework)
+    (is (some #{'slopp.http.html} framework)
         (str "the scan found the http family. Pinned on a NAMED member rather "
              "than a count, because a count is a second hand-kept number that "
              "goes stale the first time a namespace legitimately leaves. "
@@ -1278,7 +1278,7 @@
   ;; anything in the code — so a published jar carries the code and leaves the
   ;; tiers behind. Measured: `slopp.ui.hub` moved into the slopp-ui project
   ;; unchanged and immediately drew four effect warnings it never drew at home,
-  ;; because `slopp.web.html` is declared :pure at home and undeclared (hence
+  ;; because `slopp.http.html` is declared :pure at home and undeclared (hence
   ;; :external) in the consumer.
   ;;
   ;; The damage is not the warning, it is the SUGGESTION: rename `picker` to
@@ -2106,8 +2106,8 @@
   no-rule-names-a-namespace-that-does-not-ship
   ;; slopp-ui's finding, 2026-07-31, and the reasoning outlived the instance
   ;; that prompted it (theirs was a stale jar). `:direct-http` says the discharge
-  ;; is "call slopp.web.client/request". That is only satisfiable because
-  ;; `slopp.web.client` happens to live under `slopp/web/`, which the vendor
+  ;; is "call slopp.http.client/request". That is only satisfiable because
+  ;; `slopp.http.client` happens to live under `slopp/http/`, which the vendor
   ;; derivation happens to cover — a COINCIDENCE OF NAMING, not a guarantee.
   ;; The moment a port ships outside a family prefix, the rule naming it is
   ;; enforceable inside slopp's store and impossible to satisfy in an app, and
@@ -2236,7 +2236,7 @@
 (deftest ^:external
   ^{:correspondence "the fake browser an author is TOLD to drive with vs the set slopp actually vendors — the same claim no-rule-names-a-namespace-that-does-not-ship makes for catalog prose, for a namespace that catalog prose does not carry"}
   the-fake-browser-SHIPS-because-both-the-skill-and-a-gate-name-it
-  ;; D-cljnx. `slopp.cljnx` used to be `slopp.web.screen`, which shipped by
+  ;; D-cljnx. `slopp.cljnx` used to be `slopp.http.screen`, which shipped by
   ;; COINCIDENCE OF NAMING: it sat under http's `:ns-prefix`, so the vendor
   ;; glob covered it. Moving it out of that family is exactly the moment the
   ;; coincidence stops holding, and nothing else would have said so — it has
