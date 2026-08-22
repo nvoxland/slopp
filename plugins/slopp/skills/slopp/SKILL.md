@@ -206,6 +206,19 @@ measurably bleed tokens.
    change was broad, when you DELETED A CALLER (dead surface appears in
    namespaces you never touched — the one thing episode scope structurally
    cannot see), or before a commit you want to stand behind.
+   **`{affected true}` is the MIDDLE GEAR, and what it saves depends entirely
+   on WHERE you changed things.** Lint, dead surface, layering and the in-image
+   suite still cover every namespace; only the `^:external` tier narrows, to
+   the tests your changes since the last milestone can REACH. So it is a
+   reachability filter, not a discount: change a leaf namespace and it runs a
+   handful of tests; change `slopp.ops`, `slopp.mcp` or `slopp.rules` and
+   nearly everything reaches you.
+   Measured here, both gears on the same store: full = 1297 external tests in
+   ~223s; `affected` after a change to `ops`/`mcp`/`rules` = 839 tests in
+   ~229s — **no saving at all**, because most of the cost is the four fresh
+   JVMs, not the tests they run. Reach for the middle gear when your episode
+   was LOCAL, and do not expect it to rescue a core change; there the honest
+   options are the full gear or fewer runs of it.
    **It is NOT a superset of `done`, and the axis it loses on is
    ISOLATION.** `done` puts every impacted `^:external` test in ONE serial
    JVM; `full_check` shards the suite across four. So two tests that only
@@ -343,7 +356,7 @@ walkable, they just stop being on anybody's way forward.
 | Several changes, one reason | just make the writes one at a time — episodes group them for you; interim reds/`:carried-errors` are normal until `done` |
 | Rename ONE form | `edit_rename` (def + all references, shadow-safe); its result lists leftover prose `:mentions` |
 | Rename a namespace ALIAS (`[a.b :as old]` -> `:as new`) | `ns_realias {ns old new}` — the `:as` in the ns form AND every `old/sym` in that namespace's bodies, one verified write. **There is no hand route**, and that is why this is a tool rather than two edits: between the two writes the ns form and the bodies disagree about the qualifier and the namespace does not load, so the alternative is the add-both / migrate / drop dance. **Reach for it right after `ns_rename`**, which rewrites namespaces and walks straight past the `:as` — the moved code keeps being called by its old module's name, and the day that name gets REUSED the alias starts pointing at a real, different module, which is worse than one naming nothing. You do not have to spot them: the rename lists them under `:left-behind :alias`, each with the `:suggest` to pass here. Scoped to one namespace by design: an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift and there is no store-wide version. A BARE `old` is left alone — only `old/x` is the qualifier, and the same spelling is routinely a local or a parameter three tokens away. Read `:sites` (0 means the alias was unused, not that nothing happened) and `:left-behind` |
-| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. **A bare name is swept as a CONCEPT, so its compounds travel with it** — `region` reaches `region-fee`, `region-fees` and `region-t`, which is what makes this one intent rather than a list of renames. Only letters end the name, so `regional` is untouched but `region-ish` is NOT: if you meant the narrower thing, sweep the compound. (A qualified KEYWORD is bounded differently -- see the row below.) **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
+| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. **A bare name is swept as a CONCEPT, so its compounds travel with it** — `region` reaches `region-fee`, `region-fees` and `region-t`, which is what makes this one intent rather than a list of renames. Only letters end the name, so `regional` is untouched but `region-ish` is NOT: if you meant the narrower thing, sweep the compound. (A qualified KEYWORD is bounded differently -- see the row below.) **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **And READ A FAILED SWEEP'S `:note`.** The namespace renames run BEFORE the atomic text group and are not part of it, so a refusal rolls back the text and leaves every namespace renamed — a store that looks renamed and is not, where `:export "old.prefix"` strings name a subtree that no longer exists and the module rules inherit from the new NAME. The result says so and names the recovery: `thread_drop` (the renames are un-landed), or fix the refusal and re-run the same sweep, which is a no-op for the namespaces. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
 | Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **A keyword is bounded as a whole TOKEN**, so `-`, digits and `_` end it and sweeping `:a/x` leaves `:a/x-ray` alone — the opposite of the bare-name row above, because `:a/x-ray` is a different marker, usually read by a different rule. **Realias when the alias carries the RENAMED segment, not when it merely sits
 under it.** After renaming `a.web.*` to `a.http.*`, an alias `web.client` for
 `a.http.client` is now a lie and wants `ns_realias`; an alias `client` for the
@@ -361,6 +374,21 @@ in the second case while looking safe in the first. When you rename anything
 consumers require, ask what BREAKS for them, not what the tool would do there —
 and say which of the two you checked, because the sentence reads the same
 either way.
+
+**And the opposite failure: a spelling a sweep CAN reach and must NOT.** A
+sweep is safe when every occurrence of a name means the CURRENT thing. A dated
+artifact means the name AS IT WAS — a captured manifest, an incident record, a
+migration note quoting the old spelling — and a rename cannot tell the two
+apart, because they are the same characters. Rewriting one turns a record into
+a claim about a past that never happened.
+
+**It stays GREEN, which is why it needs saying.** When a frozen fixture and the
+assertion over it are both text, one sweep moves both and they agree
+afterwards; nothing fails. The only signal is `dry-run`'s `:in-strings` bucket,
+which is what that REVIEW FIRST note is for — read it as "which of these mean
+the name as it is TODAY?", and expect a `[]` there to be the normal case, so a
+non-empty one deserves the time. Measured: one such fixture in this codebase
+has been swept and reverted three times, its own docstring saying not to.
 
 **A NAMESPACE rename does not reach the spellings that are not the name.** A
 sweep matches the dotted token, so three shapes survive it, and each one fails
