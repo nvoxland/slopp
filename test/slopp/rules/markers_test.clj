@@ -59,7 +59,11 @@
       (is (markers/known? :entry-point)))
     (testing "a marker nobody declared is NOT slopp's, whatever it looks like"
       (is (not (markers/known? :looks-official-ok)))
-      (is (not (markers/known? :web/websocket))))
+      ;; qualified as well as bare, and deliberately a name no rename will
+      ;; ever want: this used to be `:web/websocket`, which reads like a real
+      ;; marker and could therefore be CAPTURED by a family sweep — at which
+      ;; point the assertion would flip to describing a marker slopp defines
+      (is (not (markers/known? :http/not-a-real-marker))))
     (testing "the store's markers in use are reported, so drift is visible"
       (is (= '#{:unused-ok :entry-point} (markers/in-use st))))
     (testing "and an UNDECLARED marker in use comes back as the finding"

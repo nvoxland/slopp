@@ -238,6 +238,28 @@
                    marker on the form. Read only by edit.gates/gate-capability
                    deciding whether to run a gate, so nothing crosses"})
 
+(def ^:export owned-marker-namespaces
+  "The keyword namespaces slopp gives meaning to — the scope of every question
+  of the form \"is this marker OURS?\".
+
+  Includes the capability catalog's two OWNER rows: `app`, which every project
+  has and which `:app/entry` belongs to precisely because that marker spans
+  both app types, and `slopp`, which is reserved. `web` stays after the family
+  was retired, and that is the point of keeping it: a consumer still spelling
+  `:web/anything` is exactly who these checks are for.
+
+  **ONE producer, because two copies drifted and the drift was silent.** The
+  boundary inventory scoped itself to `#{web malli rule}` while the unknown
+  marker rule used the full set. After the marker waves moved slopp's
+  vocabulary to `:http/*`, `:rest/*` and `:webapp/*`, the inventory was
+  policing a family that owns no live markers and ignoring every family that
+  does — so the check whose whole job is to notice the registry rotting had
+  rotted, in the direction where it reports nothing and looks fine.
+
+  It survived the rename because it is a set of bare family-NAME strings, not
+  markers: no sweep of `:web/x` can see the string `\"web\"`."
+  #{"web" "webapp" "cli" "rest" "rule" "malli" "http" "app" "slopp"})
+
 (defn ^:export store-crossings
   "The store's boundary exits: which crossing kinds it actually has, which of
   those nothing checks, and any marker no kind claims.
@@ -253,8 +275,8 @@
     output that matters: `slopp.index.refs` makes every edge INSIDE the store
     answerable, and there was no equivalent question for an edge leaving it,
     so each exit grew an ad-hoc check or none and nobody could tell which.
-  - **`:unclassified`** — a `web/`, `malli/` or `rule/`-namespaced marker in
-    use that no kind claims. This is what stops the registry rotting: an
+  - **`:unclassified`** — a marker in use, in one of the namespaces slopp owns
+    ([[owned-marker-namespaces]]), that no kind claims. This is what stops the registry rotting: an
     inventory that cannot notice a new exit describes the system it was
     written against, not the one you have.
 
@@ -264,7 +286,7 @@
   nothing about."
   [st]
   (let [ours?  (fn [k] (and (qualified-keyword? k)
-                            (contains? #{"web" "malli" "rule"} (namespace k))))
+                            (contains? owned-marker-namespaces (namespace k))))
         owned  (into (set (keys internal-markers)) (mapcat :markers) kinds)
         marked (for [nsx  (keys (:namespaces st))
                      e    (store/forms st nsx)

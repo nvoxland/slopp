@@ -70,11 +70,17 @@
     (testing "a marker NO kind claims is a finding — this is what stops it rotting"
       ;; the failure mode of any inventory: someone adds an exit and the list
       ;; silently does not describe the system any more
+      ;; the marker is obviously FAKE for the same reason the kind above is
+      ;; permanent: this was `:web/websocket`, which reads like a real marker
+      ;; and is therefore capturable by a family sweep — and a sweep that
+      ;; captured it would turn "no kind claims this" into a marker slopp
+      ;; classifies, leaving the assertion green and describing nothing. It
+      ;; was swept by accident once during the marker wave and reverted.
       (let [st2 (store/ingest st 'app.socket
                               "(ns app.socket)
-(defn ^{:web/websocket \"/feed\"} feed [_] {})")
+(defn ^{:http/not-a-real-marker \"/feed\"} feed [_] {})")
             r   (crossings/store-crossings st2)]
-        (is (= [:web/websocket] (map :marker (:unclassified r)))
+        (is (= [:http/not-a-real-marker] (map :marker (:unclassified r)))
             "a slopp-namespaced marker that no crossing kind claims")
         (is (= '[app.socket/feed] (map :at (:unclassified r))))))
     (testing "a store with no exits says so with an empty inventory, not a nil"

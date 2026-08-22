@@ -1483,6 +1483,38 @@
                            (str/join ", " (map :name tools/tools)))
                       {}))))))
 
+(defn- foreign-unlanded-note
+  "The line a ONE-SHOT process owes its caller when another thread holds
+  un-landed work — or nil, which is the ordinary case.
+
+  A `--call` process opens its own session and therefore reads the BRANCH. A
+  session working through MCP reads its own THREAD. While that thread holds
+  un-landed writes the two disagree, and nothing said so: the CLI answer looks
+  authoritative because it IS authoritative, about a different store.
+
+  Measured at roughly an hour on the wave that added this. A write-path gate
+  refused a form; the gate was reproduced over the CLI, came back CLEAN, and
+  the contradiction was filed as a mystery. The gate was judging a half-renamed
+  session; the CLI was judging the branch. Both readings were correct, and
+  nothing on either side named the difference.
+
+  **Silent at zero**, which is what makes it worth printing at all: a CI run, a
+  fresh clone, or any store nobody is mid-episode in has no foreign thread and
+  gets no note."
+  [session]
+  (let [rows (->> (:threads (branch/thread-list session))
+                  (remove :mine)
+                  (filter #(pos? (:unlanded % 0))))]
+    (when (seq rows)
+      (str "NOTE — this is a ONE-SHOT read of the BRANCH. "
+           (count rows) " other thread(s) hold "
+           (reduce + (map :unlanded rows))
+           " un-landed write(s) that this process cannot see, because it opened"
+           " the store fresh. A session working through MCP reads its own"
+           " thread, so its answer to this question can differ from this one and"
+           " both be right. If you are diagnosing something a WRITE did, ask"
+           " through that session rather than here."))))
+
 (defn call!
   "One-shot tool invocation against the store at `dir` — the --call CLI's
   engine and the fallback when no MCP connection exists. Opens a durable
@@ -1512,15 +1544,22 @@
                    (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
     (swap! session assoc :require-turns? true)
     (try
-      (try (call-tool! session {:name tool :arguments arguments})
-           (catch Exception e
-             (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                   msgs  (into [] (comp (take-while some?)
-                                        (map #(str (.getSimpleName (class %))
-                                                   ": " (ex-message %))))
-                               chain)]
-               (assoc (text! (str "error: " (str/join " <- " msgs)))
-                      :isError true))))
+      (let [r (try (call-tool! session {:name tool :arguments arguments})
+                   (catch Exception e
+                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                           msgs  (into [] (comp (take-while some?)
+                                                (map #(str (.getSimpleName (class %))
+                                                           ": " (ex-message %))))
+                                       chain)]
+                       (assoc (text! (str "error: " (str/join " <- " msgs)))
+                              :isError true))))]
+        ;; ...and say what this process could not see. See
+        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+        ;; somebody's thread holds un-landed work that is a different store from
+        ;; the one an MCP session answers from.
+        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+          (update r :content (fnil conj []) {:type "text" :text note})
+          r))
       (finally (ops/close! session)))))
 
 ^:unsafe

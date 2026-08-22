@@ -2104,8 +2104,16 @@
 (deftest ^:external
   ^{:correspondence "the slopp namespaces a shipped RULE names in its prose vs the set slopp actually vendors — a rule whose discharge names a namespace the author does not have cannot be discharged, and nothing else can see both halves"}
   no-rule-names-a-namespace-that-does-not-ship
-  ;; slopp-ui's finding, 2026-07-31, and the reasoning outlived the instance
-  ;; that prompted it (theirs was a stale jar). `:direct-http` says the discharge
+  ;; ORIGIN NOT RECORDED. This comment used to name a consuming store and a
+  ;; date; asked about it, that store searched its own backlog, our shared
+  ;; mailbox and its git history and found nothing behind either. The comment
+  ;; was the only source for its own attribution, and it survived because it
+  ;; was plausible and nobody could cheaply check it.
+  ;;
+  ;; A name in a docstring is a claim like any other. Unattributed is the
+  ;; honest state here, and saying so is worth more than a name, because it
+  ;; tells the next reader not to go looking. The reasoning outlived whatever
+  ;; instance prompted it (a stale jar). `:direct-http` says the discharge
   ;; is "call slopp.http.client/request". That is only satisfiable because
   ;; `slopp.http.client` happens to live under `slopp/http/`, which the vendor
   ;; derivation happens to cover — a COINCIDENCE OF NAMING, not a guarantee.

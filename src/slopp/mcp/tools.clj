@@ -351,7 +351,7 @@
     :description "Close a unit of work: normalize your touched forms, re-verify, record a labeled boundary. EPISODE-SCOPED — it runs the whole in-image suite plus the ^:external tests your changes impact, but lint and dead-surface cover only the namespaces you touched and the full ^:external / ^:integration tiers do not run. Its :scope field says so every time, and names `full_check` for the whole store. done REPORTS; it never refuses — an unfixable finding is recorded honestly rather than blocking you. Selection is per form: trace evidence where it exists, the form's own namespace-reach where it does not."
     :inputSchema {:type "object" :properties {:label {:type "string"}}}}
    {:name "commit_point"
-    :description "Record a MILESTONE — green-gated on the FULL ^:external suite (run automatically; no test_run first; force=true records red honestly and skips the gate). The git-projection grain; target=<delta id> marks an earlier spot."
+    :description "Record a MILESTONE — it runs a full done (normalize, verify, the IMPACTED ^:external slice, advisories) and gates on that verdict; force=true records red honestly and skips the gate. It does NOT run a whole-store check: a red ^:external test this episode never touched will not stop it, which is `full_check`'s job and yours to call. This said 'green-gated on the FULL ^:external suite' for a while and that was never what it did — a description claiming a stronger gate than exists is worse than one claiming none, because it is trusted instead of checked. The git-projection grain; target=<delta id> marks an earlier spot."
     :inputSchema {:type "object"
                   :properties {:description {:type "string"}
                                :force {:type "boolean"}

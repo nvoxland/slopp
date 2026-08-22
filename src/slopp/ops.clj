@@ -4538,7 +4538,29 @@ recompiled (engine/after-write! session ns-sym)]
               :else
               (let [r (edit-group! session steps :prompt why :agent agent)]
                 (if (:error r)
-                  r
+                  ;; THE TEXT ROLLED BACK; THE NAMESPACE RENAMES DID NOT.
+                  ;; They ran above as ordinary writes, one per namespace, and
+                  ;; the atomic group covers only the form rewrites — so a
+                  ;; refusal here leaves a store that LOOKS renamed and is not:
+                  ;; `:export "old.prefix"` strings name a subtree that no
+                  ;; longer exists, and the module rules inherit from the NAME.
+                  ;;
+                  ;; This used to return the refusal bare, with
+                  ;; `:renamed-namespaces` computed and then discarded. A bare
+                  ;; refusal reads as "the sweep did nothing" — it was read that
+                  ;; way, and reported that way, while 24 namespaces had moved.
+                  (cond-> r
+                    (seq (:renamed-namespaces nsr))
+                    (-> (merge nsr)
+                        (assoc :note
+                               (str (count (:renamed-namespaces nsr))
+                                    " namespace rename(s) are STILL APPLIED — they ran"
+                                    " before the atomic group and were NOT rolled back"
+                                    " with it, so this store is half-migrated. They are"
+                                    " un-landed, so thread_drop takes them off and puts"
+                                    " you back where the branch is. Or fix the refusal"
+                                    " above and run the same sweep again: it is a no-op"
+                                    " for the namespaces and applies only the text."))))
                   ;; read off the store AFTER the write, over the OLD token:
                   ;; whatever still names it was, by construction, not rewritten
                   (let [st*  (:store @session)

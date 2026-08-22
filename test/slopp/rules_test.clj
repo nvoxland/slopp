@@ -1313,8 +1313,19 @@
   ;; rule: `:myapp/anything` is the app's own business and none of ours.
   ;; Squatting `:web/*` with a key slopp does not define is the only thing
   ;; reported, and it is always either a typo or a name that used to work.
+  ;; **The fixture marker is obviously fake ON PURPOSE.** It used to be
+  ;; `:web/spa` — the real retired spelling from the story above — and that is a
+  ;; trap: a marker fixture that looks like a live marker gets caught by the
+  ;; next family sweep, which silently converts "a marker slopp does NOT define"
+  ;; into one it does, and the test then proves nothing while staying green.
+  ;; That nearly happened during the marker wave: `:web/websocket` was swept by
+  ;; accident and had to be reverted. A name no rename will ever want cannot be
+  ;; captured by one.
+  ;;
+  ;; It still has to sit in a namespace slopp OWNS, or the rule correctly
+  ;; ignores it — that scope is the precision being tested, not an obstacle.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn ^{:http/method :get :http/path \"/\" :web/spa [\"/store\"]}\n"
+                 "(defn ^{:http/method :get :http/path \"/\" :http/not-a-real-marker [\"/store\"]}\n"
                  "  doc \"The document.\" [_] {:status 200 :body \"<html>\"})\n\n"
                  "(defn ^{:myapp/audited true} totals \"T.\" [x] x)\n")
         st  (store/ingest (store/empty-store) 'shop.ui src)
@@ -1324,7 +1335,7 @@
     (testing "the retired marker is named, and so is the form carrying it"
       (is (= 1 (count found)) (pr-str found))
       (is (= 'shop.ui/doc (:form (first found))) (pr-str found))
-      (is (= :web/spa (:marker (first found))) (pr-str found)))
+      (is (= :http/not-a-real-marker (:marker (first found))) (pr-str found)))
 
     (testing "the teaching says it is INERT, not merely unrecognised"
       ;; "unknown marker" reads as a lint nit; "nothing reads this" is the

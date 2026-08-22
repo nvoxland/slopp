@@ -469,7 +469,7 @@
    layering algorithm, not a claim about today. Read the two `api` keys with
    that in mind, because both names were later REUSED and a glossary keyed by
    spelling cannot say so — `slopp.api` here is the 322-form operation drawer
-   (today's `slopp.ops`), and `slopp.http-api` is what today's `slopp.api`
+   (today's `slopp.ops`), and `slopp.web-api` is what today's `slopp.api`
    was called. `slopp.boot` and `slopp.rt` were later folded into one module,
    `slopp.kernel`. Nothing about this fixture is stale; the names simply moved
    underneath it.
@@ -478,9 +478,20 @@
    touch them: a module is the first TWO segments of a namespace, so the
    rewrite a sweep produces for a namespace that gained a segment — here
    `slopp.rt` to `slopp.kernel.rt` — names a module that `module-of` can
-   never yield. It is not merely dated then, it is invalid. Both sweeps of
-   the kernel move hit this form and both were reverted."
-  {"slopp.api"   ["slopp.boot" "slopp.edit" "slopp.image" "slopp.index" "slopp.store" "slopp.http"]
+   never yield. It is not merely dated then, it is invalid.
+
+   **THREE sweeps have hit this form and all three were reverted** — both of
+   the kernel move, and the `slopp.web` → `slopp.http` family rename. This
+   warning is prose, and prose has now failed three times, so treat a sweep
+   touching this form as expected rather than surprising.
+
+   The reason it survives review badly: the sibling assertion in
+   `substrate-on-a-real-manifest-names-the-foundation-and-nothing-else` names
+   the same modules as TEXT, so one sweep moves the fixture and the assertion
+   together and they agree afterwards. Nothing goes red. The only signal is
+   `dry-run`'s `:in-strings` bucket, which is why that bucket says REVIEW
+   FIRST."
+  {"slopp.api"   ["slopp.boot" "slopp.edit" "slopp.image" "slopp.index" "slopp.store" "slopp.web"]
    "slopp.bench" ["slopp.api" "slopp.mcp" "slopp.store"]
    "slopp.boot"  []
    "slopp.cache" []
@@ -488,12 +499,12 @@
    "slopp.git"   ["slopp.store"]
    "slopp.image" ["slopp.rt" "slopp.store"]
    "slopp.index" ["slopp.cache" "slopp.image"]
-   "slopp.mcp"   ["slopp.api" "slopp.git" "slopp.store" "slopp.sync" "slopp.http-api" "slopp.http"]
+   "slopp.mcp"   ["slopp.api" "slopp.git" "slopp.store" "slopp.sync" "slopp.web-api" "slopp.web"]
    "slopp.rt"    []
    "slopp.store" ["slopp.cache"]
    "slopp.sync"  ["slopp.api" "slopp.boot" "slopp.git" "slopp.store"]
-   "slopp.http-api"    ["slopp.api" "slopp.edit" "slopp.store" "slopp.http"]
-   "slopp.http"   []})
+   "slopp.web-api"    ["slopp.api" "slopp.edit" "slopp.store" "slopp.web"]
+   "slopp.web"   []})
 
 (deftest substrate-on-a-real-manifest-names-the-foundation-and-nothing-else
   ;; The names here are the DATED ones `slopp-production` carries and must
@@ -502,7 +513,13 @@
   (let [band  (read.modules/substrate slopp-production)
         edges (for [[m ds] slopp-production d ds] [m d])]
     (testing "the foundation is the three widely-used sinks plus the store hub"
-      (is (= #{"slopp.boot" "slopp.cache" "slopp.http" "slopp.store"} band)))
+      ;; `slopp.web`, because the fixture is a DATED snapshot of July 2026 and
+    ;; that is what the module was called then. Fixture and assertion are both
+    ;; TEXT, so a store-wide sweep moves both and they agree afterwards — the
+    ;; test stays green while the artifact becomes a claim about a past that
+    ;; never happened. That is why neither may be swept, and why reverting one
+    ;; without the other goes red.
+    (is (= #{"slopp.boot" "slopp.cache" "slopp.web" "slopp.store"} band)))
     (testing "store is banded despite an outgoing edge — everyone calls it, it calls almost nothing"
       (is (contains? band "slopp.store")))
     (testing "rt is a sink but NOT foundation: its one edge from image is the informative kind"

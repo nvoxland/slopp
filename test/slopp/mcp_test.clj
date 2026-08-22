@@ -2443,3 +2443,37 @@
                      (pr-str (:unreadable r)))))))
 
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-one-shot-CALL-says-when-another-thread-holds-work-it-cannot-see
+  ;; `--call` opens its own durable session, so it reads the BRANCH. A session
+  ;; writing through MCP reads its own THREAD. When the thread holds un-landed
+  ;; work the two disagree, and nothing said so — the CLI answer looks
+  ;; authoritative because it IS authoritative, about a different store.
+  ;;
+  ;; Measured cost, this session: roughly an hour. A write-path gate refused a
+  ;; form; I reproduced the gate over the CLI, got CLEAN, and filed the
+  ;; contradiction as a mystery. The gate was judging a half-renamed session and
+  ;; the CLI was judging the branch. Both readings were correct. The consuming
+  ;; store said it would have made the identical mistake and had avoided it only
+  ;; by habit.
+  ;;
+  ;; SILENT AT ZERO on purpose: a CI run or a fresh clone has no other threads
+  ;; and gets nothing, so the note appears exactly when it is the answer.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-callnote-" (System/nanoTime))]
+    (try
+      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "holder"})]
+        (try
+          (ops/ingest! sess 'cn.core "(ns cn.core)\n\n(defn f \"F.\" [x] x)\n")
+          (testing "the fixture really is un-landed work on a thread"
+            ;; population control: with nothing un-landed there is no
+            ;; disagreement to warn about, and the assertion below would be
+            ;; asserting the absence of a note for the wrong reason
+            (is (pos? (:unlanded (first (filter :mine (:threads (branch/thread-list sess))))))))
+
+          (let [out (str/join "\n" (map :text (:content (mcp/call! dir "query_project" {:agent "other"}))))]
+            (testing "the one-shot read SAYS it cannot see that thread"
+              (is (re-find #"(?i)un-?landed" out)
+                  (str "a one-shot read gave no sign that another thread holds work"
+                       " it cannot see, so it reads as the whole truth: " out))))
+          (finally (ops/close! sess))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

@@ -944,3 +944,59 @@
                    " now misses it, including the module system's export check."
                    " forms: " (pr-str (mapv :name (store/forms st 'pm.core)))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-FAILED-sweep-says-that-its-namespace-renames-are-still-standing
+  ;; `rename_sweep` runs in two phases: `ns_rename!` per namespace as ordinary
+  ;; writes, THEN the text rewrites as one atomic group. The group is atomic;
+  ;; the renames are not part of it. So a group failure rolls back the text and
+  ;; leaves every namespace renamed — a store that LOOKS renamed and is not,
+  ;; where `:export "old.prefix"` strings name a subtree that no longer exists.
+  ;;
+  ;; The error was returned bare, and `:renamed-namespaces` was computed and
+  ;; then discarded. I read one as "the sweep did nothing", reported that a
+  ;; store was untouched while 24 of its namespaces had moved, and spent an
+  ;; hour diagnosing a refusal that was a consequence of the half-renamed state
+  ;; rather than of anything wrong with the form it named.
+  ;;
+  ;; The failure is FORCED here rather than provoked: what is under test is
+  ;; what the caller is told when the group fails, not any particular way of
+  ;; making it fail.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'a.web "(ns a.web)\n\n(defn f \"F.\" [x] x)\n")
+      (ops/ingest! sess 'a.web.sub
+                   "(ns a.web.sub (:require [a.web :as web]))\n\n(defn g \"G.\" [x] (web/f x))\n")
+      ;; a BARE mention in a string. `ns_rename` rewrites qualified references
+      ;; and leaves this one, so the text group has work to do — without it the
+      ;; sweep short-circuits on `(empty? steps)` and never reaches the group
+      ;; at all, and this test would be forcing a failure in a phase that does
+      ;; not run.
+      (ops/ingest! sess 'a.note "(ns a.note)\n\n(def where \"the code lives under a.web\")\n")
+
+      (let [r (with-redefs [ops/edit-group! (fn [& _] {:error "forced group failure"})]
+                (ops/rename-sweep! sess "a.web" "a.http" :prompt "sweep that will fail"))]
+
+        (testing "the failure is still reported"
+          (is (some? (:error r)) (pr-str r)))
+
+        (testing "and it SAYS the namespace renames are standing"
+          (is (seq (:renamed-namespaces r))
+              (str "a failed sweep reported nothing about the namespaces it had"
+                   " already renamed, so the error reads as 'nothing happened': "
+                   (pr-str r)))
+          (is (= '[[a.web a.http] [a.web.sub a.http.sub]]
+                 (vec (sort-by (comp str first) (:renamed-namespaces r))))
+              (pr-str (:renamed-namespaces r))))
+
+        (testing "and it names the recovery, because the store is now half-migrated"
+          (is (re-find #"(?i)thread_drop|still renamed|not rolled back"
+                       (str (:error r) (:note r)))
+              (pr-str (select-keys r [:error :note])))))
+
+      (testing "population control: the renames really did happen"
+        ;; without this the assertions above could pass against a sweep that
+        ;; renamed nothing, which is a different bug wearing the same result
+        (let [st (:store @sess)]
+          (is (contains? (:namespaces st) 'a.http) (pr-str (keys (:namespaces st))))
+          (is (not (contains? (:namespaces st) 'a.web)))))
+      (finally (ops/close! sess)))))

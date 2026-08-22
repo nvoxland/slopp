@@ -919,13 +919,13 @@
   dead declaration is the whole fix."
   [_session st* changed]
   (let [owned (crossings/known-markers)
-        ;; every namespace slopp gives meaning to, including the capability
-        ;; catalog's two OWNER rows — `app`, which every project has and which
-        ;; `:app/entry` belongs to precisely because that marker spans both app
-        ;; types, and `slopp`, which is reserved. An owned namespace missing
-        ;; here is the worst of the two states: it reads exactly like a policed
-        ;; one, so a typo in it is inert and silent
-        ours  #{"web" "webapp" "cli" "rest" "rule" "malli" "http" "app" "slopp"}]
+        ;; the ONE producer — `crossings/owned-marker-namespaces`. This was an
+        ;; inline copy, and the boundary inventory held a second, smaller one
+        ;; that had gone stale through two marker renames without anything
+        ;; noticing. An owned namespace missing from a set like this is the
+        ;; worst of the two states: it reads exactly like a policed one, so a
+        ;; typo in it is inert and silent.
+        ours  crossings/owned-marker-namespaces]
     (vec (for [fid   changed
                :let  [e (store/form-by-id st* fid)]
                :when (and e (:name e))
@@ -1032,7 +1032,10 @@
     ;; point is that it sits untouched in a consumer's store — so this rule is
     ;; the sweep or it is nothing
     :sweep true
-    :fires-on "(ns rf.core)\n(defn ^{:web/spa [\"/x\"]} doc \"D.\" [_] {})\n"}
+    ;; an obviously FAKE marker, not the real retired spelling: a fixture that
+    ;; looks live is capturable by the next family sweep, which would quietly
+    ;; make this rule's own trigger a marker slopp DOES define
+    :fires-on "(ns rf.core)\n(defn ^{:http/not-a-real-marker [\"/x\"]} doc \"D.\" [_] {})\n"}
 ;; the client's route table against the paths the server answers for. Every
    ;; in-app CLICK works either way — only a refresh or a shared link 404s, so
    ;; the app is fine for whoever is inside it and broken for whoever was sent
