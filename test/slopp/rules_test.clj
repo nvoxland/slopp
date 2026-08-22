@@ -1247,7 +1247,7 @@
   ;; app type and everything web-shaped landed under it. They are not about
   ;; SERVING — they are about the app that runs in the page:
   ;;
-  ;;   page-unreachable   the ^:web/page entry slopp opens headlessly
+  ;;   page-unreachable   the ^:app/entry entry slopp opens headlessly
   ;;   page-reach         that entry's closure reaching :cljs
   ;;   client-routes-consequences   what declaring :web/client-routes changes about every path
   ;;
@@ -1344,3 +1344,40 @@
             ids (mapv :id (filter :name (store/forms ok 'shop.ok)))]
         (is (empty? (rules/unknown-marker-check nil ok ids))
             "every marker here is one slopp defines")))))
+
+(deftest the-app-marker-namespace-is-one-slopp-OWNS-and-therefore-polices
+  ;; `app` is a capability-catalog owner — the always-on row every project has,
+  ;; the one `:app/entry` belongs to because that marker spans BOTH app types
+  ;; and so belongs to neither capability. But `unknown-marker-check` polices a
+  ;; hand-kept set of owned namespaces, and `app` was not in it.
+  ;;
+  ;; **A marker namespace slopp owns and does not police is the worst of the
+  ;; two states**, because it reads exactly like the policed ones: an author
+  ;; who typos `:app/entyr` gets a declaration that refuses nothing, generates
+  ;; nothing and changes nothing, while looking like a marker that works. That
+  ;; is the same silence `:web/spa` produced — an app that serves fine, clicks
+  ;; fine, and 404s on every refresh.
+  ;;
+  ;; It matters NOW rather than in principle: the marker that names an app's
+  ;; entry moved INTO this namespace from `:web/`, so every store with a
+  ;; browser or served app carries one.
+  ;;
+  ;; (This comment is itself the worked example of a sweep gotcha: it used to
+  ;; spell both sides of that rename, and the sweep rewrote the FROM side too,
+  ;; leaving a sentence that said a name was renamed to itself. Prose
+  ;; describing a rename is prose the rename will happily eat.)
+  (let [src (str "(ns shop.entry)\n\n"
+                 "(defn ^{:app/entyr true} page \"P.\" [] {:state nil})\n\n"
+                 "(defn ^{:myapp/audited true} totals \"T.\" [x] x)\n")
+        st  (store/ingest (store/empty-store) 'shop.entry src)
+        ids (mapv :id (filter :name (store/forms st 'shop.entry)))
+        found (rules/unknown-marker-check nil st ids)]
+
+    (testing "a typo in slopp's own app namespace is REPORTED"
+      (is (= 1 (count found)) (pr-str found))
+      (is (= :app/entyr (:marker (first found))) (pr-str found)))
+
+    (testing "and the app's own namespace is still none of slopp's business"
+      ;; the control that keeps the scope honest: widening `ours` must not
+      ;; start reporting keys that belong to whoever wrote them
+      (is (not-any? #(= :myapp/audited (:marker %)) found) (pr-str found)))))

@@ -78,7 +78,7 @@
                    "(ns demo.app.views)\n\n(defn page-view \"V.\" [s] [:div (str s)])\n")
       (let [i (ops/ingest! sess 'demo.app
                            (str "(ns demo.app (:require [demo.app.views :as views]))\n\n"
-                                "(defn ^:web/page app \"A.\" []"
+                                "(defn ^:app/entry app \"A.\" []"
                                 " {:state (atom {}) :view views/page-view})\n"))]
         (is (nil? (:error i)) (pr-str i))
         (is (some #{'app} (map :name (store/forms (:store @sess) 'demo.app)))
@@ -113,7 +113,7 @@
   ;; view is a CLIENT ROUTE KEY, and this is the table it is a key into.
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/state (atom {})\n"
                  "   :webapp/routes [[\"/store\" things]\n"
                  "                   [\"/store/form/:id\" things]]})\n")
@@ -137,7 +137,7 @@
                                    (str "(ns shop.dyn)\n\n"
                                         "(def base \"/store\")\n\n"
                                         "(defn s \"S.\" [_] [:p])\n\n"
-                                        "(defn ^:web/page app \"A.\" []\n"
+                                        "(defn ^:app/entry app \"A.\" []\n"
                                         "  {:webapp/routes [[base s] [\"/real\" s]]})\n"))]
         (is (= ["/real"] (rules.webapp/client-routes computed)))))))
 
@@ -160,7 +160,7 @@
                        "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
                        "        :web/client-routes " (pr-str prefixes) "}\n"
                        "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n\n"
-                       "(defn ^:web/page app \"A.\" []\n"
+                       "(defn ^:app/entry app \"A.\" []\n"
                        "  {:webapp/routes " routes "})\n"))
         check   (fn [prefixes routes]
                   (rules.webapp/client-routes-unserved
@@ -212,7 +212,7 @@
                    "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
                    "        :web/client-routes [\"/p/:slug/store\"]}\n"
                    "  doc \"D.\" [_] {})\n\n"
-                   "(defn ^:web/page app \"A.\" []\n"
+                   "(defn ^:app/entry app \"A.\" []\n"
                    "  {:webapp/routes " routes "})\n"))
         at  (fn [routes] (rules.webapp/derived-client-route-prefixes
                           (store/ingest (store/empty-store) 'shop.ui (src routes))))]
@@ -236,7 +236,7 @@
 
     (testing "an app that declares NO prefix has no mount point, and says nothing"
       ;; the honest limit. Without a declaration there is no form to read the
-      ;; mount from, and guessing at one — the first endpoint, the ^:web/page
+      ;; mount from, and guessing at one — the first endpoint, the ^:app/entry
       ;; entry — is exactly the bug this rewrite fixed. The advisory names the
       ;; app-space segments instead, which is the half that IS known
       (let [none (store/ingest (store/empty-store) 'shop.ui
@@ -244,7 +244,7 @@
                                     "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
                                     "(defn ^{:web/method :get :web/path \"/p/:slug\"}\n"
                                     "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:web/page app \"A.\" []\n"
+                                    "(defn ^:app/entry app \"A.\" []\n"
                                     "  {:webapp/routes [[\"/store\" s]]})\n"))]
         (is (= [] (rules.webapp/derived-client-route-prefixes none)))))))
 
@@ -261,7 +261,7 @@
                  "(defn things \"T.\" [_s] [:p \"things\"])\n"
                  "(defn thing \"T.\" [_s] [:p \"thing\"])\n\n"
                  "(defn ^{:web/method :get :web/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes  [[\"/things\" things] [\"/things/:id\" thing]]\n"
                  "   :webapp/actions {:thing/rename {}\n"
                  "                    :thing/delete {:effectful? true}\n"
@@ -291,7 +291,7 @@
       (let [src2 (str "(ns shop.two)\n\n"
                       "(defn thing \"T.\" [_s] [:p \"thing\"])\n"
                       "(defn thing-request \"R.\" [_p] {:webapp/path \"/api/thing\"})\n\n"
-                      "(defn ^:web/page app \"A.\" []\n"
+                      "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes [[\"/things/:id\" {:render thing :request thing-request}]]})\n")
             rows (:screens (rules.webapp/webapp-report
                             (assoc-in (store/ingest (store/empty-store) 'shop.two src2)
@@ -308,7 +308,7 @@
       ;; `rules.rest/contracts-report`'s own scar: one member that threw made
       ;; nine endpoints unreadable on the day a store turned the capability on
       (let [src3 (str "(ns shop.three)\n\n"
-                      "(defn ^:web/page app \"A.\" []\n"
+                      "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes [[\"/ok\" {:render identity}]\n"
                       "                   [\"/broken\" {:request identity}]]})\n")
             rows (:screens (rules.webapp/webapp-report
@@ -335,7 +335,7 @@
       ;; so a report drawing only screens shows an app fetching less than it does
       (let [src4 (str "(ns shop.four)\n\n"
                       "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
-                      "(defn ^:web/page app \"A.\" []\n"
+                      "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes        []\n"
                       "   :webapp/session-loads {:modules {:request modules-request}\n"
                       "                          :user    {}}})\n")
@@ -359,9 +359,9 @@
   ;; Reported by slopp-ui on the first real run, with three false positives and
   ;; a malformed remedy: `:declare ["//change" "//endpoints" "//store"]`.
   ;;
-  ;; **Their store separates two forms my fixtures had merged.** `^:web/page` is
+  ;; **Their store separates two forms my fixtures had merged.** `^:app/entry` is
   ;; the HEADLESS entry — zero-arg, `:cljc`, carrying canned fixtures, and NOT a
-  ;; route, because `:web/page` means "an entry `screen` can open" and a store
+  ;; route, because `:app/entry` means "an entry `screen` can open" and a store
   ;; may mark a page that is served by something else. The document is a
   ;; different form, and it is the one carrying `:web/client-routes`.
   ;;
@@ -369,7 +369,7 @@
   ;; marker. It took the alphabetically-first endpoint path in the store — `/`
   ;; in theirs — which is how a mount point became the empty string and every
   ;; derived prefix gained a doubled slash. The docstring meanwhile explained
-  ;; that it "picks the FIRST document by name … a store with two ^:web/page
+  ;; that it "picks the FIRST document by name … a store with two ^:app/entry
   ;; entries is already refused", which describes a selection the code did not
   ;; make. A justification for behaviour that does not exist is the shape this
   ;; week has been about, arriving in my own new form.
@@ -387,14 +387,14 @@
                  "        :web/client-routes [\"/p/:slug/store\"]}\n"
                  "  doc \"D.\" [_] {})\n\n"
                  ;; the HEADLESS entry, a different form with no server path
-                 "(defn ^:web/page page \"P.\" []\n"
+                 "(defn ^:app/entry page \"P.\" []\n"
                  "  {:webapp/routes [[\"/\" s] [\"/store\" s] [\"/store/form/:id\" s]]})\n")
         st  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
                       [:config "capabilities" :values "webapp.enabled"] "true")]
 
     (testing "the mount point comes from the form DECLARING client routes"
       (is (= ["/p/:slug/store"] (rules.webapp/derived-client-route-prefixes st))
-          "not the first endpoint by path, and not the ^:web/page entry"))
+          "not the first endpoint by path, and not the ^:app/entry entry"))
 
     (testing "no doubled slash, which is what a wrong mount point looks like"
       (is (not-any? #(re-find #"//" %)
@@ -419,7 +419,7 @@
                                     "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
                                     "        :web/client-routes [\"/p/:slug/store\"]}\n"
                                     "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:web/page page \"P.\" []\n"
+                                    "(defn ^:app/entry page \"P.\" []\n"
                                     "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
                  [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))
@@ -445,7 +445,7 @@
                                         "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
                                         "        :web/client-routes [\"/p/:slug/change\"]}\n"
                                         "  doc \"D.\" [_] {})\n\n"
-                                        "(defn ^:web/page page \"P.\" []\n"
+                                        "(defn ^:app/entry page \"P.\" []\n"
                                         "  {:webapp/routes [[\"/change/:range\" s]]})\n"))
                      [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= [] (rules.webapp/client-routes-unserved no-root))
@@ -460,7 +460,7 @@
                                     "(defn ^{:web/method :get :web/path \"/p/:slug\"\n"
                                     "        :web/client-routes [\"/p/:slug/store\"]}\n"
                                     "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:web/page page \"P.\" []\n"
+                                    "(defn ^:app/entry page \"P.\" []\n"
                                     "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
                  [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))))
@@ -635,13 +635,13 @@
                  "(def actions \"A.\" {})\n"
                  "(def session-loads \"S.\" {:modules {}})\n\n"
                  "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes        routes\n"
                  "   :webapp/actions       actions\n"
                  "   :webapp/session-loads session-loads})\n\n"
                  ;; a second, READABLE app in the same store — without it a
                  ;; report that returned empty would look like it had coped
-                 "(defn ^:web/page other \"O.\" []\n"
+                 "(defn ^:app/entry other \"O.\" []\n"
                  "  {:webapp/routes  [[\"/things\" things]]\n"
                  "   :webapp/actions {:thing/save {:effectful? true}}})\n")
         on  (assoc-in (store/ingest (store/empty-store) 'shop.six src)
@@ -663,7 +663,7 @@
       ;; reported one would leave two loaded guns in the same function
       (doseq [k [:webapp/routes :webapp/actions :webapp/session-loads]]
         (let [one (str "(ns shop.one)\n\n(def v \"V.\" nil)\n\n"
-                       "(defn ^:web/page app \"A.\" [] {" k " v})\n")
+                       "(defn ^:app/entry app \"A.\" [] {" k " v})\n")
               st  (assoc-in (store/ingest (store/empty-store) 'shop.one one)
                             [:config "capabilities" :values "webapp.enabled"] "true")]
           (is (map? (rules.webapp/webapp-report st))
@@ -692,7 +692,7 @@
                  "(def actions \"A.\" {:thing/save {:effectful? true}})\n"
                  "(defn things \"T.\" [_s] [:p \"t\"])\n"
                  "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes        [[\"/things\" things]]\n"
                  ;; a whole declaration naming a VAR
                  "   :webapp/actions       actions\n"
@@ -741,7 +741,7 @@
       (let [src2 (str "(ns shop.nine)\n\n"
                       "(defn things \"T.\" [_s] [:p \"t\"])\n"
                       "(def client-routes \"CR.\" {:webapp/routes [[\"/things\" things]]})\n\n"
-                      "(defn ^:web/page app \"A.\" []\n"
+                      "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes (mapv (fn [[p s]] [p s])\n"
                       "                        (:webapp/routes client-routes))})\n")
             st   (assoc-in (store/ingest (store/empty-store) 'shop.nine src2)
@@ -761,7 +761,7 @@
       (let [clean (assoc-in (store/ingest (store/empty-store) 'shop.eight
                                           (str "(ns shop.eight)\n\n"
                                                "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
-                                               "(defn ^:web/page app \"A.\" []\n"
+                                               "(defn ^:app/entry app \"A.\" []\n"
                                                "  {:webapp/routes [[\"/things\" things]]})\n"))
                             [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (empty? (:unreadable (rules.webapp/webapp-report clean)))

@@ -1507,3 +1507,52 @@
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"(?i):view|:document"
            (cljnx/open! {:state (atom {})}))))))
+
+(deftest the-entry-to-driver-derivation-is-PUBLIC-and-there-is-only-one
+  ;; slopp-ui's ask, and their argument is what decides it. The `screen` tool
+  ;; derives a driver from whatever the entry returns. If that derivation is
+  ;; internal, a consumer's tests must spell their own — and then the tool and
+  ;; the tests wire the app two different ways, which is the lookalike their
+  ;; `the-declaration-this-app-hands-both-entries-is-a-valid-one` exists to
+  ;; prevent. Worse, it would PASS, because it would be asserting against their
+  ;; own reconstruction.
+  ;;
+  ;; So the derivation is a named public function and both callers point at it.
+  ;;
+  ;; **It is the one place that knows app types, and it resolves them LATE.**
+  ;; `open!` stays ignorant — that is what let the fake browser leave http's
+  ;; family. This function names the two capabilities, but only as symbols to
+  ;; resolve inside the branch that matched, because vendoring is per family: a
+  ;; store using http is handed no `slopp.webapp` source at all, so resolving
+  ;; both up front would throw on exactly the app type that has always worked.
+  (let [state (atom {})]
+
+    (testing "a webapp DECLARATION becomes the driving contract"
+      (let [d (cljnx/driver-for
+               {:webapp/state  state
+                :webapp/routes [["/things" (fn [_s] [:main [:h1 "things"]])]]})]
+        (is (= #{:state :view :navigate :dispatch :boot} (set (keys d)))
+            (pr-str (keys d)))
+        (is (some? (cljnx/open! d)) "and what comes back opens")))
+
+    (testing "a served CTX becomes the same contract"
+      (let [d (cljnx/driver-for
+               {:web/routes [{:method :get :path "/" :auth :public
+                              :handler (fn [_] {:status 200 :body [:main [:h1 "home"]]})}]})]
+        (is (fn? (:document d)) (pr-str (keys d)))
+        (let [s (cljnx/open! d)]
+          (cljnx/visit! s "/")
+          (is (re-find #"home" (cljnx/text s nil {:detail :prose}))))))
+
+    (testing "something ALREADY the contract passes through untouched"
+      ;; identity on the neutral shape, so a caller never has to ask which of
+      ;; the three it is holding — which is the whole point of one derivation
+      (let [page {:state state :view (fn [_] [:main [:p "raw"]])}]
+        (is (= page (cljnx/driver-for page)))))
+
+    (testing "and a shape it cannot place REFUSES, naming what it takes"
+      ;; the constructor's own discipline: a page that cannot open says so
+      ;; where the mistake was made, rather than a screen later
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)webapp/routes|web/routes"
+           (cljnx/driver-for {:nonsense true}))))))

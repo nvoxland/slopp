@@ -671,7 +671,7 @@ recompiled (engine/after-write! session ns-sym)]
                                                        :before before)]
                      ;; nameless forms too: a defmethod names its TARGET, so nm is nil
                      ;; here — and `(when nm …)` skipped the whole chassis for
-                     ;; exactly the carrier whose ^:web/page marker can only be
+                     ;; exactly the carrier whose ^:app/entry marker can only be
                      ;; caught by a gate's nameless arm. Named gates no-op on nil.
                      (if-let [merr (gates/gate-refusal st' ns-sym nm)]
                        {:error merr}
@@ -3452,7 +3452,7 @@ recompiled (engine/after-write! session ns-sym)]
   most-specific declaration governs. Read platforms via query_depends
   {modules true}.
 
-  A `:cljs` declaration additionally reports the `^:web/page` entries it
+  A `:cljs` declaration additionally reports the `^:app/entry` entries it
   STRANDS (`:stranded-pages` + `:warning`): stranding happens with no write to
   the page, so the page's own done has nothing to hang the finding on, and
   the write that does the stranding is the one surface that can name it at
@@ -3526,7 +3526,7 @@ recompiled (engine/after-write! session ns-sym)]
           stranded (assoc :stranded-pages (vec stranded)
                           :warning (str "this declaration leaves "
                                         (count stranded)
-                                        " ^:web/page entr"
+                                        " ^:app/entry entr"
                                         (if (= 1 (count stranded)) "y" "ies")
                                         " unreachable from a JVM — the closure now"
                                         " reaches :cljs, so the screen tool and every"
@@ -4393,15 +4393,26 @@ recompiled (engine/after-write! session ns-sym)]
     move the symbol, since the symbol is a local binding the body still reads,
     so the rename is yours to finish.
 
-  **`:via :regex` is the other half, and it is not keyword-specific.** A regex
-  literal spells a dotted name `web\\.static`, which shares no literal text
-  with `web.static`, so the text pass walks past every one. Measured at seven
-  in a single wave, two of them surviving every write and three green
-  done-points: one rule then refused EVERY declared auth group as unknown,
-  teaching the author to configure the key it was already reading past.
-  Reported rather than rewritten, because a pattern is an INTENT — whether a
-  `.` in one separates or matches anything is a question about what the author
-  meant, and a sweep that guessed would be wrong silently."
+  **REGEX literals move too, and that is a reversal.** A pattern spells a
+  dotted name `web\\.static`, which shares no literal text with `web.static`,
+  so the text pass walks past every one. Measured at seven in a single wave,
+  two of them surviving every write and three green done-points: one rule then
+  refused EVERY declared auth group as unknown, teaching the author to
+  configure the key it was already reading past.
+
+  These were REPORTED and not rewritten, on the reasoning that a pattern is an
+  INTENT — whether a `.` in one separates or matches anything is a question
+  about what the author meant. Sound, and too broad: **slopp owns the dialect,
+  and a dot in a dotted name it governs is a SEPARATOR.** No pattern
+  legitimately means `web<any>static`, so there was never an intent to guess
+  at — only a report somebody had to act on by hand, which is what the two
+  survivors above did not get.
+
+  Only the NAME moves; the rest of the pattern is the author's own matching.
+  The rewrite is REPORTED under `:patterns-rewritten` for the reason
+  `:requalified` is: a rename's diff must not contain a change to what a
+  predicate MATCHES without naming it. `:left-behind :via :regex` survives as
+  the RESIDUE — what the rewrite did not reach — and should now be empty."
   [session from to & {:keys [prompt agent dry-run]}]
   (let [from (str from)
         to   (str to)
@@ -4460,7 +4471,15 @@ recompiled (engine/after-write! session ns-sym)]
                                    e   (store/forms st nsx)
                                    :when (:name e)
                                    :let [src  (n/string (:node e))
-                                         txt  (str/replace src pat to)
+                                         txt0 (str/replace src pat to)
+                                         ;; the ESCAPED-dot spelling, which a
+                                         ;; regex literal uses and the text pass
+                                         ;; above shares no literal text with —
+                                         ;; reported and left alone until
+                                         ;; d32361, and the residue is what once
+                                         ;; made a rule refuse every declared
+                                         ;; auth group as unknown
+                                         txt  (refactor/rewrite-patterns txt0 from to)
                                          src' (if (and requal?
                                                        (str/includes? txt from-k)
                                                        (str/includes? txt kname))
@@ -4469,11 +4488,18 @@ recompiled (engine/after-write! session ns-sym)]
                                                 txt)]
                                    :when (not= src src')]
                                {:ns nsx :name (:name e) :source src'
+                                :patterns? (not= txt0 txt)
                                 :requalified? (not= txt src')}))
                 steps   (mapv #(-> (select-keys % [:ns :name :source])
                                    (assoc :action :replace))
                               rows)
                 requal  (vec (for [r rows :when (:requalified? r)]
+                               {:ns (:ns r) :form (:name r)}))
+                ;; REPORTED even though it is now done for you, and for the
+                ;; reason `:requalified` is: moving what a pattern MATCHES is a
+                ;; semantic change, and a rename's diff must not contain one
+                ;; without naming it
+                pats    (vec (for [r rows :when (:patterns? r)]
                                {:ns (:ns r) :form (:name r)}))]
             (cond
               (and (empty? steps) (empty? (:renamed-namespaces nsr)))
@@ -4519,5 +4545,6 @@ recompiled (engine/after-write! session ns-sym)]
                         note (sweep-note from left false)]
                     (cond-> (merge r (assoc nsr :forms (count steps)))
                       (seq requal) (assoc :requalified requal)
+                      (seq pats)   (assoc :patterns-rewritten pats)
                       (seq left)   (assoc :left-behind left)
                       note         (assoc :note note))))))))))))

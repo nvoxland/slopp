@@ -96,7 +96,7 @@
                             "            :on-change #(swap! state assoc :q (:value %))}]\n"
                             "   [:button {:on-click #(swap! state update :n inc)} \"Add\"]\n"
                             "   [:p (str \"q=\" (:q s) \" n=\" (:n s))]])\n\n"
-                            "(defn ^:web/page page \"P.\" [] {:state state :view view})\n"))
+                            "(defn ^:app/entry page \"P.\" [] {:state state :view view})\n"))
           ;; the MARKER is what makes this store a framework user: its own code
           ;; requires nothing from slopp.web, and slopp opens it with
           ;; slopp.cljnx on its behalf
@@ -131,7 +131,7 @@
             ;; demo.app's atom is a DEF, so it persists across tool calls — the
             ;; script above left n=2 and the trace continues from there. That
             ;; persistence is the app's design, not the tool's; a page that
-            ;; builds fresh state in its ^:web/page fn starts clean each open.
+            ;; builds fresh state in its ^:app/entry fn starts clean each open.
             (let [r (webdev.screen/screen! sess
                                  :steps [{:fill "Filter" :value "web"} {:click "Add"}]
                                  :region "main" :detail "prose" :trace true)]
@@ -144,7 +144,7 @@
             (let [s2 (external/open!)]
               (try
                 (ops/ingest! s2 'plain.core "(ns plain.core)\n\n(defn f \"F.\" [x] x)\n")
-                (is (str/includes? (str (:error (webdev.screen/screen! s2))) "no ^:web/page")
+                (is (str/includes? (str (:error (webdev.screen/screen! s2))) "no ^:app/entry")
                     "an ERROR, not an empty screen — a blank answer reads as a broken app")
                 (finally (ops/close! s2)))))
           (finally (ops/close! sess)))))))

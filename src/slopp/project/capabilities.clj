@@ -81,7 +81,7 @@
     :ns-prefix "slopp.cli" :entry-markers [:cli/command]
     :doc "a command-line shell: argument parsing, an injected stdin/stdout/stderr, and exit codes. Without it an app's main runs with no argument or stream support at all"}
    {:capability "http" :requires []
-    :ns-prefix "slopp.web" :entry-markers [:web/page :web/path]
+    :ns-prefix "slopp.web" :entry-markers [:app/entry :web/path]
     :doc "an HTTP server: routing, static mounts, identity and authorization. Present in every store, inert until http.enabled"}
    {:capability "rest" :requires ["http"]
     :ns-prefix "slopp.rest" :entry-markers [:web/request :web/response]

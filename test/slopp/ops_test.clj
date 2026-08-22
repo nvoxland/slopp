@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -658,7 +658,7 @@
     (testing "a cli app is detected by its MARKER, not by a require"
       ;; the only usage signal there is for cli: with a generated entry the app
       ;; writes commands and slopp writes the launcher, so nothing in the store
-      ;; ever names slopp.cli. Same shape as ^:web/page, which is why the
+      ;; ever names slopp.cli. Same shape as ^:app/entry, which is why the
       ;; uses-not-merely-requires condition already had this door.
       (let [got (engine/framework-injection cli-app files)]
         (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
@@ -1627,8 +1627,8 @@
   ;; loop so a browser app never names `slopp.webapp`. Third capability, third
   ;; time.
   ;;
-  ;; **The marker is `:web/client-routes`, not `:web/page`, and the distinction is the one
-  ;; that kept `screen` in `http`.** `:web/page` declares *here is an entry a
+  ;; **The marker is `:web/client-routes`, not `:app/entry`, and the distinction is the one
+  ;; that kept `screen` in `http`.** `:app/entry` declares *here is an entry a
   ;; reader can open* — inspectability. A server-rendered HTML app marks a page
   ;; to be LOOKED AT, and it has no browser code at all. `:web/client-routes` declares
   ;; *the browser owns these paths*, which is the capability's own definition.
@@ -1649,7 +1649,7 @@
                   "        :web/response :string :web/client-routes [\"/things\"]}\n"
                   "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n")
         page (str "(ns shop.server)\n\n"
-                  "(defn ^:web/page app \"A server-rendered app, for a reader.\" []\n"
+                  "(defn ^:app/entry app \"A server-rendered app, for a reader.\" []\n"
                   "  {:web/routes []})\n")]
 
     (testing "declaring client-side routing IS using the browser framework"
@@ -1678,7 +1678,7 @@
                                capabilities/capability-catalog))]
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
         (is (= [:web/client-routes] (:entry-markers row))
-            (str "and :web/page is NOT among them, deliberately: " (pr-str row)))))))
+            (str "and :app/entry is NOT among them, deliberately: " (pr-str row)))))))
 
 (deftest the-vendored-tree-tracks-the-STORE-not-the-process-start
   ;; A consumer's notes said, in bold, "the tree is materialized from the jar at
@@ -1769,11 +1769,15 @@
                     "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
                     "        :web/response :string :web/client-routes [\"/things\"]}\n"
                     "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
-                    "(defn ^:web/page app \"The application.\" []\n"
-                    "  (webapp/wiring\n"
-                    "   {:webapp/state  (atom {})\n"
-                    "    :webapp/routes [[\"/things\" {:render  things\n"
-                    "                                :request things-request}]]}))\n")]
+                    ;; the DECLARATION, not `(webapp/wiring …)`. Both entries
+                    ;; derive from this one value — `cljnx/driver-for`
+                    ;; headlessly, `dom/mount!` in the browser — and a
+                    ;; pre-wired map is refused, because it already carries the
+                    ;; derived :webapp/view
+                    "(defn ^:app/entry app \"The application.\" []\n"
+                    "  {:webapp/state  (atom {})\n"
+                    "   :webapp/routes [[\"/things\" {:render  things\n"
+                    "                               :request things-request}]]})\n")]
     (testing "the fixture really vendors what it claims to"
       ;; without this the compile below could be green having compiled nothing
       ;; of the framework at all
@@ -1831,3 +1835,65 @@
                        " any other reason makes the green above prove nothing: "
                        (pr-str r))))
             (finally (ops/close! sess))))))))
+
+(deftest ^:external a-built-BROWSER-app-gets-its-entry-generated
+  ;; The thing the whole cljnx wave existed to unblock. `webapp-launcher-source`
+  ;; was written, tested, and had NO CALLER for a wave: the entry marker was
+  ;; asked for two incompatible shapes, so a generated `(mount! (entry))`
+  ;; refused at page load for any app that could also be opened headlessly.
+  ;;
+  ;; With one declaration and one public derivation the fork is gone, and this
+  ;; is the assertion that the capability's stated goal — **an app that opts
+  ;; into `webapp` writes no ClojureScript** — is finally true rather than true
+  ;; except for the two forms every app hand-wrote.
+  (let [app (str "(ns shop.ui\n"
+                 "  (:require [slopp.webapp :as webapp]))\n\n"
+                 "(defn things \"The list.\" [s]\n"
+                 "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
+                 "(defn ^{:web/method :get :web/path \"/\" :web/auth :public\n"
+                 "        :web/response :string :web/client-routes [\"/things\"]}\n"
+                 "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                 "(defn ^:app/entry app \"The application.\" []\n"
+                 "  {:webapp/state  (atom {})\n"
+                 "   :webapp/routes [[\"/things\" things]]})\n")
+        dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-browser-entry-" (System/nanoTime))
+        sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                        :prompt "a browser app")
+      (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
+      (swap! sess update :store store/ingest 'shop.ui app)
+
+      (testing "the fixture is a webapp with exactly one marked entry"
+        ;; population control: with no entry there is nothing to generate, and
+        ;; every assertion below would pass by describing an empty build
+        (let [st (:store @sess)]
+          (is (= 1 (count (rules.webapp/page-rows st)))
+              (pr-str (rules.webapp/page-rows st)))))
+
+      (let [r (external/build! sess dir)]
+        (is (nil? (:error r)) (pr-str r))
+
+        (testing "the browser entry is GENERATED, under the client source root"
+          ;; cljs-src/, not src/ — the ClojureScript compiler has to see it and
+          ;; the JVM classpath must not
+          (let [f (io/file dir "cljs-src" "native" "client.cljs")]
+            (is (.exists f)
+                (str "no generated browser entry — every browser app is still"
+                     " hand-writing the two forms this capability exists to"
+                     " remove. :client-entry was " (pr-str (:client-entry r))))
+            (when (.exists f)
+              (let [src (slurp f)]
+                (testing "it mounts the app's own entry"
+                  (is (str/includes? src "shop.ui/app") src)
+                  (is (str/includes? src "dom/mount!") src))
+                (testing "and REQUIRES what that entry reaches"
+                  ;; naming a page without requiring its closure is a call to a
+                  ;; var that does not exist, which reaches a reader as a blank
+                  ;; page and reads like a rendering bug rather than a wiring one
+                  (is (str/includes? src "[shop.ui]") src))))))
+
+        (testing "and the result SAYS it emitted one"
+          (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))
+      (finally (ops/close! sess)))))

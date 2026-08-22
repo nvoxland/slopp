@@ -180,17 +180,20 @@
         (.catch (fn [e] (err (.-message e)))))))
 
 (defn ^:export
-  ^{:unused-ok "the generated browser entry calls it, and that entry is a STRING
-  built by slopp.build/webapp-launcher-source — which has NO CALLER, so this
-  var is genuinely unused today and an app supplies its own entry.
+  ^{:unused-ok "the generated browser entry calls it, and that entry is a
+  STRING built by slopp.build/webapp-launcher-source — so no reference graph can
+  see the call. `ops.external/build!` emits it for any webapp store with an
+  ^:app/entry, and a-built-BROWSER-app-gets-its-entry-generated asserts the
+  emitted source names this fn.
 
-  Said plainly because the earlier version was false and unfalsifiable at once:
-  it named a caller that did not exist, and a justification asserting a caller
-  is exactly what stops anyone looking for one. Wiring the generator into
-  build! then failed for a reason worth recording here — `^:web/page` returns a
-  DRIVER for slopp.cljnx/open!, and this function needs the wiring
-  DECLARATION, so a generated (mount! (page)) refuses at page load. Pinned by
-  webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry."}
+  Two earlier versions of this justification were wrong in opposite directions,
+  which is why it now names a TEST rather than asserting a caller. The first
+  claimed a caller that did not exist — and a justification asserting one is
+  exactly what stops anyone looking. The second said the var was genuinely
+  unused, true at the time, because the generator had no caller: the entry
+  marker was asked for a DRIVER by the fake browser and the DECLARATION by this
+  function. That fork is gone — the marker names the declaration and
+  cljnx/driver-for derives the rest — so the generator has a caller again."}
   mount!
   "Run `declared` as a browser application: supply the effects a page has,
   register the two listeners a page needs, and start.

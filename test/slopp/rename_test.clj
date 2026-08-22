@@ -19,7 +19,7 @@
   a rename rebuilds the image, so it needs a real session."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history])
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn] [clojure.string])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -622,7 +622,7 @@
                      " exists: " (pr-str (scan st "nkr.core")))))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-sweep-names-the-REGEX-LITERALS-it-walked-past
+(deftest ^:external a-sweep-MOVES-the-regex-literals-it-used-to-walk-past
   ;; SEVEN instances in one wave, all config-key patterns, and two of them
   ;; survived every write and three green `done`s to be caught by the external
   ;; tier at `full_check`. A pattern is DATA: the sweep rewrites prose, symbols
@@ -636,11 +636,19 @@
   ;; saying `http.static` while the pattern beside it said `web`: prose and
   ;; pattern split inside ONE form.
   ;;
-  ;; **Rewriting is the wrong fix and reporting is the right one.** A regex is
-  ;; an intent, not a name — whether a `.` there is a separator or a wildcard
-  ;; is a question about what the author meant, and a sweep that guessed would
-  ;; be wrong silently in the harder direction. Naming it costs the author one
-  ;; look at a line the tool has already found.
+  ;; **This test used to assert the opposite**, and the reversal is the point.
+  ;; Reporting was chosen because "a regex is an INTENT, not a name: whether a
+  ;; `.` in it is a separator or a wildcard is a question about what the author
+  ;; meant, and a sweep that guessed would be wrong silently." Sound, and too
+  ;; broad — because slopp OWNS THE DIALECT, and a dot in a dotted name it
+  ;; governs is a separator. No pattern legitimately means `web<any>static`, so
+  ;; there was never an intent to guess at, and the thing standing between the
+  ;; author and a correct rewrite was a report they had to act on by hand.
+  ;;
+  ;; What survives the reversal is the REPORT: the rewrite is named under
+  ;; `:patterns-rewritten`, for the same reason `:requalified` is named. A
+  ;; rename's diff must not contain a change to what a predicate MATCHES
+  ;; without saying so.
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'pat.core
@@ -653,31 +661,199 @@
             src (query/query-source sess 'pat.core)]
         (is (nil? (:error r)) (pr-str r))
 
-        (testing "the prose moved, which is exactly what makes the silence dangerous"
-          ;; a half-swept form reads as swept: everything a reader's eye lands
-          ;; on says the new name, and the one thing that DECIDES says the old
+        (testing "the prose moved, as it always did"
           (is (re-find #"\"http\.static\"" src) src))
 
-        (testing "the pattern did not move, because it never matched"
-          (is (re-find #"web\\\.static" src) src))
+        (testing "and now the PATTERN moved with it"
+          ;; the assertion this test exists to have flipped
+          (is (re-find #"http\\\.static" src)
+              (str "the pattern did not move: " src))
+          (is (not (re-find #"web\\\.static" src))
+              (str "the retired spelling is still inside a pattern, which is"
+                   " the shape that goes on compiling and goes on passing"
+                   " while searching for a string that can no longer occur: "
+                   src)))
 
-        (testing "so the sweep NAMES it, with the text to look at"
-          (is (= [{:ns 'pat.core :form 'mounts :via :regex
-                   :text "#\"web\\.static\\..+\""}]
-                 (:left-behind r))
+        (testing "only the NAME moved — the author's own matching is untouched"
+          ;; the trailing `\\..+` is what the pattern DOES, and means nothing
+          ;; to a rename
+          (is (re-find #"http\\\.static\\\.\.\+" src) src))
+
+        (testing "and the rewrite is REPORTED, because it is a semantic change"
+          (is (= [{:ns 'pat.core :form 'mounts}] (:patterns-rewritten r))
               (pr-str r)))
 
-        (testing "and the note says these were not rewritten, and why not"
-          (is (re-find #"(?i)not rewritten" (str (:note r))) (pr-str (:note r)))
-          (is (re-find #"(?i)regex|pattern" (str (:note r))) (pr-str (:note r)))))
-
-      (testing "a store whose patterns do not name the token leaves nothing behind"
-        ;; absence has to mean checked-and-none, or the report above is unreadable
-        (ops/ingest! sess 'pat.clean
-                     (str "(ns pat.clean)\n\n"
-                          "(defn m \"Unrelated.\" [s] (re-find #\"zzz\\.other\" s))\n\n"
-                          "(defn n \"Named.\" [] \"web.other\")\n"))
-        (let [r (ops/rename-sweep! sess "web.other" "http.other"
-                                   :prompt "a family with no pattern behind it")]
+        (testing "so there is nothing left behind to hand-fix"
           (is (nil? (:left-behind r)) (pr-str r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-rename-PRESERVES-the-escapes-in-a-string-it-rewrites
+  ;; `ns_rename` rewrites QUALIFIED mentions inside string literals, and it did
+  ;; so by taking the string's VALUE, editing it, and building a fresh node from
+  ;; that value — `(n/string-node (fix (z/sexpr zl)))`. `string-node` emits its
+  ;; input between quotes and escapes NOTHING, so every escaped quote in the
+  ;; literal came back out bare, the string ended at the first inner quote, and
+  ;; the rest of the form was read as code.
+  ;;
+  ;; Measured on slopp's own store, and the arithmetic is what identified it:
+  ;; `mcp.tools/env-tools` went from 21450 to 21423 characters across one
+  ;; namespace rename — 5 for the shorter name, and 22 for the backslashes in
+  ;; its eleven escaped-quote pairs.
+  ;;
+  ;; **Three things made it expensive, and each is why this test is ^:external
+  ;; and asserts on a re-READ rather than on the tool's own report:**
+  ;;
+  ;;   - the rename returned green, because the damaged form was re-evaluated
+  ;;     into an image that already held the good definition — nothing re-read
+  ;;     the source, and in-image verification structurally cannot;
+  ;;   - `:left-behind` named other things and not this, so the report that
+  ;;     exists to say what a rename could not reach did not mention the form
+  ;;     it had just broken;
+  ;;   - a later delta repaired the form, so the STORE was clean while every git
+  ;;     projection still died, because replay re-reads history as it stood.
+  ;;
+  ;; The sibling case is deliberately asserted too: `rename_sweep` rewrites the
+  ;; same prose through a different path and is NOT affected. Aiming the first
+  ;; version of this test at the sweep is what cost an afternoon — it passed,
+  ;; and a green repro reads as "not the cause" when it means "not reproduced".
+  (let [sess  (external/open!)
+        inner (str "see esc.target/f and <tag name=" (char 34) "main" (char 34) ">")]
+    (try
+      (ops/ingest! sess 'esc.target "(ns esc.target)\n\n(defn f \"F.\" [] 1)\n")
+      (ops/ingest! sess 'esc.core
+                   (str "(ns esc.core)\n\n"
+                        "(defn label \"What this is called.\" [] " (pr-str inner) ")\n"))
+      (let [before (query/query-source sess 'esc.core)]
+
+        (testing "the fixture really does carry an escaped quote"
+          ;; the population control: if the ingest normalised the escaping away
+          ;; there is nothing here to corrupt, and every assertion below would
+          ;; pass by being about a string that never had the hazard
+          (is (clojure.string/includes? before (str (char 92) (char 34))) before)
+          (is (clojure.string/includes? before "esc.target/f") before))
+
+        (let [r   (ops/ns-rename! sess 'esc.target 'esc.renamed
+                                  :prompt "rename a namespace a docstring cites")
+              src (query/query-source sess 'esc.core)]
+          (is (nil? (:error r)) (pr-str r))
+
+          (testing "and the string is still a STRING — the escapes survived"
+            ;; the assertion the bug turns on. READING is the bar, because the
+            ;; reader is what refuses: rewrite-clj's parser is lenient and will
+            ;; hand back a node for source no JVM can load, which is exactly how
+            ;; this shipped green
+            (is (clojure.string/includes? src (str (char 92) (char 34)))
+                (str "the escapes were dropped, so this literal now ends at its"
+                     " first inner quote: " src))
+            (is (= 2 (count (clojure.edn/read-string (str "[" src "]"))))
+                (str "the namespace no longer reads as two forms — the string"
+                     " ended early and its tail became code: " src)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-KEYWORD-sweep-preserves-the-escapes-in-a-string-it-rewrites
+  ;; The case that decides whether a MARKER rename is safe, asked separately
+  ;; because the answer could not be inferred from its sibling.
+  ;;
+  ;; `symbol-mention-re`'s constituent class carries `:` and `/`, so a keyword
+  ;; rename reaches the same prose-rewriting machinery a namespace rename does.
+  ;; But the sibling test — a qualified SYMBOL swept through `rename_sweep` —
+  ;; passed even BEFORE the escaping fix, so "the symbol path is safe" says
+  ;; nothing about this one. Two paths that look alike and differ is exactly
+  ;; the shape that made the original bug expensive.
+  ;;
+  ;; It matters beyond this repo: renaming every `:web/*` marker to the
+  ;; capability that reads it is a keyword sweep across a consuming store, and
+  ;; the forms carrying those markers are the same forms carrying escaped
+  ;; markup in their descriptions.
+  (let [sess  (external/open!)
+        inner (str "answers :kw.old/path and renders <tag name="
+                   (char 34) "main" (char 34) ">")]
+    (try
+      (ops/ingest! sess 'kw.core
+                   (str "(ns kw.core)\n\n"
+                        "(defn ^{:kw.old/path \"/x\"} label \"What this is called.\" []\n"
+                        "  " (pr-str inner) ")\n"))
+      (let [before (query/query-source sess 'kw.core)]
+
+        (testing "the fixture carries BOTH the escaped quote and the keyword"
+          ;; the population control: without either half this test is about
+          ;; nothing, and would pass by having no hazard to lose
+          (is (clojure.string/includes? before (str (char 92) (char 34))) before)
+          (is (clojure.string/includes? before ":kw.old/path") before))
+
+        (let [r   (ops/rename-sweep! sess ":kw.old/path" ":kw.new/path"
+                                     :prompt "rename a marker a description cites")
+              src (query/query-source sess 'kw.core)]
+          (is (nil? (:error r)) (pr-str r))
+
+          (testing "the keyword moved — in the marker AND in the prose"
+            (is (clojure.string/includes? src ":kw.new/path") src))
+
+          (testing "and the string is still a STRING"
+            (is (clojure.string/includes? src (str (char 92) (char 34)))
+                (str "the escapes were dropped, so this literal ends at its"
+                     " first inner quote: " src))
+            (is (= 2 (count (clojure.edn/read-string (str "[" src "]"))))
+                (str "the namespace no longer reads as two forms: " src)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-rename-REWRITES-the-escaped-dot-patterns-it-used-to-only-name
+  ;; REVISES the decision `patterns-not-swept` recorded: report a regex literal,
+  ;; never rewrite it, because "a regex is an INTENT, not a name: whether a `.`
+  ;; in it is a separator or a wildcard is a question about what the author
+  ;; meant."
+  ;;
+  ;; That reasoning is sound and it is over-broad, and the mechanism says where
+  ;; the line actually falls:
+  ;;
+  ;;   #"esc\.target"   every dot ESCAPED — the author has already said they
+  ;;                    meant a literal dot. There is nothing to guess.
+  ;;   #"esc.target"    dots UNESCAPED — wildcards, matching `escXtarget` too.
+  ;;                    Genuinely ambiguous, and the sweep's own text pass
+  ;;                    already rewrites this spelling anyway.
+  ;;
+  ;; `patterns-not-swept` was already computing exactly the first set — it
+  ;; matches an optional backslash per dot and then EXCLUDES everything the
+  ;; text pass caught, so what it returns is the unambiguously-literal residue.
+  ;; The guessing problem was solved when that function was written; the report
+  ;; just stopped one step short of acting on it.
+  ;;
+  ;; Why it is worth acting: the measured incident was `#"web\.static\..+"` —
+  ;; fully escaped, unambiguous, and it survived every write and three green
+  ;; done-points, leaving a rule that refused EVERY declared auth group while
+  ;; teaching the author to configure the key it was already reading past.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'esc.target "(ns esc.target)\n\n(defn f \"F.\" [] 1)\n")
+      (ops/ingest! sess 'pat.holder
+                   (str "(ns pat.holder)\n\n"
+                        "(defn mounts \"Keys under the prefix.\" [ks]\n"
+                        "  (filterv #(re-find #\"esc\\.target\\..+\" %) ks))\n"))
+      (let [before (query/query-source sess 'pat.holder)]
+
+        (testing "the fixture holds a pattern spelling the name with escaped dots"
+          ;; the population control: the whole point is a spelling that shares
+          ;; no literal text with the name, so if the fixture lost its escaping
+          ;; there is nothing here the text pass would have missed
+          (is (clojure.string/includes? before "esc\\.target") before))
+
+        (let [r   (ops/rename-sweep! sess "esc.target" "esc.renamed"
+                                     :prompt "rename a name a pattern spells")
+              src (query/query-source sess 'pat.holder)]
+          (is (nil? (:error r)) (pr-str r))
+
+          (testing "the pattern MOVED, escaping preserved"
+            (is (clojure.string/includes? src "esc\\.renamed") src)
+            (is (not (clojure.string/includes? src "esc\\.target")) src))
+
+          (testing "the rest of the pattern is untouched"
+            ;; only the NAME is rewritten — the trailing `\\..+` is the author's
+            ;; own matching and means nothing to a rename
+            (is (clojure.string/includes? src "esc\\.renamed\\..+") src))
+
+          (testing "and the rewrite is REPORTED, because it is a semantic change"
+            ;; the same standing `:requalified` has: a rename's diff must not
+            ;; contain a change to what a predicate MATCHES without naming it
+            (is (some #(= 'mounts (:form %)) (:patterns-rewritten r))
+                (pr-str r)))))
       (finally (ops/close! sess)))))

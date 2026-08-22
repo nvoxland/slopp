@@ -26,7 +26,7 @@
             [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n]))
 
 (defn ^:export ^{:rule/applies-to :production} webapp-page-unreachable
-  "The headless-review gate (D-web): a `^:web/page` entry — the fn
+  "The headless-review gate (D-web): a `^:app/entry` entry — the fn
   `slopp.cljnx` opens an app through — must be one slopp can actually
   call AND FIND. Returns a teaching string, or nil when clean. Five ways it
   cannot be:
@@ -44,7 +44,7 @@
   var and nothing can ever find the page — and it is also NAMELESS in the
   store (it names its TARGET, not itself), so the nameless arm below is the
   only lookup that can reach it at all; a private one is invisible to the
-  tool's `ns-publics` scan, so the store answers \"no ^:web/page\" while
+  tool's `ns-publics` scan, so the store answers \"no ^:app/entry\" while
   carrying a gate-approved page — a confident wrong answer.
 
   **No zero arity.** slopp calls the entry with nothing, because there is
@@ -79,9 +79,9 @@
    (when (nil? form-name)
      (when-let [bad (first (for [f     (store/forms candidate (symbol (str ns-sym)))
                                  :when (and (nil? (:name f))
-                                            (:web/page (store/form-name-meta f)))]
+                                            (:app/entry (store/form-name-meta f)))]
                              f))]
-       (str ns-sym " carries ^:web/page on a nameless form (head: "
+       (str ns-sym " carries ^:app/entry on a nameless form (head: "
             (first (store/form-sexpr (:node bad)))
             ") — the marker must sit on a zero-arg public defn. A defmethod"
             " DISCARDS name metadata at macroexpansion, so the marker would"
@@ -90,20 +90,20 @@
    (when-let [e (and form-name
                      (store/form-named candidate (symbol (str ns-sym))
                                        (symbol (str form-name))))]
-     (when (:web/page (store/form-name-meta e))
+     (when (:app/entry (store/form-name-meta e))
        (let [sexpr  (store/form-sexpr (:node e))
              head   (first sexpr)
              others (for [n     (keys (:namespaces candidate))
                           f     (store/forms candidate n)
                           :let  [nm (:name f)]
                           :when (and nm
-                                     (:web/page (store/form-name-meta f))
+                                     (:app/entry (store/form-name-meta f))
                                      (not (and (= n (symbol (str ns-sym)))
                                                (= nm (symbol (str form-name))))))]
                       (str n "/" nm))]
          (cond
            (= :cljs (store/platform-for candidate (symbol (str ns-sym))))
-           (str ns-sym "/" form-name " is marked ^:web/page in a :cljs namespace,"
+           (str ns-sym "/" form-name " is marked ^:app/entry in a :cljs namespace,"
                 " so no JVM can open this app — and a headless test can then only"
                 " drive a hand-built lookalike, which passes while the real screen"
                 " is wrong. Move the entry (and the routing, derive and view code"
@@ -112,12 +112,12 @@
                 " portable; only the effects are :cljs.")
 
            (not= 'defn head)
-           (str ns-sym "/" form-name " carries ^:web/page on a " head
+           (str ns-sym "/" form-name " carries ^:app/entry on a " head
                 " — the marker must sit on a zero-arg public defn."
                 (case head
                   defn-     (str " A private page is invisible to the tool's"
                                  " ns-publics scan, so the store would answer"
-                                 " \"no ^:web/page\" while carrying one — a"
+                                 " \"no ^:app/entry\" while carrying one — a"
                                  " confident wrong answer.")
                   def       (str " A def's arity cannot be read from the stored"
                                  " form, so slopp cannot promise the zero-arg"
@@ -126,7 +126,7 @@
                 " Mark the zero-arg defn that builds the app instead.")
 
            (:private (store/form-name-meta e))
-           (str ns-sym "/" form-name " is marked ^:web/page but ^:private —"
+           (str ns-sym "/" form-name " is marked ^:app/entry but ^:private —"
                 " the tool finds pages via ns-publics, so a private page is"
                 " one the store denies having while the gate approved it."
                 " Make the entry public.")
@@ -139,14 +139,14 @@
            ;; a multi-arity entry WITH a zero arity is one slopp can call.
            (let [arglists (edit.modules/fn-arglists sexpr)]
              (and (seq arglists) (not-any? empty? arglists)))
-           (str ns-sym "/" form-name " is marked ^:web/page but has no zero"
+           (str ns-sym "/" form-name " is marked ^:app/entry but has no zero"
                 " arity, and slopp opens it by calling it with none — there is"
                 " nobody to pass arguments. Read what it needs from config or"
                 " from the store instead, so the entry answers to slopp and to"
                 " your own shell the same way.")
 
            (seq others)
-           (str ns-sym "/" form-name " is a SECOND ^:web/page in this store —"
+           (str ns-sym "/" form-name " is a SECOND ^:app/entry in this store —"
                 " " (str/join ", " others) " already carries it. The tool finds"
                 " the entry by scanning for the marker, so two of them means it"
                 " answers from whichever it reaches first, silently, and a"

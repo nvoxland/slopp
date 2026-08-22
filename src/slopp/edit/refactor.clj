@@ -1631,6 +1631,36 @@
     (re-pattern (str "(?<![" symbol-constituents "])" q
                      "(?![" symbol-constituents "])"))))
 
+(defn- escape-literal
+  "`s` as it must be written INSIDE a Clojure string literal — backslashes and
+  quotes escaped.
+
+  `rewrite-clj.node/string-node` takes a VALUE and emits it between quotes,
+  escaping nothing. So any pass that edits a string by reading its value,
+  changing it, and building a fresh node has to put the escaping back, or the
+  literal ends at its first inner quote and everything after it is read as code.
+
+  **Measured, because it shipped.** One namespace rename took a tool descriptor
+  from 21450 characters to 21423 — 5 for the shorter name, and 22 for the
+  backslashes of its eleven escaped-quote pairs. The form stopped reading while
+  every check stayed green: the damaged form was re-evaluated into an image
+  that already held the good definition, so nothing re-read the source, and
+  in-image verification structurally cannot. It surfaced days later as a git
+  projection that would not run, because replay re-reads history as it stood.
+
+  **Backslashes first.** Escaping quotes first would then double the backslash
+  that step had just introduced.
+
+  Written with char codes rather than escape sequences deliberately: this is the
+  one function whose subject is escaping, and a reader checking it should not
+  have to count backslashes through two levels of literal to do so."
+  [s]
+  (let [bs (str (char 92))
+        q  (str (char 34))]
+    (-> s
+        (str/replace bs (str bs bs))
+        (str/replace q (str bs q)))))
+
 (defn ^:export qualified-mention-changeset
   "{form-id new-node} rewriting QUALIFIED references inside STRING LITERALS
   across the store, given `renames` as `{old-qsym new-qsym …}` — docstrings,
@@ -1669,7 +1699,7 @@
                                  (fn [zl] (and (= :token (z/tag zl))
                                                (string? (z/sexpr zl))
                                                (not= (z/sexpr zl) (fix (z/sexpr zl)))))
-                                 (fn [zl] (z/replace zl (n/string-node (fix (z/sexpr zl))))))
+                                 (fn [zl] (z/replace zl (n/string-node (escape-literal (fix (z/sexpr zl)))))))
                                 z/root)]
                 :when  (not= (n/string out) (n/string node))]
             [(:id e) out]))))
@@ -1968,6 +1998,50 @@
     (catch Exception ex
       {:error (str "realias plan failed: " (ex-message ex))})))
 
+(defn ^:export rewrite-patterns
+  "`src` with every ESCAPED-DOT spelling of `from` rewritten to `to` — the
+  spelling a regex literal uses and a textual pass cannot see. Returns `src'`,
+  unchanged when there is nothing to move.
+
+  **This used to be reported and not done**, on the reasoning that a regex is
+  an INTENT rather than a name: whether a `.` in one separates or matches
+  anything is a question about what the author meant. That reasoning is sound
+  and its conclusion was too broad, for a reason that is slopp's to STATE
+  rather than to discover — **slopp owns the dialect, and a dot in a namespace
+  name is a separator.** No pattern legitimately means `acme<any>billing`, so
+  there is no intent to guess at and the name can move mechanically.
+
+      #\"acme\\.billing\\..+\"   ->   #\"acme\\.invoice\\..+\"
+
+  **Only the escaped spelling, and only the NAME.** The unescaped spelling
+  shares its literal text with the name, so every caller's ordinary text pass
+  has already rewritten it; matching it again here would be a second producer
+  of one behaviour. And the rest of the pattern is the author's own matching —
+  the trailing `\\..+` above means nothing to a rename and is left alone.
+
+  **A plain text replacement, deliberately, rather than a walk over `:regex`
+  nodes.** The escaped spelling is bounded the same way the name is, and prose
+  that writes `acme\\.billing` while discussing the pattern wants moving too.
+  Two backslashes cannot be caught by one: `\\\\.` contains `\\.` only where the
+  character before it is a backslash rather than the name's last letter, so the
+  boundary guard excludes it.
+
+  Why it is worth doing at all: measured at seven literals in one wave, all
+  config-key patterns, two surviving every write and three green done-points.
+  One rule then refused EVERY declared auth group as unknown — it read groups
+  under the retired spelling, found none, and taught the author to configure
+  the key it was already reading past. A stale pattern fails in the direction
+  where a predicate quietly matches nothing: a presence assertion turns red,
+  while an ABSENCE assertion becomes permanently true and guards nothing."
+  [src from to]
+  (let [bs    (str (char 92))
+        esc   (fn [nm] (str/join (str bs ".") (str/split (str nm) #"\.")))
+        from* (esc from)
+        pat   (re-pattern (str "(?<![A-Za-z\\\\])"
+                               (java.util.regex.Pattern/quote from*)
+                               "(?![A-Za-z])"))]
+    (str/replace src pat (str/re-quote-replacement (esc to)))))
+
 (defn ^:export patterns-not-swept
   "The regex LITERALS in `src` that name `from` in a spelling a textual sweep
   cannot see — an ESCAPED DOT. Returns their source text.
@@ -1985,12 +2059,16 @@
   inside ONE form, its docstring naming the new spelling beside a pattern
   naming the old.
 
-  **Reporting rather than rewriting is the decision.** A regex is an INTENT,
-  not a name: whether a `.` in it is a separator or a wildcard is a question
-  about what the author meant, and a sweep that guessed would be wrong
-  silently, in the direction where a predicate quietly matches nothing.
-  `pat` — the sweep's own exact pattern — excludes the literals it DID rewrite,
-  so this reports only what it could not see.
+  **This is the RESIDUE now, not the answer.** Reporting rather than rewriting
+  was the decision, on the reasoning that a regex is an INTENT rather than a
+  name — whether a `.` in it is a separator or a wildcard is a question about
+  what the author meant. That was too broad: slopp owns the dialect, so a dot
+  in a dotted name it governs is a separator, and [[rewrite-patterns]] moves
+  these mechanically. What this function returns is therefore what the rewrite
+  did NOT reach, and a non-empty answer is a finding rather than a chore.
+
+  `pat` — the sweep's own exact pattern — excludes the literals the text pass
+  DID rewrite, so this reports only what that pass could not see.
 
   Dots only, deliberately: every measured instance was a dot, and widening to
   every regex metacharacter would report literals that merely mention the

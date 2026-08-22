@@ -91,7 +91,7 @@
        vec))
 
 (defn webapp-page-reach-check
-  "Done-advisory: a `^:web/page` entry whose namespace CLOSURE reaches a
+  "Done-advisory: a `^:app/entry` entry whose namespace CLOSURE reaches a
   `:cljs` namespace. Reports `{:form :cljs [namespaces]}`; inert until the
   store opts into `webapp`.
 
@@ -124,7 +124,7 @@
   (when (capabilities/enabled? st* "webapp")
     (vec (keep (fn [fid]
                  (when-let [e (store/form-by-id st* fid)]
-                   (when (:web/page (store/form-name-meta e))
+                   (when (:app/entry (store/form-name-meta e))
                      (let [own  (store/ns-of-form-id st* fid)
                            cljs (page-cljs-reach st* own)]
                        (when (seq cljs)
@@ -148,7 +148,7 @@
   missing mechanism wearing thirteen hats; this is the mechanism.
 
   **Read from `:webapp/routes` literals anywhere in the store**, rather than from
-  the `^:web/page` entry alone. A big app builds its table in pieces and
+  the `^:app/entry` entry alone. A big app builds its table in pieces and
   concatenates them, and a reader that insisted on one literal in one place would
   report a partial table as the whole one — the shape that makes a join silently
   incomplete.
@@ -257,7 +257,7 @@
   any other way is wrong in a store that separates its forms. The first cut took
   the alphabetically-first endpoint path, which was the same form in slopp's own
   fixtures and `/` in the first real store — so every derived prefix came back
-  with a doubled slash. It is NOT the `^:web/page` entry either: that marker
+  with a doubled slash. It is NOT the `^:app/entry` entry either: that marker
   means *an entry `screen` can open*, and a store may mark a headless entry that
   no route serves, which the first real store does.
 
@@ -727,7 +727,7 @@
                         " being a deliberate one rather than a leftover.")}))))
 
 (defn ^:export page-rows
-  "Every `^:web/page` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —
+  "Every `^:app/entry` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —
   `[]` when nothing declares one.
 
   `:page` is the qualified symbol a generated browser entry CALLS, and
@@ -743,14 +743,14 @@
   (vec (sort-by (comp str :page)
                 (for [n     (keys (:namespaces st))
                       f     (store/forms st n)
-                      :when (and (:name f) (:web/page (store/form-name-meta f)))]
+                      :when (and (:name f) (:app/entry (store/form-name-meta f)))]
                   {:ns      n
                    :name    (:name f)
                    :page    (symbol (str n) (str (:name f)))
                    :closure (vec (sort (store/ns-closure st n)))}))))
 
 (defn ^:export stranded-pages
-  "Every `^:web/page` in `st` whose namespace closure reaches `:cljs`, as
+  "Every `^:app/entry` in `st` whose namespace closure reaches `:cljs`, as
   `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
 
   This is the whole-store face of [[page-cljs-reach]], and it exists for the

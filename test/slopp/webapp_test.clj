@@ -1755,52 +1755,54 @@
       (cljnx/visit! s "/p/demo/code")
       (is (= 1 (count @called)) (pr-str @called)))))
 
-(deftest a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry
-  ;; The reason `slopp.build/webapp-launcher-source` still has no caller, pinned
-  ;; so the next attempt to wire it fails HERE rather than in a consumer.
+(deftest ONE-declaration-reaches-both-entries-and-neither-is-hand-written
+  ;; This test used to be `a-PAGE-cannot-be-both-the-inspection-entry-and-the-
+  ;; browser-entry`, and it pinned a fork: `slopp.build/webapp-launcher-source`
+  ;; had no caller because the entry marker was asked for two incompatible
+  ;; things —
   ;;
-  ;; It was wired into `build!` for one milestone and reverted. `^:web/page` is
-  ;; the only marker naming a browser app's entry fn, and it is asked for two
-  ;; incompatible things:
-  ;;
-  ;;   slopp.cljnx/open!   {:state :view :navigate :dispatch :boot}
+  ;;   the fake browser        {:state :view :navigate :dispatch :boot}
   ;;   slopp.webapp.dom/mount!  the WIRING DECLARATION
   ;;
-  ;; A page that serves one refuses at the other, so a generated entry calling
-  ;; `(mount! (page))` breaks any app whose page can be opened headlessly —
-  ;; which is what the marker is documented to mean.
+  ;; — so a generated `(mount! (entry))` refused at page load for any app whose
+  ;; entry could be opened headlessly.
   ;;
-  ;; **My own fixture hid it.** Its `^:web/page` returned a raw declaration,
-  ;; which `screen` refuses — so the test proved a file gets written and
-  ;; nothing about whether an app can use it. Caught by the consuming app
-  ;; reading the generator rather than running it.
+  ;; **It was never a fork between two shapes.** It was one function holding
+  ;; two capabilities' adapters: the fake browser took a served ctx and
+  ;; performed the request itself, so http's adapter lived inside the namespace
+  ;; that also has to drive browser apps — and vendoring is per FAMILY, so the
+  ;; second adapter could never join the first. Naming both adapters
+  ;; (`slopp.web/driver`, `slopp.webapp/driver`) and deriving through one
+  ;; public `cljnx/driver-for` dissolves it.
+  ;;
+  ;; So the DECLARATION is the one value and both entries derive from it. What
+  ;; is asserted here is the property that makes a generated browser entry safe
+  ;; to write: the same map reaches both, and neither side is hand-wired.
   (let [declared {:webapp/state  (atom {})
-                  :webapp/routes [["/things" (fn [_s] [:p "t"])]]}
-        driver   (webapp/driver (webapp/wiring declared))]
+                  :webapp/routes [["/things" (fn [_s] [:p "t"])]]}]
 
-    (testing "a page that OPENS headlessly is a driver, and its keys are unqualified"
-      (is (= #{:state :view :navigate :dispatch :boot} (set (keys driver)))
-          (pr-str (keys driver))))
+    (testing "the declaration MOUNTS — the browser entry wires what it is given"
+      ;; `dom/mount!` calls `wiring` itself, over its own effect plug-ins, so
+      ;; what it needs is the declaration and never a derived map
+      (is (map? (webapp/wiring declared))))
 
-    (testing "and `wiring` refuses a driver, so it cannot be MOUNTED"
-      ;; what a generated `(mount! (page))` would hit for any app whose page is
-      ;; openable — a refusal at page load, naming keys the author never wrote
+    (testing "and the same declaration OPENS, through the public derivation"
+      ;; the half that used to be impossible, and the whole reason the launcher
+      ;; had no caller
+      (let [s (cljnx/open! (cljnx/driver-for declared))]
+        (cljnx/visit! s "/things")
+        (is (re-find #"\bt\b" (cljnx/text s nil {:detail :prose})))))
+
+    (testing "a DERIVED map is still refused by the browser entry's wiring"
+      ;; the property that keeps the direction honest: derivation goes one way,
+      ;; so an entry handing back a driver cannot be mounted — and returning one
+      ;; is the mistake the marker's rename makes loud rather than silent
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"(?i)unknown wiring key"
-           (webapp/wiring driver))))
+           (webapp/wiring (webapp/driver (webapp/wiring declared))))))
 
-    (testing "while the DECLARATION mounts and cannot be opened"
-      ;; the other half, and the symmetry is the point: neither shape serves
-      ;; both consumers, so one marker cannot name both entries
-      (is (map? (webapp/wiring declared)))
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"(?i)unknown page key"
-           (cljnx/open! declared))))
-
-    (testing "so the two are not one wiring entered twice — they are two SHAPES"
-      ;; the consuming app's sentence, and it is the thing to settle before a
-      ;; browser entry can be generated at all: whether `:web/page` becomes the
-      ;; declaration and `screen` derives the driver (which moves a headless
-      ;; drive's canned performer out of the page), or a second declaration
-      ;; names the browser entry
-      (is (not= (set (keys driver)) (set (keys declared)))))))
+    (testing "and the derivation is the SAME one the tool uses"
+      ;; not a reconstruction of it — two derivations of one app drift, and
+      ;; each passes against its own
+      (is (= (set (keys (webapp/driver (webapp/wiring declared))))
+             (set (keys (cljnx/driver-for declared))))))))

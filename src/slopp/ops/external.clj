@@ -14,7 +14,7 @@
   reach passes on a population of zero, which is indistinguishable from
   passing on the truth."
   (:require [clojure.java.shell :as sh]
-            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli]))
+            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli] [slopp.rules.webapp :as rules.webapp]))
 
 ^:reads (defn ^:export git-config-value
   "`git config <k>` as git would resolve it in `dir` (local then global), or
@@ -239,6 +239,14 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; the same collision on the browser side, and the silent version is worse
       ;; than the cli one: two entries both MOUNT, so the app runs twice over one
       ;; element and the second render loop is one nobody declared
+      (and (capabilities/enabled? st "webapp")
+           (seq (rules.webapp/page-rows st))
+           (get-in st [:namespaces 'native.client]))
+      {:error (str "a store namespace named native.client collides with the"
+                   " generated browser entry — both would mount this app over"
+                   " the same element, and the second render loop is one"
+                   " nobody declared. Rename yours; slopp writes this one.")}
+
       
 
       (and entry? (.exists de) (not (ours?)))
@@ -257,7 +265,7 @@ client-deps (merge (:client-deps st) (:client provided))
               ;; rather than an omission — see `build/webapp-launcher-source`,
               ;; which is written, tested, and still has no caller.
               ;;
-              ;; It was wired here for one milestone and reverted. `^:web/page`
+              ;; It was wired here for one milestone and reverted. `^:app/entry`
               ;; is the only marker naming a browser app's entry fn, and for a
               ;; webapp app that fn MUST return a DRIVER: `slopp.cljnx/open!`
               ;; accepts `{:state :view :navigate :dispatch :boot}` and refuses
@@ -268,10 +276,21 @@ client-deps (merge (:client-deps st) (:client provided))
               ;; `webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry`.
               ;;
               ;; Caught by the consuming app before adopting it, and my own
-              ;; fixture had hidden it: its `^:web/page` returned a raw
+              ;; fixture had hidden it: its `^:app/entry` returned a raw
               ;; declaration, which `screen` refuses — so the test proved the
               ;; file gets written and nothing about whether an app can use it.
-              client-entry nil]
+              client-entry
+              (let [rows (when (capabilities/enabled? st "webapp")
+                           (rules.webapp/page-rows st))]
+                ;; exactly one, because the marker's own gate allows only one —
+                ;; and a store declaring none would get an entry mounting
+                ;; nothing
+                (when (= 1 (count rows))
+                  (let [{:keys [page closure]} (first rows)
+                        f (io/file target "cljs-src" "native" "client.cljs")]
+                    (io/make-parents f)
+                    (spit f (build/webapp-launcher-source page closure))
+                    "cljs-src/native/client.cljs")))]
           (doseq [ns-sym (keys (:namespaces st))]
     (let [file (io/file target (store.render/source-path ns-sym
                                                    (store/platform-for st ns-sym)

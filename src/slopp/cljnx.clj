@@ -152,6 +152,73 @@
   ([hiccup] (of hiccup nil))
   ([hiccup opts] (str/join "\n" (lines hiccup opts))))
 
+^{:unsafe "resolves slopp.webapp/slopp.web by NAME, and a static require is
+  impossible here rather than merely inconvenient: this namespace ships to
+  EVERY store through capabilities/shipping-common, while the two it derives
+  from are vendored per FAMILY. A store using http is handed no slopp.webapp
+  source at all, so requiring it would make the fake browser fail to load for
+  the majority app type. The obligation is owned by construction — a store
+  whose entry returns :webapp/routes IS a webapp store, so that family is
+  present whenever the branch that resolves it runs. store/late-ref is the
+  dialect's carrier for this and is unavailable for the same reason: slopp.store
+  is not vendored either."}
+(defn ^:export driver-for
+  "Whatever an app's entry returned, as the ONE driving contract [[open!]] takes.
+
+  Three shapes go in and one comes out:
+
+  | the entry returned | derived by |
+  |---|---|
+  | a webapp DECLARATION (`:webapp/routes`) | `slopp.webapp/driver` over its wiring |
+  | a served CTX (`:web/routes`) | `slopp.web/driver` |
+  | the contract already | itself |
+
+  **There is exactly one of these, and it is public, because two would drift.**
+  The `screen` tool derives a driver from a store's marked entry; a project's
+  own tests drive the same entry. If this were internal the tool would derive
+  and the tests would spell their own — a second wiring of one app with nothing
+  comparing them, which is the lookalike the fake browser exists to remove,
+  reintroduced one level up. And it would PASS, because each half would be
+  asserting against its own reconstruction.
+
+  **This is the only place that knows app types, and [[open!]] still does not.**
+  That split is what let the fake browser leave http's namespace family: the
+  driving contract is neutral, and each capability derives it from what it owns.
+
+  **The capabilities resolve LATE, inside the branch that matched**, which is
+  load-bearing rather than stylistic — see the `^:unsafe` note above.
+
+  Identity on the contract itself, so a caller never has to ask which of the
+  three it is holding. A shape it cannot place refuses HERE, where the mistake
+  was made, rather than a screen later."
+  [entry]
+  (cond
+    (not (map? entry))
+    (throw (ex-info (str "an app entry returns a MAP — a webapp declaration"
+                         " (:webapp/routes), a served ctx (:web/routes), or a"
+                         " page ({:state :view}) — got " (pr-str entry))
+                    {:got entry}))
+
+    (:webapp/routes entry)
+    (let [wire ((requiring-resolve 'slopp.webapp/wiring) entry)]
+      ((requiring-resolve 'slopp.webapp/driver) wire))
+
+    (:web/routes entry)
+    ((requiring-resolve 'slopp.web/driver) entry)
+
+    ;; already the contract — :view or :document is what produces a screen, and
+    ;; open! judges the rest
+    (or (:document entry) (:view entry))
+    entry
+
+    :else
+    (throw (ex-info (str "this entry is none of the three shapes an app can"
+                         " return: no :webapp/routes (a browser app), no"
+                         " :web/routes (a served app), and no :view or"
+                         " :document (a page wired by hand). Keys: "
+                         (pr-str (vec (sort (map str (keys entry))))))
+                    {:keys (vec (keys entry))}))))
+
 (defn ^:export open!
   "Open a headless browser over `app`. ONE contract, and it knows no app type:
 

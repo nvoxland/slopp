@@ -919,7 +919,13 @@
   dead declaration is the whole fix."
   [_session st* changed]
   (let [owned (crossings/known-markers)
-        ours  #{"web" "webapp" "cli" "rest" "rule" "malli" "http"}]
+        ;; every namespace slopp gives meaning to, including the capability
+        ;; catalog's two OWNER rows — `app`, which every project has and which
+        ;; `:app/entry` belongs to precisely because that marker spans both app
+        ;; types, and `slopp`, which is reserved. An owned namespace missing
+        ;; here is the worst of the two states: it reads exactly like a policed
+        ;; one, so a typo in it is inert and silent
+        ours  #{"web" "webapp" "cli" "rest" "rule" "malli" "http" "app" "slopp"}]
     (vec (for [fid   changed
                :let  [e (store/form-by-id st* fid)]
                :when (and e (:name e))
@@ -1247,7 +1253,7 @@
                         " source-only fixture can carry — covered by"
                         " rules.web-test/a-page-reaching-cljs-cannot-be-opened-"
                         "and-done-says-so, which controls on both setup steps")
-    :teach "a ^:web/page entry reaches a :cljs namespace, so no JVM can open this app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. The write gate sees only the ENTRY's namespace; this is the reach, and it can break when a namespace the entry never mentions is declared :cljs. Move the view/derive code it reaches to :jvm or :cljc and pass the browser-shaped parts in"}
+    :teach "a ^:app/entry entry reaches a :cljs namespace, so no JVM can open this app — the screen tool and every headless test fall back to a hand-built lookalike, which passes while the real screen is wrong. The write gate sees only the ENTRY's namespace; this is the reach, and it can break when a namespace the entry never mentions is declared :cljs. Move the view/derive code it reaches to :jvm or :cljc and pass the browser-shaped parts in"}
    {:key :rest-stale-client :severity :advisory :applies-to :production :check #'rules.rest/rest-stale-client-check
     :sweep true
     :selftest-note (str "needs a recorded client/generated-sig config (a source-only"

@@ -104,7 +104,7 @@
   instead of its working tree. Judged per family: a store may define one and
   legitimately use another.
 
-  **USES is not only REQUIRING.** A `^:web/page` app is opened by
+  **USES is not only REQUIRING.** A `^:app/entry` app is opened by
   `slopp.cljnx`, which slopp calls on the app's BEHALF, so the app's own
   code may name none of the framework. **For `cli` this is the ONLY signal**:
   with a generated entry an app writes commands and slopp writes the launcher,

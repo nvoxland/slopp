@@ -4,7 +4,7 @@
 
   The framework half is `slopp.cljnx`, which SHIPS: any project can open a
   page, click, fill and read. This is the half that does not ship — finding the
-  app's `^:web/page` entry and running the driving where the app's vars live,
+  app's `^:app/entry` entry and running the driving where the app's vars live,
   which is slopp's own tooling and belongs beside `slopp.webdev.live`.
 
   **It drives in the VERIFICATION image, not the served app.** Looking at a
@@ -28,7 +28,7 @@
   the app's code lives in that image and nowhere else, so the driving has to
   happen where the vars are.
 
-  **The `^:web/page` entry is found by scanning the image's own vars**, which
+  **The `^:app/entry` entry is found by scanning the image's own vars**, which
   needs no store analysis and cannot disagree with what is actually loaded —
   a store-side scan would answer for source the image may not have reloaded.
 
@@ -49,9 +49,9 @@
   [steps {:keys [region detail list-head trace]}]
   (let [shot-opts (pr-str {:detail detail :list-head list-head})]
     (str "(let [pv (first (for [n (all-ns) [_ v] (ns-publics n)"
-         "                      :when (:web/page (meta v))] v))]"
+         "                      :when (:app/entry (meta v))] v))]"
          "  (if-not pv"
-         "    {:error \"no ^:web/page in this store — mark the zero-arg fn that"
+         "    {:error \"no ^:app/entry in this store — mark the zero-arg fn that"
          " builds your app (a :web/routes ctx, a :webapp/routes declaration, or"
          " {:state :view}) and slopp can open it; nothing else has to change\"}"
          ;; fully qualified, NOT an alias: a `require` inside this form runs at
@@ -61,19 +61,14 @@
          "      (let [open  (requiring-resolve 'slopp.cljnx/open!)"
          "            drive (requiring-resolve 'slopp.cljnx/drive!)"
          "            text  (requiring-resolve 'slopp.cljnx/text)"
-         ;; the fake browser takes ONE contract and knows no app type, so the
-         ;; entry's own shape decides which capability derives it. Resolved
-         ;; INSIDE the branch: a store using http is vendored no
-         ;; `slopp.webapp` source at all, so resolving both up front would
-         ;; throw on exactly the app type that has always worked here.
-         "            as-page (fn [v]"
-         "                      (cond"
-         "                        (:web/routes v)"
-         "                        ((requiring-resolve 'slopp.web/driver) v)"
-         "                        (:webapp/routes v)"
-         "                        ((requiring-resolve 'slopp.webapp/driver)"
-         "                         ((requiring-resolve 'slopp.webapp/wiring) v))"
-         "                        :else v))"
+         ;; THE shared derivation, not a copy of it. This branched on the
+         ;; entry's shape itself for one milestone, which is a second wiring of
+         ;; one app with nothing comparing it to the consumer's — so a project
+         ;; whose tests spelled the wrapping by hand would drive a lookalike
+         ;; and pass, each half asserting against its own reconstruction.
+         ;; `driver-for` ships to every store, so pointing at it costs nothing
+         ;; a copy would have saved.
+         "            as-page (requiring-resolve 'slopp.cljnx/driver-for)"
          "            steps " (pr-str (vec steps))
          "            shot  (fn [s] (text s " (pr-str region) " " shot-opts "))]"
          (if trace
@@ -106,7 +101,7 @@
   and deliberately not the SERVED app, which can be behind. Looking at a
   screen to decide what to write next must show the code you are writing.
 
-  Returns `{:screen <text> :entry <the ^:web/page var>}` (`:screens [{:step
+  Returns `{:screen <text> :entry <the ^:app/entry var>}` (`:screens [{:step
   :screen} …]` under trace). The entry travels on purpose: a screen is only as
   trustworthy as the app it came from, and a store with two marked pages would
   otherwise answer from whichever the scan reached first without ever saying

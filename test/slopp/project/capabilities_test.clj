@@ -389,7 +389,7 @@
                 (map :capability capabilities/capability-catalog)))))
 
 (deftest a-capability-declares-the-family-it-ships-and-the-markers-that-use-it
-  ;; Three places currently hardcode `slopp.web` and `^:web/page`:
+  ;; Three places currently hardcode `slopp.web` and `^:app/entry`:
   ;; `ops.engine/framework-injection`'s `web?`, `build.clj`'s vendor glob, and
   ;; `modules-test/the-web-framework-never-reaches-back-into-slopp`'s `ships?`.
   ;; Each was right for one app type and none of them can see a second.
@@ -403,12 +403,12 @@
         "http's family is still spelled slopp.web — the framework namespaces have not moved"))
   (testing "and the markers that mean an app USES it without requiring it"
     ;; the condition `framework-injection` calls uses-not-merely-requires. A
-    ;; `^:web/page` app is opened by slopp on its behalf; a cli app with a
+    ;; `^:app/entry` app is opened by slopp on its behalf; a cli app with a
     ;; GENERATED entry never requires slopp.cli at all, so for cli this is the
     ;; only usage signal there is.
     (is (= [:cli/command] (:entry-markers (capabilities/capability "cli"))))
-    (is (some #{:web/page} (:entry-markers (capabilities/capability "http"))))
-    ;; and :web/path, which was MISSING until a rest app was built. :web/page
+    (is (some #{:app/entry} (:entry-markers (capabilities/capability "http"))))
+    ;; and :web/path, which was MISSING until a rest app was built. :app/entry
     ;; covers the app slopp OPENS on its behalf; it misses the app slopp
     ;; SERVES. An endpoint's serve! call is generated, so a store can declare a
     ;; whole API, never name slopp.web, and have the framework vendor nothing
@@ -440,7 +440,7 @@
     (is (= "slopp.webapp" (:ns-prefix (capabilities/capability "webapp"))))
     (is (= [:web/client-routes] (:entry-markers (capabilities/capability "webapp")))
         "declaring that the browser owns some paths IS using the browser framework")
-    ;; and NOT `:web/page`, which the first version used. That marker declares
+    ;; and NOT `:app/entry`, which the first version used. That marker declares
     ;; an entry a READER can open, and a server-rendered HTML app marks one to
     ;; be looked at while having no browser code at all — so it triggered both
     ;; capabilities and vendored `slopp.webapp` into stores that never opted in.
@@ -451,7 +451,7 @@
     ;; Second consequence of this marker set in two days, after `:web/path`
     ;; turned out to be MISSING from http's. It is the least visible declaration
     ;; here and nothing fails when it is wrong — it vendors the wrong thing.
-    (is (not (some #{:web/page} (:entry-markers (capabilities/capability "webapp"))))
+    (is (not (some #{:app/entry} (:entry-markers (capabilities/capability "webapp"))))
         "inspectability is not browser-owned routing"))
   (testing "owners that are not opt-ins ship nothing at all"
     (is (nil? (:ns-prefix (capabilities/capability "app"))))

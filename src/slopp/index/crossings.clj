@@ -128,7 +128,7 @@
                  screens its rows name, and the handlers sitting in its tree"
     :to         "slopp.cljnx's driver, which opens it on a JVM and
                  presses things"
-    :markers    #{:web/page}
+    :markers    #{:app/entry}
     :checked-by "webapp-page-unreachable refuses an entry that is not a public
                  zero-arity defn (def, defmethod, private, no [] arity), one in
                  a :cljs namespace, and a SECOND entry; webapp-portable-handler

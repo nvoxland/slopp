@@ -401,7 +401,7 @@
   ;; declared, which is strictly better: a marker asserts, a join verifies.
   (let [src (str "(ns browser.ui)\n\n"
                  "(defn screen \"S.\" [_s] [:p \"s\"])\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes [[\"/store/ns/:ns\" screen]]})\n\n"
                  "(defn ns-link \"N.\" [] [:a {:href \"/store/ns/shop.core\"} \"ns\"])\n\n"
                  "(defn plain \"P.\" [] [:a {:href \"/served-by-nobody\"} \"x\"])\n")
@@ -572,7 +572,7 @@
             _  (ops/module-dep! sess "ui.app" "ui.views" :prompt "the page renders the views")
             r2 (ops/ingest! sess 'ui.app
                             (str "(ns ui.app (:require [ui.views :as v]))\n\n"
-                                 "(defn ^:web/page page \"P.\" [] {:state (atom {}) :view v/view})\n"))]
+                                 "(defn ^:app/entry page \"P.\" [] {:state (atom {}) :view v/view})\n"))]
         (is (nil? (:error r1)) (pr-str r1))
         (is (nil? (:error r2)) (pr-str r2)))
 
@@ -787,7 +787,7 @@
   ;; discharged with the same accurate sentence. That is what this retires.
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes [[\"/store\" things]\n"
                  "                   [\"/store/form/:id\" things]]})\n\n"
                  "(defn nav \"N.\" [_s]\n"
@@ -831,7 +831,7 @@
   ;; on for exactly the reason they went on.
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                 "(defn ^:web/page app \"A.\" []\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes [[\"/store/form/:id\" s]\n"
                  "                   [\"/store/ns/:ns\" s]]})\n\n"
                  "(defn links \"L.\" [r]\n"
