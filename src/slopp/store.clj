@@ -1270,12 +1270,60 @@
                                     (drop 2 kids))
                   #{})))))))))
 
+(defn ^:export name-lost?
+  "True when `node` renders to source that NAMES something while the node
+  itself answers to NO name — a node that has stopped agreeing with its own
+  text.
+
+  **The independent signal.** `stored-name-check` compares an element's
+  `:name` against `form-symbol` of its node, which is right and is
+  structurally blind to this: when a node breaks in a way `form-symbol`
+  cannot read, BOTH sides go nil, they agree, and agreement is what the check
+  reads as health. Two derivations that fail together cannot police each
+  other.
+
+  Re-parsing the rendered string is a different route to the same question, so
+  a node whose identity has drifted from its source is visible without
+  trusting the derivation that drifted.
+
+  Measured cause: a zipper rewrite returned `z/root`'s `:forms` WRAPPER rather
+  than the form inside it. `form-symbol` refuses a wrapper deliberately — one
+  may hold several forms, so the name is genuinely ambiguous — so a form whose
+  source plainly read `(def ^:export rule-catalog …)` was stored anonymous.
+  Every name-addressed surface then lost it silently, and an exported var was
+  reported as package-private by a rule that had no way to know."
+  [node]
+  (and (nil? (form-symbol node))
+       (some? (form-symbol (p/parse-string (n/string node))))))
+
 (defn apply-changeset
   "Coordinated multi-form edit (e.g. rename): replace several forms' nodes —
   possibly across namespaces — as ONE delta. `changeset` = {form-id new-node}.
   `extra` is merged into the delta (e.g. {:old .. :new ..}). Returns
   [store' delta]."
   [store op ns-sym changeset & {:keys [prompt extra agent]}]
+  ;; REFUSE a node that has stopped naming what its own source names. This is
+  ;; the write that produced the corruption [[name-lost?]] describes, and it is
+  ;; the last place the store can still say no: everything after this addresses
+  ;; the form by a name it no longer has, so the failure surfaces far away and
+  ;; as something else entirely.
+  ;;
+  ;; A THROW rather than a teaching string, because the buggy party is a rewrite
+  ;; pass and not the author — there is no edit an agent could make in response,
+  ;; and a store that quietly holds an unaddressable form is worse than a loud
+  ;; stop.
+  (when-let [bad (seq (sort (for [[fid node] changeset :when (name-lost? node)] fid)))]
+    (throw (ex-info
+            (str "this write would store " (count bad) " form(s) under NO NAME"
+                 " while their own source defines one — " (str/join ", " bad)
+                 " in " ns-sym ". A node that does not name what its text names"
+                 " is unreachable by every name-addressed surface, silently:"
+                 " rename_sweep skips it and reports success, edit_subform says"
+                 " no form named x, and a rule looking the var up reports it"
+                 " missing. The producer is a rewrite pass that returned a"
+                 " z/root :forms wrapper instead of the form inside it —"
+                 " refactor/unwrap-forms is what it owes.")
+            {:forms (vec bad) :ns ns-sym :op op})))
   (let [[did store'] (gen-id store "d")
         delta (merge (cond-> {:id did :parent (:id (last (:deltas store)))
                               :op op :ns ns-sym :at (now-ms)

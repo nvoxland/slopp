@@ -779,3 +779,53 @@
       (is (= #{} (store/form-symbols (p/parse-string "(defmethod area :square [s] 1)"))))
       (is (= #{} (store/form-symbols (p/parse-string "(println \"hi\")"))))
       (is (= #{'marked} (store/form-symbols (p/parse-string "^:export (def marked 1)")))))))
+
+(deftest a-write-may-not-store-a-form-that-LOSES-the-name-its-source-defines
+  ;; The corruption that cost an hour and a wrong diagnosis. A rewrite pass
+  ;; returned `z/root`'s `:forms` WRAPPER instead of the form inside it.
+  ;; `form-symbol` refuses a `:forms` node deliberately — a wrapper may hold
+  ;; several forms, so the name would be ambiguous — so the write stored a form
+  ;; whose source plainly reads `(def ^:export rule-catalog …)` under NO NAME.
+  ;;
+  ;; Everything downstream that addresses by name lost it silently:
+  ;; `export-level` looked the var up, found nothing, and reported an exported
+  ;; var as package-private; a whole-store rename then died on a visibility
+  ;; refusal naming a rule that was never involved.
+  ;;
+  ;; **`stored-name-check` cannot catch this**, and its blindness is structural
+  ;; rather than an oversight: it compares the element's `:name` against
+  ;; `form-symbol` of the node, and here BOTH are nil. Two derivations that
+  ;; fail together agree, and agreement is what it reads as health. The check
+  ;; has to come from somewhere independent.
+  ;;
+  ;; The ROUND TRIP is that independent thing: a node must name whatever its
+  ;; own rendered text names. Re-parsing the string is a different route to the
+  ;; same answer, so a node that has stopped agreeing with its own source is
+  ;; visible without trusting the derivation that broke.
+  (let [src  "(def ^:export cat-alog \"D.\" [1 2 3])\n"
+        st   (store/ingest (store/empty-store) 'sc.core src)
+        fid  (:id (first (filter :name (store/forms st 'sc.core))))
+        ;; the wrapper a zipper rewrite returns — parse-string-all, not
+        ;; parse-string. This is the shape the prose pass handed the store.
+        wrapped (rewrite-clj.parser/parse-string-all src)]
+
+    (testing "the fixture really is the wrapper, and it really does lose the name"
+      ;; population control: if the node named itself, the write below would be
+      ;; ordinary and this test would be asserting nothing
+      (is (= :forms (rewrite-clj.node/tag wrapped)))
+      (is (nil? (store/form-symbol wrapped)))
+      (is (= 'cat-alog (store/form-symbol (rewrite-clj.parser/parse-string src)))
+          "the same text, parsed as one form, names it — so the node disagrees with its source"))
+
+    (testing "a changeset storing that node is REFUSED, naming the form"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)name"
+           (store/apply-changeset st :replace 'sc.core {fid wrapped}
+                                  :prompt "a rewrite that lost the name"))
+          "the store accepted a form that answers to no name while its source defines one"))
+
+    (testing "and an ordinary changeset still applies"
+      ;; the other half: a check that refuses everything is not a check
+      (let [good (rewrite-clj.parser/parse-string "(def ^:export cat-alog \"D.\" [4])\n")
+            [st' _] (store/apply-changeset st :replace 'sc.core {fid good} :prompt "fine")]
+        (is (= 'cat-alog (:name (first (filter :name (store/forms st' 'sc.core))))))))))
