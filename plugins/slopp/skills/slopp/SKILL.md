@@ -130,7 +130,15 @@ measurably bleed tokens.
    **`done` is EPISODE-scoped**, and its `:scope` field says so every
    time: lint and dead-surface cover only the namespaces you touched, and
    the full `^:external`/`^:integration` tiers do not run. `full_check`
-   answers the whole-store question — see below. If your session pauses
+   answers the whole-store question — see below.
+   **Read `:scope` for whether the external slice actually RAN.** done runs
+   the impacted `^:external` tests, but above a cap it defers the whole lot
+   and runs NONE — and it still returns `:green`, because the tests that ran
+   passed. `:scope` now says when nothing external ran. The inversion is
+   worth internalising: the deferral gets likelier as your change gets
+   BROADER, since narrowing saves nothing once the impacted set approaches
+   the whole suite. So a sweeping edit earns LESS external evidence than a
+   narrow one, and that is exactly when `full_check` stops being optional. If your session pauses
    first, the hook fires done for you and the findings greet the next
    session's brief.
    **`:host-stale` means DOUBT THE VERDICT.** `done` and `full_check` carry
