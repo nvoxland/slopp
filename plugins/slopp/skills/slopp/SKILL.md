@@ -217,8 +217,15 @@ measurably bleed tokens.
    ~223s; `affected` after a change to `ops`/`mcp`/`rules` = 839 tests in
    ~229s — **no saving at all**, because most of the cost is the four fresh
    JVMs, not the tests they run. Reach for the middle gear when your episode
-   was LOCAL, and do not expect it to rescue a core change; there the honest
-   options are the full gear or fewer runs of it.
+   was LOCAL, and do not expect it to rescue a core change.
+   **You no longer have to guess: the external result carries `:cost`.** It
+   gives the per-shard wall times, the FLOOR (the fastest shard — one JVM boot
+   plus dependency resolution, which every run pays, narrowed or not), and the
+   most narrowing could therefore return. It also flags an UNBALANCED run,
+   which is a different problem with a different remedy: the tier costs its
+   slowest shard, so a lopsided split is paying for the spread rather than the
+   work, and running fewer tests does not touch it. Read `:cost` before
+   choosing a gear.
    **It is NOT a superset of `done`, and the axis it loses on is
    ISOLATION.** `done` puts every impacted `^:external` test in ONE serial
    JVM; `full_check` shards the suite across four. So two tests that only
