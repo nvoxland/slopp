@@ -1998,6 +1998,29 @@
     (catch Exception ex
       {:error (str "realias plan failed: " (ex-message ex))})))
 
+(defn ^:export name-boundary-class
+  "The character class that ENDS `from` for a sweep — the chars that, adjacent
+  to a match, mean this is a longer name rather than the one being swept.
+
+  Two answers, because a sweep means two different things:
+
+  - **A KEYWORD is a complete token.** `:web/client-routes` is not
+    `:web/client` followed by `-routes`; it is a different marker, usually
+    read by a different rule. So `-`, digits and `_` end the name. Getting
+    this wrong is SILENT and was: sweeping `:web/client` also rewrote
+    `:web/client-routes`, into a marker nothing defines.
+  - **A BARE NAME is a concept, and compounds are part of it.** Sweeping
+    `zone` → `region` is meant to carry `zone-fee`, `zone-fees` and `zone-t`
+    with it — that is what makes a sweep one intent rather than a list of
+    renames, and it is pinned by
+    `mcp-test/rename-sweep-is-one-intent`. So only letters end the name.
+
+  A DOT ends nothing in either case, and that is deliberate: a family rename
+  has to reach through it, so `slopp.web` → `slopp.http` moves
+  `slopp.web.dispatch` while `slopp.webapp` is already safe on the letter."
+  [from]
+  (if (str/starts-with? (str from) ":") "A-Za-z0-9_-" "A-Za-z"))
+
 (defn ^:export rewrite-patterns
   "`src` with every ESCAPED-DOT spelling of `from` rewritten to `to` — the
   spelling a regex literal uses and a textual pass cannot see. Returns `src'`,
@@ -2036,11 +2059,29 @@
   [src from to]
   (let [bs    (str (char 92))
         esc   (fn [nm] (str/join (str bs ".") (str/split (str nm) #"\.")))
-        from* (esc from)
-        pat   (re-pattern (str "(?<![A-Za-z\\\\])"
-                               (java.util.regex.Pattern/quote from*)
-                               "(?![A-Za-z])"))]
-    (str/replace src pat (str/re-quote-replacement (esc to)))))
+        from* (esc from)]
+    (if (= from* (str from))
+      ;; NO DOT, so there is no escaped spelling: `esc` returned the name
+      ;; unchanged, and matching it here would rewrite the PLAIN spelling a
+      ;; second time — the exact "second producer of one behaviour" this
+      ;; docstring rules out, reached whenever the name has no dot to escape.
+      ;;
+      ;; It was not harmless. The caller's text pass bounds a name by
+      ;; `[A-Za-z0-9_-]`; this pass bounded it by letters ALONE, so the second
+      ;; rewrite reached further than the first and undid its protection:
+      ;; sweeping `:web/client` rewrote `:web/client-routes` too, silently,
+      ;; into a marker nothing defines. Every keyword marker is dotless, so
+      ;; every marker sweep went through here.
+      src
+      (let [cls (name-boundary-class from)
+            ;; backslash FIRST: `cls` ends in a literal `-`, and appending
+            ;; anything after it makes that hyphen a RANGE — `[_-\\]` is
+            ;; `_`(0x5F) to `\`(0x5C), reversed, and the pattern refuses to
+            ;; compile at all
+            pat (re-pattern (str "(?<![\\\\" cls "])"
+                                 (java.util.regex.Pattern/quote from*)
+                                 "(?![" cls "])"))]
+        (str/replace src pat (str/re-quote-replacement (esc to)))))))
 
 (defn ^:export patterns-not-swept
   "The regex LITERALS in `src` that name `from` in a spelling a textual sweep
@@ -2074,12 +2115,17 @@
   every regex metacharacter would report literals that merely mention the
   token."
   [src from pat]
-  (let [loose (re-pattern
-               (str "(?<![A-Za-z])"
+  (let [;; bounded exactly like the sweep that produced `pat`, via the one
+        ;; function that decides it — otherwise this reports a longer name
+        ;; merely starting with `from` as residue the rewrite missed, sending
+        ;; the author to hand-fix a literal that is already right
+        cls   (name-boundary-class from)
+        loose (re-pattern
+               (str "(?<![" cls "])"
                     (str/join "\\\\?\\."
                               (map #(java.util.regex.Pattern/quote %)
                                    (str/split (str from) #"\.")))
-                    "(?![A-Za-z])"))]
+                    "(?![" cls "])"))]
     (vec (for [zl (->> (iterate z/next (z/of-string src))
                        (take-while (complement z/end?)))
                :let [nd (z/node zl)]

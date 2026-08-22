@@ -4416,9 +4416,12 @@ recompiled (engine/after-write! session ns-sym)]
   [session from to & {:keys [prompt agent dry-run]}]
   (let [from (str from)
         to   (str to)
-        pat  (re-pattern (str "(?<![A-Za-z])"
+        ;; what ENDS the name differs by what is being swept — a keyword is a
+        ;; complete token, a bare name is a concept that carries its compounds
+        cls  (refactor/name-boundary-class from)
+        pat  (re-pattern (str "(?<![" cls "])"
                               (java.util.regex.Pattern/quote from)
-                              "(?![A-Za-z])"))
+                              "(?![" cls "])"))
         why  (or prompt (str "sweep " from " -> " to))]
     (cond
       (or (str/blank? from) (str/blank? to))

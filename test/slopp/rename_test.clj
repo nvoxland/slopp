@@ -857,3 +857,44 @@
             (is (some #(= 'mounts (:form %)) (:patterns-rewritten r))
                 (pr-str r)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-sweep-of-a-PREFIX-name-does-not-eat-the-longer-one
+  ;; Reported by a consuming store mid-migration: sweeping `:web/client` turned
+  ;; `:web/client-routes` into `:rest/client-routes` as well, silently. The
+  ;; boundary is `(?<![A-Za-z])…(?![A-Za-z])`, and `-` is not a letter, so a
+  ;; name that is a PREFIX of another matches inside it.
+  ;;
+  ;; They worked around it by ordering — longest name first — which works and
+  ;; is not something a caller should have to know. Getting it wrong is silent:
+  ;; the longer form IS rewritten, into a name nobody defines.
+  ;;
+  ;; A DOT stays permissive on purpose, because that is what makes a
+  ;; namespace-family sweep work: `slopp.web` → `slopp.http` has to reach
+  ;; `slopp.web.dispatch`. Letters already bounded it (`slopp.webapp` survives
+  ;; because `a` is a letter); `-` and digits were the gap.
+  ;;
+  ;; Nonsense names on purpose, per [[sweep-requalifies-keys-destructuring]]:
+  ;; a sweep rewrites keyword text inside string literals, so a fixture naming
+  ;; a real marker is rewritten by any later sweep of that marker.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pfx.core
+                   (str "(ns pfx.core)\n\n"
+                        "(defn ^{:zpfx/cli false :zpfx/cli-routes [\"/a\"]}\n"
+                        "  h \"Handler.\" [_] {:status 200})\n\n"
+                        "(defn ^{:zpfx/cli2 true} h2 \"Two.\" [_] {:status 200})\n"))
+      (let [r (ops/rename-sweep! sess ":zpfx/cli" ":zrest/cli"
+                                 :prompt "sweep the short name only")]
+        (is (nil? (:error r)) (pr-str r)))
+      (let [src (query/query-source sess 'pfx.core)]
+        (testing "the shorter marker moved"
+          (is (clojure.string/includes? src ":zrest/cli false") src))
+        (testing "and the LONGER marker that merely starts with it did not"
+          (is (clojure.string/includes? src ":zpfx/cli-routes")
+              (str "sweeping :zpfx/cli rewrote :zpfx/cli-routes as well,"
+                   " producing a marker nothing defines: " src))
+          (is (not (clojure.string/includes? src ":zrest/cli-routes")) src))
+        (testing "nor did a name continuing in a DIGIT"
+          (is (clojure.string/includes? src ":zpfx/cli2") src)
+          (is (not (clojure.string/includes? src ":zrest/cli2")) src)))
+      (finally (ops/close! sess)))))
