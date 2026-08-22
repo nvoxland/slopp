@@ -17,9 +17,9 @@ touch it.
   [{:keys [id total]}]
   [:tr [:td [:a {:href (str "/orders/" id)} id]] [:td total]])
 
-(defn ^{:web/method :get :web/path "/orders" :web/auth :authenticated
-        :web/reads {:orders [:order/for-user [:web/identity :web/sub]]}
-        :web/response :string :web/client false}
+(defn ^{:http/method :get :http/path "/orders" :http/auth :authenticated
+        :http/reads {:orders [:order/for-user [:http/identity :http/sub]]}
+        :rest/response :string :rest/client false}
   orders-page
   "The orders list."
   [req]
@@ -28,7 +28,7 @@ touch it.
                :html/head [[:link {:rel "stylesheet" :href "/styles/app.css"}]]}
      [:main
       [:h1 "Orders"]
-      [:table (for [o (:orders (:web/reads req))] (order-row o))]])))
+      [:table (for [o (:orders (:http/reads req))] (order-row o))]])))
 ```
 
 `page` is the full-document shell: doctype, charset, an escaped title, optional
@@ -36,8 +36,8 @@ touch it.
 inline `<script>` or `<style>`, so a strict Content-Security-Policy needs no
 carve-outs. `html-response` renders and wraps as a `text/html` Ring map.
 
-An HTML page is a `:web/path` endpoint like any other, so it would otherwise
-get a typed fetch wrapper whose `.json()` can never succeed. `:web/client
+An HTML page is a `:http/path` endpoint like any other, so it would otherwise
+get a typed fetch wrapper whose `.json()` can never succeed. `:rest/client
 false` opts it out. Declare it rather than relying on the response schema to
 imply it: `:string` is a perfectly good JSON response, so nothing but you can
 tell HTML from JSON.
@@ -94,7 +94,7 @@ status-flipping. When something outside this store serves the path, say so on
 the rendering form:
 
 ```clj
-^{:web/external-path "the marketing site serves /pricing"}
+^{:http/external-path "the marketing site serves /pricing"}
 ```
 
 ## CSS is garden
@@ -103,8 +103,8 @@ Same story, one layer down. A stylesheet is a `defn` GET endpoint returning
 `css-response`, and its rules are data:
 
 ```clj
-(defn ^{:web/method :get :web/path "/styles/app.css" :web/auth :public
-        :web/response :string :web/client false}
+(defn ^{:http/method :get :http/path "/styles/app.css" :http/auth :public
+        :rest/response :string :rest/client false}
   app-stylesheet
   "The application stylesheet, as garden data."
   [_req]
@@ -132,7 +132,7 @@ assets](running.md#static-assets).
 ## Seeing it
 
 ```clj
-query_eval "(slopp.web/handle! (slopp.web/context {:web/namespaces ['shop.ui]})
+query_eval "(slopp.web/handle! (slopp.web/context {:http/namespaces ['shop.ui]})
                                {:request-method :get :uri \"/orders\"})"
 ```
 

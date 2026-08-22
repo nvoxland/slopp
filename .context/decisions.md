@@ -4449,3 +4449,237 @@ A store-wide scan then found 58 backticked citations of `slopp.*` names that no
 namespace answers to. Most are legitimate family prefixes (`slopp.api`), but the
 residue includes retired spellings from the `web.*` → `http.*` rename. Filed as
 its own item, not fixed here.
+
+## D-cljnx (2026-08-21, user decision) — the fake browser is its own component, the framework family is `http`, and a marker is prefixed by whoever READS it
+
+Three decisions from one observation, taken together because each is the
+reason the next is possible.
+
+**The observation.** `^:web/page` is asked for two incompatible shapes —
+`slopp.web.screen/open!` wants a driver, `slopp.webapp.dom/mount!` wants the
+wiring declaration — so a browser app hand-writes its entry and
+`slopp.build/webapp-launcher-source` has no caller. That was recorded as a
+FORK to settle (`webapp-test/a-PAGE-cannot-be-both-the-inspection-entry-and-the-browser-entry`).
+It is not a fork. It is one function holding two capabilities' adapters, and
+the ambiguity is what happens when a third is needed.
+
+### The layering that dissolves it
+
+| layer | owner | depends on |
+|---|---|---|
+| hiccup → readable text | nobody | `clojure.string` |
+| the session — `open!` `visit!` `click!` `fill!` `drive!` | nobody | the neutral contract |
+| a server ctx → that contract | `http` | `web.dispatch/handle!` |
+| a webapp declaration → that contract | `webapp` | `slopp.webapp` |
+
+The code had already split itself along that line and nobody named it:
+`screen.hiccup` and `screen.render` require nothing but `clojure.string`, and
+only the top namespace reaches `slopp.web.dispatch` — which IS the server-ctx
+adapter, inlined in `visit!`'s `cond` instead of being a function with a name.
+`webapp/driver` is the same layer, already written, already named.
+
+**So `open!` stops branching on shape.** One contract, two producers, each
+living with the capability that owns it, each vendored exactly when its family
+is. `^:app/entry` returns the app's own declaration; whoever opens it asks that
+capability for its adapter.
+
+**The vendoring blocker that proves the placement.** `open!` cannot simply
+learn the third shape: `used-families` vendors per capability by `:ns-prefix`,
+following USE, so a server-rendered store gets `slopp.web.*` and NOT
+`slopp.webapp.*`. A static require of `slopp.webapp` from inside the http
+family would make the `screen` tool fail to load for every http-only store —
+the majority case, and the shape `open!` was built for. The dependency has to
+run the other way, which is the same thing as saying the fake browser does not
+belong to http.
+
+### Decision 1 — the fake browser is `cljnx`
+
+`slopp.web.screen` becomes its own component. The name is deliberate on two
+axes: it is not `browser`, which must keep exactly one meaning because a real
+one is a thing you may also be testing with; and it is not `screen`, which is
+already three things (this namespace, the MCP tool, and a webapp PANE — the
+route-table vocabulary, which is load-bearing and stays). A coined name is
+unmistakably one thing, which is the entire problem with an overloaded one.
+
+Nothing else in the system can ever be called cljnx. That is the point.
+
+### Decision 2 — a marker is prefixed by the capability whose code READS it
+
+`:cli/command` already follows this rule; the web family is the exception.
+slopp's own `crossings/kinds` table has been classifying them this way the
+whole time while the spellings disagreed:
+
+| marker | its `:kind` | reads it |
+|---|---|---|
+| `:web/path` `:web/method` | `:http/route` | http's router |
+| `:web/request` `:web/response` | `:wire/json` | rest's contract layer |
+| `:web/client-routes` | **`:webapp/client-routing`** | webapp |
+
+`:web/client-routes` is classified as webapp's and spelled as http's. And
+webapp already lives the confusion from the other end: its REQUEST maps use
+`:webapp/path` today while its entry marker says `:web/`. One capability, two
+vocabularies, no rule saying which to write next time.
+
+**The rule is "who reads it", not "where the data comes from".** That is what
+makes a stale marker detectable, and it settles `:web/request` /
+`:web/response` against the tempting answer: they become `:rest/*`, not
+`:http/*`. They mark a TYPED CONTRACT — with `rest.enabled` false they are
+inert while HTTP keeps working — and a request travelling over HTTP no more
+makes the marker http's than JSON makes it the encoder's.
+
+**`:web/page` is the one genuine exception**, and its ambiguity is a symptom
+rather than a counterexample: it is read by cljnx, by `build!`'s launcher and
+by the edit gates, across both http and webapp apps. It becomes **`:app/entry`**
+— `app` is already the always-on owner row, and "the zero-arg fn that builds
+this app" is what it has always meant. That also makes the resolution of the
+fork read correctly: the entry returns the declaration, and each capability's
+adapter knows how to drive it.
+
+### Decision 3 — `slopp.web.*` becomes `slopp.http.*`
+
+`http` is the only capability whose name and `:ns-prefix` disagree
+(`cli`→`slopp.cli`, `rest`→`slopp.rest`, `webapp`→`slopp.webapp`,
+`http`→**`slopp.web`**). It is not cosmetic: `used-families` and
+`framework-injection` key vendoring off `:ns-prefix`, so the one capability
+whose name does not match its code is also the one where "what does
+`http.enabled` actually turn on" cannot be answered by looking.
+
+**This is a rename already half-done, twice.** The capability CONFIG keys went
+`web.*` → `http.*` on 2026-08-15 (its costs are recorded above), and slopp's
+own tooling already reads `slopp.rules.http` and `slopp.edit.http`. What is
+left is the shipped framework family and the markers — the two halves a
+consumer actually holds, which is why they were deferred and why they are
+worth finishing rather than carrying.
+
+### The three waves, and why in this order
+
+| wave | scope | slopp store | slopp-ui | docs |
+|---|---|---|---|---|
+| 1. cljnx + the entry | extract the fake browser; adapters to their owners; `^:app/entry` returns the declaration; wire the launcher | ~50 forms | 17 tests + the page | moderate |
+| 2. markers | `:web/*` → the capability that reads each | 322 forms | 46 | 292 mentions |
+| 3. namespaces | `slopp.web.*` → `slopp.http.*` | 196 forms | 41 | 98 mentions |
+
+**1 is one wave, not two.** The adapter split IS what dissolves the fork;
+doing them apart means doing the fork twice.
+
+**2 before 3.** The marker rename is the one that can fail SILENTLY in a
+consumer store, so it lands while it is the only thing moving. A namespace
+rename breaks loudly; a marker rename does not break at all.
+
+**3 last, and alone.** It is a mechanical 196-form sweep, and running it
+beside a structural change means a red cannot say which caused it.
+
+### What must not be missed, in every wave
+
+**A renamed marker is silent, not broken.** `:web/spa` → `:web/client-routes`
+left stores serving fine, clicking fine, and 404ing on every refresh and every
+shared link, because the catch-all rows were generated from a key nothing read
+any more; the one app that hit it caught it by luck.
+`rules/unknown-marker-check` exists for exactly that — **but only for keyword
+namespaces in its hand-kept `ours` set**. So `"web"` STAYS in that set
+permanently after wave 2, or every stale `:web/path` in a consumer store goes
+quiet again. Retiring the old spelling from `ours` is the one edit that undoes
+the safety net.
+
+**Rebuild the rename ledger for these waves, and retire it at the end.** The
+declared old→new table plus the two checks reading it was retired on
+2026-08-06 with "rebuild something like it if a rename of that scale happens
+again; do not carry it between times". 322 + 196 forms across two stores and
+390 doc mentions is that scale.
+
+**The four classes no sweep reaches**, each already measured here: escaped-dot
+REGEX literals (five survived the config rename; one made `http-unknown-group`
+refuse every declared group while its own teaching named the key it was
+reading past); qualified KEYWORDS, which never break and simply start lying;
+token STRINGS, which do break; and test FIXTURES, which are data rather than
+prose — the sweep once rewrote the retired spellings a rename test used as its
+SUBJECT, leaving it asserting that valid keys were orphaned.
+
+**And a guard's population shrinking silently is not a pass** — the
+`web.static` instance made `the-web-framework-never-reaches-back-into-slopp` go
+green by removing a namespace from the set the guard derives.
+
+### D-cljnx addendum (2026-08-22, user decision) — a rename MOVES the patterns that spell the name
+
+**Revises the decision `patterns-not-swept` recorded**: report a regex literal,
+never rewrite it, "because a regex is an INTENT, not a name: whether a `.` in it
+is a separator or a wildcard is a question about what the author meant, and a
+sweep that guessed would be wrong silently."
+
+The reasoning was sound and its conclusion was too broad. **slopp owns the
+dialect, and a dot in a dotted name it governs is a SEPARATOR** — there is no
+pattern that legitimately means `web<any>static`, so there was never an intent
+to guess at. What stood between the author and a correct rewrite was a report
+somebody had to act on by hand, which is exactly what the two measured
+survivors did not get: seven literals in one wave, two surviving every write
+and three green done-points, one of them leaving a rule that refused EVERY
+declared auth group as unknown while teaching the author to configure the key
+it was already reading past.
+
+**The detection needed no work, which is the tell that the decision was the
+only thing in the way.** `patterns-not-swept` already computed exactly the
+right set — it matches an optional backslash per separator and then EXCLUDES
+everything the text pass caught, so its answer was always the
+unambiguously-literal residue. The guessing problem was solved when that
+function was written; the report just stopped one step short of acting.
+
+**What moves and what does not.** Only the NAME. The rest of a pattern is the
+author's own matching and means nothing to a rename — `#"web\.static\..+"`
+becomes `#"http\.static\..+"`, the trailing `\..+` untouched. The author's dot
+SPELLING is preserved rather than normalised: rewriting an unescaped dot to an
+escaped one would narrow what the pattern matches, which is a change to their
+matching rather than to the name.
+
+**It is REPORTED under `:patterns-rewritten`**, for the reason `:requalified`
+is reported: a rename's diff must not contain a change to what a predicate
+MATCHES without naming it. `:left-behind :via :regex` survives as the RESIDUE —
+what the rewrite did not reach — and should now be empty, so a row there is a
+finding rather than a chore.
+
+**Scope, corrected by the consumer.** The exposure was never wave-shaped. It is
+three VERBS applied to a store's own code — `edit_rename`, `edit_move_forms`,
+`ns_rename`, the only three callers of `qualified-mention-changeset` — which is
+ordinary work rather than a migration. A keyword sweep reaches none of it: it
+matches no namespace name, so it runs no `ns_rename` and stays pure text
+substitution.
+
+
+### D-cljnx, wave 1 as BUILT (2026-08-22)
+
+The fork is dissolved and the launcher has a caller. What landed, and the two
+things that turned out differently from the plan:
+
+- **`slopp.web/driver`**, the mirror of `slopp.webapp/driver`. One neutral
+  driving contract, two producers, each owned by the capability whose code it
+  needs. `:document (fn [path] hiccup)` replaced the served-ctx branch that had
+  lived inside the fake browser.
+- **`slopp.cljnx`** (+ `.hiccup`, `.render`) — the fake browser, belonging to no
+  capability, vendored to every store by DECLARATION rather than by the
+  coincidence of sitting under http's prefix.
+- **`cljnx/driver-for`** — the one PUBLIC derivation, resolving each capability
+  late inside the branch that matched. The consumer's argument is what decided
+  it: an internal derivation means the tool derives and their tests spell their
+  own, which is two wirings of one app that each pass against their own
+  reconstruction. The `screen` tool now points at this rather than holding a
+  copy.
+- **`:web/page` → `:app/entry`**, 42 forms. It belongs to the always-on `app`
+  owner because it names an app's entry across BOTH app types — and because
+  `:web/` would become actively wrong at wave 3.
+- **`build!` emits the browser entry** for any webapp store with a marked entry,
+  under `cljs-src/native/client.cljs`, plus the collision refusal for a store
+  namespace of that name.
+
+**What the plan got wrong, recorded because the correction is the useful part.**
+
+The migration was described as costing the consumer their canned performer.
+It does not: `dom/mount!` merges its own plug-ins OVER the declaration, so
+fixture data can stay in the entry and the browser overrides it. That made
+"generate the launcher" and "stop the tool showing canned data" separable
+questions, and only the first was in this wave.
+
+And the exposure of the escaping bug found en route was described as belonging
+to a WAVE. It does not: it belongs to three VERBS — `edit_rename`,
+`edit_move_forms`, `ns_rename` — applied to a store's own code, which is
+ordinary work rather than a migration. A keyword sweep reaches none of them.
+That correction came from the consumer, who verified it against their own jar
+rather than accepting it.

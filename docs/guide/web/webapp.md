@@ -14,7 +14,7 @@ config_file {path "capabilities" key "webapp.enabled" value "true"}
 ```
 
 ```clj
-(defn ^:web/page app []
+(defn ^:app/entry app []
   (webapp/wiring
    {:webapp/state  state                       ; your atom
     :webapp/routes [["/"           index]      ; a bare fn IS a screen
@@ -115,7 +115,7 @@ superseded answer is not validated either.
 JSON and EDN are both read and both sent -- the encoder follows the declared
 `Content-Type`, and a type slopp does not encode for sends the body as given
 rather than guessing. `application/edn` is not an afterthought: slopp's own
-`:web/raw` endpoints publish it, so a framework that could not read it could not
+`:http/raw` endpoints publish it, so a framework that could not read it could not
 browse the API slopp itself serves.
 
 Two properties are worth knowing because they are security properties rather
@@ -241,12 +241,12 @@ rather than silently doing nothing.
 ## Driving it without a browser
 
 ```clj
-(require '[slopp.web.screen :as screen])
+(require '[slopp.cljnx :as cljnx])
 
-(def s (screen/open! (webapp/driver app)))
-(screen/visit! s "/p/demo/things")     ; the URL a reader would type
-(screen/click! s "Anvil")
-(screen/text s "main")
+(def s (cljnx/open! (webapp/driver app)))
+(cljnx/visit! s "/p/demo/things")     ; the URL a reader would type
+(cljnx/click! s "Anvil")
+(cljnx/text s "main")
 ```
 
 No browser, no compile, no headless Chrome -- and the same functions the real
@@ -330,7 +330,7 @@ used to live in the wrappers, and when the framework took over performing it
 went with them.
 
 When the contract came from **somebody else's server** (`generate_client` with a
-`from` url), each builder carries `^{:web/external-path …}` naming that url, so
+`from` url), each builder carries `^{:http/external-path …}` naming that url, so
 `webapp-request-paths-are-served` does not report a path your store genuinely
 does not serve. That has to be generated rather than added by hand: the
 namespace is `^:generated`, and the next regeneration would drop a hand-written
@@ -369,13 +369,13 @@ Turning the capability on arms these:
   URL routes, the screen renders, chrome and nav are fine, and one pane always
   fails to load while everything around it works -- so it gets reported as
   slowness rather than as a missing endpoint. Two declarations stop it asking:
-  a whole URL for a third-party server, and `^{:web/external-path "why"}` on the
+  a whole URL for a third-party server, and `^{:http/external-path "why"}` on the
   form when something outside your store serves the path -- a proxied API under
   your own mount point cannot be written in full, because the prefix is only
   known at runtime.
 - **`webapp-client-routes-consequences`** -- the consequences of declaring
   client-owned paths.
-- **`webapp-page-reach`** -- a `^:web/page` whose namespace closure reaches
+- **`webapp-page-reach`** -- a `^:app/entry` whose namespace closure reaches
   `:cljs`, so the page can no longer be opened headlessly. Reported at the
   `module_platform` write that stranded it, because that write is what broke the
   reach and no later form change would hang the finding anywhere.
@@ -399,9 +399,9 @@ Turning the capability on arms these:
 
 ## Vendoring
 
-An app that declares `:web/client-routes` is using the browser framework, so
+An app that declares `:webapp/client-routes` is using the browser framework, so
 slopp vendors `slopp/webapp*` into its tree and declares what that framework
-itself requires. A `^:web/page` alone does **not** trigger it: a page declares
+itself requires. A `^:app/entry` alone does **not** trigger it: a page declares
 *here is an entry a reader can open*, which a server-rendered app wants too.
 
 The two axes move independently and conflating them produces wrong predictions.

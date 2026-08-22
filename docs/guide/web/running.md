@@ -33,15 +33,15 @@ own, whose web surface *is* the API its live session already serves -- so in
 practice, if your project opts into `http.enabled`, slopp runs it.
 
 `http.static.*` mounts are served (the bytes are materialized for the child
-image, which has no store of its own), and handlers taking `:web/deps` work
+image, which has no store of its own), and handlers taking `:http/deps` work
 provided you declare the builder, below. The one gap left is
-`:web/auth-config`: the generated call does not carry it, so an app using it
+`:http/auth-config`: the generated call does not carry it, so an app using it
 gets a managed server on which identity does not resolve.
 
-Handlers that take `:web/deps` are fine, provided you say how to build them:
-mark one zero-arg function `^{:web/context true}` and slopp calls it, passing
-the result as `:web/perform-ctx`. Exactly one per store, and slopp holds you to
-it -- writing an endpoint that reads `:web/deps` into a store that declares no
+Handlers that take `:http/deps` are fine, provided you say how to build them:
+mark one zero-arg function `^{:http/context true}` and slopp calls it, passing
+the result as `:http/perform-ctx`. Exactly one per store, and slopp holds you to
+it -- writing an endpoint that reads `:http/deps` into a store that declares no
 builder is refused at the write, because nil dependencies either return a 500
 or, worse, answer 200 with an empty body.
 
@@ -54,7 +54,7 @@ has any chance of outliving a reload.
 One consequence worth knowing before you meet it: the builder takes no
 arguments, so it cannot double as a test seam. If your only end-to-end seam
 was context construction -- a `serve!` arity taking a fake collaborator --
-either inject at the handler instead (`:web/deps` is below the builder and
+either inject at the handler instead (`:http/deps` is below the builder and
 unaffected) or have your own `serve!` call the builder and merge an override
 over it.
 
@@ -83,9 +83,9 @@ machine never collide. Set `http.port` to pin it.
 This is what a deployed build calls, and what the dev server calls for you.
 
 ```clj
-(web/serve! {:web/namespaces ['shop.api 'shop.ui]
-             :web/host "0.0.0.0"
-             :web/port 8080})
+(web/serve! {:http/namespaces ['shop.api 'shop.ui]
+             :http/host "0.0.0.0"
+             :http/port 8080})
 ```
 
 `serve!` assembles the dispatch context from those namespaces -- the route
@@ -94,14 +94,14 @@ adapter, and returns a handle for `stop!`.
 
 | Opt | Default | Means |
 |---|---|---|
-| `:web/namespaces` | -- | The namespaces to scan. Required. |
-| `:web/adapter` | `:http-kit` | `:jdk` is the zero-dependency fallback. |
-| `:web/host` | `127.0.0.1` | Localhost by default; widen deliberately. |
-| `:web/port` | `8080` | |
-| `:web/perform-ctx` | `nil` | Passed to every read and effect performer, and to the handler as `:web/deps`. |
-| `:web/auth-config` | `nil` | The provider config identity resolves through. See [auth](auth.md). |
-| `:web/routes` | `[]` | Extra route rows appended to the derived ones -- static mounts, anything programmatic. |
-| `:web/max-body-bytes` | 1048576 | Request body cap. Thread the `http.max-body-bytes` capability in. |
+| `:http/namespaces` | -- | The namespaces to scan. Required. |
+| `:http/adapter` | `:http-kit` | `:jdk` is the zero-dependency fallback. |
+| `:http/host` | `127.0.0.1` | Localhost by default; widen deliberately. |
+| `:http/port` | `8080` | |
+| `:http/perform-ctx` | `nil` | Passed to every read and effect performer, and to the handler as `:http/deps`. |
+| `:http/auth-config` | `nil` | The provider config identity resolves through. See [auth](auth.md). |
+| `:http/routes` | `[]` | Extra route rows appended to the derived ones -- static mounts, anything programmatic. |
+| `:http/max-body-bytes` | 1048576 | Request body cap. Thread the `http.max-body-bytes` capability in. |
 
 The adapter is a value behind a one-function seam, which is what keeps the
 server library a config key rather than a rewrite.
@@ -109,7 +109,7 @@ server library a config key rather than a rewrite.
 ## Testing without a socket
 
 ```clj
-(web/handle! (web/context {:web/namespaces ['shop.api]})
+(web/handle! (web/context {:http/namespaces ['shop.api]})
              {:request-method :get :uri "/api/orders/7"})
 ```
 
@@ -122,13 +122,13 @@ then the policy runs (401 unauthenticated, 403 unauthorized), and only then is
 the handler reachable. You cannot accidentally test a handler past its own auth.
 
 For anything narrower, call the handler directly with a synthetic request:
-`{:path-params {:id "7"} :web/reads {:order {...}}}` is a complete input,
+`{:path-params {:id "7"} :http/reads {:order {...}}}` is a complete input,
 because the framework is what fetched those reads.
 
 ## Seeing a page without starting anything
 
 ```clj
-query_eval "(slopp.web/handle! (slopp.web/context {:web/namespaces ['shop.ui]})
+query_eval "(slopp.web/handle! (slopp.web/context {:http/namespaces ['shop.ui]})
                                {:request-method :get :uri \"/orders\"})"
 ```
 
@@ -155,8 +155,8 @@ links an asset, since the check joins declared routes with declared mounts.
 The capability declares the mount; the serving side turns it into routes.
 
 ```clj
-(web/serve! {:web/namespaces ['shop.api]
-             :web/routes (static/mount-routes
+(web/serve! {:http/namespaces ['shop.api]
+             :http/routes (static/mount-routes
                           {"/assets" "public"}
                           (static/file-or-resource-reader app-root))})
 ```

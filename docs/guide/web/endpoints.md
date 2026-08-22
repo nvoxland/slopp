@@ -22,41 +22,42 @@ See [store configuration](../../reference/config.md#the-capabilities-file).
 ## An endpoint is a defn
 
 ```clj
-(defn ^{:web/method   :get
-        :web/path     "/api/orders/:id"
-        :web/auth     [:group "staff"]
-        :web/reads    {:order [:order/by-id [:path-params :id]]}
-        :web/response shop.contracts/order}
+(defn ^{:http/method   :get
+        :http/path     "/api/orders/:id"
+        :http/auth     [:group "staff"]
+        :http/reads    {:order [:order/by-id [:path-params :id]]}
+        :rest/response shop.contracts/order}
   get-order
   "One order, by id."
   [req]
-  {:status 200 :body (:order (:web/reads req))})
+  {:status 200 :body (:order (:http/reads req))})
 ```
 
 Request and response maps are Ring-shaped: `:request-method`, `:uri`,
 `:headers`, `:body` in; `:status`, `:headers`, `:body` out. Everything slopp
-adds is namespaced under `:web/`, so the shape a model already knows stays
+adds is namespaced under the capability that reads it -- `:http/*` here,
+`:rest/*` for a typed contract -- so the shape a model already knows stays
 intact and the additions are visibly slopp's.
 
 | Metadata key | Means |
 |---|---|
-| `:web/method` | `:get`, `:post`, `:put`, `:patch`, `:delete`. |
-| `:web/path` | The path, with `:name` segments arriving as `:path-params`. |
-| `:web/auth` | The policy. Required -- see [auth](auth.md). |
-| `:web/reads` | `{alias [<kind> <request-path>]}`. Fetched before the handler runs. |
+| `:http/method` | `:get`, `:post`, `:put`, `:patch`, `:delete`. |
+| `:http/path` | The path, with `:name` segments arriving as `:path-params`. |
+| `:http/auth` | The policy. Required -- see [auth](auth.md). |
+| `:http/reads` | `{alias [<kind> <request-path>]}`. Fetched before the handler runs. |
 
-| `:web/effects` | `[<kind> ...]` -- the effect kinds this endpoint is allowed to emit. |
-| `:web/request` | Malli schema for the body. Required on `:post`/`:put`/`:patch`. |
-| `:web/response` | Malli schema for the response. Required on every endpoint. |
-| `:web/effectful` | `true` opts out of effects-as-data. The escape, not the default. |
-| `:web/client` | `false` excludes the endpoint from the [generated client](client.md). |
+| `:http/effects` | `[<kind> ...]` -- the effect kinds this endpoint is allowed to emit. |
+| `:rest/request` | Malli schema for the body. Required on `:post`/`:put`/`:patch`. |
+| `:rest/response` | Malli schema for the response. Required on every endpoint. |
+| `:http/effectful` | `true` opts out of effects-as-data. The escape, not the default. |
+| `:rest/client` | `false` excludes the endpoint from the [generated client](client.md). |
 
 Two markers go on *other* forms:
 
 | Marker | On |
 |---|---|
-| `^{:web/read <kind>}` | A function that fetches one read kind: `(fn [ctx arg] ...)`. |
-| `^{:web/effect <kind>}` | A function that performs one effect kind: `(fn [ctx & args] ...)`. |
+| `^{:http/read <kind>}` | A function that fetches one read kind: `(fn [ctx arg] ...)`. |
+| `^{:http/effect <kind>}` | A function that performs one effect kind: `(fn [ctx & args] ...)`. |
 
 ## Both halves of the URL
 
@@ -66,7 +67,7 @@ itself. A declared read reaches a query parameter exactly as it reaches a path
 one:
 
 ```clojure
-:web/reads {:page [:doc/by-id    [:path-params  :id]]
+:http/reads {:page [:doc/by-id    [:path-params  :id]]
             :view [:doc/fidelity [:query-params :view]]}
 ```
 
@@ -94,41 +95,41 @@ mocks anywhere.
 
 ```clj
 ;; the performers: the only forms that touch the database
-(defn ^{:web/read :order/by-id :reads true} fetch-order [db id]
+(defn ^{:http/read :order/by-id :reads true} fetch-order [db id]
   (db/order db id))
 
-(defn ^{:web/effect :order/insert} insert-order! [db row]
+(defn ^{:http/effect :order/insert} insert-order! [db row]
   (db/insert! db row))
 
 ;; the endpoint: declares both, performs neither
-(defn ^{:web/method   :post
-        :web/path     "/api/orders"
-        :web/auth     :authenticated
-        :web/effects  [:order/insert]
-        :web/request  shop.contracts/new-order
-        :web/response shop.contracts/order}
+(defn ^{:http/method   :post
+        :http/path     "/api/orders"
+        :http/auth     :authenticated
+        :http/effects  [:order/insert]
+        :rest/request  shop.contracts/new-order
+        :rest/response shop.contracts/order}
   create-order
   "Place an order."
   [req]
-  (let [order (assoc (:body req) :owner (:web/sub (:web/identity req)))]
+  (let [order (assoc (:body req) :owner (:http/sub (:http/identity req)))]
     {:status 201
      :body order
-     :web/effects [[:order/insert order]]}))
+     :http/effects [[:order/insert order]]}))
 ```
 
 The dispatcher fetches the declared reads, calls the handler, and interprets
 the returned effects through the marked performers -- validating every kind
 before running any of them, so a typo cannot leave a partial write. A unit test
 calls `create-order` with a plain map and asserts on the returned
-`:web/effects` vector; the write never happens.
+`:http/effects` vector; the write never happens.
 
 Performers are ordinary functions and the ordinary rules apply: the one that
 mutates is bang-named, the one that only reads carries `:reads` so it is not
 flagged for calling into an opaque database library.
 
 The escape ladder, in order of preference: declared reads -> a read performer
--> `:web/effectful true` on an endpoint in an `:external` namespace, with its
-dependencies arriving as `:web/deps` on the request rather than as ambient
+-> `:http/effectful true` on an endpoint in an `:external` namespace, with its
+dependencies arriving as `:http/deps` on the request rather than as ambient
 state.
 
 ## What the gates check
@@ -138,11 +139,11 @@ like any other [rule](../verification.md#rules).
 
 | Rule | Refuses |
 |---|---|
-| `http-auth-refusal` | An endpoint with no `:web/auth`. Default-deny: `:public` is typed out, never implied. |
-| `rest-endpoint-schema` | A missing `:web/response`, or `:web/request` on a body method. **Belongs to `rest`, not `http`** — an app serving HTML and publishing no typed API is not asked for one. See [Typed APIs](typed-apis.md). |
+| `http-auth-refusal` | An endpoint with no `:http/auth`. Default-deny: `:public` is typed out, never implied. |
+| `rest-endpoint-schema` | A missing `:rest/response`, or `:rest/request` on a body method. **Belongs to `rest`, not `http`** — an app serving HTML and publishing no typed API is not asked for one. See [Typed APIs](typed-apis.md). |
 | `http-route-collision` | A second owner for one method plus path. |
-| `http-undeclared-effect` | A `:web/effects` kind no marked performer provides. |
-| `http-undeclared-context` | A handler reading `:web/deps` with no `^{:web/context true}` builder in the store -- see [Running the app](running.md). |
+| `http-undeclared-effect` | A `:http/effects` kind no marked performer provides. |
+| `http-undeclared-context` | A handler reading `:http/deps` with no `^{:http/context true}` builder in the store -- see [Running the app](running.md). |
 | `http-unsafe-get` | A `:get`/`:head` endpoint that declares effects or reaches a mutation. |
 | `http-unknown-group` | A `[:group "x"]` policy naming a group the capabilities config does not define. |
 | `http-react-attrs` | `:className`, `:onClick` and friends in hiccup -- see [HTML and CSS](html.md). |
@@ -167,7 +168,7 @@ because with separate tools an empty answer cannot tell you whether the app has
 no endpoints or you asked the wrong tool.
 
 One call returns every endpoint -- method, path, auth policy, handler, declared
-`:web/reads` and `:web/effects`, whether it carries a schema, and
+`:http/reads` and `:http/effects`, whether it carries a schema, and
 `:rendered-by` (which forms link to it) -- plus the derived `:read-kinds` and
 `:effect-kinds` vocabularies. It is the same derivation the write gates run, so
 it cannot disagree with them.

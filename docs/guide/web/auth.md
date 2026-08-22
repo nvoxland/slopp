@@ -2,16 +2,16 @@
 
 Authorization is declared on the endpoint and enforced by the dispatcher before
 the handler is reachable. There is no middleware stack to get the order wrong
-in, and no way to forget: an endpoint without `:web/auth` does not land.
+in, and no way to forget: an endpoint without `:http/auth` does not land.
 
 ## The policy grammar
 
 ```clj
-:web/auth :public                       ; anyone, typed out on purpose
-:web/auth :authenticated                ; any resolved identity
-:web/auth [:group "staff"]              ; a named group
-:web/auth [:any [:group "staff"] [:group "admin"]]
-:web/auth [:all :authenticated [:group "billing"]]
+:http/auth :public                       ; anyone, typed out on purpose
+:http/auth :authenticated                ; any resolved identity
+:http/auth [:group "staff"]              ; a named group
+:http/auth [:any [:group "staff"] [:group "admin"]]
+:http/auth [:all :authenticated [:group "billing"]]
 ```
 
 Groups named in a policy must exist in the capabilities config, or
@@ -24,9 +24,9 @@ empty conjunction would otherwise have authorized everyone.
 
 ## Identity
 
-A resolved identity is `{:web/sub "alice" :web/groups #{"staff"} :web/provider
+A resolved identity is `{:http/sub "alice" :http/groups #{"staff"} :http/provider
 :bearer}`, or `nil` for anonymous. It arrives on the request as
-`:web/identity`. Providers are tried in the order `http.auth.providers` lists them,
+`:http/identity`. Providers are tried in the order `http.auth.providers` lists them,
 the first one to claim the request wins, and configured group membership
 augments whatever the provider asserted.
 
@@ -71,10 +71,10 @@ Route policy answers "may this identity reach this endpoint". It cannot answer
 "is this identity the owner of row 7". That is the handler's job:
 
 ```clj
-(web/enforce (= (:web/sub (:web/identity req)) (:owner order)) "not your order")
+(web/enforce (= (:http/sub (:http/identity req)) (:owner order)) "not your order")
 ```
 
-`enforce` throws an `ex-info` carrying `{:web/status 403}`, which the dispatcher
+`enforce` throws an `ex-info` carrying `{:http/status 403}`, which the dispatcher
 maps to a 403 response. It is deliberately not bang-named: a throw mutates
 nothing, and bang-naming it would falsely mark every pure handler doing an
 ownership check as effectful. `(web/authorized? policy identity)` is the boolean
@@ -91,10 +91,10 @@ static analyzer cannot see, and each one has a test modelling the hole:
 - **Effects are bounded at runtime by the declaration.** A handler that
   computes its effects cannot emit a kind its route never declared, even when a
   performer for that kind exists. The static gates see only the handler body.
-- **Error bodies are redacted.** An `ex-info` with `:web/status` surfaces its
-  message plus only an explicit `:web/public` allowlist. Any other exception is
+- **Error bodies are redacted.** An `ex-info` with `:http/status` surfaces its
+  message plus only an explicit `:http/public` allowlist. Any other exception is
   a generic 500 with the detail logged server-side, never returned.
-- **Bodies are bounded.** Both adapters read at most `:web/max-body-bytes`
+- **Bodies are bounded.** Both adapters read at most `:http/max-body-bytes`
   (default 1 MiB, from the `http.max-body-bytes` capability) and answer 413.
 - **Static reads are contained.** Traversal is refused in the route handler
   before the reader is called, and the built-app reader re-checks that the

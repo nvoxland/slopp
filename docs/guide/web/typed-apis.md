@@ -12,11 +12,11 @@ inert until it is true.
 ## An endpoint declares what it accepts and returns
 
 ```clojure
-(defn ^{:web/method   :post
-        :web/path     "/api/orders"
-        :web/auth     :public
-        :web/request  [:map [:sku :string] [:qty :int]]
-        :web/response [:map [:id :int]]}
+(defn ^{:http/method   :post
+        :http/path     "/api/orders"
+        :http/auth     :public
+        :rest/request  [:map [:sku :string] [:qty :int]]
+        :rest/response [:map [:id :int]]}
   create! "Place an order." [req]
   {:status 200 :body {:id (order/place! (:body req))}})
 ```
@@ -29,7 +29,7 @@ your store.
 ## What you get without writing it
 
 **A request that breaks its contract never reaches your handler.** It is a 400,
-refused *before* the declared `:web/reads` run — doing work on unvalidated input
+refused *before* the declared `:http/reads` run — doing work on unvalidated input
 is what a boundary exists to prevent. The explain goes to the caller, because it
 describes the caller's own data.
 
@@ -47,7 +47,7 @@ server-side and never sent. The client was generated from that schema, so a
 violating response breaks the consumer anyway; failing at the source beats
 failing obscurely at the far end.
 
-Error responses are exempt. `:web/response` describes the 200, so a 404's
+Error responses are exempt. `:rest/response` describes the 200, so a 404's
 `{:error …}` is not judged against it.
 
 ## Seeing what a client sees, without a server
@@ -92,7 +92,7 @@ them.
 !!! note "These used to belong to `http`"
 
     If you serve HTML and publish no typed API, you are no longer asked to
-    declare `:web/response` on every page. Serving a document is `http`'s
+    declare `:rest/response` on every page. Serving a document is `http`'s
     business; typing a JSON contract is `rest`'s.
 
 ## Your typed surface, as a report
@@ -114,12 +114,12 @@ claim about your contract rather than about the report. A map *inside* a
 collection is seen through: `[:sequential [:map [:id :int]]]` reports `[:id]`,
 since a list endpoint is the commonest non-map contract there is.
 
-`:published` is `false` for an endpoint that opted out with `:web/client false`
-— an HTML page is a `:web/path` form like any other, and a generated fetch
+`:published` is `false` for an endpoint that opted out with `:rest/client false`
+— an HTML page is a `:http/path` form like any other, and a generated fetch
 wrapper over one would be nonsense. It is a field rather than an omission so
 that "excluded on purpose" and "forgot to declare a schema" do not look alike.
 
-## `:web/request` is what the caller sends
+## `:rest/request` is what the caller sends
 
 One schema covers every carrier. A GET sends a query string for the same reason
 a POST sends a body, and the generated client reads the method to decide which

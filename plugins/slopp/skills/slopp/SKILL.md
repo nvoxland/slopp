@@ -290,7 +290,11 @@ because each part surprises somebody:
   and always holds your thread's code — which is why your tests are right
   about your work while the server is still right about the branch.
 - **`commit_point` lands too**, so a milestone always names a branch that
-  contains what it milestones.
+  contains what it milestones. When that land is REFUSED — the branch moved
+  and the rebase conflicts, or the thread is unreachable — the milestone comes
+  back `:status :unlanded` and carries the refusal in `:land`, because the one
+  thing worse than a refused milestone is a green one naming a branch that
+  does not hold the work. Resolve what `:land` names and call it again.
 - **Your thread survives the process.** Come back with the same agent
   identity and you resume the same thread, un-landed work and all. Come back
   as somebody else and you correctly see only what has landed. What persists
@@ -341,7 +345,7 @@ walkable, they just stop being on anybody's way forward.
 | Rename a namespace ALIAS (`[a.b :as old]` -> `:as new`) | `ns_realias {ns old new}` — the `:as` in the ns form AND every `old/sym` in that namespace's bodies, one verified write. **There is no hand route**, and that is why this is a tool rather than two edits: between the two writes the ns form and the bodies disagree about the qualifier and the namespace does not load, so the alternative is the add-both / migrate / drop dance. **Reach for it right after `ns_rename`**, which rewrites namespaces and walks straight past the `:as` — the moved code keeps being called by its old module's name, and the day that name gets REUSED the alias starts pointing at a real, different module, which is worse than one naming nothing. You do not have to spot them: the rename lists them under `:left-behind :alias`, each with the `:suggest` to pass here. Scoped to one namespace by design: an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift and there is no store-wide version. A BARE `old` is left alone — only `old/x` is the qualifier, and the same spelling is routinely a local or a parameter three tokens away. Read `:sites` (0 means the alias was unused, not that nothing happened) and `:left-behind` |
 | Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. Whole-word only, so `region-ish` survives a `region` sweep. **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
 | Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **Read `:requalified` and `:left-behind`; absence of either means checked-and-none.** `:requalified` is the half of the diff that is not a text substitution, and worth an eye for that reason alone. `:left-behind` is the half the tool DECLINED: changing the key's NAME (`:a/x` -> `:a/y`) rather than its qualifier cannot be applied to a destructuring, because the symbol is a LOCAL BINDING the body reads — so sweep the qualifier and rename the name as two steps, or finish the named forms by hand. A stranded destructuring presents as nil arriving silently rather than as an error, so the only tests that can catch one are the ones exercising the value END-TO-END — which for a session, a projection or a subprocess means `^:external`, and those are exactly the ones a write DEFERS. Do not read the write's green as coverage here |
-| Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep cannot rewrite these and now NAMES them under `:left-behind :via :regex`, so read that list; measured at seven in one wave, two of which survived three green done-points), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
+| Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep REWRITES these now and names them under `:patterns-rewritten`; a row under `:left-behind :via :regex` is the residue it could not reach, and is a finding. Measured at seven in one wave before this was automated, two of which survived three green done-points), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
 | Extract helper / move forms to another ns | `edit_extract` / `edit_move_forms` (new OR existing target; callers everywhere rewritten; `export: true` for a deep target with outside callers). **Propose the cluster you want and let it close the set for you** — it refuses a two-way split and NAMES the forms that would leave a cycle ("the moved set calls [x y] (staying)"). Add those and retry. Guessing the seam leaves a cycle; the refusal IS the analysis. `export: true` WIDENS per var — a var already `^:export` keeps its level without the flag, so you never pass it just to restate something already true, and passing it does not silently widen the rest. Read `:export-not-landed` on the result: the move checks its own POSTCONDITION against the committed store and names the VAR, so a planned export the store did not actually get is reported rather than discovered later. **And read `:shadowed`, which is the one finding a green write does not cover** — refs INTO the target go bare, so a moved form that binds a LOCAL of that name now calls the local: it compiles, the suite passes, and the behaviour changed |
 | Regroup whole namespaces under one prefix | `module_extract {namespaces to}` — the MODULE-grain move, for a namespace that grew into its own component or a set that wants one owning prefix. Each named ns takes its subtree and `-test` sibling. **`dry-run` first, always**: going from two segments to three makes a namespace package-private, so every outside caller breaks at once, and the plan is the only place you see WHICH vars must be hoisted and WHICH CALLERS force each. The write order is the design — hoist (`^:export`), then rename, then declare the edges the moved store actually references — so no intermediate state is one the gate would refuse. Refuses a regroup that would leave a production cycle; a `-test` back-edge is not one |
 | Reorder / delete / undo | `edit_move` / `edit_delete_form` / `edit_revert`. **A delete whose form still has a caller is REFUSED**, naming every caller — the same stance `ns_delete` takes for a namespace something still requires. Only `:static` references count (a quoted symbol or a `^{:covers}` marker names a form without needing it), and a recursive function is not its own caller. To remove a caller and its callee together, delete in REVERSE DEPENDENCY ORDER — callers first, callee last, one call each; every step verifies and every intermediate state loads. Two forms that call EACH OTHER have no valid order: `edit_replace_form` one to drop the call, then delete both. `query_depends {on "ns/name"}` still answers the question BEFORE you write, and is worth asking when you are planning a removal rather than discovering its size from a refusal. Recovery for any write is `undo {deltas 1}` — but `undo` walks back only YOUR OWN writes, so a delete made under a different agent (a `--call` script, another session) answers `no writes of yours to undo` while looking straight at it; that case needs `episode_revert` |
@@ -489,15 +493,25 @@ declaring one namespace under the name of another — and it stays green, becaus
 a fixture shaped like that usually asserts `nil`. Rank these above ordinary
 token strings: nothing else in `:left-behind` is a pair that has come apart.
 
-**REGEX literals come back under `:regex`, and they are the ones to judge
-first.** A pattern is data, so no rewrite reaches it, and a regex escapes its
-dots so the text sweep misses the spelling too. The failure is asymmetric,
-which is what makes it worth ranking: a PRESENCE assertion built on a stale
-pattern turns red and you go fix it, while an ABSENCE assertion — `(is (not
-(re-find #"acme\.billing" src)))` — becomes permanently true and guards
-nothing, forever, with no symptom. Reporting rather than rewriting is
-deliberate: a pattern may be matching text rather than code, and substituting
-inside one silently changes what a guard searches for.
+**REGEX literals are REWRITTEN for you now, and reported under
+`:patterns-rewritten`.** A pattern escapes its dots, so `acme\.billing` shares
+no literal text with `acme.billing` and the text pass walks past it. That used
+to be reported and left to you, on the reasoning that a pattern is an INTENT
+rather than a name — but slopp owns the dialect, and a dot in a dotted name it
+governs is a SEPARATOR, so there was never an intent to guess at. Only the NAME
+moves; the rest of the pattern is your own matching.
+
+It is reported rather than done silently for the reason `:requalified` is: a
+rename's diff must not contain a change to what a predicate MATCHES without
+naming it. Read the rows. `:left-behind :via :regex` still exists as the
+RESIDUE — what the rewrite could not reach — and should be empty; a row there
+is a finding.
+
+Why it earned automation: the failure is asymmetric. A PRESENCE assertion on a
+stale pattern turns red and you go fix it, while an ABSENCE assertion — `(is
+(not (re-find #"acme\.billing" src)))` — becomes permanently true and guards
+nothing, forever, with no symptom. Measured at seven literals in one wave, two
+surviving three green done-points.
 
 **Qualified KEYWORDS come back under `:keyword`, and they are the silent
 class.** `:acme.billing/customer-id` survives `acme.billing` → `acme.invoice`
@@ -717,12 +731,12 @@ something you KNOW contains the name:
 (is (= [] (vec (re-seq #"acme\.client" src))))                          ; …and it is absent HERE
 ```
 
-slopp reports this one for you, at two different moments. `ns_rename` AND
-`rename_sweep` name every pattern spelling the old name under `:left-behind`
-with `:via :regex`, which is the earlier and more useful half — you are told at the moment the staleness is
-CREATED, while you still remember what the pattern was for. Later, the
-**`stale-pattern`** advisory flags a regex naming a name in your store's OWN
-root family that is neither a namespace nor a prefix of one.
+slopp handles this one for you now: `ns_rename` and `rename_sweep` REWRITE
+every pattern spelling the old name and report it under `:patterns-rewritten`.
+The **`stale-pattern`** advisory remains as the backstop, flagging a regex
+naming a name in your store's OWN root family that is neither a namespace nor
+a prefix of one — which is what catches a pattern that entered by some other
+route than a rename.
 
 The two are not redundant, and the gap between them is worth knowing: the
 advisory can only see a pattern naming a namespace that no longer EXISTS. A
@@ -795,6 +809,16 @@ signature change swept by grep twice reported every caller migrated while two
 were still broken — found minutes later by the whole-store check. The wrong
 method LOOKS thorough, because a search that misses a hit is shaped exactly
 like a search that found them all.
+
+**The graph answers about the STORE, and an empty answer is not "nobody calls
+this."** Only edges whose TARGET is a store form are recorded, so a call into
+framework or library code — anything vendored at build rather than stored —
+resolves to nothing. Asking `query_depends {on "slopp.webapp.dom/mount!"}` in
+an app store returns empty for a store that plainly mounts, and empty is
+exactly the shape of "no callers". Before you read a `[]` as absence, check
+that the target is a form the store actually holds; when it is not, the
+question has to be answered another way (the analyzer resolves the aliases, a
+completeness test derives both sides).
 
 | both ends addressable? | what you need | do this |
 |---|---|---|
@@ -1035,11 +1059,11 @@ full map.
   reaches, grouped by how each was found. Under `ns_rename` the `:alias` rows
   are the callers whose `:as` still spells the old name, each with a `:suggest`
   to hand `ns_realias`. Under `rename_sweep` each row carries `:via`:
-  `:destructuring` (a `{:a/keys [x]}` whose key NAME changed) and `:regex` (a
-  pattern spelling the name with escaped dots, which shares no literal text with
-  the token). Neither is rewritten for you and the reasons differ — a symbol is a
-  local the body reads; a pattern is an INTENT, and whether a `.` in one separates
-  or matches anything is a question about what you meant. `:requalified`
+  `:destructuring` (a `{:a/keys [x]}` whose key NAME changed) — not rewritten
+  for you, because the symbol is a LOCAL BINDING the body reads — and `:regex`,
+  which is now the RESIDUE after the rewrite rather than the whole population,
+  so a row there is a finding. `:patterns-rewritten` names the regex literals it
+  DID move. `:requalified`
   (rename_sweep) — destructurings it restructured, which is the half of a keyword
   rename's diff that is not a text substitution. Absence of any of them means
   checked-and-none, never unchecked.
@@ -1257,11 +1281,11 @@ implies `http`.
 An endpoint declares what it accepts and returns:
 
 ```clojure
-(defn ^{:web/method   :post
-        :web/path     "/api/orders"
-        :web/auth     :public
-        :web/request  [:map [:sku :string] [:qty :int]]
-        :web/response [:map [:id :int]]}
+(defn ^{:http/method   :post
+        :http/path     "/api/orders"
+        :http/auth     :public
+        :rest/request  [:map [:sku :string] [:qty :int]]
+        :rest/response [:map [:id :int]]}
   create! "Place an order." [req]
   {:status 200 :body {:id (order/place! (:body req))}})
 ```
@@ -1269,7 +1293,7 @@ An endpoint declares what it accepts and returns:
 With `rest` on, three things follow that you write no code for.
 
 **A request that breaks its contract never reaches your handler.** It is a 400,
-refused *before* the declared `:web/reads` run — work on unvalidated input is
+refused *before* the declared `:http/reads` run — work on unvalidated input is
 the thing a boundary exists to prevent. The explain travels to the caller,
 because it describes the caller's own data.
 
@@ -1282,7 +1306,7 @@ contract the server does not actually require.
 **A response that breaks its own contract is a 500**, with the explain logged
 server-side and never in the body. The client was generated from that schema, so
 a violating response breaks the consumer anyway — failing at the source beats
-failing obscurely at the far end. Error responses are exempt: `:web/response`
+failing obscurely at the far end. Error responses are exempt: `:rest/response`
 describes the 200, and a 404's `{:error …}` is not judged against it.
 
 ### `slopp.rest/call` — see what a client sees, with no server
@@ -1313,15 +1337,15 @@ done-grain advisories about contract drift, duplication, unconstrained fields
 and documentation. `query_capabilities` lists them before you opt in.
 
 **These used to be `http`'s.** If you serve HTML and publish no typed API, you
-are no longer asked to declare `:web/response` on every page — serving a
+are no longer asked to declare `:rest/response` on every page — serving a
 document is `http`'s business, and typing a JSON contract is `rest`'s.
 
 `query_surface` gains a `:rest` section: per endpoint, the NAMES its request and
 response declare, its handler, and whether it is `:published` (an HTML page opts
-out with `:web/client false`, and that exclusion is a field rather than an
+out with `:rest/client false`, and that exclusion is a field rather than an
 omission, so "opted out" and "forgot a schema" do not look alike).
 
-### `:web/request` is what the CALLER SENDS, wherever it travels
+### `:rest/request` is what the CALLER SENDS, wherever it travels
 
 One schema covers the path segments, the query string and the body. A GET sends
 a query string for the same reason a POST sends a body, and the generated client
@@ -1355,39 +1379,40 @@ Opt in once: `config_file {path "capabilities" key "http.enabled" value
 no route table, no macro:
 
 ```clj
-(defn ^{:web/method :get
-        :web/path   "/api/users/:id"
-        :web/auth   [:group "admin"]
-        :web/reads  {:user [:user/by-id [:path-params :id]]}
+(defn ^{:http/method :get
+        :http/path   "/api/users/:id"
+        :http/auth   [:group "admin"]
+        :http/reads  {:user [:user/by-id [:path-params :id]]}
         :malli/schema [:=> [:cat Req] Resp]}
-  get-user "One user." [{:keys [path-params] :web/keys [reads]}] …)
+  get-user "One user." [{:keys [path-params] :http/keys [reads]}] …)
 ```
 
 Request/response maps are RING-shaped (`:request-method` `:uri` `:body` /
-`:status` `:headers` `:body` as data); everything slopp adds is
-`:web/`-namespaced. `query_surface` lists the whole surface in its `:http` section: every method,
-path, policy, handler, the declared `:web/request`/`:web/response` contract,
+`:status` `:headers` `:body` as data); everything slopp adds is namespaced by
+the CAPABILITY that reads it — `:http/*` for the server's own vocabulary,
+`:rest/*` for a typed contract, `:webapp/*` for the browser's routing. `query_surface` lists the whole surface in its `:http` section: every method,
+path, policy, handler, the declared `:rest/request`/`:rest/response` contract,
 and the derived effect/read vocabularies.
 
 **Write gates** (all inert until `http.enabled`; dial via `rules` config):
-- every endpoint DECLARES `:web/auth` — `:public` is typed out, never implied
-- every endpoint TYPES its contract — `:web/response` (all) and `:web/request`
+- every endpoint DECLARES `:http/auth` — `:public` is typed out, never implied
+- every endpoint TYPES its contract — `:rest/response` (all) and `:rest/request`
   (body methods `:post`/`:put`/`:patch`) — a `.cljc` malli schema VAR
   (`some.contracts/order`: shared, refs-visible, and the input to the generated
   client — the paved road) or an inline `[:map …]` for a one-off (D-web-contracts)
 - one method+path has one owner (collision refuses at the write)
-- a `:get`/`:head` endpoint is SAFE: no `:web/effects`, no reachable mutation
-- `:web/effects` may only name kinds a `^{:web/effect <kind>}` performer
+- a `:get`/`:head` endpoint is SAFE: no `:http/effects`, no reachable mutation
+- `:http/effects` may only name kinds a `^{:http/effect <kind>}` performer
   provides
 
-**Keep handlers pure.** Reads: declare `:web/reads {alias [<kind> <req-path>]}`
-naming a `^{:web/read <kind>}` performer — the framework fetches BEFORE the
+**Keep handlers pure.** Reads: declare `:http/reads {alias [<kind> <req-path>]}`
+naming a `^{:http/read <kind>}` performer — the framework fetches BEFORE the
 handler, so a unit test just passes the value. Writes: RETURN
-`{:web/effects [[<kind> & args]…]}` as data and let the dispatcher run the
+`{:http/effects [[<kind> & args]…]}` as data and let the dispatcher run the
 marked performer — the test asserts `=` on data, no mocks. An endpoint that
-must perform effects directly declares `:web/effectful true` (ON the name,
+must perform effects directly declares `:http/effectful true` (ON the name,
 with the rest of the contract) and lives in an `:external` namespace (the
-escape, not the default); its dependencies arrive as `:web/deps` on the
+escape, not the default); its dependencies arrive as `:http/deps` on the
 request, never as ambient state.
 
 **For many web projects you do not run it — slopp does.** slopp boots a
@@ -1404,20 +1429,20 @@ this wrong because it is never asked. (It used to be a `dev.server` capability.
 The only adopter who ever set it set it to work around 404ing assets, and the
 switch then made a bug look like a preference for a week.)
 
-`http.static.*` mounts and handlers taking `:web/deps` both work — the generated
+`http.static.*` mounts and handlers taking `:http/deps` both work — the generated
 call carries the mounts and calls your context builder.
 
-**One real gap: `:web/auth-config` is not carried,** so an app using it gets a
+**One real gap: `:http/auth-config` is not carried,** so an app using it gets a
 managed server on which identity does not resolve. There is nothing to
 configure around it; if that is you, say so rather than working around it.
 
-**Handlers taking `:web/deps` DO work — declare the builder, and slopp
-insists.** Mark one zero-arg fn `^{:web/context true}`; slopp calls it and
-passes the result as `:web/perform-ctx`, handlers receive it as `:web/deps`,
+**Handlers taking `:http/deps` DO work — declare the builder, and slopp
+insists.** Mark one zero-arg fn `^{:http/context true}`; slopp calls it and
+passes the result as `:http/perform-ctx`, handlers receive it as `:http/deps`,
 performers as their first argument. Exactly one per store (a singleton, unlike
 performers, which are keyed by kind). It cannot be a performer — performers
 already RECEIVE the context, so it is upstream of that vocabulary. Writing an
-endpoint that reads `:web/deps` into a store that declares no builder is
+endpoint that reads `:http/deps` into a store that declares no builder is
 REFUSED (`http-undeclared-context`): nil deps either 500 or, worse, answer 200
 with an empty body, and `generate_client` consumes the empty one as a success.
 An app that runs its OWN `serve!` should mark the builder it already has and
@@ -1438,7 +1463,7 @@ named escape, and this is one of them.
 end-to-end seam was context construction — a `serve!` arity taking a fake
 collaborator, say — the builder becomes the single source of the context and
 simultaneously stops being parameterisable. Two ways out, both fine: inject at
-the HANDLER (`(web/handle! … {:web/deps {:registry … :requester fake}})`,
+the HANDLER (`(web/handle! … {:http/deps {:registry … :requester fake}})`,
 which is below the builder and unaffected), or have your own `serve!` call the
 builder and merge an override over it, which keeps one definition and keeps
 the seam. Obvious once said, and not before.
@@ -1459,12 +1484,12 @@ Where it does apply, three things worth knowing:
 `http.port` pins the address; unset, it is derived from the store dir so two
 projects on one machine never collide.
 
-**The runtime underneath: `slopp.web`.** `(web/serve! {:web/namespaces
-['my.api] :web/port 8080})` scans the namespaces' var metadata (the same
-contract the gates enforced) and serves on http-kit (`:web/adapter :jdk` =
+**The runtime underneath: `slopp.web`.** `(web/serve! {:http/namespaces
+['my.api] :http/port 8080})` scans the namespaces' var metadata (the same
+contract the gates enforced) and serves on http-kit (`:http/adapter :jdk` =
 zero-dep fallback) — that is what a deployed build calls, and what the dev
 server calls for you. Tests never need it: `(web/handle! (web/context
-{:web/namespaces ['my.api]}) request-map)` runs the ENTIRE pipeline — route,
+{:http/namespaces ['my.api]}) request-map)` runs the ENTIRE pipeline — route,
 policy, declared reads, handler, effect interpretation — portlessly. In-handler
 guards: `(web/enforce (= owner sub))` throws a 403-mapped ex-info (no bang —
 your handler stays analyzer-pure); `(web/authorized? policy identity)`
@@ -1475,7 +1500,7 @@ they neither report in query_surface nor claim paths.
 `:path-params` AND `:query-params` on the request (the query string is
 parsed once, there — don't split `:query-string` yourself), so a declared
 read reaches a query parameter exactly as it reaches a path one:
-`:web/reads {:page [:my/page [:query-params :view]]}`. Needs both? Declare
+`:http/reads {:page [:my/page [:query-params :view]]}`. Needs both? Declare
 the read over the whole request with `[]` and destructure. A parameter the
 page cannot honour should be a 404, not a silent fall back to the default —
 otherwise a link means "whatever the default became" the day you add a
@@ -1483,12 +1508,12 @@ second value.
 
 **Security posture the runtime enforces** (not just the write gates): auth is
 default-deny and an empty `[:all]`/`[:any]` policy DENIES; the dispatcher
-bounds a response's effects to the route's declared `:web/effects` (a handler
+bounds a response's effects to the route's declared `:http/effects` (a handler
 cannot emit an undeclared kind, even one a performer provides); error bodies
-are redacted — an `ex-info` with `:web/status` surfaces its message plus only
-a `:web/public` allowlist, anything else is a generic 500 (detail logged, not
+are redacted — an `ex-info` with `:http/status` surfaces its message plus only
+a `:http/public` allowlist, anything else is a generic 500 (detail logged, not
 returned); request bodies are capped (default 1 MiB — thread
-`:web/max-body-bytes` from the `http.max-body-bytes` capability into
+`:http/max-body-bytes` from the `http.max-body-bytes` capability into
 `serve!`); the static asset reader contains paths under its root. Auth: static
 passwords are salted PBKDF2 (`slopp.web.auth/hash-password` — mint one with
 `query_eval`, it is not on the `slopp.web` facade), bearer and
@@ -1526,12 +1551,12 @@ The rules that matter:
   (who links here), and `done` fails on a path nothing serves
   (`http-dangling-route-refs`). `(str "/prefix/" x)` checks by prefix; a
   fully dynamic path is reported `:unresolved`, never counted clean.
-  Served by something outside this store? `^{:web/external-path "why"}`
+  Served by something outside this store? `^{:http/external-path "why"}`
   on the rendering form discharges.
 - **See a page without a server:** `(web/handle! (web/context
-  {:web/namespaces ['my.ui]}) {:request-method :get :uri "/x"})` via
+  {:http/namespaces ['my.ui]}) {:request-method :get :uri "/x"})` via
   `query_eval` — the full pipeline, rendered HTML in the response map.
-  Test on data first (call the handler with a synthetic `{:web/reads …}`
+  Test on data first (call the handler with a synthetic `{:http/reads …}`
   request); pin one rendered string per component. Under `--live`, an
   edited page hot-serves — browser F5, no build step.
 
@@ -1670,11 +1695,11 @@ stop being the assumption once the app grows.
   on a failed fetch, fall back to a full page load: a stale pane under a new
   URL is the SPA failure mode that lies to the reader.
 - **One list of served namespaces, not a literal per server.** Routes and
-  `:web/read` performers can live in different namespaces (reads resolve by
+  `:http/read` performers can live in different namespaces (reads resolve by
   VOCABULARY, store-wide, so an API endpoint can reuse a page's read). A
   server given only half answers **500, not 404** — much harder to diagnose.
   If two servers mount the same app, they share one `def`.
-- **Mark transport endpoints `^{:web/client false}`.** Anything that is not
+- **Mark transport endpoints `^{:rest/client false}`.** Anything that is not
   the app's own API — health, metrics, an RPC transport — otherwise gets a
   typed browser `fetch` wrapper generated for it. The same flag is what keeps
   HTML page endpoints out of the client.
@@ -1682,7 +1707,7 @@ stop being the assumption once the app grows.
 #### If you go all the way: no server-rendered pages at all
 
 - **Serve ONE document** — head, an empty `<div id="app">`, nothing else —
-  and declare `:web/client-routes` with the prefixes your client router owns.
+  and declare `:webapp/client-routes` with the prefixes your client router owns.
   Note the prefix ROOT is not covered (`["/store"]` generates `/store/*`), so
   `/store` itself needs its own route.
 - **Consequence to state out loud: every path under a declared prefix now
@@ -1700,16 +1725,19 @@ stop being the assumption once the app grows.
 declare the app; slopp owns the loop.
 
 ```clojure
-(defn ^:web/page app []
-  (webapp/wiring
-   {:webapp/state  state                        ; your atom
-    :webapp/routes [["/"            index]      ; a TABLE, not a function
-                    ["/things"      things]     ; a bare fn IS a screen
-                    ["/things/:id"  {:render  thing         ; a screen that
-                                     :request thing-request ; asks for its
-                                     :check   valid?        ; own data, and
-                                     :derive  unwrap}]]     ; vets the answer
-    :webapp/chrome (fn [state inner] [:div [nav state] inner])}))
+;; the entry returns the DECLARATION — slopp wires it. Both entries derive
+;; from this one value: `cljnx/driver-for` for a headless drive, `dom/mount!`
+;; for the browser. Returning `(webapp/wiring …)` yourself is REFUSED, because
+;; a wired map already carries the derived `:webapp/view`.
+(defn ^:app/entry app []
+  {:webapp/state  state                         ; your atom
+   :webapp/routes [["/"            index]       ; a TABLE, not a function
+                   ["/things"      things]      ; a bare fn IS a screen
+                   ["/things/:id"  {:render  thing         ; a screen that
+                                    :request thing-request ; asks for its
+                                    :check   valid?        ; own data, and
+                                    :derive  unwrap}]]     ; vets the answer
+   :webapp/chrome (fn [state inner] [:div [nav state] inner])})
 ```
 
 - **Routes are DATA and a function is refused.** A function answers only when
@@ -1753,7 +1781,7 @@ declare the app; slopp owns the loop.
   exist fails quietly — the url routes, the screen renders, one pane never loads
   while everything around it works, so it gets reported as slowness rather than
   as a missing endpoint. Two declarations stop it asking: a whole url for a
-  third-party server, and `^{:web/external-path "why"}` on the form when
+  third-party server, and `^{:http/external-path "why"}` on the form when
   something OUTSIDE your store serves the path — a proxied API under your own
   mount point cannot be written in full, because the prefix is runtime.
 - **A request carries the MOUNT POINT, like every other address.** Write
@@ -1812,7 +1840,7 @@ declare the app; slopp owns the loop.
   (a full page load, for a destination that is not a client route). Declaring
   the kind is what stops a browser dispatcher and a headless one drifting
   apart.
-- **Drive it headlessly**: `(screen/open! (webapp/driver app))`, then `visit!`
+- **Drive it headlessly**: `(cljnx/open! (webapp/driver app))`, then `visit!`
   the url a reader would type — mount point included — and `click!` a link.
   No browser, no compile, and the same functions the real page runs. **`visit!`
   takes the FULL url**, which is what is in the address bar; a drive that passes
@@ -1842,7 +1870,7 @@ declare the app; slopp owns the loop.
   false "unresolved namespace" finding.)
 
 **The typed client is GENERATED, never hand-written (D-web-contracts).** Once
-your endpoints declare their `:web/request`/`:web/response` contracts (the write
+your endpoints declare their `:rest/request`/`:rest/response` contracts (the write
 gate requires it — see the D-web write gates), `generate_client` writes a stored
 `:cljs` namespace (default `app.client.api`, set `client`/`generated-ns`) of
 typed `fetch` wrappers — one fn per endpoint, validating params OUT and the
@@ -1858,7 +1886,7 @@ before the request leaves. Rules of the road:
   ownership, strip the marker). It's still fully inspectable — `query_source`,
   blast-radius, refs — and because the wrappers reference the schema VARS,
   "change a schema → every affected client call" falls out of the reference graph.
-- **Schemas must be `.cljc`.** A `:web/request`/`:web/response` VAR the client
+- **Schemas must be `.cljc`.** A `:rest/request`/`:rest/response` VAR the client
   ships has to live in a `:cljc` ns (so it compiles into the bundle AND is the
   one the server validates); `generate_client` SKIPS an endpoint whose schema
   isn't shippable and reports it in `:problems`. A `rest-inline-schema-dup` advisory
@@ -1891,8 +1919,8 @@ before the request leaves. Rules of the road:
   `X-Slopp-Base: /your/prefix` with the proxied request: the document reads it
   per REQUEST (not from config — the same server may also be answering
   directly on its own port) and emits its own asset urls prefixed.
-- **A page endpoint opts OUT: `^{:web/client false}`.** An HTML page is a
-  `:web/path` form like any other, so it would otherwise get a typed wrapper
+- **A page endpoint opts OUT: `^{:rest/client false}`.** An HTML page is a
+  `:http/path` form like any other, so it would otherwise get a typed wrapper
   whose `.json` parse can never succeed. Declare it rather than relying on the
   response schema — `:string` is a perfectly good JSON response, so the schema
   can't tell HTML from JSON; only you can.
@@ -1906,13 +1934,13 @@ that. Neither store reads the other.
 - **Producer: serve `slopp.web.contract/contract-document`.** It takes your
   served namespace list and returns `{:slopp/contract-version 1 :endpoints […]}`
   — method, path, name, the handler's QUALIFIED symbol, its docstring, and the
-  request/response schemas as VALUES. Serve it as EDN with `:web/raw true` and
-  `Content-Type: application/edn`; mark the endpoint `^{:web/client false}`
+  request/response schemas as VALUES. Serve it as EDN with `:http/raw true` and
+  `Content-Type: application/edn`; mark the endpoint `^{:rest/client false}`
   (describing the wrappers doesn't need a wrapper). It ships in the `slopp-web`
   slim jar, so any app can publish, not just one whose code lives in a store.
 - **Your handler's docstring IS the endpoint's public description.** It travels
-  in `:doc`, de-indented and whole — there is deliberately no second `:web/summary`
-  field, because one fact with two homes can disagree. Write it for the CALLER:
+  in `:doc`, de-indented and whole — there is deliberately no second summary
+  field beside it, because one fact with two homes can disagree. Write it for the CALLER:
   open with what the endpoint is for, and keep implementation notes out of it,
   because everyone generating a client reads it. `:handler` is there because
   `:name` alone does not resolve — on a real surface a third of endpoint names
@@ -1929,7 +1957,7 @@ that. Neither store reads the other.
   EDN as the source of truth and derive OpenAPI later if a non-Clojure consumer
   ever needs it.
 - **Names come from ENDPOINTS, not from the producer's schema names.** Metadata
-  is evaluated at def time, so `^{:web/response contracts/timeline}` is already
+  is evaluated at def time, so `^{:rest/response contracts/timeline}` is already
   a plain vector by the time anything can read it — the name `timeline` never
   existed at runtime. The consumer gets `timeline-response`, and a schema shared
   by two endpoints arrives inlined in both.
@@ -1937,7 +1965,7 @@ that. Neither store reads the other.
   `:slopp/contract-version` generates nothing and reports a problem, rather than
   guessing at a shape it doesn't know.
 - **Pass the served-namespace list to your performers as data.** Only the
-  server knows what it serves. Thread it through `:web/perform-ctx` — reaching
+  server knows what it serves. Thread it through `:http/perform-ctx` — reaching
   for it from a page namespace inverts the dependency, and forgetting it
   entirely publishes an empty contract with a 200, which a consumer will
   happily generate an empty client from. Test that one over a real socket: an
@@ -1956,13 +1984,21 @@ assume: `query_eval` `(.getResource (clojure.lang.RT/baseLoader)
 
 ### Reviewing a UI without a browser
 
-**`slopp.web.screen` drives your app like a browser, with no rendering engine**
-— document, event dispatch, re-render, on the JVM, running your app's OWN
-client code. Reach for it the moment you want to *look at* a screen, not just
-when writing a test: opening a real browser to read a sentence is the habit
-this replaces. (It is called `screen` and not `browser` on purpose — a real
-browser is a thing you may also be testing with, and that word has to keep one
-meaning.)
+**`slopp.cljnx` drives your app like a browser, with no rendering engine** —
+document, event dispatch, re-render, on the JVM, running your app's OWN client
+code. Reach for it the moment you want to *look at* a screen, not just when
+writing a test: opening a real browser to read a sentence is the habit this
+replaces.
+
+**It is `cljnx`, not `browser` and not `screen`.** Not `browser`, because a
+real one is a thing you may also be testing with and that word has to keep one
+meaning. Not `screen`, because in a `webapp` a screen is a PANE — what a route
+row points at — and that vocabulary is load-bearing. The coined name can only
+ever mean this one thing.
+
+**It belongs to no capability, and that is the design.** It takes ONE driving
+contract and knows no app type; each capability derives that contract from
+what it owns. So it is vendored to every store rather than to one family's.
 
 **To LOOK, use the `screen` tool** — no code, no test, no browser:
 
@@ -1971,21 +2007,37 @@ screen {steps [{visit "/store"} {fill "Filter" value "web"} {click "Add"}]
         region "main" detail "prose"}
 ```
 
-**To ASSERT, the same thing in a test.** `screen/drive!` takes the identical
+**To ASSERT, the same thing in a test.** `cljnx/drive!` takes the identical
 step script, so a screen you looked at is one you can pin without retyping it
 as a call chain:
 
 ```clj
-(require '[slopp.web.screen :as screen])
+(require '[slopp.cljnx :as cljnx])
 
-(def s (screen/open! ctx))          ; a slopp.web ctx — nothing else to declare
-(screen/drive! s [{:visit "/store"} {:click "Code"}])
-(screen/text s "main")              ; ONE region — and it throws if absent
-(screen/text s nil {:within "rate"}); ONE element, addressed like a click
+;; a SERVED app — its own ctx, through http's adapter
+(def s (cljnx/open! (slopp.web/driver ctx)))
+;; a BROWSER app — the same contract, through webapp's
+(def s (cljnx/open! (webapp/driver (webapp/wiring app))))
+
+(cljnx/drive! s [{:visit "/store"} {:click "Code"}])
+(cljnx/text s "main")              ; ONE region — and it throws if absent
+(cljnx/text s nil {:within "rate"}); ONE element, addressed like a click
 ```
 
-Mark the zero-arg PUBLIC defn that builds your app `^:web/page` and the tool
-can find it; there is deliberately no session between tool calls, so a script
+**The `driver` call is the whole of what you write, and it is not ceremony.**
+`cljnx/open!` refuses a served ctx, naming its producer: the fake browser used
+to perform http's requests itself, which put one capability's adapter inside a
+namespace that has to drive both. Hand-wiring the contract yourself is the
+thing this exists to stop — `{:document (fn [path] hiccup)}` is a page you can
+open, and a page you wrote by hand is a lookalike that drifts.
+
+Mark the zero-arg PUBLIC defn that builds your app `^:app/entry` and the tool
+can find it — it belongs to the always-on `app` owner rather than to a
+capability, because the same marker names a served ctx, a browser app's
+declaration and a hand-wired page. `cljnx/driver-for` is the ONE public
+derivation from whatever it returns to what `open!` takes; point your own tests
+at that rather than spelling the wrapping, or the tool and your tests wire the
+app two different ways and each passes against its own reconstruction; there is deliberately no session between tool calls, so a script
 is the whole interaction and the same script reproduces the same screen
 (`trace true` shows the screen after every step of one run). A page may
 declare `:boot (fn [state] state')` — its entry point's state transform — and
@@ -2078,7 +2130,7 @@ typo'd `:vew` used to render a blank page, the silent worst).
   anything but a zero-arity public `defn` (a `def`'s arity cannot be read, a
   `defmethod` discards the marker at macroexpansion, a private page is
   invisible to the tool's scan); the entry in a `:cljs` namespace; a SECOND
-  `^:web/page` (the scan would answer from whichever it reached first,
+  `^:app/entry` (the scan would answer from whichever it reached first,
   silently). And the one that catches real apps with no write to your entry at
   all: the entry's namespace CLOSURE reaching `:cljs` — `module_platform`
   reports the pages a `:cljs` declaration strands (`:stranded-pages`) at the
@@ -2093,7 +2145,7 @@ typo'd `:vew` used to render a blank page, the silent worst).
 - **Read the screen BEFORE asserting on it.** Most view bugs are plain wrong
   sentences, and they are obvious in a readout and invisible in a `get-in`.
   "Look at the UI" costing a browser is why they ship.
-- **Scope an assertion to the region it names** — `(screen/text s "main")` is
+- **Scope an assertion to the region it names** — `(cljnx/text s "main")` is
   shorter than the whole page on purpose, and comes back DEDENTED so moving a
   `<div>` around the region cannot break it. A whole-page `str/includes?` is
   one keystroke from asserting nothing: a real tint check once matched its
@@ -2105,7 +2157,7 @@ typo'd `:vew` used to render a blank page, the silent worst).
   lists what can be clicked), it is on the screen but nothing over it handles
   a click, two distinct controls say it, it is disabled, or the app has no
   urls. Five different bugs, never one silent no-op.
-- **`screen/lines` when you want to address ONE line**, e.g. the `<svg>` census
+- **`cljnx/lines` when you want to address ONE line**, e.g. the `<svg>` census
   — assertions are easy to write here and therefore easy to write too broadly.
 - **A readout reveals what CSS was silently supplying, and that is a whole
   class of markup bug you get for free.** Two elements separated only by a

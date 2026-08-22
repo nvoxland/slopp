@@ -97,7 +97,7 @@ possibility from the same source.
 
 ## The typed client is generated
 
-Once endpoints declare their `:web/request` and `:web/response` -- which the
+Once endpoints declare their `:rest/request` and `:rest/response` -- which the
 `rest-endpoint-schema` gate requires -- slopp can write the browser side of the
 contract for you:
 
@@ -153,7 +153,7 @@ Rules of the road:
   malli's JSON-Schema spelling. Build a long one with `(str ...)`: unlike a
   docstring this is a value, so a multi-line literal ships its own source
   indentation to everyone who renders it.
-- **Page endpoints opt out** with `:web/client false`. See [HTML and
+- **Page endpoints opt out** with `:rest/client false`. See [HTML and
   CSS](html.md).
 
 ## Sharing real logic
@@ -237,12 +237,12 @@ case `webapp` is not for.
 
 ### Two wiring rules the framework enforces
 
-- **One list of served namespaces.** Routes and `:web/read` performers can
+- **One list of served namespaces.** Routes and `:http/read` performers can
   live in different namespaces -- reads resolve by *vocabulary*, store-wide,
   so an API endpoint can reuse a page's read. `web/context` refuses a
   namespace list that cannot perform the reads its own routes declare, naming
   each unservable kind and the route that wanted it. Without that check the
   symptom is a **500, not a 404**, which is much harder to read from outside.
-- **Mark transport endpoints `^{:web/client false}`.** Health, metrics, an RPC
+- **Mark transport endpoints `^{:rest/client false}`.** Health, metrics, an RPC
   transport -- anything that is not the app's own API otherwise gets a typed
   browser `fetch` wrapper generated for it.
