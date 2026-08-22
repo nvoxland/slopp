@@ -45,10 +45,24 @@
     (testing "every namespace lands exactly once — a shard split may not lose work"
       (is (= (set nses) (set (apply concat shards))))
       (is (= (count nses) (count (apply concat shards)))))
-    (testing "the heaviest namespace gets a shard to itself: 6 against 3+1+1+1"
-      (is (some #(= ['bs.heavy-test] %) shards)
-          (str "round-robin by index would have paired it with others: "
-               (pr-str shards))))
+    (testing "the SLOWEST shard is minimised — no single namespace can move and improve it"
+      ;; This asserted a SHAPE — "the heaviest gets a shard to itself" — which
+      ;; held only while a namespace that booted nothing weighed ZERO. Under
+      ;; that model heavy(6) against 3+1+1+1 balanced at 6/6. It was an artifact
+      ;; of the free light namespaces, and the same artifact packed 78 of them
+      ;; into one real shard while the boots read [132 133 133 133].
+      ;;
+      ;; A cost proxy that priced the base was TRIED and measured WORSE — twice,
+      ;; 264s and 275s against 217s — so the weight is image boots again. The
+      ;; assertion stays a property rather than an arrangement, because that is
+      ;; what survived the experiment: the shape assertion had to be rewritten
+      ;; to run it, and would have to be rewritten again by the next attempt.
+      (let [w     '{bs.heavy-test 6 bs.mid-test 3 bs.a-test 1 bs.b-test 1 bs.c-test 1}
+            costs (sort (map (fn [g] (reduce + 0 (map w g))) shards))]
+        (is (<= (- (last costs) (first costs)) (apply min (vals w)))
+            (str "the shards differ by more than the cheapest namespace, so moving"
+                 " one would improve the critical path: "
+                 (pr-str (map (fn [g] [(reduce + 0 (map w g)) g]) shards))))))
     (testing "the requested shard count is honoured even when one would be empty"
       (is (= 4 (count (testrun/balance-shards st ['bs.a-test] 4)))))
     (testing "deterministic — a split that varies between runs is unrepeatable"

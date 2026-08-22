@@ -206,11 +206,29 @@
   rescheduled boot work into CPU that was not idle and measured zero gain. It
   removes idle time that already exists, and adds no concurrency.
 
-  The weight is static calls to `open!` read from THE reference graph, not a
-  source scan, so it tracks the code and cannot drift. A namespace whose tests
-  boot nothing weighs 0 and packs freely. The order is total (weight, then
-  name), so the split is deterministic — a shard assignment that varied
-  between runs would make a flake unreproducible."
+  The weights come from THE reference graph, not a source scan, so they track
+  the code and cannot drift. The order is total (weight, then name), so the
+  split is deterministic — a shard assignment that varied between runs would
+  make a flake unreproducible.
+
+  **Balanced boots are not balanced time, and a better-looking proxy made it
+  WORSE.** This split produces `[132 133 133 133]` boots — textbook — while the
+  shards hold `[78 15 14 13]` namespaces and run `[43.3s 108.1s 134.0s
+  217.1s]`. A namespace that boots nothing weighs ZERO and packs for free,
+  which looks like the bug.
+
+  It is not. Pricing a BASE per namespace plus a heavy term for tests that
+  shell a whole project was built and measured TWICE: `264s` and `275s` against
+  this weight's `217s`. Those 78 light namespaces really are nearly free —
+  43.3s across all of them, ~0.55s each — so pricing them at a boot apiece
+  spread them into the shards already carrying the expensive tests.
+
+  **The spread is not a packing failure.** It is a few namespaces costing
+  enormously more than the rest, and no split of four shards goes below the
+  single most expensive one. Fixing it needs per-namespace MEASUREMENT, which
+  the store does not record today (`:observe` deltas carry status, not time) —
+  not a cleverer proxy. Read `:cost` on an external result for what the current
+  split achieves."
   [store nses n]
   (let [w    (frequencies (map :from-ns
                                (concat (refs/refs-to store 'slopp.ops.external/open!)
@@ -300,10 +318,15 @@
                          " everything and narrows to almost the same set."))
                   (when uneven?
                     (str " The shards are UNBALANCED (" (secs floor) "…"
-                         (secs slowest) "): this tier costs its slowest, so it is"
-                         " paying for the SPREAD rather than for the work, and"
-                         " running fewer tests does not address that — an even"
-                         " split would land it near " (secs (long mean)) "."))
+                         (secs slowest) "): this tier costs its slowest, so part"
+                         " of that is the SPREAD rather than the work, and running"
+                         " fewer tests does not address it. A PERFECTLY divisible"
+                         " split would land near " (secs (long mean)) " — but the"
+                         " work is not divisible below one namespace, so if a"
+                         " single test namespace costs more than that, this is"
+                         " already near its floor and re-balancing cannot help."
+                         " Re-weighting the split was tried against this spread"
+                         " and measured WORSE, twice."))
                   " Materializing the project cost " (secs build-ms) " on top.")})))
 
 (defn ^{:export "slopp.verification"} run-shard!
