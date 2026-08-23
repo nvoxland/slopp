@@ -4753,3 +4753,61 @@ describing a design that had been replaced. And the `screen` tool's own
 description pointed at `slopp.http.screen/drive!`, a namespace wave 1 retired.
 Neither could be caught by anything: prose is not checked against the code it
 describes.
+
+### Addendum (2026-08-23) — the consumer measured the BEFORE, and it was worse than described
+
+slopp-ui measured the old behaviour on a real 302 before taking the fix, in the
+one window where that was possible (their jar behind, the new one on disk).
+Both corrections are theirs, and both changed something.
+
+**The body was not kept either.** The account above said the driver kept
+`(:body resp)`. What it actually did was `pr-str` a non-hiccup body, so a string
+body arrived DOUBLE-escaped — `pr-str`'s quotes and escapes, then the reader's
+own HTML-escaping:
+
+```
+HTTP 302
+<pre>"&lt;a href=\"/p/demo/\"&gt;continue&lt;/a&gt;"</pre>
+```
+
+That is a stronger fact than the one it replaces. The old behaviour did not
+degrade a redirect to "a page you follow by hand" — it degraded it to a page
+whose only actionable element was **not clickable**, so there was no manual
+workaround at all. `document-body` now prints a STRING as itself; `pr-str`
+stays for data, which has a shape worth keeping.
+
+**And it is the whole non-2xx class**, not redirects — a 404 rendered the same
+way — which is consistent with the fix moving the whole response rather than
+special-casing `Location`.
+
+**An UNASSEMBLED context answered 404 for every path.** Handing
+`{:http/namespaces … :http/routes …}` — the shape `serve!` documents — straight
+to `driver` or `handle!` produced a correct answer to a question nobody asked:
+no derived route table means every path genuinely misses. It cost three
+attempts and reads as a bug in the CALLER'S routes, which is where they looked.
+
+`dispatch/handle!` now refuses it. **The tell is a declaration, not a guess** —
+`context` READS `:http/namespaces` and does not pass it on, so a ctx carrying
+one provably never went through it, and a hand-built `{:http/routes […]}` stays
+legitimate. That is the difference between this and the coincidence tests
+`D-rule-grounding` forbids.
+
+**The shape both of these share, stated because it is now the fourth instance
+in two days.** The consumer's own words, on the stale-jar build that printed a
+STALE warning and exited 0:
+
+> An exit code that cannot distinguish "built what you meant" from "built
+> something" is the same thing as a check whose output cannot vary. The warning
+> line was the only varying part of that output and it lost to the part that
+> never varies.
+
+Same family as: a bind result that cannot distinguish a mounted app from an
+empty one; a status that could only be asserted by searching prose; a 404 that
+cannot distinguish "your route is wrong" from "your context is not a context".
+**When a signal cannot vary with the thing it is supposed to report, the
+invariant part is what gets read.**
+
+Open and unfixed: `uber` knows the head it is jarring and knows `store.db`
+moved after it, prints the comparison, and still exits 0. Left alone
+deliberately — `build.clj` is a file humans own here, and turning a warning
+into a failure is not a change to make silently.
