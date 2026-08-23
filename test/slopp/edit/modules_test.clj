@@ -266,3 +266,43 @@
                                    "(defn ^{:generated \"shop.api/mk\"} mk! \"M.\" [p] p)\n"))]
         (is (some? (:refuse (gates/gate-check gen 'shop.client 'mk!)))
             "a generated form must refuse a hand edit on ANY store, http or not")))))
+
+(deftest a-half-migrated-endpoint-is-told-it-is-MID-MIGRATION-not-missing-a-declaration
+  ;; Reported by a consuming store, mid marker-family migration. Sweeping the
+  ;; marker that CONSTITUTES an endpoint first leaves every route declaring
+  ;; `:http/path` beside siblings that have not moved yet, and the auth gate
+  ;; fires correctly — it IS an endpoint with no `:http/auth`.
+  ;;
+  ;; The refusal was right and its TEACHING was wrong for this case: "declares
+  ;; a route but no :http/auth" is exactly what a genuinely forgotten
+  ;; declaration looks like, and the obvious remedy — adding `:http/auth` by
+  ;; hand — produces a form carrying a retired marker beside a live one, half
+  ;; migrated, which nothing flags afterwards. They avoided it only by knowing
+  ;; they were mid-migration.
+  ;;
+  ;; The tool can tell the two apart from what is ALREADY on the form: a
+  ;; retired marker that maps to the missing one is an ordering artifact, not
+  ;; an omission. Read from the retired-marker ledger rather than a hardcoded
+  ;; pair, so the next family migration gets this for free.
+  (let [mk (fn [src] (store/ingest (store/empty-store) 'shop.mid src))]
+
+    (testing "a genuinely bare endpoint still gets the default-deny teaching"
+      ;; population control: if the new branch swallowed the ordinary case the
+      ;; gate would have stopped doing its job
+      (let [s (mk (str "(ns shop.mid)\n\n"
+                       "(defn ^{:http/method :get :http/path \"/x\"}\n"
+                       "  bare \"B.\" [_] {:status 200})\n"))
+            r (str (edit.http/http-auth-refusal s 'shop.mid 'bare))]
+        (is (re-find #":http/auth" r) r)
+        (is (not (re-find #"(?i)migration" r))
+            (str "an ordinary omission was told it was mid-migration: " r))))
+
+    (testing "but one carrying the RETIRED sibling is told what is actually happening"
+      (let [s (mk (str "(ns shop.mid)\n\n"
+                       "(defn ^{:http/method :get :http/path \"/x\" :web/auth :public}\n"
+                       "  half \"H.\" [_] {:status 200})\n"))
+            r (str (edit.http/http-auth-refusal s 'shop.mid 'half))]
+        (is (re-find #"(?i)migrat" r)
+            (str "a half-migrated endpoint reads as a forgotten declaration: " r))
+        (is (re-find #":web/auth" r)
+            (str "the refusal does not name the retired marker that is already here: " r))))))

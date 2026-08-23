@@ -26,7 +26,7 @@
             [slopp.index.analyze :as analyze]
             [slopp.index.derive :as derive]
             [slopp.store :as store]
-            [slopp.store.render :as store.render]))
+            [slopp.store.render :as store.render] [slopp.index.crossings :as crossings]))
 
 (defn ^:export web-name-meta
   "The metadata on a stored form's NAME symbol — THE reader for the `:web/*`
@@ -77,6 +77,31 @@
               :when kind]
           [kind (symbol (str nsx) (str (:name e)))])))
 
+(defn ^:export retired-sibling
+  "The RETIRED marker present on `m` that maps to `live` — or nil.
+
+  **What tells a half-migrated form from a forgotten declaration.** A family
+  rename moves markers one at a time, and the marker that CONSTITUTES a thing
+  (`:http/path` makes an endpoint) turns every form into a half-migrated one
+  the moment it moves ahead of its siblings. The per-endpoint gates then fire,
+  correctly — the form really is an endpoint with no policy — and their
+  teaching is indistinguishable from a genuine omission.
+
+  The distinction is already ON the form: a retired marker mapping to the
+  missing live one is an ordering artifact. Reported by a consuming store
+  mid-migration, where the obvious remedy was the wrong one — adding the live
+  marker by hand leaves both spellings on one form, half migrated, and nothing
+  flags it afterwards.
+
+  Read from [[slopp.index.crossings/retired-markers]] rather than a hardcoded
+  pair, so the next family rename inherits this without anyone remembering to."
+  [m live]
+  (first (for [k     (keys m)
+               :when (qualified-keyword? k)
+               :when (= live (get crossings/retired-markers
+                                  (str (namespace k) "/" (name k))))]
+           k)))
+
 (defn ^:export ^{:rule/applies-to :production} http-auth-refusal
   "The default-deny auth gate (D-web): a `:http/path` endpoint with NO
   `:http/auth` declaration is refused — `:public` must be typed out, so an
@@ -92,20 +117,35 @@
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (web-name-meta e)]
-      ;; BOTH spellings, for the length of the marker wave and no longer. A gate
-      ;; runs from COMPILED code while a sweep rewrites the forms it judges, so
-      ;; a one-shot rename is refused at the first endpoint it re-tags — and
-      ;; this gate requires `:http/auth` to be PRESENT, which is exactly the
-      ;; shape that cannot be renamed underneath itself. Teach both, sweep,
-      ;; tighten.
-      (when (and (or (:http/path m) (:http/path m))
-                 (not (or (contains? m :http/auth) (contains? m :http/auth))))
-        (str ns-sym "/" form-name " declares the route "
-             (pr-str (or (:http/path m) (:http/path m)))
-             " but no :http/auth — every endpoint declares its policy"
-             " (default-deny): add :http/auth :public (deliberately open),"
-             " :authenticated, or [:group \"<name>\"] to the name metadata;"
-             " groups live in the capabilities config (query_capabilities)")))))
+      ;; This carried a two-spelling `or` through the marker wave — a gate runs
+      ;; from COMPILED code while a sweep rewrites the forms it judges, so a
+      ;; gate requiring a marker to be PRESENT cannot be renamed underneath
+      ;; itself: teach both, sweep, tighten. The sweep then rewrote both arms to
+      ;; the same key and left `(or x x)` reading as though it still handled
+      ;; two. Tightened, which is the third phase that never happened.
+      (when (and (:http/path m) (not (contains? m :http/auth)))
+        (if-let [retired (retired-sibling m :http/auth)]
+          ;; MID-MIGRATION, and saying so is the whole point: this refusal is
+          ;; otherwise identical to a forgotten policy, and the obvious remedy
+          ;; is the wrong one.
+          (str ns-sym "/" form-name " declares the route "
+               (pr-str (:http/path m)) " with no :http/auth — but it carries "
+               retired ", the RETIRED spelling of exactly that. This is a"
+               " half-migrated endpoint mid family rename, NOT a missing policy:"
+               " the marker that constitutes an endpoint moved ahead of its"
+               " siblings, so the per-endpoint gates now judge a form whose"
+               " other markers have not moved yet."
+               " Do NOT add :http/auth by hand — that leaves both spellings on"
+               " one form, half migrated, and nothing flags it afterwards."
+               " Finish the family instead: rename_sweep {from \"" retired
+               "\" to \":http/auth\"}. Sweeping the CONSTITUTING marker last"
+               " avoids this window altogether.")
+          (str ns-sym "/" form-name " declares the route "
+               (pr-str (:http/path m))
+               " but no :http/auth — every endpoint declares its policy"
+               " (default-deny): add :http/auth :public (deliberately open),"
+               " :authenticated, or [:group \"<name>\"] to the name metadata;"
+               " groups live in the capabilities config (query_capabilities)"))))))
 
 (defn ^:export ^{:rule/applies-to :production} http-route-collision
   "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
