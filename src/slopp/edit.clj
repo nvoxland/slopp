@@ -482,11 +482,6 @@
     (when (and (seq? s)
                (contains? '#{deftest clojure.test/deftest} (first s))
                (symbol? (second s))
-               ;; BOTH spellings during the ^:external -> ^:external migration. A live
-               ;; gate enforcing a marker cannot be renamed atomically WITH the
-               ;; marker: it runs from the OLD compiled code while the group
-               ;; rewrites it, so a one-shot sweep is refused at the first test
-               ;; it re-tags. Accepting either is what makes the sweep possible.
                ;; ONE spelling. Tolerating the old `^:isolated` too would be WORSE
                ;; than rejecting it: the runner (`test-var-tiers`) reads
                ;; `:external`, so a tolerated old marker would pass this gate

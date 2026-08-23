@@ -30,27 +30,33 @@
   is required on EVERY endpoint; `:rest/request` is required on a BODY method
   (`:post`/`:put`/`:patch`) — a `:get`/`:delete`/`:head` needs only a response.
   Declare a `.cljc` malli schema VAR (shareable/reusable — `some.contracts/order`)
-  or an inline `[:map …]` for a one-off shape. Inert until the store opts into
-  HTTP (`http.enabled`), which `edit.gates/gate-check` decides — not this gate;
-  auth is checked first, so a naked endpoint still refuses
-  on `:http/auth` before this. Returns a teaching string, or nil when clean."
+  or an inline `[:map …]` for a one-off shape. Returns a teaching string, or nil
+  when clean.
+
+  **Inert until the store opts into `rest`**, which `edit.gates/gate-check`
+  decides from the namespace this gate lives in — not this gate. That is the
+  point of it living in `slopp.edit.rest` rather than in http: serving a
+  document is http's business and publishing a typed API is rest's, so an app
+  that renders HTML is never asked for a JSON contract.
+
+  **This docstring said `http.enabled` for a while and that was wrong** — an
+  error worth recording rather than quietly correcting, because a consumer
+  derived a design proposal from it and reached \"slopp requires a contract on
+  every page\". It does not. What is true is narrower and still worth knowing:
+  once a store enables `rest`, EVERY endpoint in it is asked for a contract,
+  including the pages, which is why `:rest/client false` accumulates on
+  stylesheets in stores that also publish an API."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (edit.http/web-name-meta e)]
-      ;; BOTH spellings, for the length of the marker wave and no longer — see
-      ;; `edit.http/http-auth-refusal` for why. This gate requires a contract to
-      ;; be PRESENT, so a sweep that re-tags it is refused at the first endpoint
-      ;; unless the gate already answers to the name it is moving to.
-      (when (or (:http/path m) (:http/path m))
-        (let [body?   (contains? #{:post :put :patch}
-                                 (or (:http/method m) (:http/method m)))
-              has?    (fn [new old] (or (contains? m new) (contains? m old)))
+      (when (:http/path m)
+        (let [body?   (contains? #{:post :put :patch} (:http/method m))
               missing (cond-> []
-                        (not (has? :rest/response :rest/response)) (conj :rest/response)
-                        (and body? (not (has? :rest/request :rest/request))) (conj :rest/request))]
+                        (not (contains? m :rest/response)) (conj :rest/response)
+                        (and body? (not (contains? m :rest/request))) (conj :rest/request))]
           (when (seq missing)
             (str ns-sym "/" form-name " declares the route "
-                 (pr-str (or (:http/path m) (:http/path m)))
+                 (pr-str (:http/path m))
                  " but no " (str/join " / " (map str missing))
                  " — every endpoint types out its contract so the client"
                  " validates against the SAME schema (D-web-contracts). Add "
