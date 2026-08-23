@@ -409,7 +409,7 @@ has been swept and reverted three times, its own docstring saying not to.
 sweep matches the dotted token, so three shapes survive it, and each one fails
 only when something is BUILT or LOADED — never at the write:
 
-- **slash paths** — `slopp/web/css.clj` in a vendoring manifest or a resource
+- **slash paths** — `slopp/http/css.clj` in a vendoring manifest or a resource
   lookup. Sweep the slash form as its own pass (`slopp/web` → `slopp/http`);
   the letter boundary still protects `slopp/webapp`.
 - **a bare directory segment** — `(io/file parent "web")`, where the segment
@@ -1548,7 +1548,7 @@ named escape, and this is one of them.
 end-to-end seam was context construction — a `serve!` arity taking a fake
 collaborator, say — the builder becomes the single source of the context and
 simultaneously stops being parameterisable. Two ways out, both fine: inject at
-the HANDLER (`(web/handle! … {:http/deps {:registry … :requester fake}})`,
+the HANDLER (`(http/handle! … {:http/deps {:registry … :requester fake}})`,
 which is below the builder and unaffected), or have your own `serve!` call the
 builder and merge an override over it, which keeps one definition and keeps
 the seam. Obvious once said, and not before.
@@ -1569,15 +1569,15 @@ Where it does apply, three things worth knowing:
 `http.port` pins the address; unset, it is derived from the store dir so two
 projects on one machine never collide.
 
-**The runtime underneath: `slopp.http`.** `(web/serve! {:http/namespaces
+**The runtime underneath: `slopp.http`.** `(http/serve! {:http/namespaces
 ['my.api] :http/port 8080})` scans the namespaces' var metadata (the same
 contract the gates enforced) and serves on http-kit (`:http/adapter :jdk` =
 zero-dep fallback) — that is what a deployed build calls, and what the dev
-server calls for you. Tests never need it: `(web/handle! (web/context
+server calls for you. Tests never need it: `(http/handle! (http/context
 {:http/namespaces ['my.api]}) request-map)` runs the ENTIRE pipeline — route,
 policy, declared reads, handler, effect interpretation — portlessly. In-handler
-guards: `(web/enforce (= owner sub))` throws a 403-mapped ex-info (no bang —
-your handler stays analyzer-pure); `(web/authorized? policy identity)`
+guards: `(http/enforce (= owner sub))` throws a 403-mapped ex-info (no bang —
+your handler stays analyzer-pure); `(http/authorized? policy identity)`
 answers booleans. Test namespaces' endpoint-shaped forms are FIXTURES —
 they neither report in query_surface nor claim paths.
 
@@ -1638,7 +1638,7 @@ The rules that matter:
   fully dynamic path is reported `:unresolved`, never counted clean.
   Served by something outside this store? `^{:http/external-path "why"}`
   on the rendering form discharges.
-- **See a page without a server:** `(web/handle! (web/context
+- **See a page without a server:** `(http/handle! (http/context
   {:http/namespaces ['my.ui]}) {:request-method :get :uri "/x"})` via
   `query_eval` — the full pipeline, rendered HTML in the response map.
   Test on data first (call the handler with a synthetic `{:http/reads …}`
@@ -1931,7 +1931,7 @@ declare the app; slopp owns the loop.
   takes the FULL url**, which is what is in the address bar; a drive that passes
   app-relative paths exercises a url no browser produces, and is correct only
   while the fixture's base is `""`.
-- **Endpoint tests must ROUND-TRIP through JSON.** `web/handle!` returns the
+- **Endpoint tests must ROUND-TRIP through JSON.** `http/handle!` returns the
   body as Clojure DATA — the adapter serializes — so a keyword sails through
   a `[:x :string]` contract in-image and reaches the browser as a string. A
   test that does not serialize is checking a value no client receives. Watch
@@ -2058,14 +2058,14 @@ that. Neither store reads the other.
 
 **If your store declares `io.github.nvoxland/slopp-web`, your DECLARATION is
 the version you run — not the slopp hosting you.** The slopp process carries
-`slopp/web/**` inside its own jar, and the declared coord still wins: tests,
+`slopp/http/**` inside its own jar, and the declared coord still wins: tests,
 `query_eval` and your server all load the pinned release. So a `slopp.http` fix
 in a newer slopp does not reach you until that release is republished and you
 `deps_add` it (then `restart` — a hot `deps_add` cannot displace an
 already-loaded namespace). Nothing warns you when the pin is behind, so treat
 "is my `slopp-web` current?" as a question you have to ask. Measure rather than
 assume: `query_eval` `(.getResource (clojure.lang.RT/baseLoader)
-"slopp/web/static.clj")` names the jar actually in force.
+"slopp/http/static.clj")` names the jar actually in force.
 
 ### Reviewing a UI without a browser
 
@@ -2085,29 +2085,56 @@ ever mean this one thing.
 contract and knows no app type; each capability derives that contract from
 what it owns. So it is vendored to every store rather than to one family's.
 
+**Hand it a url, the way you would a browser.** That is the whole interface:
+an address, and optionally a script of what to do once you are there.
+
 **To LOOK, use the `screen` tool** — no code, no test, no browser:
 
 ```
-screen {steps [{visit "/store"} {fill "Filter" value "web"} {click "Add"}]
+screen {url "/store"}
+screen {url "/store" steps [{fill "Filter" value "web"} {click "Add"}]
         region "main" detail "prose"}
 ```
 
-**To ASSERT, the same thing in a test.** `cljnx/drive!` takes the identical
-step script, so a screen you looked at is one you can pin without retyping it
-as a call chain:
+It answers with the page plus what a browser would also tell you: `url` — the
+ADDRESS BAR, which after a redirect is not what you asked for — `status`, and
+`redirects` when the app sent you somewhere. Each is absent when there is
+nothing to say, so a `{:state :view}` page with no urls answers exactly as it
+always did.
+
+**To ASSERT, the same thing in a test.** `cljnx/open!` takes the same address
+and `cljnx/drive!` the same step script, so a screen you looked at is one you
+can pin without retyping it as a call chain:
 
 ```clj
 (require '[slopp.cljnx :as cljnx])
 
 ;; a SERVED app — its own ctx, through http's adapter
-(def s (cljnx/open! (slopp.http/driver ctx)))
+(def s (cljnx/open! (slopp.http/driver ctx) "/store"))
 ;; a BROWSER app — the same contract, through webapp's
-(def s (cljnx/open! (webapp/driver (webapp/wiring app))))
+(def s (cljnx/open! (webapp/driver (webapp/wiring app)) "/store"))
 
-(cljnx/drive! s [{:visit "/store"} {:click "Code"}])
+(cljnx/drive! s [{:click "Code"}])
 (cljnx/text s "main")              ; ONE region — and it throws if absent
 (cljnx/text s nil {:within "rate"}); ONE element, addressed like a click
+
+(cljnx/status s)                   ; 404 — a NUMBER, not a sentence
+(cljnx/url s)                      ; where you ENDED UP
+(cljnx/redirects s)                ; [{:from … :status … :to …}]
 ```
+
+**Assert a status with `status`, never by searching the page.** A non-hiccup
+body renders as `HTTP 404` on the screen — a reader needs to see that — so it
+is tempting to write `(str/includes? (text s) "404")`. Don't: a whole-page
+match is one keystroke from asserting nothing in particular, and it will stay
+green with the layout torn out. Same rule as regions: the narrow assertion is
+the shorter one to write.
+
+**Redirects are followed, so post-redirect-get works.** A 302 lands you on the
+target and `url` reports the target, not what you asked for. Two urls pointing
+at each other refuse by NAMING the cycle rather than counting hops, and a
+redirect off-site refuses saying the APP sent you there — a different fact from
+your test asking to leave.
 
 **The `driver` call is the whole of what you write, and it is not ceremony.**
 `cljnx/open!` refuses a served ctx, naming its producer: the fake browser used

@@ -323,7 +323,7 @@
     ;; (D-framework-injection part 2). Two facts, both generated so neither can
     ;; drift from what shipped:
     ;;
-    ;;   framework-version.edn — which slopp-web this jar's slopp/web/** IS,
+    ;;   framework-version.edn — which slopp-web this jar's slopp/http/** IS,
     ;;     authored once in the tracked manifest. NOT a maven version any more;
     ;;     slopp-web is never published, so this is a STAMP saying what a built
     ;;     tree carries.

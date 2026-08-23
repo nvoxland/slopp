@@ -243,16 +243,23 @@ rather than silently doing nothing.
 ```clj
 (require '[slopp.cljnx :as cljnx])
 
-(def s (cljnx/open! (webapp/driver app)))
-(cljnx/visit! s "/p/demo/things")     ; the URL a reader would type
+(def s (cljnx/open! (webapp/driver app) "/p/demo/things"))  ; open AT a URL
 (cljnx/click! s "Anvil")
 (cljnx/text s "main")
+(cljnx/url s)                         ; the address bar
+(cljnx/status s)                      ; the status, as a number
 ```
 
 No browser, no compile, no headless Chrome -- and the same functions the real
-page runs. Visit the full URL including the mount point, because that is what is
-in the address bar; a drive that visited app-relative paths would exercise a URL
-no browser ever produces.
+page runs. You hand it an address the way you hand a browser one; `visit!` moves
+it afterwards. Use the full URL including the mount point, because that is what
+is in the address bar; a drive that visited app-relative paths would exercise a
+URL no browser ever produces.
+
+For a served page the address goes down the real request pipeline, so redirects
+are followed and `url` reports where you *ended up*. Assert a status with
+`status` rather than searching the page for the string `HTTP 404`: a whole-page
+match is one keystroke from asserting nothing in particular.
 
 This is where the slow-response race stops being a heisenbug: hold the
 performer's callback, navigate again, then answer the first one, and assert the

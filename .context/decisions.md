@@ -4683,3 +4683,73 @@ to a WAVE. It does not: it belongs to three VERBS — `edit_rename`,
 ordinary work rather than a migration. A keyword sweep reaches none of them.
 That correction came from the consumer, who verified it against their own jar
 rather than accepting it.
+
+---
+
+## D-cljnx-address (2026-08-23) — the browser's external interface is an ADDRESS, and the response survives the trip
+
+**Decision.** `slopp.cljnx` takes a starting url (`(open! app "/things/42")`,
+`screen {url}`), keeps the http response's STATUS as a field, and follows
+redirects. The guiding rule stated once so later additions can be judged
+against it: **the closer the interface an agent drives is to a browser's, the
+better it drives it.** A session that opens at no url, reachable only through
+a `{:visit …}` step, is a state a browser is never in.
+
+**What was actually wrong was that http's adapter threw the response away.**
+`slopp.http/driver` kept `(:body resp)` and rendered anything non-hiccup as its
+status. That discarded two facts the caller needed, and each failure is a
+different shape:
+
+- **The status became a SENTENCE.** `HTTP 404` on the screen is right for a
+  reader and useless for an assertion, so "does this 404" was a whole-page
+  `str/includes?` — one keystroke from asserting nothing in particular, which
+  is the exact failure `lines` was split into two faces to prevent. A screen
+  fact that has a number should be readable as a number.
+- **`Location` was dropped, so no redirect was ever followed.**
+  Post-redirect-get did not work at all, and `:path` reported the url asked for
+  rather than the one arrived at — the one thing a browser's address bar is
+  never wrong about. `dispatch/handle!` had been passing redirects through the
+  whole time; nothing downstream could see them.
+
+**`:document` widened to hiccup-OR-response, and the discrimination is
+`vector?` vs `map?`.** Top-level hiccup is never a map, so the two shapes
+cannot be confused — which matters because the OTHER producer of a document
+(`slopp.webapp`'s driver, and any hand-written page) must keep answering plain
+hiccup and knowing nothing about http. That is the property that lets the fake
+browser belong to no capability, and widening a contract is exactly where it
+would be lost by accident. A map without `:status` refuses rather than
+rendering blank.
+
+**The non-hiccup fallback MOVED from the adapter into the browser.** It renders
+a status, so it belongs where the status is known; and a hiccup document has no
+status to render, so applying it there would invent a `200` nobody asked for.
+
+**Loop detection precedes the hop cap, and this is the load-bearing part.**
+Two urls pointing at each other is what a misconfigured sign-in redirect looks
+like and is far and away the common case. A cap alone reports it as "too many
+hops", which sends the reader looking for a long chain that does not exist —
+the same class as a checker naming a symptom instead of the thing it found. So
+the cycle is named (`/a -> /b -> /a`), and the cap below it says explicitly
+that these are all different urls.
+
+**Deliberately NOT built, each with its reason.**
+
+- **A session held across tool calls.** `drive!` refuses one on purpose: a
+  session kept between scripts makes the same call answer differently depending
+  on what ran before it, and re-running the script buys that a screen you
+  looked at is one you can PIN, because the pin IS the script. This was first
+  written up as the biggest shortfall and it is not a shortfall — the thing
+  that should look like a browser is the ADDRESS, not a session handle.
+- **Identity/headers on a session.** `http/driver` sends no headers and
+  `slopp.http.auth` resolves identity FROM headers, so every driven request is
+  anonymous and no auth-gated screen is reachable. Real, open, and a separate
+  change.
+- **A back button.** Revisit once the url stack has a use.
+
+**Two stale docstrings found and fixed en route, both the same shape as the
+change itself.** `screen!` claimed `:trace` did "prefix re-drives" while
+`drive-code` explained at length why it deliberately does not — a docstring
+describing a design that had been replaced. And the `screen` tool's own
+description pointed at `slopp.http.screen/drive!`, a namespace wave 1 retired.
+Neither could be caught by anything: prose is not checked against the code it
+describes.
