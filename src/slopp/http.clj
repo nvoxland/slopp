@@ -241,6 +241,24 @@
   to the reader and following belongs to the browser; producing the response is
   the only part that is http's.
 
+  **A `:http/hiccup` body is swapped in, and `:document` is the BROWSER's
+  contract rather than the socket's.** `slopp.http.html/html-response` renders
+  to a string — which is what the socket writes — and carries the hiccup it
+  came from. Without the swap, every page served through slopp's own documented
+  helper drove as escaped markup in a `<pre>`, with no regions, nothing
+  clickable, and a 200 labelled `HTTP 200`. Measured by a consumer on a real
+  content page.
+
+  Both views derive from ONE hiccup at one call site, so they cannot drift. The
+  alternative — parsing the HTML back downstream — would have been a second
+  derivation of the same page, which agrees until it does not.
+
+  **The swap happens here rather than in the fake browser, and that placement
+  is the adapter's whole job.** `:http/hiccup` is http's key, read by http's
+  code. `slopp.cljnx` belongs to no capability, which is what lets it be
+  vendored to every store; teaching it one prefix is how that would end. Same
+  seam and same argument as splitting the url here.
+
   **The url is split the way a browser SENDS one**, which IS this adapter's
   business rather than the fake browser's, because only the side that knows the
   url is about to become an http request can split it: `:uri` never carries the
@@ -256,6 +274,19 @@
          :document
          (fn [path]
            (let [base     (first (str/split path #"#" 2))
-                 [uri qs] (str/split base #"\?" 2)]
-             (dispatch/handle! ctx (cond-> {:request-method :get :uri uri}
-                                     qs (assoc :query-string qs)))))))
+                 [uri qs] (str/split base #"\?" 2)
+                 resp     (dispatch/handle! ctx (cond-> {:request-method :get :uri uri}
+                                                  qs (assoc :query-string qs)))]
+             ;; A page rendered by `slopp.http.html/html-response` has a STRING
+             ;; body — that is what the socket writes — and carries the hiccup
+             ;; it came from. Hand the reader the structure.
+             ;;
+             ;; The swap happens HERE and not in the fake browser, which is the
+             ;; whole point of there being an adapter: `:http/hiccup` is http's
+             ;; key, read by http's code, and `slopp.cljnx` belongs to no
+             ;; capability. Teaching it one prefix is how it would stop being
+             ;; vendorable to every store. Same seam, same argument, as
+             ;; splitting the url here.
+             (if-let [h (:http/hiccup resp)]
+               (assoc resp :body h)
+               resp)))))

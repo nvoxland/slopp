@@ -707,3 +707,55 @@
                                   "(defn ^{:http/path \"/x\" :http/method :get}\n"
                                   "  h \"H.\" [_] {:status 200})\n"))]
         (is (nil? (orient/unread-declarations ok)))))))
+
+(deftest the-remedy-a-brief-NAMES-has-to-be-one-that-can-be-RUN
+  ;; slopp-ui, 2026-08-23, on first contact with this report. It fired
+  ;; unprompted and told them the right fact — and then named
+  ;; `rename_sweep {from … to …}`, which REFUSES generated forms, correctly.
+  ;; All nine of their stale-marker forms are `^:generated` in a wire namespace,
+  ;; so the suggestion was 0-for-9 on the one store whose markers are written
+  ;; by a generator rather than by hand.
+  ;;
+  ;; A remedy that cannot be taken is worse than none: it reads as the answer,
+  ;; so the reader runs it, gets a refusal, and now has two problems to
+  ;; separate. And this report already reads `form-name-meta`, which is where
+  ;; `^:generated` lives — so it could tell them apart the whole time.
+  (testing "all generated — name REGENERATION, and do not name the sweep"
+    (let [st (store/ingest (store/empty-store) 'wire.api
+                           (str "(ns wire.api)\n\n"
+                                "(defn ^{:generated true :web/path \"/x\"}\n"
+                                "  h \"H.\" [_] {:status 200})\n"))
+          r  (orient/unread-declarations st)]
+      (is (some? r))
+      (is (not (re-find #"rename_sweep" (:note r)))
+          (str "a sweep refuses generated forms, so naming it sends the reader"
+               " to a refusal: " (:note r)))
+      (is (re-find #"(?i)generat" (:note r)) (:note r))))
+
+  (testing "none generated — the sweep is the remedy, unchanged"
+    (let [st (store/ingest (store/empty-store) 'app.a
+                           (str "(ns app.a)\n\n"
+                                "(defn ^{:web/path \"/x\"} h \"H.\" [_] {:status 200})\n"))
+          r  (orient/unread-declarations st)]
+      (is (re-find #"rename_sweep" (:note r)) (:note r))))
+
+  (testing "MIXED — both remedies, with how many each reaches"
+    ;; the split matters more than either half: a reader who runs the sweep and
+    ;; sees "moved 1" has no way to know two more are waiting on a generator
+    (let [st (-> (store/empty-store)
+                 (store/ingest 'app.a
+                               (str "(ns app.a)\n\n"
+                                    "(defn ^{:web/path \"/x\"} h \"H.\" [_] {:status 200})\n"))
+                 (store/ingest 'wire.api
+                               (str "(ns wire.api)\n\n"
+                                    "(defn ^{:generated true :web/path \"/y\"}\n"
+                                    "  g \"G.\" [_] {:status 200})\n"
+                                    "(defn ^{:generated true :web/path \"/z\"}\n"
+                                    "  k \"K.\" [_] {:status 200})\n")))
+          r  (orient/unread-declarations st)]
+      (is (re-find #"rename_sweep" (:note r)) (:note r))
+      (is (re-find #"(?i)2 .*generat|generat.*2" (:note r))
+          (str "the generated count has to be in the sentence, or the sweep's"
+               " own \"moved 1\" reads as done: " (:note r)))
+      (is (= 3 (get-in r [:markers :web/path :count])) (pr-str r))
+      (is (= 2 (get-in r [:markers :web/path :generated])) (pr-str r)))))

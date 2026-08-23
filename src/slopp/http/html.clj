@@ -94,11 +94,26 @@
 (defn ^:export html-response
   "Ring response serving rendered hiccup as text/html. :http/raw true — both
   adapters write the body verbatim. opts may carry :status and extra
-  :headers; Content-Type stays ours."
+  :headers; Content-Type stays ours.
+
+  **`:http/hiccup` carries the structure the body was rendered FROM.** An
+  adapter writes `:body` and ignores it; a reader that wants the page rather
+  than the bytes reads it — `slopp.http/driver` does, so a headless drive of a
+  server-rendered page gets a tree instead of a string.
+
+  It is here because this is the only place that has both. Downstream the
+  hiccup is gone and getting it back would mean parsing HTML, which is a whole
+  dependency and a lossy round trip to recover something that existed one
+  function earlier. Same move as handing the whole response to the driver
+  rather than its body: keep what you already hold.
+
+  Costless to anyone who does not want it — the response is a map, and a key
+  nobody reads is a key nobody pays for."
   ([hiccup] (html-response hiccup nil))
   ([hiccup {:keys [status headers]}]
    {:status  (or status 200)
     :http/raw true
+    :http/hiccup hiccup
     :headers (merge headers {"Content-Type" "text/html; charset=utf-8"})
     :body    (render hiccup)}))
 

@@ -11,7 +11,7 @@
   its failure mode is a green suite over a blank page."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [slopp.cljnx :as cljnx] [slopp.cljnx.hiccup :as hiccup] [slopp.webapp :as webapp] [slopp.http :as slopp.http]))
+            [slopp.cljnx :as cljnx] [slopp.cljnx.hiccup :as hiccup] [slopp.webapp :as webapp] [slopp.http :as slopp.http] [slopp.http.html :as html]))
 
 (deftest a-block-never-glues-to-the-text-around-it
   ;; THE founding bug, and the reason a naive flatten is not merely uglier but
@@ -1734,3 +1734,73 @@
       (is (str/includes? s ":error") s)
       ;; a map's string VALUE stays quoted — that is the map's own printing
       (is (str/includes? s "\"no route\"") s))))
+
+(deftest a-page-served-through-slopps-own-HTML-HELPER-is-drivable
+  ;; Found by slopp-ui on a real content page, and it is general rather than
+  ;; theirs: `html-response` calls `(render hiccup)`, so its `:body` is a
+  ;; STRING — which took the non-hiccup fallback. Every `slopp.http` app
+  ;; serving through slopp's OWN documented helper was undrivable:
+  ;;
+  ;;   text   "HTTP 200\n<pre>&lt;!DOCTYPE html&gt;…&lt;h1&gt;slopp&lt;/h1&gt;…</pre>"
+  ;;
+  ;; so `text` returned MARKUP rather than the page's words, `region` could not
+  ;; scope, `click!` had no anchors, and a 200 was labelled `HTTP 200` — an
+  ;; error banner on a page that is fine.
+  ;;
+  ;; The fix is NOT an HTML parser. `html-response` holds the hiccup at the
+  ;; moment it serializes, so it carries it: `:http/hiccup` beside the body.
+  ;; Same move as the whole response travelling, one layer in — keep what you
+  ;; already have rather than reconstructing it downstream.
+  ;;
+  ;; And the translation lives in `slopp.http/driver`, NOT here. The fake
+  ;; browser must not learn an http-prefixed key: it belongs to no capability,
+  ;; which is what lets it be vendored to every store. An adapter turning its
+  ;; own vocabulary into the neutral contract is exactly the seam's job — the
+  ;; same argument that puts url-splitting there.
+  (let [ctx {:http/routes
+             [{:method :get :path "/" :auth :public :handler
+               (fn [_] (html/html-response
+                        [:main {:data-region "main"}
+                         [:h1 "slopp"]
+                         [:p "No project has checked in yet"]
+                         [:a {:href "/p/demo/"} "demo"]]))}
+              {:method :get :path "/p/demo/" :auth :public :handler
+               (fn [_] (html/html-response [:main [:h1 "demo"]]))}]}
+        b   (cljnx/open! (slopp.http/driver ctx) "/")]
+
+    (testing "the screen is the page's WORDS, not its markup"
+      (let [s (cljnx/text b)]
+        (is (str/includes? s "No project has checked in yet") s)
+        (is (not (str/includes? s "DOCTYPE")) s)
+        (is (not (str/includes? s "HTTP 200"))
+            (str "a 200 labelled HTTP 200 reads as an error banner on a page"
+                 " that is fine: " s))))
+
+    (testing "and it is structure, so a region scopes and a link is a link"
+      (is (str/includes? (cljnx/text b "main" {:detail :prose}) "slopp")
+          (str "the region cut works because the tree was never a string: "
+               (cljnx/text b)))
+      (cljnx/click! b "demo")
+      (is (str/includes? (cljnx/text b) "demo"))
+      (is (= "/p/demo/" (cljnx/url b))
+          "clicking an anchor navigates, which needs a parsed anchor"))
+
+    (testing "the status still travels, and the two views cannot disagree"
+      (is (= 200 (cljnx/status b)))
+      ;; `:document` is the fake browser's contract, not the socket's, so the
+      ;; body it hands back is the SCREEN's — the structure. The socket's view
+      ;; is `html-response`'s own map, whose :body is the rendered string.
+      ;;
+      ;; They cannot drift, and that is the property worth pinning rather than
+      ;; either value: both derive from ONE hiccup at one call site. An HTML
+      ;; parser downstream would have produced a second derivation that agrees
+      ;; until it does not.
+      (let [served (html/html-response [:p "one"])
+            driven ((:document (slopp.http/driver
+                                {:http/routes [{:method :get :path "/" :auth :public
+                                                :handler (fn [_] served)}]}))
+                    "/")]
+        (is (string? (:body served)) "what the socket writes")
+        (is (= [:p "one"] (:body driven)) "what the reader reads")
+        (is (= (:http/hiccup served) (:body driven))
+            "one source, so no second derivation exists to drift")))))

@@ -70,9 +70,25 @@
 (deftest html-response-is-a-raw-html-ring-map
   (is (= {:status 200
           :http/raw true
+          :http/hiccup [:p "hi"]
           :headers {"Content-Type" "text/html; charset=utf-8"}
           :body "<p>hi</p>"}
          (html/html-response [:p "hi"])))
+
+  (testing "the hiccup travels BESIDE the body, not instead of it"
+    ;; an adapter writes :body and ignores the rest; a reader that wants the
+    ;; PAGE rather than the bytes reads :http/hiccup. Both, because they have
+    ;; different consumers — dropping either would serve one of them nothing.
+    ;;
+    ;; It is set here because this is the only place holding both. Downstream
+    ;; the hiccup is gone, and recovering it would mean parsing HTML to get
+    ;; back something that existed one function earlier. slopp-ui measured the
+    ;; cost of not doing it: every page served through this helper drove as
+    ;; escaped markup in a <pre>, with no regions and nothing clickable.
+    (let [r (html/html-response [:main [:h1 "t"]])]
+      (is (= [:main [:h1 "t"]] (:http/hiccup r)))
+      (is (= "<main><h1>t</h1></main>" (:body r)))))
+
   (testing "opts merge status and headers; Content-Type stays ours"
     (let [r (html/html-response [:p "x"] {:status 404
                                           :headers {"X-A" "1"
