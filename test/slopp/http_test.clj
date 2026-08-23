@@ -500,3 +500,49 @@
                                             {:status 200 :body [:p "ok"]})}]})]
         ((:document (slopp.http/driver c2)) "/s?q=web")
         (is (= {:uri "/s" :query-string "q=web"} @seen))))))
+
+(deftest an-UNASSEMBLED-context-says-so-instead-of-404ing-everything
+  ;; Reported by slopp-ui, 2026-08-23, after three attempts: they built
+  ;; {:http/namespaces … :http/routes …} — the shape `serve!` documents — and
+  ;; handed it straight to `slopp.http/driver`. Every path answered
+  ;; {:status 404 :body {:error "no route"}}, which is a CORRECT answer to a
+  ;; question nobody asked: an unassembled ctx has no derived router, so every
+  ;; path genuinely misses.
+  ;;
+  ;; The cost is that it implicates the caller's ROUTES. They looked there
+  ;; first, and only found it via a sentence in this namespace's docstring
+  ;; while reading it for something else.
+  ;;
+  ;; The tell is exact rather than a guess, which is what makes it a rule worth
+  ;; having: `context` does not carry :http/namespaces into what it returns, so
+  ;; a ctx holding one is an INPUT map that never went through it. Nothing
+  ;; legitimate looks like that.
+  (testing "the input map to context is refused, naming the call that fixes it"
+    (let [m (try (slopp.http/handle! {:http/namespaces ['slopp.http-test]}
+                                     {:request-method :get :uri "/anything"})
+                 nil
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+      (is (some? m) "a 404 here sends the reader to their own route table")
+      (is (str/includes? m "slopp.http/context") m)
+      (is (str/includes? m ":http/namespaces") m)))
+
+  (testing "and through the driver, which is how it was actually hit"
+    (let [m (try ((:document (slopp.http/driver {:http/namespaces ['slopp.http-test]})) "/")
+                 nil
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+      (is (some? m))
+      (is (str/includes? m "slopp.http/context") m)))
+
+  (testing "an ASSEMBLED context is untouched, and so is a bare route table"
+    ;; a hand-built {:http/routes [...]} is a legitimate minimal ctx — the
+    ;; fixtures in this repo use it — so the refusal keys on the input marker
+    ;; and not on the absence of assembly
+    (let [ctx (slopp.http/context
+               {:http/namespaces []
+                :http/routes [{:method :get :path "/hi" :auth :public
+                               :handler (fn [_] {:status 200 :body [:p "hi"]})}]})]
+      (is (= 200 (:status (slopp.http/handle! ctx {:request-method :get :uri "/hi"}))))
+      (is (= 200 (:status (slopp.http/handle!
+                           {:http/routes [{:method :get :path "/hi" :auth :public
+                                           :handler (fn [_] {:status 200 :body [:p "hi"]})}]}
+                           {:request-method :get :uri "/hi"})))))))

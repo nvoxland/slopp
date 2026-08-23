@@ -269,6 +269,15 @@
   blank page: a 404 that read as an empty screen would send a reader looking
   for a rendering bug in a handler that was never reached.
 
+  **A STRING body is already text and is not printed again.** `pr-str` is
+  right for data — `{:error \"no route\"}` has a shape worth keeping — and
+  wrong for a string, where it adds quotes and escapes them ON TOP of the
+  reader's own HTML-escaping. Measured on a real 302, whose body's only
+  actionable element — the `continue` link naming the target — arrived as
+  `&lt;a href=\\\"/p/demo/\\\"&gt;` and could not be clicked. So the old
+  behaviour was not a redirect you had to follow by hand; it was one with no
+  manual workaround at all.
+
   It lived in `slopp.http/driver` while that adapter was the only producer of
   a response. It is here now because the status is what decides the question
   and this is where the status is known — and because a document answering
@@ -279,7 +288,7 @@
   (let [b (:body resp)]
     (if (or (nil? (:status resp)) (vector? b))
       b
-      [:div [:p (str "HTTP " (:status resp))] [:pre (pr-str b)]])))
+      [:div [:p (str "HTTP " (:status resp))] [:pre (if (string? b) b (pr-str b))]])))
 
 (defn- document-visit!
   "Go to `path` through the app's `:document`, following redirects, and leave

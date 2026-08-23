@@ -135,6 +135,25 @@
   exception is a GENERIC 500 with the detail logged server-side, never in
   the body (review W3)."
   [ctx req]
+  ;; An UNASSEMBLED context — the input map `context` takes, handed straight
+  ;; here — has no derived route table, so every path misses and every path
+  ;; answers 404. That is a correct answer to a question nobody asked, and it
+  ;; implicates the CALLER'S ROUTES, which is where they look first. Reported
+  ;; by a consumer who spent three attempts there.
+  ;;
+  ;; The tell is a declaration rather than a guess: `context` READS
+  ;; :http/namespaces and does not pass it on, so a ctx carrying one has not
+  ;; been through it. A hand-built {:http/routes […]} stays legitimate.
+  (when (contains? ctx :http/namespaces)
+    (throw (ex-info (str "this context has not been assembled — it still carries"
+                         " :http/namespaces, which slopp.http/context reads and"
+                         " does not pass on. Unassembled, there is no derived"
+                         " route table, so EVERY path answers 404 and the 404"
+                         " looks like a bug in your routes. Wrap it:"
+                         " (slopp.http/handle! (slopp.http/context opts) req),"
+                         " or (slopp.http/driver (slopp.http/context opts)) to"
+                         " drive it headlessly")
+                    {:http/namespaces (vec (:http/namespaces ctx))})))
   (let [req (if (or (:http/identity req) (nil? (:http/auth-config ctx)))
               req
               (assoc req :http/identity

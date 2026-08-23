@@ -1697,3 +1697,40 @@
       (is (some? m) "rendering this blank is the failure open!'s checks exist to end")
       (is (str/includes? m ":status") m)
       (is (str/includes? m "hiccup") m))))
+
+(deftest a-STRING-body-is-already-text-and-is-not-quoted-again
+  ;; Measured by slopp-ui on a real 302 before taking the fix, which is the
+  ;; only window in which the old behaviour could be recorded rather than
+  ;; remembered. The hub's root answered:
+  ;;
+  ;;   HTTP 302
+  ;;   <pre>"&lt;!DOCTYPE html&gt;…&lt;a href=\"/p/demo/\"&gt;continue&lt;/a&gt;…"</pre>
+  ;;
+  ;; DOUBLE-escaped: `pr-str` wrapped the body in quotes and escaped its
+  ;; quotes, and then the reader HTML-escaped the result. So the one actionable
+  ;; thing in a redirect body — the `continue` link naming the target — arrived
+  ;; as unreadable text rather than as a link a click! could take. The
+  ;; correction to the account matters: this was not "a redirect you must
+  ;; follow by hand", it was one with no manual workaround at all.
+  ;;
+  ;; `pr-str` is right for DATA — {:error "no route"} has to keep its shape —
+  ;; and wrong for a string, which is already what it looks like.
+  (testing "a string body shows the text, escaped ONCE by the reader"
+    (let [b (cljnx/open! {:document (fn [_] {:status 502
+                                             :body "<a href=\"/p/demo/\">continue</a>"})}
+                         "/x")
+          s (cljnx/of (cljnx/tree b))]
+      (is (str/includes? s "502") s)
+      (is (str/includes? s "continue") s)
+      (is (not (str/includes? s "\\\""))
+          (str "no backslash-escaped quotes: that is pr-str's, on top of the"
+               " reader's own escaping, and it is what made the link"
+               " unreadable: " s))))
+
+  (testing "and DATA keeps its shape, because that is what reading it means"
+    (let [b (cljnx/open! {:document (fn [_] {:status 404 :body {:error "no route"}})}
+                         "/x")
+          s (cljnx/of (cljnx/tree b))]
+      (is (str/includes? s ":error") s)
+      ;; a map's string VALUE stays quoted — that is the map's own printing
+      (is (str/includes? s "\"no route\"") s))))
