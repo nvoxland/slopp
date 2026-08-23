@@ -3151,3 +3151,52 @@ Teach-both/sweep/tighten has no gate on the third step, so the store keeps a
 correct-looking artifact of an intermediate state. If a migration needs a
 tighten phase, the sweep that ends it is the moment to do it — the window it
 existed for is closed by definition at exactly that point.
+
+## The justification you WRITE DOWN decides what a later reader is allowed to remove
+
+Two justifications can support the same decision and leave it in different
+states of repair. Recorded 2026-08-23 after a consumer caught this in a message
+rather than in the code, which is the only reason it did not become durable.
+
+`uber`'s staleness check was a warning plus exit 0 for a release, with an
+explicit reason:
+
+> STALE can only be a hint, never a refusal: a live session touches store.db
+> constantly, so "db is newer" is often off by seconds and failing on it would
+> block legitimate builds.
+
+That was overridden — refuse before writing, with a `:stale true` escape. Two
+different things could be written down as WHY the override is safe:
+
+1. **the asymmetry** — a false refusal costs one flag, a false success costs an
+   artifact that misrepresents the store and reaches a consumer; the ESCAPE is
+   what makes the override safe;
+2. **the measurement** — "we ran it twice and the noise the old comment feared
+   did not appear."
+
+Both are true statements. Only the first is a justification.
+
+**(2) invites deleting the escape.** A future reader finding "we measured and
+it was fine" beside an option nobody has passed concludes the option is dead
+weight — and removing it re-creates exactly the failure the old comment feared,
+now with no way past it. (1) cannot be read that way: it names the escape as
+the mechanism, so removing the escape removes the reason.
+
+**And the measurement was not one anyway.** Two builds, one session, one
+machine, minutes apart: that is ONE CONDITION SAMPLED TWICE, not two
+conditions. The condition the old comment actually feared — a second live
+session writing between materialize and jar — was never sampled, and the store
+where it demonstrably exists is one where nobody runs `uber`. The consumer's
+line: *I would rather that be the stated reason than "we measured and it was
+fine".*
+
+**The test.** For a decision that displaces a recorded objection, ask: *if this
+justification is true, what does it license someone removing?* A justification
+that licenses removing the safety mechanism is the wrong one to write down even
+when it is factually correct. Put the mechanism in the reason.
+
+Related, and the reason this is a discipline rather than an anecdote: the same
+move appears wherever an escape hatch exists to make a strict rule safe —
+`^:frozen`, `^:unused-ok`, `:not-swept`, `test_only`. Each is load-bearing
+precisely in the case that has not happened yet, so each is vulnerable to being
+measured as unused and tidied away.

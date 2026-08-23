@@ -297,6 +297,14 @@
         ;; costs one flag. A false success costs a jar that misrepresents the
         ;; store, is announced as built, and reaches a consumer — caught only
         ;; because that consumer happened to check head.edn before restarting.
+        ;;
+        ;; That asymmetry is the reason, and :stale is the mechanism it names.
+        ;; NOT "we measured and the noise never appeared" — which is both weak
+        ;; (two builds in one session on one machine is one condition sampled
+        ;; twice) and the wrong shape: it would license a later reader deleting
+        ;; :stale as dead weight, re-creating the failure the displaced comment
+        ;; feared with no way past it. The escape is load-bearing exactly in
+        ;; the case that has not happened yet.
         (when (and behind (not stale))
           (throw (ex-info
                   (str "refusing to jar a STALE materialization.\n\n"
