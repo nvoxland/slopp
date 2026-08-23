@@ -3132,6 +3132,9 @@ recompiled (engine/after-write! session ns-sym)]
         ;; restart, covers import as well as adoption, and cannot disagree
         ;; with the module graph — one `module-layers`, one answer.
         cycles   (vec (:cycles (store/module-layers (:modules st))))
+        ;; one store-wide scan, not two — the cond-> below tests and reports the
+        ;; same value
+        unread   (orient/unread-declarations st)
 ;; the line this session WRITES to, when it is a private one. Read from
         ;; the session rather than resolved, deliberately: resolving ADOPTS,
         ;; and orientation must not be the thing that creates a workspace.
@@ -3207,6 +3210,18 @@ recompiled (engine/after-write! session ns-sym)]
                   " {from … to … remove true}."))
       host       (assoc :host host)
       thread     (assoc :thread thread)
+      ;; what this store DECLARES that this slopp no longer reads. The brief is
+      ;; where it belongs because the moment it becomes true is a RESTART onto
+      ;; a different artifact — no write happened, so no write-time gate could
+      ;; have said it, and the store did not change.
+      ;;
+      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
+      ;; per-form half at done grain, and nobody adds ten of those up. A
+      ;; consuming store hit exactly this — every route declaring a retired
+      ;; spelling, so nothing registered and everything 404d — and diagnosed
+      ;; beat-contract drift from this brief's own `:hub-note`, because the
+      ;; fact it needed was not here to read.
+      unread     (assoc :unread-declarations unread)
       ;; the reviewer UI, when the server brought one up. It is for a HUMAN,
       ;; and its only other announcement is a line on the server's stderr —
       ;; which most clients never show anyone. Hand the url over when asked

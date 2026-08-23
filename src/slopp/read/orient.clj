@@ -16,7 +16,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules]))
+            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings]))
 
 (defn ^:export snip
   "Cap `s` at `n` chars with an ellipsis — composites (brief/report) carry
@@ -588,3 +588,76 @@
          :behind (count (filter #(and (not (contains? fields/markers (:op %)))
                                       (client (:ns %)))
                                 (subvec ds (inc idx))))}))))
+
+(defn ^:export unread-declarations
+  "Markers this store DECLARES that this slopp no longer READS — or nil, which
+  is the ordinary case.
+
+  `{:markers {:web/path {:count 10 :now :http/path}} :note \"…\"}`.
+
+  **The join, not the finding.** `unknown-marker` already reports the per-form
+  half, at done grain, phrased as *nothing reads it* about ONE marker. Nobody
+  adds ten of those up, and a store with ZERO readable endpoints is a different
+  fact from ten forms carrying unread markers — different enough that a
+  consuming store diagnosed the second while the first was what had happened.
+
+  What it cost there: they restarted onto a new jar, the hub refused its own
+  check-in with 404, five tests went red, and the brief's `:hub-note` pointed
+  at beat-contract drift. It was not drift. Their routes declared `:web/path`,
+  the jar reads `:http/path`, so not one endpoint registered and everything
+  404d. Every input was available at boot — the store declares its endpoints,
+  the running code knows which marker it reads, and the intersection was
+  empty.
+
+  Read from [[slopp.index.crossings/retired-markers]], so the current spelling
+  comes from the ledger a rename already maintains rather than from a second
+  list that would agree until it did not.
+
+  **Silent when clean**, which is what makes it worth printing: a line every
+  brief carries is a line nobody reads."
+  [store]
+  (let [retired  crossings/retired-markers
+        hits     (for [nsx (keys (:namespaces store))
+                       e   (slopp.store/forms store nsx)
+                       :when (:name e)
+                       k   (keys (slopp.store/form-name-meta e))
+                       :when (qualified-keyword? k)
+                       :let [now (get retired (str (namespace k) "/" (name k)))]
+                       :when now]
+                   [k now])
+        by-mark  (reduce (fn [m [k now]]
+                           (-> m (assoc-in [k :now] now)
+                               (update-in [k :count] (fnil inc 0))))
+                         {} hits)]
+    (when (seq by-mark)
+      (let [;; the CONSEQUENCE, per capability-ish current spelling: how many
+            ;; forms carry the live marker these retired ones map to
+            live-counts (into {}
+                              (for [[_ {:keys [now]}] by-mark]
+                                [now (count (for [nsx (keys (:namespaces store))
+                                                  e   (slopp.store/forms store nsx)
+                                                  :when (and (:name e)
+                                                             (contains? (slopp.store/form-name-meta e) now))]
+                                              e))]))
+            ;; report the WORST one in the sentence — the rest are in :markers.
+            ;; One marker with ten forms is the fact; a list of five is a lint
+            ;; report, and the reader is trying to find out why nothing serves.
+            worst  (first (sort-by (comp - :count val) by-mark))
+            mk     (key worst)
+            n      (:count (val worst))
+            now    (:now (val worst))
+            live   (get live-counts now 0)]
+        {:markers by-mark
+         :note (str n " form(s) in this store declare " mk
+                    ", which this slopp does not read — "
+                    (if (zero? live)
+                      (str "and NONE of them are readable, so whatever "
+                           mk " configures, this store is not doing it. ")
+                      (str "while " live " form(s) use the live spelling, so this"
+                           " store is doing it partly. "))
+                    "The current spelling is " now
+                    ". A rename moved it and these were left behind;"
+                    " rename_sweep {from \"" mk "\" to \"" now "\"} moves them."
+                    " Every input to this was here at boot — the store says what"
+                    " it declares and this slopp says what it reads, and nothing"
+                    " joined the two.")}))))

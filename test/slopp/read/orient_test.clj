@@ -659,3 +659,51 @@
                    (store/ingest 'app.server "(ns app.server)\n\n(defn h \"H.\" [r] r)\n"))]
         (is (= 0 (:behind (orient/bundle-currency st out)))
             "a :jvm write is not something the browser can be behind on")))))
+
+(deftest a-store-DECLARING-what-nothing-reads-says-so-as-one-fact
+  ;; Reported by a consuming store, and the cost was a WRONG DIAGNOSIS rather
+  ;; than time. They restarted onto a new jar, the hub refused its own check-in
+  ;; with 404, five tests went red, and `:hub-note` said the beat contract
+  ;; crosses the split by COPY so a refusal is where drift surfaces — pointing
+  ;; at contract drift. It was not drift: their routes declared `:web/path`,
+  ;; the jar reads `:http/path`, so NOT ONE endpoint was registered and
+  ;; everything 404d.
+  ;;
+  ;; Every input was available at boot. The store declares ten endpoints; the
+  ;; running code knows which marker it reads; the intersection was empty.
+  ;;
+  ;; `unknown-marker` already knows the per-form half — but it is per-form,
+  ;; done-grain, and phrased as "nothing reads it" about ONE marker. Nobody
+  ;; joins ten of those into "you are serving nothing", and a store with zero
+  ;; readable endpoints is a different FACT from ten forms with unread markers.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'app.a
+                             (str "(ns app.a)\n\n"
+                                  "(defn ^{:web/path \"/x\" :web/method :get}\n"
+                                  "  h \"H.\" [_] {:status 200})\n"))
+               (store/ingest 'app.b
+                             (str "(ns app.b)\n\n"
+                                  "(defn ^{:web/path \"/y\"} g \"G.\" [_] {:status 200})\n")))
+        r  (orient/unread-declarations st)]
+
+    (testing "the retired spelling is named, with how many forms carry it"
+      (is (some? r) "a store serving nothing said nothing")
+      (is (= 2 (get-in r [:markers :web/path :count])) (pr-str r)))
+
+    (testing "and what the CURRENT spelling is, because that is the whole fix"
+      (is (= :http/path (get-in r [:markers :web/path :now])) (pr-str r)))
+
+    (testing "the note states the consequence, not the count"
+      ;; "2 forms carry an unread marker" is a lint nit; "this store serves
+      ;; nothing" is the fact that was needed, and it is the one a reader
+      ;; cannot assemble from per-form findings
+      (is (re-find #"(?i)serves nothing|0 (of|are)|none of them" (:note r))
+          (:note r)))
+
+    (testing "a store whose markers are all CURRENT says nothing at all"
+      ;; silent at zero, or it becomes a line every brief carries and nobody reads
+      (let [ok (store/ingest (store/empty-store) 'app.ok
+                             (str "(ns app.ok)\n\n"
+                                  "(defn ^{:http/path \"/x\" :http/method :get}\n"
+                                  "  h \"H.\" [_] {:status 200})\n"))]
+        (is (nil? (orient/unread-declarations ok)))))))

@@ -402,16 +402,18 @@
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
 
-(def ^:export
-  ^{:unused-ok "read by bin/check-retired-markers.sh, which is outside the
-  store and so invisible to the reference graph. It has to be outside: the
-  check reads the SHIPPED docs, and both test tiers run in a materialized temp
-  dir where plugins/slopp/skills resolves to nothing — an in-store version read
-  ZERO files and passed every absence assertion vacuously, which is the exact
-  failure it exists to prevent."}
-  retired-markers
+(def ^:export retired-markers
   "The marker renames of the `:web/*` → owning-capability wave, as
   `{\"old/name\" :new/name}`.
+
+  **Two consumers, and only one of them is visible to the reference graph.**
+  `slopp.read.orient/unread-declarations` reads it to tell a store which
+  CURRENT spelling a retired marker maps to. A repo-side script also reads it
+  to check the SHIPPED docs, and has to live outside the store: both test tiers
+  run in a materialized temp dir where those docs resolve to nothing, so an
+  in-store version read ZERO files and passed every absence assertion
+  vacuously — the exact failure it exists to prevent. That second reader is why
+  this carried an `^:unused-ok` waiver until the first one existed.
 
   **The retired side is a STRING, and that is the whole reason this form works
   at all.** It was written with keyword keys and the sweep ATE it: a rename
