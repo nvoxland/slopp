@@ -1363,17 +1363,37 @@ refusals cannot disagree.
 with `config_file {path "capabilities" key "rest.enabled" value "true"}` — it
 implies `http`.
 
-An endpoint declares what it accepts and returns:
+**A REST api declares `:rest/path`; general HTTP content declares
+`:http/path`. There is no overlap.**
 
 ```clojure
+;; an API — typed, documented, generatable
 (defn ^{:http/method   :post
-        :http/path     "/api/orders"
+        :rest/path     "/api/orders"
         :http/auth     :public
         :rest/request  [:map [:sku :string] [:qty :int]]
         :rest/response [:map [:id :int]]}
   create! "Place an order." [req]
   {:status 200 :body {:id (order/place! (:body req))}})
+
+;; content — a document for a reader
+(defn ^{:http/method :get :http/path "/styles/app.css" :http/auth :public}
+  stylesheet "The stylesheet." [_req]
+  (html/css-response …))
 ```
+
+**`:rest/path` must live under the API prefix, and `:http/path` must not.**
+The prefix is `rest.prefix`, default `"/api"` — one answer per store, so
+`/api/*` means something to a proxy, a CSP or a reader WITHOUT consulting
+metadata. Declaring both markers on one form refuses; so does either on the
+wrong side. All three are write-time refusals and all three name the fix.
+
+Before the split there was one path marker, so every route was asked the API's
+questions — which is why a stylesheet ended up declaring `:rest/response
+:string` (a lie about a `text/css` body) and then opting out of the wrapper
+that followed. If you enable `rest` on a store that already serves something
+under `/api`, that route refuses until it says which kind it is; that is the
+partition becoming total rather than a regression.
 
 With `rest` on, three things follow that you write no code for.
 
@@ -1426,9 +1446,16 @@ are no longer asked to declare `:rest/response` on every page — serving a
 document is `http`'s business, and typing a JSON contract is `rest`'s.
 
 `query_surface` gains a `:rest` section: per endpoint, the NAMES its request and
-response declare, its handler, and whether it is `:published` (an HTML page opts
-out with `:rest/client false`, and that exclusion is a field rather than an
-omission, so "opted out" and "forgot a schema" do not look alike).
+response declare, and its handler. Content is absent from it by KIND — an
+`:http/path` form is not part of a typed contract and needs no flag to say so.
+
+**There is no way to exclude an api from the document.** `:rest/client false`
+used to, and it was retired: whether to generate a client is the generating
+CONSUMER's question, asked at generation time against a document, and an
+endpoint does not know who will call it. Excluding one also removed it from the
+published API documentation, which nobody asked for — a public, schema'd
+endpoint went missing from its own app's docs because one consumer wanted no
+wrapper.
 
 ### `:rest/request` is what the CALLER SENDS, wherever it travels
 
@@ -1465,7 +1492,7 @@ no route table, no macro:
 
 ```clj
 (defn ^{:http/method :get
-        :http/path   "/api/users/:id"
+        :rest/path   "/api/users/:id"
         :http/auth   [:group "admin"]
         :http/reads  {:user [:user/by-id [:path-params :id]]}
         :malli/schema [:=> [:cat Req] Resp]}
@@ -1786,10 +1813,13 @@ stop being the assumption once the app grows.
   VOCABULARY, store-wide, so an API endpoint can reuse a page's read). A
   server given only half answers **500, not 404** — much harder to diagnose.
   If two servers mount the same app, they share one `def`.
-- **Mark transport endpoints `^{:rest/client false}`.** Anything that is not
-  the app's own API — health, metrics, an RPC transport — otherwise gets a
-  typed browser `fetch` wrapper generated for it. The same flag is what keeps
-  HTML page endpoints out of the client.
+- **Health, metrics and RPC transports are still APIs — declare them, and let
+  the generator emit wrappers you may not call.** They used to be marked
+  `^{:rest/client false}` to keep them out of the client; that flag is retired,
+  because "this consumer does not call it" is not a fact about the endpoint,
+  and excluding it also took it out of the app's published documentation. An
+  unused generated wrapper costs a few lines in a namespace that is regenerated
+  wholesale; a missing one costs the next consumer the endpoint entirely.
 
 #### If you go all the way: no server-rendered pages at all
 
@@ -2006,11 +2036,23 @@ before the request leaves. Rules of the road:
   `X-Slopp-Base: /your/prefix` with the proxied request: the document reads it
   per REQUEST (not from config — the same server may also be answering
   directly on its own port) and emits its own asset urls prefixed.
-- **A page endpoint opts OUT: `^{:rest/client false}`.** An HTML page is a
-  `:http/path` form like any other, so it would otherwise get a typed wrapper
-  whose `.json` parse can never succeed. Declare it rather than relying on the
-  response schema — `:string` is a perfectly good JSON response, so the schema
-  can't tell HTML from JSON; only you can.
+- **Content is not generated for, and needs no flag to say so.** A page or a
+  stylesheet declares `:http/path`, so it is not part of a typed contract and
+  no wrapper is emitted. That used to need `^{:rest/client false}` on the page,
+  because a page WAS an endpoint like any other and a schema could never tell
+  HTML from JSON (`:string` is a perfectly good JSON response).
+- **An endpoint says what it ANSWERS: `^{:rest/media-type "application/edn"}`.**
+  Absent means `application/json`. Every wrapper used to call `.json()`
+  unconditionally, so an endpoint answering anything else failed on the first
+  character; a non-JSON one now reads `.text` and validates the body as it
+  stands. This is a fact about the endpoint and is checkable — which the flag
+  it replaced was not.
+- **There is no way to say "generate no client for me."** `:rest/client` was
+  retired: whether to generate is the generating consumer's question, and an
+  endpoint does not know who will call it. Its three real uses turned out to be
+  a base problem in one client namespace serving two APIs, "our browser does
+  not call it" (not the producer's business), and an endpoint answering EDN —
+  which is the media type above.
 
 **Consuming someone else's API: publish a contract, generate against it.**
 Everything above assumes the endpoints and the client live in ONE store. When
@@ -2021,10 +2063,16 @@ that. Neither store reads the other.
 - **Producer: serve `slopp.http.contract/contract-document`.** It takes your
   served namespace list and returns `{:slopp/contract-version 1 :endpoints […]}`
   — method, path, name, the handler's QUALIFIED symbol, its docstring, and the
-  request/response schemas as VALUES. Serve it as EDN with `:http/raw true` and
-  `Content-Type: application/edn`; mark the endpoint `^{:rest/client false}`
-  (describing the wrappers doesn't need a wrapper). It ships in the `slopp-web`
-  slim jar, so any app can publish, not just one whose code lives in a store.
+  request/response schemas as VALUES. Serve it as EDN with `:http/raw true`,
+  `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
+  so a generated wrapper reads text rather than attempting JSON. It ships in the
+  `slopp-web` slim jar, so any app can publish, not just one whose code lives in
+  a store.
+
+  This endpoint used to be marked "no client — describing the wrappers needs no
+  wrapper." That was never the fact: nothing is circular at runtime, and the
+  consumer who hand-wrote request paths for it would have had them generated.
+  The fact was the encoding.
 - **Your handler's docstring IS the endpoint's public description.** It travels
   in `:doc`, de-indented and whole — there is deliberately no second summary
   field beside it, because one fact with two homes can disagree. Write it for the CALLER:

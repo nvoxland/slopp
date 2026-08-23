@@ -4811,3 +4811,112 @@ Open and unfixed: `uber` knows the head it is jarring and knows `store.db`
 moved after it, prints the comparison, and still exits 0. Left alone
 deliberately — `build.clj` is a file humans own here, and turning a warning
 into a failure is not a change to make silently.
+
+---
+
+## D-rest-path (2026-08-23, user decision) — a REST api and general HTTP content are two kinds of route, and an endpoint never says who may call it
+
+Two decisions from one root cause, taken together because the second is only
+reachable once the first exists.
+
+**The root cause.** `:http/path` was slopp's only path declaration, so a REST
+endpoint and a stylesheet were the same kind of thing to every gate. Once a
+store enabled `rest`, `rest-endpoint-schema` asked EVERY route for a
+`:rest/response` — including the pages. So a page declared `:rest/response
+:string`, which is a lie about a `text/css` body, and then `:rest/client false`
+to suppress the typed fetch wrapper that followed. Measured in the consuming
+store: **11 endpoints, 10 carrying the flag, 1 recording why.** Nine bare
+copies of one flag in a store where an `^:unused-ok` carries a paragraph — the
+shape that gets copied forward without anyone re-deciding it, and how
+`/api/projects` and `/api/deregister` came to be flagged beside a stylesheet.
+
+### Decision 1 — `:rest/path` declares an API; `:http/path` declares content
+
+```clj
+^{:rest/path "/api/orders" :http/method :get :http/auth :public
+  :rest/response contracts/order-list}          ; an API
+
+^{:http/path "/css/app.css" :http/method :get :http/auth :public}   ; content
+```
+
+**`rest.prefix`**, a capability key, default `"/api"`. Three refusals at the
+write, all grounded in a DECLARATION rather than a coincidence: both markers on
+one form; `:rest/path` outside the prefix; `:http/path` inside it.
+
+**The prefix rule earns its place beyond the marker.** It makes `/api/*` mean
+something to a proxy, a CSP or a reader WITHOUT consulting metadata — the
+consuming store's hub proxies `/p/:slug/api/*path` on exactly that assumption,
+and nothing was enforcing it. Configurable rather than hard-coded because a
+real API may live at `/v1` or `/graphql`, and one answer per store keeps the
+partition total.
+
+**Which gate asks what.** `:rest/response` is a `:rest/path` question alone —
+that is the whole point. Everything about being REACHABLE stays on both:
+`:http/auth` (default-deny), route collision, safe-GET, declared effects,
+declared context, unknown group. `edit.http/route-path` is the ONE accessor
+every reachability gate asks, because a gate reading one marker leaves the
+other kind ungated — a gap for most of them and a HOLE for auth.
+
+**Accepted cost, stated so it is not rediscovered as a bug.** An http-only
+store may serve `/api/foo` as a page today, and enabling `rest` later refuses
+it. That is the partition becoming total.
+
+**What could not be verified here.** slopp's own store is 100% REST — ten
+endpoints, all under `/api/`, ZERO content endpoints. So every page-side
+assertion is fixture-only, and the consuming store's five content endpoints are
+the only real ones. Building a page-versus-API distinction in a store with no
+pages is the *works on exactly the store it was developed on* hazard pointed
+the other way, and the milestone says so rather than implying coverage.
+
+### Decision 2 — `:rest/client` is retired; `:rest/media-type` says what an endpoint ANSWERS
+
+**The principle, stated by the user and load-bearing for the rest of this
+entry:** *the goal of an API is to be usable by anyone, anywhere.* An endpoint
+does not know who will call it, so whether to generate a client is the
+generating CONSUMER's question, asked at generation time against a document.
+
+`:rest/client false` put one consumer's answer on the producer's declaration —
+and reached every OTHER consumer too, including out of the published document.
+A public, schema'd, JSON-answering endpoint went missing from its own app's API
+documentation because one consumer wanted no wrapper. That half was never asked
+for.
+
+**Its three real uses each dissolved rather than needing a replacement:**
+
+| endpoint | claimed reason | what it actually was |
+|---|---|---|
+| `/api/projects` | "a wrapper would prefix to `/p/<slug>/`" | one client namespace serving TWO APIs; two namespaces, two bases, no conflict |
+| `/api/deregister` | "our browser does not call it" | not a fact about the endpoint |
+| `/api/contracts` | "describing the describer is circular" | it answers EDN, and every wrapper called `.json` |
+
+The third is the only producer-side fact in the set, and "no client" was the
+wrong name for it. **`:rest/media-type`** — default `application/json` — is
+about the endpoint, is checkable, and is positive rather than an opt-out. A
+non-JSON endpoint's wrapper reads `.text` and validates the body as it stands;
+there is no JSON boundary, so nothing for the json-transformer to cross.
+
+It rides the spec, the published document AND both generators, because the
+local and remote producers must not disagree about how to read a body — the
+parity a test already pins.
+
+**And it inverts the justification it replaced.** `/api/contracts` is now
+generated, which deletes the two request paths the consuming store hand-writes
+*because it could not be generated*.
+
+### Two process notes worth keeping
+
+**Order removed the need for migration scaffolding.** A gate enforcing a marker
+cannot be renamed atomically with the marker — the gate runs from OLD compiled
+code while the sweep rewrites. The last wave hand-rolled a both-spellings
+tolerance for that, which rotted into `(or (:http/path m) (:http/path m))`.
+This wave needed none: the new gate was built FIRST, knowing both kinds, and
+the sweep followed. Same for `:rest/media-type` before retiring `:rest/client`.
+The general fix is filed as *a self-enforcing rename judges its END state*.
+
+**A silent wrong answer that the whole suite was green about.**
+`rules.rest/contracts-report` still read `:http/path` after the migration, so
+`query_surface`'s `:rest` section reported `:path ""` for every endpoint. 1320
+external tests passed, because no test asserted the path in that report. It was
+caught by LOOKING at `query_surface` — the only thing that could have.
+
+---

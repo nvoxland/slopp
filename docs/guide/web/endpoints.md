@@ -23,7 +23,7 @@ See [store configuration](../../reference/config.md#the-capabilities-file).
 
 ```clj
 (defn ^{:http/method   :get
-        :http/path     "/api/orders/:id"
+        :rest/path     "/api/orders/:id"
         :http/auth     [:group "staff"]
         :http/reads    {:order [:order/by-id [:path-params :id]]}
         :rest/response shop.contracts/order}
@@ -42,7 +42,8 @@ intact and the additions are visibly slopp's.
 | Metadata key | Means |
 |---|---|
 | `:http/method` | `:get`, `:post`, `:put`, `:patch`, `:delete`. |
-| `:http/path` | The path, with `:name` segments arriving as `:path-params`. |
+| `:rest/path` | A REST API's path. Must be under the API prefix (`rest.prefix`, default `/api`). |
+| `:http/path` | General HTTP content -- a page, a stylesheet. Must be *outside* the API prefix. |
 | `:http/auth` | The policy. Required -- see [auth](auth.md). |
 | `:http/reads` | `{alias [<kind> <request-path>]}`. Fetched before the handler runs. |
 
@@ -50,7 +51,7 @@ intact and the additions are visibly slopp's.
 | `:rest/request` | Malli schema for the body. Required on `:post`/`:put`/`:patch`. |
 | `:rest/response` | Malli schema for the response. Required on every endpoint. |
 | `:http/effectful` | `true` opts out of effects-as-data. The escape, not the default. |
-| `:rest/client` | `false` excludes the endpoint from the [generated client](client.md). |
+| `:rest/media-type` | What the endpoint answers. Defaults to `application/json`; a wrapper reads text for anything else. |
 
 Two markers go on *other* forms:
 
@@ -103,7 +104,7 @@ mocks anywhere.
 
 ;; the endpoint: declares both, performs neither
 (defn ^{:http/method   :post
-        :http/path     "/api/orders"
+        :rest/path     "/api/orders"
         :http/auth     :authenticated
         :http/effects  [:order/insert]
         :rest/request  shop.contracts/new-order

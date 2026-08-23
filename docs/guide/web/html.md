@@ -18,8 +18,7 @@ touch it.
   [:tr [:td [:a {:href (str "/orders/" id)} id]] [:td total]])
 
 (defn ^{:http/method :get :http/path "/orders" :http/auth :authenticated
-        :http/reads {:orders [:order/for-user [:http/identity :http/sub]]}
-        :rest/response :string :rest/client false}
+        :http/reads {:orders [:order/for-user [:http/identity :http/sub]]}}
   orders-page
   "The orders list."
   [req]
@@ -44,11 +43,16 @@ of as escaped markup. The two views come from one call site, so they cannot
 disagree; recovering the structure downstream would have meant parsing the
 HTML back into a second derivation of the same page.
 
-An HTML page is a `:http/path` endpoint like any other, so it would otherwise
-get a typed fetch wrapper whose `.json()` can never succeed. `:rest/client
-false` opts it out. Declare it rather than relying on the response schema to
-imply it: `:string` is a perfectly good JSON response, so nothing but you can
-tell HTML from JSON.
+Note what a page does *not* declare: no `:rest/response`, no opt-out flag. A
+page is `:http/path` -- general HTTP content -- and a REST API is `:rest/path`.
+Only the second is asked for a contract, published in the API document, or
+generated a client for.
+
+That split is recent. There used to be one path marker, so a page was an
+endpoint like any other: it was asked for a `:rest/response` (`:string`, a lie
+about an HTML body), and then needed `:rest/client false` to suppress the typed
+fetch wrapper that followed. Both declarations existed only to undo a question
+the page should never have been asked.
 
 ## The rules that actually bite
 
@@ -112,7 +116,7 @@ Same story, one layer down. A stylesheet is a `defn` GET endpoint returning
 
 ```clj
 (defn ^{:http/method :get :http/path "/styles/app.css" :http/auth :public
-        :rest/response :string :rest/client false}
+        }
   app-stylesheet
   "The application stylesheet, as garden data."
   [_req]

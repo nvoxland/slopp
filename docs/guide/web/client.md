@@ -153,8 +153,13 @@ Rules of the road:
   malli's JSON-Schema spelling. Build a long one with `(str ...)`: unlike a
   docstring this is a value, so a multi-line literal ships its own source
   indentation to everyone who renders it.
-- **Page endpoints opt out** with `:rest/client false`. See [HTML and
-  CSS](html.md).
+- **Pages get no wrapper because they are not APIs.** A page declares
+  `:http/path` and an API declares `:rest/path`; only the second is generated
+  for. No flag is involved. See [HTML and CSS](html.md).
+- **Say what an endpoint answers** with `:rest/media-type` when it is not
+  `application/json`. A wrapper called `.json()` unconditionally, so an
+  endpoint serving EDN failed on the first character; a non-JSON one now reads
+  text and validates the body as it stands.
 
 ## Sharing real logic
 
@@ -243,6 +248,9 @@ case `webapp` is not for.
   namespace list that cannot perform the reads its own routes declare, naming
   each unservable kind and the route that wanted it. Without that check the
   symptom is a **500, not a 404**, which is much harder to read from outside.
-- **Mark transport endpoints `^{:rest/client false}`.** Health, metrics, an RPC
-  transport -- anything that is not the app's own API otherwise gets a typed
-  browser `fetch` wrapper generated for it.
+- **Health, metrics and RPC transports are APIs too, and get wrappers.** They
+  used to be marked `:rest/client false` to keep them out of the client. That
+  flag is retired: "this consumer does not call it" is not a fact about the
+  endpoint, and excluding it also removed it from the published API document,
+  where the next consumer would have looked for it. An unused wrapper costs a
+  few lines in a namespace regenerated wholesale.

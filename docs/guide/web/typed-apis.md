@@ -13,7 +13,7 @@ inert until it is true.
 
 ```clojure
 (defn ^{:http/method   :post
-        :http/path     "/api/orders"
+        :rest/path     "/api/orders"
         :http/auth     :public
         :rest/request  [:map [:sku :string] [:qty :int]]
         :rest/response [:map [:id :int]]}
@@ -114,10 +114,14 @@ claim about your contract rather than about the report. A map *inside* a
 collection is seen through: `[:sequential [:map [:id :int]]]` reports `[:id]`,
 since a list endpoint is the commonest non-map contract there is.
 
-`:published` is `false` for an endpoint that opted out with `:rest/client false`
-— an HTML page is a `:http/path` form like any other, and a generated fetch
-wrapper over one would be nonsense. It is a field rather than an omission so
-that "excluded on purpose" and "forgot to declare a schema" do not look alike.
+Content is absent from the report entirely: a page or a stylesheet declares
+`:http/path` rather than `:rest/path`, so it is not part of a typed contract
+and never was one. That used to need a `:rest/client false` flag on the page,
+because one marker declared both kinds of route.
+
+There is no way to exclude an API from the report or from the published
+document. Whether to generate a client is the generating consumer's question,
+and an endpoint does not know who will call it.
 
 ## `:rest/request` is what the caller sends
 

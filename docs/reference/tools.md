@@ -168,9 +168,10 @@ symbol, because `:name` alone does not resolve: on a real surface a third of
 endpoint names match more than one form, and a consumer linking by simple name
 points at the wrong one while looking right.
 
-as EDN (`:http/raw true`, `Content-Type: application/edn`), on an endpoint marked
-`^{:rest/client false}` — describing the wrappers needs no wrapper. It lives in
-`slopp.http`, so it ships in the `slopp-web` slim jar and any app can publish.
+as EDN (`:http/raw true`, `Content-Type: application/edn`, and
+`^{:rest/media-type "application/edn"}` so a generated wrapper reads text rather
+than attempting JSON). It lives in `slopp.http`, so it ships in the `slopp-web`
+slim jar and any app can publish.
 
 The consumer then runs:
 
