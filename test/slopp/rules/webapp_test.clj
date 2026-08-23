@@ -804,3 +804,60 @@
     (testing "a store that does neither has nothing to collide with"
       (is (= [] (rules.webapp/own-mount-nses
                  (st-of 'shop.plain "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")))))))
+
+(deftest a-screens-request-is-joined-against-what-the-store-SERVES
+  ;; The api/content split gave routes two markers, and this join asks a
+  ;; question that does not care which: **does this store serve the thing the
+  ;; screen asks for?** Serving is serving.
+  ;;
+  ;; Read rather than assumed, which is why this is its own test. The four
+  ;; `rules.webapp` forms reading a path marker split two ways, and only these
+  ;; two take both kinds:
+  ;;
+  ;;   request-paths-unserved / …-are-served-check   BOTH — a screen may fetch
+  ;;                                                 an api OR an asset
+  ;;   client-routes-unserved / derived-…-prefixes   :http/path ONLY — the SPA
+  ;;                                                 mount is a document, and an
+  ;;                                                 api must never be picked
+  ;;                                                 as one
+  ;;
+  ;; Restricting this one to `:rest/path` would report a screen fetching a
+  ;; served asset as unserved — a false positive in the report whose whole
+  ;; value is that its findings can be discharged.
+  (let [st (-> (store/empty-store)
+               (store/record-config-put "capabilities" :manifest "webapp.enabled" "true") first
+               (store/ingest 'shop.api
+                             (str "(ns shop.api)\n\n"
+                                  "(defn ^{:rest/path \"/api/things\" :http/method :get"
+                                  " :http/auth :public :rest/response [:map]}\n"
+                                  "  things \"T.\" [_] {:status 200})\n"))
+               (store/ingest 'shop.assets
+                             (str "(ns shop.assets)\n\n"
+                                  "(defn ^{:http/path \"/css/app.css\" :http/method :get"
+                                  " :http/auth :public}\n"
+                                  "  sheet \"S.\" [_] {:status 200})\n"))
+               (store/ingest 'shop.ui
+                             (str "(ns shop.ui)\n\n"
+                                  "(defn screen-a \"A.\" []\n"
+                                  "  {:request (fn [_] {:webapp/method :get"
+                                  " :webapp/path \"/api/things\"})})\n\n"
+                                  "(defn screen-b \"B.\" []\n"
+                                  "  {:request (fn [_] {:webapp/method :get"
+                                  " :webapp/path \"/css/app.css\"})})\n\n"
+                                  "(defn screen-c \"C.\" []\n"
+                                  "  {:request (fn [_] {:webapp/method :get"
+                                  " :webapp/path \"/api/nope\"})})\n")))]
+
+    (testing "an api this store declares is served"
+      (is (not-any? #(= "/api/things" (:path %)) (rules.webapp/request-paths-unserved st))
+          (pr-str (rules.webapp/request-paths-unserved st))))
+
+    (testing "and so is CONTENT — a screen may legitimately fetch an asset"
+      (is (not-any? #(= "/css/app.css" (:path %)) (rules.webapp/request-paths-unserved st))
+          (str "restricting the join to :rest/path reports a served asset as"
+               " missing, which is a finding nobody can discharge: "
+               (pr-str (rules.webapp/request-paths-unserved st)))))
+
+    (testing "a path nothing declares is still reported, or the join says nothing"
+      (is (= ["/api/nope"] (mapv :path (rules.webapp/request-paths-unserved st)))
+          (pr-str (rules.webapp/request-paths-unserved st))))))

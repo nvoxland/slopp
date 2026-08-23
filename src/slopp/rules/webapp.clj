@@ -201,6 +201,13 @@
   The client ROOT is the document's own url, so a document at `/p/:slug` serves
   the client route `/` by existing.
 
+  **Both reads of `:http/path` here are CONTENT reads, not oversights.** A
+  client route is served by a document on a hard load — the mount, and any
+  explicit route covering a prefix root — and a `:rest/path` api can serve
+  neither. So this asks the content marker rather than `route-path`, unlike the
+  request-path join next door, which asks both because a screen may legitimately
+  fetch an asset.
+
   Advisory rather than a refusal, for the reason a store mid-migration always
   gets: the state this fires on is a table and a declaration that have not been
   reconciled, and refusing the writes would block the reconciliation."
@@ -252,6 +259,12 @@
   point**, declared beside the prefixes an author keeps by hand:
 
       the document's :http/path  +  each top-level segment of the client table
+
+  **`:http/path` DELIBERATELY, not `route-path`.** The mount is a DOCUMENT —
+  the SPA shell a hard load lands on — so it is content by kind, and a
+  `:rest/path` api must never be picked as one. Before the api/content split
+  that read as the only available marker; it is a statement now, and the
+  partition makes it enforceable rather than hopeful.
 
   **The document is the form carrying `:webapp/client-routes`**, and identifying it
   any other way is wrong in a store that separates its forms. The first cut took
@@ -623,7 +636,14 @@
   `rules.http` already depends on this namespace for the client route table, so
   the join has to be made from here or not at all."
   [st]
-  (let [served (into #{} (keep #(:http/path (:meta %))) (edit.http/web-endpoint-rows st))]
+  ;; BOTH route kinds, through the one accessor. The question is whether this
+  ;; store SERVES what a screen asks for, and serving does not care whether the
+  ;; route is a typed api or an asset — a screen fetching a served stylesheet is
+  ;; ordinary. Reading `:http/path` alone reported every `:rest/path` endpoint
+  ;; as missing: a finding nobody can discharge, in a report whose whole value
+  ;; is that its findings can be.
+  (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
+                     (edit.http/web-endpoint-rows st))]
     (vec (remove (fn [{:keys [path from-origin]}]
                    (or (contains? served path)
                        (str/includes? path "://")
@@ -660,7 +680,10 @@
   declarations that drift apart are usually not edited together."
   [_session st* _changed]
   (when (capabilities/enabled? st* "webapp")
-    (let [served (sort (distinct (keep #(:http/path (:meta %))
+    ;; both kinds, matching the join above — the "this store serves …" list in
+    ;; the teach string has to be the same set the finding was computed from,
+    ;; or an author is handed a remedy that does not contain their path
+    (let [served (sort (distinct (keep #(edit.http/route-path (:meta %))
                                        (edit.http/web-endpoint-rows st*))))]
       (vec (for [{:keys [path form]} (request-paths-unserved st*)]
              {:path path
