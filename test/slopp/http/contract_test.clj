@@ -56,21 +56,21 @@
   {:status 200 :body {:secret "s"}})
 
 (defn ^{:http/method :get :rest/path "/c/no-client" :http/auth :public
-        :rest/response [:map [:ok :boolean]]
-        :rest/client false}
+        :rest/response [:map [:ok :boolean]]}
   c-no-client
-  "Fixture: a REAL typed api that opts out of a generated wrapper.
+  "Fixture: a REAL typed api that one consumer generates no wrapper for.
 
-  This is what `:rest/client` is left doing once content is its own kind, and
-  it is worth a fixture of its own because it is the case the page/api split
-  does NOT reach. A consuming store has two: their hub sits at the origin root,
-  so a generated wrapper would prefix the url to `/p/<slug>/` and call the
-  wrong address — a fact about that CONSUMER, sitting on the producer's
-  declaration.
+  It carried `:rest/client false` for one afternoon — added to pin what the
+  flag was \"left doing\" once content became its own kind. It turned out to be
+  doing nothing legitimate. The three real instances resolved as: a base
+  problem in one client namespace serving two APIs; \"our browser does not call
+  it\", which is not the producer's business; and an endpoint answering EDN,
+  which is `:rest/media-type`.
 
-  Until that is fixed the flag also keeps the endpoint out of the DOCUMENT,
-  which is the half nobody asked for. Pinned here so the two halves are
-  visible as two."
+  Kept, without the flag, because the property worth pinning is the opposite
+  one: **this is published whatever any consumer wants from it.** An endpoint
+  does not know who will call it, and a document that omits one takes the
+  decision away from the consumer whose decision it is."
   [_req]
   {:status 200 :body {:ok true}})
 
@@ -82,7 +82,8 @@
       (is (= 1 (:slopp/contract-version doc))))
 
     (testing "an endpoint is addressed by method AND path — one path serves two verbs"
-      (is (= #{[:get "/c/things"] [:post "/c/things"] [:get "/c/bare"] [:get "/c/admin"]}
+      (is (= #{[:get "/c/things"] [:post "/c/things"] [:get "/c/bare"] [:get "/c/admin"]
+               [:get "/c/no-client"]}
              (set (keys by-addr)))))
 
     (testing "schemas travel as VALUES, equal to what the var declared"
@@ -108,12 +109,15 @@
       ;; fixture below rather than sharing this one
       (is (not (contains? (set (map :path (:endpoints doc))) "/c/page"))))
 
-    (testing "and :rest/client false STILL opts a real api out, which is a different fact"
-      ;; the case the page/api split does not reach: a genuine typed endpoint
-      ;; whose wrapper this consumer does not want. Sharing one fixture with
-      ;; the page hid that these were two questions
-      (is (not (contains? (set (map :path (:endpoints doc))) "/c/no-client"))
-          "the flag still excludes — from the DOCUMENT as well as the client, which is the half nobody asked for"))))
+    (testing "and a REAL api is published whatever any consumer wants from it"
+      ;; `/c/no-client` carried `:rest/client false` for one afternoon, added
+      ;; here to pin what the flag was "left doing" after content became its
+      ;; own kind. It turned out to be doing nothing legitimate: whether to
+      ;; generate a wrapper is the generating CONSUMER's question, asked
+      ;; against this document, and excluding the endpoint from the document
+      ;; took the question away from them entirely.
+      (is (contains? (set (map :path (:endpoints doc))) "/c/no-client")
+          "an endpoint does not know who will call it"))))
 
 (deftest an-endpoint-says-what-it-IS-and-WHERE-it-lives
   ;; Two keys, both asked for by slopp-ui after measuring what the document

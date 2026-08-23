@@ -55,7 +55,12 @@
    {:kind       :wire/json
     :leaves     "a declared request/response contract"
     :to         "JSON, and a browser that never sees Clojure data"
-    :markers    #{:rest/request :rest/response}
+    ;; `:rest/media-type` rides here because it describes the ENCODING this
+    ;; crossing uses. The crossing's name says JSON because that is the
+    ;; default and the common case; an endpoint answering EDN is still this
+    ;; crossing, and a generated client that assumed JSON failed on the first
+    ;; character of one.
+    :markers    #{:rest/request :rest/response :rest/media-type}
     :checked-by "the boundary honours it at runtime once `rest.enabled`.
                  `slopp.rest.contract/decode-request` judges EVERYTHING the
                  caller sent — path segments, query string and body against one
@@ -224,8 +229,6 @@
                    never leaves"
    :http/effectful "declares the handler performs its own effects — a statement
                    about where effects run, not about anything crossing"
-   :rest/client    "a MODIFIER on the generated-client crossing (opt this
-                   endpoint out), not an exit of its own"
    :http/context   "names WHICH fn builds the perform-ctx — a declaration about
                    in-process assembly. The map it returns reaches handlers as
                    :http/deps and performers as their first argument, all inside
@@ -398,9 +401,9 @@
   []
   (let [owned (known-markers)]
     (vec (sort (remove owned
-                       [:http/path :http/method :http/auth :http/reads :http/effects
+                       [:rest/path :http/path :http/method :http/auth :http/reads :http/effects
                         :http/read :http/effect :http/effectful :rest/request
-                        :rest/response :rest/client :http/context
+                        :rest/response :rest/media-type :http/context
                         :webapp/client-routes :http/external-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))

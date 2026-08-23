@@ -221,11 +221,12 @@
      ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
      ;; page; `:kind` says it now.
      ;;
-     ;; `:rest/client false` still opts a REAL api out, which is a different
-     ;; fact and the one the flag is left doing. Declared, never sniffed:
-     ;; :string is a legitimate JSON response, so a response schema could never
-     ;; have decided either question.
-     (if (or (not= :rest kind) (false? (:rest/client meta)))
+     ;; And there is no opt-out beyond that. `:rest/client false` also excluded
+     ;; a REAL api, which put one consumer's decision on the producer — an
+     ;; endpoint does not know who will call it, and the flag reached every
+     ;; other consumer too. What it was standing in for turned out to be
+     ;; `:rest/media-type` in the one case that was about the endpoint at all.
+     (if (not= :rest kind)
        acc
        (let [endpoint (symbol (str ns) (str name))
              method   (:http/method meta)
@@ -248,6 +249,11 @@
                                          "!")))
                     :method   method
                     :path     path
+                    ;; what the endpoint ANSWERS, defaulting to JSON. A wrapper
+                    ;; decodes what it is given, and `.json` on anything else
+                    ;; fails on the first character — slopp's own
+                    ;; /api/contracts answers application/edn
+                    :media-type (or (:rest/media-type meta) "application/json")
                     :endpoint endpoint
                     ;; whatever the verb. WHETHER there is a request is the endpoint's
                     ;; declaration; HOW it travels — body or query string — is
@@ -304,10 +310,19 @@
    so a `?depth=`-style parameter needs no new vocabulary — it needs the
    generator to stop assuming every declared request is a body.
 
+   **How the response is READ follows from `:rest/media-type`.** This was
+   `.json` unconditionally, and slopp's own `/api/contracts` answers
+   `application/edn` — a malli schema is keywords and symbols, and JSON would
+   render `:string` and `\"string\"` identically, so the far end could not tell
+   them apart. A wrapper for it failed on the first character, and the endpoint
+   carried `:rest/client false` to HIDE that rather than to state it. Saying
+   what an endpoint answers is checkable, positive, and about the endpoint;
+   opting out of clients was none of those.
+
    The PATH params are dissoc'd from the query: a segment interpolated into the
    url must not also arrive as a query key, and repeating it would make the url
    depend on map ordering."
-  [{:keys [fn-name method path endpoint request response]}]
+  [{:keys [fn-name method path endpoint request response media-type]}]
   (let [verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
         resp-code (schema-form response)
@@ -346,7 +361,16 @@
                     (str "  (when-not (m/validate " req-code " params)\n"
                          "    (throw (ex-info \"" fn-name " request failed validation\"\n"
                          "                    {:errors (m/explain " req-code " params)})))\n"))
-        handle    (if resp-code
+        json?     (= "application/json" (or media-type "application/json"))
+        read-body (if json? ".json" ".text")
+        ;; non-JSON validates the body as it stands: there is no JSON boundary,
+        ;; so nothing for the json-transformer to transform across, and
+        ;; `js->clj` on a string would be a no-op that reads as intent.
+        handle    (cond
+                    (not resp-code)
+                    "      (.then (fn [body] body)))"
+
+                    json?
                     (str "      (.then (fn [body]\n"
                          "               (let [data (m/decode " resp-code
                          " (js->clj body :keywordize-keys true) (mt/json-transformer))]\n"
@@ -354,13 +378,19 @@
                          "                   (throw (ex-info \"" fn-name " response failed validation\"\n"
                          "                                   {:errors (m/explain " resp-code " data)})))\n"
                          "                 data))))")
-                    "      (.then (fn [body] body)))")]
+
+                    :else
+                    (str "      (.then (fn [body]\n"
+                         "               (when-not (m/validate " resp-code " body)\n"
+                         "                 (throw (ex-info \"" fn-name " response failed validation\"\n"
+                         "                                 {:errors (m/explain " resp-code " body)})))\n"
+                         "               body)))"))]
     (str "(defn ^{:generated \"" endpoint "\"} ^:export " fn-name "\n"
          "  \"" verb " " path " — generated client wrapper (D-web-contracts).\"\n"
          "  " arglist "\n"
          (or validate "")
          "  (-> (js/fetch (url " url-expr ") " opts ")\n"
-         "      (.then (fn [resp] (.json (ok! resp))))\n"
+         "      (.then (fn [resp] (" read-body " (ok! resp))))\n"
          handle ")")))
 
 (defn ^:export render-client-ns
@@ -497,7 +527,7 @@
                  :version (:slopp/contract-version document)
                  :supported supported-contract-version}]}
     (reduce
-     (fn [acc {:keys [method path name request response]}]
+     (fn [acc {:keys [method path name request response media-type]}]
        (let [base    (symbol (str/replace (str name) #"!$" ""))
              mutate? (contains? #{:post :put :patch :delete} method)
              ;; a body verb carries a request; every other verb declares none,
@@ -530,6 +560,10 @@
                                                "!")))
                       :method   method
                       :path     path
+                      ;; the document carries it, so both producers decode what
+                      ;; the endpoint answers rather than assuming JSON — the
+                      ;; parity a test pins over both
+                      :media-type (or media-type "application/json")
                       :endpoint name
                       :request  (ref req)
                       :response (ref resp)}))))

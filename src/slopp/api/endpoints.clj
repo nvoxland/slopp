@@ -168,7 +168,7 @@
   {:status 200 :body (:modules (:http/reads req))})
 
 (defn ^{:http/method :get :rest/path "/api/contracts" :http/auth :public
-        :rest/client false
+        :rest/media-type "application/edn"
         :rest/response :string
         :http/reads {:contract [:ui/contract []]}}
   contract
@@ -176,12 +176,21 @@
 
   What makes a reviewer UI in a DIFFERENT store possible: it generates its
   typed client from this document instead of sharing slopp's contracts
-  namespace. `:rest/client false` because generating a typed wrapper for the
-  endpoint that describes the wrappers is circular and useless.
+  namespace.
 
   EDN, not JSON, and `:http/raw` so the adapter leaves it alone. A malli schema
   is data made of keywords, symbols and vectors; JSON would render `:string`
-  and `\"string\"` identically and the far end could not tell them apart."
+  and `\"string\"` identically and the far end could not tell them apart.
+
+  **`:rest/media-type` is why this is generatable at all.** It carried
+  `:rest/client false` with the reason \"generating a typed wrapper for the
+  endpoint that describes the wrappers is circular and useless\". That was not
+  the fact: nothing is circular at runtime, and the consumer who hand-writes
+  two request paths for this endpoint would have had them generated. The real
+  fact is that every wrapper decoded `.json` unconditionally and this answers
+  EDN, so a wrapper failed on the first character. Saying what an endpoint
+  ANSWERS is checkable and about the endpoint; opting out of clients was
+  neither."
   [req]
   {:status 200
    :http/raw true

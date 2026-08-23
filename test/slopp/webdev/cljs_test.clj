@@ -344,18 +344,21 @@
           (is (re-find #"generate_client" (str (:error r))) (pr-str r))))
       (finally (ops/close! sess)))))
 
-(deftest client-wrapper-specs-honors-the-client-opt-out
-  ;; Dogfood finding: an HTML page was a `:http/path` form like any other, so
-  ;; generate_client emitted a typed fetch wrapper for it — one whose
-  ;; (.json resp) can never succeed on HTML. Sniffing the response schema would
-  ;; be the wrong fix (:string is a legitimate JSON response), so the endpoint
-  ;; declared it: `^{:rest/client false}`.
+(deftest client-wrapper-specs-generates-for-APIS-and-nothing-else
+  ;; This test was `…-honors-the-client-opt-out`, and its subject is gone.
   ;;
-  ;; A page declares `:http/path` now and an api declares `:rest/path`, so the
-  ;; page needs no flag at all — it is not a client's business by KIND. The
-  ;; flag is left doing the one job that was always genuinely about generation,
-  ;; and the two cases are separate here because sharing one fixture is what
-  ;; hid that they were two questions.
+  ;; The original finding was real: an HTML page was a `:http/path` form like
+  ;; any other, so generate_client emitted a typed fetch wrapper whose
+  ;; (.json resp) can never succeed on HTML. The remedy was `:rest/client
+  ;; false` — an opt-out on the page.
+  ;;
+  ;; A page declares `:http/path` now, so it is excluded by KIND and needs no
+  ;; flag. And the flag's other use — excluding a REAL api — turned out not to
+  ;; be the producer's call at all: whether to generate a wrapper is the
+  ;; generating consumer's question, and the flag reached every other consumer
+  ;; too, including out of the published document.
+  ;;
+  ;; So: generate for every api, for nobody's convenience in particular.
   (let [st (-> (store/empty-store)
                (store/ingest 'pg.api
                              (str "(ns pg.api)\n\n"
@@ -364,20 +367,17 @@
                                   "(defn ^{:http/method :get :rest/path \"/api/x\" :http/auth :public"
                                   " :rest/response :map} data \"Data.\" [r] r)\n\n"
                                   "(defn ^{:http/method :get :rest/path \"/api/y\" :http/auth :public"
-                                  " :rest/response :map :rest/client false}"
-                                  " no-wrapper \"Real api, no wrapper wanted.\" [r] r)\n")))
+                                  " :rest/response :map}"
+                                  " also \"Another api.\" [r] r)\n")))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
 
     (testing "CONTENT gets no wrapper because it is content — no flag needed"
       (is (not (some #{'home} (map :fn-name wrappers))) (pr-str wrappers)))
 
-    (testing "and :rest/client false still excludes a REAL api, which is the other question"
-      (is (not (some #{'no-wrapper} (map :fn-name wrappers))) (pr-str wrappers)))
+    (testing "and every API gets one, whoever does or does not want it"
+      (is (= '[data also] (mapv :fn-name wrappers)) (pr-str wrappers)))
 
-    (testing "the ordinary typed endpoint still gets its wrapper"
-      (is (= '[data] (mapv :fn-name wrappers))))
-
-    (testing "neither exclusion is a problem to report — both are declarations"
+    (testing "excluding by kind is not a problem to report — it is a declaration"
       (is (empty? problems) (pr-str problems)))))
 
 (deftest ^:external compiling-a-bundle-says-how-to-serve-it
@@ -1200,3 +1200,49 @@
           (is (= 'shopv.elsewhere.api (:generated r)) (pr-str r))))
 
       (finally (ops/close! sess)))))
+
+(deftest a-wrapper-decodes-what-the-endpoint-ANSWERS
+  ;; Found while retiring `:rest/client`. Every generated fetch wrapper does
+  ;; `(.json (ok! resp))` unconditionally, and slopp's own `/api/contracts`
+  ;; answers `application/edn` — a malli schema is keywords and symbols, and
+  ;; JSON renders `:string` and `"string"` identically, so the far end could
+  ;; not tell them apart. A wrapper for it would fail on the first character.
+  ;;
+  ;; That endpoint carried `:rest/client false` with the reason "generating a
+  ;; typed wrapper for the endpoint that describes the wrappers is circular and
+  ;; useless". The consumer showed that is not the fact — nothing is circular at
+  ;; runtime, and generating it would REMOVE the two request paths they
+  ;; hand-write precisely because it cannot be generated.
+  ;;
+  ;; The actual fact is about what the endpoint ANSWERS. It is checkable,
+  ;; positive rather than an opt-out, and about the endpoint rather than about
+  ;; a consumer — which is why it replaces the flag instead of joining it.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'doc.api
+                             (str "(ns doc.api)\n\n"
+                                  "(defn ^{:http/method :get :rest/path \"/api/things\""
+                                  " :http/auth :public :rest/response [:map]}\n"
+                                  "  things \"JSON, the default.\" [_] {:status 200})\n\n"
+                                  "(defn ^{:http/method :get :rest/path \"/api/contracts\""
+                                  " :http/auth :public :rest/response :string"
+                                  " :rest/media-type \"application/edn\"}\n"
+                                  "  contract \"EDN, not JSON.\" [_] {:status 200})\n")))
+        by (into {} (map (juxt :fn-name identity))
+                 (:wrappers (cljs/client-wrapper-specs st)))]
+
+    (testing "the media type rides the spec, defaulting to JSON when unsaid"
+      (is (= "application/json" (:media-type (by 'things))) (pr-str (by 'things)))
+      (is (= "application/edn" (:media-type (by 'contract))) (pr-str (by 'contract))))
+
+    (testing "a JSON endpoint renders the decode it always did"
+      (let [src (#'cljs/render-wrapper (by 'things))]
+        (is (str/includes? src ".json") src)
+        (is (str/includes? src "json-transformer") src)))
+
+    (testing "and a NON-json endpoint reads TEXT and does not json-decode it"
+      (let [src (#'cljs/render-wrapper (by 'contract))]
+        (is (str/includes? src ".text") src)
+        (is (not (str/includes? src ".json"))
+            (str "`.json` on application/edn fails on the first character: " src))
+        (is (not (str/includes? src "json-transformer"))
+            (str "and there is no JSON boundary to transform across: " src))))))

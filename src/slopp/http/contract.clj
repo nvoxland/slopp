@@ -105,14 +105,28 @@
               ;; is not part of one. That used to be `:rest/client false`'s job,
               ;; which is why a stylesheet needed a flag to stay out of its own
               ;; app's API document
+              ;; `:rest` rows ONLY — a contract describes the TYPED api, and content
+              ;; is not part of one.
+              ;;
+              ;; No client opt-out. `:rest/client false` used to exclude an
+              ;; endpoint from BOTH generation and this document, and the
+              ;; second half was never asked for: a public, schema'd, JSON
+              ;; endpoint went missing from its own app's API documentation
+              ;; because one consumer did not want a wrapper. Whether to
+              ;; generate is the generating consumer's question, asked against
+              ;; a document; an endpoint does not know who will call it.
               :when (and (= :rest (:kind row))
-                         (= (:path row) (str (:rest/path m)))
-                         (not (false? (:rest/client m))))]
+                         (= (:path row) (str (:rest/path m))))]
           {:method   (:method row)
            :path     (:path row)
            :name     (:name m)
            :handler  (symbol (str (:ns m)) (str (:name m)))
            :doc      (undent (:doc m))
            :auth     (:http/auth m)
+           ;; what it ANSWERS. A remote consumer generating from this document
+           ;; has no store to ask, so an endpoint answering EDN would otherwise
+           ;; get a `.json` wrapper that fails on the first character — the
+           ;; same defect the local generator had, one process further away.
+           :media-type (or (:rest/media-type m) "application/json")
            :request  (:rest/request m)
            :response (:rest/response m)}))})

@@ -279,7 +279,7 @@
       ;; to itself and pass however wrong both were.
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search"}
+               "/api/search" "/api/contracts"}
              (set (keys by-path)))))
 
     (testing "the published schema IS the var the endpoint declares"
@@ -290,10 +290,22 @@
       (is (contains? (by-path "/api/timeline") :request))
       (is (nil? (:request (by-path "/api/timeline")))))
 
-    (testing "pages, the bundle and the contract itself are not part of a TYPED contract"
+    (testing "CONTENT is not part of a typed contract — pages and the bundle"
+      ;; and they are absent by KIND now, not by a flag. `/` and the bundle are
+      ;; :http/path; nothing about them opts out
       (is (not (contains? by-path "/")))
-      (is (not (contains? by-path "/js/main.js")))
-      (is (not (contains? by-path "/api/contracts")))))
+      (is (not (contains? by-path "/js/main.js"))))
+
+    (testing "but the contract endpoint DOES publish itself, and says what it answers"
+      ;; it carried `:rest/client false` for "describing the describer is
+      ;; circular", which was never the fact. Nothing is circular at runtime; a
+      ;; wrapper broke because every wrapper decoded `.json` and this answers
+      ;; EDN. Saying so makes it generatable, which deletes the request paths a
+      ;; consumer hand-writes for exactly this endpoint
+      (is (= "application/edn" (:media-type (by-path "/api/contracts")))
+          (pr-str (by-path "/api/contracts")))
+      (is (= "application/json" (:media-type (by-path "/api/timeline")))
+          "and an ordinary endpoint says JSON rather than leaving it unsaid")))
 
   (testing "and the ENDPOINT still serves EDN verbatim, whatever it documents"
     ;; JSON would flatten a keyword schema into a string, so the wire format is
@@ -336,8 +348,13 @@
             src (fn [ns- n] (str (store/form-named st ns- n)))]
 
         (testing "the same wrappers local generation produces, by name"
+          ;; `contract` joined them: it carried `:rest/client false` for
+          ;; "describing the describer is circular", which was never the fact.
+          ;; It answers EDN, says so with :rest/media-type, and is generated
+          ;; like anything else — which is what deletes the request paths a
+          ;; consumer hand-writes for exactly this endpoint
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
-                   "modules" "module" "search"}
+                   "modules" "module" "search" "contract"}
                  (set (:wrappers out)))
               (pr-str out)))
 
@@ -358,8 +375,13 @@
           (is (str/includes? (src 'demo.client.api 'timeline)
                              "demo.client.contracts/timeline-response")))
 
-        (testing "an endpoint that opted out of the client stays out"
-          (is (nil? (store/form-named st 'demo.client.api 'contract)))))
+        (testing "and the EDN endpoint reads text rather than assuming JSON"
+          ;; the wrapper exists now, and the media type is what makes it
+          ;; correct: `.json` on application/edn fails on the first character,
+          ;; which is what `:rest/client false` was hiding
+          (let [w (str (store/form-named st 'demo.client.api 'contract))]
+            (is (str/includes? w ".text") w)
+            (is (not (str/includes? w ".json")) w))))
       (finally
         (server/stop!)
         (ops/close! consumer)))))
