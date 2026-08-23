@@ -100,18 +100,35 @@ clojure -T:build uber                                  # -> target/slopp.jar
 SLOPP_JAR=$PWD/target/slopp.jar  # what the plugin's bin/slopp honours
 ```
 
-**`uber` alone silently ships a STALE jar.** It bundles whatever is under
-`target/jar-src/src` — if you skip the materialize step that directory can be
-days old, and the build succeeds, prints "built target/slopp.jar", and takes
-only a few seconds. Two things say so rather than one:
+**`uber` alone REFUSES rather than shipping a stale jar**, and writes nothing
+when it does. It bundles whatever is under `target/jar-src/src`, which if you
+skip the materialize step can be days old; if `.slopp/store.db` is newer than
+that tree, the build stops before touching `target/slopp.jar`, names the head
+and both timestamps, and gives you the two commands. `:stale true` jars it
+anyway — legitimate for reproducing an old artifact or bisecting — and prints
+that it did.
+
+This was a WARNING plus exit 0 until 2026-08-23, and it failed exactly as a
+warning does: it printed, and the invariant part of the output — "built
+target/slopp.jar", exit 0 — is what got read. The consumer who caught it said
+it best: *an exit code that cannot distinguish "built what you meant" from
+"built something" is the same thing as a check whose output cannot vary.*
+
+**Refusing BEFORE the write is the load-bearing half**, not failing after.
+Nothing downstream reads an exit code — a restart reads the file, a consumer's
+pre-flight reads `META-INF/slopp/head.edn`, this task's own success line names
+a path — so a non-zero exit that left a plausible jar behind would convert a
+loud failure into a silent one. A missing new jar is unambiguous; a present
+wrong one is not.
+
+Two other things still report it, and the second is the one that matters:
 
 - `uber` PRINTS the head it is jarring (`build!` writes
-  `src/META-INF/slopp/head.edn`), and warns when `store.db` changed after the
-  materialization was written.
+  `src/META-INF/slopp/head.edn`), refusal or not.
 - **the running process reports it back** — `session_brief`'s `:host :jar
-  {:head :behind}`. That is the one that matters, because the question is
-  almost never asked while building; it is asked two days later by whoever is
-  wondering why a fix they can see in the store is not in the tool.
+  {:head :behind}`. That question is almost never asked while building; it is
+  asked two days later by whoever is wondering why a fix they can see in the
+  store is not in the tool.
 
 The old check was `ls -la` plus `unzip -p … | grep` for a symbol, and it was
 expensive AND wrong once: mtime and size agreed with a build that had not

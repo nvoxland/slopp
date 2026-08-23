@@ -235,8 +235,13 @@
   "Build target/slopp.jar. :src = the source tree to bundle (default
   target/jar-src/src, the local materialization; pass \"src\" on a checkout).
   Entry point comes from the tracked META-INF/MANIFEST.MF next to :src's
-  parent; without one the jar falls back to clojure.main (-m slopp.boot)."
-  [{:keys [src] :or {src "target/jar-src/src"}}]
+  parent; without one the jar falls back to clojure.main (-m slopp.boot).
+
+  REFUSES, writing nothing, when the default materialization is older than
+  .slopp/store.db — jarring a tree the store has moved past is how a fix that
+  is plainly in the store turns out not to be in the artifact. :stale true
+  jars it anyway and says so."
+  [{:keys [src stale] :or {src "target/jar-src/src"}}]
   ;; The tree is FILELESS: `src` is a MATERIALIZATION of the store, produced by
   ;; the `build` tool. `uber` alone re-jars whatever is sitting there — which
   ;; may be days old — and still prints "built target/slopp.jar" in a few
@@ -252,38 +257,77 @@
                              " slopp --call build '{\"dir\":\""
                              (.getAbsolutePath (io/file "target/jar-src")) "\"}')")
                         {:src src})))
-      ;; STALE can only be a hint, never a refusal: a live session touches
-      ;; store.db constantly, so "db is newer" is often off by seconds and
-      ;; failing on it would block legitimate builds. Compare the newest FILE
-      ;; under src — a directory's mtime does NOT move when nested files are
-      ;; rewritten, which is what made the first version of this check misfire.
+      ;; Compare the newest FILE under src — a directory's mtime does NOT move
+      ;; when nested files are rewritten, which is what made the first version
+      ;; of this check misfire.
       (let [newest (->> (file-seq srcd)
                         (filter #(.isFile ^java.io.File %))
                         (map #(.lastModified ^java.io.File %))
                         (reduce max 0))
             db     (io/file ".slopp" "store.db")
             stamp  (io/file srcd "META-INF" "slopp" "head.edn")
-            fmt    #(.format (java.text.SimpleDateFormat. "HH:mm:ss") (java.util.Date. ^long %))]
-        ;; NEVER be silent about what is being shipped. `build!` stamps the
-        ;; materialization with the head delta it was built from; print it so a
-        ;; stale jar is visible rather than inferred. (This tool runs under -T,
-        ;; whose deps replace the project's, so it has no sqlite driver to read
-        ;; the current head itself — comparing is the caller's one glance.)
+            fmt    #(.format (java.text.SimpleDateFormat. "HH:mm:ss") (java.util.Date. ^long %))
+            ;; The stamp is UNDER src/, so it is the same file the jar carries
+            ;; and slopp.kernel.boot/jar-head reads back at runtime. It used to
+            ;; sit beside the tree, where a println was its only reader and the
+            ;; artifact could not answer for itself.
+            head   (if (.exists stamp)
+                     (str "head " (:head (edn/read-string (slurp stamp))))
+                     "an UNKNOWN head")
+            behind (and (.exists db) (> (.lastModified db) newest))]
+        ;; THE REFUSAL COMES BEFORE ANY WRITE, and that ordering is the whole
+        ;; point rather than tidiness. This was a WARNING plus exit 0 for one
+        ;; release, and it did exactly what a warning does: it printed, and the
+        ;; part of the output that never varies — "built target/slopp.jar",
+        ;; exit 0 — is what got read. A consumer put it best: an exit code that
+        ;; cannot distinguish "built what you meant" from "built something" is
+        ;; the same thing as a check whose output cannot vary.
         ;;
-        ;; The stamp is UNDER src/, so it is the same file the jar carries and
-        ;; slopp.kernel.boot/jar-head reads back at runtime. It used to sit
-        ;; beside the tree, where this print was its only reader and the
-        ;; artifact could not answer for itself.
-        (println (str "jarring a materialization of "
-                      (if (.exists stamp)
-                        (str "head " (:head (edn/read-string (slurp stamp))))
-                        "UNKNOWN head")
-                      ", written " (fmt newest)))
-        (when (and (.exists db) (> (.lastModified db) newest))
-          (println (str "WARNING: .slopp/store.db changed at " (fmt (.lastModified db))
-                        ", after that materialization — this jar may be STALE."
-                        " Re-run the `build` tool if you expect recent store"
-                        " changes in it."))))))
+        ;; And failing AFTER the write would be worse than either, which is the
+        ;; correction that produced this shape. Nothing downstream reads an
+        ;; exit code: a restart reads the file, a consumer's pre-flight reads
+        ;; META-INF/slopp/head.edn, this task's own success line names a path.
+        ;; A non-zero exit that leaves a plausible jar on disk converts a loud
+        ;; failure into a silent one. So: no artifact is produced, and the
+        ;; previous jar stays whatever it was — a state everyone already
+        ;; understands. A missing new jar is unambiguous; a present wrong one
+        ;; is not.
+        ;;
+        ;; The asymmetry that settles the false-positive worry: a false refusal
+        ;; costs one flag. A false success costs a jar that misrepresents the
+        ;; store, is announced as built, and reaches a consumer — caught only
+        ;; because that consumer happened to check head.edn before restarting.
+        (when (and behind (not stale))
+          (throw (ex-info
+                  (str "refusing to jar a STALE materialization.\n\n"
+                       "  " src " materializes " head ", written " (fmt newest) "\n"
+                       "  .slopp/store.db changed at " (fmt (.lastModified db))
+                       ", after it\n\n"
+                       "Materialize, then jar — both steps, in this order:\n"
+                       "  build {dir \"" (.getAbsolutePath (io/file "target/jar-src"))
+                       "\"}   (the MCP tool, or slopp --call build)\n"
+                       "  clojure -T:build uber\n\n"
+                       "Or :stale true to jar THIS materialization deliberately"
+                       " — reproducing an old artifact, or bisecting. A refusal"
+                       " with no named way past it gets worked around rather"
+                       " than obeyed.\n\n"
+                       "No jar was written; target/slopp.jar is whatever it"
+                       " already was.\n\n"
+                       "This task cannot name the store's CURRENT head to put"
+                       " beside the one above: it runs under -T, whose deps"
+                       " replace the project's, so there is no sqlite driver"
+                       " here. Materializing prints it.")
+                  {:src src :head head
+                   :materialized-at (fmt newest)
+                   :store-changed-at (fmt (.lastModified db))})))
+        ;; NEVER be silent about what is being shipped.
+        (println (str "jarring a materialization of " head ", written " (fmt newest)))
+        ;; SAY what was declined. An escape that leaves no trace in the output
+        ;; is indistinguishable from the check not having run.
+        (when behind
+          (println (str "  :stale true — .slopp/store.db changed at "
+                        (fmt (.lastModified db)) ", after this materialization."
+                        " Jarring it anyway, as asked."))))))
   (b/delete {:path class-dir})
   (b/delete {:path "target/launcher"})
   (let [root  (or (.getParent (io/file (str src))) ".")
