@@ -22,7 +22,7 @@
   (:require [slopp.project.capabilities :as capabilities]
             [slopp.http.router :as router] [slopp.store :as store] [slopp.store.render :as store.render] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http] [slopp.index.refs :as refs] [slopp.rules.webapp :as rules.webapp]))
 
-(defn endpoints
+(defn ^:export endpoints
   "Every declared endpoint in the store — a `:http/path` form's route row:
   `{:handler :ns :name :form-id :method :path :auth :http/effects :http/reads
   :schema? :effectful?}` (slopp's own vocabulary keys stay namespaced —

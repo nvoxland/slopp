@@ -782,3 +782,58 @@
         (is (str/includes? code "(require (quote slopp.rest))")
             (str "the child resolves slopp.rest/validating only if it required it: "
                  code))))))
+
+(deftest a-plan-that-would-serve-NOTHING-says-so-before-the-port-binds
+  ;; What the human actually experiences when a marker family moves underneath
+  ;; a consuming store: the app server comes up, binds its port, answers 404 to
+  ;; every path, and reports `:serving? true` with a url. `session_brief`
+  ;; advertises that url and `start-app!` prints it to stderr as a healthy line.
+  ;;
+  ;; It happened today. My `:web/path` → `:http/path` rename made a consuming
+  ;; store's routes unreadable; their app bound its port and served nothing, and
+  ;; the surfaces all reported success. `serve-in!` cannot tell — it reports
+  ;; health on BIND alone, and a bind succeeds whether or not anything is
+  ;; mounted behind it.
+  ;;
+  ;; The store knows. `rules.http/endpoints` is a pure derivation over exactly
+  ;; the markers this slopp reads, so a plan can count what it is about to serve
+  ;; before spawning anything.
+  (let [cfg       (fn [st values]
+                    (assoc-in st [:config "capabilities"]
+                              {:format :manifest :values values}))
+        with-http (fn [src]
+                    (-> (store/empty-store)
+                        (cfg {"http.enabled" "true"})
+                        (store/ingest 'app.h src)))]
+
+    (testing "a store with a readable endpoint plans to serve it"
+      ;; population control: without this the assertion below passes for a
+      ;; store that has no web surface at all, which is a different thing
+      (let [st (with-http (str "(ns app.h)\n\n"
+                               "(defn ^{:http/method :get :http/path \"/x\" :http/auth :public}\n"
+                               "  h \"H.\" [_] {:status 200})\n"))
+            p  (live/serve-plan st "/tmp/nowhere")]
+        (is (true? (:enabled? p)) (pr-str p))
+        (is (= 1 (:endpoints p)) (pr-str p))
+        (is (nil? (:serves-nothing p)) (pr-str p))))
+
+    (testing "and one whose markers this slopp does not read plans to serve NOTHING"
+      (let [st (with-http (str "(ns app.h)\n\n"
+                               "(defn ^{:web/method :get :web/path \"/x\" :web/auth :public}\n"
+                               "  h \"H.\" [_] {:status 200})\n"))
+            p  (live/serve-plan st "/tmp/nowhere")]
+        (is (= 0 (:endpoints p)) (pr-str p))
+        (is (string? (:serves-nothing p))
+            (str "a plan that will 404 everything reported nothing unusual: " (pr-str p)))
+        (is (re-find #"(?i)404|nothing" (:serves-nothing p)) (:serves-nothing p))))
+
+    (testing "static-only is NOT nothing — a store can legitimately serve just assets"
+      ;; the failure this must not have: refusing to call an assets-only app
+      ;; healthy would turn a working configuration into a warning
+      (let [st (-> (store/empty-store)
+                   (cfg {"http.enabled" "true" "http.static./assets" "public"})
+                   (store/ingest 'app.h "(ns app.h)\n\n(defn f \"F.\" [x] x)\n"))
+            p  (live/serve-plan st "/tmp/nowhere")]
+        (is (= 0 (:endpoints p)) (pr-str p))
+        (is (nil? (:serves-nothing p))
+            (str "an assets-only app was called empty: " (pr-str p)))))))

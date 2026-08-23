@@ -856,12 +856,24 @@
   an agent has no reason to make that second call. Action and announcement
   belonged in the same one."
   [refreshed]
-  (when (and (map? refreshed)
-             (false? (:serving? refreshed))
-             (not (:stopped refreshed))
-             (:reason refreshed))
+  (cond
+    (and (map? refreshed)
+         (false? (:serving? refreshed))
+         (not (:stopped refreshed))
+         (:reason refreshed))
     (str "the app server slopp runs for this project is DOWN after this done: "
-         (:reason refreshed))))
+         (:reason refreshed))
+
+    ;; SERVING AND EMPTY is the fourth outcome, and it hid behind the first
+    ;; three because it looks exactly like success: the port bound, the url is
+    ;; right, and every path 404s. It is news at a done for the same reason a
+    ;; failure is — this done is when it became true, and the change that did
+    ;; it is still in the author's hand.
+    (and (map? refreshed)
+         (:serving? refreshed)
+         (get-in refreshed [:plan :serves-nothing]))
+    (str "the app server slopp runs for this project came back up at "
+         (:url refreshed) " and " (get-in refreshed [:plan :serves-nothing]))))
 
 ^:unsafe (defn refresh-app!
   "Re-serve this project's app on the CURRENT store, or stop a managed server
@@ -1670,7 +1682,12 @@
                 ^String (if (:serving? r)
                           (str "slopp app: " (:url r)
                                (when-let [ms (:boot-ms r)]
-                                 (str " (image up in " ms "ms)")))
+                                 (str " (image up in " ms "ms)"))
+                               ;; a url with nothing behind it is worse than no
+                               ;; url: the human opens it, gets 404, and has no
+                               ;; reason to suspect the SERVER is fine
+                               (when-let [empty-note (get-in r [:plan :serves-nothing])]
+                                 (str " — but " empty-note)))
                           (str "slopp app unavailable: " (:reason r)))))
     r))
 

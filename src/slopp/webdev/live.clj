@@ -163,7 +163,30 @@
      ;; plan is what production and the dev server both answer from, and a
      ;; switch consulted at code-generation time would be a second reader of the
      ;; config that could disagree with this one.
-     :validate?       (capabilities/enabled? store "rest")}))
+     :validate?       (capabilities/enabled? store "rest")
+     ;; WHAT IT WILL ACTUALLY SERVE, counted from the store before anything is
+     ;; spawned. `serve-in!` reports health on the BIND, and a bind succeeds
+     ;; whether or not anything is mounted behind it — so an app whose markers
+     ;; this slopp no longer reads comes up, answers 404 to every path, and is
+     ;; advertised by `session_brief` and `start-app!` as a healthy url. That is
+     ;; what a consuming store experienced the day a marker family moved: the
+     ;; server was up, the url was right, and nothing was behind it.
+     :endpoints       (count (rules.http/endpoints store))
+     ;; ...and the sentence, when it will serve NOTHING. Static-only is not
+     ;; nothing: a store may legitimately serve just its assets, and calling
+     ;; that empty would turn a working configuration into a warning. Both
+     ;; empty is the case where the port answers and every path 404s.
+     :serves-nothing  (when (and (empty? (rules.http/endpoints store))
+                                 (empty? (rules.http/static-mounts store)))
+                        (str "this app will bind its port and answer 404 to"
+                             " EVERY path: the store declares no endpoint this"
+                             " slopp can read, and no static mount. A bind"
+                             " succeeds either way, so the url reported after"
+                             " this is not evidence that anything is behind it."
+                             " If the store was written against an older slopp,"
+                             " its endpoint markers may be a retired spelling —"
+                             " session_brief's :unread-declarations says so and"
+                             " names the current one."))}))
 
 (defn load-order
   "The store namespaces to load into the app image, dependencies first.
