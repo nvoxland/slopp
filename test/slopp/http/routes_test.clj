@@ -9,7 +9,7 @@
   That is the same behavioural change `http-client-routes-consequences` states at the
   done point — the rule tells the author once, and this holds the code to it."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.http.routes :as routes] [slopp.http.router :as router] [slopp.webapp :as webapp]))
+            [slopp.http.routes :as routes] [slopp.http.router :as router] [slopp.webapp :as webapp] [slopp.lang :as lang]))
 
 (defn ^{:http/method :get :http/path "/t/users/:id" :http/auth :public
         :http/reads {:user [:user/by-id [:path-params :id]]}}
@@ -173,3 +173,60 @@
                 (str "captures differ for " (pr-str path)
                      " — server: " (pr-str server)
                      ", client: " (pr-str client)))))))))
+
+(deftest an-ENCODED-segment-decodes-on-BOTH-sides-of-the-round-trip
+  ;; slopp-ui, 2026-08-23, from a human clicking `read its source`:
+  ;;
+  ;;   GET /api/source/slopp-ui.hub/register!    → 200
+  ;;   GET /api/source/slopp-ui.hub/register%21  → 404
+  ;;   GET /api/source/slopp-ui.hub/projects     → 200   (control)
+  ;;
+  ;; `slopp.webapp` builds links with `lang/encode-component`, segment-wise and
+  ;; fully encoded; both matchers then captured the segment VERBATIM. So the
+  ;; handler looked up a form literally named "register%21".
+  ;;
+  ;; `encode-component` and `decode-component` are neighbours in `slopp.lang`,
+  ;; written as a pair — the encoder's own docstring says the pair is the point.
+  ;; The pair was split across the round trip with only one end wired.
+  ;;
+  ;; **What it costs is not one form.** `encode-component` escapes `!`, `?` and
+  ;; `*`, which in Clojure marks every effectful var and every predicate. So the
+  ;; failure set was exactly the interesting names: `projects` worked and
+  ;; `register!` did not.
+  ;;
+  ;; Third instance in this project of a remembered alphabet biased against
+  ;; precisely the marked members — shell globs eating `authorized?` and
+  ;; `open!`, a regex mangling `!` in a var sweep, and now URL encoding. The
+  ;; characters a language puts on its most interesting vars are the characters
+  ;; other layers reserve.
+  (doseq [nm ["register!" "authorized?" "*warn-on-reflection*" "a+b" "plain"]]
+    (let [enc  (lang/encode-component nm)
+          uri  (str "/api/source/demo.ns/" enc)
+          rows [{:method :get :path "/api/source/:ns/:name" :handler :h}]
+          srv  (router/match rows :get uri)
+          cli  (webapp/match-route [["/api/source/:ns/:name" :screen]] uri)]
+      (testing (str "the SERVER hands the handler the name that was linked: " nm)
+        (is (= nm (get-in srv [:path-params :name]))
+            (str "encoded as " enc " — a handler looking that up finds nothing,"
+                 " and the 404 reads as a missing form")))
+      (testing (str "and the CLIENT matcher agrees, as the grammar test requires: " nm)
+        (is (= nm (get-in cli [:params :name]))))))
+
+  (testing "a trailing catch-all decodes every segment it swallowed — BOTH sides"
+    ;; a static mount serves a TREE, so the remainder is joined from segments
+    ;; that were each encoded on their own. Asserted on both matchers for the
+    ;; reason the whole finding is about: fixing one end of a pair and not the
+    ;; other is how this arrived
+    (let [uri (str "/assets/" (lang/encode-component "a b") "/" (lang/encode-component "x!.js"))
+          srv (router/match [{:method :get :path "/assets/*path" :handler :h}] :get uri)
+          cli (webapp/match-route [["/assets/*path" :screen]] uri)]
+      (is (= "a b/x!.js" (get-in srv [:path-params :path])) (pr-str srv))
+      (is (= "a b/x!.js" (get-in cli [:params :path])) (pr-str cli))))
+
+  (testing "an encoded SLASH stays inside its segment"
+    ;; the reason decoding happens AFTER the split and never before: %2F is a
+    ;; slash in the VALUE, not a segment boundary, and decoding the whole uri
+    ;; first would silently re-segment the address
+    (let [uri (str "/api/source/demo.ns/" (lang/encode-component "a/b"))
+          srv (router/match [{:method :get :path "/api/source/:ns/:name" :handler :h}] :get uri)]
+      (is (= "a/b" (get-in srv [:path-params :name])) (pr-str srv)))))

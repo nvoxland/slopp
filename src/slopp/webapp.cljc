@@ -392,12 +392,25 @@
                           (when (and (= 1 (count ps)) (seq u))
                             {:screen target
                              :params (assoc params (keyword (subs (first ps) 1))
-                                            (str/join "/" u))
+                                            ;; each segment encoded on its own,
+                                            ;; so each decodes on its own and
+                                            ;; THEN joins — the server's
+                                            ;; catch-all does the same
+                                            (str/join "/" (map lang/decode-component u)))
                              :rank   (rank (segs pattern))})
 
                           (cap? (first ps))
+                          ;; DECODED, like the server's — a browser hands this
+                          ;; matcher an encoded pathname, and the link it came
+                          ;; from was built by `lang/encode-component`. Decoded
+                          ;; after the split, never before: %2F is a slash in
+                          ;; the VALUE and would otherwise re-segment the
+                          ;; address. The two matchers must agree here as they
+                          ;; do on the grammar, or one screen resolves a
+                          ;; `register!` its server cannot.
                           (recur (rest ps) (rest u)
-                                 (assoc params (keyword (subs (first ps) 1)) (first u)))
+                                 (assoc params (keyword (subs (first ps) 1))
+                                        (lang/decode-component (first u))))
 
                           (= (first ps) (first u))
                           (recur (rest ps) (rest u) params)
