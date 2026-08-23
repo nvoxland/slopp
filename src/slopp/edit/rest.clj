@@ -117,10 +117,13 @@
   **This docstring said `http.enabled` for a while and that was wrong** — an
   error worth recording rather than quietly correcting, because a consumer
   derived a design proposal from it and reached \"slopp requires a contract on
-  every page\". It does not. What is true is narrower and still worth knowing:
-  once a store enables `rest`, EVERY endpoint in it is asked for a contract,
-  including the pages, which is why `:rest/client false` accumulates on
-  stylesheets in stores that also publish an API."
+  every page\". It does not.
+
+  What WAS true, until `:rest/path` existed: once a store enabled `rest`, every
+  route in it was asked for a contract, pages included — so a stylesheet
+  declared `:rest/response :string` and then `:rest/client false` to undo the
+  wrapper. Both markers existed only to answer a question the page should never
+  have been asked, and this gate asking `:rest/path` alone is what ended it."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (edit.http/web-name-meta e)]

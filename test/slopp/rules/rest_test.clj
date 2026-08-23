@@ -59,8 +59,8 @@
         ;; a generated fetch wrapper over an HTML page is nonsense — and a
         ;; reader asking what consumers can call needs that visible rather
         ;; than inferred from a missing schema
-        (is (false? (:published (by "/api/internal"))))
-        (is (true? (:published (by "/api/orders"))))))))
+        (is (not (contains? (by "/api/internal") :published)))
+        (is (not (contains? (by "/api/orders") :published)))))))
 
 (deftest a-contract-that-is-not-a-MAP-does-not-break-the-whole-report
   ;; Reported from a real store the day `rest` was enabled there: `query_surface`

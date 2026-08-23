@@ -448,6 +448,14 @@
   false, unrelated to whether HTTP works), and `unconstrained-ok` follows the
   advisory it discharges rather than the family it was spelled in.
 
+  **A destination that is itself retired must LEAVE**, not point somewhere
+  dead. `web/client` mapped to `:rest/client`, which no longer exists — so a
+  consuming store carrying the old spelling would have been told to rename to a
+  marker nothing reads, which is the exact failure this table exists to
+  prevent, arrived at from the other end. Row removed. What such a store needs
+  is not a rename: content declares `:http/path` and needs no flag, and an
+  endpoint answering something other than JSON says `:rest/media-type`.
+
   **Three names are held out, and all three are the same shape.**
 
   - `web/spa` was retired long ago; every occurrence left is an incident record
@@ -482,7 +490,6 @@
     "web/client-path"       :webapp/client-path
     "web/request"           :rest/request
     "web/response"          :rest/response
-    "web/client"            :rest/client
     "web/unconstrained-ok"  :rest/unconstrained-ok
     "web/path"              :http/path
     "web/method"            :http/method

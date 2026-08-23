@@ -291,15 +291,16 @@
       ;; rather than at the tests, which is the only thing that could have.
       (vec (for [{:keys [ns name meta path kind]} (sort-by :path
                                                            (edit.http/web-endpoint-rows store))
-                 :when (and (= :rest kind)
-                            (or (:rest/request meta) (:rest/response meta)
-                                (false? (:rest/client meta))))
+                 ;; every REST endpoint. It used to also need a contract declared, or
+                 ;; the retired `:rest/client false` — but a `:rest/path` owes a
+                 ;; `:rest/response` by gate, and content is excluded by kind
+                 ;; one line up, so the extra arms could not vary
+                 :when (= :rest kind)
                  :let [from [ns name]]]
              (cond-> {:kind      :contract
                       :method    (:http/method meta)
                       :path      path
-                      :handler   (symbol (str ns) (str name))
-                      :published (not (false? (:rest/client meta)))}
+                      :handler   (symbol (str ns) (str name))}
                (:rest/request meta)
                (assoc :request (names from (:rest/request meta)))
                (:rest/response meta)

@@ -91,9 +91,16 @@
   A missing schema is published as an explicit nil rather than an absent key,
   so a consumer can tell \"no body\" from \"I don't know\".
 
-  `:rest/client false` opts an endpoint OUT, the same exclusion the client
-  generator honours — an HTML page is a `:http/path` form like any other, and a
-  typed fetch wrapper over it would be nonsense."
+  **Every `:rest/path` endpoint is here, and there is no way to opt one out.**
+  Content is absent by KIND — an `:http/path` form is not part of a typed
+  contract — and that is the only exclusion. `:rest/client false` used to
+  remove an api as well, which put one consumer's decision on the producer and
+  took it out of the published documentation every OTHER consumer reads.
+
+  `:media-type` says what each endpoint ANSWERS, defaulting to
+  `application/json`. A remote consumer has no store to ask, so an endpoint
+  serving EDN would otherwise be generated a wrapper that calls `.json` and
+  fails on the first character."
   [ns-syms]
   {:slopp/contract-version 1
    :endpoints

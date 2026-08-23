@@ -1396,8 +1396,11 @@
           (is (= :contract (:kind row)) (pr-str rep))
           (is (= "/api/ping" (:path row)))
           (is (= 'wr.api/ping (:handler row)))
-          (is (true? (:published row))
-              "an endpoint with no :rest/client false is part of the published API")))
+          (is (not (contains? row :published))
+              (str "every REST endpoint is part of the published API, so there"
+                   " is no per-row publishedness left to report — :published"
+                   " was :rest/client inverted, and could only read true once"
+                   " that flag was retired"))))
 
       (testing "the tool is advertised read-only"
         (is (contains? tools/read-only-tools "query_surface")))
