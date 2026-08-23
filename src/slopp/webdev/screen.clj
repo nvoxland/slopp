@@ -9,7 +9,7 @@
 
   **It drives in the VERIFICATION image, not the served app.** Looking at a
   screen to decide what to write next has to show the code you are writing; the
-  served app can be behind, and `session_brief`'s `:app {:behind N}` is the
+  served app can be behind, and `session_brief`'s `:app-behind` is the
   surface for that question instead.
 
   Deliberately thin. The steps travel as EDN and `slopp.cljnx/drive!`

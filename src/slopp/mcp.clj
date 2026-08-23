@@ -858,6 +858,22 @@
   belonged in the same one."
   [refreshed]
   (cond
+    ;; THE BOUND EXPIRED. This used to report nil — "say nothing rather than
+    ;; guess" — which put a re-serve that had not happened into the same
+    ;; silence as a store slopp runs nothing for and a re-serve that worked.
+    ;; Three outcomes, one silence, and two of them fine: a consumer served
+    ;; twenty minutes of old code with every surface reading clean.
+    ;;
+    ;; Guessing was never the alternative. Naming WHICH question went
+    ;; unanswered is, and it costs one line at the rare moment it is true.
+    (= ::refresh-timed-out refreshed)
+    (str "the app re-serve did not finish inside this done's wait — it is"
+         " STILL RUNNING, and this done cannot say whether the image was"
+         " replaced. session_brief reports the outcome: :app-behind 0 means it"
+         " landed, a positive count means the browser is still on the older"
+         " store. Not a failure by itself; a done that stayed silent here"
+         " would have been indistinguishable from one that re-served cleanly.")
+
     (and (map? refreshed)
          (false? (:serving? refreshed))
          (not (:stopped refreshed))
@@ -1361,10 +1377,15 @@
                    ;; refresh-app! returns nil immediately for anything slopp
                    ;; does not run, which is most stores, and that is the same
                    ;; test as "could this line ever be news". The deref bound
-                   ;; is a backstop, not a budget: on expiry we say nothing
-                   ;; rather than guess, and the future still lands the truth
-                   ;; in the session for session_brief.
-                   app (deref (future (refresh-app! session)) 20000 nil)]
+                   ;; is a backstop, not a budget — and on expiry it now says
+                   ;; SO, rather than nil. nil was already the answer for "no
+                   ;; managed server" and for "re-served cleanly", so an
+                   ;; expiring wait joined two silences that are both fine and
+                   ;; became unreadable: a consumer served twenty minutes of
+                   ;; old code with every surface clean. The future still lands
+                   ;; the truth in the session for session_brief, which is what
+                   ;; the note points at.
+                   app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)]
                (text! (if-let [note (app-note-for app)]
                         (assoc r :app-note note)
                         r)))
@@ -1392,7 +1413,7 @@
                                   ;; verb and not the other: a feature that
                                   ;; arrives, or fails to, by which call site you
                                   ;; happened to use.
-                                  app (deref (future (refresh-app! session)) 20000 nil)
+                                  app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
                                   r   (if-let [note (app-note-for app)]
                                         (assoc r :app-note note)
                                         r)]

@@ -3240,6 +3240,19 @@ recompiled (engine/after-write! session ns-sym)]
       ;; already computed, because the only place it was written was stderr.
       (:boot-ms (:app-server @session))
       (assoc :app-boot-ms (:boot-ms (:app-server @session)))
+      ;; and whether that image is built from what you just wrote. `full_check`
+      ;; has carried this for a while and the BRIEF is where a reader looks —
+      ;; a consumer read this brief through a twenty-minute window in which
+      ;; their app served old code, and it said nothing, because the counter
+      ;; lived in a different call. Two docstrings meanwhile claimed it was
+      ;; here.
+      ;;
+      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
+      ;; to look at built from what I just wrote", and silence on yes puts the
+      ;; reader back to hand-checking something slopp knows. Silence is for
+      ;; nothing-is-serving, which `behind` answers nil for.
+      (some? (orient/behind (:store @session) (:app-server @session)))
+      (assoc :app-behind (orient/behind (:store @session) (:app-server @session)))
       ;; and a managed app server that FAILED is not the same as one nobody
       ;; asked for. Silence on both is how "the dev server is broken" reads
       ;; as "this project has no dev server", which sends the reader nowhere.

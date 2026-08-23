@@ -759,3 +759,37 @@
                " own \"moved 1\" reads as done: " (:note r)))
       (is (= 3 (get-in r [:markers :web/path :count])) (pr-str r))
       (is (= 2 (get-in r [:markers :web/path :generated])) (pr-str r)))))
+
+(deftest a-counter-that-reads-ZERO-both-ways-is-not-a-counter
+  ;; slopp-ui, 2026-08-23. A `done` went green and the served stylesheet stayed
+  ;; byte-identical for about twenty minutes — the app image was running old
+  ;; code while every surface said fine. They went to `session_brief`, which is
+  ;; where you look, and it showed `:app <url>` and `:app-boot-ms` and NOTHING
+  ;; about currency. `:app {:behind n}` exists and they had seen it fire twice
+  ;; that day — in `full_check`, a different call.
+  ;;
+  ;; Their words, and the reason this is a defect rather than a preference: a
+  ;; counter that reads 0 both when you are current and when nobody updated the
+  ;; counter is a signal whose output cannot vary. The accounting that exists to
+  ;; catch exactly this was silent in the one case it was for.
+  ;;
+  ;; Two docstrings were meanwhile telling readers this lived in the brief. It
+  ;; did not. Now it does — as `:app-behind`, beside `:app-boot-ms`.
+  (let [st (store/ingest (store/empty-store) 'app.a
+                         "(ns app.a)\n\n(defn ^:unused-ok f \"F.\" [x] x)\n")]
+
+    (testing "0 for an image served after the last code delta, and 0 is an ANSWER"
+      (is (= 0 (orient/behind st {:serving? true
+                                  :served-at (+ 1000 (System/currentTimeMillis))}))))
+
+    (testing "and it COUNTS the code deltas an image was served before"
+      (is (pos? (orient/behind st {:serving? true :served-at 0}))
+          "an image from before every delta is behind by all of them"))
+
+    (testing "nothing serving is a different answer from a current image"
+      ;; nil, not 0. A store slopp runs no app for must not be told its app is
+      ;; up to date — that is the same conflation one level up, and it is why
+      ;; the brief omits the key entirely rather than reporting a reassuring
+      ;; zero
+      (is (nil? (orient/behind st nil)))
+      (is (nil? (orient/behind st {:serving? false :served-at 0}))))))

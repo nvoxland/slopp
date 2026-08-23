@@ -2477,3 +2477,37 @@
                        " it cannot see, so it reads as the whole truth: " out))))
           (finally (ops/close! sess))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest a-re-serve-that-did-not-FINISH-says-so-rather-than-nothing
+  ;; slopp-ui, 2026-08-23: a done went green and the app image was not
+  ;; replaced, and the store served old code for twenty minutes while every
+  ;; surface said fine. The cause of the miss is n=1 and they correctly refused
+  ;; to promote their correlation to one. **The defect is that the miss is
+  ;; invisible**, and that half is reproducible by reading the code.
+  ;;
+  ;; `done` waits on the re-serve with a 20s bound and reports `nil` on
+  ;; expiry — "say nothing rather than guess". But nil is ALSO what "this store
+  ;; is not one slopp runs" and "it came back up" report, so three outcomes
+  ;; share one silence and two of them are fine. A reader cannot tell a
+  ;; re-serve that did not happen from one that did.
+  ;;
+  ;; Guessing was never the alternative. Saying WHICH question went unanswered
+  ;; is: the same `:not-swept` move as everywhere else — name what you declined
+  ;; to report, so an absence is a statement instead of a gap.
+  (testing "the bound expiring is NEWS, and names where the answer will appear"
+    (let [n (#'mcp/app-note-for ::mcp/refresh-timed-out)]
+      (is (some? n) "silence here is indistinguishable from a clean re-serve")
+      (is (re-find #"(?i)still running|did not finish" (str n)) (str n))
+      (is (re-find #"session_brief" (str n))
+          (str "the future keeps going and lands the truth in the session, so"
+               " the note has to say where to read it: " n))))
+
+  (testing "and the three outcomes that were ALREADY silent stay silent"
+    ;; nothing to do, and a clean re-serve. A line at every done point is how
+    ;; a report stops being read, and that reasoning is unchanged — what was
+    ;; wrong was one more case hiding inside it
+    (is (nil? (#'mcp/app-note-for nil)))
+    (is (nil? (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:7359/"})))
+    (is (nil? (#'mcp/app-note-for {:serving? false :stopped true
+                                   :reason "http.enabled is false for this store"}))
+        "a deliberate stop is not a failure")))
