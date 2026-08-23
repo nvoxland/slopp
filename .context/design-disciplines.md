@@ -3110,3 +3110,44 @@ wrong answer, reached by a method that looks correct.
 The same shape as the population controls this codebase already runs: a scan
 that reaches SOMETHING has not shown it reached everything, and a record that
 agrees with a claim has not shown it is independent of it.
+
+## A construct that survives its own reason keeps its SHAPE and loses its meaning
+
+Three instances in one week, from two stores, and they only became a class once
+they were put side by side:
+
+| construct | outlived | still looked like |
+|---|---|---|
+| `(or (:web/auth m) (:http/auth m))` in a write gate | the migration window it was written for | a gate handling two spellings |
+| a refusal printing the bare namespace | the row that once carried `:to-name` | evidence about `export-level` |
+| `graph-test/slopp-production` | nothing — it is SUPPOSED to outlive | current data, to a sweep |
+
+**The shape is what everyone reads.** Each of these was written for a reason
+that was correct at the time, and each kept the form that reason gave it after
+the reason expired. Nobody re-reads a construct to ask whether its premise
+still holds; they read what it appears to do.
+
+The first two are the same failure with different mechanisms. The two-spelling
+`or` came from the deliberate three-phase dance a gate requires — teach both,
+sweep, tighten — because a gate runs from COMPILED code while a sweep rewrites
+the forms it judges, so a gate requiring a marker to be PRESENT cannot be
+renamed underneath itself. The dance is right. **The third phase is the one
+nothing forces**, and when the sweep rewrote both arms to the same key the
+result read as though it still handled two spellings while being `(or x x)`.
+
+The third is the exception that sharpens the rule: a dated fixture is supposed
+to outlive its moment, and the failure is on the SWEEP for not knowing better.
+That one wants a declaration (`^:frozen`), not a cleanup.
+
+**The question that finds them**, which is the same one that catches a check
+whose output cannot vary: *what would this do if the thing it distinguishes
+were actually different?* Reading the code does not surface it — the `(or x x)`
+above was found by asking what the `or` would do if the two spellings differed,
+and the answer was that they cannot. A construct whose branches cannot differ
+is not a construct, it is a comment with parentheses.
+
+**Where this bites hardest: a phase that only completes if someone remembers.**
+Teach-both/sweep/tighten has no gate on the third step, so the store keeps a
+correct-looking artifact of an intermediate state. If a migration needs a
+tighten phase, the sweep that ends it is the moment to do it — the window it
+existed for is closed by definition at exactly that point.
