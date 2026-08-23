@@ -1610,7 +1610,9 @@ slopp does not taint-track a handler returning another tenant's rows.
 **HTML pages are hiccup — store forms, not template files (D-web-html).** A
 page or component is a `defn` returning hiccup data; `slopp.http.html/render`
 serializes it (hiccup 2.x underneath, escape-by-default), `html-response`
-wraps it as a `text/html` RING map, and `page` is the full-document shell
+wraps it as a `text/html` RING map — carrying the hiccup it rendered from as
+`:http/hiccup`, which is what lets `cljnx` drive a server-rendered page as
+STRUCTURE rather than as escaped markup — and `page` is the full-document shell
 (`{:html/title … :html/lang … :html/head […]}` + body — doctype and charset
 included, NO inline script or style, so a strict CSP needs no carve-outs).
 The rules that matter:

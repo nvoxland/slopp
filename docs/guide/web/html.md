@@ -36,6 +36,14 @@ touch it.
 inline `<script>` or `<style>`, so a strict Content-Security-Policy needs no
 carve-outs. `html-response` renders and wraps as a `text/html` Ring map.
 
+It also carries the hiccup it rendered from, as `:http/hiccup` beside the
+`:body`. An HTTP adapter writes the body and ignores it; a reader that wants
+the page rather than the bytes reads it -- which is how `cljnx` drives a
+server-rendered page as structure, with real regions and real links, instead
+of as escaped markup. The two views come from one call site, so they cannot
+disagree; recovering the structure downstream would have meant parsing the
+HTML back into a second derivation of the same page.
+
 An HTML page is a `:http/path` endpoint like any other, so it would otherwise
 get a typed fetch wrapper whose `.json()` can never succeed. `:rest/client
 false` opts it out. Declare it rather than relying on the response schema to
