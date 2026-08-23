@@ -3200,3 +3200,49 @@ move appears wherever an escape hatch exists to make a strict rule safe —
 `^:frozen`, `^:unused-ok`, `:not-swept`, `test_only`. Each is load-bearing
 precisely in the case that has not happened yet, so each is vulnerable to being
 measured as unused and tidied away.
+
+### The fork: a mechanism can be PERMANENT or a CURRENT LIMITATION, and only
+one of them gets an expiry
+
+The consumer ran the rule above over their own four escapes before it hardened,
+and it was incomplete. "Put the mechanism in the reason" protects an escape
+from a reader asking *is this still needed?* — but it leaves that reader nothing
+to do except leave it alone forever, which is wrong for an escape resting on a
+limitation that will lift.
+
+> **Put the MECHANISM in the reason. If the mechanism is PERMANENT, say nothing
+> more — an invented expiry is a lie. If the mechanism is a CURRENT LIMITATION,
+> name what would end it, in BOTH directions.**
+
+Their three permanent ones correctly carry no expiry: a bundle entry point can
+never acquire a caller (`:unused-ok` on a top-level `defonce`), a proxy can
+never name the shapes it forwards (`:rest/unconstrained-ok`), a test-only module
+edge exists as long as both namespaces do. Bolting a review date onto any of
+those would be writing a lie.
+
+Their fourth rests on a limitation and says so in both directions:
+
+> A screen's `:derive` is `(fn [response])` — no state, no params, no wiring —
+> so a runtime plug-in cannot reach it … **If the seam lands, this has a caller
+> again; if slopp decides against it, this goes.**
+
+That converts the question from a JUDGEMENT into a CHECK. A reader does not
+weigh whether the escape is dead; they look at whether the seam landed.
+
+**The two halves stop opposite failures**, which is why both are needed. The
+first stops an escape being tidied away while load-bearing. The second stops one
+OUTLIVING ITS REASON — the class in *A construct that survives its own reason*
+above. `(or x x)` had no expiry condition written anywhere, and that is exactly
+why its tighten phase never happened.
+
+**A corollary about what a reason may be made of.** An escape whose reason is a
+fact about the PAST — "no caller since wave 4d" — hands a reader grounds to act.
+The same escape with "if the seam lands, this has a caller again" hands them a
+question instead. That is why the consumer's fourth escape survived three sweeps
+and a marker migration untouched: not luck, and not anyone remembering it, but
+that nobody reading it had grounds.
+
+**And it settles `^:frozen` before it is built.** Its mechanism is permanent — a
+dated snapshot is dated forever — so under the fork it correctly needs no expiry
+and should not be given a review date. The instinct to make every escape carry
+one is the thing this fork exists to refuse.
