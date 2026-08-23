@@ -215,13 +215,17 @@
    generated namespace always compiles. Pure function of the store value."
   [store]
   (reduce
-   (fn [acc {:keys [ns name meta]}]
-     ;; ^{:rest/client false} opts an endpoint OUT of client generation. An HTML
-     ;; page is a :http/path form like any other, but a typed fetch wrapper whose
-     ;; (.json resp) runs against HTML is nonsense. Declared, never sniffed:
-     ;; :string is a legitimate JSON response, so the response schema cannot
-     ;; decide this — only the endpoint can.
-     (if (false? (:rest/client meta))
+   (fn [acc {:keys [ns name meta kind path]}]
+     ;; CONTENT is not a client's business at all — a typed fetch wrapper whose
+     ;; (.json resp) runs against HTML is nonsense. That used to be
+     ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
+     ;; page; `:kind` says it now.
+     ;;
+     ;; `:rest/client false` still opts a REAL api out, which is a different
+     ;; fact and the one the flag is left doing. Declared, never sniffed:
+     ;; :string is a legitimate JSON response, so a response schema could never
+     ;; have decided either question.
+     (if (or (not= :rest kind) (false? (:rest/client meta)))
        acc
        (let [endpoint (symbol (str ns) (str name))
              method   (:http/method meta)
@@ -243,7 +247,7 @@
                                                   (not (.endsWith (str name) "!")))
                                          "!")))
                     :method   method
-                    :path     (:http/path meta)
+                    :path     path
                     :endpoint endpoint
                     ;; whatever the verb. WHETHER there is a request is the endpoint's
                     ;; declaration; HOW it travels — body or query string — is

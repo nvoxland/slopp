@@ -1358,7 +1358,7 @@
                                    :prompt "opt in"})
         (call! sess "edit_add_form"
                {:ns "wr.api"
-                :source "(defn ^{:http/method :get :http/path \"/api/ping\" :http/auth :public :rest/response :map} ping \"P.\" [req] req)"
+                :source "(defn ^{:http/method :get :rest/path \"/api/ping\" :http/auth :public :rest/response :map} ping \"P.\" [req] req)"
                 :prompt "a public endpoint"})
         (let [rep (edn/read-string (call! sess "query_surface" {}))
               row (first (:http rep))]
@@ -1907,7 +1907,7 @@
   (doseq [n server/served-namespaces] (require n))
   (let [paths   (->> server/served-namespaces
                      (mapcat (comp vals ns-publics))
-                     (keep (comp :http/path meta))
+                     (keep (comp #(or (:rest/path %) (:http/path %)) meta))
                      sort vec)
         non-api (remove #(str/starts-with? % "/api") paths)
         desc    (:description (first (filter #(= "ui_serve" (:name %)) tools/tools)))]

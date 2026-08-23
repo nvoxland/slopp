@@ -21,7 +21,7 @@
   an organising principle and became the only thing there is."
   (:require [slopp.api.contracts :as contracts]))
 
-(defn ^{:http/method :get :http/path "/api/namespaces" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/namespaces" :http/auth :public
         :rest/response contracts/namespace-list
         :http/reads {:namespaces [:browse/namespaces []]}}
   namespaces
@@ -42,7 +42,7 @@
    :body (mapv (fn [{:keys [ns forms]}] {:ns (str ns) :forms forms})
                (:namespaces (:http/reads req)))})
 
-(defn ^{:http/method :get :http/path "/api/ns/:ns" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/ns/:ns" :http/auth :public
         :rest/request contracts/ns-outline-request
         :rest/response contracts/ns-outline
         :http/reads {:outline [:browse/ns-outline [:path-params :ns]]}}
@@ -78,7 +78,7 @@
             :gaps gaps}}
     {:status 404 :body {:error "no such namespace"}}))
 
-(defn ^{:http/method :get :http/path "/api/timeline" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/timeline" :http/auth :public
         :rest/response contracts/timeline
         :http/reads {:timeline [:ui/timeline []]}}
   timeline
@@ -90,7 +90,7 @@
   [req]
   {:status 200 :body (:timeline (:http/reads req))})
 
-(defn ^{:http/method :get :http/path "/api/change/:range" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/change/:range" :http/auth :public
         :rest/request contracts/change-request
         :rest/response contracts/change-view
         :http/reads {:change [:ui/change [:path-params :range]]}}
@@ -105,7 +105,7 @@
     {:status 200 :body c}
     {:status 404 :body {:error "no such change range"}}))
 
-(defn ^{:http/method :get :http/path "/api/form/:id" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/form/:id" :http/auth :public
         :rest/request contracts/form-request
         :rest/response contracts/form-view
         :http/reads {:view [:ui/form []]}}
@@ -129,7 +129,7 @@
     {:status 200 :body v}
     {:status 404 :body {:error "no such form"}}))
 
-(defn ^{:http/method :get :http/path "/api/source/:ns/:name" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/source/:ns/:name" :http/auth :public
         :rest/request contracts/source-request
         :rest/response contracts/form-source
         :http/reads {:source [:browse/form-source [:path-params]]}}
@@ -147,7 +147,7 @@
                           :form-id form-id :source source}}
       {:status 404 :body {:error "no such form"}})))
 
-(defn ^{:http/method :get :http/path "/api/modules" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/modules" :http/auth :public
         :rest/response contracts/module-index
         :http/reads {:modules [:browse/modules []]}}
   modules
@@ -167,7 +167,7 @@
   [req]
   {:status 200 :body (:modules (:http/reads req))})
 
-(defn ^{:http/method :get :http/path "/api/contracts" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/contracts" :http/auth :public
         :rest/client false
         :rest/response :string
         :http/reads {:contract [:ui/contract []]}}
@@ -188,7 +188,7 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:contract (:http/reads req)))})
 
-(defn ^{:http/method :get :http/path "/api/module/:m" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/module/:m" :http/auth :public
         :rest/request contracts/module-request
         :rest/response contracts/module-detail
         :http/reads {:detail [:browse/module [:path-params :m]]}}
@@ -208,7 +208,7 @@
     {:status 200 :body d}
     {:status 404 :body {:error "no such module"}}))
 
-(defn ^{:http/method :get :http/path "/api/search" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/search" :http/auth :public
         :rest/request contracts/search-request
         :rest/response contracts/search-results
         :http/reads {:results [:browse/search []]}}

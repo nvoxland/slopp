@@ -200,10 +200,10 @@
         st (first (store/record-module-platform st "shop.contracts" :cljc))
         st (store/ingest st 'shop.api
                          (str "(ns shop.api)\n\n"
-                              "(defn ^{:http/method :post :http/path \"/api/orders\""
+                              "(defn ^{:http/method :post :rest/path \"/api/orders\""
                               " :rest/request shop.contracts/order :rest/response shop.contracts/order}"
                               " create-order [req] req)\n\n"
-                              "(defn ^{:http/method :get :http/path \"/api/orders/:id\""
+                              "(defn ^{:http/method :get :rest/path \"/api/orders/:id\""
                               " :rest/response shop.contracts/order} get-order [req] req)\n"))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
     (testing "one wrapper per endpoint; mutating verbs get a ! suffix"
@@ -216,7 +216,7 @@
       ;; convention with a double bang is it fighting the house style.
       (let [st2 (store/ingest st 'shop.api2
                               (str "(ns shop.api2)\n\n"
-                                   "(defn ^{:http/method :post :http/path \"/api/pay\""
+                                   "(defn ^{:http/method :post :rest/path \"/api/pay\""
                                    " :rest/request shop.contracts/order"
                                    " :rest/response shop.contracts/order}"
                                    " pay! [req] req)\n"))
@@ -240,7 +240,7 @@
       ;; hand-rolled fetch `direct-http` refuses.
       (let [st3 (store/ingest st 'shop.api3
                               (str "(ns shop.api3)\n\n"
-                                   "(defn ^{:http/method :get :http/path \"/api/search\""
+                                   "(defn ^{:http/method :get :rest/path \"/api/search\""
                                    " :rest/request shop.contracts/order"
                                    " :rest/response shop.contracts/order}"
                                    " search [req] req)\n"))
@@ -263,7 +263,7 @@
                ;; platform LEFT :jvm — a jvm-only schema cannot ship to the client
                (store/ingest 'shop.api
                              (str "(ns shop.api)\n\n"
-                                  "(defn ^{:http/method :post :http/path \"/api/orders\""
+                                  "(defn ^{:http/method :post :rest/path \"/api/orders\""
                                   " :rest/request shop.contracts/order :rest/response shop.contracts/order}"
                                   " create-order [req] req)\n")))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
@@ -324,7 +324,7 @@
       (ops/module-platform! sess "shopg.contracts" "cljc" :prompt "shared contract")
       (ops/ingest! sess 'shopg.api
                    (str "(ns shopg.api)\n\n"
-                        "(defn ^{:http/method :post :http/path \"/api/orders\""
+                        "(defn ^{:http/method :post :rest/path \"/api/orders\""
                         " :rest/request shopg.contracts/order :rest/response shopg.contracts/order}"
                         " create-order \"Create an order.\" [req] req)\n"))
       (let [r (cljs/generate-client! sess :ns 'shopg.client.api)]
@@ -345,23 +345,39 @@
       (finally (ops/close! sess)))))
 
 (deftest client-wrapper-specs-honors-the-client-opt-out
-  ;; Dogfood finding: an HTML page is a :http/path form like any other, so
+  ;; Dogfood finding: an HTML page was a `:http/path` form like any other, so
   ;; generate_client emitted a typed fetch wrapper for it — one whose
   ;; (.json resp) can never succeed on HTML. Sniffing the response schema would
   ;; be the wrong fix (:string is a legitimate JSON response), so the endpoint
-  ;; declares it: ^{:rest/client false} opts out of client generation.
+  ;; declared it: `^{:rest/client false}`.
+  ;;
+  ;; A page declares `:http/path` now and an api declares `:rest/path`, so the
+  ;; page needs no flag at all — it is not a client's business by KIND. The
+  ;; flag is left doing the one job that was always genuinely about generation,
+  ;; and the two cases are separate here because sharing one fixture is what
+  ;; hid that they were two questions.
   (let [st (-> (store/empty-store)
                (store/ingest 'pg.api
                              (str "(ns pg.api)\n\n"
-                                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public"
-                                  " :rest/response :string :rest/client false}"
+                                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public}"
                                   " home \"The page.\" [r] r)\n\n"
-                                  "(defn ^{:http/method :get :http/path \"/api/x\" :http/auth :public"
-                                  " :rest/response :map} data \"Data.\" [r] r)\n")))
+                                  "(defn ^{:http/method :get :rest/path \"/api/x\" :http/auth :public"
+                                  " :rest/response :map} data \"Data.\" [r] r)\n\n"
+                                  "(defn ^{:http/method :get :rest/path \"/api/y\" :http/auth :public"
+                                  " :rest/response :map :rest/client false}"
+                                  " no-wrapper \"Real api, no wrapper wanted.\" [r] r)\n")))
         {:keys [wrappers problems]} (cljs/client-wrapper-specs st)]
-    (testing "the page opts out; the JSON endpoint still gets its wrapper"
+
+    (testing "CONTENT gets no wrapper because it is content — no flag needed"
+      (is (not (some #{'home} (map :fn-name wrappers))) (pr-str wrappers)))
+
+    (testing "and :rest/client false still excludes a REAL api, which is the other question"
+      (is (not (some #{'no-wrapper} (map :fn-name wrappers))) (pr-str wrappers)))
+
+    (testing "the ordinary typed endpoint still gets its wrapper"
       (is (= '[data] (mapv :fn-name wrappers))))
-    (testing "opting out is not a problem to report — it is a declaration"
+
+    (testing "neither exclusion is a problem to report — both are declarations"
       (is (empty? problems) (pr-str problems)))))
 
 (deftest ^:external compiling-a-bundle-says-how-to-serve-it
@@ -642,7 +658,7 @@
       (ops/module-platform! sess "shopf.contracts" "cljc" :prompt "shared contract")
       (ops/ingest! sess 'shopf.api
                    (str "(ns shopf.api)\n\n"
-                        "(defn ^{:http/method :post :http/path \"/api/orders\""
+                        "(defn ^{:http/method :post :rest/path \"/api/orders\""
                         " :rest/request shopf.contracts/order"
                         " :rest/response shopf.contracts/order}"
                         " create-order \"Create an order.\" [req] req)\n"))
@@ -775,7 +791,7 @@
         st     (first (store/record-module-platform st "shop.contracts" :cljc))
         st     (store/ingest st 'shop.api
                              (str "(ns shop.api)\n\n"
-                                  "(defn ^{:http/method :get :http/path \"/api/form/:id\""
+                                  "(defn ^{:http/method :get :rest/path \"/api/form/:id\""
                                   " :rest/request shop.contracts/q"
                                   " :rest/response shop.contracts/q}"
                                   " form [req] req)\n"))
@@ -982,7 +998,7 @@
       (ops/module-platform! sess "shopw.contracts" :cljc :prompt "shared with the browser")
       (ops/ingest! sess 'shopw.api
                    (str "(ns shopw.api)\n\n"
-                        "(defn ^{:http/method :get :http/path \"/api/orders/:id\"\n"
+                        "(defn ^{:http/method :get :rest/path \"/api/orders/:id\"\n"
                         "        :http/auth :public :rest/response shopw.contracts/order}\n"
                         "  get-order \"G.\" [_] {:status 200 :body {}})\n"))
 
@@ -1161,7 +1177,7 @@
       (ops/ingest! sess 'shopv.views (str "(ns shopv.views)\n\n(defn v \"V.\" [] [:p])\n"))
       (ops/ingest! sess 'shopv.api
                    (str "(ns shopv.api)\n\n"
-                        "(defn ^{:http/method :get :http/path \"/api/things\"\n"
+                        "(defn ^{:http/method :get :rest/path \"/api/things\"\n"
                         "        :http/auth :public :rest/response :string}\n"
                         "  things \"T.\" [_] {:status 200 :body \"[]\"})\n"))
 

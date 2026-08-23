@@ -42,7 +42,10 @@
   [{:kind       :http/routing
     :leaves     "a form's name metadata"
     :to         "the served route table, and from there HTTP"
-    :markers    #{:http/path :http/method}
+    ;; both path markers: a REST api and general HTTP content leave the
+    ;; process the same way, and an exit the registry cannot name is one
+    ;; nothing reports on
+    :markers    #{:rest/path :http/path :http/method}
     :checked-by "http-dangling-route-refs ties every literal :href/:src to a
                  route; query_surface reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running

@@ -23,7 +23,7 @@
   ;; that keep it from becoming a document that rots are below.
   (let [st (-> (store/empty-store)
                (store/ingest 'app.api "(ns app.api)
-(defn ^{:http/method :get :http/path \"/api/x\" :rest/response [:map]} x [_] {})
+(defn ^{:http/method :get :rest/path \"/api/x\" :rest/response [:map]} x [_] {})
 (defn ^{:http/method :get :http/path \"/\" :webapp/client-routes [\"/app\"]} doc [_] {})
 (defn ^{:http/external-path \"nginx serves the docs site\"} docs-link [] [:a {:href \"/docs/\"} \"docs\"])"))]
     (testing "every exit is listed, with the checker that covers it"

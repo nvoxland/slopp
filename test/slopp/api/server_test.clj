@@ -192,7 +192,7 @@
   ;; metadata, so this needs no store read — which matters, because nothing
   ;; in this tier can open slopp's own store.
   (let [declares? (fn [nsx] (some #(let [m (meta %)]
-                                     (or (:http/path m) (:http/read m)))
+                                     (or (:rest/path m) (:http/path m) (:http/read m)))
                                   (vals (ns-publics nsx))))
         candidates (->> (all-ns) (map ns-name)
                         ;; the prefix is DATA — a rename rewrites code and

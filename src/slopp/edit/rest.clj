@@ -24,6 +24,81 @@
             [slopp.edit.http :as edit.http]
             [slopp.store :as store]))
 
+(defn ^:export rest-path-prefix
+  "The url prefix this store's REST API lives under — `rest.prefix`, or
+  `\"/api\"`.
+
+  **One answer per store**, which is what makes the API/content partition
+  total: every route is on exactly one side of it. A setting rather than a
+  constant because a real API may live at `/v1` or `/graphql`, and a framework
+  that hard-codes `/api` tells such a store its API is content.
+
+  Read here rather than at each gate so the default has one definition."
+  [candidate]
+  (or (not-empty (str (get-in candidate [:config "capabilities" :values "rest.prefix"])))
+      "/api"))
+
+(defn ^:export ^{:rule/applies-to :production} rest-path-partition
+  "The API/CONTENT partition gate: a route is a REST API (`:rest/path`) or
+  general HTTP content (`:http/path`), never both and never on the wrong side
+  of [[rest-path-prefix]]. Returns a teaching string, or nil when clean.
+
+  **There is no allowed intersection.** That is what lets `/api/*` mean
+  something to a proxy, a CSP or a reader WITHOUT consulting metadata — a
+  consuming hub proxies `/p/:slug/api/*path` on exactly that assumption, and
+  nothing was enforcing it.
+
+  Three refusals, all grounded in a DECLARATION rather than a coincidence: the
+  author says which kind the route is.
+
+  **Why the split exists at all.** `:http/path` was once the only path
+  declaration, so a stylesheet and a typed endpoint were the same thing to
+  every gate — and `rest-endpoint-schema` asked both for a contract. A page
+  therefore declared `:rest/response :string`, which is a lie about a
+  `text/css` body, and `:rest/client false` existed to undo it. Measured in a
+  consuming store at 10 of 11 endpoints carrying that flag, 9 of them bare
+  copies recording no reason. The flag was the ABSENCE of this gate.
+
+  Inert until the store opts into `rest`, decided by `edit.gates/gate-check`
+  from the namespace this lives in. A store with no typed API has no partition
+  to keep, and `:http/path` under `/api` is unremarkable there — which is a
+  cost worth naming: enabling `rest` later will refuse such a route, and that
+  is the partition becoming total rather than a regression."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m       (edit.http/web-name-meta e)
+          rest-p  (:rest/path m)
+          http-p  (:http/path m)
+          prefix  (rest-path-prefix candidate)
+          under?  (fn [p] (let [s (str p)]
+                            (or (= s prefix) (str/starts-with? s (str prefix "/")))))
+          where   (str ns-sym "/" form-name)]
+      (cond
+        (and rest-p http-p)
+        (str where " declares BOTH :rest/path " (pr-str (str rest-p))
+             " and :http/path " (pr-str (str http-p))
+             " — one endpoint is one kind. :rest/path is a typed API: it owes a"
+             " :rest/response, it is published in the contract document, and a"
+             " client is generated for it. :http/path is content a reader"
+             " fetches, and owes none of that. Keep the one it IS.")
+
+        (and rest-p (not (under? rest-p)))
+        (str where " declares :rest/path " (pr-str (str rest-p))
+             ", which is outside this store's API prefix " (pr-str prefix)
+             " — so nothing can tell it from content by its url. Either move it"
+             " under " (pr-str prefix) ", or change the prefix"
+             " (config_file {path \"capabilities\" key \"rest.prefix\" value \"/v1\"})"
+             " if this store's API genuinely lives elsewhere. One answer per"
+             " store, or the partition is not total.")
+
+        (and http-p (under? http-p))
+        (str where " declares :http/path " (pr-str (str http-p))
+             ", which is under this store's API prefix " (pr-str prefix)
+             " — that space belongs to the typed API, so a proxy or a reader"
+             " can rely on it without reading metadata. If this IS an API,"
+             " declare :rest/path and give it a :rest/response; if it is"
+             " content, serve it outside " (pr-str prefix) ".")))))
+
 (defn ^:export ^{:rule/applies-to :production} rest-endpoint-schema
   "The API-contract gate (D-web-contracts): a `:http/path` endpoint must type out
   its contract so the client validates against the SAME schema. `:rest/response`
@@ -49,18 +124,26 @@
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (edit.http/web-name-meta e)]
-      (when (:http/path m)
+      ;; `:rest/path` ONLY. This used to fire on `:http/path`, which was the
+      ;; only path marker there was — so it asked a stylesheet for a JSON
+      ;; contract, the stylesheet answered `:rest/response :string`, and
+      ;; `:rest/client false` existed to undo the wrapper that followed. The
+      ;; question is right; it was being asked of the wrong things.
+      (when (:rest/path m)
         (let [body?   (contains? #{:post :put :patch} (:http/method m))
               missing (cond-> []
                         (not (contains? m :rest/response)) (conj :rest/response)
                         (and body? (not (contains? m :rest/request))) (conj :rest/request))]
           (when (seq missing)
             (str ns-sym "/" form-name " declares the route "
-                 (pr-str (:http/path m))
+                 (pr-str (str (:rest/path m)))
                  " but no " (str/join " / " (map str missing))
-                 " — every endpoint types out its contract so the client"
-                 " validates against the SAME schema (D-web-contracts). Add "
+                 " — a :rest/path is a TYPED api, so it types out its contract"
+                 " and the client validates against the SAME schema"
+                 " (D-web-contracts). Add "
                  (str/join " and " (map str missing))
                  " to the name metadata: a .cljc malli schema VAR"
                  " (shareable/reusable, e.g. some.contracts/order) or an inline"
-                 " [:map …] for a one-off shape.")))))))
+                 " [:map …] for a one-off shape. If this is content rather than"
+                 " an api, declare :http/path instead and it is asked for"
+                 " none of this.")))))))

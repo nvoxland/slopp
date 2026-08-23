@@ -14,7 +14,7 @@
   discovers."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.http-test :as slopp.http-test] [clojure.string :as str] [slopp.rules.rest :as rules.rest]))
+            [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.http-test :as slopp.http-test] [clojure.string :as str] [slopp.rules.rest :as rules.rest] [slopp.edit.http :as edit.http]))
 
 (deftest routes-derive-from-stored-nodes
   (let [src (str "(ns shop.api)\n\n"
@@ -858,3 +858,49 @@
       ;; the arm that keeps this from being a blanket pass on anything ending
       ;; in a slash
       (is (contains? paths "/nowhere/") (pr-str found)))))
+
+(deftest a-route-is-an-API-or-CONTENT-and-the-traversal-says-which
+  ;; Nathan, 2026-08-23: `:http/path` was the only path declaration slopp had,
+  ;; so a REST endpoint and a stylesheet were the same kind of thing to every
+  ;; gate. `rest-endpoint-schema` then asked EVERY endpoint for a contract once
+  ;; `rest` was on — including the pages — so a page declared
+  ;; `:rest/response :string`, which is a lie about a `text/css` body, and
+  ;; `:rest/client false` existed to undo it. The flag was the ABSENCE of this
+  ;; distinction, worked around: measured at 10 of 11 endpoints in the
+  ;; consuming store, 9 of them bare copies recording no reason.
+  ;;
+  ;; `:rest/path` is the concept. The traversal is where it has to land first,
+  ;; because `web-endpoint-rows` is the SINGLE route walk — the router, the
+  ;; collision gate, query_surface, vendoring and the contract all build on it,
+  ;; and a second walk for the second marker is how the two would drift.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'demo.api
+                             (str "(ns demo.api)\n\n"
+                                  "(defn ^{:rest/path \"/api/orders\" :http/method :get"
+                                  " :http/auth :public :rest/response [:map]}\n"
+                                  "  orders \"O.\" [_] {:status 200})\n"))
+               (store/ingest 'demo.pages
+                             (str "(ns demo.pages)\n\n"
+                                  "(defn ^{:http/path \"/css/app.css\" :http/method :get"
+                                  " :http/auth :public}\n"
+                                  "  stylesheet \"S.\" [_] {:status 200})\n")))
+        rows (edit.http/web-endpoint-rows st)
+        by-path (into {} (map (juxt #(str (or (:rest/path (:meta %)) (:http/path (:meta %))))
+                                    identity))
+                      rows)]
+
+    (testing "BOTH kinds are routes, and one walk finds them"
+      (is (= 2 (count rows))
+          (str "a marker the traversal cannot see is a route that never serves,"
+               " with no write-time signal: " (pr-str rows))))
+
+    (testing "and every row says which kind it is"
+      (is (= :rest (:kind (by-path "/api/orders"))) (pr-str rows))
+      (is (= :content (:kind (by-path "/css/app.css"))) (pr-str rows)))
+
+    (testing "rules/endpoints carries the path and the kind through"
+      (let [es (into {} (map (juxt :path identity)) (rules.http/endpoints st))]
+        (is (= :rest (:kind (es "/api/orders"))) (pr-str es))
+        (is (= :content (:kind (es "/css/app.css"))) (pr-str es))
+        (is (= '[demo.api/orders demo.pages/stylesheet]
+               (sort (map :handler (vals es)))))))))

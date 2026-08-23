@@ -422,8 +422,8 @@
     ;; Declaring a contract is therefore the only usage signal there is — the
     ;; same lesson cli taught with its generated entry, arriving a second time.
     (is (= "slopp.rest" (:ns-prefix (capabilities/capability "rest"))))
-    (is (= [:rest/request :rest/response]
-           (:entry-markers (capabilities/capability "rest")))
+    (is (= [:rest/path :rest/request :rest/response]
+        (:entry-markers (capabilities/capability "rest")))
         "both, because a GET-only API declares no :rest/request and still has a
          typed response to honour"))
   (testing "webapp ships a family too, and its marker is CLIENT ROUTING"

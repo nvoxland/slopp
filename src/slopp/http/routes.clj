@@ -50,12 +50,20 @@
          (assoc row :path (str p "/*client-path")))))
 
 (defn ^:export from-namespaces
-  "Route rows from the loaded namespaces' public vars carrying `:http/path`
-  metadata — the UNIVERSAL route source: a live store, a jar, and a native
-  binary all answer from var metadata, the same contract query_surface reads
-  off the stored node. A namespace that isn't loaded contributes no rows.
-  Rows: {:handler <the var, callable> :method :path :auth :http/effects
+  "Route rows from the loaded namespaces' public vars carrying `:rest/path`
+  (a REST API) or `:http/path` (general HTTP content) — the UNIVERSAL route
+  source: a live store, a jar, and a native binary all answer from var
+  metadata, the same contract query_surface reads off the stored node. A
+  namespace that isn't loaded contributes no rows.
+  Rows: {:handler <the var, callable> :method :path :kind :auth :http/effects
   :http/reads :effectful?}.
+
+  **Both markers, because this is what actually serves.** The store-side
+  traversal (`edit.http/web-endpoint-rows`) is a different walk over a
+  different input, so a marker landing in one and not here is a route that
+  passes every write gate, appears in `query_surface`, and 404s — with nothing
+  able to say why. `:kind` rides the row so the dispatcher and the contract
+  never re-derive which marker carried the path.
 
   A var may also carry `:webapp/client-routes` — a vector of path prefixes it serves as the
   client-routed document — and then contributes one extra catch-all row per
@@ -73,8 +81,10 @@
           :let   [nsx (find-ns (symbol ns-sym))]
           :when  nsx
           v      (vals (ns-publics nsx))
-          :let   [m (meta v)]
-          :when  (:http/path m)]
+          :let   [m    (meta v)
+                  kind (cond (:rest/path m) :rest
+                             (:http/path m) :content)]
+          :when  kind]
       {:client-routes (:webapp/client-routes m)
        ;; the CONTRACT rides the row when the endpoint declared one. The
        ;; dispatcher holds a row at request time and nothing else, so a
@@ -85,7 +95,8 @@
        ;; would otherwise be the same row.
        :row (cond-> {:handler   v
                      :method    (:http/method m)
-                     :path      (str (:http/path m))
+                     :path      (str (or (:rest/path m) (:http/path m)))
+                     :kind      kind
                      :auth      (:http/auth m)
                      :http/effects (:http/effects m)
                      :http/reads   (:http/reads m)

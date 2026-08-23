@@ -9,7 +9,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.http.contract :as http.contract]))
 
-(defn ^{:http/method :get :http/path "/c/things" :http/auth :public
+(defn ^{:http/method :get :rest/path "/c/things" :http/auth :public
         :rest/response [:map [:things [:sequential :string]]]}
   c-list
   "Fixture: a typed GET — the ordinary case a published contract describes.
@@ -21,7 +21,7 @@
   [_req]
   {:status 200 :body {:things []}})
 
-(defn ^{:http/method :post :http/path "/c/things" :http/auth :public
+(defn ^{:http/method :post :rest/path "/c/things" :http/auth :public
         :http/effectful true
         :rest/request [:map [:name :string]]
         :rest/response [:map [:id :int]]}
@@ -30,28 +30,49 @@
   [req]
   {:status 201 :body {:id (count (str (:name (:body req))))}})
 
-(defn ^{:http/method :get :http/path "/c/page" :http/auth :public
-        :rest/client false :rest/response :string}
+(defn ^{:http/method :get :http/path "/c/page" :http/auth :public}
   c-page
-  "Fixture: an HTML page. A :http/path form like any other, and no part of a
-  TYPED contract — a fetch wrapper whose (.json resp) runs against HTML is
-  nonsense, which is what :rest/client false already says at the client
-  generator."
+  "Fixture: an HTML page — CONTENT, not an api.
+
+  It used to carry `:rest/response :string` and `:rest/client false`, and both
+  existed only because there was one path marker: the contract gate asked every
+  route for a schema, a page answered `:string` — a lie about an HTML body —
+  and then opted out of the wrapper that followed. `:http/path` says content,
+  so it is asked for neither."
   [_req]
   {:status 200 :body "<h1>c</h1>"})
 
-(defn ^{:http/method :get :http/path "/c/bare" :http/auth :public
+(defn ^{:http/method :get :rest/path "/c/bare" :http/auth :public
         :rest/response [:map [:ok :boolean]]}
   c-bare
   [_req]
   {:status 200 :body {:ok true}})
 
-(defn ^{:http/method :get :http/path "/c/admin" :http/auth [:group "admin"]
+(defn ^{:http/method :get :rest/path "/c/admin" :http/auth [:group "admin"]
         :rest/response [:map [:secret :string]]}
   c-admin
   "Fixture: an endpoint only a group may call — the case `:public` cannot show."
   [_req]
   {:status 200 :body {:secret "s"}})
+
+(defn ^{:http/method :get :rest/path "/c/no-client" :http/auth :public
+        :rest/response [:map [:ok :boolean]]
+        :rest/client false}
+  c-no-client
+  "Fixture: a REAL typed api that opts out of a generated wrapper.
+
+  This is what `:rest/client` is left doing once content is its own kind, and
+  it is worth a fixture of its own because it is the case the page/api split
+  does NOT reach. A consuming store has two: their hub sits at the origin root,
+  so a generated wrapper would prefix the url to `/p/<slug>/` and call the
+  wrong address — a fact about that CONSUMER, sitting on the producer's
+  declaration.
+
+  Until that is fixed the flag also keeps the endpoint out of the DOCUMENT,
+  which is the half nobody asked for. Pinned here so the two halves are
+  visible as two."
+  [_req]
+  {:status 200 :body {:ok true}})
 
 (deftest a-contract-publishes-the-typed-surface-and-nothing-else
   (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
@@ -80,8 +101,19 @@
     (testing "the endpoint carries its NAME — the consumer names its wrapper from it"
       (is (= 'c-list (:name (by-addr [:get "/c/things"])))))
 
-    (testing ":rest/client false opts an endpoint out, exactly as it does at the client generator"
-      (is (not (contains? (set (map :path (:endpoints doc))) "/c/page"))))))
+    (testing "CONTENT is absent because it is content, not because of a flag"
+      ;; `/c/page` used to be excluded by `:rest/client false`. It is
+      ;; `:http/path` now, so it is not a contract's business at all — and this
+      ;; assertion would pass either way, which is why the flag gets its own
+      ;; fixture below rather than sharing this one
+      (is (not (contains? (set (map :path (:endpoints doc))) "/c/page"))))
+
+    (testing "and :rest/client false STILL opts a real api out, which is a different fact"
+      ;; the case the page/api split does not reach: a genuine typed endpoint
+      ;; whose wrapper this consumer does not want. Sharing one fixture with
+      ;; the page hid that these were two questions
+      (is (not (contains? (set (map :path (:endpoints doc))) "/c/no-client"))
+          "the flag still excludes — from the DOCUMENT as well as the client, which is the half nobody asked for"))))
 
 (deftest an-endpoint-says-what-it-IS-and-WHERE-it-lives
   ;; Two keys, both asked for by slopp-ui after measuring what the document

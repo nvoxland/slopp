@@ -101,7 +101,12 @@
               :let [m (meta (:handler row))]
               ;; a :webapp/client-routes var contributes catch-all rows pointing at the SAME
               ;; handler; they are one endpoint, so keep the declared path only
-              :when (and (= (:path row) (str (:http/path m)))
+              ;; `:rest` rows ONLY — a contract describes the TYPED api, and content
+              ;; is not part of one. That used to be `:rest/client false`'s job,
+              ;; which is why a stylesheet needed a flag to stay out of its own
+              ;; app's API document
+              :when (and (= :rest (:kind row))
+                         (= (:path row) (str (:rest/path m)))
                          (not (false? (:rest/client m))))]
           {:method   (:method row)
            :path     (:path row)

@@ -284,14 +284,20 @@
                          ;; stronger form of the `[]` mistake this report
                          ;; already refuses to make.
                          decl))]
-      (vec (for [{:keys [ns name meta]} (sort-by #(str (:http/path (:meta %)))
-                                                 (edit.http/web-endpoint-rows store))
-                 :when (or (:rest/request meta) (:rest/response meta)
-                           (false? (:rest/client meta)))
+      ;; the row's own :path and :kind. Reading `:http/path` here survived the
+      ;; api/content split as a SILENT wrong answer: every migrated endpoint
+      ;; reported :path "" while the whole suite stayed green, because no test
+      ;; asserted the path in this report. Caught by LOOKING at query_surface
+      ;; rather than at the tests, which is the only thing that could have.
+      (vec (for [{:keys [ns name meta path kind]} (sort-by :path
+                                                           (edit.http/web-endpoint-rows store))
+                 :when (and (= :rest kind)
+                            (or (:rest/request meta) (:rest/response meta)
+                                (false? (:rest/client meta))))
                  :let [from [ns name]]]
              (cond-> {:kind      :contract
                       :method    (:http/method meta)
-                      :path      (str (:http/path meta))
+                      :path      path
                       :handler   (symbol (str ns) (str name))
                       :published (not (false? (:rest/client meta)))}
                (:rest/request meta)

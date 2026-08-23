@@ -45,22 +45,60 @@
   [e]
   (store/form-name-meta e))
 
+(defn ^:export route-path
+  "The path a route form declares — `:rest/path` (a REST API) or `:http/path`
+  (general HTTP content) — or nil for a form that is neither.
+
+  **One definition, because a gate that reads only one marker leaves the other
+  KIND UNGATED.** For most gates that is a gap; for `http-auth-refusal` it is a
+  hole — default-deny would stop applying to exactly the endpoints most likely
+  to carry data. Every gate that asks \"is this a route\" asks it here.
+
+  The split itself is `web-endpoint-rows`: an API types out a contract, is
+  published and gets a generated client; content does none of those. What does
+  NOT differ is everything about being reachable — auth, route uniqueness,
+  safe-GET, declared effects — so those gates take both and this is how."
+  [m]
+  (or (:rest/path m) (:http/path m)))
+
 (defn ^:export web-endpoint-rows
-  "Every `:http/path` form in `store`: `{:ns :name :form-id :meta}` rows —
+  "Every route form in `store`: `{:ns :name :form-id :meta :kind :path}` rows —
   the single route traversal; the collision gate and `slopp.rules.http` both
-  build on it. TEST namespaces are excluded: their endpoint-shaped forms
-  are fixtures, not servable surface, and a fixture must neither report in
-  query_surface nor claim a path against a production endpoint. A pure
-  function of the store value."
+  build on it. A pure function of the store value.
+
+  **Two markers, two kinds, ONE walk.** `:rest/path` declares a REST API and
+  `:http/path` declares general HTTP content, and they are genuinely different
+  things: an API types out a contract, is documented and gets a generated
+  client; a document does none of those and a typed wrapper over it would be
+  nonsense. Before the split there was one marker, so every gate asked every
+  route the API's questions — which is why a stylesheet ended up declaring
+  `:rest/response :string` and then `:rest/client false` to undo it.
+
+  `:kind` is `:rest` or `:content`, and `:path` is whichever marker carried it,
+  so no caller repeats the choice. A second traversal for the second marker is
+  exactly how the two would drift apart, and this walk feeds the router,
+  vendoring, `query_surface` and the contract.
+
+  **A form carrying BOTH is `:rest`**, and cannot arise through slopp: the
+  write gate refuses the combination. It is reachable only by import, which is
+  `store_doctor`'s ground — the sweep for states that predate a rule.
+
+  TEST namespaces are excluded: their endpoint-shaped forms are fixtures, not
+  servable surface, and a fixture must neither report in `query_surface` nor
+  claim a path against a production endpoint."
   [store]
   (vec
    (for [nsx (sort (keys (:namespaces store)))
          :when (not (store.render/test-ns? nsx))
          e   (store/forms store nsx)
          :when (:name e)
-         :let [m (web-name-meta e)]
-         :when (:http/path m)]
-     {:ns nsx :name (:name e) :form-id (:id e) :meta m})))
+         :let [m    (web-name-meta e)
+               kind (cond (:rest/path m) :rest
+                          (:http/path m) :content)]
+         :when kind]
+     {:ns nsx :name (:name e) :form-id (:id e) :meta m
+      :kind kind
+      :path (str (or (:rest/path m) (:http/path m)))})))
 
 (defn ^:export web-performers
   "The app-declared performer vocabulary for `marker-key` (`:http/effect` or
@@ -123,7 +161,7 @@
       ;; itself: teach both, sweep, tighten. The sweep then rewrote both arms to
       ;; the same key and left `(or x x)` reading as though it still handled
       ;; two. Tightened, which is the third phase that never happened.
-      (when (and (:http/path m) (not (contains? m :http/auth)))
+      (when (and (route-path m) (not (contains? m :http/auth)))
         (if-let [retired (retired-sibling m :http/auth)]
           ;; MID-MIGRATION, and saying so is the whole point: this refusal is
           ;; otherwise identical to a forgotten policy, and the obvious remedy
@@ -157,12 +195,12 @@
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (web-name-meta e)]
-      (when (:http/path m)
+      (when (route-path m)
         (let [method (:http/method m)
-              path   (str (:http/path m))
+              path   (str (route-path m))
               other  (some #(when (and (not= (:form-id %) (:id e))
                                        (= method (:http/method (:meta %)))
-                                       (= path (str (:http/path (:meta %)))))
+                                       (= path (str (route-path (:meta %)))))
                               %)
                            (web-endpoint-rows candidate))]
           (when other
@@ -200,7 +238,7 @@
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (web-name-meta e)
           kinds (seq (:http/effects m))]
-      (when (and (:http/path m) kinds)
+      (when (and (route-path m) kinds)
         (let [known (set (keys (web-performers candidate :http/effect)))
               missing (remove known kinds)]
           (when (seq missing)
@@ -222,7 +260,7 @@
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (web-name-meta e)]
-      (when (and (:http/path m) (#{:get :head} (:http/method m)))
+      (when (and (route-path m) (#{:get :head} (:http/method m)))
         (cond
           (seq (:http/effects m))
           (str ns-sym "/" form-name " is a GET/HEAD endpoint but declares"
@@ -250,7 +288,7 @@
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
     (let [m (web-name-meta e)]
-      (when (:http/path m)
+      (when (route-path m)
         (let [known (into #{}
                           (keep #(second (re-matches #"http\.auth\.groups\.([^.]+)\..*" (str %))))
                           (keys (get-in candidate [:config "capabilities" :values] {})))
@@ -305,7 +343,7 @@
    the recorded value with the current one. A pure function of the store value."
   [store]
   (str (hash (mapv (fn [{:keys [ns name meta]}]
-                     [(str ns) (str name) (:http/method meta) (:http/path meta)
+                     [(str ns) (str name) (:http/method meta) (route-path meta)
                       (pr-str (:rest/request meta)) (pr-str (:rest/response meta))])
                    (web-endpoint-rows store)))))
 
@@ -387,7 +425,7 @@
   the shape that silently empties."
   [candidate ns-sym form-name]
   (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (when (and (:http/path (web-name-meta e))
+    (when (and (route-path (web-name-meta e))
                (empty? (web-context-builders candidate)))
       (let [sx    (try (n/sexpr (:node e)) (catch Exception _ nil))
             nodes (tree-seq coll? seq sx)]

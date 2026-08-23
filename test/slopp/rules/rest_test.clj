@@ -12,16 +12,18 @@
 
 (deftest the-rest-section-reports-the-TYPED-surface
   (let [src (str "(ns shop.api)\n\n"
-                 "(defn ^{:http/method :post :http/path \"/api/orders\" :http/auth :public\n"
+                 "(defn ^{:http/method :post :rest/path \"/api/orders\" :http/auth :public\n"
                  "        :rest/request [:map [:sku :string] [:qty :int]]\n"
                  "        :rest/response [:map [:id :int]]}\n"
                  "  create! \"Place an order.\" [req] req)\n\n"
-                 "(defn ^{:http/method :get :http/path \"/api/health\" :http/auth :public\n"
+                 "(defn ^{:http/method :get :rest/path \"/api/health\" :http/auth :public\n"
                  "        :rest/response [:map [:ok :boolean]]}\n"
                  "  health \"Health.\" [req] req)\n\n"
-                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
-                 "        :rest/client false}\n"
-                 "  page \"A document, not an API.\" [req] req)\n")
+                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public}\n"
+                 "  page \"A document, not an API — no flag needed to say so.\" [req] req)\n\n"
+                 "(defn ^{:http/method :get :rest/path \"/api/internal\" :http/auth :public\n"
+                 "        :rest/response [:map [:n :int]] :rest/client false}\n"
+                 "  internal \"A real api this store generates no wrapper for.\" [req] req)\n")
         off (store/ingest (store/empty-store) 'shop.api src)
         on  (assoc-in off [:config "capabilities" :values "rest.enabled"] "true")]
 
@@ -57,7 +59,7 @@
         ;; a generated fetch wrapper over an HTML page is nonsense — and a
         ;; reader asking what consumers can call needs that visible rather
         ;; than inferred from a missing schema
-        (is (false? (:published (by "/"))))
+        (is (false? (:published (by "/api/internal"))))
         (is (true? (:published (by "/api/orders"))))))))
 
 (deftest a-contract-that-is-not-a-MAP-does-not-break-the-whole-report
@@ -75,14 +77,14 @@
   ;; surface is the human-facing view of an API, so the shape most likely to
   ;; appear is the shape someone reached for when a plain map would not do.
   (let [src (str "(ns odd.api)\n\n"
-                 "(defn ^{:http/method :get :http/path \"/api/projects\" :http/auth :public\n"
+                 "(defn ^{:http/method :get :rest/path \"/api/projects\" :http/auth :public\n"
                  "        :rest/response [:sequential [:map [:id :int] [:slug :string]]]}\n"
                  "  projects \"A list.\" [req] req)\n\n"
-                 "(defn ^{:http/method :post :http/path \"/api/register\" :http/auth :public\n"
+                 "(defn ^{:http/method :post :rest/path \"/api/register\" :http/auth :public\n"
                  "        :rest/request [:map [:slug :string]]\n"
                  "        :rest/response [:or [:map [:ok :boolean]] [:map [:error :string]]]}\n"
                  "  register! \"Two answers.\" [req] req)\n\n"
-                 "(defn ^{:http/method :get :http/path \"/api/token\" :http/auth :public\n"
+                 "(defn ^{:http/method :get :rest/path \"/api/token\" :http/auth :public\n"
                  "        :rest/response :string}\n"
                  "  token \"Just a string.\" [req] req)\n")
         st  (-> (store/ingest (store/empty-store) 'odd.api src)
@@ -131,11 +133,11 @@
                        "(def receipt [:sequential [:map [:id :int] [:total :int]]])\n")
         api       (str "(ns shop.api\n"
                        "  (:require [shop.contracts :as contracts]))\n\n"
-                       "(defn ^{:http/method :post :http/path \"/api/orders\" :http/auth :public\n"
+                       "(defn ^{:http/method :post :rest/path \"/api/orders\" :http/auth :public\n"
                        "        :rest/request contracts/order\n"
                        "        :rest/response contracts/receipt}\n"
                        "  create! \"Place an order.\" [req] req)\n\n"
-                       "(defn ^{:http/method :get :http/path \"/api/health\" :http/auth :public\n"
+                       "(defn ^{:http/method :get :rest/path \"/api/health\" :http/auth :public\n"
                        "        :rest/response [:map [:ok :boolean]]}\n"
                        "  health \"Health.\" [req] req)\n")
         st        (-> (store/empty-store)
@@ -178,7 +180,7 @@
                        "(def receipts [:sequential order])\n")
         api       (str "(ns shop.api\n"
                        "  (:require [shop.contracts :as contracts]))\n\n"
-                       "(defn ^{:http/method :get :http/path \"/api/receipts\" :http/auth :public\n"
+                       "(defn ^{:http/method :get :rest/path \"/api/receipts\" :http/auth :public\n"
                        "        :rest/response contracts/receipts}\n"
                        "  all \"Every receipt.\" [req] req)\n")
         st        (-> (store/empty-store)

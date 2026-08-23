@@ -30,13 +30,17 @@
   the write gates check (`modules/web-endpoint-rows`), so what query_surface
   shows is what the gates enforced. A pure function of the store value."
   [store]
-  (mapv (fn [{:keys [ns name form-id meta]}]
+  (mapv (fn [{:keys [ns name form-id meta kind path]}]
           {:handler   (symbol (str ns) (str name))
            :ns        ns
            :name      name
            :form-id   form-id
            :method    (:http/method meta)
-           :path      (str (:http/path meta))
+           ;; :path and :kind come from the TRAVERSAL rather than being
+           ;; re-derived here. `:rest/path` and `:http/path` are two markers,
+           ;; and choosing between them in two places is how two answers appear
+           :path      path
+           :kind      kind
            :auth      (:http/auth meta)
            :http/effects (:http/effects meta)
            :http/reads   (:http/reads meta)
@@ -280,7 +284,7 @@
     (vec (keep (fn [fid]
                  (when-let [e (store/form-by-id st* fid)]
                    (let [m (edit.http/web-name-meta e)]
-                     (when (and (:http/path m)
+                     (when (and (edit.http/route-path m)
                                 (= :public (:http/auth m))
                                 (seq (:http/effects m)))
                        {:form (symbol (str (store/ns-of-form-id st* fid))

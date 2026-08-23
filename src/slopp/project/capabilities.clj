@@ -84,7 +84,7 @@
     :ns-prefix "slopp.http" :entry-markers [:app/entry :http/path]
     :doc "an HTTP server: routing, static mounts, identity and authorization. Present in every store, inert until http.enabled"}
    {:capability "rest" :requires ["http"]
-    :ns-prefix "slopp.rest" :entry-markers [:rest/request :rest/response]
+    :ns-prefix "slopp.rest" :entry-markers [:rest/path :rest/request :rest/response]
     :doc "a typed API: request/response contracts, boundary validation, and generated clients derived from the same schemas"}
    {:capability "webapp" :requires ["http"]
     :ns-prefix "slopp.webapp" :entry-markers [:webapp/client-routes]

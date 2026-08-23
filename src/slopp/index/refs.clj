@@ -173,7 +173,12 @@
                m (when (and (seq? s) (symbol? (second s))) (meta (second s)))
                marker (cond (:entry-point m)  :entry-point
                             (:unused-ok m)    :unused-ok
-                            (:http/path m)     :web-endpoint
+                            ;; both route markers: a :rest/path api is reached from OUTSIDE
+                            ;; exactly as a :http/path document is, so a
+                            ;; declaration the dead-surface check cannot see
+                            ;; reports ten live endpoints as unused
+                            (or (:rest/path m)
+                                (:http/path m))  :web-endpoint
                             (:http/effect m)   :web-effect
                             (:http/read m)     :web-read
                             (:cli/command m)  :cli-command

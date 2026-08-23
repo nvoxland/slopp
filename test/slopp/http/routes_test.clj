@@ -48,8 +48,18 @@
 (deftest routes-derive-from-var-metadata
   (let [rows (routes/from-namespaces ['slopp.http.routes-test])]
     (testing "endpoint vars become rows; unmarked vars don't"
-      (is (= 3 (count rows)))
-      (is (= #{"/t/users/:id" "/t/users" "/t/page"} (set (map :path rows)))))
+      ;; hand-kept, which is the point: derived from the same metadata the rows
+      ;; come from, it would compare a derivation to itself. `/api/fixture-orders`
+      ;; is the `:rest/path` fixture — its presence here IS the assertion that
+      ;; the runtime source sees both markers
+      (is (= 4 (count rows)))
+      (is (= #{"/t/users/:id" "/t/users" "/t/page" "/api/fixture-orders"}
+             (set (map :path rows)))))
+
+    (testing "and each row says which KIND of route it is"
+      (let [kind (into {} (map (juxt :path :kind)) rows)]
+        (is (= :content (kind "/t/page")))
+        (is (= :rest (kind "/api/fixture-orders")))))
     (testing "the row carries the contract and the CALLABLE var"
       (let [row (first (filter #(= "/t/users/:id" (:path %)) rows))]
         (is (= :get (:method row)))
@@ -230,3 +240,36 @@
     (let [uri (str "/api/source/demo.ns/" (lang/encode-component "a/b"))
           srv (router/match [{:method :get :path "/api/source/:ns/:name" :handler :h}] :get uri)]
       (is (= "a/b" (get-in srv [:path-params :name])) (pr-str srv)))))
+
+(defn ^{:rest/path "/api/fixture-orders" :http/method :get :http/auth :public
+        :rest/response [:map]
+        :unused-ok "a route-discovery fixture — it exists to be FOUND by the scan, so having no caller is the property under test"}
+  fixture-orders
+  "A REST endpoint fixture."
+  [_req]
+  {:status 200 :body {}})
+
+(deftest the-RUNTIME-route-source-finds-BOTH-markers
+  ;; `from-namespaces` reads VAR metadata and ships in the slim jar — it is
+  ;; what the router actually serves from. The store-side traversal is a
+  ;; different walk over a different input, so a marker landing in one and not
+  ;; the other is a route that passes every write gate and then does not exist
+  ;; at runtime. Nothing would say so: the write is green, `query_surface`
+  ;; lists it, and requests 404.
+  ;;
+  ;; That is why this is asserted here as well as at the traversal, rather than
+  ;; trusted to follow from it.
+  (let [rows (routes/from-namespaces ['slopp.http.routes-test])
+        by-path (into {} (map (juxt :path identity)) rows)]
+    (testing "a :rest/path var is discovered as a route"
+      (is (contains? by-path "/api/fixture-orders")
+          (str "declared, gated, listed — and unroutable: "
+               (pr-str (sort (keys by-path))))))
+
+    (testing "and it carries its kind, like the store-side row"
+      (is (= :rest (:kind (by-path "/api/fixture-orders")))))
+
+    (testing "a var carrying NEITHER marker is still passed over"
+      ;; the negative control that already lived here — route discovery must
+      ;; keep ignoring an ordinary public fn
+      (is (not-any? #(= 'plain (:name %)) rows) (pr-str rows)))))
