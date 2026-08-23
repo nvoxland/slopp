@@ -459,20 +459,35 @@
                                           {:status 200 :body [:main [:h1 "hello"]]})}]})
         driver (slopp.http/driver ctx)]
 
-    (testing "the driver answers a PATH with a document"
+    (testing "the driver answers a PATH with the whole RESPONSE"
+      ;; it used to answer `(:body resp)` and render anything non-hiccup as its
+      ;; status. That threw away the two facts the caller needed: the STATUS,
+      ;; which left `(= 404 …)` as a whole-page string search over a rendered
+      ;; sentence, and `Location`, so a redirect was never followed and
+      ;; post-redirect-get did not work at all. Rendering is the reader's half
+      ;; and following is the browser's; producing this is the only part that
+      ;; is http's
       (is (fn? (:document driver))
           "no :document — nothing would render a served page headlessly")
-      (is (= [:main [:h1 "hello"]] ((:document driver) "/hi"))))
+      (is (= {:status 200 :body [:main [:h1 "hello"]]}
+             ((:document driver) "/hi"))))
 
     (testing "and it is a real request down the real pipeline, so a path
-              nothing serves says so rather than rendering blank"
+              nothing serves comes back as the 404 it is"
       ;; the property `open!`'s ctx branch had, and the reason it drove
-      ;; `dispatch/handle!` rather than calling a handler: a 404 that read as
-      ;; an empty screen sends a reader looking for a rendering bug in a
-      ;; handler that was never reached
+      ;; `dispatch/handle!` rather than calling a handler
       (let [doc ((:document driver) "/nope")]
-        (is (vector? doc))
-        (is (re-find #"404" (pr-str doc)) (pr-str doc))))
+        (is (= 404 (:status doc)) (pr-str doc))))
+
+    (testing "a redirect reaches the browser INTACT, headers and all"
+      ;; the fact this change exists for: `slopp.cljnx/visit!` follows it, and
+      ;; it cannot follow what the adapter dropped
+      (let [c3 (slopp.http/context
+                {:http/routes [{:method :get :path "/old" :auth :public
+                               :handler (fn [_] {:status 302
+                                                 :headers {"Location" "/new"}})}]})]
+        (is (= {:status 302 :headers {"Location" "/new"}}
+               ((:document (slopp.http/driver c3)) "/old")))))
 
     (testing "the query string is SPLIT the way a browser sends it"
       ;; `:uri` never carries the `?`; measured as `/search?q=web` 404ing on a

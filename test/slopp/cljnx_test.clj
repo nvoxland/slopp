@@ -1556,3 +1556,144 @@
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"(?i)webapp/routes|web/routes"
            (cljnx/driver-for {:nonsense true}))))))
+
+(deftest an-app-OPENS-at-a-url-and-its-STATUS-is-a-field
+  ;; Two halves of one idea: the external interface an agent drives should
+  ;; look like a browser. A browser is handed an ADDRESS, and it is never
+  ;; wrong about what came back.
+  ;;
+  ;; Before this, `open!` left the session at no url at all and the only way
+  ;; in was a `{:visit …}` step, while the status arrived RENDERED — a 404
+  ;; was the string "HTTP 404" somewhere on the screen. Asserting on that
+  ;; means a whole-page `str/includes?`, which is one keystroke from
+  ;; asserting nothing in particular; it is the same failure `lines` was
+  ;; split into two faces to prevent.
+  (let [ctx {:http/routes
+             [{:method :get :path "/" :auth :public :handler
+               (fn [_] {:status 200 :body [:div [:h1 "Home"]]})}
+              {:method :get :path "/thing" :auth :public :handler
+               (fn [_] {:status 200 :body [:div [:h1 "Thing"]]})}
+              {:method :get :path "/gone" :auth :public :handler
+               (fn [_] {:status 410 :body {:error "gone"}})}]}]
+
+    (testing "opening AT an address renders that screen, with no visit step"
+      (let [b (cljnx/open! (slopp.http/driver ctx) "/thing")]
+        (is (= "<h1>Thing</h1>" (cljnx/of (cljnx/tree b))))
+        (is (= "/thing" (cljnx/url b)) "the address bar says where we are")
+        (is (= 200 (cljnx/status b)))))
+
+    (testing "a status is a NUMBER to compare, not a sentence to search for"
+      (let [b (cljnx/open! (slopp.http/driver ctx) "/nope")]
+        (is (= 404 (cljnx/status b))
+            "the whole point: `(= 404 (status b))` cannot accidentally pass")
+        (is (str/includes? (cljnx/of (cljnx/tree b)) "404")
+            (str "and the screen still SAYS it — a reader looking at a 404"
+                 " must not see a blank page and go hunting for a rendering"
+                 " bug in a handler that was never reached"))))
+
+    (testing "every status the pipeline produces arrives the same way"
+      (is (= 410 (cljnx/status (cljnx/open! (slopp.http/driver ctx) "/gone"))))
+      (is (= 401 (cljnx/status (cljnx/open! (slopp.http/driver
+                                             {:http/routes
+                                              [{:method :get :path "/s"
+                                                :auth :authenticated
+                                                :handler (fn [_] {:status 200 :body [:p "s"]})}]})
+                                            "/s")))
+          "an anonymous visit to a protected page is 401 here exactly as served"))))
+
+(deftest a-redirect-lands-where-a-browser-would
+  ;; Post-redirect-get is the commonest real web flow and it did not work at
+  ;; all: the driver kept `(:body resp)` and dropped the status and headers,
+  ;; so a 302 rendered the WORDS "HTTP 302" and the session's path still
+  ;; reported the url you asked for. The address bar is the one thing a
+  ;; browser is never wrong about.
+  (let [ctx {:http/routes
+             [{:method :get :path "/admin" :auth :public :handler
+               (fn [_] {:status 302 :headers {"Location" "/login?next=/admin"}})}
+              {:method :get :path "/login" :auth :public :handler
+               (fn [req] {:status 200
+                          :body [:div [:h1 "Sign in"]
+                                 [:p (or (:query-string req) "none")]]})}
+              ;; two urls pointing at each other — a misconfigured auth
+              ;; redirect, and the failure this has to name precisely
+              {:method :get :path "/a" :auth :public :handler
+               (fn [_] {:status 302 :headers {"Location" "/b"}})}
+              {:method :get :path "/b" :auth :public :handler
+               (fn [_] {:status 302 :headers {"Location" "/a"}})}
+              {:method :get :path "/away" :auth :public :handler
+               (fn [_] {:status 302 :headers {"Location" "https://example.com/"}})}]}]
+
+    (testing "the hop is followed and the FINAL address is what we report"
+      (let [b (cljnx/open! (slopp.http/driver ctx) "/admin")]
+        (is (str/includes? (cljnx/of (cljnx/tree b)) "Sign in"))
+        (is (= "/login?next=/admin" (cljnx/url b))
+            "not /admin — a browser's address bar shows where you ENDED UP")
+        (is (= 200 (cljnx/status b))
+            "the status is the FINAL response's; the 302 is history")
+        (is (= [{:from "/admin" :status 302 :to "/login?next=/admin"}]
+               (cljnx/redirects b))
+            (str "and the hop is recorded, so a test can assert THAT it"
+                 " redirected rather than only that it ended up somewhere"))
+        (is (str/includes? (cljnx/of (cljnx/tree b)) "next=/admin")
+            "the target is a real request, query string and all")))
+
+    (testing "a plain page records no redirects at all"
+      (is (= [] (cljnx/redirects (cljnx/open! (slopp.http/driver ctx) "/login")))))
+
+    (testing "a LOOP names the cycle, and does not blame a hop count"
+      (let [m (try (cljnx/open! (slopp.http/driver ctx) "/a") nil
+                   (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+        (is (some? m) "bouncing forever is not an answer")
+        (is (str/includes? m "/a") m)
+        (is (str/includes? m "/b") m)
+        (is (not (str/includes? m "10"))
+            (str "a hop CAP would report the commonest redirect bug as"
+                 " \"too many hops\", which sends the reader looking for a"
+                 " long chain that does not exist. Name the cycle instead"))))
+
+    (testing "a redirect OFF-SITE refuses, and says the app did it"
+      (let [m (try (cljnx/open! (slopp.http/driver ctx) "/away") nil
+                   (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+        (is (some? m))
+        (is (str/includes? m "example.com") m)
+        (is (str/includes? m "redirected") m)
+        (is (not (str/includes? m "leaves the app"))
+            (str "distinct from a CALLER visiting an external url: that is a"
+                 " mistake in the test, this is a fact about the app"))))))
+
+(deftest a-document-answers-hiccup-or-a-RESPONSE-and-nothing-else
+  ;; The contract widened so the status could survive the trip, and the
+  ;; discrimination is safe for a reason worth stating: top-level hiccup is a
+  ;; VECTOR and never a map, so the two shapes cannot be confused.
+  ;;
+  ;; A hand-written page and `slopp.webapp`'s driver keep answering hiccup and
+  ;; keep knowing nothing about http. That is the property that lets the fake
+  ;; browser belong to no capability, and widening a contract is exactly where
+  ;; it would be lost by accident.
+  (testing "a hiccup document renders, and has no status because nothing asked one"
+    (let [b (cljnx/open! {:document (fn [p] [:div [:h1 (str "at " p)]])} "/x")]
+      (is (= "<h1>at /x</h1>" (cljnx/of (cljnx/tree b))))
+      (is (nil? (cljnx/status b))
+          (str "not 200 — inventing a status for a page with no http behind"
+               " it would be a confident answer to a question nobody asked"))
+      (is (= "/x" (cljnx/url b)))))
+
+  (testing "a response document renders its body and carries its status"
+    (let [b (cljnx/open! {:document (fn [_] {:status 201 :body [:p "made"]})} "/x")]
+      (is (= "made" (cljnx/of (cljnx/tree b))))
+      (is (= 201 (cljnx/status b)))))
+
+  (testing "a non-hiccup body renders as its STATUS and its data"
+    ;; a 404 that read as an empty screen sends a reader looking for a
+    ;; rendering bug in a handler that was never reached
+    (let [b (cljnx/open! {:document (fn [_] {:status 404 :body {:error "no route"}})} "/x")
+          s (cljnx/of (cljnx/tree b))]
+      (is (str/includes? s "404") s)
+      (is (str/includes? s "no route") s)))
+
+  (testing "a map that is neither REFUSES, naming both legal shapes"
+    (let [m (try (cljnx/open! {:document (fn [_] {:body [:p "hi"]})} "/x") nil
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+      (is (some? m) "rendering this blank is the failure open!'s checks exist to end")
+      (is (str/includes? m ":status") m)
+      (is (str/includes? m "hiccup") m))))

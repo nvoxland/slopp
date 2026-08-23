@@ -96,11 +96,26 @@
                             "            :on-change #(swap! state assoc :q (:value %))}]\n"
                             "   [:button {:on-click #(swap! state update :n inc)} \"Add\"]\n"
                             "   [:p (str \"q=\" (:q s) \" n=\" (:n s))]])\n\n"
-                            "(defn ^:app/entry page \"P.\" [] {:state state :view view})\n"))
+                            "(defn ^:app/entry page \"P.\" [] {:state state :view view :navigate (fn [s p] (assoc s :at p))})\n"))
           ;; the MARKER is what makes this store a framework user: its own code
           ;; requires nothing from slopp.http, and slopp opens it with
           ;; slopp.cljnx on its behalf
           (ops/restart! sess)
+
+          (testing "an ADDRESS reaches open! in a REAL vendored image"
+            ;; the composition the in-image tests cannot reach: the tool
+            ;; generates a script, the script runs where the app's vars live,
+            ;; and `slopp.cljnx/url` has to resolve THERE — in a store holding
+            ;; only what slopp vendored it. A url that reached open! but whose
+            ;; accessors did not resolve would look exactly like a screen with
+            ;; no address
+            (let [r (webdev.screen/screen! sess :url "/things")]
+              (is (nil? (:error r)) (pr-str r))
+              (is (= "/things" (:url r))
+                  (str "the address bar came back through the generated"
+                       " script: " (pr-str r)))
+              (is (str/includes? (str (:screen r)) "<h1>Demo</h1>")
+                  "and the page still rendered")))
 
           (testing "a bare look renders the v2 screen, and names the entry it used"
             (let [r (webdev.screen/screen! sess)]
@@ -259,3 +274,35 @@
                  " builds a page tag by hand, so every capability attr"
                  " (aria-label / aria-hidden / inert) and slopp:on it should"
                  " carry is dropped — render it through page-tag"))))))
+
+(deftest the-screen-tool-takes-an-ADDRESS
+  ;; The external interface an agent drives should look like the thing it is
+  ;; imitating. You hand a browser a url; you did not hand this one anything —
+  ;; the only way in was a `{:visit …}` step, so the tool's first argument was
+  ;; a SCRIPT where every other browser in the world takes an address.
+  ;;
+  ;; Asserted over the generated source rather than through an image: this is
+  ;; the seam where the url either reaches `open!` or silently does not, and
+  ;; the end-to-end drive is the external test below.
+  (testing "the url is passed at OPEN, which is where a browser takes one"
+    (let [c (webdev.screen/drive-code [] {:url "/things/42"})]
+      (is (str/includes? c "(open (as-page ((var-get pv))) \"/things/42\")") c)))
+
+  (testing "with no url the app opens at none, exactly as before"
+    ;; an app with no urls at all — {:state :view} — is legitimate, and this
+    ;; tool must keep looking at it
+    (let [c (webdev.screen/drive-code [] {})]
+      (is (str/includes? c "(open (as-page ((var-get pv))))") c)))
+
+  (testing "the answer reads the address bar, the status and the hops"
+    (let [c (webdev.screen/drive-code [] {:url "/x"})]
+      (is (str/includes? c "slopp.cljnx/url") c)
+      (is (str/includes? c "slopp.cljnx/status") c)
+      (is (str/includes? c "slopp.cljnx/redirects") c)))
+
+  (testing "a url that is not a url refuses HERE, before the image"
+    ;; same discipline as `detail`: input the tool cannot mean is refused
+    ;; where the mistake was made, not diagnosed out of a generated script's
+    ;; read failure
+    (let [r (webdev.screen/screen! nil :url 42)]
+      (is (str/includes? (str (:error r)) "url") (pr-str r)))))

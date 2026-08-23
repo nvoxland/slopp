@@ -229,18 +229,24 @@
   could never be written and the two adapters could never sit together. Naming
   this one moves the dependency to the side that can hold it.
 
-  `:document` is `(fn [path] hiccup)` and it is a REAL request down the real
+  `:document` is `(fn [path] response)` and it is a REAL request down the real
   pipeline — routing, auth policy, declared reads, the handler, effects — so a
-  page that 401s here 401s when served. A non-hiccup body is rendered as its
-  STATUS and its data rather than as a blank page: a 404 that read as an empty
-  screen sends a reader looking for a rendering bug in a handler that was never
-  reached.
+  page that 401s here 401s when served.
 
-  **The url is split the way a browser SENDS one**, which is this adapter's
-  business rather than the fake browser's: `:uri` never carries the `?`, the
-  query string arrives as `:query-string`, and a `#fragment` never reaches the
-  wire at all. Measured as `/search?q=web` 404ing on a mounted route, so every
-  pagination link read as a broken route.
+  **The whole response travels, not just its body.** It used to keep `(:body
+  resp)` and render anything non-hiccup as its status, which threw away two
+  facts the caller needed: the STATUS, leaving `(= 404 …)` as a whole-page
+  string search over a rendered sentence, and `Location`, so a redirect was
+  never followed and post-redirect-get did not work at all. Rendering belongs
+  to the reader and following belongs to the browser; producing the response is
+  the only part that is http's.
+
+  **The url is split the way a browser SENDS one**, which IS this adapter's
+  business rather than the fake browser's, because only the side that knows the
+  url is about to become an http request can split it: `:uri` never carries the
+  `?`, the query string arrives as `:query-string`, and a `#fragment` never
+  reaches the wire at all. Measured as `/search?q=web` 404ing on a mounted
+  route, so every pagination link read as a broken route.
 
   A ctx carrying a page half — `:state` and `:view` for a mounted document that
   also has client logic — hands both through, so an app that is both is opened
@@ -250,10 +256,6 @@
          :document
          (fn [path]
            (let [base     (first (str/split path #"#" 2))
-                 [uri qs] (str/split base #"\?" 2)
-                 resp     (dispatch/handle! ctx (cond-> {:request-method :get :uri uri}
-                                                  qs (assoc :query-string qs)))
-                 body     (:body resp)]
-             (if (vector? body)
-               body
-               [:div [:p (str "HTTP " (:status resp))] [:pre (pr-str body)]])))))
+                 [uri qs] (str/split base #"\?" 2)]
+             (dispatch/handle! ctx (cond-> {:request-method :get :uri uri}
+                                     qs (assoc :query-string qs)))))))

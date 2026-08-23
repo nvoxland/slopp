@@ -219,8 +219,240 @@
                          (pr-str (vec (sort (map str (keys entry))))))
                     {:keys (vec (keys entry))}))))
 
+(defn tree
+  "The session's current document.
+
+  With a `:view`, that is the app's view over the app's state, RE-DERIVED on
+  every call rather than cached — which is what makes a handler's effect
+  visible without the browser knowing anything happened. A real browser earns
+  this with a render loop; here the view is a pure function of state, so
+  reading IS re-rendering.
+
+  Without one, it is whatever the last [[visit!]] received from the app's own
+  routes. A mounted page with no client logic is static after load, and that is
+  the correct answer rather than a limitation."
+  [session]
+  (let [{:keys [app document]} @session]
+    (if-let [view (:view app)]
+      (view @(:state app))
+      document)))
+
+(defn- external-url?
+  "Whether `url` leaves this app — an absolute url with a scheme.
+
+  One definition because there are two askers: the caller handing a url to
+  [[visit!]], and an app answering a redirect to one. They must agree about
+  what \"elsewhere\" means; they say different things about whose mistake it
+  is."
+  [url]
+  (boolean (re-find #"^[a-z][a-z0-9+.-]*://" (str url))))
+
+(defn- redirect-location
+  "The url `resp` sends a browser to next, or nil when it sends it nowhere.
+
+  The five statuses a browser follows on a GET, and `Location` looked up
+  case-INSENSITIVELY across whatever a handler spelled: a request's headers
+  are lowercased by the adapter, a response's are whatever the author typed,
+  and `\"Location\"` losing to `\"location\"` would present as a redirect that
+  silently did not happen."
+  [resp]
+  (when (#{301 302 303 307 308} (:status resp))
+    (some (fn [[k v]]
+            (when (= "location" (str/lower-case (if (keyword? k) (name k) (str k))))
+              v))
+          (:headers resp))))
+
+(defn- document-body
+  "The hiccup a document response puts on the screen.
+
+  **A non-hiccup body is rendered as its STATUS and its data**, never as a
+  blank page: a 404 that read as an empty screen would send a reader looking
+  for a rendering bug in a handler that was never reached.
+
+  It lived in `slopp.http/driver` while that adapter was the only producer of
+  a response. It is here now because the status is what decides the question
+  and this is where the status is known — and because a document answering
+  plain hiccup, which is what a hand-written page and `slopp.webapp`'s driver
+  answer, has no status to render and must be left alone. Inventing `200` for
+  one would be a confident answer to a question nobody asked."
+  [resp]
+  (let [b (:body resp)]
+    (if (or (nil? (:status resp)) (vector? b))
+      b
+      [:div [:p (str "HTTP " (:status resp))] [:pre (pr-str b)]])))
+
+(defn- document-visit!
+  "Go to `path` through the app's `:document`, following redirects, and leave
+  the session on the address a browser would be showing.
+
+  A document answers one of two shapes, and they cannot be confused because
+  top-level hiccup is a VECTOR and never a map:
+
+  - **hiccup** — a hand-written page, or `slopp.webapp`'s driver. No status,
+    because nothing here made a request.
+  - **a response** — `{:status :headers :body}`, what `slopp.http/driver`
+    hands back from the real pipeline. A map without `:status` is neither, and
+    refuses: rendering it blank is the failure the constructor's key checks
+    exist to end.
+
+  **A LOOP is named before any hop count is.** Two urls pointing at each other
+  is what a misconfigured auth redirect looks like, and it is far and away the
+  common case; reporting it as \"too many hops\" sends the reader looking for a
+  long chain that does not exist. The cap below it is a backstop for a chain
+  that really is long, and says so differently.
+
+  **A redirect off-site refuses**, and the message says the APP sent us there
+  — a different fact from the caller asking to leave, which [[visit!]] refuses
+  in its own words. A headless session has nowhere to go either way."
+  [session app path]
+  (let [doc (:document app)]
+    (loop [u path, seen #{}, hops []]
+      (let [r (doc u)]
+        (when (and (map? r) (not (contains? r :status)))
+          (throw (ex-info (str "a :document answers hiccup — a VECTOR, what a"
+                               " page looks like — or a response carrying"
+                               " :status, which is what slopp.http/driver hands"
+                               " back. This one is a map with no :status, so"
+                               " there is no way to tell which was meant, and"
+                               " guessing renders a BLANK page. Keys: "
+                               (str/join ", " (map pr-str (sort-by str (keys r)))))
+                          {:path u :got (vec (keys r))})))
+        (let [resp (if (map? r) r {:body r})
+              loc  (redirect-location resp)]
+          (cond
+            (nil? loc)
+            (let [body (document-body resp)]
+              (swap! session assoc
+                     :document body
+                     :path u
+                     :status (:status resp)
+                     :redirects hops)
+              ;; a mounted page that ALSO has client logic: its :view
+              ;; re-renders from state, so the document has to be reachable
+              ;; from there
+              (when-let [st (:state app)] (swap! st assoc ::document body))
+              session)
+
+            (external-url? loc)
+            (throw (ex-info (str "visiting " (pr-str path) " redirected off-site"
+                                 " to " (pr-str loc) " — a headless session has"
+                                 " nowhere else to go. The app decided this,"
+                                 " which is usually the fact worth knowing;"
+                                 " following it is a real browser's business")
+                            {:path path :location loc}))
+
+            (or (= loc u) (contains? seen loc))
+            (throw (ex-info (str "redirect loop: "
+                                 (str/join " -> " (concat (map :from hops) [u loc]))
+                                 " — the app sends this url back to one it has"
+                                 " already served, so a browser would bounce"
+                                 " forever. Two urls pointing at each other is"
+                                 " what a misconfigured sign-in redirect looks"
+                                 " like")
+                            {:path path :cycle (conj (mapv :from hops) u loc)}))
+
+            (<= 9 (count hops))
+            (throw (ex-info (str "redirect chain too long from " (pr-str path)
+                                 ": " (str/join " -> " (concat (map :from hops) [u loc]))
+                                 ". No cycle here — these are all different"
+                                 " urls — so this is a chain a browser would"
+                                 " also give up on")
+                            {:path path :chain (conj (mapv :from hops) u loc)}))
+
+            :else
+            (recur loc (conj seen u)
+                   (conj hops {:from u :status (:status resp) :to loc}))))))))
+
+(defn ^:export visit!
+  "Go to `path`. Returns the session.
+
+  How a url resolves depends on what the app IS, and both answers are the
+  app's own — slopp never learns what `/store` means:
+
+  - **`:navigate`** — `(fn [state path] state')`, client-side routing. ONE
+    function, deliberately not a router: which screen, which params, what to
+    fetch, whether anything loads at all is the app's business. The path
+    arrives VERBATIM, query string included.
+  - **`:document`** — `(fn [path] hiccup-or-response)`, and for a served app
+    that is a real request through `slopp.http.dispatch/handle!`: routing,
+    auth policy, declared reads, the handler, effects. Redirects are followed
+    and the response's status is kept — see [[document-visit!]]. The url is
+    split the way a browser sends it — `:uri` never carries the `?`, the query
+    string arrives as `:query-string`, and a `#fragment` never reaches the
+    wire at all — by the ADAPTER, which is the half that knows whether the url
+    is about to become an http request or a client route.
+
+  `:navigate` wins where both exist, because an app that routes on the client
+  is telling you a url change is a client event — and it leaves [[status]] nil
+  for the honest reason that no request was made.
+
+  **Each branch lands its own address**, rather than a shared tail setting
+  `:path` to the argument: a document visit can END somewhere else, and a tail
+  would have quietly put the requested url back over the final one — the
+  address bar reporting where you asked to go rather than where you are, which
+  is the one thing a browser is never wrong about.
+
+  Three urls that are not navigations, each answered as a browser answers it:
+  an EXTERNAL url (`https://…`) REFUSES — a headless session has nowhere to
+  go, and handing it to a client router would be wrong for both sides; a bare
+  fragment (`#top`) is a SCROLL, so it is a no-op here; a hash ROUTE (`#/…`)
+  is client routing by convention and goes to `:navigate` like any path.
+
+  **An app with neither REFUSES rather than doing nothing.** An app without
+  urls is legitimate, and visiting one is a mistake worth hearing about — a
+  silent no-op reads as a page that navigated and rendered nothing, which is a
+  bug report about the app rather than about the call."
+  [session path]
+  (let [{:keys [app]} @session]
+    (cond
+      (external-url? path)
+      (throw (ex-info (str "visiting " (pr-str path) " leaves the app — a"
+                           " headless session has nowhere else to go. The href"
+                           " is on the screen, which is usually the fact a test"
+                           " wants; following it is a real browser's business")
+                      {:path path}))
+
+      ;; a bare fragment is a scroll target; a browser changes no page state,
+      ;; and so neither does the address. #/… is the hash-ROUTING convention
+      ;; and falls through to :navigate.
+      (and (str/starts-with? path "#") (not (str/starts-with? path "#/")))
+      nil
+
+      (:navigate app)
+      ;; NOT (swap! state nav path). swap! RETRIES its function whenever the
+      ;; CAS loses, so it requires a pure one — and `nav` is the app's, which
+      ;; slopp cannot know anything about. A real SPA loop swaps the same atom
+      ;; from inside it: the inner swap changes the value mid-computation, the
+      ;; outer CAS fails, it retries, forever. Measured at 64 MILLION retries in
+      ;; three seconds, and it presents as a HANG rather than an error — a
+      ;; consumer lost 127 seconds and a dead image to it, then `query_eval`
+      ;; answering [] because the image was pinned.
+      ;;
+      ;; Read, call, write. There is one thread here, so nothing is lost by
+      ;; giving up the atomicity — and an app that mutates the atom ITSELF and
+      ;; returns the new value (the ordinary adapter shape) works either way.
+      (let [st (:state app)]
+        (reset! st ((:navigate app) @st path))
+        ;; a client route made no request, so a status left over from an
+        ;; earlier document visit would be a stale answer to a live question
+        (swap! session assoc :path path :status nil :redirects []))
+
+      (:document app)
+      (document-visit! session app path)
+
+      :else
+      (throw (ex-info (str "this app declares neither :navigate nor :document,"
+                           " so it has no urls — cannot visit " (pr-str path)
+                           ". A served app gets both from slopp.http/driver and"
+                           " a browser app from slopp.webapp/driver; a page"
+                           " wired by hand adds :navigate (fn [state path]"
+                           " state') or :document (fn [path] hiccup)")
+                      {:path path}))))
+  session)
+
 (defn ^:export open!
-  "Open a headless browser over `app`. ONE contract, and it knows no app type:
+  "Open a headless browser over `app`, optionally AT a url. ONE contract, and
+  it knows no app type:
 
   ```clj
   {:document (fn [path] hiccup)     ; how a path becomes a screen
@@ -233,6 +465,14 @@
 
   An app needs SOME way to produce a screen — a `:view` over state, a
   `:document` over a path, or both — and nothing else here is required.
+
+  **`(open! app \"/things/42\")` opens at an address, because that is what a
+  browser is handed.** The url arity is [[visit!]] applied once, and it exists
+  because the closer this interface is to a browser's, the better an agent or
+  a test drives it: a session that opens at NO url, reachable only through a
+  `{:visit …}` step, is a state a browser is never in. An app with no urls
+  gets `visit!`'s own refusal, which is the right answer to giving one an
+  address.
 
   **Neither half of the contract is produced by hand.** A served app becomes
   one through `slopp.http/driver`, which performs a real request down the real
@@ -279,181 +519,74 @@
   browser takes, so a test drives a lookalike and passes while the real screen
   is wrong. That is the bug this exists to kill; a design that reintroduces it
   one level up is not a fix."
-  [app]
-  (when-not (map? app)
-    (throw (ex-info (str "open takes the app as a map — {:document …} for a path"
-                         " that renders, {:state … :view …} for client state —"
-                         " got " (pr-str app))
-                    {:got app})))
-  ;; a served ctx is the one wrong shape worth naming rather than reporting as
-  ;; unknown keys: its author did not typo anything, they handed over the map
-  ;; this used to take, and the answer is one call away
-  (when (:http/routes app)
-    (throw (ex-info (str "this is a served CONTEXT, not a page — wrap it:"
-                         " (open! (slopp.http/driver ctx)). The fake browser no"
-                         " longer performs http's requests itself, so that the"
-                         " same contract can be produced from a browser app's"
-                         " wiring by slopp.webapp/driver.")
-                    {:unknown [:http/routes]})))
-  (let [allowed #{:state :view :navigate :dispatch :boot :document}
-        unknown (remove allowed (keys app))]
-    (when (seq unknown)
-      (throw (ex-info (str "unknown page key"
-                           (when (next unknown) "s") " "
-                           (str/join ", " (map pr-str (sort-by str unknown)))
-                           " — a page declares :document, :state, :view,"
-                           " :navigate, :dispatch and :boot. (A typo here used"
-                           " to render a BLANK page; refusing is the favour.)")
-                      {:unknown (vec unknown)})))
-    ;; SOME way to produce a screen. An app declaring neither renders nothing
-    ;; at every url, which is the blank page this constructor exists to refuse
-    (when-not (or (contains? app :view) (contains? app :document))
-      (throw (ex-info (str "a page needs :view — (fn [state] hiccup) — or"
-                           " :document — (fn [path] hiccup); with neither there"
-                           " is no screen to read at any url")
-                      {})))
-    (when (and (contains? app :view) (not (ifn? (:view app))))
-      (throw (ex-info (str "a page needs :view — (fn [state] hiccup); without"
-                           " one there is no screen to read")
-                      {})))
-    (when (and (contains? app :document) (not (ifn? (:document app))))
-      (throw (ex-info (str ":document must be callable — (fn [path] hiccup),"
-                           " what a visit renders — got "
-                           (pr-str (:document app)))
-                      {:document (:document app)})))
-    ;; a :view is a function OF STATE, so one without state has nothing to read
-    (when (and (contains? app :view) (not (contains? app :state)))
-      (throw (ex-info (str "a page needs :state — the app's OWN atom, so what"
-                           " a handler changes is what the view re-reads")
-                      {})))
-    (when (and (contains? app :state)
-               (not (instance? clojure.lang.IAtom (:state app))))
-      (throw (ex-info (str "a page's :state must be an atom — something the"
-                           " browser can read and reset! — got "
-                           (pr-str (type (:state app))))
-                      {:state (:state app)})))
-    (when (and (contains? app :boot) (not (ifn? (:boot app))))
-      (throw (ex-info (str ":boot must be callable — (fn [state] state'),"
-                           " the entry point's state transform — got "
-                           (pr-str (:boot app)))
-                      {:boot (:boot app)})))
-    (when (and (:boot app) (not (:state app)))
-      (throw (ex-info ":boot needs :state — an entry point with no state to change has nothing to say headlessly" {}))))
-  (when-let [b (:boot app)]
-    ;; read, call, write — never inside swap!, for navigate's reason: the
-    ;; entry point is the app's own code and swap! demands a pure fn
-    (let [st (:state app)]
-      (reset! st (b @st))))
-  (atom {:app app :path nil :document nil}))
-
-(defn tree
-  "The session's current document.
-
-  With a `:view`, that is the app's view over the app's state, RE-DERIVED on
-  every call rather than cached — which is what makes a handler's effect
-  visible without the browser knowing anything happened. A real browser earns
-  this with a render loop; here the view is a pure function of state, so
-  reading IS re-rendering.
-
-  Without one, it is whatever the last [[visit!]] received from the app's own
-  routes. A mounted page with no client logic is static after load, and that is
-  the correct answer rather than a limitation."
-  [session]
-  (let [{:keys [app document]} @session]
-    (if-let [view (:view app)]
-      (view @(:state app))
-      document)))
-
-(defn ^:export visit!
-  "Go to `path`. Returns the session.
-
-  How a url resolves depends on what the app IS, and both answers are the
-  app's own — slopp never learns what `/store` means:
-
-  - **`:navigate`** — `(fn [state path] state')`, client-side routing. ONE
-    function, deliberately not a router: which screen, which params, what to
-    fetch, whether anything loads at all is the app's business. The path
-    arrives VERBATIM, query string included.
-  - **`:http/routes`** — a real request through `slopp.http.dispatch/handle!`:
-    routing, auth policy, declared reads, the handler, effects. The url is
-    split the way a browser sends it — `:uri` never carries the `?`, the
-    query string arrives as `:query-string`, and a `#fragment` never reaches
-    the wire at all. The review measured the alternative: `/search?q=web`
-    404ing on a mounted route, so every pagination link read as a broken
-    route.
-
-  `:navigate` wins where both exist, because an app that routes on the client
-  is telling you a url change is a client event.
-
-  Three urls that are not navigations, each answered as a browser answers it:
-  an EXTERNAL url (`https://…`) REFUSES — a headless session has nowhere to
-  go, and handing it to a client router would be wrong for both sides; a bare
-  fragment (`#top`) is a SCROLL, so it is a no-op here; a hash ROUTE (`#/…`)
-  is client routing by convention and goes to `:navigate` like any path.
-
-  **A non-hiccup body is rendered as its STATUS and its data**, never as a
-  blank page. A 404 that read as an empty screen would send a reader looking
-  for a rendering bug in a handler that was never reached.
-
-  **An app with neither REFUSES rather than doing nothing.** An app without
-  urls is legitimate, and visiting one is a mistake worth hearing about — a
-  silent no-op reads as a page that navigated and rendered nothing, which is a
-  bug report about the app rather than about the call."
-  [session path]
-  (let [{:keys [app]} @session]
-    (cond
-      (re-find #"^[a-z][a-z0-9+.-]*://" path)
-      (throw (ex-info (str "visiting " (pr-str path) " leaves the app — a"
-                           " headless session has nowhere else to go. The href"
-                           " is on the screen, which is usually the fact a test"
-                           " wants; following it is a real browser's business")
-                      {:path path}))
-
-      ;; a bare fragment is a scroll target; a browser changes no page state.
-      ;; #/… is the hash-ROUTING convention and falls through to :navigate.
-      (and (str/starts-with? path "#") (not (str/starts-with? path "#/")))
-      nil
-
-      (:navigate app)
-      ;; NOT (swap! state nav path). swap! RETRIES its function whenever the
-      ;; CAS loses, so it requires a pure one — and `nav` is the app's, which
-      ;; slopp cannot know anything about. A real SPA loop swaps the same atom
-      ;; from inside it: the inner swap changes the value mid-computation, the
-      ;; outer CAS fails, it retries, forever. Measured at 64 MILLION retries in
-      ;; three seconds, and it presents as a HANG rather than an error — a
-      ;; consumer lost 127 seconds and a dead image to it, then `query_eval`
-      ;; answering [] because the image was pinned.
-      ;;
-      ;; Read, call, write. There is one thread here, so nothing is lost by
-      ;; giving up the atomicity — and an app that mutates the atom ITSELF and
-      ;; returns the new value (the ordinary adapter shape) works either way.
-      (let [st (:state app)]
-        (reset! st ((:navigate app) @st path)))
-
-      (:document app)
-      ;; the path arrives VERBATIM. Splitting a url — stripping the fragment a
-      ;; browser never sends, separating the query string — is what the
-      ;; PRODUCER of this document does, because only it knows whether the url
-      ;; is about to become an http request or a client route. This used to
-      ;; call the dispatcher here, which is how http's adapter came to live
-      ;; inside the fake browser.
-      (let [doc ((:document app) path)]
-        (swap! session assoc :document doc)
-        ;; a mounted page that ALSO has client logic: its :view re-renders from
-        ;; state, so the document has to be reachable from there
-        (when-let [st (:state app)] (swap! st assoc ::document doc)))
-
-      :else
-      (throw (ex-info (str "this app declares neither :navigate nor :document,"
-                           " so it has no urls — cannot visit " (pr-str path)
-                           ". A served app gets both from slopp.http/driver and"
-                           " a browser app from slopp.webapp/driver; a page"
-                           " wired by hand adds :navigate (fn [state path]"
-                           " state') or :document (fn [path] hiccup)")
-                      {:path path})))
-    (when-not (and (str/starts-with? path "#") (not (str/starts-with? path "#/")))
-      (swap! session assoc :path path))
-    session))
+  ([app]
+   (when-not (map? app)
+     (throw (ex-info (str "open takes the app as a map — {:document …} for a path"
+                          " that renders, {:state … :view …} for client state —"
+                          " got " (pr-str app))
+                     {:got app})))
+   ;; a served ctx is the one wrong shape worth naming rather than reporting as
+   ;; unknown keys: its author did not typo anything, they handed over the map
+   ;; this used to take, and the answer is one call away
+   (when (:http/routes app)
+     (throw (ex-info (str "this is a served CONTEXT, not a page — wrap it:"
+                          " (open! (slopp.http/driver ctx)). The fake browser no"
+                          " longer performs http's requests itself, so that the"
+                          " same contract can be produced from a browser app's"
+                          " wiring by slopp.webapp/driver.")
+                     {:unknown [:http/routes]})))
+   (let [allowed #{:state :view :navigate :dispatch :boot :document}
+         unknown (remove allowed (keys app))]
+     (when (seq unknown)
+       (throw (ex-info (str "unknown page key"
+                            (when (next unknown) "s") " "
+                            (str/join ", " (map pr-str (sort-by str unknown)))
+                            " — a page declares :document, :state, :view,"
+                            " :navigate, :dispatch and :boot. (A typo here used"
+                            " to render a BLANK page; refusing is the favour.)")
+                       {:unknown (vec unknown)})))
+     ;; SOME way to produce a screen. An app declaring neither renders nothing
+     ;; at every url, which is the blank page this constructor exists to refuse
+     (when-not (or (contains? app :view) (contains? app :document))
+       (throw (ex-info (str "a page needs :view — (fn [state] hiccup) — or"
+                            " :document — (fn [path] hiccup); with neither there"
+                            " is no screen to read at any url")
+                       {})))
+     (when (and (contains? app :view) (not (ifn? (:view app))))
+       (throw (ex-info (str "a page needs :view — (fn [state] hiccup); without"
+                            " one there is no screen to read")
+                       {})))
+     (when (and (contains? app :document) (not (ifn? (:document app))))
+       (throw (ex-info (str ":document must be callable — (fn [path] hiccup),"
+                            " what a visit renders — got "
+                            (pr-str (:document app)))
+                       {:document (:document app)})))
+     ;; a :view is a function OF STATE, so one without state has nothing to read
+     (when (and (contains? app :view) (not (contains? app :state)))
+       (throw (ex-info (str "a page needs :state — the app's OWN atom, so what"
+                            " a handler changes is what the view re-reads")
+                       {})))
+     (when (and (contains? app :state)
+                (not (instance? clojure.lang.IAtom (:state app))))
+       (throw (ex-info (str "a page's :state must be an atom — something the"
+                            " browser can read and reset! — got "
+                            (pr-str (type (:state app))))
+                       {:state (:state app)})))
+     (when (and (contains? app :boot) (not (ifn? (:boot app))))
+       (throw (ex-info (str ":boot must be callable — (fn [state] state'),"
+                            " the entry point's state transform — got "
+                            (pr-str (:boot app)))
+                       {:boot (:boot app)})))
+     (when (and (:boot app) (not (:state app)))
+       (throw (ex-info ":boot needs :state — an entry point with no state to change has nothing to say headlessly" {}))))
+   (when-let [b (:boot app)]
+     ;; read, call, write — never inside swap!, for navigate's reason: the
+     ;; entry point is the app's own code and swap! demands a pure fn
+     (let [st (:state app)]
+       (reset! st (b @st))))
+   (atom {:app app :path nil :document nil :status nil :redirects []}))
+  ([app url]
+   (visit! (open! app) url)))
 
 (defn- unary?
   "Whether `f` accepts exactly one argument — read off the function, never
@@ -582,6 +715,44 @@
         (visit! session (:href a))
         (submit! session node)))
     session))
+
+(defn ^:export url
+  "The address this session is showing — its address bar.
+
+  After a redirect chain this is where it ENDED UP, not what was asked for,
+  which is the whole reason it is worth reading. nil before the first visit."
+  [session]
+  (:path @session))
+
+(defn ^:export status
+  "The http status of the screen this session is showing, or nil.
+
+  ```clj
+  (is (= 404 (status b)))
+  ```
+
+  nil is an answer and not a gap: a page produced by `:navigate`, or by a
+  `:document` that hands back plain hiccup, made no request, and inventing
+  `200` for it would answer a question nobody asked.
+
+  It is a FIELD because it used to be a sentence. A non-hiccup body renders as
+  `HTTP 404` on the screen — which a reader needs — so the only way to assert
+  a status was a whole-page `str/includes?`, one keystroke from asserting
+  nothing in particular. That is the failure [[lines]] was split into two
+  faces to prevent, and it applies to every screen fact that has a number."
+  [session]
+  (:status @session))
+
+(defn ^:export redirects
+  "The hops taken to reach the current screen — `[{:from :status :to} …]`,
+  empty when the address answered directly.
+
+  Worth having separately from [[url]] because they assert different things:
+  `url` says where we are, which a direct visit could also have reached. This
+  says the app SENT us, which is the behaviour a sign-in or post-redirect-get
+  test is actually about."
+  [session]
+  (or (:redirects @session) []))
 
 (defn ^:export text
   "What is on the screen right now, as readable text — the whole assertion

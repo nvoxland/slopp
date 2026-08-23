@@ -402,7 +402,8 @@
                              :steps (:steps a)
                              :region (:region a)
                              :detail (:detail a)
-                             :trace (:trace a))))
+                             :trace (:trace a)
+                             :url (:url a))))
    "compile_client"
    (fn [session a _sym]
      (text! (if (:output a)
