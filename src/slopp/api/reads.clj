@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.http.contract :as http.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.http.contract :as http.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -78,16 +78,54 @@
   [{:keys [session]} _]
   (model/module-index session))
 
-(defn ^{:http/read :ui/contract} contract-read
-  "The shape of this app's own API, for a consumer that generates a typed
-  client against it.
+(defn ^:export app-namespaces
+  "The namespaces of `store` that DECLARE endpoints — this application's own
+  API surface, whoever happens to be serving it.
 
-  The namespace list arrives through `perform-ctx` rather than being reached
-  for here: only the SERVER knows what it serves, and a performer that imported
-  that list would invert the dependency (slopp.api.server already requires this
-  namespace). It is data on the way in, like every other dep."
+  **Serving and declaring are different questions**, and the reviewer listener
+  is where they come apart. It runs slopp's own API namespaces, so a contract
+  built from what it serves describes the MCP SERVER rather than the project
+  being reviewed. That is true on every store: the endpoints screen was 100%
+  infrastructure and 0% application, and it read as correct because on slopp's
+  own store the two answers coincide — `slopp.api.endpoints` is a form in
+  slopp's store and framework everywhere else. A feature that works on exactly
+  the store it was developed on.
+
+  It also removes a symptom rather than papering it: every handler named by a
+  document built from this list IS a form in the store the document describes,
+  so the reviewer UI's `read its source` link resolves by construction. It used
+  to 404 on every endpoint of every project, and the honest reading of that 404
+  was that those endpoints were never the application's.
+
+  Built on `web-endpoint-rows`, the single route traversal the write gates also
+  use, so what is documented is what was enforced — and TEST namespaces are
+  excluded there, which is right here too: a fixture endpoint is not surface."
+  [store]
+  (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
+
+(defn ^{:http/read :ui/contract} contract-read
+  "The shape of this APPLICATION's own API, for a consumer that generates a
+  typed client against it.
+
+  **The namespaces come from the STORE, not from what this listener serves**,
+  and the two are different questions — see [[app-namespaces]]. The reviewer
+  listener runs slopp's own API, so serving was the wrong source: it published
+  the MCP server's surface as though the project had written it, on every
+  project, and looked right only on slopp's own store.
+
+  The CONTENT still comes from var metadata, and that split is forced rather
+  than chosen. A schema is evaluated at def time — `^{:rest/response
+  contracts/timeline}` is plain malli data by the time anything sees it — so
+  the store holds the SYMBOL and only the loaded var holds the value. A
+  document derived outright from the store would publish schema NAMES a
+  consumer cannot validate against, which is worse than publishing nothing.
+
+  So: the store says WHICH, the image says WHAT. A namespace declared in the
+  store but not loaded contributes no rows rather than broken ones, because
+  `routes/from-namespaces` reads what is actually there."
   [ctx _]
-  (http.contract/contract-document (:served-namespaces ctx)))
+  (http.contract/contract-document
+   (app-namespaces (:store @(:session ctx)))))
 
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the

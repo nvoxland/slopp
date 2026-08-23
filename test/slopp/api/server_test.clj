@@ -121,27 +121,58 @@
     (is (= 0 (server/preferred-port nil nil)))))
 
 (deftest ^:external a-real-server-publishes-its-own-contract
-  ;; serve! is the only thing that knows which namespaces it serves, so that
-  ;; list reaches the read performer through perform-ctx. Forget to thread it
-  ;; and /api/contracts still answers 200 — with zero endpoints. A consumer
-  ;; would generate an empty client from it and nothing would look broken
-  ;; until a call that was never generated went missing.
+  ;; This used to be about serve! threading its served-namespaces list into
+  ;; perform-ctx: forget it and /api/contracts answers 200 with zero endpoints,
+  ;; a consumer generates an empty client, and nothing looks broken until a
+  ;; call that was never generated goes missing.
   ;;
-  ;; In-image tests cannot catch this: they build perform-ctx themselves, so
-  ;; they pass whether or not the SERVER does. Only a real serve! can tell.
-  (let [sess (atom {:store (store/empty-store)})]
-    (try
-      (let [r   (server/serve! sess 0)
-            doc (edn/read-string
-                 (:http/body
-                  (http.client/request
-                   {:http/url (str "http://127.0.0.1:" (:port r) "/api/contracts")})))
-            paths (set (map :path (:endpoints doc)))]
-        (is (= 1 (:slopp/contract-version doc)))
-        (is (contains? paths "/api/timeline")
-            "a server that forgot to thread its namespace list publishes nothing")
-        (is (contains? paths "/api/modules")))
-      (finally (server/stop!)))))
+  ;; That list is no longer the source. The document follows the STORE — what
+  ;; this application DECLARES — because the reviewer listener serves slopp's
+  ;; own API and describing that as the project's was the bug. So the failure
+  ;; this guards moved with it: forget to thread the SESSION and the document
+  ;; is empty for the same reason, with the same silence.
+  ;;
+  ;; In-image tests still cannot catch it — they build perform-ctx themselves,
+  ;; so they pass whether or not the SERVER does. Only a real serve! can tell,
+  ;; and that is why this one is ^:external.
+  (testing "a store that DECLARES endpoints gets them published"
+    ;; the declaration is a stub; the schemas come from the loaded vars, which
+    ;; is the store-says-WHICH / image-says-WHAT split
+    (let [sess (atom {:store (store/ingest
+                              (store/empty-store) 'slopp.api.endpoints
+                              (str "(ns slopp.api.endpoints)\n\n"
+                                   "(defn ^{:http/path \"/api/timeline\" :http/method :get"
+                                   " :http/auth :public}\n  timeline \"T.\" [_] {:status 200})\n"))})]
+      (try
+        (let [r   (server/serve! sess 0)
+              doc (edn/read-string
+                   (:http/body
+                    (http.client/request
+                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/contracts")})))
+              paths (set (map :path (:endpoints doc)))]
+          (is (= 1 (:slopp/contract-version doc)))
+          (is (contains? paths "/api/timeline")
+              "a server that forgot to thread its session publishes nothing")
+          (is (contains? paths "/api/modules")
+              "and the whole namespace's surface arrives, read off the loaded vars"))
+        (finally (server/stop!)))))
+
+  (testing "and a store that declares NOTHING publishes nothing"
+    ;; the property the change is for: this listener is serving the reviewer
+    ;; API in order to answer at all, and must not describe it as the
+    ;; application's. Before, an empty store published all nine reviewer paths
+    (let [sess (atom {:store (store/empty-store)})]
+      (try
+        (let [r   (server/serve! sess 0)
+              doc (edn/read-string
+                   (:http/body
+                    (http.client/request
+                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/contracts")})))]
+          (is (= 1 (:slopp/contract-version doc)))
+          (is (empty? (:endpoints doc))
+              (str "the listener's own surface is the MCP server's, not this"
+                   " project's: " (pr-str (map :path (:endpoints doc))))))
+        (finally (server/stop!))))))
 
 (deftest the-served-list-is-checked-against-what-declares-endpoints
   ;; `served-namespaces`' docstring argues at length that the list must be

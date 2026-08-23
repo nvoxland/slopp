@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.http.contract :as http.contract] [slopp.rest :as slopp.rest]))
+            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.http.contract :as http.contract] [slopp.rest :as slopp.rest] [slopp.api.reads :as reads]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -262,17 +262,15 @@
   ;; that matters is not "some document is served" but "the schema published
   ;; for an endpoint IS the var that endpoint declares" — anything weaker and a
   ;; generated client would validate against a shape the server never promised.
-  (let [ctx (slopp.http/context {:http/namespaces server/served-namespaces
-                          :http/perform-ctx {:session (atom {:store (store/empty-store)})
-                                            :served-namespaces server/served-namespaces}})
-        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})
-        doc (edn/read-string (:body r))
+  ;;
+  ;; That property belongs to `contract-document` and is asserted here against
+  ;; slopp's own API namespaces DIRECTLY. It used to be asserted through the
+  ;; `/api/contracts` endpoint, which was possible only while that endpoint
+  ;; documented the listener's own surface — and documenting the listener was
+  ;; the bug (see the-contract-documents-the-APPLICATION-…). Asserting it here
+  ;; keeps the property and stops it depending on the thing that was wrong.
+  (let [doc     (http.contract/contract-document server/served-namespaces)
         by-path (into {} (map (juxt :path identity)) (:endpoints doc))]
-
-    (testing "EDN verbatim — JSON would flatten a keyword schema into a string"
-      (is (= 200 (:status r)))
-      (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
-      (is (= "application/edn" (get-in r [:headers "Content-Type"]))))
 
     (testing "the document is versioned and lists the typed endpoints"
       (is (= 1 (:slopp/contract-version doc)))
@@ -295,7 +293,19 @@
     (testing "pages, the bundle and the contract itself are not part of a TYPED contract"
       (is (not (contains? by-path "/")))
       (is (not (contains? by-path "/js/main.js")))
-      (is (not (contains? by-path "/api/contracts"))))))
+      (is (not (contains? by-path "/api/contracts")))))
+
+  (testing "and the ENDPOINT still serves EDN verbatim, whatever it documents"
+    ;; JSON would flatten a keyword schema into a string, so the wire format is
+    ;; a property of the endpoint independent of which namespaces it covers
+    (let [ctx (slopp.http/context {:http/namespaces server/served-namespaces
+                            :http/perform-ctx {:session (atom {:store (store/empty-store)})
+                                              :served-namespaces server/served-namespaces}})
+          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})]
+      (is (= 200 (:status r)))
+      (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
+      (is (= "application/edn" (get-in r [:headers "Content-Type"])))
+      (is (= 1 (:slopp/contract-version (edn/read-string (:body r))))))))
 
 (deftest ^:external a-consumer-generates-an-equivalent-client-from-the-published-contract
   ;; The fixed point the whole split rests on. A store that has never seen
@@ -306,7 +316,16 @@
   ;;
   ;; Two processes' worth of separation in one JVM: the producer serves over a
   ;; real socket, and the consumer is a genuinely separate session and store.
-  (let [producer (atom {:store (store/empty-store)})
+  (let [;; the producer DECLARES its API, because the published document now
+        ;; follows the store rather than the listener's own served list — a
+        ;; reviewer listener describing its own surface as the project's was
+        ;; the bug. The declaration is a stub and the schemas still come from
+        ;; the loaded vars: the store says WHICH, the image says WHAT.
+        producer (atom {:store (store/ingest
+                                (store/empty-store) 'slopp.api.endpoints
+                                (str "(ns slopp.api.endpoints)\n\n"
+                                     "(defn ^{:http/path \"/api/timeline\" :http/method :get"
+                                     " :http/auth :public}\n  timeline \"T.\" [_] {:status 200})\n"))})
         consumer (external/open!)]
     (try
       (let [r   (server/serve! producer 0)
@@ -967,3 +986,75 @@
       ;; the deliberate-error path, which must not become a 500 for failing to
       ;; match a schema describing the 200
       (is (= 404 (:status (GET "/api/ns/no.such.ns")))))))
+
+(deftest the-contract-documents-the-APPLICATION-not-the-listener-serving-it
+  ;; Nathan's framing, via slopp-ui, and it supersedes the bug they first
+  ;; reported (a 404 on `read its source` for every endpoint on every project
+  ;; but slopp's own):
+  ;;
+  ;;   The APIs the slopp framework automatically exposes on all projects
+  ;;   should be sort of "hidden" — they are inherently part of a slopp MCP
+  ;;   server, not part of the application. What the reviewer UI exposes is
+  ;;   documenting the application itself.
+  ;;
+  ;; That makes the 404 a CONSEQUENCE rather than a defect: those handlers have
+  ;; no form in the store being browsed because they are not that store's code.
+  ;; Fixing the link would have made infrastructure look like the app, more
+  ;; convincingly.
+  ;;
+  ;; Measured before the change: the project listener answered `/api/namespaces`
+  ;; 200 and not one of the consuming app's eleven declared endpoints, so the
+  ;; endpoints screen was 100% MCP-server surface and 0% application.
+  ;;
+  ;; **The list comes from the store; the CONTENT still comes from var
+  ;; metadata**, and that split is forced rather than chosen. A schema is
+  ;; evaluated at def time — `^{:rest/response contracts/timeline}` is plain
+  ;; malli data by the time anything sees it — so the store holds the SYMBOL
+  ;; and only the loaded var holds the value. Deriving the document outright
+  ;; from the store would publish names a consumer cannot validate against.
+  (testing "the namespaces to document are the STORE's, not the listener's"
+    ;; the whole fix, as a pure function, so it is checkable without an image
+    (let [st (-> (store/empty-store)
+                 (store/ingest 'demo.api
+                               (str "(ns demo.api)\n\n"
+                                    "(defn ^{:http/path \"/things\" :http/method :get"
+                                    " :http/auth :public}\n  h \"H.\" [_] {:status 200})\n"))
+                 (store/ingest 'demo.pages
+                               (str "(ns demo.pages)\n\n"
+                                    "(defn ^{:http/path \"/\" :http/method :get"
+                                    " :http/auth :public}\n  home \"Home.\" [_] {:status 200})\n"))
+                 (store/ingest 'demo.plain
+                               "(ns demo.plain)\n\n(defn ^:unused-ok helper \"H.\" [x] x)\n"))]
+      (is (= '#{demo.api demo.pages} (set (reads/app-namespaces st)))
+          "a namespace declaring no endpoint contributes nothing")
+      (is (not-any? #(str/starts-with? (str %) "slopp.") (reads/app-namespaces st))
+          "slopp's own reviewer API is not this application's code")))
+
+  (testing "a store declaring NO endpoints publishes an empty document"
+    ;; and specifically not the reviewer API, which this very listener is
+    ;; serving in order to answer the request. Serving is not declaring
+    (let [ctx (slopp.http/context
+               {:http/namespaces server/served-namespaces
+                :http/perform-ctx {:session (atom {:store (store/empty-store)})
+                                   :served-namespaces server/served-namespaces}})
+          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})
+          doc (edn/read-string (:body r))
+          paths (set (map :path (:endpoints doc)))]
+      (is (= 200 (:status r)))
+      (is (= 1 (:slopp/contract-version doc)))
+      (is (empty? paths)
+          (str "the listener serves the reviewer API and must not describe it"
+               " as the application's: " (pr-str paths)))))
+
+  (testing "every namespace published HAS forms in the store it describes"
+    ;; slopp-ui's invariant, and the one that would have failed the day this
+    ;; shipped on any store but slopp's own: if /api/contracts publishes an
+    ;; address, /api/source resolves it. It holds by CONSTRUCTION now — the
+    ;; addresses come from the store — and this pins the construction
+    (let [st (store/ingest (store/empty-store) 'demo.api
+                           (str "(ns demo.api)\n\n"
+                                "(defn ^{:http/path \"/things\" :http/method :get"
+                                " :http/auth :public}\n  h \"H.\" [_] {:status 200})\n"))]
+      (doseq [nsx (reads/app-namespaces st)]
+        (is (seq (store/forms st nsx))
+            (str nsx " is documented but has no forms in this store"))))))
