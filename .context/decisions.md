@@ -5008,3 +5008,72 @@ An earlier attempt at that gate was deleted rather than kept (`d35493`): it
 refused `:http/reads`/`:http/effects`, which is the right check for "a handler
 that computes" and the wrong one for "content is a stored value" — under this
 model both are impossible by construction, so the check could never fire.
+
+## D-closed-request (2026-08-24, user decision) — a request contract is CLOSED, and this REVERSES a stated decision
+
+**Nathan: "I want the query maps to be closed so we aren't sending along or
+allowing invalid keys."**
+
+`decode-request` now judges the carrier merge against a top-level-closed
+schema. A key `:rest/request` does not name is a 400 that names the key.
+
+### What it reverses, and why the old reason had expired
+
+`contract-test/a-contract-covers-everything-the-caller-SENDS` asserted the
+opposite, with a reason:
+
+> the contract says what is REQUIRED, not what is forbidden, and a link
+> carrying a tracking parameter must not 400
+
+**That reason was about PAGES, and `D-rest-path` retired the case a day
+earlier.** A page is general HTTP content now: it declares no contract, so
+`decode-request` sees a nil schema and passes every carrier through. `?utm=x`
+on a link never reaches this function. What is left under it is a typed API,
+where an undeclared key is not a tracking parameter — it is a caller sending
+something the contract does not describe.
+
+So this is a construct outliving its reason rather than a decision being
+overruled, which is the distinction `A construct that survives its own reason`
+in the disciplines exists to make. The old reason is quoted in the test that
+now asserts the opposite, so a reader meets both.
+
+### The measured case
+
+A generated builder forwarded its consumer's own route param — `?slug=demo` —
+to a service that never asked for it. Correct response, correct render, and the
+only witness was the other service's access log. Reported by the consuming
+store, which found it in its own keystone test.
+
+### Closed at the TOP LEVEL only
+
+`closed-map` closes the merge and nothing nested. `malli.util/closed-schema`
+closes every nested map too, which would refuse the keys of a free-form blob an
+author declared on purpose — a strictness nobody wrote, applied where they had
+already said what they meant. The question here is only about the carriers:
+path, query and body merge into one map, and that map is what the contract
+enumerates.
+
+### The nesting question, asked and answered NO
+
+Nathan asked whether the flat params map should become
+`{:path-params … :query-params … }` plus room for headers and auth, since the
+builder currently splits by leftover.
+
+**The split is not the defect; the openness was.** `decode-request`'s own
+contract is the reason: *"`:rest/request` describes what the caller sends, not
+where it travels … One schema, three possible carriers, judged as one map."*
+The server merges path, query and body and judges the merge. A nested client
+argument would make the two ends disagree about what `:rest/request` means, and
+the carrier for a key is already derivable — the path pattern says which keys
+are segments, the method says body or query.
+
+**Headers and auth are a different question and the answer there may well be
+yes.** They are not "what the caller sends" as data; they are transport and
+identity, they belong on the REQUEST map rather than inside the params, and
+nothing accommodates them today.
+
+**One real asymmetry surfaced while checking this and is NOT fixed:** the query
+branch emits `(dissoc params <segments>)` and the body branch emits `params`
+whole, so a POST to `/api/things/:id` sends `:id` in the path AND in the body.
+`decode-request` merges with path last so the value is right, but its own
+docstring says overlap should not arise. Filed, not built.
