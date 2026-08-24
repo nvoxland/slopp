@@ -15,30 +15,122 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.http :as slopp.http] [slopp.http.static :as static] [clojure.string :as str] [slopp.lang :as lang]))
 
-(defn ^{:http/method :get :http/path "/w/mine/:owner" :http/auth :authenticated}
+(defn ^{:http/method :get :rest/path "/api/w/mine/:owner"
+        :http/auth :authenticated
+        :rest/response [:map [:yours :boolean]]}
   t-mine
-  "Row-level check inside the handler: only the owner may read."
+  "Row-level check inside the handler: only the owner may read.
+
+  Declared `:rest/path` and not `:http/path` because it COMPUTES an answer
+  from the request. `:http/path` names a stored value now, and a `defn` under
+  it would be served as the string of its own function object."
   [req]
   (slopp.http/enforce (= (:owner (:path-params req))
                         (:http/sub (:http/identity req))))
   {:status 200 :body {:yours true}})
 
+(def ^{:http/method :get :http/path "/about" :http/auth :public}
+  t-about
+  "Hiccup content: the def's VALUE is the page."
+  [:main [:h1 "About"]])
+
+(def ^{:http/method :get :http/path "/robots.txt" :http/auth :public
+       :http/media-type "text/plain"}
+  t-robots
+  "String content: served as it stands, at a declared media type."
+  "User-agent: *\nDisallow:\n")
+
+(def ^{:http/method :get :http/path "/" :http/auth :public
+       :webapp/shell "/js/main.js"}
+  t-shell
+  "The SPA shell. The app writes the WHOLE document — title, meta, stylesheet,
+  mount point — and writes neither the bundle script nor the mount prefix,
+  because neither is a static fact about this page."
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "utf-8"}]
+    [:title "Demo"]
+    [:link {:rel "stylesheet" :href "/css/style.css"}]]
+   [:body [:div {:id "app"}]]])
+
+(def t-broken-shell
+  "A shell an app got wrong: no mount point, so nothing renders. Carries no
+  markers — it is handed to a context as an explicit row instead, so it stays
+  out of every other test's route table."
+  [:html [:head [:title "Broken"]] [:body [:div {:id "root"}]]])
+
 (deftest facade-assembles-and-enforces
   (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]})]
     (testing "context derives the route table from var metadata"
-      (is (= 1 (count (:http/routes ctx))))
-      (is (= "/w/mine/:owner" (:path (first (:http/routes ctx))))))
+      (is (= {"/api/w/mine/:owner" :rest, "/" :content
+              "/about" :content, "/robots.txt" :content}
+             (into {} (map (juxt :path :kind)) (:http/routes ctx)))
+          "both markers, and the row says which one carried the path"))
     (testing "handle! is the portless test surface"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/w/mine/ada"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
                                 :http/identity {:http/sub "ada" :http/groups #{}}})]
         (is (= 200 (:status r)) (pr-str r))))
     (testing "enforce inside the handler maps to 403 response data"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/w/mine/ada"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
                                 :http/identity {:http/sub "eve" :http/groups #{}}})]
         (is (= 403 (:status r)) (pr-str r))))
     (testing "authorized? answers booleans for branching"
       (is (slopp.http/authorized? [:group "admin"] {:http/groups #{"admin"}}))
       (is (not (slopp.http/authorized? [:group "admin"] nil))))))
+
+(deftest content-is-a-VALUE-the-dispatcher-serves-not-a-handler-it-calls
+  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]})]
+    (testing "hiccup content renders, and keeps its structure for a headless drive"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/about"})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= "text/html; charset=utf-8" (get-in r [:headers "Content-Type"])))
+        (is (= [:main [:h1 "About"]] (:http/hiccup r))
+            "the tree the body was rendered from, same as html-response carries")
+        (is (str/includes? (str (:body r)) "<h1>About</h1>") (pr-str (:body r)))))
+    (testing "a string is served as it stands, at the media type the def declares"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/robots.txt"})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= "text/plain" (get-in r [:headers "Content-Type"]))
+            "verbatim, and deliberately NOT the \"text/plain; charset=utf-8\"
+             default — an assertion that matched the default would hold
+             whether or not the declaration was ever read")
+        (is (= "User-agent: *\nDisallow:\n" (:body r)))
+        (is (nil? (:http/hiccup r))
+            "nothing was rendered, so there is no tree to carry")))))
+
+(deftest a-webapp-SHELL-is-completed-by-the-framework
+  (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                  :webapp/base "/p/demo"})
+        r    (slopp.http/handle! ctx {:request-method :get :uri "/"})
+        body (str (:body r))]
+    (is (= 200 (:status r)) (pr-str r))
+    (testing "the bundle script is injected, INTO the head the app wrote"
+      (is (str/includes? body "src=\"/js/main.js\"") body)
+      (is (str/includes? body "<script defer") body)
+      (is (< (str/index-of body "<script") (str/index-of body "</head>"))
+          "in the head and not merely somewhere in the document"))
+    (testing "the mount point carries the base, which no static document knows"
+      (is (str/includes? body "data-base=\"/p/demo\"") body)
+      (is (str/includes? body "id=\"app\"") body))
+    (testing "what the app wrote survives untouched"
+      (is (str/includes? body "<title>Demo</title>") body)
+      (is (str/includes? body "href=\"/css/style.css\"") body)
+      (is (str/starts-with? body "<!DOCTYPE html>") body))
+    (testing "and the app's own hiccup is NOT what gets served"
+      (is (not= t-shell (:http/hiccup r))
+          "the tree a headless drive reads is the completed one, so what it
+           drives is what a browser would get"))))
+
+(deftest a-broken-shell-refuses-when-the-app-is-ASSEMBLED
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"no mount point"
+       (slopp.http/context
+        {:http/namespaces []
+         :http/routes [{:handler #'t-broken-shell :kind :content :method :get
+                        :path "/bad" :auth :public
+                        :webapp/shell "/js/main.js"}]}))
+      "assembly and not the first request: a shell is checked once, where the
+       app comes up, rather than answering 500 to whoever loads it first"))
 
 (deftest ^:external
   ^{:adapter "http — a deliberately INDEPENDENT client. requester-contract's
@@ -54,7 +146,7 @@
         resp (.send http
                     (-> (java.net.http.HttpRequest/newBuilder)
                         (.uri (java.net.URI/create
-                               (str "http://127.0.0.1:" (:port srv) "/w/mine/ada")))
+                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
                         (.build))
                     (java.net.http.HttpResponse$BodyHandlers/ofString))]
     (try
@@ -74,7 +166,7 @@
         resp (.send http
                     (-> (java.net.http.HttpRequest/newBuilder)
                         (.uri (java.net.URI/create
-                               (str "http://127.0.0.1:" (:port srv) "/w/mine/ada")))
+                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
                         (.build))
                     (java.net.http.HttpResponse$BodyHandlers/ofString))]
     (try
@@ -102,11 +194,11 @@
                                     (java.net.http.HttpResponse$BodyHandlers/ofString)))))]
     (try
       (testing "anonymous → 401; wrong token → 401; the right token → 200 (t-mine checks sub=owner)"
-        (is (= 401 (GET "/w/mine/ada")))
-        (is (= 401 (GET "/w/mine/ada" "wrong")))
-        (is (= 200 (GET "/w/mine/ada" "tok-ada")))
+        (is (= 401 (GET "/api/w/mine/ada")))
+        (is (= 401 (GET "/api/w/mine/ada" "wrong")))
+        (is (= 200 (GET "/api/w/mine/ada" "tok-ada")))
         (testing "and enforce still 403s the wrong owner, authenticated or not"
-          (is (= 403 (GET "/w/mine/someone-else" "tok-ada")))))
+          (is (= 403 (GET "/api/w/mine/someone-else" "tok-ada")))))
       (finally (slopp.http/stop! srv)))))
 
 (deftest ^:external ^{:adapter "http — independent client on purpose; same reason as

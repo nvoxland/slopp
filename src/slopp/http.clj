@@ -31,7 +31,7 @@
   time."
   (:require [slopp.http.routes :as routes]
             [slopp.http.dispatch :as dispatch]
-            [slopp.http.server.jdk :as jdk] [slopp.http.server.httpkit :as httpkit] [clojure.string :as str]))
+            [slopp.http.server.jdk :as jdk] [slopp.http.server.httpkit :as httpkit] [clojure.string :as str] [slopp.http.html :as html]))
 
 (defn enforce
   "In-handler guard for what route policy can't see (row-level authz: is
@@ -88,13 +88,15 @@
   difference. Found by dogfooding: adding an `/api` namespace to this repo's
   own reviewer UI hit it immediately, because the endpoints and their read
   performers live in different namespaces on purpose."
-  [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes]}]
+  [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes]
+    :webapp/keys [base]}]
   (let [ctx (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
                      :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
                      :http/effect-performers (routes/performers-from-namespaces namespaces :http/effect)
                      :http/perform-ctx perform-ctx
                      :http/max-body-bytes (or max-body-bytes 1048576)}
-              auth-config (assoc :http/auth-config auth-config))
+              auth-config (assoc :http/auth-config auth-config)
+              base (assoc :webapp/base base))
         missing (for [row (:http/routes ctx)
                       [decl performers] [[:http/reads (:http/read-performers ctx)]
                                          [:http/effects (:http/effect-performers ctx)]]
@@ -113,6 +115,15 @@
                            " so the namespace list is checked here rather than at request time")
                       {:http/missing-performers (vec (distinct missing))
                        :http/namespaces (vec namespaces)})))
+;; Every SHELL is completed once, here, and the answer thrown away. It is
+    ;; completed AGAIN per request — a redefined content def has to reach the
+    ;; next one, which a value frozen at assembly would not — so this is not a
+    ;; cache. It is the only place a shell that CANNOT be completed can refuse
+    ;; while somebody is watching: the alternative is a 500 to whoever loads
+    ;; the page first, for an app that was already wrong when it came up.
+    (doseq [row   (distinct (:http/routes ctx))
+            :when (:webapp/shell row)]
+      (html/complete-shell (var-get (:handler row)) (:webapp/shell row) base))
     ctx))
 
 (defn handle!

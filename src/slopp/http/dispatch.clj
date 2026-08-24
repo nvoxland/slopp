@@ -27,7 +27,7 @@
   Query parsing happens once, here, so no app writes its own splitter — and a
   declared read addresses `[:query-params :view]` exactly as it addresses
   `[:path-params :id]`."
-  (:require [slopp.http.router :as router] [slopp.http.auth :as auth] [clojure.string :as str] [slopp.lang :as lang]))
+  (:require [slopp.http.router :as router] [slopp.http.auth :as auth] [clojure.string :as str] [slopp.lang :as lang] [slopp.http.html :as html]))
 
 (defn authorized?
   "Does `identity` ({:http/sub … :http/groups #{…}} or nil) satisfy `policy`?
@@ -189,6 +189,21 @@
       ;; says nothing.
       (:error sent)
       {:status 400 :body {:error (:error sent)}}
+
+      ;; CONTENT, and it is served by DEREFERENCING the var rather than
+      ;; calling it. `:http/path` declares a `def` whose value IS the page, so
+      ;; there is no handler to invoke, no request to hand it, and nothing
+      ;; below this branch applies: a stored value cannot declare reads,
+      ;; cannot emit effects, and cannot violate a response contract it has no
+      ;; way to declare. Placing it after POLICY and not before is the whole
+      ;; point — content is as unreachable un-authorized as any handler.
+      (= :content (:kind row))
+      (html/content-response
+       (let [value (var-get (:handler row))]
+         (if-let [bundle (:webapp/shell row)]
+           (html/complete-shell value bundle (:webapp/base ctx))
+           value))
+       (:http/media-type row))
 
       :else
       (let [;; DECODED IN PLACE: a handler reads :path-params, :query-params and

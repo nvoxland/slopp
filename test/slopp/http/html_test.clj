@@ -4,7 +4,7 @@
   hiccup upgrade means the escaping contract changed underneath us; treat it
   as a security event, not a formatting nit."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.http.html :as html]))
+            [slopp.http.html :as html] [clojure.string :as str]))
 
 (deftest text-escaping-blocks-injection
   (testing "SECURITY: text children are escaped by default"
@@ -97,19 +97,50 @@
       (is (= "1" (get-in r [:headers "X-A"])))
       (is (= "text/html; charset=utf-8" (get-in r [:headers "Content-Type"]))))))
 
-(deftest page-shell-renders-a-full-document
-  (testing "doctype, charset meta, escaped title; NO inline script or style"
-    (is (= (str "<!DOCTYPE html><html>"
-                "<head><meta charset=\"utf-8\"><title>T &amp; t&apos;s</title></head>"
-                "<body><main>b</main></body></html>")
-           (html/render (html/page {:html/title "T & t's"} [:main "b"])))))
-  (testing ":html/lang and extra :html/head elements ride the shell"
+(deftest a-whole-DOCUMENT-gets-its-doctype-from-the-renderer
+  (testing "a top-level [:html …] is a document, so the doctype is prepended"
     (is (= (str "<!DOCTYPE html><html lang=\"en\">"
-                "<head><meta charset=\"utf-8\"><title>T</title>"
+                "<head><meta charset=\"utf-8\"><title>T &amp; t&apos;s</title>"
                 "<link href=\"/assets/app.css\" rel=\"stylesheet\">"
                 "</head>"
-                "<body><p>x</p></body></html>")
+                "<body><main>b</main></body></html>")
            (html/render
-            (html/page {:html/title "T" :html/lang "en"
-                        :html/head [[:link {:rel "stylesheet" :href "/assets/app.css"}]]}
-                       [:p "x"]))))))
+            [:html {:lang "en"}
+             [:head [:meta {:charset "utf-8"}] [:title "T & t's"]
+              [:link {:rel "stylesheet" :href "/assets/app.css"}]]
+             [:body [:main "b"]]]))
+        "title, lang and head elements are written where they go — an app that
+         holds the whole document needs no parameter for any of them"))
+  (testing "a FRAGMENT gets no doctype, which is what makes the rule safe"
+    (is (= "<main>b</main>" (html/render [:main "b"])))
+    (is (= "<div><html-ish></html-ish></div>"
+           (html/render [:div [:html-ish]]))
+        "only the top-level tag decides, and only when it is exactly :html")))
+
+(deftest a-shell-the-framework-cannot-complete-REFUSES
+  (testing "no head: there is nowhere to put the bundle"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no \[:head"
+         (html/complete-shell [:html [:body [:div {:id "app"}]]] "/js/main.js" ""))))
+  (testing "no mount point: the app has nothing to render into"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no mount point"
+         (html/complete-shell [:html [:head] [:body [:div {:id "root"}]]]
+                              "/js/main.js" ""))
+        "an author who wrote #root gets a message instead of a blank screen"))
+  (testing "not hiccup at all"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"must be a hiccup DOCUMENT"
+         (html/complete-shell "<html></html>" "/js/main.js" ""))))
+  (testing "the #app SHORTHAND counts, because hiccup authors write it"
+    (let [done (html/complete-shell [:html [:head] [:body [:div#app.wrap]]]
+                                    "/js/main.js" "/p/x")]
+      (is (str/includes? (html/render done) "data-base=\"/p/x\"")
+          (html/render done))))
+  (testing "an absent base is the ROOT, and says so rather than being omitted"
+    (is (str/includes?
+         (html/render (html/complete-shell [:html [:head] [:body [:div#app]]]
+                                           "/js/main.js" nil))
+         "data-base=\"\"")
+        "the attribute is always present, so a missing one is a missing SHELL
+         rather than a deployment at the root")))

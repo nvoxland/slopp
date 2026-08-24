@@ -45,7 +45,7 @@
     ;; both path markers: a REST api and general HTTP content leave the
     ;; process the same way, and an exit the registry cannot name is one
     ;; nothing reports on
-    :markers    #{:rest/path :http/path :http/method}
+    :markers    #{:rest/path :http/path :http/method :http/media-type}
     :checked-by "http-dangling-route-refs ties every literal :href/:src to a
                  route; query_surface reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running
@@ -130,6 +130,28 @@
                  covered. And the client table must be LITERAL: a computed
                  pattern is skipped rather than guessed at, which makes the join
                  partial in the safe direction"}
+{:kind       :webapp/shell
+    :leaves     "a stored hiccup document declared as the app's SPA shell"
+    :to         "a browser, which loads the compiled bundle it names and mounts
+                 into the element it carries"
+    :markers    #{:webapp/shell}
+    :checked-by "slopp.http/context completes every shell at ASSEMBLY and
+                 refuses one with no [:head …] to inject the script into, or no
+                 mount point to render into — so an app that cannot work does
+                 not come up, rather than answering a blank page to whoever
+                 loads it first"
+    :blind      "the two NAMES are hard-coded on both sides and nothing joins
+                 them: this end writes id=\"app\" and data-base, and
+                 slopp.webapp.dom/mount! reads exactly those. That namespace is
+                 :cljs, so slopp has no runner that could assert the agreement —
+                 a rename on either side compiles, serves, and renders a blank
+                 page.
+
+                 And the BUNDLE url is taken on trust. The marker's value is a
+                 path this store may or may not serve; a typo is a script tag
+                 pointing at a 404, which is the same blank page from a
+                 different cause. Joining it to the route table is possible and
+                 is not done."}
 
    {:kind       :app/headless-entry
     :leaves     "the whole application as data — state, a route TABLE, the
@@ -403,8 +425,8 @@
     (vec (sort (remove owned
                        [:rest/path :http/path :http/method :http/auth :http/reads :http/effects
                         :http/read :http/effect :http/effectful :rest/request
-                        :rest/response :rest/media-type :http/context
-                        :webapp/client-routes :http/external-path
+                        :rest/response :rest/media-type :http/media-type :http/context
+                        :webapp/client-routes :webapp/shell :http/external-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
 

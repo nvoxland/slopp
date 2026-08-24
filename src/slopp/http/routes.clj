@@ -102,7 +102,9 @@
                      :http/reads   (:http/reads m)
                      :effectful? (boolean (:http/effectful m))}
               (:rest/request m)  (assoc :rest/request (:rest/request m))
-              (:rest/response m) (assoc :rest/response (:rest/response m)))}))))
+              (:rest/response m) (assoc :rest/response (:rest/response m))
+              (:http/media-type m) (assoc :http/media-type (:http/media-type m))
+              (:webapp/shell m) (assoc :webapp/shell (:webapp/shell m)))}))))
 
 (defn ^:export performers-from-namespaces
   "The performer vocabulary off loaded var metadata: {kind → the var,

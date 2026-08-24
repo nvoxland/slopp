@@ -237,7 +237,14 @@
   {
    :http/auth-config "not threaded yet. Nobody has hit it only because the apps
                      measuring the managed server have no auth; one that did
-                     would deny everything, or fail resolving identity"})
+                     would deny everything, or fail resolving identity"
+   :webapp/base      "the managed server serves at the ROOT of its own port, so
+                     the mount prefix is empty and stamping it would say the
+                     same thing at more length. It is not the server's fact at
+                     all: an app reached through a proxy that mounts it at
+                     /p/<slug> is served by THIS code at /, and only the proxy
+                     knows the prefix. Threading it would mean the live server
+                     accepting a claim about where someone else publishes it"})
 
 (defn ^:export materialize-static!
   "Write every file the `mounts` cover into a fresh temp dir and return its
