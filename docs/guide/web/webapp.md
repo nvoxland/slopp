@@ -212,16 +212,28 @@ takes) is left alone. That makes three base-aware paths -- the pushed url, the
 arriving url, and the outgoing request -- and it was two until an app served
 under `/p/<slug>` found every one of its screens fetching a 404.
 
-When a request is *not* under your mount point, say so on the request:
+When a request is *not* measured from your mount point, say where it is
+measured from:
 
 ```clj
-{:webapp/path "/api/projects" :webapp/from-origin true}
+{:webapp/path "/api/modules" :webapp/base (str "/p/" slug)}
+{:webapp/path "/api/projects" :webapp/base ""}          ; the origin
 ```
 
 That is the escape an absolute URL cannot cover -- an app calling a different
 application at the same origin cannot spell the whole URL, because the origin is
-only known at runtime. It is declared per request rather than per app, because
-that is where the fact lives: the same app's other requests *are* mounted.
+only known at runtime.
+
+It is declared per request rather than per app because that is where the fact
+lives, and the reason is sharper than "the same app's other requests *are*
+mounted". **Which API a request belongs to is route state.** A client-routed app
+switches which upstream it is reading by navigating, not by loading a page, and
+the app-level base is stamped once at page load. No value delivered that way can
+be right for an app that talks to more than one API -- so the base is a default
+and the request has the last word.
+
+(`:webapp/from-origin true` is the empty case of this and still works. Prefer
+the base; the flag exists only until its users migrate.)
 
 ## Actions are declared, in three kinds
 

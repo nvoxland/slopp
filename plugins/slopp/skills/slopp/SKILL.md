@@ -1949,10 +1949,17 @@ declare the app; slopp owns the loop.
 - **A request carries the MOUNT POINT, like every other address.** Write
   `/api/things` and slopp addresses it under your `:webapp/base`, for the same
   reason your `:href` gets it. An absolute url (scheme, or protocol-relative
-  `//`) is left alone, and `:webapp/from-origin true` on the request says the
-  path is measured from the ORIGIN instead — which is what you write when you
-  call a different app at the same origin and cannot spell the url, because the
-  origin is only known at runtime.
+  `//`) is left alone.
+- **A request may name its OWN base, and the app's is only the default.**
+  `{:webapp/path "/api/modules" :webapp/base (str "/p/" slug)}` is measured
+  from there instead. **Which api a request belongs to is ROUTE STATE**, not
+  configuration: a client-routed app switches which upstream it reads without a
+  page load, and the app-level base is stamped once at load — so no value
+  delivered that way can be right for an app that talks to more than one.
+  `:webapp/base ""` means the origin. (`:webapp/from-origin true` is the empty
+  case of exactly this and still works; prefer the base.) A request naming a
+  base is skipped by `webapp-request-paths-are-served`, since it is addressed
+  at somewhere this store does not answer for.
 - **The table is ADDRESSES, not screens** — a row's screen is not unique and a
   screen's row is not unique. One screen answers at several urls the moment you
   have a lens bar, a print view, an alternate rendering, or a detail page that
