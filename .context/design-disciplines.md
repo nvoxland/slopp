@@ -3246,3 +3246,51 @@ that nobody reading it had grounds.
 dated snapshot is dated forever — so under the fork it correctly needs no expiry
 and should not be given a review date. The instinct to make every escape carry
 one is the thing this fork exists to refuse.
+
+## The defect a framework author cannot reach is found by a CONFIDENT question, not a stuck one
+
+**Measured twice in one week, both by the consuming store, both from a question
+its author nearly did not send.**
+
+| what surfaced | what the asker was doing |
+|---|---|
+| `query_surface` reporting `:path ""` on ten endpoints, 1320 tests green | checking that their own screen rendered |
+| a stylesheet `def` serving `<main margin="0">` under `Content-Type: text/css` | confirming a migration they had already reasoned out correctly |
+
+Neither was reachable from here by thinking harder. `content-response`
+discriminates hiccup as "a vector", which is exactly right and stayed right
+through review, a docstring, and a whole-store check — because the author was
+never going to write a stylesheet, and garden rules are vectors too. The rule
+has no defect visible from inside the framework. It has one visible from the
+first place it is USED.
+
+**The operative half is not "a consumer finds things". It is WHICH question
+finds them.** The consuming store's own phrasing, and it is better than mine:
+
+> the moment to ask is when you have reasoned it through and are confident, not
+> when you are stuck. Being stuck is legible on its own. Being confident and
+> one step short is not.
+
+A store that escalates only what it already suspects is wrong finds neither of
+the rows above. Both asks looked routine to their author — one was "does this
+migration sound right", answered "yes, and also it would have served garbage".
+
+### What follows for how this repo works
+
+- **A "sounds right, just checking" question from a consumer is the highest
+  value input available, and it does not look like it.** It arrives phrased as
+  a courtesy. Answer it by CHECKING rather than by confirming — the two
+  instances above both survived a confident read and failed a look at the code.
+- **Do not treat a consumer's correct reasoning as the end of the question.**
+  Their stylesheet reasoning was sound: garden renders at load time, so the
+  value is a string. Right about WHEN, silent about SHAPE, and the silence is
+  where the defect was.
+- **This is not the same as dogfooding.** Dogfooding finds what the author
+  would hit; this finds what the author would never do. The dogfooding practice
+  stays, and it does not substitute.
+
+Related: `A guarantee reads as unconditional at the point it is CONSUMED` and
+`Core 10 — a check you hand a CONSUMER has to run on THEIR classpath`. Both are
+about the consumer's position revealing something the author's cannot. This one
+is about the consumer's CONFIDENCE doing it, which is the harder half to
+provoke deliberately.
