@@ -24,6 +24,22 @@
             [malli.transform :as mt]
             [cheshire.core :as json]))
 
+(defn- closed-map
+  "`schema` with its TOP LEVEL closed, or `schema` unchanged when it is not a
+  map. Existing properties are kept.
+
+  Top level only, deliberately. `malli.util/closed-schema` closes every nested
+  map as well, which would refuse the keys of a free-form blob an author
+  declared on purpose — a strictness nobody wrote, applied where they had
+  already said what they meant. The question this answers is only about the
+  carriers: path, query and body merge into one map, and that map is what the
+  contract enumerates."
+  [schema]
+  (let [s (m/schema schema)]
+    (if (= :map (m/type s))
+      (m/into-schema :map (assoc (m/properties s) :closed true) (m/children s))
+      s)))
+
 (defn ^:export decode-request
   "Decode everything the caller SENT to the types `schema` declares, then judge
   the whole of it — `{:value {:path-params … :query-params … :body …}}` with
@@ -77,11 +93,26 @@
           ;; is the carrier we are surest about. Overlap should not arise — a
           ;; key travels one way for a given endpoint — but a rule beats a
           ;; coincidence.
-          merged (merge q b p)]
-      (if (m/validate schema merged)
+          merged (merge q b p)
+          ;; CLOSED at the top level, and only there. `:rest/request` names what
+          ;; the caller sends; a key it does not name is not something the
+          ;; caller sends, and carrying it means an undeclared value crossed the
+          ;; boundary this function exists to be. The measured case is sharper
+          ;; than tidiness: a client leaking its OWN routing state into the
+          ;; query string gets a correct response, renders correctly, and shows
+          ;; up only in somebody else's access log.
+          judged (closed-map schema)]
+      ;; CLOSED at the top level, and only there. `:rest/request` names what the
+      ;; caller sends; a key it does not name is not something the caller sends,
+      ;; and carrying it means an undeclared value crossed the boundary this
+      ;; function exists to be. The consuming case is sharper than tidiness: a
+      ;; client leaking its OWN routing state into the query string gets a
+      ;; correct response, renders correctly, and shows up only in somebody
+      ;; else's access log.
+      (if (m/validate judged merged)
         {:value {:path-params p :query-params q :body b}}
         {:error (str "request does not match the declared contract: "
-                     (pr-str (me/humanize (m/explain schema merged))))}))))
+                     (pr-str (me/humanize (m/explain judged merged))))}))))
 
 (defn ^:export check-response
   "nil when `value` HONOURS `schema` for the consumer, else a teaching string.

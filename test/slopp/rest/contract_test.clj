@@ -156,18 +156,63 @@
       (is (string? (:error r)))
       (is (re-find #"sku" (:error r)) (:error r))))
 
-  (testing "an undeclared param is not invented"
-    ;; an open map is malli's default, so an extra query key rides along rather
-    ;; than being refused — the contract says what is REQUIRED, not what is
-    ;; forbidden, and a link carrying a tracking parameter must not 400
+  (testing "an undeclared param is REFUSED — reversed 2026-08-24, reason expired"
+    ;; This asserted the opposite, and its reason was: "the contract says what
+    ;; is REQUIRED, not what is forbidden, and a link carrying a tracking
+    ;; parameter must not 400."
+    ;;
+    ;; That reason was about PAGES, and it stopped applying when `:rest/path`
+    ;; and `:http/path` split (D-rest-path). A page is general HTTP content
+    ;; now: it declares no contract, so `decode-request` sees a nil schema and
+    ;; passes every carrier through. `?utm=x` on a link is untouched by this
+    ;; function. What remains here is a typed API, where an undeclared key is
+    ;; not a tracking parameter — it is a caller sending something the contract
+    ;; does not describe.
+    ;;
+    ;; The measured case: a generated builder forwarded its consumer's own
+    ;; route param (`?slug=demo`) to a service that never asked for it. Correct
+    ;; response, correct render, visible only in somebody else's access log.
     (let [r (rest.contract/decode-request
              [:map [:id :int]]
              {:path-params {:id "7"} :query-params {:utm "x"}})]
-      (is (nil? (:error r)) (pr-str r))
-      (is (= {:utm "x"} (:query-params (:value r))))))
+      (is (:error r) (pr-str r))
+      (is (re-find #"utm" (:error r))
+          (str "and it names the key, which an open map could never do because"
+               " it never failed: " (pr-str r)))))
 
   (testing "no schema passes every carrier through untouched"
     (let [r (rest.contract/decode-request nil {:path-params {:a "1"} :body {:b 2}})]
       (is (nil? (:error r)))
       (is (= {:a "1"} (:path-params (:value r))))
       (is (= {:b 2} (:body (:value r)))))))
+
+(deftest a-contract-is-CLOSED-so-an-undeclared-key-is-refused
+  (let [schema [:map [:id :string] [:depth {:optional true} :int]]]
+    (testing "a key the contract does not name is refused, and NAMED"
+      (let [r (rest.contract/decode-request schema
+                                            {:path-params {:id "f1"}
+                                             :query-params {:depth "2" :slug "demo"}})]
+        (is (:error r) (pr-str r))
+        (is (re-find #"slug" (:error r))
+            (str "the caller has to be told WHICH key, or the refusal is a"
+                 " puzzle: " (pr-str r)))))
+    (testing "and what it does name still passes, decoded"
+      (let [r (rest.contract/decode-request schema
+                                            {:path-params {:id "f1"}
+                                             :query-params {:depth "2"}})]
+        (is (nil? (:error r)) (pr-str r))
+        (is (= 2 (:depth (:query-params (:value r)))) (pr-str r))))
+    (testing "an OPTIONAL declared key may be absent without being undeclared"
+      (is (nil? (:error (rest.contract/decode-request
+                         schema {:path-params {:id "f1"} :query-params {}})))))
+    (testing "a nil schema still passes everything through"
+      (is (nil? (:error (rest.contract/decode-request
+                         nil {:query-params {:anything "goes"}}))))))
+  (testing "closing is TOP-LEVEL: a nested map the contract declares stays as declared"
+    ;; a request carrying a free-form blob is a real shape, and closing every
+    ;; map inside the schema would refuse the blob's own keys — a strictness
+    ;; nobody asked for, applied where the author already said what they meant
+    (let [schema [:map [:id :string] [:meta [:map [:kind :string]]]]]
+      (is (nil? (:error (rest.contract/decode-request
+                         schema {:body {:id "f1" :meta {:kind "x" :extra 1}}})))
+          "the top level is closed; what the author declared inside it is not"))))
