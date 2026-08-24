@@ -1806,3 +1806,31 @@
       ;; each passes against its own
       (is (= (set (keys (webapp/driver (webapp/wiring declared))))
              (set (keys (cljnx/driver-for declared))))))))
+
+(deftest a-REQUEST-may-name-the-base-it-is-measured-from
+  (testing "absent, the app's own mount point applies, exactly as before"
+    (is (= "/p/demo/api/things"
+           (:webapp/path (webapp/addressed "/p/demo" {:webapp/path "/api/things"})))))
+  (testing "present, it WINS — the request is measured from the api it belongs to"
+    (is (= "/p/other/api/things"
+           (:webapp/path (webapp/addressed "/p/demo"
+                                           {:webapp/path "/api/things"
+                                            :webapp/base "/p/other"})))
+        "a client-routed app switches which upstream it is reading WITHOUT a
+         page load, so no value stamped once at load can be right — the app's
+         base is a default, not the answer"))
+  (testing "empty means the ORIGIN, which is what :webapp/from-origin said"
+    (is (= "/api/projects"
+           (:webapp/path (webapp/addressed "/p/demo"
+                                           {:webapp/path "/api/projects"
+                                            :webapp/base ""})))))
+  (testing "and :webapp/from-origin still says it, in terms of the same lever"
+    (is (= "/api/projects"
+           (:webapp/path (webapp/addressed "/p/demo"
+                                           {:webapp/path "/api/projects"
+                                            :webapp/from-origin true})))))
+  (testing "an absolute url is still left alone, whatever base is named"
+    (is (= "https://other.example/api/x"
+           (:webapp/path (webapp/addressed "/p/demo"
+                                           {:webapp/path "https://other.example/api/x"
+                                            :webapp/base "/p/other"}))))))

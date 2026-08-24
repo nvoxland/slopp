@@ -1113,8 +1113,8 @@
 (defn ^:export
   ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string] [:maybe :map]] [:maybe :map]]}
   addressed
-  "`request` with its path under the app's mount point — the url a browser
-  should actually fetch.
+  "`request` with its path under the base it is measured from — the url a
+  browser should actually fetch.
 
   **The third of three, and it was missing.** `:webapp/base` was applied by
   `:webapp/push-url!`, by [[strip-base]] on an arriving url, and by
@@ -1129,30 +1129,36 @@
   bug: *what `prefix-links` does to an `:href` and `strip-base` does to an
   arriving url, nothing did to a request.*
 
-  So an app writes `/api/things` and gets its own mount point for the same
-  reason its links do, with no new vocabulary to declare.
+  **A REQUEST may name its own base, and the app's is only the DEFAULT.** The
+  app-level value is stamped once, at page load, from a per-server context —
+  so it can only be right while an app talks to one upstream for the life of a
+  document. A client-routed app does not: switching which project you are
+  reading is a route change, not a page load, and the upstream it addresses
+  changes with it. **Which api a request belongs to is ROUTE STATE**, and route
+  state is not something a page-load-time attribute can carry. Same key at two
+  scopes and deliberately the same word, because it is the same fact — the
+  narrower one wins, the way an inline style beats a sheet.
 
-  **An ABSOLUTE url is left alone**, which is the same judgement `prefix-links`
-  makes: a third-party API is not under this app's mount point, and prefixing it
-  would break the one request the app cannot re-address. Both spellings count —
-  a scheme, and the protocol-relative `//` that a CDN link takes.
+  `:webapp/base \"\"` on a request therefore means *measured from the ORIGIN*,
+  and that is exactly what `:webapp/from-origin true` says. The flag stays
+  working and is expressed in terms of this lever rather than beside it, so
+  there is one mechanism; it is a candidate for retirement once its users
+  migrate, and unlike a deprecation this one removes its own cause — an escape
+  from a field that could not hold two values stops being needed once the field
+  holds N.
 
-  **`:webapp/from-origin true` says the path is measured from the ORIGIN**, and
-  it is the escape an absolute url cannot cover. The app that needed it is
-  served at `/p/<slug>` and also calls the HUB, a genuinely different
-  application at the same origin with its endpoint at the root: it cannot write
-  the whole url, because the origin is only known at runtime, and prefixing
-  sends the request to a project that does not serve it.
-
-  Declared on the REQUEST rather than on the app, because that is where the fact
-  lives — the same app's other requests ARE under its mount point, and only this
-  one is not. It was a stated limit for exactly one day; a limit with an
-  instance is a gap."
+  **An ABSOLUTE url is left alone**, which is the same judgement
+  `prefix-links` makes: a third-party API is not under anyone's mount point,
+  and prefixing it would break the one request the app cannot re-address. Both
+  spellings count — a scheme, and the protocol-relative `//` that a CDN link
+  takes."
   [base request]
-  (let [p (:webapp/path request)]
+  (let [p    (:webapp/path request)
+        base (cond (:webapp/from-origin request) ""
+                   (contains? request :webapp/base) (:webapp/base request)
+                   :else base)]
     (if (and (string? p)
              (seq (str base))
-             (not (:webapp/from-origin request))
              (not (str/includes? p "://"))
              (not (str/starts-with? p "//")))
       (assoc request :webapp/path (prefixed base p))

@@ -392,7 +392,12 @@
                      ;; still what a screen LOADS, so the surface report wants
                      ;; it. Only the served join skips it, because the origin is
                      ;; not this store's to answer for
-                     (:webapp/from-origin node) (assoc :from-origin true)))))))
+                     (:webapp/from-origin node) (assoc :from-origin true)
+                     ;; a request naming its own base is the general case of
+                     ;; the line above, and is carried for the same reason:
+                     ;; the surface report wants every path a screen LOADS,
+                     ;; and only the served join skips it
+                     (contains? node :webapp/base) (assoc :own-base true)))))))
 
 (defn ^:export webapp-report
   "The `webapp` section of `query_surface`: what this browser application IS.
@@ -621,11 +626,14 @@
   answers for what THIS store serves and says nothing about anyone else's
   server.
 
-  **`:webapp/from-origin` is left alone for the same reason**, and it is the
-  form of that statement a MOUNTED app can actually write: it cannot spell an
-  absolute url, because the origin is only known at runtime. A path measured
-  from the origin is addressed at whatever sits there, which is not this store
-  or the declaration would be saying nothing.
+  **A request naming its own `:webapp/base` is left alone for the same
+  reason**, and it is the form of that statement a MOUNTED app can actually
+  write: it cannot spell an absolute url, because the origin is only known at
+  runtime. A path measured from a base it names is addressed at whatever sits
+  THERE, which is not this store or the declaration would be saying nothing.
+
+  `:webapp/from-origin` is the empty case of that and is honoured beside it
+  while its users migrate.
 
   Every escape here is a DECLARATION rather than a silence, which is what keeps
   the finding list clearable — and a list nobody can clear is a list everybody
@@ -644,14 +652,21 @@
   ;; is that its findings can be.
   (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
                      (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path from-origin]}]
+    (vec (remove (fn [{:keys [path from-origin own-base]}]
                    (or (contains? served path)
                        (str/includes? path "://")
                        ;; the same statement an absolute url makes, in the form
                        ;; a MOUNTED app can actually write: measured from the
                        ;; origin, so addressed at whatever sits there — which is
                        ;; not this store, or the declaration says nothing
-                       from-origin))
+                       from-origin
+                       ;; and its general case. A client-routed app switches
+                       ;; which upstream it reads without a page load, so the
+                       ;; base is route state on the request; a request that
+                       ;; names one is measured from THERE. from-origin is the
+                       ;; empty case of this and is kept only until its users
+                       ;; migrate
+                       own-base))
                  (request-paths st)))))
 
 (defn webapp-request-paths-are-served-check

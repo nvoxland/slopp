@@ -529,6 +529,22 @@
                            [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= [] (rules.webapp/request-paths-unserved st))
             (pr-str (rules.webapp/request-paths-unserved st)))))
+(testing "a request naming its own BASE is not this store's to serve either"
+      ;; the general form of the line above, and the reason it had to become
+      ;; general: a client-routed app switches which upstream it reads WITHOUT
+      ;; a page load, so the base is route state carried on the request. A
+      ;; request that names one is addressed at whatever sits THERE — the same
+      ;; statement from-origin makes, which is now just the empty case of it.
+      (let [src6 (str "(ns shop.six)\n\n"
+                      "(defn project-request \"R.\" [p]\n"
+                      "  {:webapp/path \"/api/modules\"\n"
+                      "   :webapp/base (str \"/p/\" (:slug p))})\n")
+            st   (assoc-in (store/ingest (store/empty-store) 'shop.six src6)
+                           [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= [] (rules.webapp/request-paths-unserved st))
+            (str "a request measured from another api was reported against"
+                 " THIS store's routes: "
+                 (pr-str (rules.webapp/request-paths-unserved st))))))
 
     (testing "and a form marked ^:http/external-path is skipped WHOLE"
       ;; the escape the absolute-url one cannot cover, reported by the app that

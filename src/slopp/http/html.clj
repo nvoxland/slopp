@@ -139,8 +139,28 @@
   The default media type follows the shape rather than the path: hiccup is
   `text/html`, everything else `text/plain`. An extension says nothing here —
   a def named `robots.txt` is a var, not a file — so a def that answers
-  anything else declares it."
+  anything else declares it. A declared type is used VERBATIM, charset
+  included or not, because that is the author's call and not ours.
+
+  **A vector with a declared type that is not HTML REFUSES**, and the case
+  that makes it necessary is a stylesheet: garden rules are vectors too, so
+  `(def ^{:http/media-type \"text/css\"} style [:main {:margin 0}])` is valid
+  hiccup, renders to `<main margin=\"0\">`, and serves 200 with the right header
+  and a nonsense body. Nothing downstream can tell that from a page. The fix is
+  to render at def time — `slopp.http.css/render` answers a string, which is
+  what a stylesheet's value should have been."
   [value media-type]
+  (when (and (vector? value)
+             media-type
+             (not (str/starts-with? media-type "text/html")))
+    (throw (ex-info (str "this content is a VECTOR, which means hiccup, but it"
+                         " declares :http/media-type " (pr-str media-type)
+                         " — hiccup only ever renders to HTML. If this is"
+                         " garden data, render it at def time"
+                         " (slopp.http.css/render answers a string); if it is"
+                         " something else, store the value it should serve"
+                         " rather than a description of it")
+                    {:http/media-type media-type})))
   (if (vector? value)
     {:status 200
      :http/raw true

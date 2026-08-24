@@ -144,3 +144,22 @@
          "data-base=\"\"")
         "the attribute is always present, so a missing one is a missing SHELL
          rather than a deployment at the root")))
+
+(deftest a-vector-that-is-not-HTML-refuses-rather-than-rendering-as-hiccup
+  (testing "garden rules are a vector, and so is hiccup"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"text/css"
+         (html/content-response [[:main {:margin 0}] [:a {:color "#333"}]]
+                                "text/css"))
+        "a stylesheet def holding garden DATA would otherwise render as HTML
+         and serve <main margin=\"0\"> as a stylesheet — 200, right header,
+         nonsense body"))
+  (testing "the fix is a rendered string, and that is what passes"
+    (is (= "text/css"
+           (get-in (html/content-response "main{margin:0}" "text/css")
+                   [:headers "Content-Type"]))))
+  (testing "hiccup with an html media type is exactly what a vector IS for"
+    (is (= [:main "x"]
+           (:http/hiccup (html/content-response [:main "x"] "text/html")))))
+  (testing "and a vector with NO declared media type is plain hiccup"
+    (is (= [:main "x"] (:http/hiccup (html/content-response [:main "x"] nil))))))
