@@ -5044,6 +5044,36 @@ to a service that never asked for it. Correct response, correct render, and the
 only witness was the other service's access log. Reported by the consuming
 store, which found it in its own keystone test.
 
+### SCOPED to an API REQUEST — Nathan, 2026-08-24
+
+> the malli schemas should only be closed for APIs. The previous decision about
+> what is REQUIRED is still true for all other schemas.
+
+So the reversal is narrow, and the narrowness is the decision rather than a
+side effect of where the code sits. Three places it deliberately does NOT
+reach, named in `closed-map`'s docstring so nobody generalises from the one
+that changed:
+
+- **RESPONSES.** `check-response` judges the server's own answer. A server
+  sending a field it did not advertise is a different question from a caller
+  sending one nobody asked for, and this does not settle it.
+- **`:malli/schema` on ordinary functions.** A function's schema describes
+  arguments, and a map argument is the caller's own data structure.
+- **content.** A page declares no contract, so the schema is nil and every
+  carrier passes through. This is what makes closing a REQUEST safe and it was
+  not true before `:rest/path` and `:http/path` split.
+
+Pinned by `contract-test/closing-is-scoped-to-a-REQUEST-and-the-boundary-is-DELIBERATE`,
+because a boundary stated only in prose is one the next reader argues past.
+
+**Measured while confirming that test can fail:** closing RESPONSES too breaks
+`api.endpoints-test/every-endpoint-HONOURS-its-contract-once-SERIALIZED` —
+slopp's own `/api/form/:id` answers with fields its `:rest/response` does not
+declare. So the response question is not academic: closing there would surface
+real under-declared contracts, starting with ours. Also worth knowing before
+anyone tries it: malli's `humanize` renders a closed-schema failure as `nil`, so
+the refusal would arrive with an empty explanation.
+
 ### Closed at the TOP LEVEL only
 
 `closed-map` closes the merge and nothing nested. `malli.util/closed-schema`

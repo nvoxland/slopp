@@ -1475,6 +1475,19 @@ Decoded **in place**: your handler reads `:path-params`, `:query-params` and
 `:body` where it always did and finds them typed. `?depth=banana` against a
 declared `[:depth :int]` is a 400 before your handler runs.
 
+**A request contract is CLOSED: a key it does not name is a 400 that names the
+key.** This is the one place a malli schema in slopp says what is FORBIDDEN
+rather than only what is required — everywhere else (responses, `:malli/schema`
+on ordinary functions) a schema still means "at least this". Closed at the top
+level only, so a nested map you declared keeps whatever openness you gave it.
+
+It matters because the failure it replaces was silent: a caller passing an
+extra key got a correct response and a correct render, and the only witness was
+the other service's access log. If you are calling an API with a map you happen
+to have — route params, app state — send what the contract names, not what you
+are holding. General HTTP content is unaffected: a page declares no contract,
+so `?utm=x` on a link meets no schema at all.
+
 !!! note "Typed params are a property of the capability being ON"
 
     The decoding happens when the boundary runs, so a handler receives typed

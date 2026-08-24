@@ -147,6 +147,30 @@ Decoded **in place**, so your handler reads `:path-params`, `:query-params` and
 
 `?depth=banana` is a 400 before your handler runs.
 
+### The contract is closed
+
+A key the contract does not name is a 400 that names the key.
+
+```clojure
+;; GET /api/form/f1?depth=2&slug=demo  against  [:map [:id :string] [:depth :int]]
+;; => 400  {:slug ["disallowed key"]}
+```
+
+This is the one place a malli schema in slopp says what is *forbidden* rather
+than only what is required. Responses and `:malli/schema` on ordinary functions
+still mean "at least this". Only the top level closes, so a nested map you
+declared keeps whatever openness you gave it.
+
+The failure it replaces was silent. A client passing a map it happened to have
+-- route params, app state -- sent the extra keys as query parameters; the
+server answered correctly, the screen rendered, and the only witness was the
+other service's access log. So send what the contract names, not what you are
+holding.
+
+General HTTP content is unaffected: a page declares no contract, so `?utm=x` on
+a link meets no schema at all. That was not true before `:rest/path` and
+`:http/path` split, and it is why closing is safe now and was not then.
+
 !!! note "Typed params are a property of the capability being on"
 
     The decoding happens when the boundary runs, so a handler receives typed
