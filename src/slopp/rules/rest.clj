@@ -260,11 +260,13 @@
   real store the day it enabled this capability, making nine endpoints
   unreadable because a tenth answered `[:or [:map …] [:map …]]`.
 
-  `:published` is `:rest/client false` inverted, and it is a field rather than an
-  omission because a reader asking what consumers can CALL needs the exclusion
-  visible. An HTML document is a `:http/path` form like any other and a generated
-  fetch wrapper over it would be nonsense — but \"excluded on purpose\" and
-  \"forgot to declare a schema\" must not look the same.
+  **Every REST endpoint is a row, and there is no `:published` field.** It used
+  to carry one — `:rest/client false` inverted — so that a reader asking what
+  consumers can CALL could see an exclusion rather than infer it from an
+  absence. Both halves of that are gone: content is excluded by KIND and never
+  appears here, and an api cannot be excluded at all, because whether to
+  generate a client is the generating consumer's question. A field that could
+  only ever read `true` is not a field.
 
   Rows carry `:kind :contract`, so a renderer that knows nothing about this
   capability can draw one beside a command or an endpoint."

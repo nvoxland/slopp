@@ -793,3 +793,51 @@
       ;; zero
       (is (nil? (orient/behind st nil)))
       (is (nil? (orient/behind st {:serving? false :served-at 0}))))))
+
+(deftest a-marker-slopp-DELETED-is-reported-like-one-it-renamed
+  ;; Reported by slopp-ui, 2026-08-23, at the boot after the `:rest/client`
+  ;; retirement — and it is a hole this very session opened.
+  ;;
+  ;; At ONE boot, that store carried both:
+  ;;
+  ;;   :web/external-path → :http/external-path   RENAMED   reported
+  ;;   :rest/client       → gone                  DELETED   silent
+  ;;
+  ;; The block was keyed on being able to say "the current spelling is X", so a
+  ;; marker with no successor produced no row — and no row reads as an
+  ;; all-clear. **That is the worse half.** A renamed marker usually breaks
+  ;; something visible; a deleted one quietly stops meaning anything, and every
+  ;; reader after that point reasons from a declaration nothing reads. Their
+  ;; stylesheet still carried `:rest/client false` with a docstring explaining
+  ;; why it was necessary.
+  ;;
+  ;; The join was already there — what the store DECLARES against what this
+  ;; slopp READS. Only the rows whose right-hand side is empty went unreported.
+  ;;
+  ;; And the deleted case can carry MORE than the renamed one, because the
+  ;; reason it went is known: "drop the marker" is a complete instruction, the
+  ;; way "re-run whatever writes them" was for a generated form.
+  ;;
+  ;; **Any marker deleted rather than renamed has this property, and a
+  ;; partition is exactly the kind of change that deletes vocabulary rather
+  ;; than moving it.**
+  (testing "a DELETED marker is reported, and told to go rather than to move"
+    (let [st (store/ingest (store/empty-store) 'app.pages
+                           (str "(ns app.pages)\n\n"
+                                "(defn ^{:http/path \"/\" :rest/client false}\n"
+                                "  home \"H.\" [_] {:status 200})\n"))
+          r  (orient/unread-declarations st)]
+      (is (some? r) "a declaration nothing reads, reported as nothing to see")
+      (is (= 1 (get-in r [:markers :rest/client :count])) (pr-str r))
+      (is (nil? (get-in r [:markers :rest/client :now]))
+          "there is no current spelling — that is the whole point")
+      (is (re-find #"(?i)drop|remove" (:note r)) (:note r))
+      (is (not (re-find #"rename_sweep" (:note r)))
+          (str "a sweep renames; there is nothing to rename it TO: " (:note r)))))
+
+  (testing "and a RENAMED marker still says what the current spelling is"
+    (let [st (store/ingest (store/empty-store) 'app.a
+                           "(ns app.a)\n\n(defn ^{:web/path \"/x\"} h \"H.\" [_] {:status 200})\n")
+          r  (orient/unread-declarations st)]
+      (is (= :http/path (get-in r [:markers :web/path :now])) (pr-str r))
+      (is (re-find #"rename_sweep" (:note r)) (:note r)))))

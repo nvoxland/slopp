@@ -593,7 +593,9 @@
   "Markers this store DECLARES that this slopp no longer READS — or nil, which
   is the ordinary case.
 
-  `{:markers {:web/path {:count 10 :generated 9 :now :http/path}} :note \"…\"}`.
+  `{:markers {:web/path {:count 10 :generated 9 :now :http/path}} :note \"…\"}`,
+  and `:gone` in place of `:now` for a marker that was RETIRED rather than
+  renamed.
 
   **The join, not the finding.** `unknown-marker` already reports the per-form
   half, at done grain, phrased as *nothing reads it* about ONE marker. Nobody
@@ -605,50 +607,56 @@
   check-in with 404, five tests went red, and the brief's `:hub-note` pointed
   at beat-contract drift. It was not drift. Their routes declared `:web/path`,
   the jar reads `:http/path`, so not one endpoint registered and everything
-  404d. Every input was available at boot — the store declares its endpoints,
-  the running code knows which marker it reads, and the intersection was
-  empty.
+  404d.
 
-  Read from [[slopp.index.crossings/retired-markers]], so the current spelling
-  comes from the ledger a rename already maintains rather than from a second
-  list that would agree until it did not.
+  **Two ledgers, because a marker can leave two ways.**
+  [[slopp.index.crossings/retired-markers]] maps old→new; a RENAME can always
+  say what the current spelling is. [[slopp.index.crossings/deleted-markers]]
+  holds the ones that went outright, and reading only the first is what made a
+  retirement report NOTHING — which is an all-clear. Found by a consuming store
+  at the boot after `:rest/client` went: at one boot it carried a renamed
+  marker (reported) and nine forms declaring a deleted one (silent), with a
+  docstring still explaining why the dead flag was necessary.
+
+  The deleted half is the worse one. A renamed marker usually breaks something
+  visible; a deleted one quietly stops meaning anything, and every reader
+  afterwards reasons from a declaration nothing reads.
 
   **The remedy has to be one the reader can RUN.** `rename_sweep` refuses
   `^:generated` forms, correctly — so on a store whose markers are written by a
-  generator, naming the sweep is naming a refusal. That is worse than naming
-  nothing: it reads as the answer, so it gets run, and now there are two
-  problems to separate. Reported by a consumer for whom the suggestion was
-  0-for-9. The counts are split here because `form-name-meta` carries
-  `^:generated` and this already reads it — the information was present the
-  whole time and only the sentence was wrong.
-
-  **A MIXED store names both halves with their counts**, which matters more
-  than either alone: a reader who runs the sweep and sees *moved 1* has no way
-  to learn that two more are waiting on a generator.
+  generator, naming the sweep is naming a refusal. Reported by a consumer for
+  whom the suggestion was 0-for-9. And a DELETED marker gets no sweep at all,
+  because there is nothing to rename it to.
 
   **Silent when clean**, which is what makes it worth printing: a line every
   brief carries is a line nobody reads."
   [store]
   (let [retired  crossings/retired-markers
+        deleted  crossings/deleted-markers
         hits     (for [nsx (keys (:namespaces store))
                        e   (slopp.store/forms store nsx)
                        :when (:name e)
                        :let [m (slopp.store/form-name-meta e)]
                        k   (keys m)
                        :when (qualified-keyword? k)
-                       :let [now (get retired (str (namespace k) "/" (name k)))]
-                       :when now]
-                   [k now (boolean (:generated m))])
-        by-mark  (reduce (fn [m [k now gen?]]
+                       :let [spelling (str (namespace k) "/" (name k))
+                             now      (get retired spelling)
+                             gone     (get deleted spelling)]
+                       :when (or now gone)]
+                   [k now (boolean (:generated m)) gone])
+        by-mark  (reduce (fn [m [k now gen? gone]]
                            (-> m (assoc-in [k :now] now)
+                               (assoc-in [k :gone] gone)
                                (update-in [k :count] (fnil inc 0))
                                (update-in [k :generated] (fnil + 0) (if gen? 1 0))))
                          {} hits)]
     (when (seq by-mark)
-      (let [;; the CONSEQUENCE, per capability-ish current spelling: how many
-            ;; forms carry the live marker these retired ones map to
+      (let [;; the CONSEQUENCE, per current spelling: how many forms carry the
+            ;; live marker these retired ones map to. A deleted marker has no
+            ;; successor, so there is nothing to count
             live-counts (into {}
-                              (for [[_ {:keys [now]}] by-mark]
+                              (for [[_ {:keys [now]}] by-mark
+                                    :when now]
                                 [now (count (for [nsx (keys (:namespaces store))
                                                   e   (slopp.store/forms store nsx)
                                                   :when (and (:name e)
@@ -663,38 +671,49 @@
             gen    (:generated (val worst) 0)
             hand   (- n gen)
             now    (:now (val worst))
+            gone   (:gone (val worst))
             live   (get live-counts now 0)
-            sweep  (str "rename_sweep {from \"" mk "\" to \"" now "\"}")
-            remedy (cond
-                     (zero? gen)
-                     (str sweep " moves them.")
-
-                     (zero? hand)
-                     ;; the sweep CALL is deliberately not printed here, not
-                     ;; even to warn against. A reader skimming for something
-                     ;; to run finds the call and runs it; the negation around
-                     ;; it is what a skim drops. Naming no command is the
-                     ;; honest answer when no command exists.
-                     (str "Every one of them is ^:generated, so no sweep can"
-                          " move them — a sweep refuses a generated form. Re-run"
-                          " whatever writes them.")
-
-                     :else
-                     (str sweep " moves the " hand " hand-written one(s); the"
-                          " other " gen " are ^:generated and a sweep refuses"
-                          " those, so re-run whatever writes them. Both halves,"
-                          " or the sweep's own count reads as finished."))]
+            sweep  (str "rename_sweep {from \"" mk "\" to \"" now "\"}")]
         {:markers by-mark
-         :note (str n " form(s) in this store declare " mk
-                    ", which this slopp does not read — "
-                    (if (zero? live)
-                      (str "and NONE of them are readable, so whatever "
-                           mk " configures, this store is not doing it. ")
-                      (str "while " live " form(s) use the live spelling, so this"
-                           " store is doing it partly. "))
-                    "The current spelling is " now
-                    ". A rename moved it and these were left behind; "
-                    remedy
-                    " Every input to this was here at boot — the store says what"
-                    " it declares and this slopp says what it reads, and nothing"
-                    " joined the two.")}))))
+         :note
+         (if gone
+           ;; RETIRED OUTRIGHT. No sweep is named because there is nothing to
+           ;; rename it to, and the ledger's own sentence says what to do
+           ;; instead — which can be more than a rename could ever hand over,
+           ;; since the reason it went is known.
+           (str n " form(s) in this store declare " mk
+                ", which this slopp RETIRED — it is not a rename, so there is no"
+                " current spelling and no sweep to run. " gone
+                ". Until they go, every reader of those forms is reasoning from"
+                " a declaration nothing reads, which is quieter than a rename"
+                " and lasts longer.")
+
+           (str n " form(s) in this store declare " mk
+                ", which this slopp does not read — "
+                (if (zero? live)
+                  (str "and NONE of them are readable, so whatever "
+                       mk " configures, this store is not doing it. ")
+                  (str "while " live " form(s) use the live spelling, so this"
+                       " store is doing it partly. "))
+                "The current spelling is " now
+                ". A rename moved it and these were left behind; "
+                (cond
+                  (zero? gen) (str sweep " moves them.")
+
+                  (zero? hand)
+                  ;; the sweep CALL is deliberately not printed here, not even
+                  ;; to warn against. A reader skimming for something to run
+                  ;; finds the command and runs it; the negation around it is
+                  ;; what a skim drops.
+                  (str "Every one of them is ^:generated, so no sweep can move"
+                       " them — a sweep refuses a generated form. Re-run"
+                       " whatever writes them.")
+
+                  :else
+                  (str sweep " moves the " hand " hand-written one(s); the other "
+                       gen " are ^:generated and a sweep refuses those, so"
+                       " re-run whatever writes them. Both halves, or the"
+                       " sweep's own count reads as finished."))
+                " Every input to this was here at boot — the store says what it"
+                " declares and this slopp says what it reads, and nothing"
+                " joined the two."))}))))

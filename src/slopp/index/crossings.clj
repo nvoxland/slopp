@@ -408,6 +408,43 @@
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
 
+(def ^:export deleted-markers
+  "Markers slopp USED to read and has RETIRED outright, as
+  `{\"old/name\" \"what to do instead\"}`.
+
+  **The sibling [[retired-markers]] cannot hold these, and that is the bug this
+  exists for.** That table maps old→new, so every row can say *the current
+  spelling is X*. A marker with no successor produces no row — and no row reads
+  as an all-clear. Reported by a consuming store at the boot after
+  `:rest/client` went: at ONE boot it carried a RENAMED marker (reported,
+  correctly) and nine forms declaring a DELETED one (silent), and a stylesheet
+  still carried the dead flag with a docstring explaining why it was necessary.
+
+  **The deleted case is the worse half.** A renamed marker usually breaks
+  something visible; a deleted one quietly stops meaning anything, and every
+  reader afterwards reasons from a declaration nothing reads.
+
+  **And it can carry MORE than a rename can**, because the reason it went is
+  known. \"Drop it\" plus why is a complete instruction, the way *re-run
+  whatever writes them* is for a generated form — where a rename can only ever
+  hand over a new spelling.
+
+  The key is a STRING for [[retired-markers]]'s reason, and it is sharper here:
+  a sweep rewrites every occurrence of the keyword it is renaming, and a ledger
+  is nothing but occurrences. Written without the leading colon nothing can
+  match it.
+
+  **A partition is exactly the kind of change that deletes vocabulary rather
+  than moving it**, so expect this table to grow when a concept splits."
+  {"rest/client"
+   (str "content is excluded from a client and from the published contract by"
+        " KIND now — an `:http/path` form is not part of a typed API — so a"
+        " page needs no flag. And an API can no longer opt out at all: whether"
+        " to generate a client is the generating CONSUMER's question, asked"
+        " against the document, and an endpoint does not know who will call it."
+        " Drop the marker. If the endpoint answers something other than JSON,"
+        " that fact is `:rest/media-type`")})
+
 (def ^:export retired-markers
   "The marker renames of the `:web/*` → owning-capability wave, as
   `{\"old/name\" :new/name}`.
