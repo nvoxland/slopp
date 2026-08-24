@@ -1488,6 +1488,15 @@ to have — route params, app state — send what the contract names, not what y
 are holding. General HTTP content is unaffected: a page declares no contract,
 so `?utm=x` on a link meets no schema at all.
 
+**A GENERATED builder refuses the same thing before the request leaves**, so
+you get the key named without a round trip. It is plain set membership emitted
+from the contract's declared keys — no malli, which is what keeps the `:cljc`
+builder namespace requiring nothing and reachable from `:pure` views. Path
+segments stay allowed whether or not the contract names them, since the builder
+needs them to build the url at all. **Regenerate after upgrading**
+(`generate_client`) or your builders keep the old, permissive shape — nothing
+prompts you, because the contract has not drifted.
+
 !!! note "Typed params are a property of the capability being ON"
 
     The decoding happens when the boundary runs, so a handler receives typed
