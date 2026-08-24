@@ -253,6 +253,15 @@
              way to say anything the path does not carry")))
     (testing "the source endpoint rides each spec as provenance"
       (is (= 'shop.api/create-order (:endpoint (first wrappers)))))
+(testing "the declared KEYS ride the spec, read out of the var's literal"
+      ;; the half that needs the store. contract->plan is handed schemas as
+      ;; VALUES; here `:rest/request` is a symbol, so the keys are behind a
+      ;; name and generation has to look them up — without which the guard
+      ;; would exist only for stores consuming somebody else's API.
+      (is (= #{:item :qty} (:request-keys (first wrappers)))
+          (pr-str (first wrappers)))
+      (is (nil? (:request-keys (second wrappers)))
+          "an endpoint declaring no request has no keys to enumerate"))
     (testing "a clean fixture yields no problems"
       (is (empty? problems) (pr-str problems)))))
 
@@ -1246,3 +1255,68 @@
             (str "`.json` on application/edn fails on the first character: " src))
         (is (not (str/includes? src "json-transformer"))
             (str "and there is no JSON boundary to transform across: " src))))))
+
+(deftest a-BUILDER-refuses-params-its-contract-does-not-name
+  ;; The measured failure: a consumer passed the map it had — its own route
+  ;; params — and `:slug` fell through to the query string of a service that
+  ;; never asked for it. Correct response, correct render, visible only in
+  ;; somebody else's access log.
+  ;;
+  ;; The server closes the same question (D-closed-request). This is the same
+  ;; refusal one layer earlier, where it names the key without a round trip —
+  ;; and it needs no malli, so it stays in the `:cljc` builder namespace that
+  ;; requires NOTHING.
+  (let [spec {:fn-name 'get-order :method :get :path "/api/orders/:id"
+              :endpoint 'shop.api/get-order
+              :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
+              :request-keys #{:depth}
+              :response {:kind :none}}
+        src  (cljs/render-request-ns 'shop.client.api [spec] nil)]
+
+    (testing "the builder carries the declared key set and refuses anything else"
+      (is (re-find #"remove #\{" src) src)
+      (is (re-find #":depth" src) src))
+
+    (testing "a PATH SEGMENT is allowed even when the contract omits it"
+      ;; the builder needs it to build the url at all. Whether the contract
+      ;; ought to name it is the SERVER's question, and closing there already
+      ;; asks it — a builder inventing a stricter rule than the boundary would
+      ;; refuse requests the boundary accepts
+      (is (re-find #"#\{[^}]*:id" src)
+          (str "a captured segment must stay allowed or the url cannot be"
+               " built: " src)))
+
+    (testing "the guard names the endpoint and the offending keys"
+      (is (re-find #"get-order-request" src) src)
+      (is (re-find #"does not name" src) src))
+
+    (testing "and it still requires NOTHING — the whole reason it is not malli"
+      (is (not (re-find #":require" src)) src)
+      (is (not (re-find #"m/validate" src)) src))
+(testing "the :cljs WRAPPER gets the same guard, because it had the same hole"
+      ;; its `m/validate` looked like the check that was missing and never was
+      ;; one: malli map schemas are OPEN, so an undeclared key passed it and
+      ;; always had. A fix reaching only one renderer would have charged every
+      ;; store a regeneration and reached some of them.
+      (let [w (cljs/render-client-ns
+               'shop.client
+               [{:fn-name 'get-order :method :get :path "/api/orders/:id"
+                 :endpoint 'shop.api/get-order
+                 :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
+                 :request-keys #{:depth}
+                 :response {:kind :none}}])]
+        (is (re-find #"does not name" w) w)
+        (is (< (.indexOf w "does not name") (.indexOf w "m/validate"))
+            (str "the undeclared check must run BEFORE the typed one, or a"
+                 " caller learns about a type error in a key that should never"
+                 " have been sent: " w)))))
+
+  (testing "an endpoint whose declared keys are UNKNOWN gets no guard"
+    ;; degrade safely: a non-literal or non-map schema means generation cannot
+    ;; enumerate what is allowed, and a guard built from a guess would refuse
+    ;; correct calls. No check beats a wrong one.
+    (let [spec {:fn-name 'ping :method :get :path "/api/ping"
+                :endpoint 'shop.api/ping
+                :request {:kind :none} :response {:kind :none}}]
+      (is (not (re-find #"remove #\{"
+                        (cljs/render-request-ns 'shop.client.api [spec] nil)))))))

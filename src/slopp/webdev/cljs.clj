@@ -203,70 +203,6 @@
                        :else {:kind :var :sym fq :ns full-ns}))
     :else          {:kind :inline :schema raw}))
 
-(defn ^:export client-wrapper-specs
-  "The generated-client plan (D-web-contracts part 2): one wrapper SPEC per web
-   endpoint (`edit.modules/web-endpoint-rows`), with its request/response schemas
-   resolved to shippable :cljc vars. Returns {:wrappers [spec …] :problems [p …]}.
-   A spec is {:fn-name :method :path :endpoint :request :response} — :fn-name gets
-   a ! on a mutating verb (post/put/patch/delete), :request/:response are
-   resolve-schema-ref results (only a body verb carries a request). An endpoint
-   whose schema can't ship to the client (non-:cljc, or a missing var) is SKIPPED
-   and reported as a problem {:endpoint :schema-ref :ns :issue :platform} so the
-   generated namespace always compiles. Pure function of the store value."
-  [store]
-  (reduce
-   (fn [acc {:keys [ns name meta kind path]}]
-     ;; CONTENT is not a client's business at all — a typed fetch wrapper whose
-     ;; (.json resp) runs against HTML is nonsense. That used to be
-     ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
-     ;; page; `:kind` says it now.
-     ;;
-     ;; And there is no opt-out beyond that. `:rest/client false` also excluded
-     ;; a REAL api, which put one consumer's decision on the producer — an
-     ;; endpoint does not know who will call it, and the flag reached every
-     ;; other consumer too. What it was standing in for turned out to be
-     ;; `:rest/media-type` in the one case that was about the endpoint at all.
-     (if (not= :rest kind)
-       acc
-       (let [endpoint (symbol (str ns) (str name))
-             method   (:http/method meta)
-             req      (resolve-schema-ref store ns (:rest/request meta))
-             resp     (resolve-schema-ref store ns (:rest/response meta))
-             bad      (vals (into {} (map (juxt :sym identity))
-                                 (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
-         (if (seq bad)
-           (update acc :problems into
-                   (for [b bad] {:endpoint endpoint :schema-ref (:sym b)
-                                 :ns (:ns b) :issue (:kind b) :platform (:platform b)}))
-           (update acc :wrappers conj
-                   {:fn-name  (symbol (str name
-                                       ;; not a second bang: a mutating endpoint
-                                       ;; named with one is already following the
-                                       ;; dialect's convention, and `pay!!` is the
-                                       ;; generator fighting the house style
-                                       (when (and (#{:post :put :patch :delete} method)
-                                                  (not (.endsWith (str name) "!")))
-                                         "!")))
-                    :method   method
-                    :path     path
-                    ;; what the endpoint ANSWERS, defaulting to JSON. A wrapper
-                    ;; decodes what it is given, and `.json` on anything else
-                    ;; fails on the first character — slopp's own
-                    ;; /api/contracts answers application/edn
-                    :media-type (or (:rest/media-type meta) "application/json")
-                    :endpoint endpoint
-                    ;; whatever the verb. WHETHER there is a request is the endpoint's
-                    ;; declaration; HOW it travels — body or query string — is
-                    ;; render-wrapper's decision from the method. Dropping it
-                    ;; here on a non-body verb removed the caller's only way to
-                    ;; say anything the PATH does not carry, which is how
-                    ;; `?depth=` came to answer on the wire while the generated
-                    ;; wrapper had nowhere to put it.
-                    :request  req
-                    :response resp})))))
-   {:wrappers [] :problems []}
-   (edit.http/web-endpoint-rows store)))
-
 (defn ^:private schema-form
   "The cljs code for a resolved schema ref: the fully-qualified var symbol (a
    :var) or the inline malli form pr-str'd (an :inline); nil for :none."
@@ -322,7 +258,7 @@
    The PATH params are dissoc'd from the query: a segment interpolated into the
    url must not also arrive as a query key, and repeating it would make the url
    depend on map ordering."
-  [{:keys [fn-name method path endpoint request response media-type]}]
+  [{:keys [fn-name method path endpoint request response media-type request-keys]}]
   (let [verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
         resp-code (schema-form response)
@@ -357,6 +293,21 @@
                          ":body (js/JSON.stringify (clj->js (m/encode " req-code
                          " params (mt/json-transformer))))})")
                     (str "(clj->js {:method \"" verb "\"})"))
+        ;; BEFORE the malli check, and not instead of it: malli's map schema is
+        ;; OPEN, so `m/validate` passed an undeclared key and always had. The
+        ;; two ask different questions — this one whether the caller sent
+        ;; something the contract never named, that one whether what it named
+        ;; is well typed. Same guard the `:cljc` builder emits, because the
+        ;; hole was never about which renderer you got.
+        allowed   (when (seq request-keys)
+                    (sort (into (set request-keys) segs)))
+        undeclared (when (and (seq allowed) params?)
+                     (str "  (when-let [extra (seq (remove #{"
+                          (str/join " " (map pr-str allowed))
+                          "} (keys params)))]\n"
+                          "    (throw (ex-info (str \"" fn-name ": this endpoint's"
+                          " contract does not name \" (pr-str (vec extra)))\n"
+                          "                    {:undeclared (vec extra)})))\n"))
         validate  (when req-code
                     (str "  (when-not (m/validate " req-code " params)\n"
                          "    (throw (ex-info \"" fn-name " request failed validation\"\n"
@@ -388,7 +339,7 @@
     (str "(defn ^{:generated \"" endpoint "\"} ^:export " fn-name "\n"
          "  \"" verb " " path " — generated client wrapper (D-web-contracts).\"\n"
          "  " arglist "\n"
-         (or validate "")
+         (or undeclared "") (or validate "")
          "  (-> (js/fetch (url " url-expr ") " opts ")\n"
          "      (.then (fn [resp] (" read-body " (ok! resp))))\n"
          handle ")")))
@@ -499,76 +450,6 @@
 (def ^:private supported-contract-version
   "The only `:slopp/contract-version` this generator knows how to read."
   1)
-
-(defn ^:export contract->plan
-  "The generated-client plan for a PUBLISHED contract — the remote twin of
-   [[client-wrapper-specs]], which reads the local store instead.
-
-   `document` is what `slopp.http.contract/contract-document` serves;
-   `contracts-ns` is where the schemas will be defined in THIS store. Returns
-   `{:defs [{:name :schema}] :wrappers [spec …] :problems [p …]}`, where the
-   wrapper specs are the shape [[render-client-ns]] already renders — so
-   generating against someone else's API and against your own produce the same
-   kind of namespace.
-
-   Schemas arrive as VALUES, because the publisher's var names did not survive
-   evaluation (see `slopp.http.contract`). So each is re-named from its
-   ENDPOINT — `things` → `things-response`, `create!` → `create-request` — and
-   the bang stays on the wrapper, where it describes the call, rather than
-   leaking into a schema's name.
-
-   An unrecognised `:slopp/contract-version` yields no wrappers and a problem.
-   A consumer that generated anyway from a shape it does not know would fail
-   later, somewhere else, with nothing pointing back to here."
-  [document contracts-ns]
-  (if (not= supported-contract-version (:slopp/contract-version document))
-    {:defs [] :wrappers []
-     :problems [{:issue :unsupported-contract-version
-                 :version (:slopp/contract-version document)
-                 :supported supported-contract-version}]}
-    (reduce
-     (fn [acc {:keys [method path name request response media-type]}]
-       (let [base    (symbol (str/replace (str name) #"!$" ""))
-             mutate? (contains? #{:post :put :patch :delete} method)
-             ;; a body verb carries a request; every other verb declares none,
-             ;; the same split client-wrapper-specs makes locally
-             ;; ANY verb that declares a request carries it — a body verb sends it
-             ;; as a body, everything else as a query string, and render-wrapper
-             ;; decides which from the method.
-             ;;
-             ;; This used to drop it on a non-body verb, matching a split
-             ;; client-wrapper-specs made locally — and a comment here SAID SO,
-             ;; which is how it survived being fixed there: the prose asserted a
-             ;; parity in the same commit that broke it, positioned exactly
-             ;; where a reader checks whether both paths were covered.
-             ;; The parity is a TEST now, over both producers.
-             req     (when request (symbol (str base "-request")))
-             resp    (when response (symbol (str base "-response")))
-             ref     (fn [sym] (if sym
-                                 {:kind :var
-                                  :sym (symbol (str contracts-ns) (str sym))
-                                  :ns contracts-ns}
-                                 {:kind :none}))]
-         (-> acc
-             (update :defs into (cond-> []
-                                  req  (conj {:name req :schema request :endpoint name})
-                                  resp (conj {:name resp :schema response :endpoint name})))
-             (update :wrappers conj
-                     {:fn-name  (symbol (str name
-                                             (when (and mutate?
-                                                        (not (str/ends-with? (str name) "!")))
-                                               "!")))
-                      :method   method
-                      :path     path
-                      ;; the document carries it, so both producers decode what
-                      ;; the endpoint answers rather than assuming JSON — the
-                      ;; parity a test pins over both
-                      :media-type (or media-type "application/json")
-                      :endpoint name
-                      :request  (ref req)
-                      :response (ref resp)}))))
-     {:defs [] :wrappers [] :problems []}
-     (:endpoints document))))
 
 (defn ^:export render-contracts-ns
   "Render the generated CONTRACTS namespace source (a string) from
@@ -903,6 +784,189 @@
                                     (store/forms store n)))]
                n))))
 
+(defn ^:private schema-literal-for
+  "The literal schema a resolved `:var` reference points at, read out of the
+  store, or nil.
+
+  A contract declared inline hands its keys straight over; one declared as a
+  var — which is the shape the dialect prefers, and the shape `:rest/request`
+  usually takes — hides them behind a name. This is the difference between the
+  two producers: `contract->plan` receives schemas as VALUES from a published
+  document, while `client-wrapper-specs` receives a reference and has to look.
+
+  Anything other than a plain `(def name … <literal>)` answers nil, which the
+  caller treats as \"cannot enumerate\" and emits no guard."
+  [store {:keys [kind sym ns]}]
+  (when (= :var kind)
+    (when-let [e (store/form-named store ns (symbol (clojure.core/name sym)))]
+      (let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
+        (when (and (seq? sx) (= 'def (first sx)))
+          (last sx))))))
+
+(defn ^:private declared-map-keys
+  "The top-level keys a LITERAL `[:map …]` schema declares, or nil when this
+  cannot be answered from the data.
+
+  nil is the safe answer and the common one: a schema that is a var reference,
+  a non-map, a computed form, or a `[:map]` with no entries gives generation
+  nothing to enumerate, and a guard built from a guess would refuse correct
+  calls. No check beats a wrong one — the boundary still closes the same
+  question server-side."
+  [schema]
+  (when (and (vector? schema) (= :map (first schema)))
+    (let [entries (remove map? (rest schema))]
+      (when (and (seq entries)
+                 (every? #(and (vector? %) (keyword? (first %))) entries))
+        (into #{} (map first) entries)))))
+
+(defn ^:export client-wrapper-specs
+  "The generated-client plan (D-web-contracts part 2): one wrapper SPEC per web
+   endpoint (`edit.modules/web-endpoint-rows`), with its request/response schemas
+   resolved to shippable :cljc vars. Returns {:wrappers [spec …] :problems [p …]}.
+   A spec is {:fn-name :method :path :endpoint :request :response} — :fn-name gets
+   a ! on a mutating verb (post/put/patch/delete), :request/:response are
+   resolve-schema-ref results (only a body verb carries a request). An endpoint
+   whose schema can't ship to the client (non-:cljc, or a missing var) is SKIPPED
+   and reported as a problem {:endpoint :schema-ref :ns :issue :platform} so the
+   generated namespace always compiles. Pure function of the store value."
+  [store]
+  (reduce
+   (fn [acc {:keys [ns name meta kind path]}]
+     ;; CONTENT is not a client's business at all — a typed fetch wrapper whose
+     ;; (.json resp) runs against HTML is nonsense. That used to be
+     ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
+     ;; page; `:kind` says it now.
+     ;;
+     ;; And there is no opt-out beyond that. `:rest/client false` also excluded
+     ;; a REAL api, which put one consumer's decision on the producer — an
+     ;; endpoint does not know who will call it, and the flag reached every
+     ;; other consumer too. What it was standing in for turned out to be
+     ;; `:rest/media-type` in the one case that was about the endpoint at all.
+     (if (not= :rest kind)
+       acc
+       (let [endpoint (symbol (str ns) (str name))
+             method   (:http/method meta)
+             req      (resolve-schema-ref store ns (:rest/request meta))
+             resp     (resolve-schema-ref store ns (:rest/response meta))
+             bad      (vals (into {} (map (juxt :sym identity))
+                                 (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
+         (if (seq bad)
+           (update acc :problems into
+                   (for [b bad] {:endpoint endpoint :schema-ref (:sym b)
+                                 :ns (:ns b) :issue (:kind b) :platform (:platform b)}))
+           (update acc :wrappers conj
+                   {:fn-name  (symbol (str name
+                                       ;; not a second bang: a mutating endpoint
+                                       ;; named with one is already following the
+                                       ;; dialect's convention, and `pay!!` is the
+                                       ;; generator fighting the house style
+                                       (when (and (#{:post :put :patch :delete} method)
+                                                  (not (.endsWith (str name) "!")))
+                                         "!")))
+                    :method   method
+                    :path     path
+                    ;; what the endpoint ANSWERS, defaulting to JSON. A wrapper
+                    ;; decodes what it is given, and `.json` on anything else
+                    ;; fails on the first character — slopp's own
+                    ;; /api/contracts answers application/edn
+                    :media-type (or (:rest/media-type meta) "application/json")
+                    :endpoint endpoint
+                    ;; whatever the verb. WHETHER there is a request is the endpoint's
+                    ;; declaration; HOW it travels — body or query string — is
+                    ;; render-wrapper's decision from the method. Dropping it
+                    ;; here on a non-body verb removed the caller's only way to
+                    ;; say anything the PATH does not carry, which is how
+                    ;; `?depth=` came to answer on the wire while the generated
+                    ;; wrapper had nowhere to put it.
+                    :request  req
+                    ;; inline hands the keys over; a var hides them behind a
+                    ;; name and has to be read. Either way nil means "cannot
+                    ;; enumerate", and render-request then emits no guard —
+                    ;; the boundary still closes the same question
+                    :request-keys (or (declared-map-keys (:rest/request meta))
+                                      (declared-map-keys
+                                       (schema-literal-for store req)))
+                    :response resp})))))
+   {:wrappers [] :problems []}
+   (edit.http/web-endpoint-rows store)))
+
+(defn ^:export contract->plan
+  "The generated-client plan for a PUBLISHED contract — the remote twin of
+   [[client-wrapper-specs]], which reads the local store instead.
+
+   `document` is what `slopp.http.contract/contract-document` serves;
+   `contracts-ns` is where the schemas will be defined in THIS store. Returns
+   `{:defs [{:name :schema}] :wrappers [spec …] :problems [p …]}`, where the
+   wrapper specs are the shape [[render-client-ns]] already renders — so
+   generating against someone else's API and against your own produce the same
+   kind of namespace.
+
+   Schemas arrive as VALUES, because the publisher's var names did not survive
+   evaluation (see `slopp.http.contract`). So each is re-named from its
+   ENDPOINT — `things` → `things-response`, `create!` → `create-request` — and
+   the bang stays on the wrapper, where it describes the call, rather than
+   leaking into a schema's name.
+
+   An unrecognised `:slopp/contract-version` yields no wrappers and a problem.
+   A consumer that generated anyway from a shape it does not know would fail
+   later, somewhere else, with nothing pointing back to here."
+  [document contracts-ns]
+  (if (not= supported-contract-version (:slopp/contract-version document))
+    {:defs [] :wrappers []
+     :problems [{:issue :unsupported-contract-version
+                 :version (:slopp/contract-version document)
+                 :supported supported-contract-version}]}
+    (reduce
+     (fn [acc {:keys [method path name request response media-type]}]
+       (let [base    (symbol (str/replace (str name) #"!$" ""))
+             mutate? (contains? #{:post :put :patch :delete} method)
+             ;; a body verb carries a request; every other verb declares none,
+             ;; the same split client-wrapper-specs makes locally
+             ;; ANY verb that declares a request carries it — a body verb sends it
+             ;; as a body, everything else as a query string, and render-wrapper
+             ;; decides which from the method.
+             ;;
+             ;; This used to drop it on a non-body verb, matching a split
+             ;; client-wrapper-specs made locally — and a comment here SAID SO,
+             ;; which is how it survived being fixed there: the prose asserted a
+             ;; parity in the same commit that broke it, positioned exactly
+             ;; where a reader checks whether both paths were covered.
+             ;; The parity is a TEST now, over both producers.
+             req     (when request (symbol (str base "-request")))
+             resp    (when response (symbol (str base "-response")))
+             ref     (fn [sym] (if sym
+                                 {:kind :var
+                                  :sym (symbol (str contracts-ns) (str sym))
+                                  :ns contracts-ns}
+                                 {:kind :none}))]
+         (-> acc
+             (update :defs into (cond-> []
+                                  req  (conj {:name req :schema request :endpoint name})
+                                  resp (conj {:name resp :schema response :endpoint name})))
+             (update :wrappers conj
+                     {:fn-name  (symbol (str name
+                                             (when (and mutate?
+                                                        (not (str/ends-with? (str name) "!")))
+                                               "!")))
+                      :method   method
+                      :path     path
+                      ;; the document carries it, so both producers decode what
+                      ;; the endpoint answers rather than assuming JSON — the
+                      ;; parity a test pins over both
+                      :media-type (or media-type "application/json")
+                      :endpoint name
+                      :request  (ref req)
+                      ;; the schemas arrive as VALUES here, so the declared
+                      ;; keys are simply in hand — no store lookup, no
+                      ;; resolution. This is the path a store takes when it
+                      ;; consumes SOMEBODY ELSE'S api, which is exactly where
+                      ;; sending an undeclared key is somebody else's problem
+                      ;; to notice
+                      :request-keys (declared-map-keys request)
+                      :response (ref resp)}))))
+     {:defs [] :wrappers [] :problems []}
+     (:endpoints document))))
+
 (defn ^:private render-request
   "One endpoint as a REQUEST BUILDER — a source string, `:cljc`, requiring
    nothing.
@@ -932,7 +996,7 @@
    escape is a marker on a form nobody may hand-edit — the next generation drops
    it silently. Generation knows where the contract came from, so generation
    declares it."
-  [{:keys [fn-name method path endpoint request response]} external]
+  [{:keys [fn-name method path endpoint request response request-keys]} external]
   (let [base      (str/replace (str fn-name) #"!$" "")
         verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
@@ -963,10 +1027,36 @@
                        (when external
                          (str " :http/external-path \"generated from the contract"
                               " published at " external "\""))
-                       "}")]
+                       "}")
+        ;; The guard, and it is plain Clojure on purpose. `:rest/request` names
+        ;; what the caller SENDS, so a key it does not name is one this endpoint
+        ;; has no use for — and the measured failure was a consumer passing the
+        ;; map it HAD, its own route params, which rode out as a query string to
+        ;; a service that never asked. The boundary closes the same question
+        ;; server-side; this asks it before the round trip and names the key.
+        ;;
+        ;; No malli, which is what lets it live here at all: this namespace
+        ;; requires NOTHING, and a require is what would tier it out of reach of
+        ;; the `:pure` views that name these builders in a route row.
+        ;;
+        ;; Path SEGMENTS stay allowed whether or not the contract names them,
+        ;; because the builder needs them to build the url. Whether a contract
+        ;; ought to name its own segments is the BOUNDARY's question and closing
+        ;; already asks it — a builder refusing what the boundary would accept
+        ;; is a stricter rule invented in the wrong place.
+        allowed   (when (seq request-keys)
+                    (sort (into (set request-keys) segs)))
+        guard     (when (and (seq allowed) params?)
+                    (str "  (when-let [extra (seq (remove #{"
+                         (str/join " " (map pr-str allowed))
+                         "} (keys params)))]\n"
+                         "    (throw (ex-info (str \"" base "-request: this endpoint's"
+                         " contract does not name \" (pr-str (vec extra)))\n"
+                         "                    {:undeclared (vec extra)})))\n"))]
     (str "(defn " meta* " ^:export " base "-request\n"
          "  \"" verb " " path " — generated request builder (D-web-contracts).\"\n"
          "  " (if params? "[params]" "[]") "\n"
+         (or guard "")
          "  {" (str/join "\n   " pairs) "})")))
 
 (defn ^:export
