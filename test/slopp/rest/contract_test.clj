@@ -216,3 +216,30 @@
       (is (nil? (:error (rest.contract/decode-request
                          schema {:body {:id "f1" :meta {:kind "x" :extra 1}}})))
           "the top level is closed; what the author declared inside it is not"))))
+
+(deftest closing-is-scoped-to-a-REQUEST-and-the-boundary-is-DELIBERATE
+  ;; The reversal that closed request contracts is narrow on purpose: a malli
+  ;; schema still means what is REQUIRED and not what is forbidden everywhere
+  ;; else. Without this, the next reader meets one closed schema and a
+  ;; plausible argument for closing its neighbour — and nothing saying the
+  ;; neighbour was considered.
+  (testing "a REQUEST is closed"
+    (is (:error (rest.contract/decode-request
+                 [:map [:id :int]] {:query-params {:id "1" :extra "x"}}))))
+
+  (testing "a RESPONSE is NOT — a server sending an extra field is a different question"
+    ;; the caller of check-response is a dispatcher holding an answer it is
+    ;; about to send. Whether a server may answer with more than it advertised
+    ;; is open; it is not settled by the decision about what a CALLER may send,
+    ;; and closing it here would settle it silently.
+    (is (nil? (rest.contract/check-response
+               [:map [:id :int]] {:id 1 :extra "x"}))
+        "an undeclared response field passes, deliberately and not yet decided"))
+
+  (testing "and CONTENT never reaches the question at all"
+    ;; what makes closing a request safe, and was not true before :rest/path
+    ;; and :http/path split: a page declares no contract, so the schema here is
+    ;; nil and every carrier passes through. A tracking parameter on a link
+    ;; meets nothing.
+    (is (nil? (:error (rest.contract/decode-request
+                       nil {:query-params {:utm "x" :fbclid "y"}}))))))

@@ -28,8 +28,25 @@
   "`schema` with its TOP LEVEL closed, or `schema` unchanged when it is not a
   map. Existing properties are kept.
 
-  Top level only, deliberately. `malli.util/closed-schema` closes every nested
-  map as well, which would refuse the keys of a free-form blob an author
+  **Scoped to an API REQUEST, and the scope is the decision rather than a side
+  effect of where this happens to live.** Everywhere else a malli schema means
+  what it has always meant — what is REQUIRED, not what is forbidden — and that
+  reading is still right for the same reasons it always was. Three places this
+  deliberately does NOT reach, so nobody generalises from the one that changed:
+
+  - **RESPONSES.** [[check-response]] judges the server's own answer, and a
+    server sending a field it did not advertise is a different question from a
+    caller sending one nobody asked for. Whether that should close too is open,
+    not settled by this.
+  - **`:malli/schema` on ordinary functions.** A function's schema describes
+    arguments, and a map argument is the caller's own data structure.
+  - **content.** A page declares no contract at all, so a nil schema arrives
+    here and every carrier passes through untouched. `?utm=x` on a link never
+    meets this function — which is what makes closing a REQUEST safe, and was
+    not true before `:rest/path` and `:http/path` split.
+
+  Top level only, within that scope. `malli.util/closed-schema` closes every
+  nested map as well, which would refuse the keys of a free-form blob an author
   declared on purpose — a strictness nobody wrote, applied where they had
   already said what they meant. The question this answers is only about the
   carriers: path, query and body merge into one map, and that map is what the
