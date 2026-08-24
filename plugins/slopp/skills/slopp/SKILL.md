@@ -1657,6 +1657,13 @@ so it renders as the string of its own function object.
 `text/html`, everything else to `text/plain`. There is no extension-based
 guessing: a def named `robots.txt` is a var, not a file.
 
+**A VECTOR means hiccup, so one declaring a non-HTML media type REFUSES.** The
+case that needs it is a stylesheet: garden rules are vectors too, so `(def
+^{:http/media-type "text/css"} style [:main {:margin 0}])` is valid hiccup,
+renders to `<main margin="0">`, and serves 200 with the right header and a
+nonsense body. Render at def time — `slopp.http.css/render` answers a string,
+which is what a stylesheet's value should be.
+
 `slopp.http.html/render` serializes hiccup (hiccup 2.x underneath,
 escape-by-default) and **prepends `<!DOCTYPE html>` to a top-level `[:html …]`**,
 so an app writes its whole document — title, meta, stylesheets, all of it —

@@ -32,6 +32,12 @@ Hiccup renders as `text/html`; anything else is served as it stands, as
 `text/plain`. A `:http/media-type` you declare is used verbatim. There is no
 extension-based guessing -- a def named `robots.txt` is a var, not a file.
 
+A vector means hiccup, so one declaring a non-HTML media type refuses. That
+matters for stylesheets, because garden rules are vectors too: `(def
+^{:http/media-type "text/css"} style [:main {:margin 0}])` is valid hiccup and
+would serve `<main margin="0">` with a `text/css` header. Render at def time --
+`slopp.http.css/render` answers a string, which is what the value should be.
+
 `render` prepends `<!DOCTYPE html>` to a top-level `[:html ...]`, which is what
 lets an app hold a whole document:
 
