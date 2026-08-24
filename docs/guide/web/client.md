@@ -61,12 +61,18 @@ of journal. A clone starts with an empty cache, which is normal: `build`
 reports the gap as `missing-artifacts` and `compile_client` fills it.
 
 Compile errors and analyzer warnings are anchored to the owning store form, by
-name, with no file or line. Reference the bundle from a page's head, and let a
-top-level `defonce` start it so the page needs no inline script:
+name, with no file or line. You do not reference the bundle yourself: declare
+it on the shell document and the framework injects the script into the `[:head
+…]` you wrote, along with the mount prefix.
 
 ```clj
-:html/head [[:script {:src "/js/main.js" :defer true}]]
+(def ^{:http/method :get :http/path "/" :http/auth :public
+       :webapp/shell "/js/main.js"}
+  shell
+  [:html [:head [:title "Orders"]] [:body [:div {:id "app"}]]])
 ```
+
+A top-level `defonce` starts the bundle, so the page needs no inline script:
 
 ```clj
 (defonce _start (main))

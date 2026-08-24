@@ -1634,14 +1634,47 @@ password compares are constant-time, and **OIDC requires a configured
 server must not accept cross-audience tokens). Row-level authz is still yours:
 slopp does not taint-track a handler returning another tenant's rows.
 
-**HTML pages are hiccup — store forms, not template files (D-web-html).** A
-page or component is a `defn` returning hiccup data; `slopp.http.html/render`
-serializes it (hiccup 2.x underneath, escape-by-default), `html-response`
-wraps it as a `text/html` RING map — carrying the hiccup it rendered from as
-`:http/hiccup`, which is what lets `cljnx` drive a server-rendered page as
-STRUCTURE rather than as escaped markup — and `page` is the full-document shell
-(`{:html/title … :html/lang … :html/head […]}` + body — doctype and charset
-included, NO inline script or style, so a strict CSP needs no carve-outs).
+**HTML is hiccup, and `:http/path` serves a stored VALUE (D-web-html).** A
+content endpoint is a **`def`**, not a `defn` — its value IS what is served:
+
+```clj
+(def ^{:http/method :get :http/path "/about" :http/auth :public}
+  about
+  [:main [:h1 "About"]])                       ; hiccup → rendered, text/html
+
+(def ^{:http/method :get :http/path "/robots.txt" :http/auth :public
+       :http/media-type "text/plain"}
+  robots
+  "User-agent: *\nDisallow:\n")                ; anything else → served as it stands
+```
+
+**Dynamic means API.** `:rest/path` is the marker for anything that computes an
+answer from a request; `:http/path` names content that does not vary. A `defn`
+under `:http/path` is not a handler slopp calls — it is a value slopp serves,
+so it renders as the string of its own function object.
+
+`:http/media-type` is used VERBATIM when declared; hiccup defaults to
+`text/html`, everything else to `text/plain`. There is no extension-based
+guessing: a def named `robots.txt` is a var, not a file.
+
+`slopp.http.html/render` serializes hiccup (hiccup 2.x underneath,
+escape-by-default) and **prepends `<!DOCTYPE html>` to a top-level `[:html …]`**,
+so an app writes its whole document — title, meta, stylesheets, all of it —
+with no shell helper and no parameters for any of it. Content responses carry
+the hiccup they rendered from as `:http/hiccup`, which is what lets `cljnx`
+drive a page as STRUCTURE rather than as escaped markup. (`html-response` is
+the same wrapper for a value you build in code.)
+
+**A single-page app declares `:webapp/shell "<bundle url>"` on its document,
+and the framework completes it**: the `<script>` goes at the end of the
+`[:head …]` you wrote, and the mount prefix is stamped on your mount point as
+`data-base`. Those are the only two things it adds — they are the two facts a
+stored value CANNOT hold, since an app served at `/p/x/store` cannot tell that
+from its own url. Your side of the contract is a `[:head …]` and a mount point
+(`[:div {:id "app"}]`, or the `#app` shorthand); a document missing either
+REFUSES when the app is assembled, because the symptom is a blank page and a
+blank page implicates everything.
+
 The rules that matter:
 
 - **Attrs are position 2, always a map or absent.** Compute conditional
@@ -1681,8 +1714,8 @@ garden data (`[:main {:margin "0 auto"}]`, nested `[:main [:a {…}]]`,
 and validates every selector/value string against block-breakout (`{ } <`
 throw — garden renders strings verbatim, so an interpolated value is an
 injection door; `;` is allowed because data URIs use it). Serve it, then
-`[:link {:rel "stylesheet" :href "/styles/app.css"}]` from `page`'s
-`:html/head` — that `:href` is a literal, so `http-dangling-route-refs`
+`[:link {:rel "stylesheet" :href "/styles/app.css"}]` in your document's
+`[:head …]` — that `:href` is a literal, so `http-dangling-route-refs`
 ties the link to the stylesheet endpoint like any other route. Raw or
 vendored CSS goes through a static `.css` asset (`file_put` + an
 `http.static.*` mount), not the renderer.
@@ -1715,16 +1748,21 @@ Cypress/Playwright territory someday).
   Node**) to one `:simple` bundle, recorded as a served blob (default
   `public/cljs/main.js`, served at a URL you choose via a static mount).
   Compile-error-as-oracle: analyzer warnings and hard errors are anchored to
-  the owning store form. Reference the bundle with `[:script {:src
-  "/js/main.js" :defer true}]` from `page`'s `:html/head`; a top-level
-  `(defonce _ (main))` self-starts it so the page needs no inline JS.
+  the owning store form. **Do not write the `<script>` yourself** — declare
+  `:webapp/shell "/js/main.js"` on the shell document and the framework injects
+  it into the `[:head …]` you wrote, with the mount prefix beside it. A
+  top-level `(defonce _ (main))` self-starts the bundle, so the page needs no
+  inline JS.
   **Address it by what it IS, not by what built it** — `/js/main.js`, not
   `/assets/cljs/main.js`. A URL is an address that ends up in bookmarks and
   caches; `cljs` names a toolchain you might change, and nothing about
   serving JavaScript changes if you do.
-  **And a `:src` is a route reference** — `http-dangling-route-refs` checks it
-  like an `:href`, so a bundle you link but never mount fails `done` instead
-  of 404ing silently in a browser.
+  **A `:src` you write in hiccup is a route reference** —
+  `http-dangling-route-refs` checks it like an `:href`, so a script or image
+  you link but never mount fails `done` instead of 404ing silently. A
+  `:webapp/shell` bundle url is NOT checked that way: it is a marker value, not
+  hiccup, so a typo there is a script tag pointing at a 404. Confirm it against
+  `query_surface` yourself.
 - **slopp provisions its OWN toolchain — you never `deps_add` the compiler or
   malli.** There are TWO dep configs: **yours** (the `deps_add` manifest —
   application libraries, delta-tracked, in `deps_list`) and **slopp's** (the

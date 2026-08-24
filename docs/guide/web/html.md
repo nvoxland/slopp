@@ -1,58 +1,103 @@
 # HTML and CSS
 
-Server-rendered pages are store forms like everything else. There is no
-template directory, because there are no files: a page is a `defn` returning
-hiccup data, and a stylesheet is a `defn` returning garden data.
+Pages are store forms like everything else. There is no template directory,
+because there are no files: a page is a `def` holding hiccup data, and a
+stylesheet is a `defn` returning garden data.
 
 That is not a stylistic preference. A template file is one opaque blob to the
-merge, the reference graph, and the trace map. A page built from `defn`s
+merge, the reference graph, and the trace map. A page built from forms
 merges per component, renames with `edit_rename`, and re-runs the tests that
 touch it.
 
-## A page
+## Content is a stored value
+
+A content endpoint is a **`def`**, not a `defn`. Its value *is* what gets
+served.
 
 ```clj
-(defn order-row
-  "One row of the orders table."
-  [{:keys [id total]}]
-  [:tr [:td [:a {:href (str "/orders/" id)} id]] [:td total]])
+(def ^{:http/method :get :http/path "/about" :http/auth :public}
+  about
+  "The about page."
+  [:main
+   [:h1 "About"]
+   [:p "Hiccup data, stored. Rendered on the way out."]])
 
-(defn ^{:http/method :get :http/path "/orders" :http/auth :authenticated
-        :http/reads {:orders [:order/for-user [:http/identity :http/sub]]}}
-  orders-page
-  "The orders list."
-  [req]
-  (html/html-response
-   (html/page {:html/title "Orders"
-               :html/head [[:link {:rel "stylesheet" :href "/styles/app.css"}]]}
-     [:main
-      [:h1 "Orders"]
-      [:table (for [o (:orders (:http/reads req))] (order-row o))]])))
+(def ^{:http/method :get :http/path "/robots.txt" :http/auth :public
+       :http/media-type "text/plain"}
+  robots
+  "User-agent: *\nDisallow:\n")
 ```
 
-`page` is the full-document shell: doctype, charset, an escaped title, optional
-`:html/lang`, and whatever extra `:html/head` elements you pass. It emits no
-inline `<script>` or `<style>`, so a strict Content-Security-Policy needs no
-carve-outs. `html-response` renders and wraps as a `text/html` Ring map.
+Hiccup renders as `text/html`; anything else is served as it stands, as
+`text/plain`. A `:http/media-type` you declare is used verbatim. There is no
+extension-based guessing -- a def named `robots.txt` is a var, not a file.
 
-It also carries the hiccup it rendered from, as `:http/hiccup` beside the
-`:body`. An HTTP adapter writes the body and ignores it; a reader that wants
-the page rather than the bytes reads it -- which is how `cljnx` drives a
-server-rendered page as structure, with real regions and real links, instead
-of as escaped markup. The two views come from one call site, so they cannot
-disagree; recovering the structure downstream would have meant parsing the
-HTML back into a second derivation of the same page.
+`render` prepends `<!DOCTYPE html>` to a top-level `[:html ...]`, which is what
+lets an app hold a whole document:
 
-Note what a page does *not* declare: no `:rest/response`, no opt-out flag. A
-page is `:http/path` -- general HTTP content -- and a REST API is `:rest/path`.
-Only the second is asked for a contract, published in the API document, or
-generated a client for.
+```clj
+(def ^{:http/method :get :http/path "/" :http/auth :public}
+  home
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "utf-8"}]
+    [:title "Orders"]
+    [:link {:rel "stylesheet" :href "/styles/app.css"}]]
+   [:body [:main [:h1 "Orders"]]]])
+```
+
+Title, language, stylesheets, meta tags: written where they go. There is no
+page-shell helper and no options map, because there is nothing left for one to
+assemble.
+
+A content response also carries the hiccup it rendered from, as `:http/hiccup`
+beside the `:body`. An HTTP adapter writes the body and ignores it; a reader
+that wants the page rather than the bytes reads it -- which is how `cljnx`
+drives a page as structure, with real regions and real links, instead of as
+escaped markup.
+
+## Dynamic means API
+
+`:http/path` names content that does not vary. Anything that computes an answer
+from a request is `:rest/path` -- a REST API, asked for a contract, published in
+the API document, generated a client for.
+
+A `defn` under `:http/path` is not a handler slopp calls. It is a value slopp
+serves, so it renders as the string of its own function object. If a page needs
+per-request data, it is either an API or a single-page app calling one.
 
 That split is recent. There used to be one path marker, so a page was an
 endpoint like any other: it was asked for a `:rest/response` (`:string`, a lie
 about an HTML body), and then needed `:rest/client false` to suppress the typed
 fetch wrapper that followed. Both declarations existed only to undo a question
 the page should never have been asked.
+
+## A single-page app: the shell
+
+A SPA's document declares the bundle it boots, and the framework completes it:
+
+```clj
+(def ^{:http/method :get :http/path "/" :http/auth :public
+       :webapp/shell "/js/main.js"}
+  shell
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "utf-8"}]
+    [:title "Orders"]
+    [:link {:rel "stylesheet" :href "/styles/app.css"}]]
+   [:body [:div {:id "app"}]]])
+```
+
+Two things are added on the way out, and only two: the `<script>` at the end of
+the `[:head ...]` you wrote, and `data-base` on your mount point. Those are the
+two facts a stored value cannot hold -- where the compiled bundle is served, and
+what prefix this app is mounted under, which an app served at `/p/x/store`
+cannot tell from its own url.
+
+Your half of the contract is a `[:head ...]` and a mount point (`[:div {:id
+"app"}]`, or the `#app` shorthand). A document missing either refuses when the
+app is assembled rather than at request time, because the symptom is a blank
+page and a blank page implicates everything.
 
 ## The rules that actually bite
 

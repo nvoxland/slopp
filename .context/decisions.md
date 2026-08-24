@@ -1984,10 +1984,23 @@ attributes), nothing in this design depends on it, and plain links + forms
   string-only, kept as DATA in forms and converted to hiccup's raw wrapper
   only at render, so pages stay `=`-testable and the ref walker sees
   literals. Escaping tests are labeled SECURITY.
-- **`page` shell opts are `:html/`-namespaced** (`:html/title` etc.) — the
-  namespaced-keys boundary gate demanded it and it matches the `:web/*`
-  envelope convention. The shell emits no inline script/style: strict-CSP
-  compatible by construction; apps set their own CSP header.
+- **`page` is RETIRED (2026-08-23), and nothing replaced it.** It assembled a
+  document from named parts (`:html/title`, `:html/lang`, `:html/head`), so the
+  parts needed names. Once `:http/path` names a stored `def` whose value is the
+  whole document, there are no parts: an app writes `[:html [:head [:title …]]
+  …]` and title, lang, stylesheets and meta are hiccup it already holds.
+  `render` prepends the doctype to a top-level `[:html …]`, which is the only
+  thing `page` did that a hand-written document could not.
+
+  **The `:http/title` / `:http/head` markers that looked necessary were an
+  inherited assumption, not a requirement** — they existed only to carry
+  `page`'s parameter list forward. `:http/head` in particular would have put
+  arbitrary hiccup in NAME metadata, where every other marker is a scalar or a
+  schema, and nothing could have checked it. The absence is the design.
+
+  The strict-CSP property survives unchanged, and now by construction rather
+  than by a helper's restraint: nothing emits inline script or style, because
+  nothing emits anything. Apps still set their own CSP header.
 - **UI→route referential integrity, analysis-side** (`slopp.rules.web`):
   `ui-route-refs` (a derived pure fn of forms — the keyword-inventory
   litmus, so correct across branches/merges/history) classifies literal
@@ -4920,3 +4933,78 @@ external tests passed, because no test asserted the path in that report. It was
 caught by LOOKING at `query_surface` — the only thing that could have.
 
 ---
+
+## D-content-value (2026-08-23, user decision) — `:http/path` serves a stored VALUE, and the framework completes an SPA shell
+
+**The driver, in the user's words: "A big driver behind the static work is so
+you aren't confused about APIs vs. other dynamic content. It's just APIs at
+this point."** Dynamic means API. Nothing else is dynamic. This is a CATEGORY
+split, not a preference for static serving — `D-rest-path` separated the two
+markers and this decides what the content half actually is.
+
+**A content endpoint is a `def`, not a `defn`.** Its value is what gets served:
+hiccup renders as `text/html`, anything else is `str`'d and served as it
+stands, and `:http/media-type` is used verbatim when declared. Two consequences
+follow necessarily and are worth stating rather than discovering: content
+cannot take path params (one value cannot vary by `:slug` — that is what client
+routing is for), and it cannot declare `:http/reads` (a def has no request).
+
+**What this buys is that a document is DATA.** A handler returning a page is
+opaque; a stored hiccup value can be looked inside. That is what makes the
+shell possible at all, and it is why the model is worth more than tidiness.
+
+### The shell: the framework adds exactly two things
+
+`:webapp/shell "<bundle url>"` on a content def declares it the SPA shell.
+`slopp.http.html/complete-shell` injects a `<script>` at the end of the
+`[:head …]` the app wrote, and stamps the mount prefix on the mount point as
+`data-base`.
+
+**Those two and no more, because those are the only two facts a stored value
+CANNOT hold** — where the compiled bundle is served, and what prefix this app
+is mounted under, which an app served at `/p/x/store` cannot tell from its own
+url. Everything else about the document — title, lang, meta, stylesheets — is
+hiccup the app already holds, which is why `page` retired with nothing
+replacing it and why the `:http/title` / `:http/head` markers that looked
+necessary were never built.
+
+**Refusal, at ASSEMBLY.** A shell with no `[:head …]` or no mount point
+refuses when `slopp.http/context` is built, not on the first request. The
+symptom of getting it wrong is a blank page, and a blank page implicates
+everything — the bundle, the compile, the router, the app's own code. So it
+refuses where somebody is watching, naming the shape.
+
+Every shell is completed once at assembly and the answer thrown away; it is
+completed AGAIN per request. That is deliberate and is not a missing cache: a
+value frozen at assembly would not see a redefined content def, and this store
+hot-reloads.
+
+### What is NOT joined, and is known not to be
+
+`slopp.http.html` writes `id="app"` and `data-base`; `slopp.webapp.dom/mount!`
+reads exactly those two names. Nothing joins them, and nothing can here:
+`slopp.webapp.dom` is `:cljs` and slopp has no runner for it. A rename on
+either side compiles, serves, and renders a blank page. Registered as the
+`:webapp/shell` crossing's `:blind`, with the bundle url beside it — that value
+is a marker, not hiccup, so `http-dangling-route-refs` does not check it and a
+typo is a script tag pointing at a 404.
+
+The alternative — http requiring webapp so the convention has one home — was
+rejected: it would make the general HTTP capability depend on the browser one.
+There is precedent for the direction taken: `slopp.http.routes/from-namespaces`
+already reads `:webapp/client-routes`, so route assembly reading a `:webapp/*`
+declaration is the established shape rather than a new one.
+
+### The transition hazard, and why the gate is not built yet
+
+A `defn` under `:http/path` is now a value slopp serves, so it renders as the
+string of its own function object. This store's own `t-mine` fixture did
+exactly that, silently, the moment the dispatcher branch landed. **The gate
+that refuses `:http/path` on a `defn` is deliberately LAST** — it must land
+after serving works, or every existing content `defn` in every store refuses
+before it has anywhere to go.
+
+An earlier attempt at that gate was deleted rather than kept (`d35493`): it
+refused `:http/reads`/`:http/effects`, which is the right check for "a handler
+that computes" and the wrong one for "content is a stored value" — under this
+model both are impossible by construction, so the check could never fire.
