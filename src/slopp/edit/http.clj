@@ -237,6 +237,63 @@
                  " hiccup renders as text/html, anything else is served as it"
                  " stands, and :http/media-type says what it is.")))))))
 
+(defn ^:export ^{:rule/applies-to :production} http-unreachable-declaration
+  "The reachability gate: a route or performer marker on a PRIVATE form is
+  refused, because the populations that serve them are public vars. Returns a
+  teaching string, or nil when clean.
+
+  `slopp.http.routes/from-namespaces` and `performers-from-namespaces` both
+  build from `ns-publics`. So a private form carrying `:rest/path`,
+  `:http/path`, `:http/read` or `:http/effect` declares something and
+  contributes nothing — it passes every other gate, appears to its author to be
+  wired up, and is not there.
+
+  **The two failures are not equally loud, and the second is the one to
+  weigh.** A private ROUTE 404s on a path `query_surface` will list. A private
+  PERFORMER answers 500, on a request the store believes it serves, with a
+  stack trace naming the framework rather than the `defn-` — `slopp.http/context`
+  calls that the worst pairing available, because the failure with no check is
+  also the hardest to read from outside.
+
+  **NO ESCAPE, and the absence is the design.** Wanting the IMPLEMENTATION
+  private is legitimate and already expressible: put the marker on a public
+  wrapper and keep the helper private. What is not expressible is a private
+  thing that is nevertheless served, because the serving population is public
+  vars — that is not a policy this gate could waive even if it wanted to.
+
+  Grounded in a DECLARATION rather than an inference: `defn-`, or `:private` in
+  the name metadata. Same question `webapp-page-unreachable` asks of an
+  `^:app/entry`, whose wording is the argument — *a private one is invisible to
+  the tool's ns-publics scan, so the store answers \"no entry\" while carrying a
+  gate-approved page, a confident wrong answer.* Pages got that gate and routes
+  never did: routes got auth, collision, effects and context gates, every one of
+  which assumes the route exists."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m        (web-name-meta e)
+          head     (first (store/form-sexpr (:node e)))
+          private? (or (= 'defn- head) (boolean (:private m)))
+          route    (route-path m)
+          perform  (or (:http/read m) (:http/effect m))]
+      (when (and private? (or route perform))
+        (if route
+          (str ns-sym "/" form-name " declares the route " (pr-str route)
+               " on a private form — but the served route table is built from"
+               " ns-publics, so this route is declared and never served. It"
+               " passes every other gate, shows up in query_surface, and 404s."
+               " Make the endpoint public; if the IMPLEMENTATION should stay"
+               " private, move the marker to a public wrapper that calls it —"
+               " that is the shape this gate leaves open, and the only one.")
+          (str ns-sym "/" form-name " declares the performer kind "
+               (pr-str perform)
+               " on a private form — but performers are resolved through"
+               " ns-publics, so this kind has no provider and every endpoint"
+               " declaring it answers 500, not 404: a request the store"
+               " believes it serves, failing with a stack trace that names the"
+               " framework rather than this form. Make the performer public;"
+               " if the implementation should stay private, move the marker to"
+               " a public wrapper that calls it."))))))
+
 (defn ^:export ^{:rule/applies-to :production} http-route-collision
   "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
   method+path another FORM already claims is refused at the write — a

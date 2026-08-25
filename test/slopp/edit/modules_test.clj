@@ -351,3 +351,72 @@
                             " :http/auth :public :rest/response :string}"
                             " x \"X.\" [req] req)"))]
         (is (nil? (edit.http/http-content-shape s 'shop.more 'x)))))))
+
+(deftest a-PRIVATE-route-or-performer-declares-a-surface-nothing-serves
+  ;; There is no such thing as a private endpoint. `from-namespaces` and
+  ;; `performers-from-namespaces` both build from `ns-publics`, so a private
+  ;; form carrying either marker declares something and contributes nothing.
+  ;;
+  ;; The two failures are not equally loud, which is why both are here:
+  ;;
+  ;;   a route     → 404 on a path query_surface will happily list
+  ;;   a performer → 500, on a request the store believes it serves, with a
+  ;;                 stack trace naming the framework rather than the defn-
+  ;;
+  ;; `slopp.http/context` calls the second the worst pairing available: the
+  ;; failure with no check is also the hardest to read from outside.
+  ;;
+  ;; NO ESCAPE, deliberately. Wanting the IMPLEMENTATION private is legitimate
+  ;; and already expressible — put the marker on a public wrapper. What is not
+  ;; expressible is a private thing that is nevertheless served, because the
+  ;; serving population is public vars and that is not a policy this gate can
+  ;; waive.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.api "(ns shop.api)\n")
+                     "capabilities" :manifest "http.enabled" "true"))
+        land (fn [st form-src]
+               (store/ingest st 'shop.more (str "(ns shop.more)\n\n" form-src "\n")))
+        gate (fn [st nm] (edit.http/http-unreachable-declaration st 'shop.more nm))]
+
+    (testing "a defn- carrying :rest/path refuses, naming the serving population"
+      (let [s (land on (str "(defn- ^{:http/method :get :rest/path \"/api/x\""
+                            " :http/auth :public :rest/response :map}"
+                            " x \"X.\" [req] req)"))
+            r (gate s 'x)]
+        (is (some? r) "a private endpoint must not land")
+        (is (re-find #"ns-publics" (str r))
+            (str "the REASON is the population, not a style rule: " r))
+        (is (re-find #"wrapper" (str r))
+            (str "and the remedy keeps the helper private: " r))))
+
+    (testing "^:private on a def carrying :http/path refuses too"
+      ;; the case http-content-shape cannot see: it judges the HEAD, and `def`
+      ;; is the right head. Private is a different question about the same form
+      (let [s (land on (str "(def ^{:private true :http/method :get"
+                            " :http/path \"/about\" :http/auth :public}"
+                            " about [:main \"x\"])"))]
+        (is (some? (gate s 'about)) (pr-str (gate s 'about)))))
+
+    (testing "a private PERFORMER refuses, and says 500 rather than 404"
+      (let [s (land on "(defn- ^{:http/read :thing/one} one \"O.\" [ctx k] k)")
+            r (gate s 'one)]
+        (is (some? r) "a private performer must not land")
+        (is (re-find #"500" (str r))
+            (str "the failure it causes is not the route's: " r))))
+
+    (testing "and the PUBLIC forms of all three land clean"
+      ;; the control. Without it every assertion above holds for a gate that
+      ;; refuses whatever it is shown
+      (let [s (land on (str "(defn ^{:http/method :get :rest/path \"/api/y\""
+                            " :http/auth :public :rest/response :map}"
+                            " y \"Y.\" [req] req)\n\n"
+                            "(def ^{:http/method :get :http/path \"/ok\""
+                            " :http/auth :public} ok [:main \"x\"])\n\n"
+                            "(defn ^{:http/read :thing/two} two \"T.\" [ctx k] k)"))]
+        (is (nil? (gate s 'y)) (pr-str (gate s 'y)))
+        (is (nil? (gate s 'ok)) (pr-str (gate s 'ok)))
+        (is (nil? (gate s 'two)) (pr-str (gate s 'two)))))
+
+    (testing "and a private form carrying NO routing marker is none of this gate's business"
+      (let [s (land on "(defn- helper \"H.\" [x] x)")]
+        (is (nil? (gate s 'helper)))))))
