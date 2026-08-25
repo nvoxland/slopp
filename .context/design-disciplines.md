@@ -2862,6 +2862,52 @@ The near-miss is worth keeping because it is the same error the project has
 made before under a different name — an instrument written where the author
 sits, whose only other user cannot reach it.
 
+### A measurement that BORROWS a boundary inherits what that boundary cannot see
+
+slopp-ui, 2026-08-25, hours after the read meter shipped. The read record rides
+the `:turn-end` delta, which was the obvious home: turns already existed,
+already carried timing, and already bracketed a user ask. What it inherited is
+the rotation gate — a turn rotates only when a user PROMPT has arrived AND a
+write tool follows. Both conditions are correct for what turns are for. Both
+are wrong for a read meter:
+
+- a **read-only ask** never rotates a turn, so exploration, review and planning
+  — the highest read-to-write workloads there are — record nothing;
+- an **event-driven session** never rotates one either, because the prompt hook
+  writes the pending intent on a human prompt and there is not one;
+- and the ring is memory, so a session of either kind loses its rows entirely
+  rather than accumulating them into a wide one.
+
+Measured the day it shipped: both stores read `0` records, from 321 and 118
+closed turns respectively, with one turn in the consumer store twelve hours and
+twenty-six operations wide.
+
+**The general rule: a measurement placed on an existing boundary acquires that
+boundary's blind spots as its own sampling frame, silently.** Nothing goes red,
+because a span that produced no row is not an empty row — it is absent from the
+population, and every honesty guard written into the fold defends against a
+population that is VISIBLY incomplete. `read-cost` refuses a rate over nothing;
+`read-ledger` counts `:unmeasured` turns rather than dropping them. Neither can
+see an invisibly SKEWED one.
+
+Worse, the skew here runs toward the flattering answer: the spans that record
+nothing are the read-heavy ones, so the trim gets measured only where reads are
+least of the bill.
+
+The fix direction is to stop borrowing rather than to widen the boundary —
+widening turns to serve telemetry would degrade `report` and the verbatim-intent
+trail to improve a measurement. Filed rather than built.
+
+**And the check this yields, from the same consumer:** *naming the route is not
+sufficient if the route's GRAIN differs between the stores being compared* —
+extended one step, because grain is the visible half. Two routes can share a
+grain and still be dark over different parts of each store, which surfaces not
+as a units mismatch but as two plausible numbers that are not about the same
+thing. So the question is not *are our rows the same width*, it is **what does
+each store's route fail to see, and is it the same thing**. Answerable only
+with a second consumer; one journal produces a confident number and no reason
+to doubt it.
+
 ### A column that is never written is not backfillable, so cover the JOIN
 
 From the same exchange, and this is the half that had already shipped broken.
