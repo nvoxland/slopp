@@ -3331,3 +3331,31 @@ construction, and it turns a defence into a trigger.
 that argues only WHY, however well, is one nobody will ever be able to retire —
 and every stale claim in this repo's own museum has that shape. They all argued
 why. None said when they would stop.
+
+## Validate against the AUTHORITY, never against the input's own claim about itself
+
+slopp-ui's phrasing (2026-08-25), from fixing a fixture that normalised the
+tenant prefix off a URL before looking the answer up. Stripping made an
+addressed request and an unaddressed one indistinguishable by construction, so
+the guard could not fail. The fix kept the normalisation and made it CHECK —
+and the near-miss is the part worth keeping:
+
+> it checks against what the hub serves, NOT against the request's own
+> `:webapp/base`. Checking the base would let a wrong base validate itself —
+> the same defect one level in, and I nearly wrote it.
+
+It generalises past fixtures. A context that validates because it was *told* it
+validates is the same shape: `serve!` and a test both assembled by hand, both
+believing they were the validated path, and the one that was wrong could not
+find out from anything it held. So could a version field read out of the
+document it is meant to gate, or a manifest checked against itself.
+
+The test is mechanical: **name the authority, and check that it is not derived
+from the thing being judged.** If the two share a source, the check's output
+cannot vary — which is this repo's most frequently rediscovered failure, and
+the reason it is worth naming a third way.
+
+The structural remedy is usually to move the authority OUT of reach of the
+input: assemble in one function both paths call ([[D-declared-is-served]]),
+route the fixture the way the real server routes, publish the version from the
+code that changes when the shape does.

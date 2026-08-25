@@ -5484,3 +5484,41 @@ still carrying it is addressed under the app's base like any other, and
 slopp has adopters who cannot be told to upgrade in step, the weighting changes
 and this decision is what to revisit — not silently, since that is the failure
 mode it is currently guarding against in the other direction.
+
+### D-declared-is-served — a context refuses a contract it cannot honour (2026-08-25)
+
+`slopp.http/context` REFUSES to assemble when a route declares `:rest/request`
+or `:rest/response` and the context carries neither `:rest/decode-request` nor
+`:rest/check-response`. Wrapping with `slopp.rest/validating` is what supplies
+them.
+
+**Why a refusal and not a warning.** slopp-ui measured the failure and it
+presents as success: their hub had one path that wrapped (the served app) and
+one that did not (a test calling `serve!` directly), and a test that started a
+real server and asserted 200 passed for as long as the served endpoint had been
+answering 500. There is no test they could have written on the unwrapped path
+that would have failed, because the check simply was not in it. A missing
+performer answers 500 — loud. A missing validator answers 200s nobody checked —
+which is the worse half of the pair that had no check.
+
+**Asked in `slopp.http` with two `get`s and no malli.** Whether a validator is
+PRESENT is http's business; what one does is rest's. The dispatcher still does
+not know `slopp.rest` exists, which is the property that keeps malli out of the
+framework.
+
+**It fires SECOND, after the missing-performer refusal.** Written first, it
+masked that older message — an existing test could no longer see its own error.
+A route missing a performer cannot run at all, so it is the more urgent answer;
+telling someone their contract is unvalidated when the endpoint would 500
+anyway sends them to the wrong end. Generalises: a new check placed ahead of an
+old one silently deletes the old one's diagnosis, and nothing reports that.
+
+**What it found here.** 23 sites in slopp's own store drove the typed reviewer
+API through a context validating nothing — including a test whose docstring
+claimed the response "is validated against the SAME schema var the generated
+client validates with", which had been false for as long as it had been
+written. They are now one assembly (`slopp.api.server/context`), with the
+app-describing opts shared with `serve!` so the listener and the in-process
+context cannot describe different apps. Two endpoint docstrings turned out to
+promise a floor their declared `:int` contradicted; `?depth=banana` and
+`?limit=banana` are 400 now rather than a silent fallback.

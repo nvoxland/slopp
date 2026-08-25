@@ -1679,6 +1679,18 @@ your handler stays analyzer-pure); `(http/authorized? policy identity)`
 answers booleans. Test namespaces' endpoint-shaped forms are FIXTURES —
 they neither report in query_surface nor claim paths.
 
+**A route that DECLARES a contract may only be served by a context that
+HONOURS one.** The moment any endpoint carries `:rest/request` or
+`:rest/response`, both calls above take `:http/wrap-context rest/validating`
+— the one call that turns a declared contract into an enforced one — and
+`context` REFUSES to assemble without it, naming the routes. Assemble it in
+ONE function that your tests and your `serve!` both call, rather than at each
+site: an app that can be stood up two ways will eventually be stood up both,
+and only one of them will validate. Not hypothetical — a real app's test
+started a server, asserted 200, and passed for as long as the served endpoint
+had been answering 500, because the production path wrapped and the test path
+did not.
+
 **Both halves of the URL are addressed the same way.** The dispatcher puts
 `:path-params` AND `:query-params` on the request (the query string is
 parsed once, there — don't split `:query-string` yourself), so a declared

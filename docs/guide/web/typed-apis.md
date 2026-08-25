@@ -26,6 +26,27 @@ the boundary that validates, the generated client that validates on the other
 side, and `/api/contracts` that publishes the shape to a consumer who never sees
 your store.
 
+## Turning a declared contract into an enforced one
+
+Declaring is not enforcing. The validators ride the dispatch context, and one
+call puts them there:
+
+```clj
+(slopp.http/serve! {:http/namespaces ['shop.api]
+                    :http/wrap-context slopp.rest/validating
+                    :http/port 8080})
+```
+
+You will not forget it: a context assembling a route that declares
+`:rest/request` or `:rest/response` while carrying no validators **refuses**,
+and names the routes. The managed dev server generates the wrapper for you
+when `rest` is enabled.
+
+Build it in ONE function that your tests and your `serve!` both call. An app
+that can be stood up two ways will eventually be stood up both, and only one
+of them will validate — which is a failure that presents as success, since a
+200 nobody checked looks exactly like a 200 that was.
+
 ## What you get without writing it
 
 **A request that breaks its contract never reaches your handler.** It is a 400,
