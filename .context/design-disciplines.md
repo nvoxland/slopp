@@ -3294,3 +3294,40 @@ Related: `A guarantee reads as unconditional at the point it is CONSUMED` and
 about the consumer's position revealing something the author's cannot. This one
 is about the consumer's CONFIDENCE doing it, which is the harder half to
 provoke deliberately.
+
+### Sharpening (2026-08-24, from slopp-ui): the better the ARGUMENT, the longer the defect survives
+
+The fork above says what a good reason contains. This is the reason the fork
+earns its cost, and it is uncomfortable enough to state on its own.
+
+Two endpoints, one week, the same defect — an API declared as content:
+
+| | the justification | how long it stood |
+|---|---|---|
+| `shop.api/ping` (ours) | none | months, because nobody looked |
+| `project-api` (theirs) | three revised paragraphs | days, because everybody who looked was satisfied |
+
+The consuming store's own summary: *a well-argued limitation is still a
+limitation, and the argument is not the check.*
+
+**A repo that rewards good justification produces well-defended defects.** That
+is not an argument against justifying — this codebase would be worse without
+`marker-why`, and a bare flag is the failure the advisory exists for. It is an
+argument that prose alone cannot be the counterweight, because prose scales in
+the wrong direction: the more carefully a limitation is explained, the more it
+reads as a decision somebody already made well.
+
+**The counterweight is the expiry, and it is why the fork above is the whole
+discipline rather than a refinement of it.** Theirs converted the day
+`:webapp/base` became a per-request key — not because anyone re-read the
+argument, but because the argument had NAMED the field that would have to exist.
+A reader checked one fact instead of re-weighing three paragraphs.
+
+So the operative form, which is now in the SHIPPED skill and not only here:
+*name the condition under which this stops being true.* Falsifiable, dated by
+construction, and it turns a defence into a trigger.
+
+**The failure this predicts, stated so it can be recognised:** a justification
+that argues only WHY, however well, is one nobody will ever be able to retire —
+and every stale claim in this repo's own museum has that shape. They all argued
+why. None said when they would stop.

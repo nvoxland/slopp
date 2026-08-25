@@ -670,6 +670,32 @@ would have bought a well-written sentence explaining why a rule that cannot
 fire is permanently waived — which reads exactly like the true ones, and is
 worse than the bare marker it replaced.
 
+**Put the MECHANISM in the reason — then fork on whether it can end.** A
+justification says why something is forced; a reader needs to know whether that
+can stop being true.
+
+- **A PERMANENT mechanism gets no expiry.** A bundle entry point can never
+  acquire a caller; a proxy can never name the shapes it forwards. Bolting a
+  review date onto one of those is writing a lie, and the next reader has to
+  disprove it.
+- **A CURRENT LIMITATION names what would end it, in both directions.**
+  `"no caller while the plug-in seam does not exist — if the seam lands this
+  has a caller again; if slopp decides against it, this goes"` converts the
+  question from a JUDGEMENT into a CHECK. A reader does not weigh whether the
+  escape is dead; they look at whether the seam landed.
+
+This matters more than it sounds, because **the better the argument, the longer
+it survives.** A bare marker is wrong for as long as nobody looks; a
+well-defended one is wrong for as long as everybody who looks is satisfied. The
+second is the more expensive habit, and naming the expiry is the counterweight —
+a well-argued limitation is still a limitation, and the argument is not the
+check.
+
+Measured across two stores in one week: an endpoint whose docstring argued
+across three revisions that its declaration was a limitation rather than a
+description. It was still wrong — but it had named the field that would have to
+exist, so it converted the day that field landed rather than being re-defended.
+
 **Tiers are not your problem:** `done` runs the WHOLE in-image suite plus
 the `^:external` tests your changes impact (in a separate JVM,
 automatically; a large slice defers and rides findings as
