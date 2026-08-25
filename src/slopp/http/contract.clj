@@ -75,6 +75,17 @@
   disagree, and this one cannot. Write it for the caller: an implementation
   note left in there ships to everyone generating a client.
 
+  **And it is MARKDOWN** (D-doc-markdown). This is the crossing where saying so
+  matters: the consumer rendering this text is a different store, written by a
+  different agent, that cannot ask the author what format it is in — and every
+  other field here is typed while the prose was left to convention. Paragraph
+  breaks, code spans, bold, lists and tables mean what they look like. The one
+  non-markdown construct to expect is `[[name]]`, a reference to another form,
+  which a renderer may resolve or may leave as text.
+
+  slopp ships NO renderer, deliberately: publishing the data is this function's
+  job, and deciding what it looks like belongs to whatever displays it.
+
   Derived from VAR METADATA, like every other route derivation here, so it
   answers identically from a live store, a jar, and a native binary — and so
   it ships in the slim jar. That is the whole point: publishing a contract is

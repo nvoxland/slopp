@@ -362,7 +362,7 @@
 
 (defn ^:export ^{:rule/capability :any} http-generated-ns
   "The generated-client protection gate (D-web-contracts part 2): a form marked
-  ^{:generated \"<endpoint>\"} is OUTPUT of generate_client and must not be
+  `^{:generated \"<endpoint>\"}` is OUTPUT of generate_client and must not be
   hand-edited. Regeneration rewrites the whole client namespace (through
   store/ingest, BELOW this gate layer — so the generator itself is unaffected;
   only edit-tool writes reach here). Returns a teaching string naming the source
