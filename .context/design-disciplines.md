@@ -2818,6 +2818,25 @@ wrap and reading the five routes back. Worth doing every time a migration is
 motivated by a new guard: the guard's existence is a separate claim from the
 suite's colour, and only one of them is tested by restarting.
 
+**The steady-state generalization, same consumer, same day**, on finding their
+jar at a milestone nobody had announced:
+
+> green proves nothing BROKE; it does not prove nothing CHANGED that I should
+> be adopting
+
+The companion above is about one migration; this is about every ordinary
+restart. A green suite is a statement about the consumer's code against the
+jar it HAS, and it is structurally silent about the jar it could have. The
+consumer cannot close that gap by testing harder — the information is not in
+their store. Only the producer can close it, by announcing, and **a milestone
+that lands without a message has moved the cost onto someone who cannot pay
+it.** They asked rather than inferred, which is the correct default and not a
+fallback; the failure was mine for making the question necessary.
+
+Both of their examples are the same shape: `:effectful?` shipped under a
+version read as unchanged, and a hub that served declared contracts unread
+through weeks of green. Neither was detectable from inside a passing suite.
+
 ## A guard shared by N call sites is fixed once; a guard inlined N times is fixed N-1 times
 
 slopp-ui checked all four `fetch` sites in their store rather than assuming. The
