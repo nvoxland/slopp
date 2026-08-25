@@ -156,6 +156,12 @@ Two more fire at done time rather than at the write:
   it should be a decision.
 - `http-dangling-route-refs` (error) fails a rendered link or form targeting a
   path nothing serves. See [HTML and CSS](html.md#links-are-checked).
+- `http-unreachable-declaration` (error) refuses a route or performer marker on
+  a *private* form. Both the route table and the performer vocabulary are built
+  from `ns-publics`, so a private one declares a surface and contributes
+  nothing. A private route 404s on a path `query_surface` lists; a private
+  performer answers 500, on a request the store believes it serves. To keep the
+  implementation private, put the marker on a public wrapper that calls it.
 
 ## Reading the surface
 

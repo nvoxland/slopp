@@ -1710,6 +1710,17 @@ content endpoint is a **`def`**, not a `defn` — its value IS what is served:
   "User-agent: *\nDisallow:\n")                ; anything else → served as it stands
 ```
 
+**An endpoint and a performer must be PUBLIC.** The served route table and the
+performer vocabulary are both built from `ns-publics`, so a `defn-` or
+`^:private` carrying `:rest/path`, `:http/path`, `:http/read` or `:http/effect`
+declares a surface and contributes nothing — `http-unreachable-declaration`
+refuses it. A private route 404s on a path `query_surface` lists; a private
+performer answers **500**, on a request the store believes it serves, with a
+stack trace naming the framework rather than your form. Want the implementation
+private? Put the marker on a public wrapper that calls it — that is the shape
+left open, and the only one: there is no dial, because no waiver changes which
+vars get served.
+
 **Dynamic means API.** `:rest/path` is the marker for anything that computes an
 answer from a request; `:http/path` names content that does not vary. A `defn`
 under `:http/path` is not a handler slopp calls — it is a value slopp serves,
