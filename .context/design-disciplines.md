@@ -2837,6 +2837,55 @@ Both of their examples are the same shape: `:effectful?` shipped under a
 version read as unchanged, and a hub that served declared contracts unread
 through weeks of green. Neither was detectable from inside a passing suite.
 
+### An ask for a MEASUREMENT has to name the route to it
+
+slopp-ui, 2026-08-25. Asked to run `slopp.lab.reads/read-ledger` against their
+journal — the second workload a read-cost decision was explicitly gated on —
+they answered that they could not:
+
+> the instrument that would answer it is shipped only to the store whose answer
+> you already have
+
+I had decided not to vendor it, deliberately and with a cited precedent, and
+then asked for the measurement anyway in the same message. The two decisions
+never met. **An ask for a number is not complete until the route to it is
+named, and if naming the route turns out to be hard, that difficulty IS the
+finding** — it means the instrument is reachable only from where it was
+written.
+
+The resolution mattered less than the shape: the fold was a sum over records
+that already ride the consumer's own deltas, so `query_store` was the route all
+along and no vendoring was needed. That is luck, not design. Had the data lived
+only where the instrument did, they would have been right.
+
+The near-miss is worth keeping because it is the same error the project has
+made before under a different name — an instrument written where the author
+sits, whose only other user cannot reach it.
+
+### A column that is never written is not backfillable, so cover the JOIN
+
+From the same exchange, and this is the half that had already shipped broken.
+The new read record had a test that the wire fills the ring, and a test that
+the fold reads a ring, and **nothing asserting the two ever meet on a real
+delta.** Each half green, the join untested — and the consumer, asked to wait a
+week for data, asked the question I had not:
+
+> I wait a week, you ship an instrument, and we find the column was empty the
+> whole time. That is not recoverable — a journal not written is not
+> backfillable.
+
+Checking, this store showed the same zero, for an innocent reason (no turn had
+closed since the work landed) that is indistinguishable from the guilty one.
+**An empty column cannot say which it is.** That is worse than a wrong number:
+a wrong number is visible and correctable, an unwritten one silently consumes
+the whole window it was supposed to measure.
+
+So a new record on a journal needs a test that drives the real path end to end,
+not two tests that each cover a half. And it needs to be watched RED —
+`done`'s `assertions-never-red` advisory caught five assertions here that were
+green on arrival, which for a test whose subject is a silently-unwritten column
+would have been the identical failure one level up.
+
 ## A guard shared by N call sites is fixed once; a guard inlined N times is fixed N-1 times
 
 slopp-ui checked all four `fetch` sites in their store rather than assuming. The
