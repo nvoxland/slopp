@@ -12,7 +12,7 @@
   does — including one that throws a bare exception leaking a filesystem path,
   because masking that is the thing being asserted."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.http.dispatch :as dispatch] [slopp.rest.contract :as rest.contract]))
+            [slopp.http.dispatch :as dispatch] [slopp.rest.contract :as rest.contract] slopp.http))
 
 (deftest dispatch-runs-the-whole-pipeline-portlessly
   (let [performed (atom [])
@@ -318,3 +318,50 @@
                                          :body "hello"}))
             r   (dispatch/handle! (assoc ctx :http/routes [txt]) GET)]
         (is (= 200 (:status r)) (pr-str r))))))
+
+(deftest a-DECLARED-contract-with-no-validator-refuses-at-assembly
+  ;; The asymmetry a consuming store measured, in the form that lets a store's
+  ;; own suite see it. `slopp.rest/validating` is opt-in, so "declared a
+  ;; contract" and "enforces a contract" were two independent facts: an app
+  ;; could stand up the same routes two ways and only one validated. Theirs
+  ;; did — production wrapped, the test path did not — so a test that started a
+  ;; real server and asserted 200 passed while the served endpoint 500'd.
+  ;;
+  ;; **Contracts were the only declaration in this map that could go unhonoured
+  ;; silently.** A declared READ with no performer already refuses here, and
+  ;; that refusal's reasoning applies word for word: it is checked at assembly
+  ;; because at request time it is invisible. Worse here, in fact — a missing
+  ;; performer 500s, while a missing validator serves 200s nobody checked.
+  ;;
+  ;; No malli is needed to ask this, which is what keeps it in http: the
+  ;; question is whether two KEYS are present, not what they do.
+  (let [row  {:handler (fn [_] {:status 200 :body {:ok true}})
+              :method :get :path "/api/x" :auth :public
+              :rest/response [:map [:ok :boolean]]}
+        opts {:http/namespaces [] :http/routes [row]}
+        wrap #(assoc % :rest/check-response rest.contract/check-response
+                     :rest/decode-request rest.contract/decode-request)]
+
+    (testing "a route declaring a contract with no validator REFUSES"
+      (let [e (try (slopp.http/context opts) nil
+                   (catch clojure.lang.ExceptionInfo ex ex))]
+        (is (some? e) "an unhonoured contract must not come up quietly")
+        (is (re-find #"validating" (ex-message e))
+            (str "the remedy is one call and the message has to name it: "
+                 (ex-message e)))
+        (is (= ["GET /api/x"] (:rest/unhonoured-contracts (ex-data e)))
+            (pr-str (ex-data e)))))
+
+    (testing "and lands once the validators are on the context"
+      ;; `:http/wrap-context` is applied BY assembly, so the check sees what
+      ;; the server will serve. Applying it after assembly would have let the
+      ;; refusal fire on a context that was about to be given validators
+      (let [ctx (slopp.http/context (assoc opts :http/wrap-context wrap))]
+        (is (= 1 (count (:http/routes ctx))))
+        (is (some? (:rest/check-response ctx)))))
+
+    (testing "a route declaring NO contract is unaffected"
+      ;; every http-only app is this case and it must cost exactly nothing
+      (is (some? (slopp.http/context
+                  {:http/namespaces []
+                   :http/routes [(dissoc row :rest/response)]}))))))

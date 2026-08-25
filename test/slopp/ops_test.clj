@@ -1276,12 +1276,15 @@
       (let [sess (external/open!)
             dir  (str (Files/createTempDirectory "slopp-rest-runs"
                                                  (make-array FileAttribute 0)))
-            ;; the probe an author would write: assemble the app's own context,
-            ;; attach the boundary, and call an endpoint with a bad body
+            ;; the probe an author would write: assemble the app's own context WITH
+            ;; the boundary on it, and call an endpoint with a bad body. Not
+            ;; two steps any more: `context` refuses to assemble a declared
+            ;; contract it cannot honour, so there is no unvalidated context
+            ;; left for a wrap to arrive too late for
             probe (str "(require 'slopp.http 'slopp.rest 'shop.api)\n"
-                       "(let [ctx (slopp.rest/validating\n"
-                       "            (slopp.http/context {:http/namespaces '[shop.api]}))
-"
+                       "(let [ctx (slopp.http/context\n"
+                       "            {:http/namespaces '[shop.api]\n"
+                       "             :http/wrap-context slopp.rest/validating})\n"
                        "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
                        "                                :body {:sku 42}})]\n"
                        "  (println :STATUS (:status r)))")]

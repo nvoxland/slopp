@@ -116,8 +116,14 @@
   Declared over the WHOLE request rather than one segment, because it is
   addressed by both halves of the URL. An unknown id and an unknown fidelity
   are the same answer — 404 — and neither is a reason to quietly render the
-  other thing. An unreadable depth is NOT one of those: it has an obvious
-  floor, and 1 is what every link written before the parameter existed meant.
+  other thing.
+
+  An UNREADABLE depth is a 400, not a floor. This once promised the floor —
+  \"1 is what every link written before the parameter existed meant\" — and that
+  argument was made when nothing enforced the contract. `:depth` is declared
+  `:int`, so `?depth=banana` is refused at the boundary before this handler can
+  be kind about it, and the two could not both be true. What the compatibility
+  promise actually protects is an ABSENT depth, which still means the default.
 
   `:rest/request` is declared even though this is a GET with no body. It is
   what a caller SENDS, and how that travels follows from the method — without

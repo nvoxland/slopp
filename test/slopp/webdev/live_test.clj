@@ -454,6 +454,7 @@
         plan      {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
                    :adapter :http-kit :max-body-bytes 42
                    :context-builder 'demo.sys/deps
+                   :validate? true
                    :static {"/assets" "public"} :static-dir "/tmp/x"}
         generated (->> (edn/read-string {:default (fn [_ v] v)}
                                         (live/serve-code plan))

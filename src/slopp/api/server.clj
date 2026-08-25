@@ -18,7 +18,7 @@
   belongs to the HUB, which is its own project (`slopp-ui`) and proxies here.
   `ui_serve {port}` is still an explicit override for one run."
   (:require [slopp.http :as slopp.http]
-            [slopp.api.reads] [slopp.api.endpoints]))
+            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest]))
 
 (defonce ^:private current
   ;; defonce, not def: under --live this namespace reloads on every edit,
@@ -115,6 +115,46 @@
       (some-> dir derived-port)
       0))
 
+(defn- serving-opts
+  "Everything the reviewer API's opts say about the APPLICATION, with nothing
+  about its address — which is exactly the half that was duplicated.
+
+  `serve!` adds host and port; [[context]] adds nothing. Splitting it here is
+  what makes the two impossible to disagree: the listener and the in-process
+  context described the same app by hand until one of them stopped, and the
+  one that stopped was the one no browser was pointed at."
+  [session]
+  {:http/namespaces served-namespaces
+   ;; the reviewer API publishes typed contracts; anything serving them
+   ;; unvalidated answers 200s nobody checked
+   :http/wrap-context slopp.rest/validating
+   :http/perform-ctx {:session session
+                      :served-namespaces served-namespaces}})
+
+(defn ^:export context
+  "The reviewer API's dispatch context, assembled ONE way — over `session`.
+
+  **This exists because there were seventeen.** Every test that drove these
+  endpoints built its own `slopp.http/context` inline, and `serve!` built a
+  third; none of them wrapped, so the whole typed surface was served and
+  exercised with nothing honouring a single declared contract. One of those
+  tests opens by claiming *\"the response is validated against the SAME schema
+  var the generated client validates with\"*, which was false for as long as it
+  had been written.
+
+  `slopp.rest/validating` is what makes that claim true, and it is here rather
+  than at each call site for the reason a consuming store measured: an app that
+  can be stood up two ways will eventually be stood up both, and only one of
+  them will validate. Theirs was — production wrapped, the test path did not,
+  and a test that started a real server and asserted 200 passed while the
+  served endpoint was answering 500.
+
+  `slopp.http/context` now REFUSES a route that declares a contract with no
+  validator, so this cannot silently drift back; what this adds is that there
+  is one place to keep right."
+  [session]
+  (slopp.http/context (serving-opts session)))
+
 (defn ^:export serve!
   "Serve the reviewer UI on `port` over the CALLER's session, and return
   `{:url :port}` — or `{:error :port}` when the port is taken.
@@ -142,11 +182,9 @@
   [session port]
   (stop!)
   (try
-    (let [srv (slopp.http/serve! {:http/namespaces served-namespaces
-                           :http/host "127.0.0.1"
-                           :http/port port
-                           :http/perform-ctx {:session session
-                                           :served-namespaces served-namespaces}})
+    (let [srv (slopp.http/serve! (assoc (serving-opts session)
+                                    :http/host "127.0.0.1"
+                                    :http/port port))
           p   (:port srv)
           url (str "http://127.0.0.1:" p "/")]
       (reset! current {:server srv :port p :url url})

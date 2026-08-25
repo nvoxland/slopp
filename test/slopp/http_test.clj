@@ -13,7 +13,25 @@
   own tests through the client would close the loop and let a symmetric bug —
   client omits a header, server ignores it — pass both suites."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.http :as slopp.http] [slopp.http.static :as static] [clojure.string :as str] [slopp.lang :as lang]))
+            [slopp.http :as slopp.http] [slopp.http.static :as static] [clojure.string :as str] [slopp.lang :as lang] [slopp.rest.contract :as rest.contract]))
+
+(def ^:private honouring
+  "`:http/wrap-context` that puts the contract validators on, which every
+  context in this namespace now needs.
+
+  `t-mine` declares `:rest/response`, because in THIS store every `defn` route
+  must: the content gate refuses a `defn` under `:http/path`, and
+  `rest-endpoint-schema` asks a `:rest/path` for its contract. So the http
+  facade's own tests cannot build a context over their own fixtures without the
+  rest capability — which is a true statement about a store whose surface is
+  entirely typed, rather than about http.
+
+  `slopp.rest/validating` is what an app writes; this reaches
+  `slopp.rest.contract` directly through the TEST-ONLY module edge
+  `slopp.http.dispatch-test` already declares, so the facade's tests do not put
+  a production dependency on rest to say what they are saying."
+  #(assoc % :rest/decode-request rest.contract/decode-request
+          :rest/check-response rest.contract/check-response))
 
 (defn ^{:http/method :get :rest/path "/api/w/mine/:owner"
         :http/auth :authenticated
@@ -60,7 +78,8 @@
   [:html [:head [:title "Broken"]] [:body [:div {:id "root"}]]])
 
 (deftest facade-assembles-and-enforces
-  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]})]
+  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       :http/wrap-context honouring})]
     (testing "context derives the route table from var metadata"
       (is (= {"/api/w/mine/:owner" :rest, "/" :content
               "/about" :content, "/robots.txt" :content}
@@ -79,7 +98,8 @@
       (is (not (slopp.http/authorized? [:group "admin"] nil))))))
 
 (deftest content-is-a-VALUE-the-dispatcher-serves-not-a-handler-it-calls
-  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]})]
+  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       :http/wrap-context honouring})]
     (testing "hiccup content renders, and keeps its structure for a headless drive"
       (let [r (slopp.http/handle! ctx {:request-method :get :uri "/about"})]
         (is (= 200 (:status r)) (pr-str r))
@@ -100,6 +120,7 @@
 
 (deftest a-webapp-SHELL-is-completed-by-the-framework
   (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                  :http/wrap-context honouring
                                   :webapp/base "/p/demo"})
         r    (slopp.http/handle! ctx {:request-method :get :uri "/"})
         body (str (:body r))]
@@ -141,6 +162,7 @@
               must not go through the port."}
   serve-round-trips-the-facade
   (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
                          :http/port 0})
         http (java.net.http.HttpClient/newHttpClient)
         resp (.send http
@@ -160,6 +182,7 @@
               shared client cannot witness."}
   httpkit-adapter-round-trips-the-facade
   (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
                          :http/adapter :http-kit
                          :http/port 0})
         http (java.net.http.HttpClient/newHttpClient)
@@ -179,6 +202,7 @@
               is precisely the shape a symmetric client/server bug would hide."}
   auth-round-trips-over-the-wire
   (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
                          :http/adapter :http-kit
                          :http/port 0
                          :http/auth-config {:auth/providers [:bearer]
@@ -406,7 +430,8 @@
   (testing "a context that can perform every read it declares assembles"
     ;; the guard must not fire on the ordinary case, including a route with
     ;; no declared reads at all
-    (is (map? (slopp.http/context {:http/namespaces ['slopp.http-test]})))))
+    (is (map? (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                   :http/wrap-context honouring})))))
 
 (defn reader-contract
   "Every property a `mount-routes` reader must satisfy, run against whatever
@@ -515,7 +540,10 @@
   ;; first user, and `slopp.http` does not learn that rest exists — which is the
   ;; whole reason malli is not in this framework.
   (let [seen (atom nil)
-        wrap (fn [ctx] (reset! seen ctx) (assoc ctx :probe/wrapped true))]
+        ;; honours on the way through as well as probing: what it wraps here is a
+        ;; namespace of typed endpoints, and a wrapper is exactly the seam that
+        ;; is supposed to carry that
+        wrap (fn [ctx] (reset! seen ctx) (honouring (assoc ctx :probe/wrapped true)))]
     (testing "the wrapper receives the ASSEMBLED context, not the opts"
       ;; it has to run after `context` has derived the routes and the performer
       ;; vocabularies, or a wrapper deciding anything from the surface would be
@@ -530,8 +558,11 @@
 
     (testing "and no wrapper leaves serving exactly as it was"
       ;; every app enabling no such capability is this case, and it must cost
-      ;; nothing
-      (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test] :http/port 0})]
+      ;; nothing. Served over NO namespaces on purpose: every fixture route in
+      ;; this one is a typed endpoint, and a context over those may not serve
+      ;; unwrapped any more — so reusing them here would have exercised the
+      ;; refusal while claiming to show its absence.
+      (let [srv (slopp.http/serve! {:http/namespaces [] :http/port 0})]
         (try (is (map? srv))
              (finally (slopp.http/stop! srv)))))))
 

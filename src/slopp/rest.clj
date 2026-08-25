@@ -28,21 +28,25 @@
 
 (defn ^:export validating
   "`ctx` with the contract validators attached — the one call that turns a
-  declared contract into an enforced one.
+  declared contract into an enforced one. Hand it to `:http/wrap-context`,
+  which applies it between assembly and serving:
 
-  Written as a function OVER a context rather than an option to
-  `slopp.http/context` on purpose. The dispatcher must not know this namespace
-  exists: it looks for `:rest/decode-request` and `:rest/check-response` and
-  calls whatever it finds, the same way it treats `:http/read-performers`. That
-  is what keeps malli here and out of the http framework, so an app serving
-  HTML never pays for a validation library it has no contracts to use.
+      (http/serve! {:http/namespaces [...]
+                    :http/wrap-context rest/validating
+                    :http/port 8080})
 
-  So an app assembles its own boundary and can SEE that it did:
+  A FUNCTION rather than an option `slopp.http/context` knows by name, on
+  purpose. The dispatcher must not know this namespace exists: it looks for
+  `:rest/decode-request` and `:rest/check-response` and calls whatever it
+  finds, the same way it treats `:http/read-performers`. That is what keeps
+  malli here and out of the http framework, so an app serving HTML never pays
+  for a validation library it has no contracts to use.
 
-      (-> (web/context {:http/namespaces [...]}) (rest/validating))
-
-  Leaving the call out is how an app opts out, and the absence is visible at
-  the call site rather than in a config file somewhere else."
+  It used to be applied to an already-assembled context, and that is no longer
+  possible: assembling a route that DECLARES a contract with no validator now
+  refuses, so there is no unvalidated context left for a later wrap to arrive
+  too late for. Declaring no contract is still how an app opts out — what is
+  refused is declaring one and serving it unread."
   [ctx]
   (assoc ctx
          :rest/decode-request rest.contract/decode-request

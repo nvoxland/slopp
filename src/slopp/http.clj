@@ -88,15 +88,33 @@
   difference. Found by dogfooding: adding an `/api` namespace to this repo's
   own reviewer UI hit it immediately, because the endpoints and their read
   performers live in different namespaces on purpose."
-  [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes]
+  [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes wrap-context]
     :webapp/keys [base]}]
-  (let [ctx (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
-                     :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
-                     :http/effect-performers (routes/performers-from-namespaces namespaces :http/effect)
-                     :http/perform-ctx perform-ctx
-                     :http/max-body-bytes (or max-body-bytes 1048576)}
-              auth-config (assoc :http/auth-config auth-config)
-              base (assoc :webapp/base base))
+  (let [ctx ((or wrap-context identity)
+             (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
+                      :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
+                      :http/effect-performers (routes/performers-from-namespaces namespaces :http/effect)
+                      :http/perform-ctx perform-ctx
+                      :http/max-body-bytes (or max-body-bytes 1048576)}
+               auth-config (assoc :http/auth-config auth-config)
+               base (assoc :webapp/base base)))
+        ;; A route DECLARING a contract that nothing on this context honours.
+        ;; The same question `missing` asks below of a declared read, and the
+        ;; answer matters more: a missing performer answers 500, while a missing
+        ;; validator answers 200s that were never checked — so the failure does
+        ;; not merely go quiet, it looks like success. A consuming store had a
+        ;; test start a real server and assert 200 while the served endpoint was
+        ;; 500ing, because their two entry points wrapped differently.
+        ;;
+        ;; Asked with two lookups and no malli, which is what keeps it here:
+        ;; whether a validator is PRESENT is http's business and what it does
+        ;; is rest's.
+        unhonoured (when-not (and (:rest/decode-request ctx)
+                                  (:rest/check-response ctx))
+                     (vec (for [row (:http/routes ctx)
+                                :when (or (:rest/request row) (:rest/response row))]
+                            (str (str/upper-case (name (:method row :get)))
+                                 " " (:path row)))))
         missing (for [row (:http/routes ctx)
                       [decl performers] [[:http/reads (:http/read-performers ctx)]
                                          [:http/effects (:http/effect-performers ctx)]]
@@ -115,6 +133,28 @@
                            " so the namespace list is checked here rather than at request time")
                       {:http/missing-performers (vec (distinct missing))
                        :http/namespaces (vec namespaces)})))
+    ;; SECOND, deliberately. A route missing a performer cannot RUN at all, and
+    ;; telling someone their contract is unvalidated when the endpoint would
+    ;; 500 anyway sends them to the wrong end. Found by writing it first: an
+    ;; existing test could no longer see its own error, because the new check
+    ;; had masked the older one.
+    (when (seq unhonoured)
+      (throw (ex-info (str "this context serves "
+                           (if (next unhonoured) "routes that DECLARE contracts"
+                               "a route that DECLARES a contract")
+                           " and carries nothing to honour "
+                           (if (next unhonoured) "them" "it") ": "
+                           (str/join ", " unhonoured)
+                           " — so every request through "
+                           (if (next unhonoured) "them" "it")
+                           " is answered unvalidated, and a 200 that was never"
+                           " checked looks exactly like one that was. Wrap the"
+                           " context: :http/wrap-context slopp.rest/validating,"
+                           " the one call that turns a declared contract into an"
+                           " enforced one. Declaring no contract is the other"
+                           " honest answer; what is refused is declaring one and"
+                           " serving it unread.")
+                      {:rest/unhonoured-contracts unhonoured})))
 ;; Every SHELL is completed once, here, and the answer thrown away. It is
     ;; completed AGAIN per request — a redefined content def has to reach the
     ;; next one, which a value frozen at assembly would not — so this is not a
