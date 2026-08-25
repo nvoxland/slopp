@@ -41,7 +41,8 @@
   ([issuer requester]
    (let [GET   (fn [url]
                  (let [{:http/keys [status body]}
-                       (requester {:http/method :get :http/url (str url)})]
+                       (requester {:http/method :get :http/url (str url)
+                                   :http/timeout-ms http.client/default-timeout-ms})]
                    (when-not (= 200 status)
                      (throw (ex-info (str "jwks fetch failed: HTTP " status
                                           " from " url)

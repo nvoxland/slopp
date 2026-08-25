@@ -109,23 +109,6 @@
     "application/edn"  (edn/read-string (str body))
     body))
 
-(def ^:export default-timeout-ms
-  "The timeout applied when an upstream declares none: 10 seconds.
-
-  A number rather than a nil, because `slopp.http.client/request` makes the
-  timeout OPTIONAL and the absence means wait forever — so a framework that
-  made outbound calls easy and left this alone would have made the wrong thing
-  easy. One unresponsive upstream would hold a request thread until something
-  else gave up, and the store that noticed would be the one running out of
-  threads rather than the one that made the call.
-
-  Ten seconds is a judgement, not a measurement: long enough that a slow but
-  working upstream is not cut off, short enough that a hung one is not mistaken
-  for a slow one for minutes. Declare `:rest/timeout-ms` when you know better —
-  and an upstream you call in a request path probably wants far less than
-  this."
-  10000)
-
 (defn ^:export ^{:http/effectful true}
   ^{:malli/schema
     [:=> {:throws [[:map [:rest/error [:enum :escaping-path :contract]]]]}
@@ -165,7 +148,11 @@
 
   ## What is handled, since \"safe\" was half the ask
 
-  - **A timeout is ALWAYS set** ([[default-timeout-ms]] when nobody says).
+  - **A timeout is ALWAYS set** (`slopp.http.client/default-timeout-ms` when
+    nobody says). The port publishes that number rather than applying it, and
+    the reason it is published at all is that two of slopp's OWN outbound call
+    sites had none — found when a consuming store reported the same omission in
+    theirs.
   - **The path cannot leave the base** — refused, not cleaned ([[checked-path]]).
   - **Redirects are not followed**, because `java.net.http.HttpClient` defaults
     to `NEVER` and nothing here changes it. An upstream that could redirect you
@@ -204,7 +191,7 @@
               (cond-> {:http/url url
                        :http/method (:webapp/method request :get)
                        :http/headers (merge (:headers init) headers)
-                       :http/timeout-ms (or timeout-ms default-timeout-ms)}
+                       :http/timeout-ms (or timeout-ms http.client/default-timeout-ms)}
                 (some? (:body init)) (assoc :http/body (encoded-body init))))
         body (decoded-body (get (:http/headers resp) "content-type")
                            (:http/body resp))]

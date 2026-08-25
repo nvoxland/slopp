@@ -80,3 +80,32 @@
                                        {:jwks_uri (str issuer "/gone")})})})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"/gone"
                               (jwks/fetch-jwks! issuer dangling)))))))
+
+(deftest a-hung-issuer-cannot-hang-startup
+  ;; Found by a consuming store reporting the same defect in their own only
+  ;; outbound call site, after reading a paragraph about a framework function
+  ;; they cannot use. `slopp.http.client/request` makes `:http/timeout-ms`
+  ;; OPTIONAL, so omitting it means wait forever — and this call site is worse
+  ;; than most: it runs at server STARTUP, on the auth path, and its own
+  ;; docstring promises "a misconfigured issuer should fail loudly at startup,
+  ;; not 401 mysteriously forever".
+  ;;
+  ;; A hang is the loudest failure to experience and the quietest to read: the
+  ;; server simply never finishes coming up, naming nothing.
+  (let [seen (atom [])
+        requester (fn [req]
+                    (swap! seen conj req)
+                    {:http/status 200
+                     :http/body (if (= 1 (count @seen))
+                                  "{\"jwks_uri\":\"https://iss.test/keys\"}"
+                                  "{\"keys\":[{\"kid\":\"k1\"}]}")
+                     :http/headers {}})]
+    (is (= [{:kid "k1"}] (jwks/fetch-jwks! "https://iss.test" requester)))
+    (testing "BOTH hops are bounded, not just the first"
+      ;; the second url comes out of the first document, so an issuer that
+      ;; answers the discovery hop and then stalls on its own jwks_uri is the
+      ;; shape a one-hop fix would miss
+      (is (= 2 (count @seen)))
+      (doseq [req @seen]
+        (is (pos-int? (:http/timeout-ms req))
+            (str "an unbounded hop waits forever: " (pr-str req)))))))

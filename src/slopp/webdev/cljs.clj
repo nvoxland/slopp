@@ -492,6 +492,7 @@
    (let [{:http/keys [status body]}
          (requester {:http/method  :get
                      :http/url     (str url)
+                     :http/timeout-ms http.client/default-timeout-ms
                      :http/headers {"Accept" "application/edn"}})]
      (when-not (= 200 status)
        (throw (ex-info (str "contract fetch failed: HTTP " status " from " url)

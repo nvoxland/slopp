@@ -1320,3 +1320,19 @@
                 :request {:kind :none} :response {:kind :none}}]
       (is (not (re-find #"remove #\{"
                         (cljs/render-request-ns 'shop.client.api [spec] nil)))))))
+
+(deftest fetching-a-contract-is-BOUNDED
+  ;; The same omission as `slopp.http.jwks/fetch-jwks!`, found in the same
+  ;; sweep: `:http/timeout-ms` is optional on the port, so leaving it out means
+  ;; wait forever. Less dangerous here — this is a dev-time tool rather than a
+  ;; request path — and worth fixing for the reason that makes it findable at
+  ;; all: an author running `generate_client` against a host that accepts and
+  ;; stalls gets a tool that never returns and never says why.
+  (let [seen (atom nil)]
+    (cljs/fetch-contract "https://pub.test/api/contracts"
+                         (fn [req]
+                           (reset! seen req)
+                           {:http/status 200 :http/headers {}
+                            :http/body "{:slopp/contract-version 1 :endpoints []}"}))
+    (is (pos-int? (:http/timeout-ms @seen))
+        (str "an unbounded fetch hangs the tool: " (pr-str @seen)))))
