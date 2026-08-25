@@ -1673,7 +1673,11 @@ content endpoint is a **`def`**, not a `defn` — its value IS what is served:
 **Dynamic means API.** `:rest/path` is the marker for anything that computes an
 answer from a request; `:http/path` names content that does not vary. A `defn`
 under `:http/path` is not a handler slopp calls — it is a value slopp serves,
-so it renders as the string of its own function object.
+so it would render as the string of its own function object. **`http-content-shape`
+refuses that at the write**, naming both ways out: `:rest/path` if it computes,
+a `def` if it does not. One direction only — `:rest/path` on a `def` throws on
+the first request, which is loud and implicates the right form, and a gate
+exists to convert silence.
 
 `:http/media-type` is used VERBATIM when declared; hiccup defaults to
 `text/html`, everything else to `text/plain`. There is no extension-based

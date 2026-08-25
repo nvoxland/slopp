@@ -69,8 +69,14 @@ from a request is `:rest/path` -- a REST API, asked for a contract, published in
 the API document, generated a client for.
 
 A `defn` under `:http/path` is not a handler slopp calls. It is a value slopp
-serves, so it renders as the string of its own function object. If a page needs
-per-request data, it is either an API or a single-page app calling one.
+serves, so it would render as the string of its own function object.
+`http-content-shape` refuses that at the write and names both ways out: declare
+`:rest/path` if the form computes, or make it a `def` if it does not. If a page
+needs per-request data, it is either an API or a single-page app calling one.
+
+The gate runs one way only. `:rest/path` on a `def` throws on the first request
+-- loud, immediate, implicating the right form. Only this direction was silent,
+and converting silence is what a gate is for.
 
 That split is recent. There used to be one path marker, so a page was an
 endpoint like any other: it was asked for a `:rest/response` (`:string`, a lie
