@@ -147,6 +147,17 @@ Literal `:href`, `:src` and `:action` values are indexed. Route rows carry
 mount serves. The UI nil pun is that a broken link ships and 404s in front of a
 user; this catches it at the same moment as a failing test.
 
+If your app rewrites its own links -- a call to `slopp.webapp/prefix-links` from
+your own views -- this join cannot be made at all: the `:href` literal is then in
+app space while the route table is in server space, and the prefix between them
+is route state. The check says so instead of guessing. Every literal lands in
+`:unresolved` with that reason attached, which is `:severity :info` and never
+counted clean.
+
+The way back to a working check is to write links against the routes your app
+declares. Under a root shell the base is empty, so there is nothing left to
+rewrite.
+
 ```clj
 query_surface {}     ; check the path before writing the link
 ```

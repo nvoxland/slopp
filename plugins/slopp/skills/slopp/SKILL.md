@@ -1729,6 +1729,13 @@ The rules that matter:
   fully dynamic path is reported `:unresolved`, never counted clean.
   Served by something outside this store? `^{:http/external-path "why"}`
   on the rendering form discharges.
+  **A store that calls `slopp.webapp/prefix-links` itself makes this join
+  impossible**, and is TOLD so rather than being handed false findings: an
+  `:href` literal is then in APP space while the route table is in SERVER
+  space, and the prefix between them is route state. Every literal lands in
+  `:unresolved` carrying that reason. The way back to a working check is to
+  write links against the routes your app DECLARES — under a root shell the
+  base is empty, so there is nothing left to rewrite.
 - **See a page without a server:** `(http/handle! (http/context
   {:http/namespaces ['my.ui]}) {:request-method :get :uri "/x"})` via
   `query_eval` — the full pipeline, rendered HTML in the response map.
