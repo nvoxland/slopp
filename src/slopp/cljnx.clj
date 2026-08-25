@@ -469,7 +469,7 @@
    :view     (fn [state] hiccup)    ; state -> hiccup, re-derived every read
    :navigate (fn [state path] state')
    :dispatch (fn [action value] …)
-   :boot     (fn [state] state')}
+   :boot     (fn [state url] state')}
   ```
 
   An app needs SOME way to produce a screen — a `:view` over state, a
@@ -498,13 +498,23 @@
   shim, because accepting one silently is exactly the arrangement that had to
   end.
 
-  **`:boot` is the page's entry point, and open RUNS it, once.** A browser runs
-  an app's entry point at page load, and the entry point is where every app
-  starts the loads that belong to no particular screen — which is exactly the
-  data a driven session used to show as structurally present and materially
-  empty, with nothing distinguishing \"the app never asked\" from \"asked, not
-  yet arrived\". Same shape and same discipline as `:navigate`: `(fn [state]
-  state')`, applied read-call-write, never inside `swap!`.
+  **`:boot` is the page's entry point, and open RUNS it, once, WITH the address
+  the session is opening at** (nil when opened without one). A browser runs an
+  app's entry point at page load, and the entry point is where every app starts
+  the loads that belong to no particular screen — which is exactly the data a
+  driven session used to show as structurally present and materially empty.
+
+  The url is passed because **\"belongs to no particular SCREEN\" is not the same
+  as \"independent of the ADDRESS\"**, and a real app is the case where the two
+  come apart: a session-scoped load can be independent of every screen and still
+  depend on which tenant the url names. `slopp.webapp/driver` turns it into that
+  app's route captures; a `:document`-only page ignores it. The browser's
+  `start!` has the address before it routes for the same reason, so both
+  producers answer identically — which is the ONE difference this whole
+  namespace exists to prevent.
+
+  Same shape and discipline as `:navigate`: applied read-call-write, never
+  inside `swap!`.
 
   **Both together, for a mounted page that carries client logic** — which is
   ordinary and not an SPA. The document arrives through `:document`; the
@@ -528,7 +538,8 @@
   browser takes, so a test drives a lookalike and passes while the real screen
   is wrong. That is the bug this exists to kill; a design that reintroduces it
   one level up is not a fix."
-  ([app]
+  ([app] (open! app nil))
+  ([app url]
    (when-not (map? app)
      (throw (ex-info (str "open takes the app as a map — {:document …} for a path"
                           " that renders, {:state … :view …} for client state —"
@@ -582,7 +593,7 @@
                             (pr-str (type (:state app))))
                        {:state (:state app)})))
      (when (and (contains? app :boot) (not (ifn? (:boot app))))
-       (throw (ex-info (str ":boot must be callable — (fn [state] state'),"
+       (throw (ex-info (str ":boot must be callable — (fn [state url] state'),"
                             " the entry point's state transform — got "
                             (pr-str (:boot app)))
                        {:boot (:boot app)})))
@@ -592,10 +603,14 @@
      ;; read, call, write — never inside swap!, for navigate's reason: the
      ;; entry point is the app's own code and swap! demands a pure fn
      (let [st (:state app)]
-       (reset! st (b @st))))
-   (atom {:app app :path nil :document nil :status nil :redirects []}))
-  ([app url]
-   (visit! (open! app) url)))
+       (reset! st (b @st url))))
+   (let [session (atom {:app app :path nil :document nil
+                        :status nil :redirects []})]
+     ;; the visit comes AFTER boot, so an entry point that starts loads has
+     ;; started them before the first screen is read — the same order a browser
+     ;; runs, and the reason boot is handed the url rather than the visit being
+     ;; asked to hand it back
+     (if url (visit! session url) session))))
 
 (defn- unary?
   "Whether `f` accepts exactly one argument — read off the function, never

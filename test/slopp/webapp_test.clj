@@ -1643,8 +1643,8 @@
                  :webapp/routes        [["/code" (fn [s] [:p (str "code "
                                                                   (webapp/load-value s :modules))])]]
                  :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [s] {:webapp/path    "/api/modules"
-                                                                   :webapp/headers {"Authorization" (:token s)}})
+                 :webapp/session-loads {:modules {:request (fn [s _p] {:webapp/path    "/api/modules"
+                                                                      :webapp/headers {"Authorization" (:token s)}})
                                                   :derive  :names}
                                         ;; declared session-scoped, started by
                                         ;; the app itself — no :request
@@ -1661,6 +1661,53 @@
       (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
       (is (= ["a" "b"] (webapp/load-value @state :modules))
           "the :derive did not run on a session load"))
+
+    (testing "and BOOT ran first, so its state is what the request reads"
+      ;; the order start! already documents, now with something that depends on
+      ;; it: a token established by boot is what an authenticated session load
+      ;; must carry, and routing first would send the request without one
+      (is (= "abc" (get-in (first @called) [:webapp/headers "Authorization"]))
+          (pr-str (first @called))))
+(testing "a session request reaches the ROUTE CAPTURES of the address"
+      ;; The case this was built for, measured in production first: a hub
+      ;; serving one shell at the root, whose nav pane is a session load and
+      ;; whose upstream is chosen by the slug in the url. The load has no
+      ;; address OF ITS OWN and is not independent of THE address, and the two
+      ;; had been treated as the same thing — so it asked `/api/modules` at the
+      ;; origin, which that hub does not serve, and the pane was empty for the
+      ;; life of every session.
+      (let [st   (atom {})
+            seen (atom [])
+            a3   (webapp/wiring
+                  {:webapp/state         st
+                   :webapp/routes        [["/p/:slug/store" (fn [_s] [:p "s"])]]
+                   :webapp/session-loads {:nav {:request (fn [_s p]
+                                                           {:webapp/path "/api/modules"
+                                                            :webapp/base (str "/p/" (:slug p))})}}
+                   :webapp/call          (fn [rq ok _err]
+                                           ;; `fetch!` addresses before performing, so this is the url a
+                                           ;; browser would fetch. Addressing again would re-apply the
+                                           ;; base the request still carries.
+                                           (swap! seen conj (webapp/request-url rq))
+                                           (ok nil))})]
+        (webapp/start! a3 "/p/demo/store" "")
+        (is (= ["/p/demo/api/modules"] @seen)
+            (str "a session load could not see which tenant the url named, so"
+                 " it asked the origin: " (pr-str @seen)))))
+
+    (testing "and NO address means empty captures, never nil"
+      ;; so a request never has to tell "no captures" from "not asked"
+      (let [st   (atom {})
+            seen (atom nil)
+            a4   (webapp/wiring
+                  {:webapp/state         st
+                   :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
+                   :webapp/session-loads {:nav {:request (fn [_s p]
+                                                           (reset! seen p)
+                                                           {:webapp/path "/api/x"})}}
+                   :webapp/call          (fn [_rq ok _err] (ok nil))})]
+        (webapp/start! a4 "/nowhere" "")
+        (is (= {} @seen) (pr-str @seen))))
 
     (testing "and BOOT ran first, so its state is what the request reads"
       ;; the order start! already documents, now with something that depends on
@@ -1688,8 +1735,8 @@
             a2 (webapp/wiring
                 {:webapp/state         st
                  :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
-                 :webapp/session-loads {:me {:request (fn [s] (when (:token s)
-                                                                {:webapp/path "/api/me"}))}}
+                 :webapp/session-loads {:me {:request (fn [s _p] (when (:token s)
+                                                                   {:webapp/path "/api/me"}))}}
                  :webapp/call          (fn [_rq ok _err] (swap! hit inc) (ok nil))})]
         (webapp/start! a2 "/x" "")
         (is (= 0 @hit) "an unarmed session load fetched anyway")
@@ -1728,7 +1775,7 @@
                  :webapp/routes        [["/code" (fn [s] [:main "rail: "
                                                           (str (webapp/load-value s :modules))])]]
                  :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [_s] {:webapp/path "/api/modules"})
+                 :webapp/session-loads {:modules {:request (fn [_s _p] {:webapp/path "/api/modules"})
                                                   :derive  :names}}
                  :webapp/call          (fn [rq ok _err]
                                          (swap! called conj (webapp/request-url rq))
@@ -1744,6 +1791,30 @@
 
     (testing "and boot still ran, so a driven app is not half-started"
       (is (= "abc" (:token @state)) (pr-str @state)))
+(testing "and a drive OPENED at an address sees the same captures a page does"
+      ;; the new half of the same rule. `open!` hands the url to `:boot`, so a
+      ;; session load that chooses its upstream from the address answers
+      ;; identically in both producers. Without this the drive would show an
+      ;; empty pane against a declaration that works in a browser — which is
+      ;; the exact shape this test was written for, one field along.
+      (let [drive (atom [])
+            page  (atom [])
+            wire  (fn [sink]
+                    (webapp/wiring
+                     {:webapp/state         (atom {})
+                      :webapp/routes        [["/p/:slug/store" (fn [_s] [:main "s"])]]
+                      :webapp/session-loads {:nav {:request (fn [_s p]
+                                                              {:webapp/path "/api/modules"
+                                                               :webapp/base (str "/p/" (:slug p))})}}
+                      :webapp/call          (fn [rq ok _err]
+                                              (swap! sink conj (webapp/request-url rq))
+                                              (ok nil))}))]
+        (cljnx/open! (webapp/driver (wire drive)) "/p/demo/store")
+        (webapp/start! (wire page) "/p/demo/store" "")
+        (is (= ["/p/demo/api/modules"] @drive) (pr-str @drive))
+        (is (= @page @drive)
+            (str "a drive and a page disagreed about the address a session load"
+                 " is measured from: " (pr-str @page) " vs " (pr-str @drive)))))
 
     (testing "so a screen READING it draws the same thing a browser draws"
       ;; the assertion the consuming app could not make: sixteen of their

@@ -1474,7 +1474,10 @@
 
 (defn- begin!
   "Boot the app and start every declared session load, returning the state that
-  leaves. Answers the question a page load and a headless drive must answer
+  leaves. `path` is the app-relative address this session is starting at, or
+  nil when there is none.
+
+  Answers the question a page load and a headless drive must answer
   identically, so it is one function and not two.
 
   **Two callers and they must not differ.** [[start!]] is what the browser entry
@@ -1490,17 +1493,34 @@
   page load does before routing, a headless drive does too, out of one
   producer.**
 
-  Boot FIRST, because a session `:request` is `(fn [state])` and the state it
-  reads is the one boot established — an authenticated load carries a token boot
-  put there, and reversing these two sends the request without one.
+  Boot FIRST, because a session `:request` reads the state boot established —
+  an authenticated load carries a token boot put there, and reversing these two
+  sends the request without one.
+
+  **A session `:request` takes STATE and the route CAPTURES.** It used to take
+  state alone, on the reasoning that a session load has no address so there are
+  no captures to hand it. That reasoning conflated two things: a session load
+  has no address OF ITS OWN, which is not the same as being independent of THE
+  address. A real hub is where they come apart — which project a request
+  belongs to is in the url, and the load that fills the nav pane needs it. It
+  asked `/api/modules` at the origin, which that hub does not serve, and the
+  pane was empty for the life of every session.
+
+  **Matching is not rendering**, which is what makes this cost nothing: the
+  address is turned into captures here, before routing, and step 3 still shows
+  the screen. Both of [[start!]]'s ordering reasons survive untouched.
+
+  Captures are `{}` rather than nil when there is no address, so a request never
+  has to tell \"no captures\" from \"not asked\".
 
   Read-call-write, never inside `swap!`: boot is the app's own code, `swap!`
   demands a pure function and may retry, and an entry point that starts a fetch
   is neither."
-  [{:webapp/keys [state boot session-loads] :as app}]
+  [{:webapp/keys [state boot session-loads routes] :as app} path]
   (reset! state (boot @state))
-  (doseq [[key spec] session-loads]
-    (fetch! app key spec (when-let [f (:request spec)] (f @state))))
+  (let [params (or (:params (match-route routes path)) {})]
+    (doseq [[key spec] session-loads]
+      (fetch! app key spec (when-let [f (:request spec)] (f @state params)))))
   @state)
 
 (defn ^:export
@@ -1555,7 +1575,7 @@
      ;; rail against a declaration that worked in production. The state
      ;; argument is ignored because [[begin!]] reads the same atom `open!`
      ;; read it from
-     :boot     (fn [_state] (begin! app))}))
+     :boot     (fn [_state url] (begin! app (app-path (:webapp/base app) url nil)))}))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -1611,5 +1631,8 @@
   a decision should live somewhere nothing can check."
   [app pathname search]
   
-  (begin! app)
+  ;; the address is KNOWN here and SHOWN in step 3 — nothing requires those to
+  ;; be the same moment. Deriving it first is what lets a session load reach the
+  ;; route captures without either ordering reason above being given up.
+  (begin! app (app-path (:webapp/base app) pathname search))
   (navigate-url! app pathname search false))

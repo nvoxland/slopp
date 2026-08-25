@@ -965,11 +965,30 @@
   ;; architecture — a forcing this project already declined once.)
   (testing "boot runs once at open, read-call-write like navigate"
     (let [page {:state (atom {:projects {:status :absent}})
-                :boot  (fn [s] (assoc s :projects {:status :loading}))
+                :boot  (fn [s _url] (assoc s :projects {:status :loading}))
                 :view  (fn [s] [:div [:p (name (get-in s [:projects :status]))]])}
           b    (cljnx/open! page)]
       (is (= "loading" (cljnx/text b nil {:detail :prose}))
           "the screen shows the app ASKED — its loading state, not an absence")))
+  (testing "and boot is handed the ADDRESS the session opened at"
+    ;; "belongs to no particular SCREEN" is not "independent of the ADDRESS",
+    ;; and a real hub is where they come apart: its nav pane is a session load
+    ;; whose upstream is chosen by the slug in the url. Passing the url here
+    ;; rather than at the visit is what keeps a drive and a browser identical,
+    ;; since the browser's start! has the address before it routes too.
+    (let [seen (atom :unset)
+          page {:state    (atom {})
+                :boot     (fn [s url] (reset! seen url) s)
+                ;; the url arity VISITS, so the page needs urls — open!'s own
+                ;; refusal, which is why this carries a :navigate at all
+                :navigate (fn [s _path] s)
+                :view     (fn [_s] [:p "x"])}]
+      (cljnx/open! page "/p/demo/store")
+      (is (= "/p/demo/store" @seen))
+      (testing "and nil when it opened at no address, which is honest"
+        (reset! seen :unset)
+        (cljnx/open! page)
+        (is (nil? @seen)))))
   (testing "a page without :boot is unchanged"
     (let [b (cljnx/open! {:state (atom {}) :view (fn [_] [:p "hi"])})]
       (is (= "hi" (cljnx/text b nil {:detail :prose})))))
