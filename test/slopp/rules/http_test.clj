@@ -76,13 +76,13 @@
                         :prompt "opt into HTTP")
       (testing "an endpoint with no :http/auth is refused with teaching, and never lands"
         (let [r (ops/add-form! sess 'shop.api
-                               "(defn ^{:http/method :get :http/path \"/naked\"} naked \"N.\" [req] req)"
+                               "(def ^{:http/method :get :http/path \"/naked\"} naked \"N.\" [:p \"x\"])"
                                :prompt "endpoint without auth")]
           (is (re-find #":http/auth" (str (:error r))) (pr-str r))
           (is (nil? (store/form-named (:store @sess) 'shop.api 'naked)))))
       (testing "with a declared policy and response contract it lands, and the route reports"
         (let [r (ops/add-form! sess 'shop.api
-                               (str "(defn ^{:http/method :get :http/path \"/api/ping\""
+                               (str "(defn ^{:http/method :get :rest/path \"/api/ping\""
                                     " :http/auth :public :rest/response :map} ping \"P.\" [req] req)")
                                :prompt "a public endpoint")]
           (is (nil? (:error r)) (pr-str r))
@@ -191,7 +191,7 @@
     (try
       (ops/ingest! sess 'ui.core
                    (str "(ns ui.core)\n\n"
-                        "(defn ^{:http/method :get :http/path \"/home\" :http/auth :public :rest/response :map} home \"H.\" [req]\n"
+                        "(def ^{:http/method :get :http/path \"/home\" :http/auth :public} home \"H.\"\n"
                         "  [:a {:href \"/nowhere\"} \"x\"])\n"))
       (testing "inert until http.enabled"
         (let [r (external/done! sess :label "pre-optin")]
@@ -207,7 +207,8 @@
               (pr-str (:findings r)))))
       (testing "adding the route discharges"
         (ops/add-form! sess 'ui.core
-                       "(defn ^{:http/method :get :http/path \"/nowhere\" :http/auth :public :rest/response :map} nowhere \"N.\" [req] req)"
+                       (str "(def ^{:http/method :get :http/path \"/nowhere\""
+                            " :http/auth :public} nowhere \"N.\" [:p \"here\"])")
                        :prompt "serve the missing route")
         (let [r (external/done! sess :label "served")]
           (is (empty? (get-in r [:findings :http-dangling-route-refs]))

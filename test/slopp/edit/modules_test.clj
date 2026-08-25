@@ -306,3 +306,48 @@
             (str "a half-migrated endpoint reads as a forgotten declaration: " r))
         (is (re-find #":web/auth" r)
             (str "the refusal does not name the retired marker that is already here: " r))))))
+
+(deftest content-under-http-path-is-a-DEF-and-a-defn-refuses
+  ;; The transition hazard the content model created, and the reason this gate
+  ;; landed LAST. `:http/path` names a stored value the dispatcher DEREFERENCES;
+  ;; a defn under it is not called, it is served — as the string of its own
+  ;; function object, 200, with the right Content-Type. This store's own t-mine
+  ;; fixture did exactly that the moment the dispatcher branch landed, and a
+  ;; consuming store watched it happen to a live endpoint:
+  ;;
+  ;;     expected: "from the project"
+  ;;     actual:   "slopp_ui.hub$project_api@47fba6ee"
+  ;;
+  ;; Nothing downstream can tell that from a page. Turning that silence into a
+  ;; refusal is the whole job, and it had to come AFTER serving worked, or
+  ;; every existing content defn would have refused before it had anywhere to
+  ;; go.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.api "(ns shop.api)\n")
+                     "capabilities" :manifest "http.enabled" "true"))
+        land (fn [st form-src]
+               (store/ingest st 'shop.more (str "(ns shop.more)\n\n" form-src "\n")))]
+
+    (testing "a defn under :http/path REFUSES, naming both ways out"
+      (let [s (land on (str "(defn ^{:http/method :get :http/path \"/about\""
+                            " :http/auth :public} about \"A.\" [req] req)"))
+            r (edit.http/http-content-shape s 'shop.more 'about)]
+        (is (some? r) "a defn under :http/path must not land")
+        (is (re-find #":rest/path" (str r))
+            (str "one way out is that it COMPUTES, and is an api: " r))
+        (is (re-find #"\bdef\b" (str r))
+            (str "the other is that it holds a value: " r))))
+
+    (testing "a def under :http/path is exactly right and passes"
+      ;; the control. Without it the assertion above holds for any gate that
+      ;; refuses everything it is shown
+      (let [s (land on (str "(def ^{:http/method :get :http/path \"/about\""
+                            " :http/auth :public} about [:main \"x\"])"))]
+        (is (nil? (edit.http/http-content-shape s 'shop.more 'about))
+            (pr-str (edit.http/http-content-shape s 'shop.more 'about)))))
+
+    (testing "and :rest/path on a defn is untouched — an API is a function"
+      (let [s (land on (str "(defn ^{:http/method :get :rest/path \"/api/x\""
+                            " :http/auth :public :rest/response :string}"
+                            " x \"X.\" [req] req)"))]
+        (is (nil? (edit.http/http-content-shape s 'shop.more 'x)))))))

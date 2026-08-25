@@ -185,6 +185,58 @@
                " :authenticated, or [:group \"<name>\"] to the name metadata;"
                " groups live in the capabilities config (query_capabilities)"))))))
 
+(defn ^:export ^{:rule/applies-to :production} http-content-shape
+  "The content gate (D-content-value): `:http/path` names a stored VALUE, so it
+  must sit on a `def`. A `defn` under it is refused. Returns a teaching string,
+  or nil when clean.
+
+  **The dispatcher DEREFERENCES a content route rather than calling it**, so a
+  `defn` there is not a handler that never runs — it is a value that gets
+  served. It renders as the string of its own function object, with status 200
+  and the right `Content-Type`, and nothing downstream can tell that from a
+  page. This store's own fixture did it the moment the branch landed, and a
+  consuming store watched it happen to a live endpoint:
+
+      expected: \"from the project\"
+      actual:   \"slopp_ui.hub$project_api@47fba6ee\"
+
+  **Grounded in the form's HEAD**, which is a declaration and not a body scan.
+  An earlier attempt at this gate was deleted rather than kept: it refused
+  `:http/reads`/`:http/effects`, the right check for \"a handler that computes\"
+  and the wrong one for \"content is a stored value\" — under this model both are
+  impossible by construction, so it could never fire. A check whose output
+  cannot vary is the failure shape this codebase keeps meeting.
+
+  **Deliberately one-directional.** `:rest/path` on a `def` is not refused
+  here, and the asymmetry is the reason: the dispatcher CALLS an api route, so
+  a def there throws on the first request — loud, immediate, and implicating
+  the right form. Only this direction is silent, and a gate exists to convert
+  silence.
+
+  **This gate shipped LAST on purpose.** Until content actually served, every
+  existing `:http/path` `defn` had nowhere to go, and a refusal with no
+  destination gets worked around rather than obeyed."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)]
+      (when (:http/path m)
+        (let [head (first (store/form-sexpr (:node e)))]
+          (when (contains? #{'defn 'defn-} head)
+            (str ns-sym "/" form-name " declares :http/path "
+                 (pr-str (:http/path m)) " on a " head
+                 " — but :http/path names CONTENT, which is a stored value the"
+                 " dispatcher serves by dereferencing. A " head " there is not"
+                 " called: it is served, as the string of its own function"
+                 " object, 200 with the right Content-Type and nothing able to"
+                 " tell it from a page."
+                 " Two ways out, and which one is right depends on what this"
+                 " form does. If it COMPUTES an answer from the request it is"
+                 " an API: declare :rest/path instead (under this store's api"
+                 " prefix) and give it a :rest/response. If it answers the same"
+                 " thing every time, make it a def whose value IS the content —"
+                 " hiccup renders as text/html, anything else is served as it"
+                 " stands, and :http/media-type says what it is.")))))))
+
 (defn ^:export ^{:rule/applies-to :production} http-route-collision
   "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
   method+path another FORM already claims is refused at the write — a

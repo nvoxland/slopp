@@ -24,8 +24,9 @@
                         :prompt "serve HTML, publish no typed API")
       (testing "http alone: a page with no :rest/response LANDS"
         (let [r (ops/add-form! sess 'doc.pages
-                               (str "(defn ^{:http/method :get :http/path \"/about\""
-                                    " :http/auth :public} about \"A page.\" [req] req)")
+                               (str "(def ^{:http/method :get :http/path \"/about\""
+                                    " :http/auth :public} about \"A page.\""
+                                    " [:main [:h1 \"About\"]])")
                                :prompt "an HTML page, not an endpoint")]
           (is (nil? (:error r)) (pr-str r))
           (is (some? (store/form-named (:store @sess) 'doc.pages 'about))
@@ -77,7 +78,10 @@
         ;; the case that used to force `:rest/response :string` onto a page and
         ;; then `:rest/client false` to undo the wrapper
         (let [r (ops/add-form! sess 'shopc.api
-                               "(defn ^{:http/method :get :http/path \"/css/app.css\" :http/auth :public} sheet \"S.\" [req] req)"
+                               (str "(def ^{:http/method :get :http/path \"/css/app.css\""
+                                    " :http/auth :public"
+                                    " :http/media-type \"text/css\"}"
+                                    " sheet \"S.\" \"main{margin:0}\")")
                                :prompt "a stylesheet is not an api")]
           (is (nil? (:error r)) (pr-str r))
           (is (some? (store/form-named (:store @sess) 'shopc.api 'sheet)))))

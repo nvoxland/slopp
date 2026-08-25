@@ -52,13 +52,22 @@
                  process, not from the store, so a route can outlive its
                  definition until the host reloads.
 
-                 And a store that calls `slopp.webapp/prefix-links` itself has
-                 NO link check at all: its :href literals are in app space
-                 while the table is in server space, and the prefix between
-                 them is route state. That is now DECLARED rather than silent —
-                 every literal lands in :unresolved carrying the reason — but
+                 And a store that calls `slopp.webapp/prefix-links` itself gets
+                 NO LITERAL matching: its :href literals are in app space while
+                 the table is in server space, and the prefix between them is
+                 route state. That is now DECLARED rather than silent — every
+                 literal lands in :unresolved carrying the reason — but
                  declared is not checked, and this is the shape where a report
-                 says 'cannot answer' and a reader hears 'fine'"}
+                 says 'cannot answer' and a reader hears 'fine'.
+
+                 Stated as LITERAL matching deliberately, because 'no link
+                 check' was an overstatement this file carried for one day and
+                 the consuming store corrected. A headless drive CLICKS real
+                 links through the real router and asserts where they land, so
+                 a store in this shape can have real coverage by EXECUTION over
+                 the views its drives reach — and none over the views they do
+                 not. Partial by execution, absent by literal, and the two are
+                 not interchangeable"}
 
    {:kind       :wire/json
     :leaves     "a declared request/response contract"

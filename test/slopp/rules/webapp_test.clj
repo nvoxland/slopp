@@ -22,22 +22,27 @@
   ;;
   ;; It fires once, for the episode that DECLARED it, so it cannot decay into a
   ;; standing warning.
-  (let [sess (external/open!)]
+  ;;
+  ;; The fixture is a `def` holding the whole document, which is what a served
+  ;; document IS now: it carried `:rest/client false` and `:rest/response
+  ;; :string` when a page was an endpoint like any other, and both of those
+  ;; existed only to undo questions a page should never have been asked.
+  (let [sess (external/open!)
+        doc  (fn [extra body]
+               (str "(def ^{:http/method :get :http/path \"/\" :http/auth :public"
+                    extra "}\n"
+                    "  doc \"" body "\"\n"
+                    "  [:html [:head [:title \"D\"]] [:body [:div {:id \"app\"}]]])"))]
     (try
       (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
                         :prompt "the browser owns routing here — this turns http on with it")
       (ops/ingest! sess 'browser.ui
-                   (str "(ns browser.ui)\n"
-                        "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
-                        "        :rest/client false :rest/response :string}\n"
-                        "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n"))
+                   (str "(ns browser.ui)\n" (doc "" "The document.") "\n"))
       (external/done! sess :label "baseline")
       (testing "adding the declaration states the consequence"
         (ops/edit-replace! sess 'browser.ui 'doc
-                           (str "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
-                                "        :rest/client false :rest/response :string\n"
-                                "        :webapp/client-routes [\"/store\"]}\n"
-                                "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})")
+                           (doc "\n        :webapp/client-routes [\"/store\"]"
+                                "The document.")
                            :prompt "the client routes /store")
         (let [f (get-in (external/done! sess :label "client-routes") [:findings :webapp-client-routes-consequences])]
           (is (some #(= 'browser.ui/doc (:form %)) f) (pr-str f))
@@ -45,10 +50,8 @@
           (is (re-find #"(?i)not-found" (str (:teach (first f)))) (pr-str f))))
       (testing "it does NOT re-fire while the declaration merely stands"
         (ops/edit-replace! sess 'browser.ui 'doc
-                           (str "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
-                                "        :rest/client false :rest/response :string\n"
-                                "        :webapp/client-routes [\"/store\"]}\n"
-                                "  doc \"The document, reworded.\" [_] {:status 200 :body \"<html></html>\"})")
+                           (doc "\n        :webapp/client-routes [\"/store\"]"
+                                "The document, reworded.")
                            :prompt "touch the form without touching the declaration")
         (let [f (get-in (external/done! sess :label "again") [:findings :webapp-client-routes-consequences])]
           (is (nil? f) (pr-str f))))
