@@ -2782,6 +2782,42 @@ a constructor instead, that is the cheaper shape, and the difference only shows 
 on somebody else's clock — which is the same blindness [[a deprecation that
 removes the old path before the new one can see the consumer's data]] describes.
 
+### The other half: an ADDITION that becomes compulsory is THREE steps, not two
+
+slopp-ui, 2026-08-25, after `slopp.http/context` began refusing to assemble a
+declared contract with no validator. They took the breaking jar and it was a
+no-op, because they had adopted `:http/wrap-context` a jar early — and they
+named the property that made that possible, which is narrower than "ship the
+seam first":
+
+> The seam has to be a no-op on the old jar, not merely present. … Had the seam
+> merely parsed and done nothing, I would have migrated, seen green, and learned
+> nothing until the refusal landed.
+
+So: **ship the seam WORKING, announce it, then refuse.** The middle step is the
+one that pays. Adopting early was a real fix for them rather than a
+placeholder — it turned validation on a jar before it was compulsory, which is
+the only reason their live hub's acceptance of registrations with no `:dir`
+surfaced at all. A seam that is inert until the refusal lands buys the consumer
+nothing except a smaller diff on the day it breaks.
+
+The retirement case above is the mirror: there the gap between two consumer
+events is the hazard, and the fix is to make the replacement live before the
+old path dies. Same underlying rule, run in both directions — **the consumer
+must be able to be correct on BOTH jars at once**, and the seam is what makes
+that window exist.
+
+And a companion, from the same message, about what a green proves after a
+migration:
+
+> A green suite after a migration proves the migration did not break anything;
+> it does not prove the thing you migrated FOR exists.
+
+They checked the refusal by breaking it deliberately — assembling without the
+wrap and reading the five routes back. Worth doing every time a migration is
+motivated by a new guard: the guard's existence is a separate claim from the
+suite's colour, and only one of them is tested by restarting.
+
 ## A guard shared by N call sites is fixed once; a guard inlined N times is fixed N-1 times
 
 slopp-ui checked all four `fetch` sites in their store rather than assuming. The
