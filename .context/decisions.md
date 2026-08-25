@@ -5107,3 +5107,71 @@ branch emits `(dissoc params <segments>)` and the body branch emits `params`
 whole, so a POST to `/api/things/:id` sends `:id` in the path AND in the body.
 `decode-request` merges with path last so the value is right, but its own
 docstring says overlap should not arise. Filed, not built.
+
+## D-doc-markdown (2026-08-24, user decision) — docstrings are MARKDOWN, and slopp ships no renderer
+
+**Nathan: "You just define that it is markdown."** And, separately and as
+firmly: *"We shouldn't ship a renderer in slopp, it should be up to slopp-ui to
+do that as part of its UI."*
+
+### It is a declaration of practice, not a permission
+
+Reported by the consuming store after a three-paragraph endpoint docstring
+rendered as one wall of text on their API page. Their measurement over 189
+public docstrings: 158 backticks, 154 paragraph breaks, 92 bold, 91 wikilinks,
+8 bullet lists. Five of six were already markdown, transmitted by imitation of
+slopp's own register, declared nowhere.
+
+Measured here, the decisive case: **seven forms carry markdown TABLES** —
+`cljnx/lines`, `cljnx/driver-for`, `git/divergence`, `index.refs/mention-kinds`,
+`webapp/request-init`, `webapp.dom/mount!`, `api.model/graph-node-cap`. A table
+is unreadable as plain text, so the convention was already load-bearing.
+
+The undeclared state costs in both directions and that is why the answer had to
+be one or the other: a renderer treating it as plain text loses the author's
+structure, and one rendering it when the author meant literal text mangles a
+`*` in prose.
+
+### Where it is declared
+
+The SKILL, because that is what reaches a consumer. A rule about how to write a
+docstring belongs where every store's agent reads it; recording it only here
+would be the routing failure this repo has a museum of.
+
+### NO RENDERER, and the line is not about cost
+
+markdown→hiccup is `:cljc`, is wanted by every store that displays another's
+contract, and is exactly the shape of the percent-decoding helper this project
+DID adopt. The consuming store made that argument well and it was refused
+anyway, which is the part worth recording: **slopp publishes data and declines
+to decide what it looks like.** Displaying a docstring is the displaying
+application's job. A store rendering another store's contract owns that end.
+
+The percent-decoding precedent does not transfer because decoding has ONE
+correct answer and rendering does not — a UI decides what a table, a bullet
+list and a code span should look like in its own design, and a shipped renderer
+would be slopp making that decision for every consumer.
+
+### The `[[wikilink]]` extension — kept, declared, NOT swept
+
+`[[name]]` is not markdown; CommonMark renders it as literal `[[name]]`. It is
+the Clojure ecosystem's docstring cross-reference convention (cljdoc), and
+**nothing in slopp reads it** — no rule, no index, no derivation. It is prose
+with no machine reader, so the format is free to change and changing it is a
+pure text sweep across every docstring in every store.
+
+Asked for a markdown-compatible alternative, the honest answer is
+`[name](#slopp.ns/name)`: standard link syntax, a FRAGMENT target so there is no
+scheme for a sanitizer to strip and no URL for slopp to invent, and it degrades
+to a correctly-labelled link that goes nowhere. The consumer maps the fragment
+to its own URL space, which is the same split as the no-renderer decision.
+
+Not adopted, and the reason is that the benefit is small and named: today a
+strict renderer shows `[[call!]]` — the name is visible and readable, only the
+link is missing. Trading that for a sweep of every docstring in every store buys
+a link. **If a store's UI wants links, it can resolve `[[name]]` itself; the
+declaration now tells it that this is the one non-markdown construct to expect.**
+
+**Expiry:** if a second consumer appears that renders contracts and cannot
+resolve `[[…]]`, the fragment form is the migration and this decision is what to
+revisit.

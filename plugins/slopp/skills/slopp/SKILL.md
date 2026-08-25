@@ -1112,6 +1112,20 @@ exports, deps, consumers) before calling into it: `query_depends
 {modules true, on "x.y"}`. Public-surface fns warn once when a
 write leaves them undocumented — add the docstring.
 
+**DOCSTRINGS ARE MARKDOWN.** Paragraph breaks, `` `code` ``, `**bold**`,
+bullet lists and tables all mean what they look like, and a renderer is
+entitled to treat them that way. This is a declaration of an existing
+convention rather than a new permission — slopp's own docstrings carry markdown
+tables, which are unreadable as plain text, and a consuming store measured
+markdown in five of six of its own before anything said it was allowed.
+
+Two consequences worth having up front. **A `*` you meant literally needs
+escaping**, because a renderer will not guess. And **slopp ships no renderer**:
+displaying a docstring is the displaying application's job, so a store that
+renders another store's contract owns that end — which is the same split as
+every other place slopp publishes data and declines to decide what it looks
+like.
+
 **Cohesion decides WHERE code lives; the export dial decides WHO sees it —
 they are independent.** Put forms that serve one concern in one namespace (a
 deep `x.y.z` for a cluster inside a module); if one has legitimate outside
@@ -2184,9 +2198,13 @@ that. Neither store reads the other.
   wrapper." That was never the fact: nothing is circular at runtime, and the
   consumer who hand-wrote request paths for it would have had them generated.
   The fact was the encoding.
-- **Your handler's docstring IS the endpoint's public description.** It travels
-  in `:doc`, de-indented and whole — there is deliberately no second summary
-  field beside it, because one fact with two homes can disagree. Write it for the CALLER:
+- **Your handler's docstring IS the endpoint's public description, and it is
+  MARKDOWN.** It travels in `:doc`, de-indented and whole — there is
+  deliberately no second summary field beside it, because one fact with two
+  homes can disagree. This is the crossing where the format matters most: the
+  consumer rendering it is a different store, written by a different agent,
+  that cannot ask you what the text is. Every other field in that document is
+  typed; the prose is declared instead. Write it for the CALLER:
   open with what the endpoint is for, and keep implementation notes out of it,
   because everyone generating a client reads it. `:handler` is there because
   `:name` alone does not resolve — on a real surface a third of endpoint names

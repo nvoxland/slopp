@@ -140,6 +140,20 @@ Public functions without a docstring get a one-time advisory on the write --
 only on the has-doc to no-doc transition or a brand-new form, never a
 namespace-wide nag.
 
+**Docstrings are markdown.** Paragraph breaks, `code`, **bold**, bullet lists
+and tables mean what they look like, and a renderer is entitled to treat them
+that way -- so a `*` you meant literally needs escaping. This is a declaration
+of an existing convention rather than a new permission: slopp's own docstrings
+carry markdown tables, which are unreadable as plain text.
+
+slopp ships no markdown renderer. Publishing the text is slopp's job; deciding
+what it looks like belongs to whatever displays it. That matters most for an
+endpoint's docstring, which travels in the published contract and is rendered
+by a *different store* that cannot ask you what format it is in.
+
+One construct is not markdown: `[[name]]` is a reference to another form. A
+renderer may resolve it or leave it as text.
+
 ## Milestones
 
 ```clj
