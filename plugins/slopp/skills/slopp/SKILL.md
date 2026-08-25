@@ -2044,11 +2044,18 @@ declare the app; slopp owns the loop.
   reason your `:href` gets it. An absolute url (scheme, or protocol-relative
   `//`) is left alone.
 - **A request may name its OWN base, and the app's is only the default.**
-  `{:webapp/path "/api/modules" :webapp/base (str "/p/" slug)}` is measured
+  `{:webapp/path "/api/modules" :webapp/base (str "/api/p/" slug)}` is measured
   from there instead. **Which api a request belongs to is ROUTE STATE**, not
   configuration: a client-routed app switches which upstream it reads without a
   page load, and the app-level base is stamped once at load — so no value
   delivered that way can be right for an app that talks to more than one.
+  **Give it the prefix your API is served under, not the one your PAGES are.**
+  A client-routed app answers the SPA shell for everything below its own route
+  prefixes, so a request measured from there gets `200 text/html` and the whole
+  document — which reaches your JSON decoder wearing a success status. Measured
+  on a real hub: `/api/p/<slug>/api/modules` is the project's JSON,
+  `/p/<slug>/api/modules` is the shell. A 404 would have been the kinder
+  failure.
   `:webapp/base ""` means the origin — which is what the retired
   `:webapp/from-origin` boolean used to say. **That flag is gone, not
   deprecated**: nothing reads it, so a request still carrying it is addressed
@@ -2096,7 +2103,12 @@ declare the app; slopp owns the loop.
   slug in the url has a nav pane that is session-scoped and address-dependent
   at once; without the captures it asked the origin, got a 404, and showed an
   empty pane for the life of every session. Captures are `{}` when there is no
-  address, never nil. Declaring a load with no `:request` scopes it without
+  address, never nil.
+  **Which `boot`?** `:webapp/boot` — the app's own pure `(fn [state] state)` —
+  is unchanged. The `:boot` that gained a url is the one on the headless DRIVER
+  contract, which `slopp.webapp/driver` derives for you; you write that
+  signature only if you hand `slopp.cljnx/open!` a page by hand. The two names
+  are one word apart and only one of them moved. Declaring a load with no `:request` scopes it without
   starting it, for the one you begin yourself after a sign-in. This is what
   stops a nav rail being the last thing forcing `:cljs` on an app.
 - **Read a load with `load-status` AND `load-value`, never value alone.** Four

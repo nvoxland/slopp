@@ -165,10 +165,15 @@ saying nothing.
 ```clj
 :webapp/session-loads {:modules {:request (fn [state params]
                                              {:webapp/path "/api/modules"
-                                              :webapp/base (str "/p/" (:slug params))})
+                                              :webapp/base (str "/api/p/" (:slug params))})
                                  :derive  :names}
                        :user    {}}
 ```
+
+Note which `boot` this is. `:webapp/boot` -- the app's own pure `(fn [state]
+state)` -- is unchanged. The `:boot` that gained a url is the one on the
+headless driver contract, and `slopp.webapp/driver` derives it for you; you only
+write that signature if you hand `slopp.cljnx/open!` a page by hand.
 
 slopp starts each one at page load, after `:webapp/boot` and before routing --
 boot first because a session request reads the state boot established (a token,
@@ -227,13 +232,23 @@ When a request is *not* measured from your mount point, say where it is
 measured from:
 
 ```clj
-{:webapp/path "/api/modules" :webapp/base (str "/p/" slug)}
+{:webapp/path "/api/modules" :webapp/base (str "/api/p/" slug)}
 {:webapp/path "/api/projects" :webapp/base ""}          ; the origin
 ```
 
 That is the escape an absolute URL cannot cover -- an app calling a different
 application at the same origin cannot spell the whole URL, because the origin is
 only known at runtime.
+
+!!! warning "A base that points at document space fails as a **200**"
+
+    Give it the prefix your API is served under, not the one your *pages* are.
+    A client-routed app answers the SPA shell for everything below its own
+    route prefixes, so a request measured from there gets `200 text/html` and
+    the whole document -- which then reaches your JSON decoder wearing a
+    success status. Measured on a real hub: `/api/p/slug/api/modules` returns
+    the project's JSON, `/p/slug/api/modules` returns the shell. A 404 would
+    have been the kinder failure.
 
 It is declared per request rather than per app because that is where the fact
 lives, and the reason is sharper than "the same app's other requests *are*
