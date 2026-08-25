@@ -42,7 +42,7 @@ slopp.project: slopp.index slopp.store
 slopp.read: slopp.edit slopp.index slopp.project slopp.rules slopp.store slopp.ops (test)
 slopp.realias: slopp.edit (test) slopp.ops (test) slopp.store (test)
 slopp.rename: slopp.read slopp.store slopp.ops (test)
-slopp.rest: slopp.http
+slopp.rest: slopp.http slopp.webapp
 slopp.rules: slopp.cli slopp.edit slopp.http slopp.image slopp.index slopp.project slopp.store slopp.ops (test) slopp.read (test)
 slopp.store: slopp.cache slopp.ops (test) slopp.read (test)
 slopp.subform: slopp.read slopp.ops (test)
