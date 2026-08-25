@@ -5175,3 +5175,82 @@ declaration now tells it that this is the one non-markdown construct to expect.*
 **Expiry:** if a second consumer appears that renders contracts and cannot
 resolve `[[…]]`, the fragment form is the migration and this decision is what to
 revisit.
+
+## D-outbound-rest (2026-08-24, user decision) — a server calls an upstream through the request map generation already produces
+
+**Nathan: "now do the server-outbound REST framework."** Behind it, his earlier
+statement of the ask: *"We DO want the framework to be providing a way for you
+to make http requests to other rest services without having to rely on raw http
+access yourself. Slopp should be providing the framework that makes that easy
+for you to do and safe (it handles security aspects of it)."*
+
+### The gap, as the consuming store measured it
+
+```
+slopp.http.client/request + fake-requester   the ENTIRE outbound surface
+generate_client                              :cljs / :cljc — browser only
+```
+
+So slopp generated a typed client for the BROWSER and handed the SERVER a
+socket. Their hub renders an upstream's contract on a screen and forwards to
+that same upstream untyped — about forty lines of url building, error mapping
+and passthrough, none of it about their application, and nothing at all for
+security.
+
+### The shape, and why it is small
+
+**The typed halves already existed.** `render-request` emits a `:cljc` builder
+requiring nothing; `render-check` emits a `:cljc` response check. Both run on
+the JVM today. What was missing was a PERFORMER — the server's analogue of
+`:webapp/call`.
+
+So `slopp.rest.client/call!` is glue over decisions already made:
+`webapp/request-url` builds the path (segment-wise, percent-encoded),
+`webapp/request-init` names the encoder, `http.client/request` performs.
+**One request shape, two performers** — the same split `slopp.cljnx` made for
+drivers, and the reason the module edge `slopp.rest → slopp.webapp` is
+deliberate: a second copy of those decisions on this side would agree until the
+first change.
+
+### What "safe" was answered with, and what it was NOT
+
+Handled: a timeout ALWAYS set (the port makes it optional, so the default was
+wait-forever); a path that would name another origin REFUSED rather than
+cleaned; redirects not followed (the JDK default, stated so it stays true); EDN
+read with `clojure.edn/read-string` so an upstream cannot evaluate reader tags
+in this process; no header in any `ex-data`.
+
+**Not handled, and named in the docstring so nobody assumes it:** retry,
+backoff, circuit breaking, a host allowlist beyond the base, and redaction of a
+credential a caller puts in a query parameter. Each is a policy with more than
+one right answer and no instance behind it. Inventing them would be the
+framework guessing for every store.
+
+### Two failure lines, both preserved rather than re-decided
+
+**An answered request RETURNS whatever its status; an unanswered one THROWS.**
+That is `http.client/request`'s rule and its docstring defends it at length: a
+far side that refused and a far side that was never there are different facts.
+The consuming store's narrow catch exists because a broad one once reported
+THEIR bug as "the project has probably stopped" — so wrapping the port's
+`:http/error :unreachable` in a second shape would make that catch wrong again.
+
+**A failed `:check` THROWS**, typed `:rest/error :contract`. Not the caller's
+judgement: the upstream broke a promise it publishes, and there is no branch to
+take that is not "this is broken". A non-2xx is deliberately NOT checked — a
+500's body is an error document, not the shape the endpoint published, and
+reporting a contract violation for it would send a reader to the wrong end of
+the wire.
+
+### What this retires, and it is the better kind
+
+`:rest/unconstrained-ok` on a forwarding endpoint says the response cannot be
+named because another service's bytes pass through. With a typed outbound call
+that is no longer true: the response is constrained by the upstream's contract,
+which the forwarding store has already fetched. The escape becomes UNNECESSARY
+rather than discharged — the consuming store's own argument, and the same one
+that retired `:rest/client`.
+
+**Expiry:** if a store needs retry or an allowlist, this decision is what to
+revisit — the answer will be a declared policy on the upstream value, not a
+default invented here.

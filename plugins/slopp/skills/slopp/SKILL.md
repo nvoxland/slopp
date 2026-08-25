@@ -2221,6 +2221,23 @@ that. Neither store reads the other.
   `:name` alone does not resolve — on a real surface a third of endpoint names
   match more than one form, so a consumer linking by simple name points at the
   wrong one and looks right doing it.
+- **Calling an upstream FROM YOUR SERVER: `slopp.rest.client/call!`.** The
+  same builder your browser client uses, performed on the JVM:
+  `(rest.client/call! {:rest/base-url "https://up"} (api/thing-request {:id 1})
+  {:check api/thing-check})` → `{:status :headers :body}`, body decoded by what
+  the far side declared. Pass `:requester` to swap in
+  `slopp.http.client/fake-requester` and no socket opens.
+  **It handles what a raw socket does not:** a timeout is always set (10s
+  default — a missing one means wait forever), a request path may not name
+  another origin (refused, not cleaned), redirects are not followed, EDN is read
+  without evaluating reader tags, and no header reaches an `ex-data`. It does
+  NOT retry, back off, break circuits, or allowlist hosts beyond the base —
+  named so nobody assumes them.
+  Two failure lines: **an answered request returns whatever its status** (a 404
+  is data — what a missing upstream resource means is yours), **an unanswered
+  one throws** the port's own `:http/error :unreachable`, and a failed `:check`
+  throws `:rest/error :contract` because the upstream broke a promise it
+  published.
 - **Consumer: `generate_client {from "http://host/api/contracts"}`.** Writes
   TWO namespaces — a `:cljc` contracts ns of the published schemas, and the
   usual `:cljs` client pointing at it. Both `^:generated`; regenerate, never
