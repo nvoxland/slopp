@@ -412,6 +412,31 @@ The oracle must never return a false verdict. Everything here serves that.
      half-finished entry for itself — which leaves its own entry in the ring.
      `turn-begin!` clears, so one ask's bracket cannot be billed to the next.
    - Nothing called → no `:timing` key, never a zeroed record.
+   **What the answers COST, not just what they took (2026-08-25).** The ring
+   recorded a call's edges and its refusal, so it could say what slopp SPENT
+   and never what it SENT — while reads are 52% of the token bill. `handle!`
+   now binds a per-call recorder (`*response-facts*`) and adds `:chars` (off
+   the response itself), `:trimmed?` from `text!`, `:stub?` from `told!`,
+   `:spooled` for the retrieval id either path mints, and `:detail-asked` from
+   the `query_detail` branch. `read-cost` folds those per turn onto `:timing
+   :reads`; `slopp.lab.reads/read-ledger` folds the journal, by hand, no tool.
+   - **A recorder, not a return value.** Each fact is known several frames
+     below `handle!` and none of them is on the path back to it; the
+     alternative is a second value threaded out of every tool branch that
+     nothing else reads.
+   - **The delta is the only survivor.** The ring is cleared at every turn
+     boundary, so a response size that does not ride `:turn-end` is gone.
+   - **`:reads` is ABSENT when no call carried a size**, unlike `:refused`
+     which is present-and-zero. The empty cases answer different questions: no
+     refusals means measured-and-none, no sizes means never measured — and a
+     zeroed cost would read as the cheapest turn on record. First reading: 321
+     turn-ends, 276 with timing, 0 with a read record.
+   - **A re-fetch is charged to the tool that MINTED the id.** Charged to
+     `query_detail` the ledger ranks the retrieval path as expensive and
+     leaves every trimming tool clean, which inverts the question. This
+     number's whole job is to say whether the 8000-char gate PAYS, and it is
+     read once by a human to authorize work — so `:refetch-rate` is nil rather
+     than 0.0 when nothing was withheld.
    **Still unmeasured:** phases INSIDE a long tool — `module_extract`'s
    per-rename image rebuilds, `build!`, an individual image boot. The turn
    aggregate is what should point at these before any of them is instrumented.

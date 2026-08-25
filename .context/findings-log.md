@@ -1325,3 +1325,47 @@ changed the answer from "18 forms of standing debt" to "zero, and your
 measurement is the bug." Whenever a check exists, measure THROUGH it — a
 re-derivation that disagrees with the canonical route is not a measurement of
 the store, it is a measurement of the re-derivation.
+
+## 2026-08-25 — the read tier gets a meter, and its first reading is "unmeasured"
+
+`call-timing` had recorded a call's edges and whether it was refused since the
+turn-timing work — which answers what slopp SPENT and never what it SENT. The
+standing claim on that tier (P8: reads are 52% of the token bill and got the
+least optimization) had no per-tool number behind it, and the one lever that
+did ship there — the 8000-char response gate in `slopp.mcp/text!` — had been
+measured exactly once, by hand, off a single transcript.
+
+- **That one measurement is why the re-fetch is the number, not the size.**
+  eval9: an 8,367-char trimmed history read plus a 21,676-char `query_detail`,
+  where sending the payload whole would have cost 21,676. The trim spent 30k
+  to save nothing. From outside, that case and the case where the agent never
+  came back looked identical — the system recorded neither the trim nor the
+  retrieval, so it could not tell a gate that paid from one paid twice.
+- **The wire is the only layer that sees both facts, and neither is in a
+  return value.** `text!` knows a payload was cut, `told!` knows one was
+  withheld as an `:unchanged` stub, the `query_detail` branch knows which id
+  it went back for — all several frames below `handle!`, which is the only
+  layer that records a call at all. A dynamic per-call recorder was the
+  smallest channel; the alternative is a second return value threaded through
+  every tool branch that nothing else reads.
+- **First reading, taken the moment the fold existed: 321 turn-end deltas,
+  276 carrying timing, 0 carrying a read record.** That is the answer the
+  `:unmeasured` column exists to be able to give. A ledger that quietly folded
+  only the rows carrying the new key would have reported a confident small
+  number over whatever accumulated first — the same correction
+  `slopp.lab.verdicts/reuse-rate` needed for `:without-closure`, hit again on
+  the next instrument built, which suggests it is the default failure of
+  adding a field to a record that already has history.
+
+**The reusable half is the direction rule.** Both instruments now built here
+are read once, by a human, to authorize spending effort — a verdict cache, a
+budget-aware trim gate. Both can lie in two directions, and only one of them
+gets checked: the direction that argues FOR building agrees with wanting the
+feature. So the tests are written against that direction specifically — a
+`nil` rate rather than `0.0` when nothing was withheld, a re-fetch charged to
+the tool that withheld rather than the tool that fetched, unmeasured rows kept
+in the population. None of those is an arithmetic check.
+
+The gate this was built to open is NOT open. `the-trim-gate-is-a-constant-not-
+a-budget.md` stays gated: the instrument moved the question from unanswerable
+to unanswered, and a `nil` re-fetch rate is not permission.
