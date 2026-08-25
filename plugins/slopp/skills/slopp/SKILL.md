@@ -2227,10 +2227,16 @@ that. Neither store reads the other.
   {:check api/thing-check})` → `{:status :headers :body}`, body decoded by what
   the far side declared. Pass `:requester` to swap in
   `slopp.http.client/fake-requester` and no socket opens.
-  **It handles what a raw socket does not:** a timeout is always set (10s
-  default — a missing one means wait forever), a request path may not name
-  another origin (refused, not cleaned), redirects are not followed, EDN is read
-  without evaluating reader tags, and no header reaches an `ex-data`. It does
+  **It handles what a raw socket does not:** a timeout is always set
+  (`slopp.http.client/default-timeout-ms`, 10s — a missing one means wait
+  FOREVER), a request path may not name another origin (refused, not cleaned),
+  redirects are not followed, EDN is read without evaluating reader tags, and
+  no header reaches an `ex-data`.
+  **Calling the port directly? Pass `:http/timeout-ms` yourself.** The port
+  publishes the default and deliberately does not apply it, because it holds no
+  policy — so omitting the key is a choice to wait forever, made by silence.
+  Measured: a consuming store's only outbound call site had none, and so did
+  two of slopp's own, one of them on the auth path at startup. It does
   NOT retry, back off, break circuits, or allowlist hosts beyond the base —
   named so nobody assumes them.
   Two failure lines: **an answered request returns whatever its status** (a 404

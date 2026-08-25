@@ -5254,3 +5254,39 @@ that retired `:rest/client`.
 **Expiry:** if a store needs retry or an allowlist, this decision is what to
 revisit — the answer will be a declared policy on the upstream value, not a
 default invented here.
+
+### The paragraph repaired a caller that will never call it
+
+The consuming store checked whether `call!` could replace their `forward` and
+answered NO, correctly, on two grounds that stand on slopp's own code: a proxy
+for `*path` has no BUILDER (the endpoint is a wildcard the browser chose), and
+`call!` DECODES while a proxy must not (`:http/raw` exists to stop exactly that
+round trip). **A proxy's correctness is that it does not understand what it
+carries**, so this was never a typed call missing a client.
+
+They also corrected a claim I had repeated from their own earlier message —
+that the hub "already has the upstream's contract". `generate_client` fetches a
+contract at DEV time into a store; the RUNNING hub fetches nothing. So
+`:rest/unconstrained-ok` on that endpoint STAYS: its cause is not removed, and
+the retirement I announced was two, not three.
+
+Then, chasing the timeout paragraph through their side, they found their only
+outbound call site had no `:http/timeout-ms` at all. Checking slopp: **two of
+ours had none either.** `slopp.webdev.cljs/fetch-contract` (a dev tool that
+would hang with nothing said) and `slopp.http.jwks/fetch-jwks!` — which runs at
+server STARTUP on the auth path, and whose docstring promises "a misconfigured
+issuer should fail loudly at startup, not 401 mysteriously forever". A hang is
+the loudest failure to experience and the quietest to read.
+
+So `slopp.http.client/default-timeout-ms` is now PUBLISHED and still not
+applied. Published, because three call sites in two stores independently
+invented no number. Not applied, because `request`'s no-policy stance is
+defended at length and reaching into a caller's map to add a key they did not
+write is exactly what it refuses. **Its own expiry is written down**: if callers
+keep forgetting, make the port apply it and accept the policy — decided once,
+with the call sites visible, rather than by each of them separately.
+
+Worth keeping as a shape: **the finding travelled the wrong way to be luck.** It
+did not come from the fix; it came from a paragraph explaining a fix that store
+cannot use. Stating a default out loud repaired callers that will never call the
+thing the default belongs to.
