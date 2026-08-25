@@ -260,3 +260,61 @@
             r  (dispatch/handle! (assoc rest-ctx :http/routes [nf]) (post {:sku "abc"}))]
         (is (= 404 (:status r)) (pr-str r))
         (is (= {:error "no such sku"} (:body r)))))))
+
+(deftest a-RAW-response-is-judged-as-the-document-it-encodes
+  ;; The defect a consuming store measured on slopp's own /api/contracts. That
+  ;; endpoint serializes its own body (`:http/raw`, `pr-str`) and declared
+  ;; `:rest/response :string` — which is TRUE of the bytes and says nothing
+  ;; about the document. Measured through their hub:
+  ;;
+  ;;   the check on the raw body     → holds
+  ;;   the check on the decoded map  → "should be a string"
+  ;;
+  ;; and the decoded map is what a consumer works with. So the check either
+  ;; fails on what the consumer has or passes by asserting that text is text.
+  ;;
+  ;; Their diagnosis was that the schema language was describing two things at
+  ;; once — the envelope and the document — and that `:rest/media-type` already
+  ;; owns the envelope. It does. So `:rest/response` describes the DOCUMENT for
+  ;; every endpoint, which it already did for every one that does NOT serialize
+  ;; itself: a JSON endpoint's schema describes the decoded value, because
+  ;; check-response round-trips before judging.
+  (let [doc  {:items [{:id 1}] :v 2}
+        row  {:handler (fn [_] {:status 200 :http/raw true
+                                :headers {"Content-Type" "application/edn"}
+                                :body (pr-str doc)})
+              :method :get :path "/api/doc" :auth :public
+              :rest/media-type "application/edn"
+              :rest/response [:map [:items [:vector [:map [:id :int]]]] [:v :int]]}
+        ctx  {:http/routes [row]
+              :rest/check-response rest.contract/check-response}
+        GET  {:request-method :get :uri "/api/doc"}]
+
+    (testing "a raw body is DECODED by its declared media type, then judged"
+      (let [r (dispatch/handle! ctx GET)]
+        (is (= 200 (:status r))
+            (str "the document matches the schema; only the ENVELOPE is a"
+                 " string, and judging the envelope is what made :string look"
+                 " like a type: " (pr-str r)))))
+
+    (testing "and a raw body whose DOCUMENT breaks the contract is a 500"
+      ;; the half that keeps it a check. Without this the fix could be
+      ;; \"decode and accept anything\", which reads identical from outside
+      (let [bad (assoc row :handler
+                       (fn [_] {:status 200 :http/raw true
+                                :headers {"Content-Type" "application/edn"}
+                                :body (pr-str {:items "not-a-vector" :v 2})}))
+            r   (dispatch/handle! (assoc ctx :http/routes [bad]) GET)]
+        (is (= 500 (:status r)) (pr-str r))))
+
+    (testing "a media type slopp cannot decode leaves the body a STRING"
+      ;; and then :string is an honest description rather than a lie — an
+      ;; endpoint that really answers text says so and is really checked
+      (let [txt (assoc row
+                       :rest/media-type "text/plain"
+                       :rest/response :string
+                       :handler (fn [_] {:status 200 :http/raw true
+                                         :headers {"Content-Type" "text/plain"}
+                                         :body "hello"}))
+            r   (dispatch/handle! (assoc ctx :http/routes [txt]) GET)]
+        (is (= 200 (:status r)) (pr-str r))))))

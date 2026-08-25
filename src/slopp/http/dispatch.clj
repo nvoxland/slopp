@@ -100,11 +100,21 @@
   **Only a SUCCESS body is judged against it.** `:rest/response` describes what
   a 200 carries; a 404's `{:error …}` does not match it and must not become a
   500 for failing to. Getting that wrong would make every deliberate error
-  response look like a server fault, which is the opposite of the point."
+  response look like a server fault, which is the opposite of the point.
+
+  **The row says how the endpoint ANSWERS, and the checker needs that.** An
+  endpoint that serialized its own body (`:http/raw`) hands back the ENVELOPE,
+  so judging the schema against it asks about bytes rather than about the
+  document a consumer reads. This is the only place holding both the schema and
+  the declared media type, so it is where the two are joined — the checker then
+  models arrival rather than guessing at it."
   [ctx row resp]
   (when-let [f (and row (:rest/response row) (:rest/check-response ctx))]
     (when (<= 200 (:status resp 200) 299)
-      (f (:rest/response row) (:body resp)))))
+      (f (:rest/response row) (:body resp)
+         {:raw? (boolean (:http/raw resp))
+          :media-type (or (get (:headers resp) "Content-Type")
+                          (:rest/media-type row))}))))
 
 (defn ^:export
   ^{:teach "the response :body comes back as Clojure DATA — the ADAPTER serializes, so this is NOT what a client receives. slopp.rest/call drives this same pipeline through the real encoding both ways and hands back the client's view; reach for that rather than round-tripping by hand."}

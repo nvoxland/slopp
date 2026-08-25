@@ -1115,22 +1115,33 @@
    the response validation the fetch wrappers used to do by throwing, back in
    the one place a row can hang it.
 
-   **It DECODES before validating.** A keyword field arrives from JSON as a
-   string, so validating the raw body fails a contract the server honoured —
-   which is a false drift report, and false drift reports are what make a real
-   one unreadable."
-  [{:keys [fn-name path method endpoint response]}]
+   **It decodes what JSON DAMAGED, and only that.** A keyword field arrives
+   from JSON as a string, so validating the raw body fails a contract the
+   server honoured — a false drift report, and false drift reports are what
+   make a real one unreadable. An endpoint answering EDN suffered none of that
+   damage, so there is nothing to undo: transforming anyway is a second opinion
+   about types nobody asked for. Same branch [[render-wrapper]] already makes
+   about how to READ the body, and it stayed missing here only because slopp's
+   own EDN endpoint declared `:string` — a string survives any transformer, so
+   the question was unreachable until that endpoint got a real document
+   schema."
+  [{:keys [fn-name path method endpoint response media-type]}]
   (when-let [resp-code (schema-form response)]
-    (let [base (str/replace (str fn-name) #"!$" "")
-          verb (str/upper-case (clojure.core/name method))]
+    (let [base  (str/replace (str fn-name) #"!$" "")
+          verb  (str/upper-case (clojure.core/name method))
+          json? (= "application/json" (or media-type "application/json"))]
       (str "(defn ^{:generated \"" endpoint "\"} ^:export " base "-check\n"
            "  \"The response contract for " verb " " path " — nil when it holds,\n"
            "   a message when it does not. Drop into a row's :check.\"\n"
            "  [response]\n"
-           "  (let [data (m/decode " resp-code " response (mt/json-transformer))]\n"
-           "    (when-not (m/validate " resp-code " data)\n"
-           "      (str \"" base " response failed its contract: \"\n"
-           "           (pr-str (me/humanize (m/explain " resp-code " data)))))))"))))
+           (if json?
+             (str "  (let [data (m/decode " resp-code " response (mt/json-transformer))]\n"
+                  "    (when-not (m/validate " resp-code " data)\n"
+                  "      (str \"" base " response failed its contract: \"\n"
+                  "           (pr-str (me/humanize (m/explain " resp-code " data)))))))")
+             (str "  (when-not (m/validate " resp-code " response)\n"
+                  "    (str \"" base " response failed its contract: \"\n"
+                  "         (pr-str (me/humanize (m/explain " resp-code " response))))))"))))))
 
 (defn ^:export render-check-ns
   "Render the generated CHECK namespace source (a string) — a `:cljc` namespace

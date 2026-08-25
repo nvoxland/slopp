@@ -22,7 +22,7 @@
   (:require [malli.core :as m]
             [malli.error :as me]
             [malli.transform :as mt]
-            [cheshire.core :as json]))
+            [cheshire.core :as json] [clojure.edn :as edn] [clojure.string :as str]))
 
 (defn- closed-map
   "`schema` with its TOP LEVEL closed, or `schema` unchanged when it is not a
@@ -131,13 +131,49 @@
         {:error (str "request does not match the declared contract: "
                      (pr-str (me/humanize (m/explain judged merged))))}))))
 
+(defn- arrived
+  "The value a CONSUMER ends up holding, given what the handler returned and
+  how this endpoint answers. Throws whatever serialization throws, so
+  [[check-response]] can report an unserializable value as the contract problem
+  it is.
+
+  Two ways an endpoint can answer, and they arrive differently:
+
+  - **ORDINARY** — the handler returns data and the adapter serializes it. The
+    consumer's value is that data through a REAL JSON round trip, which is why
+    this pays for one: a keyword arrives a string and a set arrives an array,
+    and neither is visible in the in-image value.
+  - **RAW** (`:http/raw`) — the handler serialized it ITSELF, so what arrives
+    here is already the envelope. The consumer's value is that envelope DECODED
+    by the declared media type. Round-tripping it through JSON would model a
+    journey it never takes, and would turn an EDN document's keywords into
+    strings on the way to a check about keywords.
+
+  **This is where the envelope and the document stopped being one question.**
+  `:rest/response` describes the DOCUMENT — which it always did for an ordinary
+  endpoint. A raw one put the bytes under the schema instead, so `:string` was
+  true of the envelope and silent about everything a consumer reads.
+
+  A media type with no decoder leaves the value as it stands, and then
+  `:string` is an honest description of an endpoint that really does answer
+  text. `clojure.edn/read-string`, never `read-string`: this models a wire, and
+  the plain reader evaluates tags."
+  [value {:keys [media-type raw?]}]
+  (if raw?
+    (case (-> (str media-type) str/lower-case (str/split #";") first str/trim)
+      "application/edn"  (edn/read-string (str value))
+      "application/json" (json/parse-string (str value) true)
+      value)
+    (json/parse-string (json/generate-string value) true)))
+
 (defn ^:export check-response
   "nil when `value` HONOURS `schema` for the consumer, else a teaching string.
 
-  **Judged on what the client receives, which means a real serialize/parse.**
-  A contract is a promise to somebody who never sees Clojure data, so checking
-  the in-image value answers a different question — and gets it wrong in both
-  directions. Measured:
+  **Judged on what the client receives**, which is what [[arrived]] models —
+  and for an ordinary endpoint that means a real serialize/parse. A contract is
+  a promise to somebody who never sees Clojure data, so checking the in-image
+  value answers a different question, and gets it wrong in both directions.
+  Measured:
 
       {:x :foo}      vs [:map [:x :string]]        in-image INVALID,
                                                    arrives {:x \"foo\"} VALID
@@ -155,21 +191,29 @@
   honest price of the promise: an app that would rather not pay it declares no
   contract, and then there is nothing to check.
 
+  **`opts` says how the endpoint ANSWERS** — `{:media-type … :raw? true}` for
+  one that serialized its own body. Optional, and absent means an ordinary
+  endpoint, so every existing caller is unchanged. `slopp.http.dispatch` passes
+  it from the route row, which is the only place that knows both.
+
   **A value that cannot be serialized is reported, not thrown.** The caller is
   a dispatcher holding a response it is about to send, and an exception here
   would turn a contract problem into a mystery 500 that never mentions the
-  contract.
+  contract. A raw body that does not PARSE lands in the same arm, and for the
+  same reason: an endpoint that declares EDN and emits something else has
+  broken its contract in the one way a consumer cannot work around.
 
   A nil schema is an absence rather than a violation — see [[decode-request]]."
-  [schema value]
-  (when schema
-    (let [arrived (try {:ok (json/parse-string (json/generate-string value) true)}
-                       (catch Exception e {:err (ex-message e)}))]
-      (cond
-        (:err arrived)
-        (str "response cannot be serialized for the wire, so its contract"
-             " cannot be honoured: " (:err arrived))
+  ([schema value] (check-response schema value nil))
+  ([schema value opts]
+   (when schema
+     (let [got (try {:ok (arrived value opts)}
+                    (catch Exception e {:err (ex-message e)}))]
+       (cond
+         (:err got)
+         (str "response cannot be read as the consumer would read it, so its"
+              " contract cannot be honoured: " (:err got))
 
-        (not (m/validate schema (:ok arrived)))
-        (str "response does not match the declared contract once serialized: "
-             (pr-str (me/humanize (m/explain schema (:ok arrived)))))))))
+         (not (m/validate schema (:ok got)))
+         (str "response does not match the declared contract once serialized: "
+              (pr-str (me/humanize (m/explain schema (:ok got))))))))))

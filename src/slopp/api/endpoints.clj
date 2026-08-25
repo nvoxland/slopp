@@ -169,7 +169,20 @@
 
 (defn ^{:http/method :get :rest/path "/api/contracts" :http/auth :public
         :rest/media-type "application/edn"
-        :rest/response :string
+        :rest/response contracts/contract-document
+        :rest/unconstrained-ok
+        "three fields of the contract document are :any and cannot honestly be
+         narrower. :request and :response carry malli SCHEMAS as values — a
+         schema is a keyword, a vector, a symbol or a map, so no tighter shape
+         is true of all of them. :auth is an app's own :http/auth declaration
+         verbatim, whose grammar is open by design.
+
+         PERMANENT, not pending. The tighter check a reader would reach for is
+         a predicate — is this value a schema malli can build? — and a
+         predicate cannot be PUBLISHED: this document is data a consumer reads
+         and generates from, so a [:fn …] in it would arrive as something they
+         cannot evaluate or trust. The constraint is the publishing, and
+         publishing is the point."
         :http/reads {:contract [:ui/contract []]}}
   contract
   "GET /api/contracts — the shape of this API, as EDN.

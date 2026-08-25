@@ -1336,3 +1336,38 @@
                             :http/body "{:slopp/contract-version 1 :endpoints []}"}))
     (is (pos-int? (:http/timeout-ms @seen))
         (str "an unbounded fetch hangs the tool: " (pr-str @seen)))))
+
+(deftest a-generated-CHECK-decodes-by-what-the-endpoint-ANSWERS
+  ;; The wrapper learned this when `:rest/media-type` landed: `.json` on an EDN
+  ;; body fails on the first character. The CHECK kept transforming through
+  ;; `mt/json-transformer` unconditionally, which is the mirrored mistake and
+  ;; quieter — a json transformer exists to undo what JSON does to a value, and
+  ;; EDN does none of it. Applied to a document that never went through JSON it
+  ;; is at best a no-op and at worst a second opinion about types nobody asked
+  ;; for.
+  ;;
+  ;; It stayed invisible while slopp's own EDN endpoint declared `:string`,
+  ;; because a string survives any transformer. Giving that endpoint a real
+  ;; document schema is what made the question reachable.
+  (let [spec (fn [mt] {:fn-name 'thing :method :get :path "/api/thing"
+                       :endpoint 'shop.api/thing
+                       :media-type mt
+                       :request {:kind :none}
+                       :response {:kind :var :sym 'shop.contracts/thing
+                                  :ns 'shop.contracts}})
+        gen  (fn [mt] (cljs/render-check-ns 'shop.client.checks [(spec mt)]))]
+
+    (testing "a JSON endpoint's check decodes through the json transformer"
+      (is (re-find #"mt/json-transformer" (gen "application/json"))))
+
+    (testing "an EDN endpoint's check validates what it was given"
+      (let [edn (gen "application/edn")]
+        (is (not (re-find #"json-transformer" edn))
+            (str "EDN never went through JSON, so undoing JSON is a second"
+                 " opinion about types nobody asked for: " edn))
+        (is (re-find #"m/validate shop\.contracts/thing" edn) edn)))
+
+    (testing "and a check with no declared media type still assumes JSON"
+      ;; the default everywhere else in generation, kept so nothing changes for
+      ;; an endpoint that never said
+      (is (re-find #"mt/json-transformer" (gen nil))))))
