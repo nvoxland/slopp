@@ -448,8 +448,26 @@
          (get-in store [:config "capabilities" :values]))))
 
 (def ^:private supported-contract-version
-  "The only `:slopp/contract-version` this generator knows how to read."
-  1)
+  "The only `:slopp/contract-version` this generator knows how to read.
+
+  **A single number rather than a set, deliberately.** Version 2 required four
+  keys that version 1 left conditional and added `:effectful?`, so a v1
+  document is genuinely a different shape — and reading both would mean
+  carrying defaults for every key that moved, which is compatibility code for a
+  population of one. Nathan's call: *\"there is no consumer besides slopp-ui at
+  this point, and I'd rather manually update them than add in compatibility
+  code.\"*
+
+  So a document at any other version yields no wrappers and a problem naming
+  both numbers. **That refusal is the field working**, not a limitation: a
+  generator that guessed at a shape it does not know would fail later,
+  somewhere else, with nothing pointing back here.
+
+  **Expiry**: the day a second consumer exists, or a project that cannot be
+  upgraded in step, this becomes a set and `contract->plan` grows the defaults.
+  Not before — the compatibility path is cheap to add later and impossible to
+  remove once written."
+  2)
 
 (defn ^:export render-contracts-ns
   "Render the generated CONTRACTS namespace source (a string) from

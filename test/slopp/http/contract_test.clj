@@ -30,6 +30,20 @@
   [req]
   {:status 201 :body {:id (count (str (:name (:body req))))}})
 
+(defn ^{:http/method :post :rest/path "/c/quiet" :http/auth :public
+        :rest/request [:map [:q :string]]
+        :rest/response [:map [:hits :int]]}
+  c-quiet
+  "Fixture: a body verb that declares NO `:http/effectful`.
+
+  It exists to separate the two arms of the published `:effectful?`. This one
+  is answered by the METHOD alone, which is what makes the field useful in a
+  store where nobody writes the marker — slopp's own ten endpoints declare it
+  zero times, so publishing the marker verbatim would have shipped `false`
+  everywhere and read like an answer."
+  [req]
+  {:status 200 :body {:hits (count (str (:q (:body req))))}})
+
 (defn ^{:http/method :get :http/path "/c/page" :http/auth :public}
   c-page
   "Fixture: an HTML page — CONTENT, not an api.
@@ -79,11 +93,11 @@
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
 
     (testing "the document names its own version, so a consumer can refuse one it doesn't know"
-      (is (= 1 (:slopp/contract-version doc))))
+      (is (= 2 (:slopp/contract-version doc))))
 
     (testing "an endpoint is addressed by method AND path — one path serves two verbs"
-      (is (= #{[:get "/c/things"] [:post "/c/things"] [:get "/c/bare"] [:get "/c/admin"]
-               [:get "/c/no-client"]}
+      (is (= #{[:get "/c/admin"] [:get "/c/no-client"] [:get "/c/things"]
+        [:post "/c/things"] [:post "/c/quiet"] [:get "/c/bare"]}
              (set (keys by-addr)))))
 
     (testing "schemas travel as VALUES, equal to what the var declared"
@@ -189,3 +203,47 @@
     (testing "every endpoint carries it, because the gate refuses one without"
       (is (every? #(contains? % :auth) (:endpoints doc))
           (pr-str (remove #(contains? % :auth) (:endpoints doc)))))))
+
+(deftest version-2-publishes-EFFECTFULNESS-and-moves-because-keys-became-required
+  ;; Two changes, one bump, because every bump costs a consumer a migration and
+  ;; there is no reason to charge them twice.
+  ;;
+  ;; 1. `:handler`, `:doc`, `:media-type` and `:auth` all arrived while the
+  ;;    version stayed 1, so a version-1 document was never ONE shape. They are
+  ;;    required under 2, and the version is what says so.
+  ;; 2. `:effectful?` — the fact a consumer wants BEFORE calling anything, and
+  ;;    the one their arming gate was reading as nil.
+  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
+        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
+
+    (testing "the version MOVED, because required keys did"
+      (is (= 2 (:slopp/contract-version doc))))
+
+    (testing "every endpoint carries the four keys that used to be conditional"
+      (doseq [k [:handler :doc :media-type :auth]]
+        (is (every? #(contains? % k) (:endpoints doc))
+            (str k " is required under 2 — that is what the bump BUYS: "
+                 (pr-str (remove #(contains? % k) (:endpoints doc)))))))
+
+    (testing ":effectful? is DERIVED, not the marker verbatim"
+      ;; slopp's own ten endpoints declare `:http/effectful` zero times, so
+      ;; publishing the marker as it stands would ship `false` everywhere — and
+      ;; a consumer's arming gate would go from inert-on-nil to inert-on-FALSE,
+      ;; which is worse because false looks like an answer.
+      (testing "a safe verb with no marker is false"
+        (is (false? (:effectful? (by-addr [:get "/c/things"])))))
+
+      (testing "a mutating verb is true on the METHOD alone"
+        ;; c-quiet declares no marker. This arm is what makes the field useful
+        ;; in a store where nobody writes one
+        (is (true? (:effectful? (by-addr [:post "/c/quiet"])))))
+
+      (testing "and the MARKER still decides where the method cannot"
+        ;; c-create! declares it AND is a body verb, so it proves the marker is
+        ;; read rather than that POST is true — which the row above already
+        ;; established. Both arms are separable, deliberately.
+        (is (true? (:effectful? (by-addr [:post "/c/things"])))))
+
+      (testing "every endpoint carries it, so nobody has to tell false from absent"
+        (is (every? #(contains? % :effectful?) (:endpoints doc))
+            (pr-str (remove #(contains? % :effectful?) (:endpoints doc))))))))

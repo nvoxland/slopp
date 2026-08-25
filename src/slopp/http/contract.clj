@@ -45,10 +45,17 @@
   "The SHAPE of the API `ns-syms` serve, as data — what a consumer needs to
   generate a typed client without sharing a store.
 
-  `{:slopp/contract-version 1
+  `{:slopp/contract-version 2
     :endpoints [{:method :get :path \"/x\" :name x
                  :handler my.app/x :doc \"GET /x — …\"
+                 :media-type \"application/json\" :effectful? false
                  :auth :public :request nil :response […]}]}`
+
+  **Version 2** (2026-08-25). `:handler`, `:doc`, `:media-type` and `:auth`
+  all arrived while the version stayed 1, so a version-1 document was never one
+  shape — a consumer could not tell which of them it was about to get. Two is
+  the version that says every key is there, and it carries `:effectful?` with
+  it: one bump for both, since each costs a consumer a migration.
 
   `:auth` is the endpoint's `:http/auth` declaration verbatim — `:public`, or
   `[:group \"admin\"]`, or whatever an app declares. It is the cheapest key
@@ -113,7 +120,7 @@
   serving EDN would otherwise be generated a wrapper that calls `.json` and
   fails on the first character."
   [ns-syms]
-  {:slopp/contract-version 1
+  {:slopp/contract-version 2
    :endpoints
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]
@@ -146,5 +153,22 @@
            ;; get a `.json` wrapper that fails on the first character — the
            ;; same defect the local generator had, one process further away.
            :media-type (or (:rest/media-type m) "application/json")
+           ;; **DERIVED, not the marker verbatim.** The question a consumer is
+           ;; asking is "will firing this change something" — theirs is an
+           ;; arming gate on an API explorer — and `:http/effectful` alone
+           ;; cannot answer it: slopp's own ten endpoints declare it ZERO
+           ;; times, so publishing it as it stands ships `false` everywhere and
+           ;; reads like an answer. A consumer's gate would go from inert on
+           ;; nil to inert on false, which is worse.
+           ;;
+           ;; So a non-safe METHOD counts too. That over-warns on a POST which
+           ;; only searches, and over-warning is the safe direction for a gate
+           ;; whose job is to make someone press twice.
+           ;;
+           ;; `:http/effects` is deliberately NOT a third arm: `http-unsafe-get`
+           ;; refuses a :get/:head that declares any, so effects imply a
+           ;; non-safe method already and the arm could never decide anything.
+           :effectful? (or (boolean (:http/effectful m))
+                           (not (contains? #{:get :head} (:method row))))
            :request  (:rest/request m)
            :response (:rest/response m)}))})

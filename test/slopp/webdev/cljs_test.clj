@@ -497,7 +497,7 @@
   ;; The consuming half of contract publication. A contract is plain DATA, so
   ;; this needs no server, no store and no fixtures — which is the property
   ;; that makes generating against someone else's API cheap to test at all.
-  (let [document {:slopp/contract-version 1
+  (let [document {:slopp/contract-version 2
                   :endpoints [{:method :get :path "/api/things" :name 'things
                                :request nil :response [:sequential :string]}
                               {:method :post :path "/api/things" :name 'create!
@@ -809,7 +809,7 @@
         ;; REMOTE: the same endpoint as a published contract DOCUMENT. Built as
         ;; data on purpose — that is exactly what crosses the wire, and a
         ;; consumer has no store to read.
-        doc    {:slopp/contract-version 1
+        doc    {:slopp/contract-version 2
                 :endpoints [{:method :get :path "/api/form/:id" :name 'form
                              :request schema :response schema}]}
         remote (first (:wrappers (cljs/contract->plan doc 'demo.client.contracts)))]
@@ -1068,7 +1068,7 @@
   ;; The FETCH is redefed rather than given a seam: what is under test is which
   ;; artifact the store gets, and `a-published-contract-is-READ-and-never-
   ;; evaluated` already drives the transport through `fake-requester`.
-  (let [doc  {:slopp/contract-version 1
+  (let [doc  {:slopp/contract-version 2
               :endpoints [{:method :get :path "/api/modules" :name 'modules
                            :response [:map [:names :string]]}]}
         sess (external/open!)]
@@ -1134,7 +1134,7 @@
         ;; which is exactly the near-miss: the name the caller passes is not the
         ;; only name written, and the derived one is the generator's to compute
         (with-redefs [cljs/fetch-contract
-                      (fn [& _] {:slopp/contract-version 1
+                      (fn [& _] {:slopp/contract-version 2
                                  :endpoints [{:method :get :path "/api/things"
                                               :name 'things
                                               :response [:map [:id :string]]}]})]
@@ -1333,7 +1333,7 @@
                          (fn [req]
                            (reset! seen req)
                            {:http/status 200 :http/headers {}
-                            :http/body "{:slopp/contract-version 1 :endpoints []}"}))
+                            :http/body "{:slopp/contract-version 2 :endpoints []}"}))
     (is (pos-int? (:http/timeout-ms @seen))
         (str "an unbounded fetch hangs the tool: " (pr-str @seen)))))
 

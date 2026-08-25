@@ -273,7 +273,7 @@
         by-path (into {} (map (juxt :path identity)) (:endpoints doc))]
 
     (testing "the document is versioned and lists the typed endpoints"
-      (is (= 1 (:slopp/contract-version doc)))
+      (is (= 2 (:slopp/contract-version doc)))
       ;; hand-kept ON PURPOSE: this is the control. Derived from the same
       ;; metadata the endpoint list comes from, it would compare a derivation
       ;; to itself and pass however wrong both were.
@@ -317,7 +317,7 @@
       (is (= 200 (:status r)))
       (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
       (is (= "application/edn" (get-in r [:headers "Content-Type"])))
-      (is (= 1 (:slopp/contract-version (edn/read-string (:body r))))))))
+      (is (= 2 (:slopp/contract-version (edn/read-string (:body r))))))))
 
 (deftest ^:external a-consumer-generates-an-equivalent-client-from-the-published-contract
   ;; The fixed point the whole split rests on. A store that has never seen
@@ -1063,7 +1063,7 @@
           doc (edn/read-string (:body r))
           paths (set (map :path (:endpoints doc)))]
       (is (= 200 (:status r)))
-      (is (= 1 (:slopp/contract-version doc)))
+      (is (= 2 (:slopp/contract-version doc)))
       (is (empty? paths)
           (str "the listener serves the reviewer API and must not describe it"
                " as the application's: " (pr-str paths)))))
