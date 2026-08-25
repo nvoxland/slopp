@@ -307,3 +307,54 @@
                (assoc :request (names from (:rest/request meta)))
                (:rest/response meta)
                (assoc :response (names from (:rest/response meta)))))))))
+
+(defn rest-envelope-schema-check
+  "Advisory: an endpoint declares `:rest/response :string` under a media type
+  slopp DECODES, so the schema describes the ENVELOPE and the boundary judges
+  the document.
+
+  **This exists because the suite of the store it breaks cannot see it.**
+  `D-response-document` made the boundary decode a self-serialized body before
+  judging it, which is right — but for a store that had declared `:string`
+  (until that jar the only TRUE thing available, since the schema saw the
+  bytes) the endpoint 500s from the moment it restarts. The store that found it
+  had a test starting a real server, fetching the path and asserting 200. **It
+  passed while the endpoint was down**, because the response check runs in the
+  served app's context and not in a plain `serve!`. There was no test they
+  could have written on that path.
+
+  So the shape is found where a suite's blindness cannot reach: from the
+  DECLARATIONS. A media type slopp decodes (`application/json`,
+  `application/edn`) with a `:string` schema is a contradiction — the document
+  is data, and `:string` is true only of the bytes it arrived in.
+
+  **Advisory, not an error, and the reason is a real case rather than
+  caution.** An endpoint answering `application/edn` whose document genuinely
+  IS a string — `(pr-str \"hello\")` — is honest with `:string`, and this rule
+  cannot tell it from the broken one. An error would block a correct
+  declaration; an advisory names it, and the boundary is the enforcement.
+
+  Media types slopp does NOT decode are left alone: `text/plain` really does
+  arrive a string, so `:string` there is an honest description and reporting it
+  would be a permanent finding nobody can act on."
+  [_session store _changed]
+  (for [{:keys [ns name meta]} (edit.http/web-endpoint-rows store)
+        :let  [mt (some-> (:rest/media-type meta) str/lower-case
+                          (str/split #";") first str/trim)]
+        :when (and (= :string (:rest/response meta))
+                   (contains? #{"application/json" "application/edn"} mt))]
+    {:endpoint (symbol (str ns) (str name))
+     :media-type mt
+     :teach (str ns "/" name " declares :rest/response :string while answering "
+                 mt " — so the schema describes the ENVELOPE and the boundary"
+                 " judges the DOCUMENT. A self-serialized body is decoded"
+                 " before the contract sees it (:rest/media-type owns the"
+                 " encoding), so this endpoint answers 500 on every success"
+                 " unless its document really is a string."
+                 " Declare the shape a consumer reads —"
+                 " [:map [:items [:sequential …]]] — and :string goes back to"
+                 " meaning an endpoint that answers text."
+                 " Nothing in a store's own suite can catch this: the response"
+                 " check runs in the served app's context and not in a plain"
+                 " serve!, so a test that starts a server and asserts 200"
+                 " passes while the endpoint is down.")}))

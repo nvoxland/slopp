@@ -193,3 +193,77 @@
       ;; receipts -> order (var) -> [:map …]; the inner `line` reference must
       ;; also resolve or malli cannot build the map at all
       (is (= [:id :lines] (:response row)) (pr-str row)))))
+
+(deftest a-response-schema-that-describes-the-ENVELOPE-is-reported
+  ;; The regression `D-response-document` shipped, reported from production by
+  ;; the store it broke. Before that jar, `:rest/response :string` on a raw
+  ;; endpoint answering EDN was the only TRUE thing available — the schema saw
+  ;; the bytes. After it, the boundary decodes first, so `:string` is judged
+  ;; against a map and the endpoint answers 500 from the moment it restarts.
+  ;;
+  ;; **What makes this a rule rather than a release note is that their whole
+  ;; suite stayed green.** They have a test that starts a real server, fetches
+  ;; the path and asserts 200; it passed while the served endpoint was down,
+  ;; because the response check runs in the app image and not in a plain
+  ;; `serve!`. There was no test they could have written on that path.
+  ;;
+  ;; So the shape is found statically, where a suite's blindness cannot reach
+  ;; it: a schema of `:string` under a media type slopp DECODES describes the
+  ;; envelope, and the boundary will judge the document.
+  (let [ingest (fn [src]
+                 (-> (store/ingest (store/empty-store) 'shop.api src)
+                     (assoc-in [:config "capabilities" :values "rest.enabled"] "true")))
+        edn-string (ingest
+                    (str "(ns shop.api)\n\n"
+                         "(defn ^{:http/method :get :rest/path \"/api/doc\"\n"
+                         "        :http/auth :public\n"
+                         "        :rest/media-type \"application/edn\"\n"
+                         "        :rest/response :string}\n"
+                         "  doc \"D.\" [req] req)\n"))]
+
+    (testing "a :string schema under a DECODED media type is reported"
+      (let [f (rules.rest/rest-envelope-schema-check nil edn-string nil)]
+        (is (seq f) "an endpoint that will 500 must not be silent")
+        (is (re-find #"application/edn" (str (:teach (first f)))) (pr-str f))
+        (is (re-find #"document" (str (:teach (first f))))
+            (str "the fix is to describe the document, and the teach has to say"
+                 " so or the reader widens the schema at random: " (pr-str f)))))
+
+    (testing "the same schema under a media type slopp does NOT decode is fine"
+      ;; text/plain really does arrive a string, so :string is an honest
+      ;; description and reporting it would be the permanent-finding failure
+      (let [txt (ingest (str "(ns shop.api)\n\n"
+                             "(defn ^{:http/method :get :rest/path \"/api/txt\"\n"
+                             "        :http/auth :public\n"
+                             "        :rest/media-type \"text/plain\"\n"
+                             "        :rest/response :string}\n"
+                             "  txt \"T.\" [req] req)\n"))]
+        (is (empty? (rules.rest/rest-envelope-schema-check nil txt nil))
+            (pr-str (rules.rest/rest-envelope-schema-check nil txt nil)))))
+
+    (testing "and a DOCUMENT schema under a decoded media type is fine"
+      (let [ok (ingest (str "(ns shop.api)\n\n"
+                            "(defn ^{:http/method :get :rest/path \"/api/doc\"\n"
+                            "        :http/auth :public\n"
+                            "        :rest/media-type \"application/edn\"\n"
+                            "        :rest/response [:map [:v :int]]}\n"
+                            "  doc \"D.\" [req] req)\n"))]
+        (is (empty? (rules.rest/rest-envelope-schema-check nil ok nil)))))
+
+    (testing "the check does NOT gate itself on the capability"
+      ;; inertness moved out of the checks: `capabilities/rule-owner` derives
+      ;; the owner from the rule's NAME and the runner decides. A check that
+      ;; gated itself would answer nothing on its own `:fires-on` fixture —
+      ;; which is exactly how this was caught, by
+      ;; `rules-test/every-advisory-fires-on-its-own-fixture`, before it could
+      ;; ship as a rule that can never fire.
+      (let [off (store/ingest (store/empty-store) 'shop.api
+                              (str "(ns shop.api)\n\n"
+                                   "(defn ^{:http/method :get :rest/path \"/api/doc\"\n"
+                                   "        :http/auth :public\n"
+                                   "        :rest/media-type \"application/edn\"\n"
+                                   "        :rest/response :string}\n"
+                                   "  doc \"D.\" [req] req)\n"))]
+        (is (seq (rules.rest/rest-envelope-schema-check nil off nil))
+            "the check answers the question wherever it is asked; only
+             dispatch knows whether this store asked")))))

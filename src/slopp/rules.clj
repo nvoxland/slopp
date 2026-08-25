@@ -1281,6 +1281,36 @@
     :fires-on (str "(ns dv.api)\n"
                    "(defn ^{:http/method :get :http/path \"/v\" :http/auth :public"
                    " :rest/response [:map [:rows [:sequential :map]]]} v \"V.\" [r] r)\n")}
+;; The one rule here whose reason is another store's SUITE rather than its
+   ;; code. `D-response-document` made the boundary decode a self-serialized
+   ;; body before judging it; a store that had declared `:string` — until that
+   ;; jar the only true thing available — then 500s on restart, and its whole
+   ;; suite stays green, because the response check runs in the served app's
+   ;; context and not in a plain `serve!`. They had a test that started a real
+   ;; server and asserted 200 on that path and it PASSED while the endpoint was
+   ;; down. So the shape is found from the declarations, where a suite's
+   ;; blindness cannot reach it.
+   {:key :rest-envelope-schema :severity :advisory :applies-to :production
+    :check #'rules.rest/rest-envelope-schema-check
+    :sweep true
+    :fires-on (str "(ns de.api)\n"
+                   "(defn ^{:http/method :get :http/path \"/e\" :http/auth :public"
+                   " :rest/media-type \"application/edn\""
+                   " :rest/response :string} e \"E.\" [r] r)\n")}
+;; The SWEEP half of `http-unreachable-declaration`, which shipped as a write
+   ;; gate alone. A gate refuses the next form and never asks the question of
+   ;; one already in the store, so a violation arriving by import_dir, a branch
+   ;; merge or an episode_revert passes untouched — and done is episode-scoped,
+   ;; so nothing asks again. A consuming store found the asymmetry in THIS
+   ;; catalog: `webapp-page-reach` is the page version of the same question and
+   ;; was already swept. Pages had both grains; routes had one. Same function
+   ;; at both grains, so the refusal and the finding cannot become two answers.
+   {:key :http-unreachable-declaration-sweep :severity :advisory :applies-to :production
+    :check #'rules.http/http-unreachable-declaration-check
+    :sweep true
+    :fires-on (str "(ns du.api)\n"
+                   "(defn- ^{:http/method :get :rest/path \"/api/u\" :http/auth :public"
+                   " :rest/response :map} u \"U.\" [r] r)\n")}
    ;; a published contract's fields say what SHAPE they are and never what they
    ;; MEAN. Asked for by slopp-ui, who measured it: every entry-property map in
    ;; slopp's own 9-endpoint document is `{:optional true}` and nothing else.

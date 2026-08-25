@@ -714,7 +714,25 @@
 
   Every entry carries its own `:doc`, because this is the one document a
   consumer generating a client can read and a type says shape rather than
-  meaning."
+  meaning.
+
+  **Four entries are `{:optional true}` and none of them should have had to
+  be.** `:handler` and `:doc` arrived 2026-08-09, `:auth` on 2026-08-11,
+  `:media-type` later still — and `:slopp/contract-version` stayed 1 through
+  all of it. So a version-1 document is not one shape, and a consumer holding
+  this schema cannot tell which of them it is about to get.
+
+  Reported by a store that fronts projects on OTHER slopp releases, which is
+  its stated reason to exist: applying this schema to an older project's
+  document reported a violation for something it renders correctly, and false
+  drift reports are what make a real one unreadable.
+
+  **The version field's own `:doc` says it is there so a consumer can refuse a
+  shape it does not know. It cannot do that job while it is constant.** The
+  rule for next time is the one this schema had to work around: adding a
+  REQUIRED key moves the version, or the key ships `{:optional true}`. Marking
+  these optional is the honest description of version 1 rather than a
+  workaround — but it is only honest because the version never moved."
   [:map
    [:slopp/contract-version {:doc "the document format's version — a consumer that does not know it should generate nothing"} :int]
    [:endpoints
@@ -724,9 +742,13 @@
       [:method {:doc "the HTTP method, as a keyword"} :keyword]
       [:path {:doc "the route pattern, with :segment captures as declared"} :string]
       [:name {:doc "the handler's own name, unqualified"} :symbol]
-      [:handler {:doc "the fully-qualified handler symbol — :name alone does not resolve, and a third of real surfaces have duplicate simple names"} :symbol]
-      [:doc {:doc "the handler's docstring, de-indented and whole — public API copy, and MARKDOWN"} [:maybe :string]]
-      [:media-type {:doc "what this endpoint ANSWERS, defaulting to application/json — read it before choosing a decoder"} :string]
-      [:auth {:doc "the endpoint's :http/auth policy verbatim: :public, :authenticated, or a composite like [:group \"admin\"]"} :any]
+      [:handler {:optional true
+                 :doc "the fully-qualified handler symbol — :name alone does not resolve, and a third of real surfaces have duplicate simple names. OPTIONAL: it arrived 2026-08-09 and :slopp/contract-version did not move, so a version-1 document from an older jar may not carry it"} :symbol]
+      [:doc {:optional true
+             :doc "the handler's docstring, de-indented and whole — public API copy, and MARKDOWN. OPTIONAL for the same reason as :handler: it arrived 2026-08-09 under an unchanged version"} [:maybe :string]]
+      [:media-type {:optional true
+                    :doc "what this endpoint ANSWERS, defaulting to application/json — read it before choosing a decoder. OPTIONAL: it arrived after version 1 was minted, so absent means assume JSON"} :string]
+      [:auth {:optional true
+              :doc "the endpoint's :http/auth policy verbatim: :public, :authenticated, or a composite like [:group \"admin\"]. OPTIONAL: it landed 2026-08-11 under an unchanged version"} :any]
       [:request {:doc "the malli schema for everything the caller SENDS — path params, query and body as one map — or nil for an endpoint that takes none"} :any]
       [:response {:doc "the malli schema of the DOCUMENT a 200 carries, or nil when the endpoint declares none"} :any]]]]])

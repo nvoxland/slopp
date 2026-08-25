@@ -98,6 +98,9 @@
 {:rule :http-unreachable-declaration :grain :form
     :escape "make it public — or, if the IMPLEMENTATION should stay private, move the marker to a public wrapper that calls it. That is the shape this gate leaves open and the ONLY one: there is no dial and no marker, because the serving population is public vars and no waiver changes that"
     :teach "a route or performer marker on a PRIVATE form. from-namespaces and performers-from-namespaces both build from ns-publics, so it declares a surface and contributes nothing — passing every other gate, appearing in query_surface, and not being there. A private ROUTE 404s; a private PERFORMER answers 500 on a request the store believes it serves, with a stack trace naming the framework rather than the defn-, which slopp.http/context calls the worst pairing available (inert until http.enabled)"}
+{:rule :http-unreachable-declaration-sweep :grain :done
+    :escape "the same one as the write gate of this name — make it public, or move the marker to a public wrapper. This grain exists because the gate cannot see a form it did not judge"
+    :teach "the store-wide half of http-unreachable-declaration, asking the SAME function. A write gate refuses the next form and never asks the question of one already there, so a violation arriving by import_dir, a branch merge or an episode_revert passes untouched — and done is episode-scoped, so nothing asks again. webapp-page-reach is the page version of this question and was already swept: pages had both grains and routes had one (inert until http.enabled)"}
    {:rule :rest-path-partition :grain :form
     :escape "declare the kind it IS — :rest/path for a typed api under the store's API prefix, :http/path for content outside it — or move the prefix (config_file {path \"capabilities\" key \"rest.prefix\" value \"/v1\"}) if this store's API genuinely lives elsewhere"
     :teach "a route is a REST api (:rest/path) or general HTTP content (:http/path), never both and never on the wrong side of the API prefix. The partition is what lets /api/* mean something to a proxy, a CSP or a reader WITHOUT consulting metadata. Before it, one marker served both and every endpoint was asked the API's questions — which is why a stylesheet declared :rest/response :string and then :rest/client false to undo it (inert until rest.enabled)"}
@@ -223,6 +226,18 @@
    {:rule :rest-inline-schema-dup :grain :done
     :escape "extract the shared inline schema to a named .cljc var both endpoints reference, or accept the duplication"
     :teach "2+ endpoints declare the same inline request/response schema — a shared shape belongs in one named .cljc schema so the server and the generated client agree (D-web-contracts part 2)"}
+{:rule :rest-envelope-schema :grain :done
+    :escape "declare the shape a consumer READS — [:map [:items [:sequential …]]] — and :string goes back to meaning an endpoint that answers text. There is deliberately no marker: if the document genuinely IS a string (an EDN endpoint answering (pr-str \"hello\")) the declaration is correct, which is why this is advisory rather than an error"
+    :teach (str "an endpoint declares :rest/response :string while answering a"
+                " media type slopp DECODES, so the schema describes the"
+                " ENVELOPE and the boundary judges the DOCUMENT — 500 on every"
+                " success. Found from the DECLARATIONS because a store's own"
+                " suite cannot see it: the response check runs in the served"
+                " app's context and not in a plain serve!, so a test that"
+                " starts a real server and asserts 200 on that path passes"
+                " while the endpoint is down. Measured that way in a consuming"
+                " store, whose full_check was green over 1742 assertions"
+                " (inert until rest.enabled)")}
    {:rule :rest-unconstrained-contract :grain :done
     :escape "name the entries — [:map [:kind :string] [:text :string]]. If the endpoint genuinely CANNOT constrain — a proxy forwarding another service's bytes — say so with ^{:rest/unconstrained-ok \"why\"}, which discharges it and is itself reported as stale once the contract does constrain. Saying :any is HONEST and does not discharge: it is the reported state, not the way out"
     :teach (str "a published endpoint declares a field that constrains nothing"

@@ -778,3 +778,39 @@
     (let [{:keys [dangling unresolved]} (dangling-route-refs st*)]
       (vec (concat dangling
                    (map #(assoc % :severity :info) unresolved))))))
+
+(defn http-unreachable-declaration-check
+  "Advisory: a route or performer marker sits on a PRIVATE form somewhere in
+  this store — swept, rather than asked only of the form being written.
+
+  **The write gate is the same question at the other grain, and it is the same
+  FUNCTION**: this calls `edit.http/http-unreachable-declaration` for every
+  form carrying one of the four markers, so the refusal a write produces and
+  the finding a sweep produces cannot drift into two opinions.
+
+  Why both grains are needed, in a consuming store's words: the gate *\"refuses
+  the next form to declare a route privately and never asks the question of a
+  form already in the store\"*. A violation arriving by any path that is not an
+  edit-tool write — `import_dir`, a branch merge, an `episode_revert` — passes
+  it untouched, and `done` is episode-scoped, so nothing asks again for the
+  life of the store.
+
+  They found the asymmetry in slopp's own catalog: `webapp-page-reach` is the
+  PAGE version of this question, whose wording the gate reuses, and it was
+  already swept. **Pages had both grains and routes had one.**
+
+  Advisory rather than error at this grain, because the write gate is the
+  enforcement: a form that arrived by a route with no gate is a state to be
+  told about, not one to refuse a milestone over."
+  [_session store _changed]
+  (for [nsx (keys (:namespaces store))
+        e   (store/forms store nsx)
+        :let [nm (:name e)
+              m  (edit.http/web-name-meta e)]
+        :when (and nm (or (edit.http/route-path m)
+                          (:http/read m)
+                          (:http/effect m)))
+        :let [msg (edit.http/http-unreachable-declaration store nsx nm)]
+        :when msg]
+    {:form  (symbol (str nsx) (str nm))
+     :teach msg}))

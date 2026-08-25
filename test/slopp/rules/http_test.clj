@@ -951,3 +951,56 @@
               (str "and the reason has to name the mechanism, or the reader"
                    " cannot tell this from an ordinary dynamic path: "
                    (pr-str row))))))))
+
+(deftest a-PRIVATE-route-already-in-the-store-is-swept
+  ;; `http-unreachable-declaration` is a per-form WRITE gate: it refuses the
+  ;; next form to declare a route privately and never asks the question of one
+  ;; already there. A violation arriving by any path that is not a write —
+  ;; import_dir, a branch merge, an episode_revert — passes it untouched, and
+  ;; done is episode-scoped so nothing asks again.
+  ;;
+  ;; The asymmetry was in slopp's own catalog and a consuming store found it:
+  ;; `webapp-page-reach` is the PAGE version of this exact question, whose
+  ;; wording the route gate reuses, and it IS swept. Pages got both grains;
+  ;; routes got one. They declined to delete their temporary store-side guard
+  ;; until this existed, which was the right call.
+  (let [on (fn [src]
+             (-> (store/ingest (store/empty-store) 'shop.api src)
+                 (assoc-in [:config "capabilities" :values "http.enabled"] "true")))]
+
+    (testing "a private ROUTE that never passed a write gate is reported"
+      (let [st (on (str "(ns shop.api)\n\n"
+                        "(defn- ^{:http/method :get :rest/path \"/api/x\"\n"
+                        "         :http/auth :public :rest/response :map}\n"
+                        "  x \"X.\" [req] req)\n"))
+            f  (rules.http/http-unreachable-declaration-check nil st nil)]
+        (is (seq f) "a route nothing serves must not be silent once it is in")
+        (is (re-find #"ns-publics" (str (:teach (first f)))) (pr-str f))))
+
+    (testing "a private PERFORMER too, and it says 500 rather than 404"
+      (let [st (on (str "(ns shop.api)\n\n"
+                        "(defn- ^{:http/read :thing/one} one \"O.\" [ctx k] k)\n"))
+            f  (rules.http/http-unreachable-declaration-check nil st nil)]
+        (is (seq f) (pr-str f))
+        (is (re-find #"500" (str (:teach (first f)))) (pr-str f))))
+
+    (testing "public forms are clean, and a private form with no marker is not ours"
+      (let [st (on (str "(ns shop.api)\n\n"
+                        "(defn ^{:http/method :get :rest/path \"/api/y\"\n"
+                        "        :http/auth :public :rest/response :map}\n"
+                        "  y \"Y.\" [req] req)\n\n"
+                        "(defn- helper \"H.\" [x] x)\n"))]
+        (is (empty? (rules.http/http-unreachable-declaration-check nil st nil))
+            (pr-str (rules.http/http-unreachable-declaration-check nil st nil)))))
+
+    (testing "the check does NOT gate itself on the capability"
+      ;; inertness is the RUNNER's: `capabilities/rule-owner` derives the owner
+      ;; from the rule's NAME. A check that gated itself would answer nothing
+      ;; on its own `:fires-on` fixture, which is how this was caught before it
+      ;; could ship as a rule that can never fire.
+      (let [off (store/ingest (store/empty-store) 'shop.api
+                              (str "(ns shop.api)\n\n"
+                                   "(defn- ^{:http/method :get :rest/path \"/api/x\"\n"
+                                   "         :http/auth :public :rest/response :map}\n"
+                                   "  x \"X.\" [req] req)\n"))]
+        (is (seq (rules.http/http-unreachable-declaration-check nil off nil)))))))
