@@ -5522,3 +5522,53 @@ app-describing opts shared with `serve!` so the listener and the in-process
 context cannot describe different apps. Two endpoint docstrings turned out to
 promise a floor their declared `:int` contradicted; `?depth=banana` and
 `?limit=banana` are 400 now rather than a silent fallback.
+
+### D-read-cost — the read record is its own citizen, and never written from a read path (2026-08-25)
+
+What an answer COST to send is a `:read-cost` delta, not a field on
+`:turn-end`. It is flushed by `slopp.ops/flush-reads!` when its ring reaches
+`telemetry/read-flush-calls` (200) or at a work boundary, from a WRITE tool's
+call path only.
+
+**It shipped on `:turn-end` the same morning and was wrong by the afternoon**,
+which is the part worth keeping. Turns were the obvious home — already there,
+already carrying timing, already bracketing an ask — and the record inherited
+their rotation gate: a turn closes only when a user PROMPT arrived AND a write
+follows. Both conditions are correct for turns and fatal for a read meter,
+because a read-only ask closes no turn and an event-driven session closes no
+turn, and those are precisely the spans where reads dominate. Two stores, the
+same day: 321 and 118 closed turns, **zero** read records between them.
+
+Three things were settled fixing it, in descending order of how far they
+generalize.
+
+**A measurement does not borrow a boundary.** The alternative — widening turn
+rotation so telemetry lands more often — was rejected: a `:turn-end` that is
+not a turn ending is a lie in the journal, and `report`'s verbatim-intent
+trail would get worse to make a number better. The record gets its own op, its
+own ring (`:slopp.read.telemetry/reads`, which `turn-begin!` does not clear),
+and its own flush. `::calls` stays the clock and still clears per turn; one
+entry map feeds both rings by structural sharing.
+
+**The threshold is a CALL COUNT, and uniformity is why.** Turn-shaped rows
+were minutes wide in this store and twelve hours wide in the consumer, so two
+workloads could not be compared at all — the finding that produced this
+change. Two hundred calls is the same unit everywhere. The ledger sums rows,
+so the width sets resolution and never totals; the number is a judgement call
+and nothing is sensitive to it.
+
+**`readOnlyHint` is a promise, so the flush rides the next write.** Every read
+tool declares it on the wire and a harness may run one unprompted on that
+basis; appending a journal delta from a read tool would break it, and that is
+not a trade worth making for telemetry. The wire supplies the PERMISSION (is a
+delta legal here) and `flush-reads!` supplies the POLICY (is a span due) — put
+the other way round, the threshold lives in the wire and every future caller
+has to know the number.
+
+The residue is accepted and named rather than papered over: a session that
+never writes contributes nothing and leaves no trace of having been omitted.
+`slopp.lab.reads/read-ledger` deliberately has NO count for it — there is no
+population to count, and a zero would be read as the size of the hole — so its
+docstring says every rate it reports is a lower bound, and a test asserts the
+docstring says it. Open in
+`ideas/observation/the-read-meter-cannot-see-a-read-only-session.md`.

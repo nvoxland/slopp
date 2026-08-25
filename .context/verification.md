@@ -418,25 +418,51 @@ The oracle must never return a false verdict. Everything here serves that.
    now binds a per-call recorder (`*response-facts*`) and adds `:chars` (off
    the response itself), `:trimmed?` from `text!`, `:stub?` from `told!`,
    `:spooled` for the retrieval id either path mints, and `:detail-asked` from
-   the `query_detail` branch. `read-cost` folds those per turn onto `:timing
-   :reads`; `slopp.lab.reads/read-ledger` folds the journal, by hand, no tool.
+   the `query_detail` branch. `read-cost` folds those into a span record;
+   `slopp.lab.reads/read-ledger` folds the journal, by hand, no tool.
    - **A recorder, not a return value.** Each fact is known several frames
      below `handle!` and none of them is on the path back to it; the
      alternative is a second value threaded out of every tool branch that
      nothing else reads.
-   - **The delta is the only survivor.** The ring is cleared at every turn
-     boundary, so a response size that does not ride `:turn-end` is gone.
-   - **`:reads` is ABSENT when no call carried a size**, unlike `:refused`
-     which is present-and-zero. The empty cases answer different questions: no
-     refusals means measured-and-none, no sizes means never measured — and a
-     zeroed cost would read as the cheapest turn on record. First reading: 321
-     turn-ends, 276 with timing, 0 with a read record.
    - **A re-fetch is charged to the tool that MINTED the id.** Charged to
      `query_detail` the ledger ranks the retrieval path as expensive and
      leaves every trimming tool clean, which inverts the question. This
      number's whole job is to say whether the 8000-char gate PAYS, and it is
      read once by a human to authorize work — so `:refetch-rate` is nil rather
      than 0.0 when nothing was withheld.
+   **It shipped on `:turn-end` and that was wrong within the day.** Worth
+   keeping because the error is reusable. The record rode the turn delta
+   because turns were already there and already carried timing — and it
+   inherited the rotation gate with them: a turn closes only when a user
+   PROMPT arrived AND a write tool follows. Both conditions are right for what
+   turns are FOR. Both are fatal for a read meter, because a read-only ask
+   closes no turn and an event-driven session closes no turn, and those are
+   the spans where reads dominate. Measured the same day in two stores: 321
+   and 118 closed turns, **zero** read records between them.
+   - **The fix is to stop borrowing, not to widen.** A `:turn-end` that is not
+     a turn ending would be a lie in the journal, and the verbatim-intent
+     trail `report` reads would get worse to make a measurement better. So
+     `:read-cost` is its own marker op (registered in `store.fields/markers`)
+     with its own ring — `:slopp.read.telemetry/reads`, which `turn-begin!`
+     does NOT clear — flushed by `ops/flush-reads!` at
+     `telemetry/read-flush-calls` or on a work boundary.
+   - **Two rings, two owners, one entry.** `handle!` conjes the same map onto
+     both (structural sharing). `::calls` is the clock and clears per turn;
+     `::reads` is the cost and clears per flush. Sharing the lifecycle was the
+     entire bug.
+   - **Uniform rows are the point of a COUNT threshold.** Turn-shaped rows
+     were minutes wide in one store and twelve hours in the other, so the two
+     workloads could not be compared. Two hundred calls is the same unit
+     everywhere, and since the ledger sums rows the width changes resolution
+     and not totals.
+   - **The flush is called only from write paths, and that is a promise, not
+     an optimization.** Every read tool declares `readOnlyHint` on the wire
+     and a harness may run it unprompted on that basis; appending a journal
+     delta from one would break it. The residue is one genuinely
+     unrecordable span — a session that never writes at all — named in
+     `read-ledger`'s docstring and deliberately given NO count, because there
+     is no population to count and a zero would be read as the size of the
+     hole.
    **Still unmeasured:** phases INSIDE a long tool — `module_extract`'s
    per-rename image rebuilds, `build!`, an individual image boot. The turn
    aggregate is what should point at these before any of them is instrumented.

@@ -185,7 +185,7 @@ measurably bleed tokens.
    (median 0ms on a 170-namespace store); if yours is not, that is the signal.
    **And each TURN records where its whole wall clock went**: `turn_end`'s
    delta carries `:timing {:slopp-ms :outside-ms :idle-ms :elapsed-ms :top
-   :refused :reads}`. One turn is one USER ASK — a new ask closes the open turn and
+   :refused}`. One turn is one USER ASK — a new ask closes the open turn and
    opens its own. `:outside-ms` is time slopp was NOT working — your reasoning
    plus every non-slopp tool — and it is usually the majority (measured on
    slopp's own development: 78%). Use it before optimizing a tool: if
@@ -201,10 +201,11 @@ measurably bleed tokens.
    trip that produced nothing, and they land in the half of the clock nothing
    else measures. Read the samples before changing anything: a high rate on one
    tool is a prompt to read its contract, not to retry harder.
-   **`:reads` says what the answers COST, in characters on the wire.** Same
-   turn record: total `:chars`, per-tool rows so you can see which read is
-   actually expensive, and — the part worth knowing — whether a response you
-   were handed in trimmed form got re-fetched with `query_detail` anyway.
+   **What the answers COST is a SEPARATE record** — `:read-cost` deltas, not
+   the turn — because it must not depend on a turn closing. Each carries
+   total `:chars` on the wire, `:calls`, per-tool rows so you can see which
+   read is actually expensive, and the part worth knowing: whether a response
+   you were handed in trimmed form got re-fetched with `query_detail` anyway.
    `:withheld` counts the answers that arrived incomplete (a trim, or an
    `:unchanged` stub); `:refetched` counts the ones you went back for, charged
    to the tool that withheld rather than to `query_detail`. A re-fetch costs
