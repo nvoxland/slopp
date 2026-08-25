@@ -520,14 +520,19 @@
       (is (not (contains? (set (map :path (rules.webapp/request-paths-unserved on)))
                           "https://api.example.com/v1/rates"))))
 
-    (testing "a FROM-ORIGIN request is not this store's to serve either"
+    (testing "an ORIGIN-measured request is not this store's to serve either"
       ;; the same statement an absolute url makes, in the form a MOUNTED app
       ;; can actually write: the path is measured from the origin, so it is
       ;; addressed at whatever sits there — which is not this store, or the
-      ;; declaration would be saying nothing
+      ;; declaration would be saying nothing.
+      ;;
+      ;; Said as `:webapp/base ""` rather than the retired `:webapp/from-origin`
+      ;; boolean. Nothing reads that flag any more, so a request still carrying
+      ;; it is joined like any other and reported — which is the correct answer
+      ;; for a marker that waives nothing.
       (let [src5 (str "(ns shop.five)\n\n"
                       "(defn hub-request \"R.\" [_p]\n"
-                      "  {:webapp/path \"/api/projects\" :webapp/from-origin true})\n")
+                      "  {:webapp/path \"/api/projects\" :webapp/base \"\"})\n")
             st   (assoc-in (store/ingest (store/empty-store) 'shop.five src5)
                            [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= [] (rules.webapp/request-paths-unserved st))

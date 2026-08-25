@@ -1140,12 +1140,14 @@
   narrower one wins, the way an inline style beats a sheet.
 
   `:webapp/base \"\"` on a request therefore means *measured from the ORIGIN*,
-  and that is exactly what `:webapp/from-origin true` says. The flag stays
-  working and is expressed in terms of this lever rather than beside it, so
-  there is one mechanism; it is a candidate for retirement once its users
-  migrate, and unlike a deprecation this one removes its own cause — an escape
-  from a field that could not hold two values stops being needed once the field
-  holds N.
+  and that is exactly what the retired `:webapp/from-origin` boolean used to
+  say. **That flag is GONE, not deprecated** — it was an escape from a field
+  that could not hold two values, and an escape whose cause is removed is not a
+  thing to keep working for a while. Nothing reads it, so a request still
+  carrying it is addressed under the app's base like any other: a retired
+  marker that waives nothing while reading as though it does is worse than its
+  absence, which is the same stance `slopp.http.auth` and
+  `slopp.project.capabilities` already take about retired spellings.
 
   **An ABSOLUTE url is left alone**, which is the same judgement
   `prefix-links` makes: a third-party API is not under anyone's mount point,
@@ -1154,9 +1156,9 @@
   takes."
   [base request]
   (let [p    (:webapp/path request)
-        base (cond (:webapp/from-origin request) ""
-                   (contains? request :webapp/base) (:webapp/base request)
-                   :else base)]
+        base (if (contains? request :webapp/base)
+                 (:webapp/base request)
+                 base)]
     (if (and (string? p)
              (seq (str base))
              (not (str/includes? p "://"))

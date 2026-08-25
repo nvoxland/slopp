@@ -1579,8 +1579,10 @@
       ;; absolute url, because the origin is only known at runtime, and
       ;; prefixing sends the request to a project that does not serve it.
       ;;
-      ;; Declared on the REQUEST rather than on the app, which is where the fact
-      ;; lives: this app's other requests ARE mounted and only this one is not
+      ;; Said as a VALUE — `:webapp/base ""` — rather than as the boolean
+      ;; `:webapp/from-origin` this shipped with. That flag was an escape from
+      ;; a field that could not hold two values; once the field holds any base,
+      ;; the escape has no cause and is gone rather than deprecated.
       (reset! called [])
       (let [st (atom {})
             a4 (webapp/wiring
@@ -1589,16 +1591,17 @@
                  :webapp/routes [["/mine"   {:render  (fn [_s] [:p "m"])
                                              :request (fn [_p] {:webapp/path "/api/modules"})}]
                                  ["/theirs" {:render  (fn [_s] [:p "t"])
-                                             :request (fn [_p] {:webapp/path        "/api/projects"
-                                                                :webapp/from-origin true})}]]
+                                             :request (fn [_p] {:webapp/path "/api/projects"
+                                                                :webapp/base ""})}]]
                  :webapp/call   (fn [rq ok _err]
                                   (swap! called conj (webapp/request-url rq))
                                   (ok nil))})]
         (webapp/navigate! a4 "/mine" false)
         (webapp/navigate! a4 "/theirs" false)
         (is (= ["/p/demo/api/modules" "/api/projects"] @called)
-            (str "a from-origin request took the mount point anyway, so it"
-                 " reached a project that does not serve it: " (pr-str @called)))))
+            (str "a request measured from the origin took the mount point"
+                 " anyway, so it reached a project that does not serve it: "
+                 (pr-str @called)))))
 
     (testing "at the ROOT nothing changes, so an unmounted app reads identically"
       (reset! called [])
@@ -1824,11 +1827,22 @@
            (:webapp/path (webapp/addressed "/p/demo"
                                            {:webapp/path "/api/projects"
                                             :webapp/base ""})))))
-  (testing "and :webapp/from-origin still says it, in terms of the same lever"
-    (is (= "/api/projects"
+  (testing "the RETIRED flag is not read — no backwards compatibility"
+    ;; `:webapp/from-origin` was a boolean escape from a field that could not
+    ;; hold two values. `:webapp/base ""` says the same thing as a VALUE, so
+    ;; the flag's cause is gone — and a mechanism kept alive past its cause is
+    ;; the thing this codebase keeps removing, not something to carry for a
+    ;; consumer's convenience.
+    ;;
+    ;; Same stance `auth-test/capabilities-values-parse-into-auth-config` and
+    ;; `capabilities-test/every-capability-key-declares-its-owner` already
+    ;; take about retired spellings: they resolve to nothing.
+    (is (= "/p/demo/api/projects"
            (:webapp/path (webapp/addressed "/p/demo"
                                            {:webapp/path "/api/projects"
-                                            :webapp/from-origin true})))))
+                                            :webapp/from-origin true})))
+        "a retired marker waives nothing while reading as though it does —
+         which is worse than its absence, so it reads as absent"))
   (testing "an absolute url is still left alone, whatever base is named"
     (is (= "https://other.example/api/x"
            (:webapp/path (webapp/addressed "/p/demo"

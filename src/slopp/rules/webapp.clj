@@ -388,15 +388,17 @@
                        :when (string? p)]
                    (cond-> {:path p
                             :form (symbol (str nsx) (str (:name e)))}
-                     ;; carried rather than filtered here: a from-origin path is
-                     ;; still what a screen LOADS, so the surface report wants
-                     ;; it. Only the served join skips it, because the origin is
-                     ;; not this store's to answer for
-                     (:webapp/from-origin node) (assoc :from-origin true)
-                     ;; a request naming its own base is the general case of
-                     ;; the line above, and is carried for the same reason:
-                     ;; the surface report wants every path a screen LOADS,
-                     ;; and only the served join skips it
+                     ;; CARRIED rather than filtered here: a request measured
+                     ;; from a base it names is still what a screen LOADS, so
+                     ;; the surface report wants it. Only the served join skips
+                     ;; it, because that base is not this store's to answer for.
+                     ;;
+                     ;; `:webapp/from-origin` used to be carried beside this as
+                     ;; the empty case. It is GONE rather than honoured: the
+                     ;; boolean was an escape from a field that could not hold
+                     ;; two values, and a retired marker read by nothing is
+                     ;; worse than its absence — it waives nothing while reading
+                     ;; as though it does.
                      (contains? node :webapp/base) (assoc :own-base true)))))))
 
 (defn ^:export webapp-report
@@ -632,8 +634,12 @@
   runtime. A path measured from a base it names is addressed at whatever sits
   THERE, which is not this store or the declaration would be saying nothing.
 
-  `:webapp/from-origin` is the empty case of that and is honoured beside it
-  while its users migrate.
+  A base of `\"\"` is the empty case of that — the origin — which is what the
+  retired `:webapp/from-origin` boolean used to say. Nothing reads that flag
+  now: it was an escape from a field that could not hold two values, and once
+  the field holds any base the escape has no cause. A request still carrying it
+  is joined like any other and reported, which is the correct answer for a
+  marker that waives nothing.
 
   Every escape here is a DECLARATION rather than a silence, which is what keeps
   the finding list clearable — and a list nobody can clear is a list everybody
@@ -652,20 +658,15 @@
   ;; is that its findings can be.
   (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
                      (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path from-origin own-base]}]
+    (vec (remove (fn [{:keys [path own-base]}]
                    (or (contains? served path)
                        (str/includes? path "://")
                        ;; the same statement an absolute url makes, in the form
-                       ;; a MOUNTED app can actually write: measured from the
-                       ;; origin, so addressed at whatever sits there — which is
-                       ;; not this store, or the declaration says nothing
-                       from-origin
-                       ;; and its general case. A client-routed app switches
-                       ;; which upstream it reads without a page load, so the
-                       ;; base is route state on the request; a request that
-                       ;; names one is measured from THERE. from-origin is the
-                       ;; empty case of this and is kept only until its users
-                       ;; migrate
+                       ;; a MOUNTED app can actually write. A client-routed app
+                       ;; switches which upstream it reads without a page load,
+                       ;; so the base is route state on the request; one that
+                       ;; NAMES a base is measured from there, which is not this
+                       ;; store or the declaration says nothing
                        own-base))
                  (request-paths st)))))
 

@@ -488,7 +488,18 @@
         " to generate a client is the generating CONSUMER's question, asked"
         " against the document, and an endpoint does not know who will call it."
         " Drop the marker. If the endpoint answers something other than JSON,"
-        " that fact is `:rest/media-type`")})
+        " that fact is `:rest/media-type`")
+
+   "webapp/from-origin"
+   (str "a request now names the base it is measured from:"
+        " `:webapp/base \"\"` says exactly what this flag said, as a VALUE."
+        " Replace it. The boolean existed because `:webapp/base` was one"
+        " scalar per APP and an app calling two APIs needed one of them to be"
+        " an exception — so it was never about origins, it was a per-call"
+        " escape from a field that could not hold two values. The field holds"
+        " one per REQUEST now, so the escape has no cause and is gone rather"
+        " than deprecated: nothing reads it, and a request still carrying it"
+        " is addressed under the app's base like any other")})
 
 (def ^:export retired-markers
   "The marker renames of the `:web/*` → owning-capability wave, as
