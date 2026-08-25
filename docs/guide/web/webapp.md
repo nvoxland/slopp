@@ -163,7 +163,9 @@ saying nothing.
 ### A load that belongs to no screen is declared too
 
 ```clj
-:webapp/session-loads {:modules {:request (fn [state] {:webapp/path "/api/modules"})
+:webapp/session-loads {:modules {:request (fn [state params]
+                                             {:webapp/path "/api/modules"
+                                              :webapp/base (str "/p/" (:slug params))})
                                  :derive  :names}
                        :user    {}}
 ```
@@ -173,8 +175,17 @@ boot first because a session request reads the state boot established (a token,
 say), and routing last because the first screen may read a session load and
 rendering before they are in flight shows a flash of empty chrome.
 
-A session `:request` takes **state** where a screen's takes **params**: a
-session load has no address, so there are no captures to hand it. A nil request
+A session `:request` takes **state** *and* **the route captures of the address
+the app started at**. A session load has no address of its own -- which is not
+the same as being independent of the address. A hub whose upstream is chosen by
+the slug in the url has a nav pane that is session-scoped and address-dependent
+at once; without the captures it asks the origin, which that hub does not serve,
+and the pane stays empty for the life of the session.
+
+Matching is not rendering, so this costs neither ordering reason above: the
+address is turned into captures before the session loads, and the screen is
+still shown last. Captures are `{}` when the app started at no address, never
+nil. A nil request
 declines, which is how a load waits for a sign-in. Declaring one with no
 `:request` -- `:user` above -- scopes it without starting it, for the load you
 begin yourself.

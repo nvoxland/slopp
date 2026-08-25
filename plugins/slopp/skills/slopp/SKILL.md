@@ -2089,12 +2089,16 @@ declare the app; slopp owns the loop.
   "state is wiped": the reader who does moves the value INTO `:loads` to protect
   it, which is the one action that makes it start dying on every navigation.
 - **A load that belongs to no screen is DECLARED**, and slopp starts it at page
-  load: `:webapp/session-loads {:modules {:request (fn [state] {…}) :derive …}}`.
-  Its `:request` takes STATE where a screen's takes params — a session load has
-  no address, so there are no captures to hand it. Declaring one with no
-  `:request` scopes it without starting it, for the load you begin yourself
-  after a sign-in. This is what stops a nav rail being the last thing forcing
-  `:cljs` on an app.
+  load: `:webapp/session-loads {:modules {:request (fn [state params] {…})
+  :derive …}}`. Its `:request` takes STATE **and the route captures of the
+  address the app started at** — because *no address OF ITS OWN* is not the
+  same as *independent of THE address*. A hub whose upstream is chosen by the
+  slug in the url has a nav pane that is session-scoped and address-dependent
+  at once; without the captures it asked the origin, got a 404, and showed an
+  empty pane for the life of every session. Captures are `{}` when there is no
+  address, never nil. Declaring a load with no `:request` scopes it without
+  starting it, for the one you begin yourself after a sign-in. This is what
+  stops a nav rail being the last thing forcing `:cljs` on an app.
 - **Read a load with `load-status` AND `load-value`, never value alone.** Four
   states — `:absent :loading :ready :failed` — because "nobody asked" and
   "answered nil" are different facts and `(if (:data s) …)` cannot tell them
@@ -2388,11 +2392,14 @@ at that rather than spelling the wrapping, or the tool and your tests wire the
 app two different ways and each passes against its own reconstruction; there is deliberately no session between tool calls, so a script
 is the whole interaction and the same script reproduces the same screen
 (`trace true` shows the screen after every step of one run). A page may
-declare `:boot (fn [state] state')` — its entry point's state transform — and
-`open!` runs it once, the way a browser runs an app's entry at page load: the
-loads that belong to no particular screen START headlessly too, so their
-loading states show instead of an absence nothing can distinguish from
-never-asked. (`open!` is `!`-named for exactly that reason.)
+declare `:boot (fn [state url] state')` — its entry point's state transform,
+handed the ADDRESS the session opened at (nil without one) — and `open!` runs
+it once, the way a browser runs an app's entry at page load: the loads that
+belong to no particular screen START headlessly too, so their loading states
+show instead of an absence nothing can distinguish from never-asked. The url is
+passed because a session-scoped load can be independent of every SCREEN and
+still depend on which tenant the ADDRESS names; the browser's `start!` has it
+before routing for the same reason, so both producers answer identically. (`open!` is `!`-named for exactly that reason.)
 
 **How to read a screen — one rule.** Plain text is the page's words,
 HTML-escaped, so page text can never be mistaken for markup; an UNPREFIXED tag
