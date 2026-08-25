@@ -650,6 +650,23 @@
   counted clean."
   [store]
   (let [refs   (ui-route-refs store)
+        ;; the refs this check could answer for at all — a computed path is
+        ;; already :unresolved before anything here looks at it
+        literal (remove #(= :unresolved (:kind %)) refs)
+        ;; **When the app rewrites its own links, the join below cannot be made.**
+        ;; `slopp.webapp/prefix-links` runs at render, so an `:href` literal is in
+        ;; APP space while the served table is in SERVER space, and the prefix
+        ;; between them is route state — which no static read can supply.
+        rewriters (rules.webapp/self-prefixed-links store)
+        why     (when (seq rewriters)
+                  (str "this store rewrites its own links —"
+                       " slopp.webapp/prefix-links is called by "
+                       (str/join ", " (map str rewriters))
+                       " — so an :href literal is in APP space while the route"
+                       " table is in SERVER space, and the prefix between them"
+                       " is route state. Write links against the routes your"
+                       " app DECLARES and this join resolves with no rewriting"
+                       " at all"))
         routes (endpoints store)
         ;; a trailing slash on the value is trimmed, because the join below adds its
         ;; own: `public/` would build `public//app.css`, which no manifest holds,
@@ -721,8 +738,29 @@
                                  (some #(str/starts-with? (str (:path %)) path)
                                        client-rows)))
                     false))]
-    {:dangling   (vec (remove served? (remove #(= :unresolved (:kind %)) refs)))
-     :unresolved (filterv #(= :unresolved (:kind %)) refs)}))
+    ;; **When the app rewrites its own links, this join cannot be made at all.**
+    ;; `slopp.webapp/prefix-links` runs at render, so an `:href` literal is in
+    ;; APP space while everything above is in SERVER space, and the prefix
+    ;; between them is route state — which no static read can supply.
+    ;;
+    ;; The unresolved bucket is exactly right and already exists: a ref this
+    ;; check cannot answer for, NAMED, `:severity :info`, never counted clean.
+    ;; Reporting them as dangling would be false and would spend the
+    ;; credibility of every other finding here — measured at 23 in one store,
+    ;; all correct at runtime. Dropping them would turn the guarantee off with
+    ;; nothing saying so, which is the failure this file keeps meeting.
+    ;; The unresolved bucket is exactly right for a rewritten link and already
+    ;; exists: a ref this check cannot answer for, NAMED, `:severity :info`,
+    ;; never counted clean. Reporting them as dangling would be false — 23 of
+    ;; them in one store, every one correct at runtime — and would spend the
+    ;; credibility of every other finding here. Dropping them would turn the
+    ;; guarantee off with nothing saying so, which is the failure this file
+    ;; keeps meeting from every other direction.
+    {:dangling   (if why [] (vec (remove served? literal)))
+     :unresolved (into (filterv #(= :unresolved (:kind %)) refs)
+                       (when why
+                         (map #(assoc % :kind :unresolved :why why)
+                              (remove served? literal))))}))
 
 (defn http-dangling-route-refs-check
   "Done-advisory (D-web-html): rendered links/forms targeting a path no

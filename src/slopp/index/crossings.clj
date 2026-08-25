@@ -50,7 +50,15 @@
                  route; query_surface reads the same metadata the gates enforce"
     :blind      "the SERVED table is built from interned vars in the running
                  process, not from the store, so a route can outlive its
-                 definition until the host reloads"}
+                 definition until the host reloads.
+
+                 And a store that calls `slopp.webapp/prefix-links` itself has
+                 NO link check at all: its :href literals are in app space
+                 while the table is in server space, and the prefix between
+                 them is route state. That is now DECLARED rather than silent —
+                 every literal lands in :unresolved carrying the reason — but
+                 declared is not checked, and this is the shape where a report
+                 says 'cannot answer' and a reader hears 'fine'"}
 
    {:kind       :wire/json
     :leaves     "a declared request/response contract"

@@ -904,3 +904,49 @@
         (is (= :content (:kind (es "/css/app.css"))) (pr-str es))
         (is (= '[demo.api/orders demo.pages/stylesheet]
                (sort (map :handler (vals es)))))))))
+
+(deftest an-app-that-REWRITES-its-own-links-makes-the-join-unresolvable
+  ;; The blindness a consuming store measured: it applies its own prefix at
+  ;; render (`slopp.webapp/prefix-links` with a project-relative table), so an
+  ;; `:href` literal is in APP space and the served table is in SERVER space.
+  ;; Every one of its 23 links read as dangling and every one worked.
+  ;;
+  ;; Reporting them as dangling is the wrong answer twice: they are not
+  ;; dangling, and 23 findings nobody can clear spend the credibility of every
+  ;; other finding in the list. Silently passing them is worse — the guarantee
+  ;; would stop applying with nothing saying so.
+  ;;
+  ;; So they become UNRESOLVED: named, `:severity :info`, never counted clean.
+  ;; The same bucket a computed path already lands in, for the same reason —
+  ;; this check cannot answer, and says which.
+  (let [view (str "(defn nav \"N.\" [_s]\n"
+                  "  [:nav [:a {:href \"/store/nope\"} \"Typo\"]])\n")
+        app  (str "(defn ^:app/entry app \"A.\" []\n"
+                  "  {:webapp/routes [[\"/store\" nav]]})\n")]
+
+    (testing "WITHOUT self-prefixing, an unserved literal dangles as it always did"
+      (let [st (store/ingest (store/empty-store) 'shop.ui
+                             (str "(ns shop.ui)\n\n" view "\n" app))
+            {:keys [dangling]} (rules.http/dangling-route-refs st)]
+        (is (contains? (set (map :path dangling)) "/store/nope")
+            (str "the control: without it this MUST dangle, or the assertion"
+                 " below holds for a reason that has nothing to do with"
+                 " prefixing: " (pr-str dangling)))))
+
+    (testing "WITH it, the same literal is unresolved and NAMES why"
+      (let [st (store/ingest (store/empty-store) 'shop.ui
+                             (str "(ns shop.ui\n"
+                                  "  (:require [slopp.webapp :as webapp]))\n\n"
+                                  "(defn chrome \"C.\" [s body]\n"
+                                  "  (webapp/prefix-links \"/p/x\" [\"/store\"] body))\n\n"
+                                  view "\n" app))
+            {:keys [dangling unresolved]} (rules.http/dangling-route-refs st)]
+        (is (not (contains? (set (map :path dangling)) "/store/nope"))
+            (str "a link this check cannot resolve is not a link it knows is"
+                 " broken: " (pr-str dangling)))
+        (let [row (first (filter #(= "/store/nope" (:path %)) unresolved))]
+          (is (some? row) (pr-str unresolved))
+          (is (re-find #"prefix-links" (str (:why row)))
+              (str "and the reason has to name the mechanism, or the reader"
+                   " cannot tell this from an ordinary dynamic path: "
+                   (pr-str row))))))))

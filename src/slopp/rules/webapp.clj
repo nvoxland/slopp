@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
@@ -836,3 +836,43 @@
              :let  [cljs (page-cljs-reach st ns)]
              :when (seq cljs)]
          {:page page :cljs cljs})))
+
+(defn ^{:export "slopp.rules"} self-prefixed-links
+  "The forms in which this store calls `slopp.webapp/prefix-links` itself,
+  sorted — `[]` when it does not.
+
+  **This is the fact that decides whether a literal `:href` can be joined
+  against the served table at all.** `prefix-links` rewrites links at render,
+  so a store that calls it writes hrefs in APP space while the route table is
+  in SERVER space. The two are the same only when the prefix is empty, and the
+  check has no way to know the prefix — it is route state, not configuration.
+
+  Measured in the consuming store: 23 literal links, every one correct at
+  runtime, every one reported as dangling. Both available answers were wrong.
+  Reporting them as broken spends the credibility of every other finding in a
+  list whose whole value is that its findings can be cleared; passing them
+  silently turns the guarantee off with nothing saying so. Naming the cause is
+  the third answer, and it is the one this makes possible.
+
+  **The alias is RESOLVED rather than matched by name.** A symbol called
+  `prefix-links` in somebody else's namespace is a coincidence; a call that
+  resolves to slopp's own fn is a declaration. That distinction is the
+  difference between a rule and a guess, and this rule exists to stop a report
+  from being a guess.
+
+  Answers the FORMS rather than a boolean, so a reader is told where to look —
+  and so this can grow into \"which links\" without changing its shape."
+  [st]
+  (vec (sort-by str
+                (distinct
+                 (for [nsx  (keys (:namespaces st))
+                       :let [aliases (edit/require-aliases st nsx)]
+                       e    (store/forms st nsx)
+                       :let [sx (try (store/form-sexpr (:node e))
+                                     (catch Exception _ nil))]
+                       node (tree-seq coll? seq sx)
+                       :when (and (symbol? node)
+                                  (= "prefix-links" (name node))
+                                  (when-let [q (some-> (namespace node) symbol)]
+                                    (= 'slopp.webapp (get aliases q q))))]
+                   (symbol (str nsx) (str (:name e))))))))
