@@ -5290,3 +5290,82 @@ Worth keeping as a shape: **the finding travelled the wrong way to be luck.** It
 did not come from the fix; it came from a paragraph explaining a fix that store
 cannot use. Stating a default out loud repaired callers that will never call the
 thing the default belongs to.
+
+## D-response-document (2026-08-24, user decision) — `:rest/response` describes the DOCUMENT, and `:rest/media-type` owns the envelope
+
+**Nathan: "now do the /api/contracts :rest/response :string problem."**
+
+Reported by the consuming store, who declined to propose a fix and were right
+not to — the answer was one layer under where the symptom appeared.
+
+### The symptom, measured through a real consumer
+
+`/api/contracts` declared `:rest/response :string`. It answers EDN and
+serializes its own body (`:http/raw`, `pr-str`), so:
+
+```
+the check on the raw body      -> holds
+the check on the decoded map   -> "should be a string"
+```
+
+and the decoded map is what a consumer works with. **So the check either failed
+on what the consumer had, or passed by asserting that text is text.** Their
+words for it: `rest-unconstrained-contract` one level up — a type that says
+nothing, and invisible to the rule that reports exactly that, because
+`unconstrained-contract-fields` looks for `:map` and `:any` and `:string` is
+neither.
+
+### The cause, which is not the endpoint
+
+Their diagnosis was right: *the schema language was describing two different
+things at once — the envelope and the document.* And `:rest/media-type` already
+owns the envelope.
+
+**For every ORDINARY endpoint the schema already described the document.**
+`check-response` round-trips a handler's return through JSON before judging,
+precisely so it judges what arrives. Only an endpoint that serializes its OWN
+body put the bytes under the schema — so `:string` was not a bad declaration on
+a good design, it was the only true declaration available in a design that had
+never distinguished the two.
+
+### The fix
+
+`slopp.rest.contract/arrived` — one function that says what a consumer ends up
+holding, given how the endpoint answers:
+
+| how it answers | what arrives |
+|---|---|
+| ordinary | the handler's value through a real JSON round trip |
+| raw + `application/edn` | the envelope read with `clojure.edn/read-string` |
+| raw + `application/json` | the envelope parsed |
+| raw + anything else | the string as it stands |
+
+That last row is what makes `:string` honest again: an endpoint that really
+answers `text/plain` says `:string` and is really checked.
+
+`check-response` gained an optional third argument for it; `dispatch` passes
+`{:raw? :media-type}` from the route row, because that is the only place
+holding both the schema and the envelope.
+
+**The client half moved with it.** `render-check` transformed through
+`mt/json-transformer` unconditionally — right for JSON, a second opinion about
+types for EDN, which never suffered the damage the transformer exists to undo.
+`render-wrapper` had already learned this when `:rest/media-type` landed; the
+check had not, and **the mistake stayed invisible precisely because the one EDN
+endpoint declared `:string`** — a string survives any transformer, so the
+question was unreachable until the endpoint got a real schema. Fixing the
+declaration is what exposed the generator.
+
+### `:rest/unconstrained-ok` on it, and it is PERMANENT
+
+Three fields are `:any`: `:request` and `:response` carry malli SCHEMAS as
+values, and `:auth` is an app's own policy grammar. The tighter check a reader
+reaches for is a predicate — *is this a schema malli can build?* — and **a
+predicate cannot be PUBLISHED.** This document is data a consumer reads and
+generates from, so a `[:fn …]` in it arrives as something they cannot evaluate
+or trust. The constraint is the publishing, and publishing is the point. No
+expiry, per `D-doc-markdown`'s neighbouring rule about inventing one.
+
+Every other entry carries a `:doc`, because `rest-undocumented-contract` asked
+and was right to: this document is all a consumer generating a client can read,
+and a type says shape rather than meaning.

@@ -147,6 +147,26 @@ Decoded **in place**, so your handler reads `:path-params`, `:query-params` and
 
 `?depth=banana` is a 400 before your handler runs.
 
+### `:rest/response` describes the document
+
+Not the bytes. For an ordinary endpoint that is automatic -- the boundary
+round-trips your handler's return value through the wire before judging it, so
+the schema describes what a consumer receives.
+
+For an endpoint that serializes its own body (`:http/raw` with a declared
+`:rest/media-type`), the boundary decodes the envelope first. So this is a real
+check rather than a tautology:
+
+```clojure
+;; answers application/edn, :http/raw, body already pr-str'd
+:rest/response [:map [:endpoints [:sequential [:map ...]]]]
+```
+
+A media type slopp cannot decode leaves the body a string, and then
+`:rest/response :string` is an honest description of an endpoint that really
+answers text -- rather than a type that is true of any envelope and says nothing
+about what is inside it.
+
 ### The contract is closed
 
 A key the contract does not name is a 400 that names the key.

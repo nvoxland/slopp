@@ -1515,6 +1515,15 @@ Decoded **in place**: your handler reads `:path-params`, `:query-params` and
 `:body` where it always did and finds them typed. `?depth=banana` against a
 declared `[:depth :int]` is a 400 before your handler runs.
 
+**`:rest/response` describes the DOCUMENT, not the bytes.** For an ordinary
+endpoint that is automatic — the boundary round-trips your handler's return
+through the wire before judging it. For one that serializes its OWN body
+(`:http/raw` + a `:rest/media-type`), the boundary DECODES the envelope first,
+so your schema still describes what a consumer reads. A media type slopp cannot
+decode leaves the body a string, and then `:rest/response :string` is an honest
+description of an endpoint that really answers text — rather than a type that is
+true of any envelope and silent about everything inside it.
+
 **A request contract is CLOSED: a key it does not name is a 400 that names the
 key.** This is the one place a malli schema in slopp says what is FORBIDDEN
 rather than only what is required — everywhere else (responses, `:malli/schema`
