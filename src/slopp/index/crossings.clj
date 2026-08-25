@@ -164,6 +164,12 @@
                  a rename on either side compiles, serves, and renders a blank
                  page.
 
+                 CURRENT rather than permanent, and saying which is the point:
+                 **a ClojureScript test runner would end it**, and so would
+                 moving the two names into one .cljc value both sides read. The
+                 second needs no new tooling and is the cheaper of the two. If
+                 either lands, delete this paragraph rather than annotating it.
+
                  And the BUNDLE url is taken on trust. The marker's value is a
                  path this store may or may not serve; a typo is a script tag
                  pointing at a 404, which is the same blank page from a
