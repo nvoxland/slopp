@@ -5369,3 +5369,73 @@ expiry, per `D-doc-markdown`'s neighbouring rule about inventing one.
 Every other entry carries a `:doc`, because `rest-undocumented-contract` asked
 and was right to: this document is all a consumer generating a client can read,
 and a type says shape rather than meaning.
+
+## D-contract-v2 (2026-08-25, user decision) — the version moves, and there is no compatibility path
+
+**Nathan: "there is no consumer besides slopp-ui at this point, and I'd rather
+manually update them than add in compatibility code."**
+
+### What version 2 contains, and why it is ONE bump
+
+1. `:handler`, `:doc`, `:media-type` and `:auth` become REQUIRED. All four
+   arrived while the version stayed 1, so a version-1 document was never one
+   shape and a consumer could not tell which it was about to get.
+2. `:effectful?` — the fact a consumer wants before calling anything.
+
+One bump for both, because every bump costs a consumer a migration and there is
+no reason to charge them twice.
+
+### `:effectful?` is DERIVED, and that decision is the interesting one
+
+Publishing the `:http/effectful` marker verbatim would have shipped `false`
+everywhere: **slopp's own ten endpoints declare it zero times.** A consuming
+store's arming gate would have gone from inert-on-nil to inert-on-FALSE, which
+is worse — false looks like an answer.
+
+So it is `(or (:http/effectful m) (not (safe-method? method)))`. Over-warns on a
+POST that only searches, which is the safe direction for a gate whose job is to
+make someone press twice.
+
+**`:http/effects` is deliberately not a third arm**: `http-unsafe-get` refuses a
+`:get`/`:head` that declares any, so effects imply a non-safe method already and
+that arm could never decide anything. Caught before writing it, which is the
+`a check whose output cannot vary` shape one layer earlier than usual.
+
+### No compatibility path, deliberately
+
+`supported-contract-version` stays a single number. A document at any other
+version yields no wrappers and a problem naming both — **which is the field
+finally doing its job.** Its expiry is written into it: the day a second
+consumer exists, or a producer that cannot be upgraded in step, it becomes a
+set and `contract->plan` grows the defaults. Not before.
+
+### Two things the consuming store taught after it shipped
+
+**A version bump is the one change that cannot be discovered by regenerating,
+because regenerating is what it blocks.** Their generator refused —
+`{:issue :unsupported-contract-version :version 2 :supported 1}` — and refused
+WITHOUT writing, leaving their three `wire.*` namespaces intact. A generator
+that had half-written would have been much worse. But it means a bump has an
+ordering constraint slopp did not have before: every consumer's generator
+refuses until they take the new jar.
+
+**Prefer deriving from a field that has been there since version 1 over
+consuming a new one.** They fixed their arming gate from `:method` before this
+landed. Had they waited for `:effectful?`, the gate would work against slopp2
+and still be inert for every version-1 producer — including their own hub,
+whose only POST endpoints are on it. Their sentence: *the derivation works on
+documents older than the decision.* That is a better answer than negotiating a
+version, and it is available more often than it looks.
+
+### And a process failure worth recording, since it is mine
+
+I told the consuming store that publishing `:effectful?` needed a conversation
+BECAUSE they were the affected consumer — then had that conversation with
+Nathan, shipped, and did not tell them. Because the dev host is `--live`, the
+landed change published version 2 from slopp's own server within minutes, and
+they found out from a tool refusing to run.
+
+**Landing a wire-format change on a `--live` host is a deploy.** `done` lands to
+the trunk, the host reloads from the trunk, and any consumer pointed at it sees
+the new shape immediately — with no announcement in between and no step that
+looks like one.

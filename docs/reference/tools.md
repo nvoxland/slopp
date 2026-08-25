@@ -154,10 +154,11 @@ The producer serves `slopp.http.contract/contract-document` over its own
 namespace list:
 
 ```clojure
-{:slopp/contract-version 1
+{:slopp/contract-version 2
  :endpoints [{:method :get :path "/api/timeline" :name timeline
               :handler slopp.api.endpoints/timeline
               :doc "GET /api/timeline -- milestones newest first, plus the working set."
+              :media-type "application/json" :effectful? false :auth :public
               :request nil :response [:map [:milestones …]]}]}
 ```
 
@@ -196,7 +197,18 @@ Three things worth knowing:
   both.
 - **The version is there to be refused.** An unrecognised
   `:slopp/contract-version` generates nothing and reports a problem, rather than
-  guessing at a shape it doesn't know.
+  guessing at a shape it doesn't know. So it has to *move* when the shape does:
+  adding a required key moves the version, or the key ships `{:optional true}`.
+  Version 1 gained four keys without moving, and a consumer fronting several
+  producers could not tell which shape it had -- a constant version is a field
+  that cannot do the one job it exists for. `generate_client` reads exactly one
+  version and refuses every other; there is deliberately no compatibility path,
+  so a producer and its consumers upgrade together.
+- **`:effectful?` is derived, not a marker read back.** True when the endpoint
+  declares `:http/effectful` *or* its method is not safe -- so it is answered
+  for every endpoint rather than only the ones whose author wrote something. It
+  over-warns on a POST that only searches, which is the safe direction for a
+  caller deciding whether to confirm before firing.
 
 ## The oracle
 

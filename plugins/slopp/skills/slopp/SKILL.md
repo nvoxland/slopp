@@ -2206,8 +2206,9 @@ boundary — the producer publishes its shape and the consumer generates from
 that. Neither store reads the other.
 
 - **Producer: serve `slopp.http.contract/contract-document`.** It takes your
-  served namespace list and returns `{:slopp/contract-version 1 :endpoints […]}`
-  — method, path, name, the handler's QUALIFIED symbol, its docstring, and the
+  served namespace list and returns `{:slopp/contract-version 2 :endpoints […]}`
+  — method, path, name, the handler's QUALIFIED symbol, its docstring,
+  `:media-type`, `:effectful?`, `:auth`, and the
   request/response schemas as VALUES. Serve it as EDN with `:http/raw true`,
   `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
   so a generated wrapper reads text rather than attempting JSON. It ships in the
@@ -2270,7 +2271,18 @@ that. Neither store reads the other.
   by two endpoints arrives inlined in both.
 - **The version is there to be refused.** An unrecognised
   `:slopp/contract-version` generates nothing and reports a problem, rather than
-  guessing at a shape it doesn't know.
+  guessing at a shape it doesn't know. **So it has to MOVE when the shape does:
+  adding a REQUIRED key moves the version, or the key ships `{:optional
+  true}`.** Version 1 gained four keys without moving and a consumer fronting
+  several producers could not tell which shape it had — a constant version is a
+  field that cannot do the one job it exists for. `generate_client` reads
+  exactly one version and refuses every other; there is deliberately no
+  compatibility path, so a producer and its consumers upgrade together.
+- **`:effectful?` is DERIVED, not a marker read back.** True when the endpoint
+  declares `:http/effectful` OR its method is not safe — so it is answered for
+  every endpoint rather than only the ones whose author wrote something. It
+  over-warns on a POST that only searches, which is the safe direction for a
+  caller deciding whether to confirm before firing.
 - **Pass the served-namespace list to your performers as data.** Only the
   server knows what it serves. Thread it through `:http/perform-ctx` — reaching
   for it from a page namespace inverts the dependency, and forgetting it
