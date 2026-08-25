@@ -151,6 +151,24 @@
 
        :else nil))))
 
+(def ^:private ^:dynamic *response-facts*
+  "Bound to an atom during tools/call so whoever shapes the answer can record
+  what it DID: `text!` knows the size gate cut a payload, `told!` knows the
+  knowledge differential withheld one, and `query_detail` knows which id it
+  went back for. None of that is in the return value, and all of it happens
+  several frames below `handle!`, which is the only layer that records a call
+  at all.
+
+  A recorder rather than a return value because the alternative is a second
+  value threaded out of every tool branch that nothing else reads. It is
+  write-only and per-call: a nil binding (a direct `text!` in a test) simply
+  drops the note." nil)
+
+(defn- note-response!
+  "Record `m` about the response being shaped, if anyone is listening."
+  [m]
+  (when *response-facts* (swap! *response-facts* merge m)))
+
 (defn- text! [x]
   (when @strict-boundary?
     (when-let [leak (boundary-leak x)]
@@ -175,6 +193,11 @@
                   full
                   (if-let [sess *spool-session*]
                     (let [id  (spool! sess full)
+                          ;; every branch below withheld part of this answer,
+                          ;; and the id is what a later query_detail names — so
+                          ;; the trim can be scored against the re-fetch it
+                          ;; provoked instead of assumed to have paid
+                          _   (note-response! {:trimmed? true :spooled id})
                           ;; the spool id travels INTO the marker, so the in-band signal is
                           ;; actionable rather than only informative: a consumer that
                           ;; sees :truncated can fetch the rest without parsing the
@@ -650,11 +673,16 @@
         h [(get @session ::ask 0) (hash payload)]]
     (if (and (= h (get-in @session [::told k]))
              (< 130 (count (pr-str payload))))
-      {:unchanged true
-       :view (str tool (when (:ns a) (str " " (:ns a)))
-                  (when (:name a) (str "/" (:name a))))
-       :detail (spool! session (pr-str payload))
-       :note "identical to what this session already received — query_detail {id} if you have not"}
+      (let [id (spool! session (pr-str payload))]
+        ;; a stub is a withholding, not a saving, until nobody opens it —
+        ;; recorded through the same channel as a trim so one fold can ask
+        ;; both paths the question
+        (note-response! {:stub? true :spooled id})
+        {:unchanged true
+         :view (str tool (when (:ns a) (str " " (:ns a)))
+                    (when (:name a) (str "/" (:name a))))
+         :detail id
+         :note "identical to what this session already received — query_detail {id} if you have not"})
       (do (swap! session assoc-in [::told k] h)
           payload))))
 
@@ -1137,12 +1165,18 @@
                                             (if full?
                                               (query/query-source session (sym :ns))
                                               (gate (sym :ns)))))))
-      "query_detail" (if-let [full (get-in @session [::spool :entries (:id a)])]
-                            ;; the retrieval path must NOT re-trim its own payload
-                            {:content [{:type "text" :text full}]}
-                            (text! {:error (str "no spooled response " (:id a)
-                                                " — the spool keeps the last "
-                                                spool-cap " trimmed responses")}))
+      "query_detail" (do
+                           ;; WHAT it went back for, recorded whether or not the
+                           ;; spool still has it: a retrieval is the evidence a
+                           ;; withholding was paid for twice, and the tool that
+                           ;; minted this id is the one it should be charged to
+                           (note-response! {:detail-asked (:id a)})
+                           (if-let [full (get-in @session [::spool :entries (:id a)])]
+                             ;; the retrieval path must NOT re-trim its own payload
+                             {:content [{:type "text" :text full}]}
+                             (text! {:error (str "no spooled response " (:id a)
+                                                 " — the spool keeps the last "
+                                                 spool-cap " trimmed responses")})))
       "query_brief" (text! (told! session name a (query/query-brief session (sym :ns) (sym :name))))
       "query_slice" (text! (told! session name a
                                         (query/query-slice session (sym :ns) (sym :name)
@@ -1630,33 +1664,48 @@
     ;; slopp was NOT working — agent reasoning, non-slopp tools, the harness —
     ;; and it had no producer at all: measured over one real session, 78% of
     ;; the wall clock was invisible. turn_end folds the ring onto its delta.
-    (let [t0 (System/currentTimeMillis)
-          r  (binding [;; A smell is once-per-session and rarer, so it speaks first. The
-                       ;; thread reminder is DEFERRED rather than computed here: it
-                       ;; counts what the call is about to make un-landed, which does
-                       ;; not exist yet. `text!` forces it.
-                       *hint* (or (smells/track-hint! session
-                                                      (:name params)
-                                                      (:arguments params))
-                                  (delay (thread-hint! session (:name params))))
-                       *spool-session* session]
-               (try (call-tool! session params)
-                    (catch Exception e
-                      (assoc (text! (str "error: " (ex-message e)))
-                             :isError true))))
-          why (refusal-text r)]
+    (let [t0    (System/currentTimeMillis)
+          facts (atom {})
+          r     (binding [;; A smell is once-per-session and rarer, so it speaks first. The
+                          ;; thread reminder is DEFERRED rather than computed here: it
+                          ;; counts what the call is about to make un-landed, which does
+                          ;; not exist yet. `text!` forces it.
+                          *hint* (or (smells/track-hint! session
+                                                         (:name params)
+                                                         (:arguments params))
+                                     (delay (thread-hint! session (:name params))))
+                          *spool-session* session
+                          ;; what the ANSWER did — the trim, the withheld stub,
+                          ;; the id a retrieval went back for. Only the frames
+                          ;; that shape a response know those, and none of them
+                          ;; is on the path back to here.
+                          *response-facts* facts]
+                  (try (call-tool! session params)
+                       (catch Exception e
+                         (assoc (text! (str "error: " (ex-message e)))
+                                :isError true))))
+          why   (refusal-text r)]
       ;; after the call, so a tool that reads the ring (turn_end) never sees
       ;; its own half-finished entry
       (swap! session update :slopp.read.telemetry/calls (fnil conj [])
-             {:tool (:name params) :start t0 :end (System/currentTimeMillis)
-              ;; A REFUSAL and the reason it gave, from ONE derivation — see
-              ;; `refusal-text` for the two shapes it arrives in and for the
-              ;; deliberate under-count. The message rides along because a
-              ;; count with no cause can only ever support "read that tool's
-              ;; contract", which is the guess rather than the finding;
-              ;; `call-timing` bounds and truncates what reaches the delta.
-              :refused? (some? why)
-              :error    why})
+             (merge
+              {:tool (:name params) :start t0 :end (System/currentTimeMillis)
+               ;; A REFUSAL and the reason it gave, from ONE derivation — see
+               ;; `refusal-text` for the two shapes it arrives in and for the
+               ;; deliberate under-count. The message rides along because a
+               ;; count with no cause can only ever support "read that tool's
+               ;; contract", which is the guess rather than the finding;
+               ;; `call-timing` bounds and truncates what reaches the delta.
+               :refused? (some? why)
+               :error    why
+               ;; WHAT IT SENT, taken off the response itself rather than from
+               ;; whoever built it — characters on the wire, which is the unit
+               ;; the size gate and the payload fitter are both written in.
+               ;; The ring had a call's edges and its refusal, so it could say
+               ;; what slopp SPENT and never what it COST, and reads are 52%
+               ;; of the bill.
+               :chars    (count (get-in r [:content 0 :text] ""))}
+              @facts))
       {:jsonrpc "2.0" :id id :result r})
     "ping" {:jsonrpc "2.0" :id id :result {}}
     (when id

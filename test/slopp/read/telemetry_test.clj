@@ -172,3 +172,77 @@
       ;; the by-tool list already refuse to make
       (is (= [] (get-in (telemetry/call-timing [{:tool "done" :start 0 :end 1}])
                         [:refused :samples]))))))
+
+(deftest a-turns-reads-are-ranked-by-what-they-COST-and-a-trim-can-be-a-NET-LOSS
+  ;; The standing finding is that reads are 52% of the token bill and got the
+  ;; least optimization. The one lever shipped on that tier — the response
+  ;; trim — has been measured exactly once, by hand, off a single transcript:
+  ;; an 8,367-char trimmed history read plus a 21,676-char re-fetch, where
+  ;; sending the payload whole would have cost 21,676. That trim spent 30k to
+  ;; save nothing, and nothing in the system could tell that case from the one
+  ;; where the trim paid. This fold is what tells them apart, so the ways it
+  ;; can lie are the subject here rather than the arithmetic.
+  (let [cost telemetry/read-cost]
+    (testing "a turn nobody measured is not a turn that cost nothing — every
+              call recorded before the size existed carries no :chars, and a
+              zeroed record over those reads exactly like a measured zero"
+      (is (nil? (cost [])))
+      (is (nil? (cost [{:tool "done" :start 0 :end 10}]))))
+
+    (testing "tools rank by what they actually SENT, largest first — the tool
+              that costs the most may be the cheap one called a hundred times"
+      (let [r (cost [{:tool "query_slice" :chars 400}
+                     {:tool "query_rules" :chars 8000}
+                     {:tool "query_slice" :chars 600}])]
+        (is (= 9000 (:chars r)) (pr-str r))
+        (is (= [{:tool "query_rules" :n 1 :chars 8000}
+                {:tool "query_slice" :n 2 :chars 1000}]
+               (:by-tool r))
+            (pr-str r))))
+
+    (testing "a withholding nobody opened is the trim PAYING, and 0.0 is a
+              true statement about it — unlike the nil above"
+      (let [r (cost [{:tool "query_rules" :chars 8000 :trimmed? true :spooled "r1"}])]
+        (is (= 1 (:withheld r)) (pr-str r))
+        (is (= 0 (:refetched r)) (pr-str r))
+        (is (= 0.0 (:refetch-rate r)) (pr-str r))))
+
+    (testing "a trim the agent immediately re-fetched cost MORE than sending
+              the payload whole, and both halves of that sum are present"
+      (let [r (cost [{:tool "query_rules" :chars 8367 :trimmed? true :spooled "r1"}
+                     {:tool "query_detail" :chars 21676 :detail-asked "r1"}])]
+        (is (= 1 (:refetched r)) (pr-str r))
+        (is (= 21676 (:refetched-chars r)) (pr-str r))
+        (is (= 1.0 (:refetch-rate r)) (pr-str r))
+        (is (= 1 (:refetched (first (filter #(= "query_rules" (:tool %)) (:by-tool r)))))
+            (str "the re-fetch is charged to the tool that MINTED the id."
+                 " Charged to query_detail it would rank the retrieval path as"
+                 " the expensive one and leave every trimming tool clean: "
+                 (pr-str r)))))
+
+    (testing "a re-fetch naming an id this turn never minted is COUNTED, not
+              dropped — a turn boundary between the trim and the re-fetch is
+              not evidence that the trim paid"
+      (let [r (cost [{:tool "query_detail" :chars 900 :detail-asked "r99"}])]
+        (is (= 0 (:refetched r)) (pr-str r))
+        (is (= 1 (:refetched-elsewhere r)) (pr-str r))
+        (is (nil? (:refetch-rate r))
+            (str "nothing was withheld in this turn, so there is no rate to"
+                 " take — not a rate of none: " (pr-str r)))))
+
+    (testing "the dedup path asks the same question: an :unchanged stub the
+              agent had to open is a withholding that was paid for twice"
+      (let [r (cost [{:tool "query_slice" :chars 120 :stub? true :spooled "r2"}
+                     {:tool "query_detail" :chars 3000 :detail-asked "r2"}])]
+        (is (= 1 (:stubbed r)) (pr-str r))
+        (is (= 1 (:refetched r)) (pr-str r))))
+
+    (testing "the TURN record carries it, because the ring is cleared at
+              turn-end and the delta is the only place any of this survives"
+      (let [t (telemetry/call-timing [{:tool "query_rules" :start 0 :end 10
+                                       :chars 8000 :trimmed? true :spooled "r1"}])]
+        (is (= 8000 (get-in t [:reads :chars])) (pr-str t)))
+      (let [t (telemetry/call-timing [{:tool "done" :start 0 :end 10}])]
+        (is (not (contains? t :reads))
+            (str "an unmeasured turn must not carry a zeroed record: "
+                 (pr-str t)))))))

@@ -530,8 +530,11 @@
                 user   (assoc :user user)
                 note   (assoc :note note)
                 ;; where this ask's wall clock went — {:slopp-ms :outside-ms
-                ;; :top …}, folded by api.telemetry/call-timing from what the
-                ;; wire saw. Absent when nothing was called, never zeroed.
+                ;; :top …} — and what its answers cost to send, under :reads.
+                ;; Folded by slopp.read.telemetry/call-timing from what the
+                ;; wire saw. Absent when nothing was called, never zeroed; the
+                ;; read half is absent again when no call carried a size,
+                ;; because that turn was not measured rather than free.
                 timing (assoc :timing timing))]
     [(update store' :deltas conj delta) delta]))
 

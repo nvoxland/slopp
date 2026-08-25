@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.http.contract :as http.contract] [slopp.rest :as slopp.rest] [slopp.api.reads :as reads]))
+            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.http.contract :as http.contract] [slopp.rest :as slopp.rest] [slopp.api.reads :as api.reads]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -1048,9 +1048,9 @@
                                     " :http/auth :public}\n  home \"Home.\" [_] {:status 200})\n"))
                  (store/ingest 'demo.plain
                                "(ns demo.plain)\n\n(defn ^:unused-ok helper \"H.\" [x] x)\n"))]
-      (is (= '#{demo.api demo.pages} (set (reads/app-namespaces st)))
+      (is (= '#{demo.api demo.pages} (set (api.reads/app-namespaces st)))
           "a namespace declaring no endpoint contributes nothing")
-      (is (not-any? #(str/starts-with? (str %) "slopp.") (reads/app-namespaces st))
+      (is (not-any? #(str/starts-with? (str %) "slopp.") (api.reads/app-namespaces st))
           "slopp's own reviewer API is not this application's code")))
 
   (testing "a store declaring NO endpoints publishes an empty document"
@@ -1075,6 +1075,6 @@
                            (str "(ns demo.api)\n\n"
                                 "(defn ^{:http/path \"/things\" :http/method :get"
                                 " :http/auth :public}\n  h \"H.\" [_] {:status 200})\n"))]
-      (doseq [nsx (reads/app-namespaces st)]
+      (doseq [nsx (api.reads/app-namespaces st)]
         (is (seq (store/forms st nsx))
             (str nsx " is documented but has no forms in this store"))))))

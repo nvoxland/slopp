@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -2514,3 +2514,44 @@
     (is (nil? (#'mcp/app-note-for {:serving? false :stopped true
                                    :reason "http.enabled is false for this store"}))
         "a deliberate stop is not a failure")))
+
+(deftest ^:external the-ring-records-what-the-RESPONSE-did-not-only-what-it-cost-in-time
+  ;; The ring recorded a call's edges and whether it was refused, which
+  ;; answers what slopp SPENT and never what it SENT. Reads are 52% of the
+  ;; token bill, so a ledger with no response size in it cannot rank a single
+  ;; tool by what it actually costs — and the one lever on that tier, the
+  ;; size gate, silently trims and spools with nothing recording either.
+  ;;
+  ;; The re-fetch is the fact worth having: a trim that the agent immediately
+  ;; opens cost MORE than sending the payload whole. That has been measured
+  ;; exactly once, by hand, off one transcript. Recorded here it is a fold.
+  (let [sess (external/open!)]
+    (try
+      ;; the rule catalog is ~23k against an 8000-char gate, so this one is
+      ;; trimmed by construction rather than by a bet on a payload's size
+      (call! sess "query_rules" {})
+      (let [ring (:slopp.read.telemetry/calls @sess)
+            row  (last (filter #(= "query_rules" (:tool %)) ring))]
+        (is (pos-int? (:chars row))
+            (str "every answer carries what it cost to send: " (pr-str row)))
+        (is (true? (:trimmed? row)) (pr-str row))
+        (is (string? (:spooled row))
+            (str "and the retrieval id, so a later query_detail can be tied"
+                 " back to the tool that withheld this: " (pr-str row)))
+
+        (testing "the retrieval names what it went back FOR, which is the
+                  only way the trim can be scored against its own cost"
+          (call! sess "query_detail" {:id (:spooled row)})
+          (let [ring2 (:slopp.read.telemetry/calls @sess)
+                back  (last (filter #(= "query_detail" (:tool %)) ring2))
+                cost  (telemetry/read-cost ring2)]
+            (is (= (:spooled row) (:detail-asked back)) (pr-str back))
+            (is (< (:chars row) (:chars back))
+                (str "the re-fetch is bigger than the trimmed answer — which"
+                     " is the whole finding: " (pr-str [row back])))
+            (is (= 1 (:refetched cost)) (pr-str cost))
+            (is (= 1 (:refetched (first (filter #(= "query_rules" (:tool %))
+                                                (:by-tool cost)))))
+                (str "charged to the tool that withheld, not to the tool that"
+                     " fetched: " (pr-str cost))))))
+      (finally (ops/close! sess)))))
