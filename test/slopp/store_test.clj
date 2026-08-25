@@ -14,7 +14,7 @@
   SURVIVES a round trip through the log alone. `replay-delta` is the honest
   oracle for that, and a new op earns its place by replaying."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [rewrite-clj.node :as n]))
+            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [rewrite-clj.node :as n] [slopp.store.fields :as fields]))
 
 (def src "(ns foo)\n\n(defn add [x y]\n  (+ x y))\n\n;; a comment\n(def z 1)\n")
 
@@ -829,3 +829,41 @@
       (let [good (rewrite-clj.parser/parse-string "(def ^:export cat-alog \"D.\" [4])\n")
             [st' _] (store/apply-changeset st :replace 'sc.core {fid good} :prompt "fine")]
         (is (= 'cat-alog (:name (first (filter :name (store/forms st' 'sc.core))))))))))
+
+(deftest a-read-cost-is-its-own-journal-citizen-not-a-turn-that-is-not-one
+  ;; `:reads` rode the `:turn-end` delta because turns were already there. It
+  ;; inherited the rotation gate with them — a turn closes only when a user
+  ;; PROMPT arrived and a WRITE followed — so a read-only ask recorded nothing
+  ;; and an event-driven session recorded nothing, which are the two shapes
+  ;; where reads dominate. Measured the day it shipped: two stores, 321 and
+  ;; 118 closed turns, zero read records between them.
+  ;;
+  ;; The fix is not a wider turn. A `:turn-end` that is not a turn ending
+  ;; would be a lie in the journal, and turns bracket a user ask for reasons
+  ;; that have nothing to do with telemetry.
+  (let [st (-> (store/empty-store)
+               (store/record-read-cost {:chars 900 :calls 4 :withheld 0})
+               (store/record-read-cost {:chars 300 :calls 2 :withheld 1}))
+        ds (filter #(= :read-cost (:op %)) (store/deltas st))]
+    (is (= 2 (count ds)) (pr-str ds))
+    (is (= [{:chars 900 :calls 4 :withheld 0}
+            {:chars 300 :calls 2 :withheld 1}]
+           (mapv :reads ds))
+        (pr-str ds))
+
+    (testing "it carries the *session* sentinel, like every marker that is
+              not about one namespace — a scope put in :ns is flattened by
+              every consumer that reads :ns as a single symbol"
+      (is (every? #(= '*session* (:ns %)) ds) (pr-str ds)))
+
+    (testing "the chain is intact: a citizen that does not parent correctly
+              is one replay and merge cannot place"
+      (is (= (:id (first ds)) (:parent (second ds))) (pr-str ds))
+      (is (every? :at ds) (pr-str ds)))
+
+    (testing "and it is a MARKER — it changes no code, so a host that has not
+              loaded one is not behind, and foreign sync must not full-reload
+              on every sighting of it"
+      (is (contains? fields/markers :read-cost)
+          (str "an unregistered op makes merge-logs treat it as content: "
+               (pr-str fields/markers))))))

@@ -157,7 +157,8 @@
                                    (pos? n-re) (assoc :refetched n-re)))))
                         (sort-by (juxt (comp - :chars) :tool))
                         vec)]
-      {:chars               (reduce + 0 (map :chars sized))
+      {:calls               (count sized)
+       :chars               (reduce + 0 (map :chars sized))
        :withheld            withheld
        :trimmed             (count (filter :trimmed? calls))
        :stubbed             (count (filter :stub? calls))
@@ -167,6 +168,27 @@
        :refetch-rate        (when (pos? withheld)
                               (double (/ (count hits) withheld)))
        :by-tool             rows})))
+
+(def ^:export read-flush-calls
+  "How many recorded calls accumulate before the read ring is flushed to its
+  own delta — two hundred.
+
+  It is not a size limit. The record folds to per-TOOL rows, so a span of two
+  hundred calls and a span of ten thousand produce nearly the same delta;
+  what the threshold bounds is LOSS. The ring lives in the session, so
+  everything in it dies with the process, and a flush is the only thing that
+  makes a span durable.
+
+  Two hundred is roughly a long working ask here and well inside a session
+  that never rotates a turn at all. The number is a judgement call and the
+  measurement is insensitive to it: rows are SUMMED by the ledger, so the
+  width changes the resolution and not the totals.
+
+  A UNIFORM width is the point, and it is why this is a count rather than a
+  turn. Two stores with differently shaped turns — minutes here, hours in a
+  consumer driven by background events — produced rows that could not be
+  compared. Rows of two hundred calls are the same unit everywhere."
+  200)
 
 (defn ^:export call-timing
   "A turn's wall clock split into the part slopp spent working, the part it
@@ -209,50 +231,43 @@
                      (filter #(>= % idle-gap-ms))
                      (reduce + 0))
           live  (max 1 (- span idle))
-          reads (read-cost calls)
+          
           by    (->> (group-by :tool calls)
                      (map (fn [[t cs]] {:tool t :n (count cs)
                                         :ms (reduce + 0 (map #(- (:end %) (:start %)) cs))}))
                      (sort-by (juxt (comp - :ms) :tool))
                      vec)]
-      (cond->
-       {:calls      (count calls)
-        :slopp-ms   in
-        :outside-ms (- span in idle)
-        :idle-ms    idle
-        :elapsed-ms span
-        :slopp-share (str (int (* 100 (/ in (double live)))) "%")
-        :top        (vec (take 5 by))
-        ;; REFUSED calls — a malformed match, a lint error in the form being
-        ;; written, an arity break. Each is a whole round trip that produced
-        ;; nothing, and they live in the 78% of wall clock spent outside slopp,
-        ;; where nothing had ever counted them. Always present, zero when
-        ;; clean: an absent key would read as unmeasured.
-        ;;
-        ;; `:samples` carries what they SAID. The count alone can only ever
-        ;; support "read that tool's contract"; a classification table written
-        ;; before seeing real messages would be invented rather than derived,
-        ;; and the withdrawn :positional-form-access advisory is what that
-        ;; costs. Bounded and truncated, because a refusal can hand back a
-        ;; whole form and this rides on a delta forever.
-        :refused    (let [r (filter :refused? calls)]
-                      {:count (count r)
-                       :pct   (int (* 100 (/ (count r) (double (count calls)))))
-                       :by-tool (vec (sort-by (juxt (comp - :n) :tool)
-                                              (map (fn [[t cs]] {:tool t :n (count cs)})
-                                                   (group-by :tool r))))
-                       :samples (->> r
-                                     (keep (fn [{:keys [tool error]}]
-                                             (when error
-                                               (let [s (str error)]
-                                                 {:tool  tool
-                                                  :error (subs s 0 (min (count s)
-                                                                        refusal-sample-chars))}))))
-                                     (take refusal-samples)
-                                     vec)})}
-        ;; ABSENT when the ring carries no response sizes, unlike `:refused`
-        ;; above — the difference is which question the empty case answers.
-        ;; A turn with no refusals was measured and had none; a turn whose
-        ;; calls carry no `:chars` was never measured at all, and a zeroed
-        ;; cost would read as the cheapest turn on record.
-        reads (assoc :reads reads)))))
+      {:calls      (count calls)
+       :slopp-ms   in
+       :outside-ms (- span in idle)
+       :idle-ms    idle
+       :elapsed-ms span
+       :slopp-share (str (int (* 100 (/ in (double live)))) "%")
+       :top        (vec (take 5 by))
+       ;; REFUSED calls — a malformed match, a lint error in the form being
+       ;; written, an arity break. Each is a whole round trip that produced
+       ;; nothing, and they live in the 78% of wall clock spent outside slopp,
+       ;; where nothing had ever counted them. Always present, zero when
+       ;; clean: an absent key would read as unmeasured.
+       ;;
+       ;; `:samples` carries what they SAID. The count alone can only ever
+       ;; support "read that tool's contract"; a classification table written
+       ;; before seeing real messages would be invented rather than derived,
+       ;; and the withdrawn :positional-form-access advisory is what that
+       ;; costs. Bounded and truncated, because a refusal can hand back a
+       ;; whole form and this rides on a delta forever.
+       :refused    (let [r (filter :refused? calls)]
+                     {:count (count r)
+                      :pct   (int (* 100 (/ (count r) (double (count calls)))))
+                      :by-tool (vec (sort-by (juxt (comp - :n) :tool)
+                                             (map (fn [[t cs]] {:tool t :n (count cs)})
+                                                  (group-by :tool r))))
+                      :samples (->> r
+                                    (keep (fn [{:keys [tool error]}]
+                                            (when error
+                                              (let [s (str error)]
+                                                {:tool  tool
+                                                 :error (subs s 0 (min (count s)
+                                                                       refusal-sample-chars))}))))
+                                    (take refusal-samples)
+                                    vec)})})))

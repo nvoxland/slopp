@@ -311,6 +311,45 @@
                     [])
   {:turn :open :agent agent :intent intent})
 
+(defn flush-reads!
+  "Fold whatever the read ring has accumulated onto a `:read-cost` delta and
+  clear it. Returns the record, or nil when nothing was written.
+
+  Flushes when the ring has reached `telemetry/read-flush-calls`, or on any
+  `force?`. **The POLICY is here and the PERMISSION is at the caller** — the
+  wire knows whether writing a delta is legal at this moment and knows nothing
+  about spans; this knows the reverse. Splitting it the other way put the
+  threshold in the wire, where a second caller would have had to know the
+  number too.
+
+  **The read ring is not the timing ring, and the difference is the point.**
+  `:slopp.read.telemetry/calls` is cleared at every `turn-begin!` so an ask
+  measures only its own clock. The read rows must NOT share that lifecycle:
+  turns rotate only when a user prompt arrived and a write tool followed, so a
+  read-only ask closes no turn and an event-driven session closes no turn —
+  and those are exactly the spans where reads dominate. Measured the day the
+  read record shipped riding `:turn-end`: two stores, 321 and 118 closed
+  turns, zero read records between them. So the rows accumulate across turns
+  and leave only here.
+
+  **Call this only from a path that already writes.** Every read tool declares
+  `readOnlyHint` on the wire and a harness may run it unprompted on that
+  promise; appending a journal delta from one would break it. That leaves one
+  span genuinely unrecordable — a session that never calls a write tool at all
+  — and the honest handling is to say so rather than to record it anyway. It
+  is named in [[slopp.lab.reads/read-ledger]], where someone reading a number
+  needs to know it.
+
+  Nothing to flush → nil and no delta, for the reason the fold itself returns
+  nil on an empty ring: an empty record reads as a span that cost nothing."
+  [session & {:keys [force?]}]
+  (let [ring (:slopp.read.telemetry/reads @session)]
+    (when (or force? (<= telemetry/read-flush-calls (count ring)))
+      (when-let [reads (telemetry/read-cost ring)]
+        (engine/commit-appended! session #(store/record-read-cost % reads) [])
+        (swap! session dissoc :slopp.read.telemetry/reads)
+        reads))))
+
 (defn turn-end!
   "Close `agent`'s turn (stable or not — a red turn is still history), and
   record where the turn's WALL CLOCK went.

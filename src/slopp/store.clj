@@ -563,6 +563,34 @@
             {}
             (:deltas store))))
 
+(defn record-read-cost
+  "Append a `:read-cost` delta carrying what a SPAN of answers cost to send —
+  `reads` being the fold from [[slopp.read.telemetry/read-cost]].
+
+  Its own citizen because it started as a field on `:turn-end` and that was
+  the wrong home. A turn brackets a USER ASK, and it rotates only when a
+  prompt has arrived and a write tool follows — both correct for turns, both
+  fatal here. A read-only ask closes no turn, an event-driven session closes
+  no turn, and those are exactly the spans where reads dominate. Measured the
+  day it shipped: two stores, 321 and 118 closed turns, zero read records
+  between them.
+
+  The alternative was widening turns, and it is worse. A `:turn-end` that is
+  not a turn ending is a lie in the journal, and the verbatim-intent trail
+  that `report` reads would get worse to make a measurement better. A
+  measurement that borrows a boundary inherits what that boundary cannot see;
+  the fix is to stop borrowing.
+
+  `:ns` is the `*session*` sentinel every marker uses that is not about one
+  namespace. Registered in [[slopp.store.fields/markers]] as a no-content op,
+  or foreign sync full-reloads on every sighting of it."
+  [store reads]
+  (let [parent (:id (last (:deltas store)))
+        [did store] (gen-id store "d")]
+    (update store :deltas conj
+            {:id did :parent parent :op :read-cost :ns '*session*
+             :at (now-ms) :reads reads})))
+
 (defn record-observation
   "Append an `:observe` delta recording that tests RAN and what happened —
   the second journal citizen beside `:verify`, and deliberately not the same

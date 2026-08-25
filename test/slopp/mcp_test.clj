@@ -1561,7 +1561,18 @@
         (is (= (:elapsed-ms t) (+ (:slopp-ms t) (:outside-ms t)))
             "the split is exhaustive — an unexplained remainder is the bug")
         (is (seq (:top t)) "and it names the tools that cost")
-        (is (every? :tool (:top t)) (pr-str (:top t))))
+        (is (every? :tool (:top t)) (pr-str (:top t)))
+
+        (testing "and NOT what the answers cost to send — that left this delta"
+          ;; The read fold rode `:timing` first and inherited the rotation
+          ;; gate with it: a turn closes only when a user PROMPT arrived and a
+          ;; WRITE followed, so a read-only ask and an event-driven session
+          ;; both recorded nothing. It is `:read-cost` now, on its own
+          ;; schedule, and `the-read-record-lands-in-the-JOURNAL-not-only-in-the-ring`
+          ;; is what asserts it lands.
+          (is (not (contains? t :reads))
+              (str "two homes at two grains is where the two disagree: "
+                   (pr-str t)))))
       (testing "turns do not bleed — a new one measures only its own calls"
         ;; the wire records a call AFTER it returns (so turn_end never reads a
         ;; half-finished entry for itself), which means turn_end's own entry
@@ -2554,4 +2565,46 @@
                                                 (:by-tool cost)))))
                 (str "charged to the tool that withheld, not to the tool that"
                      " fetched: " (pr-str cost))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-read-record-lands-in-the-JOURNAL-not-only-in-the-ring
+  ;; The ring filling is covered next door and the fold is covered in
+  ;; telemetry-test; this is the JOIN, and the join is what was broken. The
+  ;; record used to ride `:turn-end`, which rotates only when a user PROMPT
+  ;; arrived and a WRITE followed — so this exact scenario, work with nobody
+  ;; typing, wrote nothing at all. Measured that way in two stores: 321 and
+  ;; 118 closed turns, zero read records between them.
+  ;;
+  ;; So the shape of the test is the shape of the bug: no pending intent is
+  ;; ever written here, no turn rotates, and the span must land anyway.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "query_rules" {})               ; ~23k against an 8000 gate
+      (call! sess "query_project" {})
+      (is (empty? (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))
+          "nothing is due yet — a delta per read would bury the journal")
+
+      ;; `done` is a WRITE and a work boundary, so it forces the flush. That
+      ;; it is also excluded from turn rotation is the point: the read record
+      ;; no longer needs a turn to exist.
+      (call! sess "done" {})
+      (let [d (last (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))
+            rd (:reads d)]
+        (is (some? d)
+            (str "a work boundary passed and the span was never written: "
+                 (pr-str (take-last 3 (store/deltas (:store @sess))))))
+        (is (= '*session* (:ns d)) (pr-str d))
+        (is (pos-int? (:calls rd)) (pr-str rd))
+        (is (pos-int? (:chars rd)) (pr-str rd))
+        (is (seq (:by-tool rd)) (pr-str rd))
+        (is (= (:chars rd) (reduce + 0 (map :chars (:by-tool rd))))
+            (str "the per-tool rows must account for the whole total — a row"
+                 " quietly dropped is a tool that reads as free: " (pr-str rd)))
+        (is (some #(= "query_rules" (:tool %)) (:by-tool rd))
+            (str "and the reads from before any turn existed are IN it: "
+                 (pr-str rd)))
+
+        (testing "no turn closed to make that happen"
+          (is (empty? (filter #(= :turn-end (:op %)) (store/deltas (:store @sess))))
+              "the whole point is that this no longer depends on a turn")))
       (finally (ops/close! sess)))))

@@ -295,8 +295,15 @@
   `:observe` is the second EVIDENCE citizen beside `:verify` — *these tests
   ran and this is what happened*, which a verification is not. It is
   bookkeeping for the same reason `:verify` is: it changes no code, so a host
-  that has not loaded one is not behind."
-  #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert})
+  that has not loaded one is not behind.
+
+  `:read-cost` is here for the same reason and arrived the same way — as a
+  field on another op that could not carry it. It records what a SPAN of
+  answers cost to send, and it is its own citizen because riding `:turn-end`
+  gave it the turn's rotation gate, which is blind to exactly the spans where
+  reads dominate."
+  #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert
+    :read-cost})
 
 (def silent-markers
   "The marker subset merge-logs skips without a note — verification and

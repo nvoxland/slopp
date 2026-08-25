@@ -1062,6 +1062,22 @@
     (let [ag (or (:agent arguments) (:agent-id @session))]
       (when (ops/turn-open? session ag)
         (ops/turn-end! session :agent ag))))
+  ;; THE READ RING, on its own schedule. This condition is about where a delta
+  ;; may be WRITTEN and nothing else: a write tool is already writing, while
+  ;; every read tool declares `readOnlyHint` on the wire and a harness may run
+  ;; it unprompted on that promise. So the flush rides the next write rather
+  ;; than the read that filled the ring, and `flush-reads!` decides whether a
+  ;; span is due.
+  ;;
+  ;; Deliberately NOT folded into the rotation gate above, which is the whole
+  ;; fix. That gate also wants a user PROMPT, so a session driven by
+  ;; background events never passes it however much it writes — measured at
+  ;; zero read records across 321 closed turns here and 118 in the consuming
+  ;; store. `done` and `commit_point` force a flush because they are the work
+  ;; boundaries an agent actually has, and unlike a turn they need nobody to
+  ;; have typed anything.
+  (when (contains? tools/write-tools name)
+    (ops/flush-reads! session :force? (boolean (#{"done" "commit_point"} name))))
   (when (and (:require-turns? @session)
              (contains? tools/write-tools name)
              ;; done/commit_point CLOSE work; always allowed
@@ -1687,25 +1703,35 @@
           why   (refusal-text r)]
       ;; after the call, so a tool that reads the ring (turn_end) never sees
       ;; its own half-finished entry
-      (swap! session update :slopp.read.telemetry/calls (fnil conj [])
-             (merge
-              {:tool (:name params) :start t0 :end (System/currentTimeMillis)
-               ;; A REFUSAL and the reason it gave, from ONE derivation — see
-               ;; `refusal-text` for the two shapes it arrives in and for the
-               ;; deliberate under-count. The message rides along because a
-               ;; count with no cause can only ever support "read that tool's
-               ;; contract", which is the guess rather than the finding;
-               ;; `call-timing` bounds and truncates what reaches the delta.
-               :refused? (some? why)
-               :error    why
-               ;; WHAT IT SENT, taken off the response itself rather than from
-               ;; whoever built it — characters on the wire, which is the unit
-               ;; the size gate and the payload fitter are both written in.
-               ;; The ring had a call's edges and its refusal, so it could say
-               ;; what slopp SPENT and never what it COST, and reads are 52%
-               ;; of the bill.
-               :chars    (count (get-in r [:content 0 :text] ""))}
-              @facts))
+      (let [entry (merge
+                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
+                    ;; A REFUSAL and the reason it gave, from ONE derivation — see
+                    ;; `refusal-text` for the two shapes it arrives in and for the
+                    ;; deliberate under-count. The message rides along because a
+                    ;; count with no cause can only ever support "read that tool's
+                    ;; contract", which is the guess rather than the finding;
+                    ;; `call-timing` bounds and truncates what reaches the delta.
+                    :refused? (some? why)
+                    :error    why
+                    ;; WHAT IT SENT, taken off the response itself rather than from
+                    ;; whoever built it — characters on the wire, which is the unit
+                    ;; the size gate and the payload fitter are both written in.
+                    ;; The ring had a call's edges and its refusal, so it could say
+                    ;; what slopp SPENT and never what it COST, and reads are 52%
+                    ;; of the bill.
+                    :chars    (count (get-in r [:content 0 :text] ""))}
+                   @facts)]
+        ;; TWO rings, one entry — shared structurally, so the second costs a
+        ;; pointer. They are separate because their LIFECYCLES are: the timing
+        ;; ring is cleared at every `turn-begin!` so an ask measures only its
+        ;; own clock, and the read rows must not inherit that. Turns rotate
+        ;; only when a user prompt arrived and a write followed, so a
+        ;; read-only ask and an event-driven session close none — which are
+        ;; the spans where reads dominate. `ops/flush-reads!` empties the
+        ;; second on its own schedule.
+        (swap! session #(-> %
+                            (update :slopp.read.telemetry/calls (fnil conj []) entry)
+                            (update :slopp.read.telemetry/reads (fnil conj []) entry))))
       {:jsonrpc "2.0" :id id :result r})
     "ping" {:jsonrpc "2.0" :id id :result {}}
     (when id

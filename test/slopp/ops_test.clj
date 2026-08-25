@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1980,4 +1980,68 @@
           (is (str/includes? (str (:client-entry-skipped r)) "shop.client.app")
               (str "the reason does not name the form that already mounts: "
                    (pr-str (:client-entry-skipped r))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-read-ring-flushes-on-its-OWN-schedule-not-the-turns
+  ;; The read record rode `:turn-end` and inherited the rotation gate: a turn
+  ;; closes only when a user PROMPT arrived and a WRITE followed. A read-only
+  ;; ask closes none, and an event-driven session closes none — the two shapes
+  ;; where reads dominate. So the ring gets its own life and its own citizen.
+  (let [sess  (external/open!)
+        rows  (fn [n] (vec (for [i (range n)]
+                             {:tool "query_slice" :chars 10 :start i :end i})))
+        spans (fn [] (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))]
+    (try
+      (testing "nothing recorded → no delta and no record, rather than an
+                empty one that would read as a span that cost nothing"
+        (is (nil? (ops/flush-reads! sess)))
+        (is (nil? (ops/flush-reads! sess :force? true)))
+        (is (empty? (spans))))
+
+      (testing "below the threshold nothing is written — a delta per write
+                would bury the journal under telemetry"
+        (swap! sess assoc :slopp.read.telemetry/reads
+               (rows (dec telemetry/read-flush-calls)))
+        (is (nil? (ops/flush-reads! sess)))
+        (is (empty? (spans)))
+
+        (testing "...but a WORK BOUNDARY forces one, because done and
+                  commit_point are the spans an agent actually has, and
+                  unlike a turn they need nobody to have typed anything"
+          (let [r (ops/flush-reads! sess :force? true)]
+            (is (= (dec telemetry/read-flush-calls) (:calls r)) (pr-str r))
+            (is (= 1 (count (spans)))))))
+
+      (testing "at the threshold a span lands on its own, so a session that
+                never rotates a turn still records"
+        (swap! sess assoc :slopp.read.telemetry/reads
+               (conj (rows telemetry/read-flush-calls)
+                     {:tool "query_rules" :chars 8000 :trimmed? true :spooled "r1"}
+                     {:tool "query_detail" :chars 21676 :detail-asked "r1"})
+               :slopp.read.telemetry/calls
+               [{:tool "query_rules" :start 0 :end 10}])
+        (let [r (ops/flush-reads! sess)
+              d (last (spans))]
+          (is (= (+ 2 telemetry/read-flush-calls) (:calls r)) (pr-str r))
+          (is (= 1 (:refetched r))
+              (str "and the fold is the same one, so a span answers the"
+                   " question a turn used to: " (pr-str r)))
+          (is (= (:reads d) r)
+              (str "the delta carries exactly what the flush returned: "
+                   (pr-str d)))
+
+          (testing "the READ ring is cleared and the TIMING ring is not —
+                    they have different owners now, and a flush that took
+                    both would bill this ask's clock to whatever turn closes
+                    next"
+            (is (empty? (:slopp.read.telemetry/reads @sess)))
+            (is (= 1 (count (:slopp.read.telemetry/calls @sess)))
+                (pr-str (:slopp.read.telemetry/calls @sess))))
+
+          (testing "and flushing again writes nothing — a span already
+                    recorded must not be counted twice by a ledger that sums
+                    rows"
+            (is (nil? (ops/flush-reads! sess :force? true)))
+            (is (= 2 (count (spans)))
+                "a third delta here would double every total"))))
       (finally (ops/close! sess)))))

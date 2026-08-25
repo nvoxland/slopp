@@ -237,12 +237,27 @@
         (is (= 1 (:stubbed r)) (pr-str r))
         (is (= 1 (:refetched r)) (pr-str r))))
 
-    (testing "the TURN record carries it, because the ring is cleared at
-              turn-end and the delta is the only place any of this survives"
+    (testing "a span says how many calls it is over, because a row with no
+              count is a row nobody can weigh against another"
+      (let [r (cost [{:tool "query_slice" :chars 400}
+                     {:tool "query_slice" :chars 600}
+                     {:tool "done" :start 0 :end 9}])]
+        (is (= 2 (:calls r))
+            (str "the calls that carried a size, not every call in the ring —"
+                 " counting the ones with nothing to measure would inflate the"
+                 " denominator of anything taken per call: " (pr-str r)))))
+
+    (testing "the TURN record does NOT carry it — the read cost has its own
+              journal citizen now, and two homes at two grains is the shape
+              where the two eventually disagree"
+      ;; It rode `:turn-end` first, and inherited the rotation gate with it: a
+      ;; turn closes only when a user PROMPT arrived and a WRITE followed, so
+      ;; a read-only ask and an event-driven session both recorded nothing.
+      ;; `:read-cost` flushes on its own schedule; `call-timing` is back to
+      ;; being only about the clock.
       (let [t (telemetry/call-timing [{:tool "query_rules" :start 0 :end 10
                                        :chars 8000 :trimmed? true :spooled "r1"}])]
-        (is (= 8000 (get-in t [:reads :chars])) (pr-str t)))
-      (let [t (telemetry/call-timing [{:tool "done" :start 0 :end 10}])]
         (is (not (contains? t :reads))
-            (str "an unmeasured turn must not carry a zeroed record: "
-                 (pr-str t)))))))
+            (str "the turn record must not carry a read fold any more: "
+                 (pr-str t)))
+        (is (= 1 (:calls t)) (str "and is otherwise untouched: " (pr-str t)))))))

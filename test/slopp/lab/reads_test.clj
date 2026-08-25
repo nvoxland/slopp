@@ -16,47 +16,44 @@
             [slopp.store :as store]
             [slopp.lab.reads :as lab.reads]))
 
-(deftest the-read-ledger-counts-only-the-turns-that-carry-the-record
-  (let [turn   (fn [store timing]
-                 (first (store/record-turn store :turn-end :timing timing)))
+(deftest the-read-ledger-sums-SPANS-and-does-not-invent-a-rate-it-cannot-take
+  (let [span   store/record-read-cost
         ledger lab.reads/read-ledger]
     (testing "an empty journal has no rate — a 0.0 here reads as 'measured,
               and the trim never costs anything'"
       (let [r (ledger (store/empty-store))]
-        (is (= 0 (:turns r)) (pr-str r))
-        (is (= 0 (:measured r)) (pr-str r))
+        (is (= 0 (:spans r)) (pr-str r))
+        (is (= 0 (:calls r)) (pr-str r))
         (is (nil? (:refetch-rate r)) (pr-str r))))
 
-    (testing "turns recorded before the read record existed are COUNTED as
-              unmeasured, never silently dropped — a ledger over the handful
-              of turns that carry it looks exactly like one over all of them"
-      (let [st (-> (store/empty-store)
-                   (turn {:calls 3 :slopp-ms 90})
-                   (turn {:calls 1 :reads {:chars 500 :withheld 0 :trimmed 0
-                                           :stubbed 0 :refetched 0
-                                           :refetched-chars 0
-                                           :refetched-elsewhere 0
-                                           :by-tool [{:tool "query_slice" :n 1 :chars 500}]}}))
+    (testing "a span with reads and nothing withheld is measured and has no
+              rate — the two nils above and here mean different things and
+              both are honest"
+      (let [st (span (store/empty-store)
+                     {:calls 4 :chars 500 :withheld 0 :trimmed 0 :stubbed 0
+                      :refetched 0 :refetched-chars 0 :refetched-elsewhere 0
+                      :by-tool [{:tool "query_slice" :n 4 :chars 500}]})
             r  (ledger st)]
-        (is (= 2 (:turns r)) (pr-str r))
-        (is (= 1 (:measured r)) (pr-str r))
-        (is (= 1 (:unmeasured r)) (pr-str r))
+        (is (= 1 (:spans r)) (pr-str r))
+        (is (= 4 (:calls r)) (pr-str r))
         (is (= 500 (:chars r)) (pr-str r))
         (is (nil? (:refetch-rate r))
-            (str "nothing was withheld across the measured turns, so there is"
-                 " no rate: " (pr-str r)))))
+            (str "nothing was withheld, so there is no rate: " (pr-str r)))))
 
-    (testing "per-tool cost accumulates ACROSS turns — the question is which
-              tool costs the most over a session, and one turn cannot say"
-      (let [reads-of (fn [rows] {:chars (reduce + (map :chars rows))
+    (testing "per-tool cost accumulates ACROSS spans — the question is which
+              tool costs the most over a session, and one span cannot say"
+      (let [reads-of (fn [rows] {:calls (reduce + (map :n rows))
+                                 :chars (reduce + (map :chars rows))
                                  :withheld 0 :trimmed 0 :stubbed 0
                                  :refetched 0 :refetched-chars 0
                                  :refetched-elsewhere 0 :by-tool rows})
             st (-> (store/empty-store)
-                   (turn {:reads (reads-of [{:tool "query_slice" :n 2 :chars 900}
-                                            {:tool "done" :n 1 :chars 400}])})
-                   (turn {:reads (reads-of [{:tool "query_slice" :n 1 :chars 600}])}))
+                   (span (reads-of [{:tool "query_slice" :n 2 :chars 900}
+                                    {:tool "done" :n 1 :chars 400}]))
+                   (span (reads-of [{:tool "query_slice" :n 1 :chars 600}])))
             r  (ledger st)]
+        (is (= 2 (:spans r)) (pr-str r))
+        (is (= 4 (:calls r)) (pr-str r))
         (is (= 1900 (:chars r)) (pr-str r))
         (is (= [{:tool "query_slice" :n 3 :chars 1500}
                 {:tool "done" :n 1 :chars 400}]
@@ -67,16 +64,16 @@
               number the whole instrument exists to produce: a withholding
               that gets opened anyway cost more than sending the payload"
       (let [st (-> (store/empty-store)
-                   (turn {:reads {:chars 8367 :withheld 1 :trimmed 1 :stubbed 0
-                                  :refetched 1 :refetched-chars 21676
-                                  :refetched-elsewhere 0
-                                  :by-tool [{:tool "query_history" :n 1 :chars 8367
-                                             :trimmed 1 :refetched 1}]}})
-                   (turn {:reads {:chars 8000 :withheld 1 :trimmed 1 :stubbed 0
-                                  :refetched 0 :refetched-chars 0
-                                  :refetched-elsewhere 0
-                                  :by-tool [{:tool "query_rules" :n 1 :chars 8000
-                                             :trimmed 1}]}}))
+                   (span {:calls 2 :chars 8367 :withheld 1 :trimmed 1 :stubbed 0
+                          :refetched 1 :refetched-chars 21676
+                          :refetched-elsewhere 0
+                          :by-tool [{:tool "query_history" :n 1 :chars 8367
+                                     :trimmed 1 :refetched 1}]})
+                   (span {:calls 1 :chars 8000 :withheld 1 :trimmed 1 :stubbed 0
+                          :refetched 0 :refetched-chars 0
+                          :refetched-elsewhere 0
+                          :by-tool [{:tool "query_rules" :n 1 :chars 8000
+                                     :trimmed 1}]}))
             r  (ledger st)]
         (is (= 2 (:withheld r)) (pr-str r))
         (is (= 1 (:refetched r)) (pr-str r))
@@ -86,14 +83,29 @@
                                             (:by-tool r)))))
             (pr-str r))))
 
-    (testing "a re-fetch the per-turn fold could not attribute stays visible
-              at journal grain — the trim and the re-fetch straddling a turn
-              boundary is the case a per-turn number silently forgives"
-      (let [st (turn (store/empty-store)
-                     {:reads {:chars 900 :withheld 0 :trimmed 0 :stubbed 0
-                              :refetched 0 :refetched-chars 0
-                              :refetched-elsewhere 2
-                              :by-tool [{:tool "query_detail" :n 2 :chars 900}]}})
+    (testing "a re-fetch the span fold could not attribute stays visible at
+              journal grain — the trim and the re-fetch straddling a FLUSH is
+              the case a per-span number silently forgives"
+      (let [st (span (store/empty-store)
+                     {:calls 2 :chars 900 :withheld 0 :trimmed 0 :stubbed 0
+                      :refetched 0 :refetched-chars 0
+                      :refetched-elsewhere 2
+                      :by-tool [{:tool "query_detail" :n 2 :chars 900}]})
             r  (ledger st)]
         (is (= 2 (:refetched-elsewhere r)) (pr-str r))
-        (is (nil? (:refetch-rate r)) (pr-str r))))))
+        (is (nil? (:refetch-rate r)) (pr-str r))))
+
+    (testing "there is NO column for the sessions this cannot see, and that
+              is deliberate rather than an omission"
+      ;; A span is durable only once a WRITE flushes it, because a read tool
+      ;; declares readOnlyHint and writing a delta from one would break that
+      ;; promise. So a session that only reads contributes nothing and leaves
+      ;; no trace of having been left out. Inventing an `:unmeasured` count
+      ;; here would be worse than the gap: it would put a number where there
+      ;; is no population, and a reader would take it for the size of the
+      ;; hole. The caveat lives in the docstring, where it cannot be read as
+      ;; data.
+      (let [r (ledger (store/empty-store))]
+        (is (not (contains? r :unmeasured)) (pr-str r))
+        (is (re-find #"CANNOT SEE" (:doc (meta #'lab.reads/read-ledger)))
+            "and the docstring says so, because nothing else can")))))

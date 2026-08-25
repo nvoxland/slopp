@@ -25,37 +25,44 @@
   never withheld anything is NOT MEASURABLE YET, not zero.")
 
 (defn read-ledger
-  "Fold every `:turn-end` delta's read record into one answer for the store.
+  "Fold every `:read-cost` delta into one answer for the store.
 
-  Returns `{:turns :measured :unmeasured :chars :withheld :trimmed :stubbed
-  :refetched :refetched-chars :refetched-elsewhere :refetch-rate :by-tool
-  :first :last}`.
+  Returns `{:spans :calls :chars :withheld :trimmed :stubbed :refetched
+  :refetched-chars :refetched-elsewhere :refetch-rate :by-tool :first :last}`.
 
-  `:turns` is the whole population and `:unmeasured` is the part of it with
-  no read record — every turn recorded before the wire measured a response
-  lacks one, and a ledger over only the turns that carry it looks exactly
-  like a ledger over all of them. Same correction the verdict-cache reuse
-  rate needed, for the same reason: the missing rows are missing in the
-  direction that flatters the instrument.
+  `:refetch-rate` is `:refetched` over `:withheld`, and it is nil when nothing
+  was withheld — there is no rate, rather than a rate of none. That
+  distinction is the whole reading discipline here: a journal with no trims in
+  it says the gate is unmeasured, and a 0.0 in its place would say it is free.
 
-  `:refetch-rate` is `:refetched` over `:withheld`, and it is nil when
-  nothing was withheld — there is no rate, rather than a rate of none. That
-  distinction is the whole reading discipline here: a journal with no trims
-  in it says the gate is unmeasured, and a 0.0 in its place would say the
-  gate is free.
-
-  `:refetched-elsewhere` are retrievals the per-turn fold could not tie to a
-  withholding it saw, because the trim and the re-fetch fell on either side
-  of a turn boundary. They survive to this grain deliberately — attributing
-  them to nobody lets a turn boundary read as evidence the gate paid.
+  `:refetched-elsewhere` are retrievals the span fold could not tie to a
+  withholding it saw, because the trim and the re-fetch fell on either side of
+  a flush. They survive to this grain deliberately — attributing them to
+  nobody would let a flush boundary read as evidence the gate paid.
 
   Read `:refetched-chars` against `:chars`, not on its own: the finding this
   exists to make findable is a withheld answer plus its re-fetch costing more
-  than the answer would have whole."
+  than the answer would have whole.
+
+  **WHAT THIS CANNOT SEE, and it cannot count it either.** A span becomes
+  durable only when a WRITE tool flushes it, because every read tool declares
+  `readOnlyHint` on the wire and writing a journal delta from one would break
+  that promise. So a session that reads and never writes — a review, a
+  question answered, a plan — contributes nothing here and leaves no trace of
+  having been omitted. There is no `:unmeasured` column for it because there
+  is nothing to count: the absence is total.
+
+  That matters because the omission is not random. It skews toward read-heavy
+  work, which is the work this number is about, so **every rate here is a
+  lower bound on how much reading actually happens** and should be quoted as
+  one. The earlier version of this ledger rode `:turn-end` and had the same
+  bias much worse — turns rotate only on a user prompt followed by a write, so
+  it also lost every event-driven session, measured at zero records across 321
+  and 118 closed turns in two stores. The flush fixed that half. This half is
+  a consequence of the read-only promise and is not going away."
   [store]
-  (let [turns (filter #(= :turn-end (:op %)) (:deltas store))
-        recs  (keep #(get-in % [:timing :reads]) turns)
-        seen  (filter #(get-in % [:timing :reads]) turns)
+  (let [spans (filter #(= :read-cost (:op %)) (:deltas store))
+        recs  (keep :reads spans)
         sum   (fn [k] (reduce + 0 (keep k recs)))
         held  (sum :withheld)
         rows  (->> (mapcat :by-tool recs)
@@ -72,9 +79,8 @@
                               (pos? n-re) (assoc :refetched n-re)))))
                    (sort-by (juxt (comp - :chars) :tool))
                    vec)]
-    {:turns               (count turns)
-     :measured            (count recs)
-     :unmeasured          (- (count turns) (count recs))
+    {:spans               (count spans)
+     :calls               (sum :calls)
      :chars               (sum :chars)
      :withheld            held
      :trimmed             (sum :trimmed)
@@ -83,6 +89,7 @@
      :refetched-chars     (sum :refetched-chars)
      :refetched-elsewhere (sum :refetched-elsewhere)
      :refetch-rate        (when (pos? held) (double (/ (sum :refetched) held)))
+     
      :by-tool             rows
-     :first               (:id (first seen))
-     :last                (:id (last seen))}))
+     :first               (:id (first spans))
+     :last                (:id (last spans))}))
