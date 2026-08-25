@@ -232,8 +232,11 @@ the app-level base is stamped once at page load. No value delivered that way can
 be right for an app that talks to more than one API -- so the base is a default
 and the request has the last word.
 
-(`:webapp/from-origin true` is the empty case of this and still works. Prefer
-the base; the flag exists only until its users migrate.)
+`:webapp/base ""` is what the retired `:webapp/from-origin` boolean used to say.
+That flag is *gone*, not deprecated: nothing reads it, so a request still
+carrying it is addressed under the app's base like any other. It was an escape
+from a field that could not hold two values, and once the field holds one per
+request the escape has no cause left.
 
 ## Actions are declared, in three kinds
 

@@ -2049,8 +2049,10 @@ declare the app; slopp owns the loop.
   configuration: a client-routed app switches which upstream it reads without a
   page load, and the app-level base is stamped once at load — so no value
   delivered that way can be right for an app that talks to more than one.
-  `:webapp/base ""` means the origin. (`:webapp/from-origin true` is the empty
-  case of exactly this and still works; prefer the base.) A request naming a
+  `:webapp/base ""` means the origin — which is what the retired
+  `:webapp/from-origin` boolean used to say. **That flag is gone, not
+  deprecated**: nothing reads it, so a request still carrying it is addressed
+  under the app's base like any other. A request naming a
   base is skipped by `webapp-request-paths-are-served`, since it is addressed
   at somewhere this store does not answer for.
 - **The table is ADDRESSES, not screens** — a row's screen is not unique and a

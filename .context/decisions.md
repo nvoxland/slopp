@@ -5439,3 +5439,48 @@ they found out from a tool refusing to run.
 the trunk, the host reloads from the trunk, and any consumer pointed at it sees
 the new shape immediately — with no announcement in between and no step that
 looks like one.
+
+
+## D-clean-over-compatible (2026-08-25, user decision) — a standing priority
+
+**Nathan: "don't pay too much attention to backwards compatibility and keeping
+them going efficiently. The big goal is clean code."**
+
+A steer about how to WEIGH, so it is written down rather than re-derived per
+change. It settles a tension this repo had been resolving the other way by
+default, one accommodation at a time.
+
+### What it licenses
+
+- Delete a mechanism whose cause is gone, rather than keeping it working while
+  its users migrate.
+- Move a wire version rather than adding optional keys to avoid moving it.
+- One supported version rather than a set, until a second consumer exists.
+- Refuse rather than tolerate, when the tolerant path is a shim.
+
+### What it does NOT license, and the line matters
+
+**Silence.** A consuming store must still be TOLD what changed — that is what
+`deleted-markers`, `retired-markers` and the refusal messages are for, and none
+of them is a compatibility path. Breaking cleanly and announcing it is the
+target; breaking quietly is a different failure that this steer does not excuse.
+`D-contract-v2` records the version bump reaching a consumer through the live
+host with no announcement, and that stays a mistake under this decision rather
+than becoming acceptable.
+
+The distinction: **compatibility code lets old callers keep working; a ledger
+lets them find out.** Drop the first, keep the second.
+
+### Applied immediately
+
+`:webapp/from-origin` — deleted, not deprecated. It was an escape from
+`:webapp/base` being one scalar per APP; once a REQUEST names its own base the
+escape has no cause. It had been kept "until its users migrate", which is
+exactly the weighting this decision reverses. Nothing reads it now, so a request
+still carrying it is addressed under the app's base like any other, and
+`deleted-markers` carries the instruction.
+
+**Expiry:** this is about a codebase with ONE consumer, updated by hand. When
+slopp has adopters who cannot be told to upgrade in step, the weighting changes
+and this decision is what to revisit — not silently, since that is the failure
+mode it is currently guarding against in the other direction.
