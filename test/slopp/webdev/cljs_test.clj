@@ -497,12 +497,12 @@
   ;; The consuming half of contract publication. A contract is plain DATA, so
   ;; this needs no server, no store and no fixtures — which is the property
   ;; that makes generating against someone else's API cheap to test at all.
-  (let [document {:slopp/contract-version 2
-                  :endpoints [{:method :get :path "/api/things" :name 'things
-                               :request nil :response [:sequential :string]}
-                              {:method :post :path "/api/things" :name 'create!
-                               :request [:map [:name :string]]
-                               :response [:map [:id :int]]}]}
+  (let [document {:slopp/rest-paths-version 1
+                  :paths [{:method :get :path "/api/things" :name 'things
+                           :request nil :response [:sequential :string]}
+                          {:method :post :path "/api/things" :name 'create!
+                           :request [:map [:name :string]]
+                           :response [:map [:id :int]]}]}
         plan (cljs/contract->plan document 'demo.client.contracts)
         by-fn (into {} (map (juxt (comp str :fn-name) identity)) (:wrappers plan))
         defs  (into {} (map (juxt :name :schema)) (:defs plan))]
@@ -531,41 +531,27 @@
     (testing "a verb with no body carries no request schema at all"
       (is (= {:kind :none} (:request (by-fn "things")))))
 
-    (testing "an unknown contract version is refused rather than guessed at"
-      (let [p (cljs/contract->plan (assoc document :slopp/contract-version 99)
+    (testing "an unknown document version is refused rather than guessed at"
+      (let [p (cljs/contract->plan (assoc document :slopp/rest-paths-version 99)
                                    'demo.client.contracts)]
         (is (empty? (:wrappers p)))
         (is (seq (:problems p))
             "a consumer that silently generated from a shape it does not know
              would fail later, further away, and with no clue why")))
 
-    (testing "the CURRENT document reads too — this generator is a consumer of
-              the published document, and it was not migrated with it"
-      ;; Found by the only real consumer on the overlap jar: they repointed at
-      ;; /api/rest/paths, got :endpoints 0 and :wrappers [], and could not
-      ;; finish the migration the overlap exists to let them finish. The
-      ;; endpoint was right and the document was right; the thing that broke is
-      ;; a tool nobody had listed as a consumer.
-      (let [current {:slopp/rest-paths-version 1 :paths (:endpoints document)}
-            p       (cljs/contract->plan current 'demo.client.contracts)]
-        (is (= #{"things" "create!"}
-               (set (map (comp str :fn-name) (:wrappers p))))
-            (pr-str p))
-        (is (empty? (:problems p)) (pr-str (:problems p)))
-        (is (= (cljs/contract->plan document 'demo.client.contracts) p)
-            "byte for byte the same plan — the rows are identical and only the
-             envelope moved, so producing two different clients from them
-             would be the defect this reads both to avoid")))
-
-    (testing "BOTH spellings read only while both endpoints serve"
-      ;; Not a compatibility path: `/api/contracts` answers for one release so
-      ;; a consumer has a jar on which it can migrate AND verify. This arm goes
-      ;; with that endpoint, and the version arm above is what keeps a document
-      ;; from a FUTURE shape from being guessed at meanwhile.
-      (is (seq (:problems (cljs/contract->plan
-                           {:slopp/rest-paths-version 99 :paths (:endpoints document)}
-                           'demo.client.contracts)))
-          "a future version of the NEW document is refused the same way"))))
+    (testing "and an envelope this generator has never heard of says what it
+              FOUND, not merely that something was wrong"
+      ;; a bare `:version nil` could not tell "wrong version" from "not this
+      ;; document at all", and a consumer met exactly that reading when the
+      ;; document moved and this generator had not: it reported :version nil
+      ;; against a document whose own version key was perfectly present.
+      (let [p (cljs/contract->plan {:some/other-version 1 :paths []}
+                                   'demo.client.contracts)]
+        (is (= {} (:version (first (:problems p))))
+            (str "an empty map is the honest answer — none of the envelopes it"
+                 " knows appears here at all: " (pr-str (:problems p))))
+        (is (= [[:slopp/rest-paths-version 1]]
+               (:supported (first (:problems p)))))))))
 
 (deftest a-generated-contracts-namespace-is-ordinary-verified-source
   ;; The schemas land as SOURCE in the consuming store, not as data parsed at
@@ -837,9 +823,9 @@
         ;; REMOTE: the same endpoint as a published contract DOCUMENT. Built as
         ;; data on purpose — that is exactly what crosses the wire, and a
         ;; consumer has no store to read.
-        doc    {:slopp/contract-version 2
-                :endpoints [{:method :get :path "/api/form/:id" :name 'form
-                             :request schema :response schema}]}
+        doc    {:slopp/rest-paths-version 1
+                :paths [{:method :get :path "/api/form/:id" :name 'form
+                         :request schema :response schema}]}
         remote (first (:wrappers (cljs/contract->plan doc 'demo.client.contracts)))]
     (testing "both producers found the endpoint at all — the control"
       (is (some? local))
@@ -1096,9 +1082,9 @@
   ;; The FETCH is redefed rather than given a seam: what is under test is which
   ;; artifact the store gets, and `a-published-contract-is-READ-and-never-
   ;; evaluated` already drives the transport through `fake-requester`.
-  (let [doc  {:slopp/contract-version 2
-              :endpoints [{:method :get :path "/api/modules" :name 'modules
-                           :response [:map [:names :string]]}]}
+  (let [doc  {:slopp/rest-paths-version 1
+              :paths [{:method :get :path "/api/modules" :name 'modules
+                       :response [:map [:names :string]]}]}
         sess (external/open!)]
     (try
       (with-redefs [cljs/fetch-contract (fn [& _] doc)]
@@ -1162,10 +1148,10 @@
         ;; which is exactly the near-miss: the name the caller passes is not the
         ;; only name written, and the derived one is the generator's to compute
         (with-redefs [cljs/fetch-contract
-                      (fn [& _] {:slopp/contract-version 2
-                                 :endpoints [{:method :get :path "/api/things"
-                                              :name 'things
-                                              :response [:map [:id :string]]}]})]
+                      (fn [& _] {:slopp/rest-paths-version 1
+                                 :paths [{:method :get :path "/api/things"
+                                          :name 'things
+                                          :response [:map [:id :string]]}]})]
           (let [r (cljs/generate-client-from! sess "http://pub.test/contract"
                                               :ns 'shopz.thing)]
             (is (:error r)
@@ -1361,7 +1347,7 @@
                          (fn [req]
                            (reset! seen req)
                            {:http/status 200 :http/headers {}
-                            :http/body "{:slopp/contract-version 2 :endpoints []}"}))
+                            :http/body "{:slopp/rest-paths-version 1 :paths []}"}))
     (is (pos-int? (:http/timeout-ms @seen))
         (str "an unbounded fetch hangs the tool: " (pr-str @seen)))))
 

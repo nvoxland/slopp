@@ -197,11 +197,16 @@
   typed client from this document instead of sharing the producer's contracts
   namespace.
 
-  **Replaces `/api/contracts`, which is still served this release and goes in
-  the next one.** Same rows, same keys; two names differ —
-  `:slopp/contract-version 2` became `:slopp/rest-paths-version 1` and
-  `:endpoints` became `:paths`. A new document at a new address starts its own
-  count rather than inheriting one.
+  **Replaced `/api/contracts`, which is retired.** Same rows, same keys; two
+  names differed — `:slopp/contract-version 2` became
+  `:slopp/rest-paths-version 1` and `:endpoints` became `:paths`. A new
+  document at a new address starts its own count rather than inheriting one.
+
+  The two overlapped for exactly one release so the only consumer could
+  repoint AND regenerate on a jar where both resolved, then report green
+  before the old one went. That is what an overlap is for, and it earned its
+  keep: it caught `generate_client` — a consumer of the document that names no
+  URL and so survived the sweep that found every other reference.
 
   The address is the convention: `/api/<capability>/<what it lists>`, with the
   sub-api named for the MARKER, so a consumer that learns one learns
@@ -284,49 +289,6 @@
    :http/raw true
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
-
-(defn ^{:http/method :get :rest/path "/api/contracts" :http/auth :public
-        :rest/media-type "application/edn"
-        :rest/response contracts/contract-document
-        :rest/unconstrained-ok
-        "three fields of the contract document are :any and cannot honestly be
-         narrower. :request and :response carry malli SCHEMAS as values — a
-         schema is a keyword, a vector, a symbol or a map, so no tighter shape
-         is true of all of them. :auth is an app's own :http/auth declaration
-         verbatim, whose grammar is open by design.
-
-         PERMANENT, not pending. The tighter check a reader would reach for is
-         a predicate — is this value a schema malli can build? — and a
-         predicate cannot be PUBLISHED: this document is data a consumer reads
-         and generates from, so a [:fn …] in it would arrive as something they
-         cannot evaluate or trust. The constraint is the publishing, and
-         publishing is the point."
-        :http/reads {:contract [:ui/contract []]}}
-  contract
-  "GET /api/contracts — the shape of this API, as EDN.
-
-  What makes a reviewer UI in a DIFFERENT store possible: it generates its
-  typed client from this document instead of sharing slopp's contracts
-  namespace.
-
-  EDN, not JSON, and `:http/raw` so the adapter leaves it alone. A malli schema
-  is data made of keywords, symbols and vectors; JSON would render `:string`
-  and `\"string\"` identically and the far end could not tell them apart.
-
-  **`:rest/media-type` is why this is generatable at all.** It carried
-  `:rest/client false` with the reason \"generating a typed wrapper for the
-  endpoint that describes the wrappers is circular and useless\". That was not
-  the fact: nothing is circular at runtime, and the consumer who hand-writes
-  two request paths for this endpoint would have had them generated. The real
-  fact is that every wrapper decoded `.json` unconditionally and this answers
-  EDN, so a wrapper failed on the first character. Saying what an endpoint
-  ANSWERS is checkable and about the endpoint; opting out of clients was
-  neither."
-  [req]
-  {:status 200
-   :http/raw true
-   :headers {"Content-Type" "application/edn"}
-   :body (pr-str (:contract (:http/reads req)))})
 
 (defn ^{:http/method :get :rest/path "/api/module/:m" :http/auth :public
         :rest/request contracts/module-request

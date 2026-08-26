@@ -122,7 +122,7 @@
 
 (deftest ^:external a-real-server-publishes-its-own-contract
   ;; This used to be about serve! threading its served-namespaces list into
-  ;; perform-ctx: forget it and /api/contracts answers 200 with zero endpoints,
+  ;; perform-ctx: forget it and the document answers 200 with zero endpoints,
   ;; a consumer generates an empty client, and nothing looks broken until a
   ;; call that was never generated goes missing.
   ;;
@@ -148,9 +148,9 @@
               doc (edn/read-string
                    (:http/body
                     (http.client/request
-                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/contracts")})))
-              paths (set (map :path (:endpoints doc)))]
-          (is (= 2 (:slopp/contract-version doc)))
+                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/rest/paths")})))
+              paths (set (map :path (:paths doc)))]
+          (is (= 1 (:slopp/rest-paths-version doc)))
           (is (contains? paths "/api/timeline")
               "a server that forgot to thread its session publishes nothing")
           (is (contains? paths "/api/modules")
@@ -167,11 +167,11 @@
               doc (edn/read-string
                    (:http/body
                     (http.client/request
-                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/contracts")})))]
-          (is (= 2 (:slopp/contract-version doc)))
-          (is (empty? (:endpoints doc))
+                     {:http/url (str "http://127.0.0.1:" (:port r) "/api/rest/paths")})))]
+          (is (= 1 (:slopp/rest-paths-version doc)))
+          (is (empty? (:paths doc))
               (str "the listener's own surface is the MCP server's, not this"
-                   " project's: " (pr-str (map :path (:endpoints doc))))))
+                   " project's: " (pr-str (map :path (:paths doc))))))
         (finally (server/stop!))))))
 
 (deftest the-served-list-is-checked-against-what-declares-endpoints

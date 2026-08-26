@@ -692,72 +692,15 @@
                         " name-prefix 0.9, name-substring 0.8, doc 0.5, why 0.4,"
                         " source 0.2")} :double]]]]])
 
-(def contract-document
-  "`GET /api/contracts` — the API's own shape, as the document a consumer
-  reads. **Version 2.**
-
-  **This replaced `:rest/response :string`, which was true and useless.** That
-  endpoint serializes its own body, so `:string` described the ENVELOPE while
-  every consumer works with the decoded map. A consuming store measured both
-  halves: the check held on the raw body and failed on the decoded one, so it
-  either passed by asserting that text is text or failed on what the consumer
-  actually had. Neither is a check.
-
-  `:media-type` owns the envelope; this describes the document.
-
-  ## Why the version moved, and what it bought
-
-  `:handler` and `:doc` arrived 2026-08-09, `:auth` on 2026-08-11,
-  `:media-type` later — **and `:slopp/contract-version` stayed 1 through all of
-  it.** So a version-1 document was never one shape, and a consumer holding a
-  schema could not tell which of them it was about to get. Reported by a store
-  that fronts projects on other slopp releases, which is its reason to exist.
-
-  Version 2 makes those four REQUIRED and adds `:effectful?`. One bump for
-  both, because every bump costs a consumer a migration and there is no reason
-  to charge them twice.
-
-  **The rule that was missing, now that it has cost something: adding a
-  REQUIRED key moves the version, or the key ships `{:optional true}`.** The
-  version field exists so a consumer can refuse a shape it does not know, and
-  it cannot do that job while it is constant.
-
-  ## Three fields are `:any` and cannot honestly be more
-
-  `:request` and `:response` carry malli SCHEMAS as values — a schema is a
-  keyword, a vector, a symbol or a map, so there is no narrower shape that is
-  true. `:auth` is an app's own `:http/auth` declaration verbatim, and its
-  grammar is open by design. See the endpoint's `:rest/unconstrained-ok` for
-  why that is permanent rather than pending.
-
-  Every entry carries its own `:doc`, because this is the one document a
-  consumer generating a client can read and a type says shape rather than
-  meaning."
-  [:map
-   [:slopp/contract-version {:doc "the document format's version — a consumer that does not know it should generate nothing. It moved to 2 when four keys became required and :effectful? arrived"} :int]
-   [:endpoints
-    {:doc "every :rest/path endpoint this app serves; content is absent by kind and there is no opt-out"}
-    [:sequential
-     [:map
-      [:method {:doc "the HTTP method, as a keyword"} :keyword]
-      [:path {:doc "the route pattern, with :segment captures as declared"} :string]
-      [:name {:doc "the handler's own name, unqualified"} :symbol]
-      [:handler {:doc "the fully-qualified handler symbol — :name alone does not resolve, and a third of real surfaces have duplicate simple names"} :symbol]
-      [:doc {:doc "the handler's docstring, de-indented and whole — public API copy, and MARKDOWN"} [:maybe :string]]
-      [:media-type {:doc "what this endpoint ANSWERS, defaulting to application/json — read it before choosing a decoder"} :string]
-      [:effectful? {:doc "true when calling this may CHANGE something — DERIVED from the :http/effectful declaration or a non-safe method, so it is answered for every endpoint rather than only the ones whose author wrote a marker. Over-warns on a POST that only searches, which is the safe direction for a caller deciding whether to confirm"} :boolean]
-      [:auth {:doc "the endpoint's :http/auth policy verbatim: :public, :authenticated, or a composite like [:group \"admin\"]"} :any]
-      [:request {:doc "the malli schema for everything the caller SENDS — path params, query and body as one map — or nil for an endpoint that takes none"} :any]
-      [:response {:doc "the malli schema of the DOCUMENT a 200 carries, or nil when the endpoint declares none"} :any]]]]])
-
 (def rest-paths-document
   "`GET /api/rest/paths` — every `:rest/path` form this project serves, with
   its contract. **Version 1.**
 
-  Replaces `/api/contracts` and its `:slopp/contract-version 2`. A new
+  Replaced `/api/contracts` and its `:slopp/contract-version 2`. A new
   document at a new address starting at 1: carrying the old counter forward
-  would claim a lineage it does not have, and both are served for one release
-  so a consumer can migrate against something that works.
+  would have claimed a lineage it does not have. The two served side by side
+  for exactly one release, so the consumer could migrate against something
+  that worked and report green before the old one went.
 
   The rule the old document taught, inherited whole: **adding a REQUIRED key
   moves the version, or the key ships `{:optional true}`.** The version field

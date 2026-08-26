@@ -247,7 +247,7 @@
    generator to stop assuming every declared request is a body.
 
    **How the response is READ follows from `:rest/media-type`.** This was
-   `.json` unconditionally, and slopp's own `/api/contracts` answers
+   `.json` unconditionally, and slopp's own `/api/rest/paths` answers
    `application/edn` — a malli schema is keywords and symbols, and JSON would
    render `:string` and `\"string\"` identically, so the far end could not tell
    them apart. A wrapper for it failed on the first character, and the endpoint
@@ -474,8 +474,7 @@
   it found. **That refusal is the field working**: a generator that guessed at
   a shape it does not know would fail later, somewhere else, with nothing
   pointing back here."
-  {[:slopp/rest-paths-version 1] :paths
-   [:slopp/contract-version 2]   :endpoints})
+  {[:slopp/rest-paths-version 1] :paths})
 
 (defn ^:export render-contracts-ns
   "Render the generated CONTRACTS namespace source (a string) from
@@ -921,7 +920,7 @@
   "The generated-client plan for a PUBLISHED contract — the remote twin of
    [[client-wrapper-specs]], which reads the local store instead.
 
-   `document` is what `slopp.http.contract/contract-document` serves;
+   `document` is what `slopp.rest.paths/paths-document` serves;
    `contracts-ns` is where the schemas will be defined in THIS store. Returns
    `{:defs [{:name :schema}] :wrappers [spec …] :problems [p …]}`, where the
    wrapper specs are the shape [[render-client-ns]] already renders — so
@@ -929,12 +928,12 @@
    kind of namespace.
 
    Schemas arrive as VALUES, because the publisher's var names did not survive
-   evaluation (see `slopp.http.contract`). So each is re-named from its
+   evaluation (see `slopp.rest.paths`). So each is re-named from its
    ENDPOINT — `things` → `things-response`, `create!` → `create-request` — and
    the bang stays on the wrapper, where it describes the call, rather than
    leaking into a schema's name.
 
-   An unrecognised `:slopp/contract-version` yields no wrappers and a problem.
+   An envelope outside [[supported-documents]] yields no wrappers and a problem.
    A consumer that generated anyway from a shape it does not know would fail
    later, somewhere else, with nothing pointing back to here."
   [document contracts-ns]

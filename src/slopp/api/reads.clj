@@ -103,36 +103,6 @@
   [store]
   (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
 
-(defn ^{:http/read :ui/contract} contract-read
-  "DEPRECATED, and scheduled: the v2 contract document for `/api/contracts`,
-  re-keyed from [[slopp.rest.paths/paths-document]].
-
-  **This exists so there is one release on which BOTH spellings resolve.** The
-  document moved to `/api/rest/paths` under `:slopp/rest-paths-version 1`;
-  retiring the old address in the same release would leave no moment at which
-  a consumer could migrate and verify — the new address does not exist on the
-  jar they run, and the old one is gone on the jar they would move to. That is
-  the sequencing rule this repo already wrote down and then very nearly failed
-  to follow: ship the seam working, announce, then refuse.
-
-  The re-keying is HERE rather than beside the publisher because the module
-  boundary refuses `slopp.http` reaching `slopp.rest` — `rest` requires `http`
-  and not the reverse, so an http-only store could never resolve it. The
-  reviewer is app code and already declares the edge, which makes this the one
-  honest place for a temporary shape.
-
-  Two keys differ from the new document and nothing else does:
-  `:slopp/rest-paths-version 1` → `:slopp/contract-version 2`, and `:paths` →
-  `:endpoints`. Rows are identical, because it is the same derivation.
-
-  **Delete this and the `/api/contracts` route in the release AFTER the
-  consumer reports green.** An overlap is not a compatibility path: nothing
-  negotiates, there is no alias and no shim, and this has one release to live."
-  [ctx _]
-  {:slopp/contract-version 2
-   :endpoints (:paths (rest.paths/paths-document
-                       (app-namespaces (:store @(:session ctx)))))})
-
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the
   only thing that knows when index 2 is a docstring and when it is a `def`'s

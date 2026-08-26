@@ -280,11 +280,8 @@
   and validates every beat against its own copy of this schema; we cannot read
   its store and it cannot read ours, so nothing proves the two agree. Two things
   make that survivable rather than a silent trap: the hub PUBLISHES its copy —
-  fetch it and diff the `/api/register` row's `:request`. It is a separate
-  application on its own release schedule, so which ADDRESS depends on the hub
-  you are talking to: `GET /api/rest/paths` (`:paths`) under the current
-  convention, or `GET /api/contracts` (`:endpoints`) on a hub that has not
-  moved yet. Try the first and fall back. And a beat it rejects comes back as
+  fetch it and diff the `/api/register` row's `:request` at
+  `GET /api/rest/paths`. And a beat it rejects comes back as
   `{:hub/refused …}`, surfacing
   in `session_brief` as a refusal rather than as an absent hub. Drift is
   detectable and diagnosable; it is not prevented. Change this and you must

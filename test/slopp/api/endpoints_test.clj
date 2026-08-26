@@ -141,7 +141,7 @@
           get* (fn [uri] (:status (slopp.http/handle! ctx {:request-method :get
                                                     :uri uri})))]
       (is (= 200 (get* "/api/namespaces")))
-      (is (= 200 (get* "/api/contracts")))
+      (is (= 200 (get* "/api/rest/paths")))
       ;; the pages moved out. Asserting their ABSENCE is the half worth
       ;; keeping: a page reappearing here would mean slopp had quietly grown a
       ;; second renderer alongside the hub's, which is the drift the :cljc
@@ -275,7 +275,7 @@
       ;; to itself and pass however wrong both were.
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search" "/api/contracts"
+               "/api/search"
                "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"}
              (set (keys by-path)))))
 
@@ -353,33 +353,17 @@
             src (fn [ns- n] (str (store/form-named st ns- n)))]
 
         (testing "the same wrappers local generation produces, by name"
-          ;; `contract` joined them: it carried `:rest/client false` for
-          ;; "describing the describer is circular", which was never the fact.
-          ;; It answers EDN, says so with :rest/media-type, and is generated
-          ;; like anything else — which is what deletes the request paths a
-          ;; consumer hand-writes for exactly this endpoint
+          ;; the three publishers are in here: each carried `:rest/client
+          ;; false` reasoning once — "describing the describer is circular" —
+          ;; which was never the fact. They answer EDN, say so with
+          ;; :rest/media-type, and are generated like anything else, which is
+          ;; what deletes the request paths a consumer hand-writes for exactly
+          ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
-                   "modules" "module" "search" "contract"
+                   "modules" "module" "search"
                    "rest-paths" "http-paths" "webapp-paths"}
                  (set (:wrappers out)))
               (pr-str out)))
-
-        (testing "the RETIRING address generates the same wrappers, over the wire"
-          ;; The overlap's entire purpose: a consumer must be able to repoint
-          ;; AND regenerate on one jar. This failed on the overlap's first
-          ;; outing — the generator read `:slopp/contract-version`, found nil
-          ;; under the new key, and a real consumer got :endpoints 0,
-          ;; :wrappers [] and nothing written. Deleted with `/api/contracts`.
-          (let [c2  (external/open!)
-                old (try (cljs/generate-client-from!
-                          c2 (str "http://127.0.0.1:" (:port r) "/api/contracts")
-                          :ns 'demo.client.api)
-                         (finally (ops/close! c2)))]
-            (is (= (set (:wrappers out)) (set (:wrappers old)))
-                (str "the rows are identical and only the envelope moved, so"
-                     " two different clients from them would be the defect"
-                     " reading both exists to avoid: "
-                     (pr-str [(:wrappers out) (:wrappers old)])))))
 
         (testing "the schemas survived the wire VALUE for value"
           ;; not 'a schema is present' — the same schema, identical to the var
@@ -398,11 +382,12 @@
           (is (str/includes? (src 'demo.client.api 'timeline)
                              "demo.client.contracts/timeline-response")))
 
-        (testing "and the EDN endpoint reads text rather than assuming JSON"
-          ;; the wrapper exists now, and the media type is what makes it
-          ;; correct: `.json` on application/edn fails on the first character,
-          ;; which is what `:rest/client false` was hiding
-          (let [w (str (store/form-named st 'demo.client.api 'contract))]
+        (testing "and an EDN endpoint reads text rather than assuming JSON"
+          ;; the media type is what makes the wrapper correct: `.json` on
+          ;; application/edn fails on the first character, which is what
+          ;; `:rest/client false` was hiding when it excluded this endpoint
+          ;; from its own document
+          (let [w (str (store/form-named st 'demo.client.api 'rest-paths))]
             (is (str/includes? w ".text") w)
             (is (not (str/includes? w ".json")) w))))
       (finally
@@ -1014,7 +999,9 @@
       ;; reviewer UI serves.
       (doseq [path ["/api/namespaces"
                     "/api/ns/demo.core"
-                    "/api/contracts"
+                    "/api/rest/paths"
+                    "/api/http/paths"
+                    "/api/webapp/paths"
                     "/api/modules"
                     "/api/timeline"
                     "/api/search?q=hello"
@@ -1086,11 +1073,11 @@
     ;; and specifically not the reviewer API, which this very listener is
     ;; serving in order to answer the request. Serving is not declaring
     (let [ctx (server/context (atom {:store (store/empty-store)}))
-          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})
+          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/rest/paths"})
           doc (edn/read-string (:body r))
-          paths (set (map :path (:endpoints doc)))]
+          paths (set (map :path (:paths doc)))]
       (is (= 200 (:status r)))
-      (is (= 2 (:slopp/contract-version doc)))
+      (is (= 1 (:slopp/rest-paths-version doc)))
       (is (empty? paths)
           (str "the listener serves the reviewer API and must not describe it"
                " as the application's: " (pr-str paths)))))
@@ -1107,27 +1094,3 @@
       (doseq [nsx (api.reads/app-namespaces st)]
         (is (seq (store/forms st nsx))
             (str nsx " is documented but has no forms in this store"))))))
-
-(deftest the-RETIRED-contract-endpoint-still-answers-for-one-release
-  ;; SCHEDULED FOR DELETION, with `/api/contracts` and
-  ;; `slopp.api.reads/contract-read`, in the release after the consumer
-  ;; reports green. It is here so the overlap is a tested promise rather than
-  ;; an accident: there has to be one jar on which BOTH spellings resolve, or
-  ;; the only consumer has nowhere to migrate and verify — the new address
-  ;; does not exist on the jar they run, and the old one would be gone on the
-  ;; jar they move to.
-  ;;
-  ;; That consumer both READS this document and PRODUCES one by the same
-  ;; derivation under a declared `:rest/response`, so a shape change here is a
-  ;; 500 in their store rather than a wrong document. Which is why the
-  ;; assertion is that nothing changed.
-  (let [ctx (server/context (atom {:store (store/empty-store)}))
-        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})
-        doc (edn/read-string (:body r))]
-    (is (= 200 (:status r)))
-    (is (= "application/edn" (get-in r [:headers "Content-Type"])))
-    (is (= 2 (:slopp/contract-version doc)) (pr-str (keys doc)))
-    (is (contains? doc :endpoints))
-    (is (not (contains? doc :paths))
-        "the old address must not start answering the new shape underneath a
-         consumer that declared a schema over the old one")))
