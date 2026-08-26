@@ -214,14 +214,22 @@
 
 (defn ^:private path-expr
   "The cljs path expression for a route: the literal path string, or a (str …)
-   that substitutes each :segment with (:segment params)."
+   that substitutes each parameter segment with its value from `params`.
+
+   A parameter segment is `:name` (read as `:name`) or a WILDCARD — `*` or
+   `**` — read as `:*`, which is the key both matchers bind it under. The
+   wildcard used to be no segment at all here, so a path carrying one was
+   printed verbatim and the generated wrapper fetched a url containing the
+   characters `**`."
   [path]
-  (let [segs (str/split path #"/" -1)]
-    (if (not-any? #(str/starts-with? % ":") segs)
+  (let [segs   (str/split path #"/" -1)
+        param? (fn [s] (or (str/starts-with? s ":") (#{"*" "**"} s)))
+        as-key (fn [s] (if (#{"*" "**"} s) :* (keyword (subs s 1))))]
+    (if (not-any? param? segs)
       (pr-str path)
       (let [parts     (mapcat (fn [s]
-                                (if (str/starts-with? s ":")
-                                  [(list (keyword (subs s 1)) 'params)]
+                                (if (param? s)
+                                  [(list (as-key s) 'params)]
                                   [s]))
                               segs)
             joined    (interpose "/" parts)
@@ -262,7 +270,14 @@
   (let [verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
         resp-code (schema-form response)
-        segs      (keep #(when (str/starts-with? % ":") (keyword (subs % 1)))
+        ;; a WILDCARD is a path parameter too, anonymous and under `:*` — the
+        ;; key both matchers bind it under. It has to be in this list for two
+        ;; reasons beyond the url: it decides whether the wrapper takes a
+        ;; params map at all, and `allowed` below is built from it, so a
+        ;; wildcard missing here made the endpoint unreachable in both
+        ;; directions — the url needed the value and the guard refused it
+        segs      (keep #(cond (str/starts-with? % ":") (keyword (subs % 1))
+                              (#{"*" "**"} %)          :*)
                         (str/split path #"/" -1))
         body?     (contains? #{:post :put :patch} method)
         params?   (boolean (or req-code (seq segs)))

@@ -1385,3 +1385,49 @@
       ;; the default everywhere else in generation, kept so nothing changes for
       ;; an endpoint that never said
       (is (re-find #"mt/json-transformer" (gen nil))))))
+
+(deftest a-wrapper-for-a-WILDCARD-path-interpolates-the-remainder
+  ;; Found by slopp-ui on the grammar change: the generator reads path segments
+  ;; with `(str/starts-with? % ":")`, so a wildcard is not a segment it knows.
+  ;; A `:rest/path` carrying `**` therefore generated a wrapper with the
+  ;; literal `**` IN THE URL — a request to `/p/x/api/**` — and the
+  ;; undeclared-key guard then rejected the one key that could have fixed it.
+  ;;
+  ;; The same hole existed for `*path`, so this is not a regression; what
+  ;; changed is that the endpoint kind which hits it — a proxy forwarding a
+  ;; remainder — is now spelled in a way a reader recognises.
+  ;;
+  ;; A wildcard is not a NAMED parameter. It is the remainder, it arrives under
+  ;; `:*` on both matchers, and a caller supplies it under `:*` too.
+  (let [wrap (fn [path request]
+               (#'cljs/render-wrapper
+                {:fn-name "proxy" :method :get :path path
+                 :endpoint "demo/proxy" :request request :response nil
+                 :request-keys [:slug]}))
+        many (wrap "/p/:slug/api/**" nil)
+        one  (wrap "/p/:slug/api/*" nil)]
+
+    (testing "the remainder is interpolated, not printed"
+      (is (re-find #"\(url \(str \"/p/\" \(:slug params\) \"/api/\" \(:\* params\)\)\)" many)
+          many)
+      (is (not (re-find #"\*\*\"" many))
+          (str "a literal wildcard in the url reaches the server as the"
+               " characters ** and 404s: " many)))
+
+    (testing "a single-segment wildcard reads the same key"
+      (is (re-find #"\(:\* params\)" one) one))
+
+    (testing "the wrapper takes a params map at all"
+      ;; a path with only a wildcard and no named capture still needs one
+      (let [bare (#'cljs/render-wrapper
+                  {:fn-name "assets" :method :get :path "/assets/**"
+                   :endpoint "demo/assets" :request nil :response nil})]
+        (is (re-find #"\n  \[params\]\n" bare) bare)))
+
+    (testing "and :* is ALLOWED rather than refused as an undeclared key"
+      ;; the guard is built from the request schema's keys plus the path's, so
+      ;; a wildcard missing from the second list makes the endpoint
+      ;; unreachable: the url needs the value and the guard rejects it
+      (let [guarded (wrap "/p/:slug/api/**"
+                          {:kind :inline :schema '[:map [:slug :string]]})]
+        (is (re-find #"remove #\{[^}]*:\*" guarded) guarded)))))
