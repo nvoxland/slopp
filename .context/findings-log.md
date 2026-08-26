@@ -1369,3 +1369,38 @@ in the population. None of those is an arithmetic check.
 The gate this was built to open is NOT open. `the-trim-gate-is-a-constant-not-
 a-budget.md` stays gated: the instrument moved the question from unanswerable
 to unanswered, and a `nil` re-fetch rate is not permission.
+
+## 2026-08-26 — a four-step retirement, run and measured end to end
+
+The first complete run of `ship the seam WORKING, announce it, then refuse`
+with a real consumer on the other side, reported by slopp-ui after restarting
+onto the retirement jar:
+
+```
+seam shipped WORKING     jar N — /api/rest/paths live, /api/contracts still serving
+announced                the shapes plus a byte diff of the rows
+migrated and VERIFIED    producer and consumer both green, and reported so
+retired                  a no-op: /api/contracts 404, nothing here noticed
+```
+
+**The middle step is what paid, and it paid in a way reading could not have.**
+`generate_client` refused the new document — it reads `:slopp/contract-version`
+as a literal — and it was a consumer NEITHER side had listed, because it never
+names the URL: it is handed one. On the two-step plan that would have surfaced
+after the old address was gone, with no supported way to rebuild a generated
+client. It surfaced in the one release where fixing it was cheap.
+
+Worth separating from the story: the plan as first written WAS two steps, and
+it was the consumer who pointed out that the three-step rule was already
+recorded here and being walked past. A discipline in `.context/` is not a
+mechanism, and this is the second time in a month that the thing which enforced
+one was somebody downstream reading it back.
+
+**What the consumer could NOT do, and it is the open item.** Their closing
+measurement was `/api/webapp/routes` answering 404 on their process, correctly
+diagnosed as jar skew — but only because they knew their own revision (d36828)
+and the endpoint's (d36877). From outside a process, "on an older jar" and
+"its route table is stale" are still indistinguishable, which is the constraint
+they attached to `a-served-route-table-outlives-the-store-it-came-from.md`: a
+listener that named the store revision its table came from would end the
+ambiguity for whoever is standing outside it.
