@@ -5582,12 +5582,41 @@ capability, each with its own version key and its own malli schema:
 GET /api/rest/paths      → :rest/path forms + their contracts
 GET /api/http/paths      → :http/path forms (content)
 GET /api/webapp/paths    → declared :webapp/client-routes prefixes
+GET /api/webapp/routes   → the :webapp/routes table (added 2026-08-26)
 ```
 
 Addressing is `/api/<capability>/<what it lists>`, always both levels, with
 the sub-api named for the MARKER so a consumer that learns one address learns
-the rest. Room is deliberately left for a second sub-api under a capability
-(`/api/http/mounts`, `/api/cli/commands`); nothing needs one yet.
+the rest. Room was deliberately left for a second sub-api under a capability
+(`/api/http/mounts`, `/api/cli/commands`), and `webapp` took it first.
+
+**The webapp pair is the case the scheme was built for, and it is the one
+that can be misread.** `/api/webapp/paths` answers *who serves this path* —
+the prefixes a served document declares it owns, server-side. `/api/webapp/
+routes` answers *what screens are there* — what the browser routes to inside
+them. One prefix and twenty screens is an ordinary shape, so neither is a
+summary of the other, and a consumer rendering only the first shows a
+client-routed app as a single page. This is the same "a form appears in two
+documents, deliberately" property one level down: the marker decides the
+document, not the var.
+
+**`/api/webapp/routes` is derived from the STORE; the other three from the
+loaded image.** The store-says-WHICH / image-says-WHAT split holds for a
+served surface because schemas and page values live only on loaded vars. A
+client route table does not: it is inside the `^:app/entry` fn's return value,
+so the image could answer only by CALLING an application's entry — a side
+effect taken for a listing. It reuses `rules.webapp/webapp-report`, which is
+the derivation `query_surface` already shows, so the tool and the document
+cannot answer differently.
+
+That has one cost, and the document carries it rather than hiding it: only a
+LITERAL table can be read, and a big app builds its table in pieces. Rows it
+could not read are named in `:unreadable` — every `:webapp/*` declaration, not
+only route ones, because all three come off one traversal and splitting the
+list by sniffing its sentences would be a second thing to keep in step.
+Over-reporting in a diagnostics key is the safe direction; the failure being
+prevented is an empty `:routes`, which is an affirmative claim of emptiness
+rather than an absence.
 
 **Why it exists.** `/api/contracts` filtered `(= :rest (:kind row))`, so a
 remote consumer of a slopp project could discover every API and zero pages.

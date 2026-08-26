@@ -2253,9 +2253,23 @@ that. Neither store reads the other.
   `:media-type`, `:effectful?`, `:auth`, and the
   request/response schemas as VALUES. Publish it at `/api/rest/paths`: the
   convention is `/api/<capability>/<what it lists>`, so a consumer that learns
-  one address learns `/api/http/paths` and `/api/webapp/paths` too. Each
+  one address learns `/api/http/paths`, `/api/webapp/paths` and
+  `/api/webapp/routes` too. Each
   capability has its own document and its own version, because they gain keys
-  on their own schedules and no consumer wants every kind listed together. Serve it as EDN with `:http/raw true`,
+  on their own schedules and no consumer wants every kind listed together.
+
+  **A capability may publish more than one document, and the webapp pair is
+  the case to know.** `/api/webapp/paths` lists the PREFIXES a served document
+  declares it owns (`:webapp/client-routes`) — server-side, answering *who
+  serves this path*. `/api/webapp/routes` lists what the browser then routes
+  to inside them (`:webapp/routes`) — answering *what screens are there*. One
+  prefix and twenty screens is ordinary, so neither is a summary of the other.
+  `/api/webapp/routes` is also the one document derived from the STORE rather
+  than from loaded vars: a route table lives inside the `^:app/entry` fn's
+  return value, so only a literal in the source says what it holds. That is
+  why it carries `:unreadable` — a table built in pieces and named by a var
+  contributes there instead of to `:routes`, and a consumer rendering the rows
+  without that line may be showing fewer screens than the app has. Serve it as EDN with `:http/raw true`,
   `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
   so a generated wrapper reads text rather than attempting JSON. It ships in the
   `slopp-web` slim jar, so any app can publish, not just one whose code lives in
@@ -2619,7 +2633,8 @@ things and giving out the wrong one wastes someone's time:
 
 - `:ui` is THIS project's own listener, and it serves `/api/*` — JSON, plus
   its own surface as EDN, one document per capability: `/api/rest/paths`,
-  `/api/http/paths` and `/api/webapp/paths` (the last two are usually empty). It is already running (the server starts
+  `/api/http/paths`, `/api/webapp/paths` and `/api/webapp/routes` (the last
+  three are usually empty). It is already running (the server starts
   it at boot), it runs on your live session so warranty and observed examples
   are the ones you actually have, and it has no pages in it at all. A human
   opening it sees JSON.

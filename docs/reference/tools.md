@@ -14,7 +14,7 @@ a running server, and is always current for the version you are on.
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards for everything it reaches. `match` + `window` narrows a giant form. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |
-| `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus its surface as EDN at `/api/rest/paths`, `/api/http/paths` and `/api/webapp/paths`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
+| `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus its surface as EDN at `/api/rest/paths`, `/api/http/paths`, `/api/webapp/paths` and `/api/webapp/routes`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
 | `help` | The workflow cheat-sheet. |
 
 ### This project's listener, and where the pages are
