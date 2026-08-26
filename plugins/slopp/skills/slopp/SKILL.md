@@ -2247,11 +2247,15 @@ they don't — a UI in its own project, two services, anything across a process
 boundary — the producer publishes its shape and the consumer generates from
 that. Neither store reads the other.
 
-- **Producer: serve `slopp.http.contract/contract-document`.** It takes your
-  served namespace list and returns `{:slopp/contract-version 2 :endpoints […]}`
+- **Producer: serve `slopp.rest.paths/paths-document`.** It takes your
+  served namespace list and returns `{:slopp/rest-paths-version 1 :paths […]}`
   — method, path, name, the handler's QUALIFIED symbol, its docstring,
   `:media-type`, `:effectful?`, `:auth`, and the
-  request/response schemas as VALUES. Serve it as EDN with `:http/raw true`,
+  request/response schemas as VALUES. Publish it at `/api/rest/paths`: the
+  convention is `/api/<capability>/<what it lists>`, so a consumer that learns
+  one address learns `/api/http/paths` and `/api/webapp/paths` too. Each
+  capability has its own document and its own version, because they gain keys
+  on their own schedules and no consumer wants every kind listed together. Serve it as EDN with `:http/raw true`,
   `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
   so a generated wrapper reads text rather than attempting JSON. It ships in the
   `slopp-web` slim jar, so any app can publish, not just one whose code lives in
@@ -2296,7 +2300,7 @@ that. Neither store reads the other.
   one throws** the port's own `:http/error :unreachable`, and a failed `:check`
   throws `:rest/error :contract` because the upstream broke a promise it
   published.
-- **Consumer: `generate_client {from "http://host/api/contracts"}`.** Writes
+- **Consumer: `generate_client {from "http://host/api/rest/paths"}`.** Writes
   TWO namespaces — a `:cljc` contracts ns of the published schemas, and the
   usual `:cljs` client pointing at it. Both `^:generated`; regenerate, never
   hand-edit.
@@ -2613,8 +2617,9 @@ callees inlined below, and the namespace index.
 **Hand over `session_brief`'s `:hub`, not its `:ui`.** Those are different
 things and giving out the wrong one wastes someone's time:
 
-- `:ui` is THIS project's own listener, and it serves `/api/*` — JSON, and the
-  EDN contract at `/api/contracts`. It is already running (the server starts
+- `:ui` is THIS project's own listener, and it serves `/api/*` — JSON, plus
+  its own surface as EDN, one document per capability: `/api/rest/paths`,
+  `/api/http/paths` and `/api/webapp/paths` (the last two are usually empty). It is already running (the server starts
   it at boot), it runs on your live session so warranty and observed examples
   are the ones you actually have, and it has no pages in it at all. A human
   opening it sees JSON.
@@ -2652,7 +2657,7 @@ sides share no compiled-in number and can be different releases.
 
 That split is worth knowing about even if you never touch the hub, because it
 is the shape a slopp app takes when it consumes another one: the hub generates
-its typed client from each project's published `/api/contracts` and talks to
+its typed client from each project's published `/api/rest/paths` and talks to
 a store it cannot open. See "Consuming someone else's API" above.
 
 **When you hit a dead end, revert cleanly and say WHY.** `undo` walks back

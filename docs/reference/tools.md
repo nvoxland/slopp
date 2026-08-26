@@ -14,7 +14,7 @@ a running server, and is always current for the version you are on.
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards for everything it reaches. `match` + `window` narrows a giant form. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |
-| `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus the API's shape as EDN at `/api/contracts`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
+| `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus its surface as EDN at `/api/rest/paths`, `/api/http/paths` and `/api/webapp/paths`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
 | `help` | The workflow cheat-sheet. |
 
 ### This project's listener, and where the pages are
@@ -22,7 +22,7 @@ a running server, and is always current for the version you are on.
 `ui_serve` controls a small web application -- built on slopp's own [web
 framework](../guide/web/index.md), the way any other slopp app is -- that
 serves **this project's API and nothing else**: `/api/*` as JSON, and the shape
-of that API as EDN at `/api/contracts`. Ask it for `/` and you get a 404.
+of that API as EDN at `/api/rest/paths`. Ask it for `/` and you get a 404.
 
 It runs on the session that is already open, so covering-test counts are the
 ones that session actually measured. Serving again replaces the running server
@@ -150,7 +150,7 @@ lives somewhere else — a UI in its own project, another service, anything acro
 a process boundary — the producer publishes its shape and the consumer generates
 from that. Neither store reads the other.
 
-The producer serves `slopp.http.contract/contract-document` over its own
+The producer serves `slopp.rest.paths/paths-document` over its own
 namespace list:
 
 ```clojure
@@ -177,7 +177,7 @@ slim jar and any app can publish.
 The consumer then runs:
 
 ```
-generate_client {from "http://127.0.0.1:7359/api/contracts"}
+generate_client {from "http://127.0.0.1:7359/api/rest/paths"}
 ```
 
 which writes **two** namespaces: a `:cljc` contracts namespace of the published

@@ -8,7 +8,7 @@ depend on, built through slopp, maintained indefinitely, and — the load-bearin
 part — **it cannot reach inside**. It has its own repo, its own store, its own
 MCP server, and it depends on the published `io.github.nvoxland/slopp-web`
 slim jar and nothing else. It talks to slopp projects over HTTP, generating a
-typed client from each one's published `/api/contracts`.
+typed client from each one's published `/api/rest/paths`.
 
 That constraint is the whole instrument. The reviewer UI used to live in
 slopp's own store and reached straight into `slopp.read.query`,

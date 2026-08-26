@@ -5572,3 +5572,72 @@ population to count, and a zero would be read as the size of the hole — so its
 docstring says every rate it reports is a lower bound, and a test asserts the
 docstring says it. Open in
 `ideas/observation/the-read-meter-cannot-see-a-read-only-session.md`.
+
+### D-surface-publishing — one document per capability, at /api/<capability>/<marker> (2026-08-26)
+
+A project publishes its own surface over HTTP as SEPARATE documents, one per
+capability, each with its own version key and its own malli schema:
+
+```
+GET /api/rest/paths      → :rest/path forms + their contracts
+GET /api/http/paths      → :http/path forms (content)
+GET /api/webapp/paths    → declared :webapp/client-routes prefixes
+```
+
+Addressing is `/api/<capability>/<what it lists>`, always both levels, with
+the sub-api named for the MARKER so a consumer that learns one address learns
+the rest. Room is deliberately left for a second sub-api under a capability
+(`/api/http/mounts`, `/api/cli/commands`); nothing needs one yet.
+
+**Why it exists.** `/api/contracts` filtered `(= :rest (:kind row))`, so a
+remote consumer of a slopp project could discover every API and zero pages.
+The exclusion was always about TYPING — a generated wrapper whose `(.json
+resp)` runs against HTML is nonsense — and never about visibility, but for a
+while it read as both. Reported by the store building the reviewer UI, which
+never opens a store and so cannot reach `query_surface`.
+
+**Separate documents, not one with a `:kind` column.** Each capability's rows
+answer a different question and will gain keys on its own schedule; a union
+document makes every addition a shared migration, and no consumer wants every
+kind listed together. The corollary is accepted rather than papered over: **a
+`:webapp/client-routes` var appears in TWO documents** — it is a served page
+and the owner of browser-side paths — and neither document is a subset of the
+other. Pinned by test so it is not tidied away as duplication later.
+
+**Each publisher lives in the family of the capability whose marker it reads**
+(`slopp.rest.paths`, `slopp.http.paths`, `slopp.webapp.paths`), because
+vendoring is per family: while the REST publisher sat under `slopp.http.*`,
+every http-only store shipped one it could never use. `undent` stays in
+`slopp.http.paths` and is shared — `rest` and `webapp` both require `http`.
+Two module edges were declared for this (`slopp.webapp → slopp.http`,
+`slopp.api → slopp.webapp`); both mirror the capability catalog's own
+`:requires`.
+
+**Published as SERVED, not as declared.** The content document's
+`:media-type` is derived from the value the way `content-response` derives it,
+because the page that declares nothing is the shell — the most important page
+in most stores — and a declaration-derived document reports nil for it. Rows
+DESCRIBE a page and never carry it (`:shape`, `:root-tag`/`:nodes`,
+`:bytes`); an index shipping bodies puts a stylesheet on the wire to render
+one table row. Client routes are published as DECLARED, never expanded into
+the framework's generated catch-alls, matching the call `rules.http/endpoints`
+already made: a row nobody wrote reads exactly like a route an author typed.
+
+**Version keys start at 1 rather than inheriting `:slopp/contract-version 2`.**
+A new document at a new address does not carry the old counter. What it does
+inherit is the rule that document taught: adding a REQUIRED key moves the
+version, or the key ships `{:optional true}`.
+
+**The retirement takes two releases, and that was a correction.** The first
+plan retired `/api/contracts` in the same release that introduced its
+replacement, which leaves no jar on which both spellings resolve — so the only
+consumer could not migrate and verify anywhere. Worse, that consumer PRODUCES
+a contract document too, by calling the same helper under a declared
+`:rest/response`, so a shape change is a 500 in their store. They pointed out
+it was this repo's own recorded rule (*ship the seam WORKING, announce it,
+then refuse*) and they were right. `/api/contracts` therefore still answers
+its exact v2 shape for one release, re-keyed in `slopp.api.reads/contract-read`
+— which is where it had to live, because the module boundary rightly refuses
+`slopp.http` reaching `slopp.rest`. An overlap is not a compatibility path:
+nothing negotiates, there is no alias and no shim, and it has one release to
+live.

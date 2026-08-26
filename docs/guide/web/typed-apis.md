@@ -23,7 +23,7 @@ inert until it is true.
 
 The same [malli](https://github.com/metosin/malli) schemas serve three readers:
 the boundary that validates, the generated client that validates on the other
-side, and `/api/contracts` that publishes the shape to a consumer who never sees
+side, and `/api/rest/paths` that publishes the shape to a consumer who never sees
 your store.
 
 ## Turning a declared contract into an enforced one
