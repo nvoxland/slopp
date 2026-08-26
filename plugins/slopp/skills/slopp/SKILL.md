@@ -1434,6 +1434,37 @@ implies `http`.
   (html/css-response …))
 ```
 
+**A path is segments, and the grammar has exactly three special ones.**
+
+| in a path | matches | bound as |
+|---|---|---|
+| `:name` | exactly one segment | `:name` in `:path-params` |
+| `*` | exactly one segment | `:*` |
+| `**` | ZERO or more segments, slash-joined | `:*` |
+
+Both wildcards are **anonymous** and both are **end-only**. `**` matching zero
+segments is what lets `/store/**` answer `/store` as well as `/store/form/9` —
+so a section covers its own root and needs no second declaration for it.
+
+```clojure
+"/api/form/:id"     ; one segment, named
+"/assets/**"        ; the whole tree under /assets, and /assets itself
+"/p/:slug/store/*"  ; one segment under a captured one
+```
+
+Anything else carrying a `*` — `*path`, `*.css`, `pre*`, a wildcard in the
+middle — **refuses at the write** (`http-path-pattern`). The router is pure, so
+a pattern it has no rule for matches nothing and the route 404s while reading
+as a live endpoint; the refusal is the only place that can say why. There is no
+partial-segment globbing.
+
+**Precedence is positional, so route order never decides anything.** Rank each
+segment (literal < `:name` < `*` < `**`) and compare left to right: the longest
+static prefix wins, `/my/**` beats `/**`, `*` beats `**`, and an exact route
+beats a `**` that also covers it. It is what reitit and Spring's `PathPattern`
+do, and the servlet spec's exact-then-longest-prefix ordering falls out of it.
+Adding a route can never steal an existing one.
+
 **`:rest/path` must live under the API prefix, and `:http/path` must not.**
 The prefix is `rest.prefix`, default `"/api"` — one answer per store, so
 `/api/*` means something to a proxy, a CSP or a reader WITHOUT consulting

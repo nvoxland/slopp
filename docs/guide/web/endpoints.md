@@ -53,6 +53,37 @@ intact and the additions are visibly slopp's.
 | `:http/effectful` | `true` opts out of effects-as-data. The escape, not the default. |
 | `:rest/media-type` | What the endpoint answers. Defaults to `application/json`; a wrapper reads text for anything else. |
 
+## Path patterns
+
+A path is segments. Three of them are special:
+
+| In a path | Matches | Arrives as |
+|---|---|---|
+| `:name` | Exactly one segment | `:name` in `:path-params` |
+| `*` | Exactly one segment | `:*` |
+| `**` | Zero or more segments, slash-joined | `:*` |
+
+Both wildcards are anonymous, and both are allowed only at the **end** of a
+path. `**` matches zero segments as well as many, so `/store/**` answers
+`/store` itself along with everything under it.
+
+```clojure
+"/api/form/:id"     ; one segment, named
+"/assets/**"        ; the tree under /assets, and /assets
+"/p/:slug/store/*"  ; one segment under a captured one
+```
+
+Anything else containing a `*` -- `*path`, `*.css`, `pre*`, or a wildcard in
+the middle -- is refused when you write it. A pattern the router has no rule
+for matches nothing, so the route would 404 while looking like a live
+endpoint. There is no partial-segment globbing.
+
+Precedence is decided segment by segment, left to right: a literal beats
+`:name`, which beats `*`, which beats `**`. The longest static prefix wins,
+`/my/**` beats `/**`, and an exact route beats a `**` that covers it. Adding a
+route never steals an existing one, and the order routes are declared in makes
+no difference.
+
 Two markers go on *other* forms:
 
 | Marker | On |

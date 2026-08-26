@@ -5573,6 +5573,63 @@ docstring says every rate it reports is a lower bound, and a test asserts the
 docstring says it. Open in
 `ideas/observation/the-read-meter-cannot-see-a-read-only-session.md`.
 
+### D-route-grammar — two anonymous wildcards, end-only, positional precedence (2026-08-26)
+
+A route path is segments, and three are special: `:name` captures one segment,
+`*` matches exactly one, `**` matches ZERO or more. Both wildcards are
+anonymous (bound under `:*`) and both are END-ONLY. Precedence ranks each
+segment (literal 0 < `:name` 1 < `*` 2 < `**` 3) and compares the vectors LEFT
+TO RIGHT, shorter winning when one is a prefix of the other.
+
+**What it replaced, and why the replacement was not optional.** Precedence was
+a global score — captures + 100×splats — so two patterns of equal counts TIED,
+and the tie broke by position in the route vector. That vector comes from
+`(vals (ns-publics …))`, which is hash order, so the winner was not merely
+order-dependent but unreproducible between runs. Measured before the rewrite:
+
+```
+routes [/**  /my/**]  →  /my/abc/xyz served by /**
+routes [/my/**  /**]  →  /my/abc/xyz served by /my/**
+```
+
+Reachable between two FRAMEWORK-GENERATED rows, so no app could have avoided it
+by writing its routes differently: a static mount inside a client-routed prefix
+produces `/p/:slug/assets/**` and `/p/:slug/**`, and the old score gave both
+101. An app's JavaScript bundle served as the SPA shell, or not, depending on
+hash iteration.
+
+**`**` matching ZERO segments deleted a rule rather than enforcing it better.**
+The generated client-route fallback was `<prefix>/*name`, and a named splat
+needed at least one segment below it — so `/store` 404'd while `/store/form/9`
+answered, and every client-routed section owed a second explicit server route
+for its own root. That rule lived in three docstrings, one check and one
+escape text, and nothing carried it to an author who had read none of them. It
+is now a property of the pattern.
+
+**Anonymous, because the name was never read.** `*path` and `*client-path`
+threaded a name through three generators; one of them read it. A static mount
+wants a tree, not a vocabulary.
+
+**Refused at the write (`http-path-pattern`), because the router cannot speak.**
+`match` is pure — data in, decision data out — so a pattern it has no rule for
+contributes no rows and the route silently answers nothing while passing every
+other gate and appearing in `query_surface`. From outside that is
+indistinguishable from a broken handler. The gate is also the migration: it
+names `**` when it sees `*path`.
+
+**Following existing practice deliberately**, rather than inventing: Spring's
+`PathPattern` restricts `**` to the end and matches zero segments with it;
+reitit ranks segment-wise left to right; the servlet spec orders
+exact-then-longest-prefix, which falls out of positional ranking rather than
+being a second rule. No intra-segment globbing (`*.css`) — that is a separate
+feature with its own precedence tier in the servlet spec, and nothing needs it.
+
+**Two implementations, one grammar.** `slopp.http.router/match` ships in the
+`http` family and `slopp.webapp/match-route` in `webapp`, because a store may
+vendor either without the other. `routes-test/the-CLIENT-and-SERVER-matchers-
+agree-about-the-pattern-grammar` runs both over one table and is what makes
+them a pair.
+
 ### D-surface-publishing — one document per capability, at /api/<capability>/<marker> (2026-08-26)
 
 A project publishes its own surface over HTTP as SEPARATE documents, one per
