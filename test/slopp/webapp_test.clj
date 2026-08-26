@@ -848,7 +848,7 @@
                 ["/things"       :things]
                 ["/things/:id"   :thing]
                 ["/things/:id/edit" :edit]
-                ["/files/*path"  :files]]
+                ["/files/**"    :files]]
         at     (fn [p] (webapp/match-route routes p))]
 
     (testing "a static segment beats a capture, whatever the order"
@@ -859,8 +859,12 @@
       (is (= {:id "42"} (:params (at "/things/42")))))
 
     (testing "a trailing catch-all takes the remainder, and ranks below both"
+      ;; anonymous — bound under `:*`, because there can be at most one and a
+      ;; name threaded through three generators was read by one of them
       (is (= :files (:screen (at "/files/a/b/c.txt"))))
-      (is (= {:path "a/b/c.txt"} (:params (at "/files/a/b/c.txt")))))
+      (is (= {:* "a/b/c.txt"} (:params (at "/files/a/b/c.txt"))))
+      (is (= {:* ""} (:params (at "/files")))
+          "** matches ZERO segments, so a section answers for its own root"))
 
     (testing "an unrouted path is nil, which is a real answer"
       ;; the app's own nowhere. Defaulting to a screen tells the reader they are

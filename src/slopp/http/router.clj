@@ -29,44 +29,93 @@
   :handler, the query_surface shape). Returns the matched row with
   `:path-params` merged ({:id \"42\"} for \"/api/users/:id\"), or nil.
 
-  A `:x` segment captures ONE segment. A TRAILING `*x` captures the REMAINDER —
-  one or more segments, slash-joined ({:path \"cljs/main.js\"} for
-  \"/assets/*path\") — which is what lets a static mount serve a TREE; a `*`
-  anywhere but last never matches. Precedence is fewest-captures-wins, and a
-  catch-all ranks below BOTH a static segment and a single-segment capture, so
-  adding one never steals an existing route. A trailing slash is tolerated.
-  Pure — request data in, decision data out."
+  **Three pattern segments, and only three.**
+
+  | `:name` | captures exactly ONE segment, bound under `:name` |
+  | `*`     | matches exactly ONE segment, bound under `:*` |
+  | `**`    | matches ZERO OR MORE segments, slash-joined under `:*` |
+
+  Both wildcards are ANONYMOUS and both are END-ONLY. Anonymous because a
+  static mount wants a tree rather than a vocabulary — the name a splat used to
+  carry was threaded through three generators and read by one of them.
+  End-only because matching a wildcard in the middle needs backtracking and the
+  pattern that needs it is nearly always a mistake; Spring's `PathPattern`
+  restricts `**` the same way and for the same reason.
+
+  **`**` matching ZERO segments is what covers a prefix ROOT.** `/store/**`
+  answers `/store` as well as `/store/form/9`. The older catch-all required a
+  segment below it, so every client-routed section needed a second declaration
+  for its own root — a rule authors had to know and nothing enforced.
+
+  **A `*` that is not a whole segment is not a pattern here, and never matches.**
+  `*path`, `*.css` and `pre*` are all refused at the write (`http-path-pattern`)
+  and match nothing if one arrives anyway. Deliberately not read as a LITERAL
+  segment: a retired `/assets/*path` read literally would answer a url whose
+  text really is `*path` and 404 every real asset — a spelling that keeps
+  working, on the wrong requests.
+
+  **Precedence is POSITIONAL: rank each segment (literal 0 < `:name` 1 < `*` 2
+  < `**` 3) and compare the vectors LEFT TO RIGHT, shorter winning when one is
+  a prefix of the other.** So the longest static prefix wins, `/my/**` beats
+  `/**`, `*` beats `**`, and an exact route beats a `**` that also covers it —
+  each a consequence of one rule rather than a rule of its own. It is what
+  reitit and Spring's `PathPattern` both do, and the servlet spec's
+  exact-then-longest-prefix ordering falls out of it.
+
+  This replaces a global score (captures + 100×splats), which TIED patterns of
+  equal counts and broke the tie by position in the route vector — and that
+  vector comes from `(vals (ns-publics …))`, so the winner was not merely
+  order-dependent but unreproducible between runs. Reachable between two
+  framework-generated rows: a static tree mounted inside a client-routed
+  prefix.
+
+  A trailing slash is tolerated. Pure — request data in, decision data out."
   [routes method uri]
   (let [segs   (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
         u      (segs uri)
         cap?   #(str/starts-with? % ":")
-        splat? #(str/starts-with? % "*")
-        ;; a catch-all is the loosest possible match — rank it far below a
-        ;; single capture so static > :one > *rest holds
-        rank   (fn [ps] (+ (count (filter cap? ps))
-                           (* 100 (count (filter splat? ps)))))
+        one?   #(= "*" %)
+        many?  #(= "**" %)
+        ;; a pattern carrying a `*` anywhere this grammar does not have one.
+        ;; Checked per ROW rather than refused here: this is pure and answers
+        ;; with data, so an unmatchable pattern contributes no rows and the
+        ;; write gate is what tells its author
+        ill?   (fn [ps]
+                 (boolean (some (fn [[i s]]
+                                  (and (str/includes? s "*")
+                                       (or (not (or (one? s) (many? s)))
+                                           (not= i (dec (count ps))))))
+                                (map-indexed vector ps))))
+        rank   (fn [ps] (mapv #(cond (many? %) 3 (one? %) 2 (cap? %) 1 :else 0) ps))
+        ;; left to right, first difference decides; all-equal-so-far means the
+        ;; one that ENDED is the more specific — `/a` over `/a/**`
+        rank<  (fn [a b] (or (first (remove zero? (map compare a b)))
+                             (compare (count a) (count b))))
         row-match (fn [{:keys [path] :as row}]
-                    (let [p (segs path)]
-                      (when (if (some splat? p)
-                              (>= (count u) (count p))
-                              (= (count p) (count u)))
+                    (let [p (segs path)
+                          done #(assoc row :path-params % ::rank (rank p))]
+                      (when-not (ill? p)
                         (loop [p p, u u, params {}]
                           (cond
                             (empty? p)
-                            (when (empty? u)
-                              (assoc row :path-params params ::captures (rank (segs path))))
+                            (when (empty? u) (done params))
 
-                            ;; trailing catch-all: swallow the rest (>= 1 segment)
-                            (splat? (first p))
-                            (when (and (= 1 (count p)) (seq u))
-                              (assoc row :path-params
-                                     (assoc params (keyword (subs (first p) 1))
-                                            ;; each segment was encoded on its
-                                            ;; own, so each decodes on its own
-                                            ;; and THEN joins — a static mount
-                                            ;; serves a tree
-                                            (str/join "/" (map lang/decode-component u)))
-                                     ::captures (rank (segs path))))
+                            ;; zero or more, so this arm comes BEFORE the
+                            ;; empty-uri test — that ordering is the whole of
+                            ;; "** covers its own root"
+                            (many? (first p))
+                            (done (assoc params :*
+                                         ;; each segment was encoded on its
+                                         ;; own, so each decodes on its own and
+                                         ;; THEN joins — a static mount serves
+                                         ;; a tree
+                                         (str/join "/" (map lang/decode-component u))))
+
+                            (empty? u) nil
+
+                            (one? (first p))
+                            (when (= 1 (count u))
+                              (done (assoc params :* (lang/decode-component (first u)))))
 
                             (cap? (first p))
                             ;; DECODED, and after the split rather than before
@@ -89,6 +138,6 @@
     (some-> (->> routes
                  (filter #(= method (:method %)))
                  (keep row-match)
-                 (sort-by ::captures)
+                 (sort-by ::rank rank<)
                  first)
-            (dissoc ::captures))))
+            (dissoc ::rank))))

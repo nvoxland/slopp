@@ -294,6 +294,49 @@
                " if the implementation should stay private, move the marker to"
                " a public wrapper that calls it."))))))
 
+(defn ^:export ^{:rule/applies-to :production} http-path-pattern
+  "The path-grammar gate: a route whose `:rest/path`/`:http/path` carries a
+  wildcard the router has no rule for is refused at the write. Inert until
+  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
+  Returns a teaching string, or nil when clean.
+
+  **The grammar is three segments and nothing else.** `:name` captures one
+  segment; `*` matches exactly one; `**` matches zero or more. Both wildcards
+  are anonymous and both are END-ONLY.
+
+  **Refused rather than left to 404, because the router cannot say anything.**
+  `slopp.http.router/match` is pure — data in, decision data out — so a pattern
+  it has no rule for contributes no rows and the route silently answers
+  nothing. It passes every other gate, appears in `query_surface`, and from
+  outside is indistinguishable from a broken handler while the author reads a
+  declaration that looks fine. This is the same shape as a marker slopp does
+  not define: a declaration that refuses nothing, generates nothing and changes
+  nothing, while looking exactly like one that works.
+
+  **It is also the migration.** `/assets/*path` was the correct spelling until
+  the grammar rework and is now unmatchable, so the refusal carries the
+  replacement — a rename an author can act on, rather than an outage they have
+  to diagnose."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)]
+      (when-let [path (route-path m)]
+        (let [segs (vec (remove str/blank? (str/split (str path) #"/")))
+              bad  (first (for [[i s] (map-indexed vector segs)
+                                :when (and (str/includes? s "*")
+                                           (or (not (#{"*" "**"} s))
+                                               (not= i (dec (count segs)))))]
+                            s))]
+          (when bad
+            (str ns-sym "/" form-name " declares " path
+                 " — \"" bad "\" is not a pattern the router has, so this route"
+                 " matches nothing and 404s while reading as a live endpoint."
+                 " The grammar is `:name` (one segment, captured under that"
+                 " name), `*` (exactly one segment) and `**` (zero or more),"
+                 " with both wildcards ANONYMOUS and at the END only —"
+                 " a named splat like *path is now `**`, read from :path-params"
+                 " under :*, and there is no partial-segment globbing")))))))
+
 (defn ^:export ^{:rule/applies-to :production} http-route-collision
   "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
   method+path another FORM already claims is refused at the write — a

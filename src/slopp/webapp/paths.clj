@@ -9,7 +9,7 @@
   catch-all per declared prefix.
 
   **Published as DECLARED, never as expanded.** The catch-alls are rows nobody
-  wrote; three `/store/*client-path` entries in a document would read as
+  wrote; three `/store/**` entries in a document would read as
   surface somebody did. Same call `slopp.rules.http/endpoints` already makes
   for `query_surface`.
 
@@ -34,9 +34,9 @@
   path* — a consumer routing a click needs the prefix, not the var.
 
   **Declared, never expanded.** `slopp.http.routes/client-route-rows`
-  generates a `/store/*client-path` catch-all per prefix so a refreshed deep
-  link reaches the app, and those are route-table entries rather than
-  published rows. A row nobody wrote reads exactly like a route an author
+  generates a `/store/**` catch-all per prefix so a refreshed deep link
+  reaches the app, and those are route-table entries rather than published
+  rows. A row nobody wrote reads exactly like a route an author
   typed and a reader cannot tell them apart — the same call
   `slopp.rules.http/endpoints` makes for `query_surface`.
 

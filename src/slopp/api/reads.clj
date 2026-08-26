@@ -284,8 +284,12 @@
   paths is asking exactly that, and the path alone never says.
 
   `:unreadable` is every `:webapp/*` declaration the reader could not take
-  literally — a table built in pieces and named by a var among them. Those
-  rows are absent from `:routes`, and an empty `:routes` is an affirmative
+  literally — a table built in pieces and named by a var among them. It does
+  NOT claim the rows are missing: every map literal in the store is scanned,
+  so the same table may be declared literally elsewhere and reported from
+  there. Measured on the first store to have one, whose entry builds its table
+  with `mapv` and whose rows all landed anyway. What it says is that this
+  declaration contributed nothing — and an empty `:routes` is an affirmative
   claim of emptiness rather than an absence, so without this key a partial
   answer and a complete one look identical. It covers actions and session
   loads as well as routes because all three come off one traversal; splitting

@@ -420,3 +420,48 @@
     (testing "and a private form carrying NO routing marker is none of this gate's business"
       (let [s (land on "(defn- helper \"H.\" [x] x)")]
         (is (nil? (gate s 'helper)))))))
+
+(deftest a-path-pattern-the-router-cannot-MATCH-refuses-at-the-write
+  ;; The failure this closes is silent by construction. `match` answers with
+  ;; data, so a pattern it has no rule for contributes no rows — the route
+  ;; passes every other gate, appears in `query_surface`, and 404s. From
+  ;; outside that is indistinguishable from a broken handler, and the author
+  ;; is looking at a declaration that reads fine.
+  ;;
+  ;; It is also the migration hazard of the grammar rework: `/assets/*path`
+  ;; was correct for a year and is now unmatchable. A refusal that names the
+  ;; new spelling is the difference between a rename and an outage.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.api "(ns shop.api)\n")
+                     "capabilities" :manifest "http.enabled" "true"))
+        land (fn [st form-src]
+               (store/ingest st 'shop.more (str "(ns shop.more)\n\n" form-src "\n")))
+        api  (fn [path] (str "(defn ^{:http/method :get :rest/path \"" path "\""
+                             " :http/auth :public :rest/response :string}"
+                             " thing \"T.\" [req] req)"))
+        gate (fn [st] (edit.http/http-path-pattern st 'shop.more 'thing))]
+
+    (testing "a NAMED splat refuses, and the message says what to write instead"
+      (let [r (gate (land on (api "/assets/*path")))]
+        (is (some? r) "an unmatchable pattern must not land")
+        (is (re-find #"\*\*" (str r))
+            (str "the refusal has to carry the replacement, or it is a puzzle: " r))))
+
+    (testing "a wildcard that is not at the END refuses"
+      (is (some? (gate (land on (api "/x/*/y")))))
+      (is (some? (gate (land on (api "/x/**/y"))))))
+
+    (testing "a * fused to a literal refuses — there is no intra-segment globbing"
+      (is (some? (gate (land on (api "/files/*.css")))))
+      (is (some? (gate (land on (api "/files/pre*"))))))
+
+    (testing "the grammar's own forms all pass — the control"
+      ;; without this the assertions above hold for a gate that refuses
+      ;; everything it is shown
+      (doseq [p ["/a" "/a/b/c" "/a/:id" "/a/:id/edit" "/a/*" "/a/**" "/**" "/"]]
+        (is (nil? (gate (land on (api p))))
+            (str p " is in the grammar and must land: "
+                 (pr-str (gate (land on (api p))))))))
+
+    (testing "and a form that declares no route at all is not this gate's business"
+      (is (nil? (gate (land on "(defn thing \"T.\" [x] x)")))))))

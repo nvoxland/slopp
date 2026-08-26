@@ -32,22 +32,27 @@
   the app document for EVERY unmatched path, and an app that can never 404 has
   no way left to distinguish a typo from a page.
 
-  So the fallback is DECLARED and SCOPED. `:webapp/client-routes [\"/store\"]` says \"I am
-  the document for client routes under /store\", and paths outside every
-  declared prefix still 404 exactly as before.
+  So the fallback is DECLARED and SCOPED. `:webapp/client-routes [\"/store\"]`
+  says \"I am the document for client routes under /store\", and paths outside
+  every declared prefix still 404 exactly as before.
 
-  No new matching rules are needed. The router already ranks a trailing
-  catch-all far below both a static segment and a single-segment capture, so
-  these rows cannot steal a real route no matter what order they are in —
-  `/store/ns/:ns` still wins over `/store/*`.
+  **`<prefix>/**` — and `**` matches ZERO or more segments, so the prefix ROOT
+  is covered.** It was not, when the generated pattern was `<prefix>/*name`:
+  the catch-all needed at least one segment below it, so `/store` 404'd while
+  `/store/form/9` answered, and every client-routed section needed a SECOND
+  declaration for its own root. That rule was written down in three places —
+  this docstring, the advisory's escape text, and the check — and an author who
+  had read none of them found out from a 404 on the one url they were most
+  likely to share.
 
-  Note the prefix ROOT is not covered: `[\"/store\"]` generates `/store/*path`,
-  which needs at least one segment below it. If `/store` itself should render
-  the app, that is an ordinary route the app declares — an intent, not a
-  side effect of a fallback."
+  No new matching rules are needed. Precedence is positional, so a catch-all
+  ranks below both a static segment and a single-segment capture at whatever
+  depth it sits: `/store/ns/:ns` still wins over `/store/**`, and a static
+  mount nested inside the prefix wins over it too — which the older global
+  score got wrong, silently and by route order."
   [row prefixes]
   (vec (for [p prefixes]
-         (assoc row :path (str p "/*client-path")))))
+         (assoc row :path (str p "/**")))))
 
 (defn ^:export from-namespaces
   "Route rows from the loaded namespaces' public vars carrying `:rest/path`

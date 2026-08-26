@@ -56,6 +56,9 @@
    {:rule :http-auth-refusal :grain :form
     :escape "declare :http/auth on the endpoint (:public typed out, :authenticated, or [:group \"<name>\"]) — or dial the rule down and let http.auth.default-policy govern"
     :teach "an endpoint (:http/path) must declare its auth policy — default-deny: an unsecured route is a visible decision, never an omission (inert until http.enabled)"}
+   {:rule :http-path-pattern :grain :form
+    :escape "spell the wildcard the way the router reads it: `*` for exactly one segment, `**` for zero or more, both ANONYMOUS and at the END only. A named splat (/assets/*path) is now /assets/** and its value arrives under :* — there is no partial-segment globbing (*.css, pre*) and no wildcard in the middle"
+    :teach "a path carrying a wildcard the router has no rule for matches NOTHING — the route passes every other gate, appears in query_surface, and 404s, which from outside is indistinguishable from a broken handler. The router is pure, so it cannot say why; this is the only place that can (inert until http.enabled)"}
    {:rule :http-route-collision :grain :form
     :escape "change the path or method, or extend the existing handler (query_surface lists every claim)"
     :teach "one method+path has one owning endpoint — a duplicate route refuses at the write instead of surprising at startup (inert until http.enabled)"}
@@ -69,7 +72,7 @@
     :escape "fix the spelling, or move the key into your OWN namespace if it is yours — slopp reads nothing under :web/*, :webapp/*, :cli/*, :rest/*, :rule/* or :malli/* that it does not define"
     :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :webapp/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
 {:rule :webapp-client-routes-are-served :grain :done
-    :escape "declare a :webapp/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. The prefix ROOT is not covered by the fallback — [\"/store\"] generates /store/*client-path, which needs at least one segment below it"
+    :escape "declare a :webapp/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. A prefix generates <prefix>/** and covers its own ROOT as well as everything below it"
     :teach "a client route the server does not serve on a hard load: clicking to it works, refreshing it or opening a shared link 404s. So the app is fine for whoever is already inside it and broken for whoever was sent a url — the population that never reports it, because they assume the link was bad (inert until webapp.enabled)"}
    {:rule :webapp-request-paths-are-served :grain :done
     :escape "fix the path to one this store declares (the finding lists them), declare the endpoint, write the WHOLE url if it is a third-party server (an absolute url is never reported), or mark the form ^{:http/external-path \"why\"} when something OUTSIDE this store serves it — a proxied API under the app's own mount point cannot be written in full, because the prefix is known only at runtime"

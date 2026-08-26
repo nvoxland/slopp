@@ -180,13 +180,17 @@
              (check ["/p/:slug/store"]
                     "[[\"/store/form/:id\" s] [\"/settings/:tab\" s]]"))))
 
-    (testing "the prefix ROOT is reported too, and it is the subtle one"
-      ;; `["/store"]` generates `/store/*client-path`, which needs at least one
-      ;; segment below it — so the root itself is NOT covered by the fallback
-      ;; and needs its own server route. That gotcha is documented in
-      ;; `client-route-rows` and nothing has ever enforced it
-      (is (= ["/store"]
-             (check ["/p/:slug/store"] "[[\"/store\" s]]"))))
+    (testing "the prefix ROOT is served by the fallback now, and used to not be"
+      ;; The gotcha this check was written to enforce, DELETED rather than
+      ;; enforced better. `["/store"]` generated `/store/*client-path`, and a
+      ;; named splat needed at least one segment below it — so `/store` 404'd
+      ;; while `/store/form/9` answered, and the author owed a second explicit
+      ;; server route for the root of every section. The rule lived in three
+      ;; docstrings and one escape text; nothing carried it to an author who
+      ;; had read none of them.
+      ;;
+      ;; `**` matches zero or more, so a declared prefix answers for itself.
+      (is (= [] (check ["/p/:slug/store"] "[[\"/store\" s]]"))))
 
     (testing "a store with no declared prefixes reports every client route"
       ;; not silence: an app whose browser owns routes and whose document
@@ -233,9 +237,25 @@
              (at "[[\"/store\" s] [\"/store/form/:id\" s] [\"/store/ns/:ns\" s]]"))))
 
     (testing "the app ROOT contributes nothing, because a prefix needs a segment"
-      ;; `["/"]` would generate `//*client-path`, which is not a path — and the
-      ;; document already answers its own url
+      ;; `["/"]` would generate `//**`, which is not a path — and the document
+      ;; already answers its own url
       (is (= [] (at "[[\"/\" s]]"))))
+
+    (testing "a document mounted at the ROOT derives a path, not a doubled slash"
+      ;; Measured on the first real store to have a browser app, whose hub is
+      ;; served at `/`: the join produced `//p`, which is not a path either.
+      ;; The advisory that exists to tell an author which prefixes to declare
+      ;; was naming one no router can match — and being advisory-only, nothing
+      ;; ever went red over it.
+      (let [root (store/ingest (store/empty-store) 'shop.ui
+                               (str "(ns shop.ui)\n\n"
+                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
+                                    "(defn ^{:http/method :get :http/path \"/\"\n"
+                                    "        :webapp/client-routes [\"/p\"]}\n"
+                                    "  doc \"D.\" [_] {})\n\n"
+                                    "(defn ^:app/entry app \"A.\" []\n"
+                                    "  {:webapp/routes [[\"/p/:slug\" s] [\"/p/:slug/pages\" s]]})\n"))]
+        (is (= ["/p"] (rules.webapp/derived-client-route-prefixes root)))))
 
     (testing "an app that declares NO prefix has no mount point, and says nothing"
       ;; the honest limit. Without a declaration there is no form to read the

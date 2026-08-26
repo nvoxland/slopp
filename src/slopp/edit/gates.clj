@@ -60,7 +60,7 @@
   them of; forgetting it fired an HTTP rule on a project that never asked for
   HTTP."
   [#'edit.modules/module-refusal #'tiers/tier-refusal #'edit.modules/schema-refusal #'edit.modules/namespaced-keys-refusal #'edit.http/http-generated-ns
-   #'edit.http/http-auth-refusal #'edit.http/http-content-shape #'edit.http/http-unreachable-declaration #'edit.rest/rest-path-partition #'edit.rest/rest-endpoint-schema #'edit.http/http-route-collision #'edit.webapp/webapp-page-unreachable #'edit.webapp/webapp-portable-handler #'edit.http/http-undeclared-effect #'edit.http/http-undeclared-context
+   #'edit.http/http-auth-refusal #'edit.http/http-content-shape #'edit.http/http-unreachable-declaration #'edit.rest/rest-path-partition #'edit.rest/rest-endpoint-schema #'edit.http/http-path-pattern #'edit.http/http-route-collision #'edit.webapp/webapp-page-unreachable #'edit.webapp/webapp-portable-handler #'edit.http/http-undeclared-effect #'edit.http/http-undeclared-context
    #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs
    #'edit.cli/cli-args-schema #'edit.cli/cli-command-collision #'edit.cli/cli-direct-stdio])
 

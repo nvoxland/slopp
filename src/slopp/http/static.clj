@@ -60,10 +60,15 @@
          ;; app and serve nothing under --live.
          :let [path-prefix (str/replace (str raw-prefix) #"/+$" "")]]
      {:method :get
-      :path (str url-prefix "/*path")
+      :path (str url-prefix "/**")
       :auth :public
       :handler (fn [req]
-                 (let [rel   (str (:path (:path-params req)))
+                 (let [;; `:*` — the wildcard is anonymous now, and `**` matches zero
+                       ;; segments, so a bare GET /assets arrives here with an
+                       ;; EMPTY remainder rather than not arriving at all. The
+                       ;; `(seq rel)` below already refuses it, which is what a
+                       ;; directory should answer
+                       rel   (str (:* (:path-params req)))
                        safe? (and (seq rel)
                                   (not (str/starts-with? rel "/"))
                                   (not (str/includes? rel "\\"))

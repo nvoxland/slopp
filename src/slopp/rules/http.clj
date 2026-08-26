@@ -52,7 +52,7 @@
            ;; the client-route prefixes this document also answers for, when it
            ;; declares any. Surfaced rather than expanded into synthetic
            ;; catch-all rows: query_surface should show what the author
-           ;; DECLARED, and three `/store/*client-path` rows would read as
+           ;; DECLARED, and three `/store/**` rows would read as
            ;; surface nobody wrote.
            :webapp/client-routes   (:webapp/client-routes meta)
            :schema?   (contains? meta :rest/response)

@@ -3,7 +3,7 @@
 
   Two failures matter and neither is a missing key. Publishing the framework's
   generated catch-alls would present rows nobody wrote as surface somebody
-  did — a reader cannot tell `/store/*client-path` from a route an author
+  did — a reader cannot tell `/store/**` from a route an author
   typed. And treating the overlap with `/api/http/paths` as duplication would
   quietly delete one of two answers: the same var is a served document AND the
   owner of browser-side paths, which are different questions."
@@ -40,10 +40,14 @@
       (is (not-any? #(= 'w-plain (:name %)) (:paths doc))))
 
     (testing "the generated catch-alls are ABSENT — they are rows nobody wrote"
-      ;; the framework generates /w/store/*client-path so a refreshed deep
-      ;; link reaches the app. Publishing it would read as a route an author
-      ;; typed, and a reader cannot tell the two apart.
-      (is (not-any? #(re-find #"\*client-path" (str (:prefix %))) (:paths doc))
+      ;; the framework generates /w/store/** so a refreshed deep link reaches
+      ;; the app. Publishing it would read as a route an author typed, and a
+      ;; reader cannot tell the two apart.
+      ;;
+      ;; The detector is the WILDCARD rather than the old splat's name: a
+      ;; regex for `*client-path` still passes here and can no longer bite,
+      ;; which is a check that retired itself when the spelling moved.
+      (is (not-any? #(re-find #"\*" (str (:prefix %))) (:paths doc))
           (pr-str (:paths doc))))
 
     (testing "each row names the SERVER route that serves the prefix, because

@@ -329,9 +329,14 @@
   (let [seen   (atom [])
         reader (fn [p] (swap! seen conj p) {:content "x" :content-type "text/plain"})
         row    (first (static/mount-routes {"/assets" "public"} reader))
-        call   (fn [captured] ((:handler row) {:path-params {:path captured}}))]
+        call   (fn [captured] ((:handler row) {:path-params {:* captured}}))]
     (testing "the mount is a catch-all, so nested assets are reachable"
-      (is (= "/assets/*path" (:path row))))
+      (is (= "/assets/**" (:path row))))
+    (testing "the mount ROOT is refused too, and it now REACHES this handler"
+      ;; `**` matches zero segments, so GET /assets routes here with an empty
+      ;; remainder where the old `*path` matched nothing at all. Same answer to
+      ;; the caller, decided somewhere that can say why
+      (is (= 404 (:status (call "")))))
     (testing "a nested path reads under the mount prefix"
       (is (= 200 (:status (call "cljs/main.js"))))
       (is (= "public/cljs/main.js" (last @seen))))
@@ -351,7 +356,7 @@
   ;; uses it as a fallback, so EVERY reader gets a correct type.
   (let [row  (first (static/mount-routes {"/assets" "public"}
                                          (fn [_] {:content "x"})))
-        call (fn [p] ((:handler row) {:path-params {:path p}}))]
+        call (fn [p] ((:handler row) {:path-params {:* p}}))]
     (testing "a typeless blob still serves with the right type"
       (is (= "text/javascript" (get-in (call "cljs/main.js") [:headers "Content-Type"])))
       (is (= "text/css" (get-in (call "app.css") [:headers "Content-Type"]))))
@@ -359,7 +364,7 @@
       (let [row2 (first (static/mount-routes
                          {"/assets" "public"}
                          (fn [_] {:content "x" :content-type "text/plain"})))]
-        (is (= "text/plain" (get-in ((:handler row2) {:path-params {:path "a.js"}})
+        (is (= "text/plain" (get-in ((:handler row2) {:path-params {:* "a.js"}})
                                     [:headers "Content-Type"])))))
     (testing "an unknown extension omits the header rather than guessing"
       (is (nil? (get-in (call "thing.zzz") [:headers "Content-Type"]))))))

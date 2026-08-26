@@ -775,8 +775,8 @@
   am the document for client routes under /store*, and the framework generates
   a scoped catch-all so a refreshed deep link reaches the app instead of a
   404. What is published is what the author DECLARED — the catch-alls are not
-  rows anybody wrote, and three `/store/*client-path` entries would read as
-  surface somebody did.
+  rows anybody wrote, and three `/store/**` entries would read as surface
+  somebody did.
 
   **A form appears here AND in `/api/http/paths`, deliberately.** The var is a
   served document and also the owner of browser-side paths; the two documents
@@ -829,5 +829,5 @@
       [:request {:optional true :doc "the fully-qualified symbol of the fn that builds what this screen fetches, when the row names one"} :symbol]
       [:loads {:optional true :doc "the url that request names, as a url rather than as the var that computes one. Absent when a request BUILDS its path instead of naming a literal"} :string]]]]
    [:unreadable
-    {:doc "every :webapp/* declaration in this store that could not be read as a literal, as sentences — a route table named by a var contributes here INSTEAD of to :routes, so a consumer showing routes without showing this may be showing fewer screens than the app has"}
+    {:doc "every :webapp/* declaration in this store that could not be read as a literal, as sentences. NOT a claim that the rows are missing: the reader scans every map literal in the store, so the same table may be declared literally elsewhere and reported from there. It says only that THIS declaration contributed nothing — so a consumer showing routes without showing this may be showing fewer screens than the app has, and cannot tell from :routes alone"}
     [:sequential :string]]])

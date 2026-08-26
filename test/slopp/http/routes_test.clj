@@ -98,10 +98,20 @@
       ;; than no fallback: the app loses its only way to say "no such thing".
       (is (nil? (router/match rows :get "/nonsense")))
       (is (nil? (router/match rows :get "/api/typo"))))
-    (testing "the prefix root itself is not swallowed — it is the app's own route"
-      ;; /store is a real page here; only paths BELOW it fall back
-      (is (nil? (router/match rows :get "/store"))
-          "no row declares /store, so it 404s rather than silently rendering the app"))))
+    (testing "the prefix ROOT is covered too, which it did not used to be"
+      ;; The change `**` bought. The generated pattern was `<prefix>/*name`,
+      ;; and a named splat needed at least one segment below it — so `/store`
+      ;; 404'd while `/store/form/9` answered. An author had to declare a
+      ;; second, explicit route for the root of every client-routed section,
+      ;; and the url they were most likely to SHARE was the one that broke.
+      ;;
+      ;; `**` matches zero or more, so the prefix answers for itself. Nothing
+      ;; outside the prefix changed: that is the assertion above, and it is
+      ;; still the one that matters.
+      (is (= :app (:handler (router/match rows :get "/store")))
+          "the declared prefix answers its own root")
+      (is (= "" (get-in (router/match rows :get "/store") [:path-params :*]))
+          "with an EMPTY remainder — the app routes it client-side from there"))))
 
 (deftest a-row-carries-the-CONTRACT-its-endpoint-declared
   ;; The row is what the dispatcher holds at request time, and until now it
@@ -147,10 +157,15 @@
   ;; within `slopp.rules.*` — running the comparison from inside `slopp.http`
   ;; needs no widening of that, and the module edge it does need is declared
   ;; test-only so production code under `slopp.http` still may not cross.
-  (let [patterns ["/" "/things" "/things/:id" "/things/:id/edit"
-                  "/a/b/c" "/files/*path" "/:only"]
+  (let [;; every form of the grammar, so a side that learns one the other has
+        ;; not is caught here rather than by a deep link that routes in the
+        ;; browser and 404s on refresh. The two WILDCARDS are the new members,
+        ;; and they are the ones whose precedence differs from a capture's.
+        patterns ["/" "/things" "/things/:id" "/things/:id/edit"
+                  "/a/b/c" "/files/**" "/files/one/*" "/:only" "/deep/**"]
         paths    ["/" "/things" "/things/" "/things/42" "/things/42/edit"
-                  "/a/b/c" "/files/x" "/files/a/b/c.txt" "/solo"
+                  "/a/b/c" "/files" "/files/x" "/files/a/b/c.txt"
+                  "/files/one/x" "/files/one/x/y" "/deep" "/deep/a/b" "/solo"
                   "/nope/deeper" "/things/42/nonsense" ""]
         ;; the pattern is its own target, so a disagreement names itself
         rows     (mapv (fn [p] {:method :get :path p :handler p}) patterns)
@@ -228,10 +243,10 @@
     ;; reason the whole finding is about: fixing one end of a pair and not the
     ;; other is how this arrived
     (let [uri (str "/assets/" (lang/encode-component "a b") "/" (lang/encode-component "x!.js"))
-          srv (router/match [{:method :get :path "/assets/*path" :handler :h}] :get uri)
-          cli (webapp/match-route [["/assets/*path" :screen]] uri)]
-      (is (= "a b/x!.js" (get-in srv [:path-params :path])) (pr-str srv))
-      (is (= "a b/x!.js" (get-in cli [:params :path])) (pr-str cli))))
+          srv (router/match [{:method :get :path "/assets/**" :handler :h}] :get uri)
+          cli (webapp/match-route [["/assets/**" :screen]] uri)]
+      (is (= "a b/x!.js" (get-in srv [:path-params :*])) (pr-str srv))
+      (is (= "a b/x!.js" (get-in cli [:params :*])) (pr-str cli))))
 
   (testing "an encoded SLASH stays inside its segment"
     ;; the reason decoding happens AFTER the split and never before: %2F is a

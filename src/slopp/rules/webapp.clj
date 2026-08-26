@@ -184,19 +184,24 @@
 
   **Two ways a client route is served, and the check has to know both.**
 
-  1. **The generated catch-all.** A declared prefix becomes
-     `<prefix>/*client-path`, so anything STRICTLY BELOW the prefix is answered.
-     The comparison is on the prefix's TAIL, because a prefix is in SERVER space
-     (`/p/:slug/store`) and a client route is in APP space (`/store/form/:id`);
-     what is decidable is whether some suffix of the prefix is a leading segment
-     of the route.
-  2. **An EXPLICIT server route.** The catch-all needs at least one segment
-     below the prefix, so the prefix ROOT is not covered by it and needs a route
-     of its own — which the advisory's escape text has always said and this
-     check did not look for. That cost three false positives on the first real
-     store, against the app's own socket test proving all three answer. **A
-     remedy the check cannot see is a remedy that produces findings for taking
-     it**, which is worse than not offering it.
+  1. **The generated catch-all.** A declared prefix becomes `<prefix>/**`, so
+     the prefix and everything below it is answered. The comparison is on the
+     prefix's TAIL, because a prefix is in SERVER space (`/p/:slug/store`) and a
+     client route is in APP space (`/store/form/:id`); what is decidable is
+     whether some suffix of the prefix is a leading segment of the route.
+
+     It used to be STRICTLY below, and that was a property of the pattern
+     rather than of routing: a named splat needed at least one segment under
+     it, so a declared prefix did not answer for its own root. `**` matches
+     zero or more, and the rule went away rather than being enforced better.
+  2. **An EXPLICIT server route.** Still a way to serve a client route — an app
+     may cover one without declaring any prefix at all — though it is no longer
+     the only way to cover a prefix ROOT. This arm was added because that
+     remedy was the advisory's own escape text and this check did not look for
+     it, which cost three false positives on the first real store against the
+     app's own socket test proving all three answer. **A remedy the check
+     cannot see is a remedy that produces findings for taking it**, which is
+     worse than not offering it.
 
   The client ROOT is the document's own url, so a document at `/p/:slug` serves
   the client route `/` by existing.
@@ -240,10 +245,13 @@
                    (let [rs (segs route)]
                      (boolean
                       (some (fn [tail]
-                              ;; STRICTLY below: the catch-all needs at least one
-                              ;; segment under the prefix, so an exact match is
-                              ;; the root case and wants arm 2
-                              (and (< (count tail) (count rs))
+                              ;; AT or below. The generated fallback is
+                              ;; `<prefix>/**` and `**` matches ZERO or more
+                              ;; segments, so a declared prefix answers for its
+                              ;; own root — it did not when the pattern was a
+                              ;; named splat, and that gap is what arm 2 below
+                              ;; existed to let an author close by hand
+                              (and (<= (count tail) (count rs))
                                    (= tail (vec (take (count tail) rs)))))
                             tails))))]
     (vec (sort (remove #(or (below? %) (explicit? %)) (client-routes st))))))
@@ -279,7 +287,7 @@
   `/store` answers both; listing them separately would be three declarations
   where one serves.
 
-  **The app root contributes nothing.** `/` would generate `//*client-path`,
+  **The app root contributes nothing.** `/` would generate `//**`,
   which is not a path — and the document already answers its own url.
 
   **Reported, never enforced.** An app may legitimately serve only some of its
@@ -298,7 +306,11 @@
                             (str (:http/path m)))))
         tops (distinct (keep (comp first segs) (client-routes st)))]
     (if doc
-      (vec (sort (map #(str doc "/" %) tops)))
+      ;; the mount's own trailing slash is stripped before the join: a
+      ;; document served at `/` is the commonest shape there is, and
+      ;; `(str "/" "/" "p")` is `//p` — not a path, named by the one
+      ;; mechanism that exists to tell an author what to declare
+      (vec (sort (map #(str (str/replace doc #"/+$" "") "/" %) tops)))
       [])))
 
 (defn webapp-client-routes-are-served-check
@@ -342,10 +354,9 @@
                             (str " Your client table and this document's own"
                                  " path imply :webapp/client-routes "
                                  (pr-str want) "."))
-                          " Note the prefix ROOT is not covered by the fallback:"
-                          " [\"/store\"] generates /store/*client-path, which"
-                          " needs at least one segment below it, so a route AT"
-                          " the prefix needs its own server route.")})))))
+                          " A declared prefix generates <prefix>/** and covers"
+                          " its own ROOT as well as everything below it, so a"
+                          " route AT the prefix needs nothing extra.")})))))
 
 (defn ^:export request-paths
   "Every `:webapp/path` literal this store declares, as

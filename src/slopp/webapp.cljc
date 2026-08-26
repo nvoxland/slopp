@@ -350,10 +350,15 @@
   layer above; a matcher that never asks cannot be wrong about the answer.
 
   **Same pattern grammar as the server**, and pinned by a test that runs both
-  over one table: a `:seg` captures one segment, a trailing `*rest` captures the
-  remainder, precedence is fewest-captures-wins so adding a route can never
-  steal an existing one, and a trailing slash is tolerated because a browser
-  produces both. Two implementations rather than one, because `slopp.http.router`
+  over one table: `:seg` captures one segment under that name, `*` matches
+  exactly one segment and `**` zero or more, both anonymous, both END-ONLY, and
+  both bound under `:*`. Precedence is POSITIONAL — rank each segment
+  (literal 0 < `:name` 1 < `*` 2 < `**` 3) and compare left to right, shorter
+  winning when one is a prefix of the other — so the longest static prefix wins
+  and the answer never depends on the order the table happens to be in. A
+  trailing slash is tolerated because a browser produces both.
+
+  Two implementations rather than one, because `slopp.http.router`
   ships in the `http` family and this ships in `webapp`: a store may vendor
   either without the other, so a require across them is a load failure in
   whichever store has one half. The agreement is asserted instead.
@@ -374,30 +379,43 @@
         segs    (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
         u       (segs p)
         cap?    #(str/starts-with? % ":")
-        splat?  #(str/starts-with? % "*")
-        rank    (fn [ps] (+ (count (filter cap? ps))
-                            (* 100 (count (filter splat? ps)))))
+        one?    #(= "*" %)
+        many?   #(= "**" %)
+        ;; a `*` this grammar does not have — never read as a literal segment,
+        ;; for the reason the server states: a retired spelling that matches
+        ;; the text `*path` answers the wrong requests instead of none
+        ill?    (fn [ps]
+                  (boolean (some (fn [[i s]]
+                                   (and (str/includes? s "*")
+                                        (or (not (or (one? s) (many? s)))
+                                            (not= i (dec (count ps))))))
+                                 (map-indexed vector ps))))
+        rank    (fn [ps] (mapv #(cond (many? %) 3 (one? %) 2 (cap? %) 1 :else 0) ps))
+        rank<   (fn [a b] (or (first (remove zero? (map compare a b)))
+                              (compare (count a) (count b))))
         try-row (fn [[pattern target]]
-                  (let [ps (segs pattern)]
-                    (when (if (some splat? ps)
-                            (>= (count u) (count ps))
-                            (= (count ps) (count u)))
+                  (let [ps   (segs pattern)
+                        done #(hash-map :screen target :params % :rank (rank ps))]
+                    (when-not (ill? ps)
                       (loop [ps ps, u u, params {}]
                         (cond
                           (empty? ps)
-                          (when (empty? u)
-                            {:screen target :params params :rank (rank (segs pattern))})
+                          (when (empty? u) (done params))
 
-                          (splat? (first ps))
-                          (when (and (= 1 (count ps)) (seq u))
-                            {:screen target
-                             :params (assoc params (keyword (subs (first ps) 1))
-                                            ;; each segment encoded on its own,
-                                            ;; so each decodes on its own and
-                                            ;; THEN joins — the server's
-                                            ;; catch-all does the same
-                                            (str/join "/" (map lang/decode-component u)))
-                             :rank   (rank (segs pattern))})
+                          ;; zero or more, so this precedes the empty-path
+                          ;; test — `/store/**` routes `/store` itself
+                          (many? (first ps))
+                          (done (assoc params :*
+                                       ;; each segment encoded on its own, so
+                                       ;; each decodes on its own and THEN
+                                       ;; joins — the server does the same
+                                       (str/join "/" (map lang/decode-component u))))
+
+                          (empty? u) nil
+
+                          (one? (first ps))
+                          (when (= 1 (count u))
+                            (done (assoc params :* (lang/decode-component (first u)))))
 
                           (cap? (first ps))
                           ;; DECODED, like the server's — a browser hands this
@@ -416,7 +434,7 @@
                           (recur (rest ps) (rest u) params)
 
                           :else nil)))))]
-    (when-let [hit (first (sort-by :rank (keep try-row routes)))]
+    (when-let [hit (first (sort-by :rank rank< (keep try-row routes)))]
       {:screen (:screen hit)
        ;; query first, so a PATH capture wins the collision
        :params (merge (lang/query-params query) (:params hit))})))
