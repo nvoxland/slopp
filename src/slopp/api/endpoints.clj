@@ -338,3 +338,33 @@
   consumer toward the hand-rolled fetch `direct-http` refuses."
   [req]
   {:status 200 :body (:results (:http/reads req))})
+
+(defn ^{:http/method :get :rest/path "/api/webapp/routes" :http/auth :public
+        :rest/media-type "application/edn"
+        :rest/response contracts/webapp-routes-document
+        :http/reads {:doc [:ui/webapp-routes []]}}
+  webapp-routes
+  "GET /api/webapp/routes — the addresses this project's BROWSER routes to, as
+  EDN.
+
+  One row per pattern in the declared `:webapp/routes` table, naming what
+  renders it, what that screen is, and which url it loads.
+
+  **A different question from `/api/webapp/paths`.** That publishes the
+  PREFIXES a document declares it owns — server-side, *who serves this path*.
+  This publishes what the browser routes to inside them — *what screens are
+  there*. One prefix and twenty routes is an ordinary shape, so neither
+  document is a summary of the other.
+
+  Alone among the capability documents it is derived from the STORE, because a
+  route table lives inside the entry fn's return value and only source says
+  what it holds. `:unreadable` carries the cost of that: a table built in
+  pieces and named by a var cannot be read, and a consumer that renders
+  `:routes` without it may be showing fewer screens than the app has.
+
+  `[]` unless the project has a browser app, which most do not."
+  [req]
+  {:status 200
+   :http/raw true
+   :headers {"Content-Type" "application/edn"}
+   :body (pr-str (:doc (:http/reads req)))})

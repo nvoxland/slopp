@@ -276,13 +276,15 @@
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
                "/api/search"
-               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"}
+               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
+               "/api/webapp/routes"}
              (set (keys by-path)))))
 
     (testing "every capability's publisher is IN the typed document, so a
               consumer generates its request builder rather than hand-writing
               one for the endpoint that describes the endpoints"
-      (doseq [p ["/api/rest/paths" "/api/http/paths" "/api/webapp/paths"]]
+      (doseq [p ["/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
+                 "/api/webapp/routes"]]
         (is (= "application/edn" (:media-type (by-path p)))
             (str p " must say what it answers, or a generated wrapper calls"
                  " .json on EDN and fails on the first character"))
@@ -311,16 +313,20 @@
     ;; JSON would flatten a keyword schema into a string, so the wire format is
     ;; a property of the endpoint independent of which namespaces it covers
     (let [ctx (server/context (atom {:store (store/empty-store)}))]
-      (doseq [[uri vkey] {"/api/rest/paths"   :slopp/rest-paths-version
-                          "/api/http/paths"   :slopp/http-paths-version
-                          "/api/webapp/paths" :slopp/webapp-paths-version}]
+      ;; the rows key travels with the version key: a document is named for
+      ;; the marker it lists, so `/api/webapp/routes` answers `:routes` and
+      ;; not `:paths`. A consumer reads the pair off its own endpoint
+      (doseq [[uri [vkey rows]] {"/api/rest/paths"    [:slopp/rest-paths-version :paths]
+                                 "/api/http/paths"    [:slopp/http-paths-version :paths]
+                                 "/api/webapp/paths"  [:slopp/webapp-paths-version :paths]
+                                 "/api/webapp/routes" [:slopp/webapp-routes-version :routes]}]
         (let [r (slopp.http/handle! ctx {:request-method :get :uri uri})]
           (is (= 200 (:status r)) uri)
           (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
           (is (= "application/edn" (get-in r [:headers "Content-Type"])) uri)
           (let [body (edn/read-string (:body r))]
             (is (= 1 (vkey body)) (str uri " " (pr-str (keys body))))
-            (is (= [] (:paths body))
+            (is (= [] (rows body))
                 (str uri " over an EMPTY store — the common case a consumer"
                      " renders most often"))))))))
 
@@ -361,7 +367,7 @@
           ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
                    "modules" "module" "search"
-                   "rest-paths" "http-paths" "webapp-paths"}
+                   "rest-paths" "http-paths" "webapp-paths" "webapp-routes"}
                  (set (:wrappers out)))
               (pr-str out)))
 
@@ -1094,3 +1100,42 @@
       (doseq [nsx (api.reads/app-namespaces st)]
         (is (seq (store/forms st nsx))
             (str nsx " is documented but has no forms in this store"))))))
+
+(deftest a-browser-apps-screens-reach-the-WIRE-and-not-only-the-derivation
+  ;; slopp's own store has no browser app, so every end-to-end check of
+  ;; `/api/webapp/routes` here can only ever exercise `[]`. That is the case a
+  ;; consumer renders most often and it is worth pinning — but a document
+  ;; whose populated shape has never crossed the pipeline is a document whose
+  ;; encoding nobody checked. The three siblings have the same blind spot for
+  ;; the same reason; this one is cheap to close because the rows come from
+  ;; the store rather than from loaded vars.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn things \"Every thing, listed.\" [_s] [:p \"things\"])\n\n"
+                 "(defn ^:app/entry app \"A.\" []\n"
+                 "  {:webapp/routes [[\"/things\" things]]})\n")
+        ctx (server/context
+             (atom {:store (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                                     [:config "capabilities" :values "webapp.enabled"]
+                                     "true")}))
+        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/webapp/routes"})
+        doc (edn/read-string (:body r))]
+    (is (= 200 (:status r)))
+    (is (= "application/edn" (get-in r [:headers "Content-Type"])))
+    (testing "the row survives the encoder as DATA, symbols and all"
+      ;; EDN rather than JSON is the whole reason these endpoints are raw: a
+      ;; JSON encoder turns `shop.ui/things` into a string and a consumer can
+      ;; no longer tell a symbol from a name that looks like one
+      (is (= [{:path "/things" :screen 'shop.ui/things
+               :doc "Every thing, listed."}]
+             (:routes doc))
+          (pr-str doc)))
+    (testing "and the capability being OFF is the difference, not the store"
+      ;; the reading side of the gates' inertness: same forms, no declaration
+      ;; that this project has a browser app, so it must not be described as
+      ;; having one
+      (let [off (server/context
+                 (atom {:store (store/ingest (store/empty-store) 'shop.ui src)}))]
+        (is (= [] (:routes (edn/read-string
+                            (:body (slopp.http/handle!
+                                    off {:request-method :get
+                                         :uri "/api/webapp/routes"}))))))))))
