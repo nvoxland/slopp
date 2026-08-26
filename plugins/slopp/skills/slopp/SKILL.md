@@ -2268,8 +2268,11 @@ that. Neither store reads the other.
   than from loaded vars: a route table lives inside the `^:app/entry` fn's
   return value, so only a literal in the source says what it holds. That is
   why it carries `:unreadable` — a table built in pieces and named by a var
-  contributes there instead of to `:routes`, and a consumer rendering the rows
-  without that line may be showing fewer screens than the app has. Serve it as EDN with `:http/raw true`,
+  contributes there, and a consumer rendering the rows without that line may
+  be showing fewer screens than the app has. It does NOT say the rows are
+  gone: every map literal in the store is scanned, so the same table may be
+  declared literally elsewhere and reported from there. It says this
+  declaration contributed nothing, which is the honest half of the claim. Serve it as EDN with `:http/raw true`,
   `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
   so a generated wrapper reads text rather than attempting JSON. It ships in the
   `slopp-web` slim jar, so any app can publish, not just one whose code lives in
