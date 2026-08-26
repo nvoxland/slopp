@@ -5641,3 +5641,25 @@ its exact v2 shape for one release, re-keyed in `slopp.api.reads/contract-read`
 `slopp.http` reaching `slopp.rest`. An overlap is not a compatibility path:
 nothing negotiates, there is no alias and no shim, and it has one release to
 live.
+
+
+**A document has consumers that are not people.** The overlap's first outing
+caught one: `generate_client` reads the published document, keyed on
+`:slopp/contract-version` and `:endpoints`, and was not migrated with it. A
+consumer on the overlap jar could repoint at `/api/rest/paths` and could NOT
+regenerate — half a migration, and no way to report the retirement safe. The
+endpoint was right, the document was right, and the thing that broke was a
+tool nobody had listed as a consumer.
+
+`slopp.webdev.cljs/supported-documents` is now a table of envelopes
+(`{[version-key version] rows-key}`) rather than one number, and reading both
+is two lookups rather than the defaults-for-every-moved-key compatibility code
+that was refused when the rows differed between versions. Here the rows are
+byte-identical — 40,749 bytes either way — so only the envelope moved. The old
+row is deleted with the endpoint.
+
+**The reusable half: when a published shape changes, grep for who READS the
+shape, not just who names the URL.** The URL sweep found docs, tests and a
+hub; it could not find a parser keyed on a version field. And the overlap
+release is what turned that from an outage into a message — which is the
+argument for overlaps stated better than the original entry stated it.
