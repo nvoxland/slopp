@@ -749,3 +749,107 @@
       [:auth {:doc "the endpoint's :http/auth policy verbatim: :public, :authenticated, or a composite like [:group \"admin\"]"} :any]
       [:request {:doc "the malli schema for everything the caller SENDS — path params, query and body as one map — or nil for an endpoint that takes none"} :any]
       [:response {:doc "the malli schema of the DOCUMENT a 200 carries, or nil when the endpoint declares none"} :any]]]]])
+
+(def rest-paths-document
+  "`GET /api/rest/paths` — every `:rest/path` form this project serves, with
+  its contract. **Version 1.**
+
+  Replaces `/api/contracts` and its `:slopp/contract-version 2`. A new
+  document at a new address starting at 1: carrying the old counter forward
+  would claim a lineage it does not have, and both are served for one release
+  so a consumer can migrate against something that works.
+
+  The rule the old document taught, inherited whole: **adding a REQUIRED key
+  moves the version, or the key ships `{:optional true}`.** The version field
+  exists so a consumer can refuse a shape it does not know, and it cannot do
+  that job while it is constant — four keys once arrived under a constant 1
+  and a consumer holding a schema could not tell which shape it would get.
+
+  Three fields are `:any` and cannot honestly be more. `:request` and
+  `:response` carry malli SCHEMAS as values — a schema is a keyword, a vector,
+  a symbol or a map, so no narrower shape is true of all of them. `:auth` is
+  an app's own `:http/auth` declaration verbatim, whose grammar is open by
+  design. See the endpoint's `:rest/unconstrained-ok` for why that is
+  permanent rather than pending."
+  [:map
+   [:slopp/rest-paths-version {:doc "the document format's version — a consumer that does not know it should generate nothing"} :int]
+   [:paths
+    {:doc "every :rest/path endpoint this project serves; content is absent by KIND and there is no opt-out"}
+    [:sequential
+     [:map
+      [:method {:doc "the HTTP method, as a keyword"} :keyword]
+      [:path {:doc "the route pattern, with :segment captures as declared"} :string]
+      [:name {:doc "the handler's own name, unqualified"} :symbol]
+      [:handler {:doc "the fully-qualified handler symbol — :name alone does not resolve, and a third of real surfaces have duplicate simple names"} :symbol]
+      [:doc {:doc "the handler's docstring, de-indented and whole — public API copy, and MARKDOWN"} [:maybe :string]]
+      [:media-type {:doc "what this endpoint ANSWERS, defaulting to application/json — read it before choosing a decoder"} :string]
+      [:effectful? {:doc "true when calling this may CHANGE something — DERIVED from the :http/effectful declaration or a non-safe method, so it is answered for every endpoint rather than only the ones whose author wrote a marker"} :boolean]
+      [:auth {:doc "the endpoint's :http/auth policy verbatim: :public, :authenticated, or a composite like [:group \"admin\"]"} :any]
+      [:request {:doc "the malli schema for everything the caller SENDS — path params, query and body as one map — or nil for an endpoint that takes none"} :any]
+      [:response {:doc "the malli schema of the DOCUMENT a 200 carries, or nil when the endpoint declares none"} :any]]]]])
+
+(def http-paths-document
+  "`GET /api/http/paths` — every `:http/path` form this project serves, as
+  CONTENT rather than as an api. **Version 1.**
+
+  The gap this closes: a remote consumer could discover every API and zero
+  pages. Content was excluded from the contract document because a typed
+  wrapper over HTML would be nonsense — a statement about TYPING, which was
+  never a reason for a page to be undiscoverable.
+
+  **Every row DESCRIBES a page and none carries it.** An index shipping bodies
+  would put a stylesheet on the wire to render one table row, and a reader who
+  wants the body has the URL.
+
+  `:media-type` is what the app ACTUALLY serves, not what the def declared —
+  the framework derives one from the value's shape when a def declares none,
+  and the page that declares nothing is the shell, which is the most important
+  page in most stores."
+  [:map
+   [:slopp/http-paths-version {:doc "the document format's version — a consumer that does not know it should render nothing"} :int]
+   [:paths
+    {:doc "every :http/path form this project serves. EMPTY is the common case — most projects serve no content of their own, and a consumer must render that well"}
+    [:sequential
+     [:map
+      [:method {:doc "the HTTP method, as a keyword"} :keyword]
+      [:path {:doc "the route this content is served at"} :string]
+      [:name {:doc "the def's own name, unqualified"} :symbol]
+      [:handler {:doc "the fully-qualified symbol of the def whose VALUE is the page — :name alone does not resolve"} :symbol]
+      [:doc {:doc "the def's docstring, de-indented and whole — public copy, and MARKDOWN"} [:maybe :string]]
+      [:media-type {:doc "what this path ACTUALLY answers with, derived from the value when the def declares none: a vector serves text/html, anything else text/plain, and a declaration wins verbatim"} :string]
+      [:auth {:doc "the route's :http/auth policy verbatim — never nil, because the auth gate refuses a route that declares none"} :any]
+      [:shape {:doc ":hiccup when the value is a vector and :text otherwise — the same discriminator the framework serves by"} :keyword]
+      [:root-tag {:optional true :doc "hiccup only: the document's outermost tag. :html means a WHOLE document (the renderer prepends the doctype); anything else is a fragment"} :keyword]
+      [:nodes {:optional true :doc "hiccup only: how many nodes the tree has AS AUTHORED — a size signal, not a byte count. What is served has the bundle injected, which depends on where the app is mounted"} :int]
+      [:bytes {:optional true :doc "text only: the length of the served string"} :int]
+      [:shell {:optional true :doc "present when this page BOOTS an application — the url of the compiled bundle the framework injects into it"} :string]]]]])
+
+(def webapp-paths-document
+  "`GET /api/webapp/paths` — the paths a project's BROWSER owns, one row per
+  declared `:webapp/client-routes` prefix. **Version 1.**
+
+  A prefix is not a server route. `:webapp/client-routes [\"/store\"]` says *I
+  am the document for client routes under /store*, and the framework generates
+  a scoped catch-all so a refreshed deep link reaches the app instead of a
+  404. What is published is what the author DECLARED — the catch-alls are not
+  rows anybody wrote, and three `/store/*client-path` entries would read as
+  surface somebody did.
+
+  **A form appears here AND in `/api/http/paths`, deliberately.** The var is a
+  served document and also the owner of browser-side paths; the two documents
+  answer different questions and neither is a subset of the other. There is no
+  union document and there will not be one — separate schemas per kind is the
+  point."
+  [:map
+   [:slopp/webapp-paths-version {:doc "the document format's version — a consumer that does not know it should render nothing"} :int]
+   [:paths
+    {:doc "one row per DECLARED client-route prefix. EMPTY unless the project's browser owns routing — most do not"}
+    [:sequential
+     [:map
+      [:prefix {:doc "the declared path prefix the browser owns, e.g. \"/store\". Paths outside every prefix still 404, which is the property a root catch-all would destroy"} :string]
+      [:document-path {:doc "the SERVER route of the document that serves this prefix — where the browser fetches the page that then routes client-side"} :string]
+      [:name {:doc "the document def's own name, unqualified"} :symbol]
+      [:handler {:doc "the fully-qualified symbol of the def that owns this prefix"} :symbol]
+      [:doc {:doc "that def's docstring, de-indented and whole — MARKDOWN"} [:maybe :string]]
+      [:auth {:doc "the route's :http/auth policy verbatim — never nil, because the auth gate refuses a route that declares none"} :any]
+      [:shell {:optional true :doc "the url of the compiled bundle the framework injects, when the document declares one. Absent means the browser owns these paths without slopp building its code"} :string]]]]])

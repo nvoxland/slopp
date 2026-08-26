@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.http.contract :as http.contract] [slopp.rest :as slopp.rest] [slopp.api.reads :as api.reads]))
+            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.rest :as slopp.rest] [slopp.api.reads :as api.reads] [slopp.rest.paths :as rest.paths]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -259,24 +259,35 @@
   ;; for an endpoint IS the var that endpoint declares" — anything weaker and a
   ;; generated client would validate against a shape the server never promised.
   ;;
-  ;; That property belongs to `contract-document` and is asserted here against
+  ;; That property belongs to `paths-document` and is asserted here against
   ;; slopp's own API namespaces DIRECTLY. It used to be asserted through the
-  ;; `/api/contracts` endpoint, which was possible only while that endpoint
-  ;; documented the listener's own surface — and documenting the listener was
-  ;; the bug (see the-contract-documents-the-APPLICATION-…). Asserting it here
-  ;; keeps the property and stops it depending on the thing that was wrong.
-  (let [doc     (http.contract/contract-document server/served-namespaces)
-        by-path (into {} (map (juxt :path identity)) (:endpoints doc))]
+  ;; endpoint, which was possible only while that endpoint documented the
+  ;; listener's own surface — and documenting the listener was the bug (see
+  ;; the-contract-documents-the-APPLICATION-…). Asserting it here keeps the
+  ;; property and stops it depending on the thing that was wrong.
+  (let [doc     (rest.paths/paths-document server/served-namespaces)
+        by-path (into {} (map (juxt :path identity)) (:paths doc))]
 
     (testing "the document is versioned and lists the typed endpoints"
-      (is (= 2 (:slopp/contract-version doc)))
+      (is (= 1 (:slopp/rest-paths-version doc)))
       ;; hand-kept ON PURPOSE: this is the control. Derived from the same
       ;; metadata the endpoint list comes from, it would compare a derivation
       ;; to itself and pass however wrong both were.
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search" "/api/contracts"}
+               "/api/search" "/api/contracts"
+               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"}
              (set (keys by-path)))))
+
+    (testing "every capability's publisher is IN the typed document, so a
+              consumer generates its request builder rather than hand-writing
+              one for the endpoint that describes the endpoints"
+      (doseq [p ["/api/rest/paths" "/api/http/paths" "/api/webapp/paths"]]
+        (is (= "application/edn" (:media-type (by-path p)))
+            (str p " must say what it answers, or a generated wrapper calls"
+                 " .json on EDN and fails on the first character"))
+        (is (false? (:effectful? (by-path p)))
+            (str p " is a GET that reads a store and changes nothing"))))
 
     (testing "the published schema IS the var the endpoint declares"
       (is (= contracts/timeline (:response (by-path "/api/timeline"))))
@@ -288,30 +299,30 @@
 
     (testing "CONTENT is not part of a typed contract — pages and the bundle"
       ;; and they are absent by KIND now, not by a flag. `/` and the bundle are
-      ;; :http/path; nothing about them opts out
+      ;; :http/path; nothing about them opts out. /api/http/paths is where they
+      ;; are published instead.
       (is (not (contains? by-path "/")))
       (is (not (contains? by-path "/js/main.js"))))
 
-    (testing "but the contract endpoint DOES publish itself, and says what it answers"
-      ;; it carried `:rest/client false` for "describing the describer is
-      ;; circular", which was never the fact. Nothing is circular at runtime; a
-      ;; wrapper broke because every wrapper decoded `.json` and this answers
-      ;; EDN. Saying so makes it generatable, which deletes the request paths a
-      ;; consumer hand-writes for exactly this endpoint
-      (is (= "application/edn" (:media-type (by-path "/api/contracts")))
-          (pr-str (by-path "/api/contracts")))
-      (is (= "application/json" (:media-type (by-path "/api/timeline")))
-          "and an ordinary endpoint says JSON rather than leaving it unsaid")))
+    (testing "and an ordinary endpoint says JSON rather than leaving it unsaid"
+      (is (= "application/json" (:media-type (by-path "/api/timeline"))))))
 
-  (testing "and the ENDPOINT still serves EDN verbatim, whatever it documents"
+  (testing "each publisher serves EDN verbatim, whatever it documents"
     ;; JSON would flatten a keyword schema into a string, so the wire format is
     ;; a property of the endpoint independent of which namespaces it covers
-    (let [ctx (server/context (atom {:store (store/empty-store)}))
-          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})]
-      (is (= 200 (:status r)))
-      (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
-      (is (= "application/edn" (get-in r [:headers "Content-Type"])))
-      (is (= 2 (:slopp/contract-version (edn/read-string (:body r))))))))
+    (let [ctx (server/context (atom {:store (store/empty-store)}))]
+      (doseq [[uri vkey] {"/api/rest/paths"   :slopp/rest-paths-version
+                          "/api/http/paths"   :slopp/http-paths-version
+                          "/api/webapp/paths" :slopp/webapp-paths-version}]
+        (let [r (slopp.http/handle! ctx {:request-method :get :uri uri})]
+          (is (= 200 (:status r)) uri)
+          (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
+          (is (= "application/edn" (get-in r [:headers "Content-Type"])) uri)
+          (let [body (edn/read-string (:body r))]
+            (is (= 1 (vkey body)) (str uri " " (pr-str (keys body))))
+            (is (= [] (:paths body))
+                (str uri " over an EMPTY store — the common case a consumer"
+                     " renders most often"))))))))
 
 (deftest ^:external a-consumer-generates-an-equivalent-client-from-the-published-contract
   ;; The fixed point the whole split rests on. A store that has never seen
@@ -348,7 +359,8 @@
           ;; like anything else — which is what deletes the request paths a
           ;; consumer hand-writes for exactly this endpoint
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
-                   "modules" "module" "search" "contract"}
+                   "modules" "module" "search" "contract"
+                   "rest-paths" "http-paths" "webapp-paths"}
                  (set (:wrappers out)))
               (pr-str out)))
 
@@ -935,7 +947,7 @@
   ;; even though this is a GET with no body… without it the generated client
   ;; takes a params map that only the path reads from"). What was missing is
   ;; anything that could tell when an endpoint stopped following it.
-  (let [doc      (http.contract/contract-document ['slopp.api.endpoints])
+  (let [doc      (rest.paths/paths-document ['slopp.api.endpoints])
         declared (fn [schema]
                    ;; entry keys of a [:map [:k …] …], however the schema was
                    ;; named — the document carries VALUES, so by the time we
@@ -944,14 +956,14 @@
                      (set (keep #(when (and (vector? %) (keyword? (first %)))
                                    (first %))
                                 (rest schema)))))
-        missing  (for [{:keys [path request]} (:endpoints doc)
+        missing  (for [{:keys [path request]} (:paths doc)
                        :let [params (map #(keyword (subs % 1))
                                          (re-seq #":[a-zA-Z][a-zA-Z0-9-]*" path))
                              have   (declared request)
                              gap    (remove (or have #{}) params)]
                        :when (seq gap)]
                    {:path path :missing (vec gap) :declares (vec (or have []))})]
-    (is (seq (filter #(re-find #"/:" (:path %)) (:endpoints doc)))
+    (is (seq (filter #(re-find #"/:" (:path %)) (:paths doc)))
         "fixture: the surface HAS parameterised paths — an empty population
          would satisfy the assertion below while checking nothing")
     (is (= [] (vec missing))
@@ -1078,3 +1090,27 @@
       (doseq [nsx (api.reads/app-namespaces st)]
         (is (seq (store/forms st nsx))
             (str nsx " is documented but has no forms in this store"))))))
+
+(deftest the-RETIRED-contract-endpoint-still-answers-for-one-release
+  ;; SCHEDULED FOR DELETION, with `/api/contracts` and
+  ;; `slopp.api.reads/contract-read`, in the release after the consumer
+  ;; reports green. It is here so the overlap is a tested promise rather than
+  ;; an accident: there has to be one jar on which BOTH spellings resolve, or
+  ;; the only consumer has nowhere to migrate and verify — the new address
+  ;; does not exist on the jar they run, and the old one would be gone on the
+  ;; jar they move to.
+  ;;
+  ;; That consumer both READS this document and PRODUCES one by the same
+  ;; derivation under a declared `:rest/response`, so a shape change here is a
+  ;; 500 in their store rather than a wrong document. Which is why the
+  ;; assertion is that nothing changed.
+  (let [ctx (server/context (atom {:store (store/empty-store)}))
+        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/contracts"})
+        doc (edn/read-string (:body r))]
+    (is (= 200 (:status r)))
+    (is (= "application/edn" (get-in r [:headers "Content-Type"])))
+    (is (= 2 (:slopp/contract-version doc)) (pr-str (keys doc)))
+    (is (contains? doc :endpoints))
+    (is (not (contains? doc :paths))
+        "the old address must not start answering the new shape underneath a
+         consumer that declared a schema over the old one")))

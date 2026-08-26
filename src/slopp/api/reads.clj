@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.http.contract :as http.contract] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.webapp.paths :as webapp.paths]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -104,28 +104,34 @@
   (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
 
 (defn ^{:http/read :ui/contract} contract-read
-  "The shape of this APPLICATION's own API, for a consumer that generates a
-  typed client against it.
+  "DEPRECATED, and scheduled: the v2 contract document for `/api/contracts`,
+  re-keyed from [[slopp.rest.paths/paths-document]].
 
-  **The namespaces come from the STORE, not from what this listener serves**,
-  and the two are different questions — see [[app-namespaces]]. The reviewer
-  listener runs slopp's own API, so serving was the wrong source: it published
-  the MCP server's surface as though the project had written it, on every
-  project, and looked right only on slopp's own store.
+  **This exists so there is one release on which BOTH spellings resolve.** The
+  document moved to `/api/rest/paths` under `:slopp/rest-paths-version 1`;
+  retiring the old address in the same release would leave no moment at which
+  a consumer could migrate and verify — the new address does not exist on the
+  jar they run, and the old one is gone on the jar they would move to. That is
+  the sequencing rule this repo already wrote down and then very nearly failed
+  to follow: ship the seam working, announce, then refuse.
 
-  The CONTENT still comes from var metadata, and that split is forced rather
-  than chosen. A schema is evaluated at def time — `^{:rest/response
-  contracts/timeline}` is plain malli data by the time anything sees it — so
-  the store holds the SYMBOL and only the loaded var holds the value. A
-  document derived outright from the store would publish schema NAMES a
-  consumer cannot validate against, which is worse than publishing nothing.
+  The re-keying is HERE rather than beside the publisher because the module
+  boundary refuses `slopp.http` reaching `slopp.rest` — `rest` requires `http`
+  and not the reverse, so an http-only store could never resolve it. The
+  reviewer is app code and already declares the edge, which makes this the one
+  honest place for a temporary shape.
 
-  So: the store says WHICH, the image says WHAT. A namespace declared in the
-  store but not loaded contributes no rows rather than broken ones, because
-  `routes/from-namespaces` reads what is actually there."
+  Two keys differ from the new document and nothing else does:
+  `:slopp/rest-paths-version 1` → `:slopp/contract-version 2`, and `:paths` →
+  `:endpoints`. Rows are identical, because it is the same derivation.
+
+  **Delete this and the `/api/contracts` route in the release AFTER the
+  consumer reports green.** An overlap is not a compatibility path: nothing
+  negotiates, there is no alias and no shim, and this has one release to live."
   [ctx _]
-  (http.contract/contract-document
-   (app-namespaces (:store @(:session ctx)))))
+  {:slopp/contract-version 2
+   :endpoints (:paths (rest.paths/paths-document
+                       (app-namespaces (:store @(:session ctx)))))})
 
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the
@@ -248,3 +254,46 @@
   (let [limit (when (re-matches #"\d+" (str (:limit query-params)))
                 (parse-long (str (:limit query-params))))]
     (model/search (:store @session) (:q query-params) limit)))
+
+(defn ^{:http/read :ui/rest-paths} rest-paths-read
+  "The typed API surface of the project under review, for a consumer that
+  generates a client against it.
+
+  **The namespaces come from the STORE, not from what this listener serves.**
+  The reviewer listener runs slopp's own API, so serving is the wrong source:
+  it would publish the MCP server's surface as though the project had written
+  it, on every project, and would look right only on slopp's own store.
+
+  The CONTENT still comes from var metadata, and that split is forced rather
+  than chosen. A schema is evaluated at def time, so the store holds the
+  SYMBOL and only the loaded var holds the value; a document derived outright
+  from the store would publish schema NAMES a consumer cannot validate
+  against. The store says WHICH, the image says WHAT."
+  [ctx _]
+  (rest.paths/paths-document (app-namespaces (:store @(:session ctx)))))
+
+(defn ^{:http/read :ui/http-paths} http-paths-read
+  "The CONTENT surface of the project under review — every `:http/path` form,
+  described rather than carried.
+
+  Same store-says-WHICH, image-says-WHAT split as [[rest-paths-read]], and
+  here the image half is load-bearing for a second reason: a page's shape,
+  size and effective media type are properties of the def's VALUE, which only
+  a loaded var has. A document built from the store alone could name the pages
+  and say nothing true about any of them.
+
+  EMPTY is the ordinary answer. Most projects serve no content of their own —
+  slopp's is one — so a consumer renders `[]` far more often than a row."
+  [ctx _]
+  (http.paths/paths-document (app-namespaces (:store @(:session ctx)))))
+
+(defn ^{:http/read :ui/webapp-paths} webapp-paths-read
+  "The paths the project's BROWSER owns — one row per declared
+  `:webapp/client-routes` prefix.
+
+  Same split as its two siblings. A form here also appears in
+  [[http-paths-read]]'s document: it is a served page AND the owner of paths
+  the server has no route for. The two answer different questions and neither
+  is a subset of the other, which is why there is no union document."
+  [ctx _]
+  (webapp.paths/paths-document (app-namespaces (:store @(:session ctx)))))

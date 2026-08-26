@@ -1,47 +1,26 @@
-(ns slopp.http.contract
-  "Publishing the SHAPE of an app's own API, so something that is not this app
-  can generate a typed client against it.
+(ns slopp.rest.paths
+  "Publishing the SHAPE of an app's typed API, so something that is not this
+  app can generate a client against it.
 
   This is what makes a client in a DIFFERENT codebase possible: the consumer
   reads a document instead of importing the producer's contracts namespace,
-  and the two share no store. Everything here derives from VAR METADATA, like
-  `slopp.http.routes` next door — which is what lets it answer identically from
-  a live store, a jar and a native binary, and what lets it ship in the slim
-  jar. Publishing a contract has to be something ANY slopp-web app can do; a
-  version that only worked for an app whose code lives in a store would be the
-  privilege it exists to remove.
+  and the two share no store. Publishing a contract has to be something ANY
+  slopp app with `rest` can do; a version that only worked for an app whose
+  code lives in a store would be the privilege it exists to remove.
+
+  **It lives in the `rest` family because `:rest/path` is rest's marker.**
+  Vendoring is per capability, so while this sat under `slopp.http.*` every
+  http-only store shipped a REST publisher it could never use, and the webapp
+  publisher had no obvious home at all. `undent` stays in `slopp.http.paths`
+  and is shared: `rest` requires `http`, so reaching it is legitimate.
 
   The price of deriving from vars rather than source: schema NAMES are gone by
   runtime — `^{:rest/response contracts/timeline}` is evaluated at def time, so
   a schema referenced by name inlines into every endpoint that uses it. Names
   are a source-level convenience the wire never had."
-  (:require [slopp.http.routes :as routes] [clojure.string :as str]))
+  (:require [slopp.http.routes :as routes] [slopp.http.paths :as http.paths]))
 
-(defn- undent
-  "A docstring with its SOURCE INDENTATION removed, or nil.
-
-  A docstring's first line begins right after the opening quote and every later
-  line carries however far the form is indented in its file. That indentation
-  is a fact about our formatting, and publishing it puts it in every consumer's
-  copy of the contract — the same trap a multi-line schema `:doc` falls into,
-  one grain up.
-
-  Line and PARAGRAPH structure survive: only the common leading run is removed,
-  so a blank-line break still separates paragraphs for a consumer that renders
-  them. A consumer that would rather collapse it all to one line still can; the
-  reverse is not available if we flatten it here."
-  [s]
-  (when s
-    (let [[head & tail] (str/split-lines s)
-          indents (for [l tail :when (seq (str/trim l))]
-                    (count (re-find #"^[ \t]*" l)))
-          n       (if (seq indents) (apply min indents) 0)]
-      (str/trimr
-       (str/join "\n" (cons (str/trim head)
-                            (map #(if (>= (count %) n) (subs % n) (str/triml %))
-                                 tail)))))))
-
-(defn ^:export contract-document
+(defn ^:export paths-document
   "The SHAPE of the API `ns-syms` serve, as data — what a consumer needs to
   generate a typed client without sharing a store.
 
@@ -120,8 +99,8 @@
   serving EDN would otherwise be generated a wrapper that calls `.json` and
   fails on the first character."
   [ns-syms]
-  {:slopp/contract-version 2
-   :endpoints
+  {:slopp/rest-paths-version 1
+   :paths
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]
               ;; a :webapp/client-routes var contributes catch-all rows pointing at the SAME
@@ -129,9 +108,10 @@
               ;; `:rest` rows ONLY — a contract describes the TYPED api, and content
               ;; is not part of one. That used to be `:rest/client false`'s job,
               ;; which is why a stylesheet needed a flag to stay out of its own
-              ;; app's API document
-              ;; `:rest` rows ONLY — a contract describes the TYPED api, and content
-              ;; is not part of one.
+              ;; app's API document. The exclusion is about TYPING, not about
+              ;; visibility: a document gets no generated client because a
+              ;; typed wrapper over HTML would be nonsense, which is not a
+              ;; reason for it to be undiscoverable.
               ;;
               ;; No client opt-out. `:rest/client false` used to exclude an
               ;; endpoint from BOTH generation and this document, and the
@@ -146,7 +126,7 @@
            :path     (:path row)
            :name     (:name m)
            :handler  (symbol (str (:ns m)) (str (:name m)))
-           :doc      (undent (:doc m))
+           :doc      (http.paths/undent (:doc m))
            :auth     (:http/auth m)
            ;; what it ANSWERS. A remote consumer generating from this document
            ;; has no store to ask, so an endpoint answering EDN would otherwise

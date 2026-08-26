@@ -1,4 +1,4 @@
-(ns slopp.http.contract-test
+(ns slopp.rest.paths-test
   "Tests for contract publishing, with endpoint fixtures of its own.
 
   The fixtures live here rather than in `slopp.http-test` because that
@@ -7,7 +7,7 @@
   to exist. A test namespace whose subject is `from-namespaces` traversal needs
   to own its route set."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.http.contract :as http.contract]))
+            [slopp.rest.paths :as rest.paths]))
 
 (defn ^{:http/method :get :rest/path "/c/things" :http/auth :public
         :rest/response [:map [:things [:sequential :string]]]}
@@ -89,11 +89,16 @@
   {:status 200 :body {:ok true}})
 
 (deftest a-contract-publishes-the-typed-surface-and-nothing-else
-  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
-        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
+  (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
+        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:paths doc))]
 
     (testing "the document names its own version, so a consumer can refuse one it doesn't know"
-      (is (= 2 (:slopp/contract-version doc))))
+      ;; a NEW key starting at 1, not :slopp/contract-version 2 carried over.
+      ;; This is a different document at a different address; continuing the
+      ;; old counter would claim a lineage it does not have, and the old
+      ;; document is still served this jar for a consumer to migrate off.
+      (is (= 1 (:slopp/rest-paths-version doc)))
+      (is (not (contains? doc :slopp/contract-version)) (pr-str (keys doc))))
 
     (testing "an endpoint is addressed by method AND path — one path serves two verbs"
       (is (= #{[:get "/c/admin"] [:get "/c/no-client"] [:get "/c/things"]
@@ -121,7 +126,7 @@
       ;; `:http/path` now, so it is not a contract's business at all — and this
       ;; assertion would pass either way, which is why the flag gets its own
       ;; fixture below rather than sharing this one
-      (is (not (contains? (set (map :path (:endpoints doc))) "/c/page"))))
+      (is (not (contains? (set (map :path (:paths doc))) "/c/page"))))
 
     (testing "and a REAL api is published whatever any consumer wants from it"
       ;; `/c/no-client` carried `:rest/client false` for one afternoon, added
@@ -130,7 +135,7 @@
       ;; generate a wrapper is the generating CONSUMER's question, asked
       ;; against this document, and excluding the endpoint from the document
       ;; took the question away from them entirely.
-      (is (contains? (set (map :path (:endpoints doc))) "/c/no-client")
+      (is (contains? (set (map :path (:paths doc))) "/c/no-client")
           "an endpoint does not know who will call it"))))
 
 (deftest an-endpoint-says-what-it-IS-and-WHERE-it-lives
@@ -149,13 +154,13 @@
   ;; :doc, because the prose already exists. Every handler here opens with
   ;; `GET <path> — what it is`; it was written for the API's reader and it
   ;; stopped at the process boundary, because a docstring is not a value.
-  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
-        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))
+  (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
+        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:paths doc))
         things  (by-addr [:get "/c/things"])]
 
     (testing "the handler's QUALIFIED symbol — a name a consumer can resolve"
-      (is (= 'slopp.http.contract-test/c-list (:handler things)))
-      (is (= 'slopp.http.contract-test/c-create! (:handler (by-addr [:post "/c/things"])))))
+      (is (= 'slopp.rest.paths-test/c-list (:handler things)))
+      (is (= 'slopp.rest.paths-test/c-create! (:handler (by-addr [:post "/c/things"])))))
 
     (testing ":name stays exactly as it was — the client generator names its
               wrapper from it, and this is additive"
@@ -192,8 +197,8 @@
   ;; `http-auth-refusal` gate refuses an endpoint that declares none. So unlike
   ;; `:request`, this key can never be nil-because-unknown, and a consumer
   ;; never has to tell "public" from "nobody said".
-  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
-        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
+  (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
+        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:paths doc))]
     (testing ":public travels as itself"
       (is (= :public (:auth (by-addr [:get "/c/things"])))))
     (testing "and so does a GROUP — the value, not merely the fact of a value"
@@ -201,29 +206,34 @@
       ;; needs: it renders who may call, not whether anyone may
       (is (= [:group "admin"] (:auth (by-addr [:get "/c/admin"])))))
     (testing "every endpoint carries it, because the gate refuses one without"
-      (is (every? #(contains? % :auth) (:endpoints doc))
-          (pr-str (remove #(contains? % :auth) (:endpoints doc)))))))
+      (is (every? #(contains? % :auth) (:paths doc))
+          (pr-str (remove #(contains? % :auth) (:paths doc)))))))
 
-(deftest version-2-publishes-EFFECTFULNESS-and-moves-because-keys-became-required
-  ;; Two changes, one bump, because every bump costs a consumer a migration and
-  ;; there is no reason to charge them twice.
+(deftest required-keys-are-what-a-VERSION-buys-and-EFFECTFULNESS-is-derived
+  ;; The version field exists so a consumer can refuse a shape it does not
+  ;; know, and it cannot do that job while it is constant. That rule was
+  ;; learned the expensive way on this document's predecessor: `:handler`,
+  ;; `:doc`, `:media-type` and `:auth` all arrived while
+  ;; `:slopp/contract-version` stayed 1, so a version-1 document was never ONE
+  ;; shape and a consumer holding a schema could not tell which it would get.
+  ;; Reported by a store that fronts projects on other slopp releases.
   ;;
-  ;; 1. `:handler`, `:doc`, `:media-type` and `:auth` all arrived while the
-  ;;    version stayed 1, so a version-1 document was never ONE shape. They are
-  ;;    required under 2, and the version is what says so.
-  ;; 2. `:effectful?` — the fact a consumer wants BEFORE calling anything, and
-  ;;    the one their arming gate was reading as nil.
-  (let [doc     (http.contract/contract-document ['slopp.http.contract-test])
-        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:endpoints doc))]
+  ;; **This document starts at 1 rather than inheriting 2.** It is a different
+  ;; document at a different address, and carrying the old counter forward
+  ;; would claim a lineage it does not have. What it does inherit is the rule:
+  ;; adding a REQUIRED key moves the version, or the key ships
+  ;; `{:optional true}`.
+  (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
+        by-addr (into {} (map (juxt (juxt :method :path) identity)) (:paths doc))]
 
-    (testing "the version MOVED, because required keys did"
-      (is (= 2 (:slopp/contract-version doc))))
+    (testing "its own version, at 1"
+      (is (= 1 (:slopp/rest-paths-version doc))))
 
-    (testing "every endpoint carries the four keys that used to be conditional"
-      (doseq [k [:handler :doc :media-type :auth]]
-        (is (every? #(contains? % k) (:endpoints doc))
-            (str k " is required under 2 — that is what the bump BUYS: "
-                 (pr-str (remove #(contains? % k) (:endpoints doc)))))))
+    (testing "every endpoint carries the keys the version is a promise about"
+      (doseq [k [:handler :doc :media-type :auth :effectful?]]
+        (is (every? #(contains? % k) (:paths doc))
+            (str k " is required at this version — that is what a version"
+                 " BUYS: " (pr-str (remove #(contains? % k) (:paths doc)))))))
 
     (testing ":effectful? is DERIVED, not the marker verbatim"
       ;; slopp's own ten endpoints declare `:http/effectful` zero times, so
@@ -242,8 +252,4 @@
         ;; c-create! declares it AND is a body verb, so it proves the marker is
         ;; read rather than that POST is true — which the row above already
         ;; established. Both arms are separable, deliberately.
-        (is (true? (:effectful? (by-addr [:post "/c/things"])))))
-
-      (testing "every endpoint carries it, so nobody has to tell false from absent"
-        (is (every? #(contains? % :effectful?) (:endpoints doc))
-            (pr-str (remove #(contains? % :effectful?) (:endpoints doc))))))))
+        (is (true? (:effectful? (by-addr [:post "/c/things"]))))))))

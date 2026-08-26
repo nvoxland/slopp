@@ -173,6 +173,118 @@
   [req]
   {:status 200 :body (:modules (:http/reads req))})
 
+(defn ^{:http/method :get :rest/path "/api/rest/paths" :http/auth :public
+        :rest/media-type "application/edn"
+        :rest/response contracts/rest-paths-document
+        :rest/unconstrained-ok
+        "three fields of this document are :any and cannot honestly be
+         narrower. :request and :response carry malli SCHEMAS as values — a
+         schema is a keyword, a vector, a symbol or a map, so no tighter shape
+         is true of all of them. :auth is an app's own :http/auth declaration
+         verbatim, whose grammar is open by design.
+
+         PERMANENT, not pending. The tighter check a reader would reach for is
+         a predicate — is this value a schema malli can build? — and a
+         predicate cannot be PUBLISHED: this document is data a consumer reads
+         and generates from, so a [:fn …] in it would arrive as something they
+         cannot evaluate or trust. The constraint is the publishing, and
+         publishing is the point."
+        :http/reads {:doc [:ui/rest-paths []]}}
+  rest-paths
+  "GET /api/rest/paths — the typed API this project serves, as EDN.
+
+  What makes a reviewer UI in a DIFFERENT store possible: it generates its
+  typed client from this document instead of sharing the producer's contracts
+  namespace.
+
+  **Replaces `/api/contracts`, which is still served this release and goes in
+  the next one.** Same rows, same keys; two names differ —
+  `:slopp/contract-version 2` became `:slopp/rest-paths-version 1` and
+  `:endpoints` became `:paths`. A new document at a new address starts its own
+  count rather than inheriting one.
+
+  The address is the convention: `/api/<capability>/<what it lists>`, with the
+  sub-api named for the MARKER, so a consumer that learns one learns
+  `/api/http/paths` and `/api/webapp/paths` for free.
+
+  EDN, not JSON, and `:http/raw` so the adapter leaves it alone. A malli schema
+  is data made of keywords, symbols and vectors; JSON would render `:string`
+  and `\"string\"` identically and the far end could not tell them apart."
+  [req]
+  {:status 200
+   :http/raw true
+   :headers {"Content-Type" "application/edn"}
+   :body (pr-str (:doc (:http/reads req)))})
+
+(defn ^{:http/method :get :rest/path "/api/http/paths" :http/auth :public
+        :rest/media-type "application/edn"
+        :rest/response contracts/http-paths-document
+        :rest/unconstrained-ok
+        ":auth is an app's own :http/auth declaration verbatim, whose grammar
+         is open by design — :public, :authenticated, or a composite like
+         [:group \"admin\"] — so no narrower shape is true of all of them.
+         PERMANENT for the same reason the typed document's is: a predicate
+         cannot be published to a consumer who has to evaluate it."
+        :http/reads {:doc [:ui/http-paths []]}}
+  http-paths
+  "GET /api/http/paths — the CONTENT this project serves, as EDN.
+
+  The gap this closes, reported by a consumer building a reviewer UI: **a
+  remote consumer of a slopp project could discover every API and zero
+  pages.** Content is absent from the typed document by KIND, because a
+  generated wrapper whose `(.json resp)` runs against HTML would be nonsense —
+  which is a statement about TYPING and was never a reason for a page to be
+  undiscoverable.
+
+  Every row DESCRIBES a page and none carries it: shape, size, what it
+  actually answers with, and whether it boots an application. An index
+  carrying bodies would put a stylesheet on the wire to render one table row,
+  and a reader who wants the body has the URL.
+
+  **`[]` is the ordinary answer.** Most projects serve no content of their own
+  — slopp's own API is one — so a consumer renders the empty document far more
+  often than a populated one.
+
+  EDN for the same reason its siblings are: `:auth` values are keywords and
+  vectors, and JSON would flatten a keyword into a string the far end cannot
+  tell from one."
+  [req]
+  {:status 200
+   :http/raw true
+   :headers {"Content-Type" "application/edn"}
+   :body (pr-str (:doc (:http/reads req)))})
+
+(defn ^{:http/method :get :rest/path "/api/webapp/paths" :http/auth :public
+        :rest/media-type "application/edn"
+        :rest/response contracts/webapp-paths-document
+        :rest/unconstrained-ok
+        ":auth is an app's own :http/auth declaration verbatim, whose grammar
+         is open by design, so no narrower shape is true of all of them.
+         PERMANENT for the same reason its two siblings are."
+        :http/reads {:doc [:ui/webapp-paths []]}}
+  webapp-paths
+  "GET /api/webapp/paths — the paths this project's BROWSER owns, as EDN.
+
+  One row per DECLARED `:webapp/client-routes` prefix. A prefix is not a
+  server route: it says *the document at this address is what serves client
+  routes under here*, and the framework generates a scoped catch-all so a
+  refreshed deep link reaches the app instead of a 404. Those catch-alls are
+  not published — a row nobody wrote reads exactly like a route an author
+  typed.
+
+  **A form appears here AND in `/api/http/paths`, deliberately.** The same var
+  is a served document and the owner of browser-side paths; the two documents
+  answer different questions and neither is a subset of the other. There is no
+  union document and there will not be one — separate schemas per kind is what
+  lets each gain keys on its own schedule.
+
+  `[]` unless the project's browser owns routing, which most do not."
+  [req]
+  {:status 200
+   :http/raw true
+   :headers {"Content-Type" "application/edn"}
+   :body (pr-str (:doc (:http/reads req)))})
+
 (defn ^{:http/method :get :rest/path "/api/contracts" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/contract-document
