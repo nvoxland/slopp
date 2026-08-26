@@ -5663,3 +5663,18 @@ shape, not just who names the URL.** The URL sweep found docs, tests and a
 hub; it could not find a parser keyed on a version field. And the overlap
 release is what turned that from an outage into a message — which is the
 argument for overlaps stated better than the original entry stated it.
+
+**Retired 2026-08-26, one release after it was replaced.** The consumer
+migrated both halves — producer to `slopp.rest.paths/paths-document`, consumer
+regenerated off `/api/rest/paths` — and reported green before anything was
+deleted. `/api/contracts`, `slopp.api.reads/contract-read`, the v2 schema, the
+`[:slopp/contract-version 2]` envelope row and the two tests that existed to
+make the overlap a promise all went together.
+
+**The overlap paid for itself on its first outing**, which is worth recording
+because the argument for it was theoretical when it was made. It caught
+`generate_client`, and it caught the boot path: deleting `slopp.http.contract`
+broke the consumer's dead require, their store healed in twenty minutes
+because one namespace failed to load and the brief said so in words, and they
+reported that as the first real use of *a broken namespace you can edit beats
+a store you cannot reach*.
