@@ -537,7 +537,35 @@
         (is (empty? (:wrappers p)))
         (is (seq (:problems p))
             "a consumer that silently generated from a shape it does not know
-             would fail later, further away, and with no clue why")))))
+             would fail later, further away, and with no clue why")))
+
+    (testing "the CURRENT document reads too — this generator is a consumer of
+              the published document, and it was not migrated with it"
+      ;; Found by the only real consumer on the overlap jar: they repointed at
+      ;; /api/rest/paths, got :endpoints 0 and :wrappers [], and could not
+      ;; finish the migration the overlap exists to let them finish. The
+      ;; endpoint was right and the document was right; the thing that broke is
+      ;; a tool nobody had listed as a consumer.
+      (let [current {:slopp/rest-paths-version 1 :paths (:endpoints document)}
+            p       (cljs/contract->plan current 'demo.client.contracts)]
+        (is (= #{"things" "create!"}
+               (set (map (comp str :fn-name) (:wrappers p))))
+            (pr-str p))
+        (is (empty? (:problems p)) (pr-str (:problems p)))
+        (is (= (cljs/contract->plan document 'demo.client.contracts) p)
+            "byte for byte the same plan — the rows are identical and only the
+             envelope moved, so producing two different clients from them
+             would be the defect this reads both to avoid")))
+
+    (testing "BOTH spellings read only while both endpoints serve"
+      ;; Not a compatibility path: `/api/contracts` answers for one release so
+      ;; a consumer has a jar on which it can migrate AND verify. This arm goes
+      ;; with that endpoint, and the version arm above is what keeps a document
+      ;; from a FUTURE shape from being guessed at meanwhile.
+      (is (seq (:problems (cljs/contract->plan
+                           {:slopp/rest-paths-version 99 :paths (:endpoints document)}
+                           'demo.client.contracts)))
+          "a future version of the NEW document is refused the same way"))))
 
 (deftest a-generated-contracts-namespace-is-ordinary-verified-source
   ;; The schemas land as SOURCE in the consuming store, not as data parsed at

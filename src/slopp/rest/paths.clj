@@ -24,8 +24,8 @@
   "The SHAPE of the API `ns-syms` serve, as data — what a consumer needs to
   generate a typed client without sharing a store.
 
-  `{:slopp/contract-version 2
-    :endpoints [{:method :get :path \"/x\" :name x
+  `{:slopp/rest-paths-version 1
+    :paths [{:method :get :path \"/x\" :name x
                  :handler my.app/x :doc \"GET /x — …\"
                  :media-type \"application/json\" :effectful? false
                  :auth :public :request nil :response […]}]}`

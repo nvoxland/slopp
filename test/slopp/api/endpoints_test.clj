@@ -347,7 +347,7 @@
     (try
       (let [r   (server/serve! producer 0)
             out (cljs/generate-client-from!
-                 consumer (str "http://127.0.0.1:" (:port r) "/api/contracts")
+                 consumer (str "http://127.0.0.1:" (:port r) "/api/rest/paths")
                  :ns 'demo.client.api)
             st  (:store @consumer)
             src (fn [ns- n] (str (store/form-named st ns- n)))]
@@ -363,6 +363,23 @@
                    "rest-paths" "http-paths" "webapp-paths"}
                  (set (:wrappers out)))
               (pr-str out)))
+
+        (testing "the RETIRING address generates the same wrappers, over the wire"
+          ;; The overlap's entire purpose: a consumer must be able to repoint
+          ;; AND regenerate on one jar. This failed on the overlap's first
+          ;; outing — the generator read `:slopp/contract-version`, found nil
+          ;; under the new key, and a real consumer got :endpoints 0,
+          ;; :wrappers [] and nothing written. Deleted with `/api/contracts`.
+          (let [c2  (external/open!)
+                old (try (cljs/generate-client-from!
+                          c2 (str "http://127.0.0.1:" (:port r) "/api/contracts")
+                          :ns 'demo.client.api)
+                         (finally (ops/close! c2)))]
+            (is (= (set (:wrappers out)) (set (:wrappers old)))
+                (str "the rows are identical and only the envelope moved, so"
+                     " two different clients from them would be the defect"
+                     " reading both exists to avoid: "
+                     (pr-str [(:wrappers out) (:wrappers old)])))))
 
         (testing "the schemas survived the wire VALUE for value"
           ;; not 'a schema is present' — the same schema, identical to the var
