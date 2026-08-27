@@ -5627,6 +5627,70 @@ changes by RENAMING a key, never by redefining one in place.** A missing
 the paths within the app; `/api/http/paths` marks which of its documents is the
 shell. `slopp.webapp.paths` and its prefix document are deleted.
 
+### D-page-function — a page is a FUNCTION that asks for what it needs (2026-08-27)
+
+The second half of [[D-page-marker]], and the one that made the marker
+load-bearing rather than decorative. A page is an ordinary function of one map
+(`{:state :params}` plus the app's declaration), it declares its own address,
+and it ASKS for its data while rendering. The route-row spec map
+(`:render`/`:request`/`:check`/`:derive`) is gone, and so is
+`:webapp/session-loads`.
+
+**`ask!` is start-if-absent, and that is the whole design.** `(ask! page
+descriptor params)` answers `{:status :value}` and starts the load when nobody
+has. Start-if-absent is what makes it safe to call from a render: the page
+re-runs when the answer lands, asks again, and finds it already there. A page
+may ask for as many endpoints as it likes, wherever it likes — which is what
+the single `:request` slot could never express, and which is why `:calls` on
+the published page row is graph-derived rather than declared.
+
+Nathan settled the eviction question: **explicit `stale!`, no automatic
+sweep.** Nothing clears a load, so `arrive` clears nothing on navigation, and
+`(stale! page descriptor params)` is what an app calls after a write. A sweep
+of what a render did not ask for is the obvious rule and it is exactly the kind
+this framework declines to guess at — a wrong eviction shows an empty pane an
+app cannot explain, while a stale one is at least visible.
+
+**`:webapp/session-loads` dissolved rather than being ported.** It named which
+loads survived a navigation — a membership rule honoured by `arrive` and by
+nothing else, so the machinery travelled to an app that navigated with its own
+code and the guarantee did not. A store read that sentence three times without
+noticing it named a function they never called. When nothing clears loads,
+there is nothing left for the declaration to say.
+
+**Both entries derive the route table; neither is written.** The browser's is
+generated into `native.client` by `build/webapp-launcher-source` from
+`rules.webapp/page-routes`; the headless one is `cljnx/marked-pages`, scanning
+the loaded vars. Two readers of ONE marker, not two declarations — and the
+headless half lives in `driver-for` rather than in the `screen` tool precisely
+because a consumer's own tests drive the same entry: deriving in the tool would
+route the tool's app and leave the consumer's test rendering not-found. The
+launcher also had to start requiring the page namespaces itself, because with
+the table gone the entry no longer reaches them.
+
+`cljnx/driver-for` now discriminates a browser app on `:webapp/state` rather
+than `:webapp/routes`, since the table is no longer something an entry carries.
+
+**`webapp-report` and `/api/webapp/paths` follow the same source.** `:screens`
+reads the markers; `:calls` is the reference graph — what the page's form
+references that is an endpoint descriptor. It cannot drift from what the page
+calls, because it IS what the page calls. `:session-loads` is gone from the
+surface with the key that declared it, and `:unreadable` survives only for
+`:webapp/actions`, still the one map literal an app may name a var for.
+
+**Vendoring had to learn `:requires`.** `slopp.webapp` reaches
+`slopp.http.endpoint`, one capability over, and vendoring followed only what a
+store REACHED FOR — so a browser app was handed the webapp family alone and the
+ClojureScript compiler reported `No such namespace: slopp.http.endpoint`, which
+reads exactly like the app's own mistake. `used-families` now walks
+`capabilities/prerequisites`, and the leak guard was tightened to match: a
+shipped family may reach its own family, `shipping-common`, or a family its
+capability requires — it permitted ANY family, which is how the cross-family
+require shipped. That tightening found a second one:
+`slopp.rest.client/call!` required the BROWSER namespace to encode a body, so
+`media-type` and `request-init` moved to `slopp.http.endpoint`, where both
+halves of a request now live.
+
 ### D-endpoint-descriptor — one var per endpoint, carrying its own contract (2026-08-26)
 
 `generate_client` emits ONE `def` per endpoint — a DESCRIPTOR — and

@@ -86,11 +86,13 @@ the page should never have been asked.
 
 ## A single-page app: the shell
 
-A SPA's document declares the bundle it boots, and the framework completes it:
+A SPA's document declares that it IS a shell, and the framework completes it —
+the bundle URL is derived from the compile output and the static mount that
+serves it, so nothing types an address the build already knows:
 
 ```clj
 (def ^{:http/method :get :http/path "/" :http/auth :public
-       :webapp/shell "/js/main.js"}
+       :webapp/shell true}
   shell
   [:html {:lang "en"}
    [:head

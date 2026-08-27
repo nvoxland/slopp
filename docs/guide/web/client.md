@@ -61,13 +61,16 @@ of journal. A clone starts with an empty cache, which is normal: `build`
 reports the gap as `missing-artifacts` and `compile_client` fills it.
 
 Compile errors and analyzer warnings are anchored to the owning store form, by
-name, with no file or line. You do not reference the bundle yourself: declare
-it on the shell document and the framework injects the script into the `[:head
-…]` you wrote, along with the mount prefix.
+name, with no file or line. You do not reference the bundle yourself: mark the document
+`:webapp/shell true` and the framework injects the script into the `[:head …]`
+you wrote, along with the mount prefix. The URL is derived from the compile
+output and the static mount that serves it — rename the mount and the
+`<script>` follows; assemble a shell with nothing serving the bundle and it
+refuses rather than shipping a tag pointing at a 404.
 
 ```clj
 (def ^{:http/method :get :http/path "/" :http/auth :public
-       :webapp/shell "/js/main.js"}
+       :webapp/shell true}
   shell
   [:html [:head [:title "Orders"]] [:body [:div {:id "app"}]]])
 ```

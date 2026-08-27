@@ -3581,3 +3581,33 @@ instruction to a consumer needs the scope its subject has.** "Regenerate, every
 wrapper changes" sent a store to look for a diff that could not exist, where
 "every FETCH wrapper changes; a webapp store's builders are unaffected and its
 fix arrives with the jar" would not have.
+
+## A permission is only true if the mechanism behind it is (2026-08-27)
+
+`no-shipped-framework-family-reaches-back-into-slopp` says, in its own message,
+that a shipped namespace must not depend on anything outside **its own family**.
+The code said something weaker: in a family, or in `shipping-common`. Any family
+could reach any other and the guard stayed green.
+
+Vendoring is per family. So `slopp.webapp` requiring `slopp.http.endpoint` was
+permitted by the guard and impossible in a consuming store — the family landed
+intact and failed inside itself, as `No such namespace` from the ClojureScript
+compiler, which reads exactly like the app's own mistake.
+
+The fix that holds is not "tighten the guard". It is **make the permission and
+the mechanism read the same declaration**: `used-families` now walks the
+catalog's `:requires`, so a family a shipped namespace may reach is a family the
+store is given, and the guard permits exactly that closure. Two readers of one
+edge, where there had been a rule with nothing behind it.
+
+**The tell**: a guard whose prose is stricter than its predicate. That gap is
+invisible in review — you read the sentence and check the cases it names — and
+it is where a rule quietly stops being one. The prose was written by whoever
+knew the reason; the predicate was written by whoever was making the test pass.
+
+Corollary, which is how the second bug was found: **tightening a guard to what
+it says finds the violations that were always there.** `slopp.rest.client`
+required the BROWSER namespace to encode a request body — a server-side client
+reaching into `webapp` — and nothing had ever complained, because the guard's
+predicate permitted it and no rest-only store had been built to break on it.
+

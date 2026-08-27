@@ -14,15 +14,16 @@ config_file {path "capabilities" key "webapp.enabled" value "true"}
 ```
 
 ```clj
+;; a PAGE declares its own address
+(defn ^{:webapp/path "/things"} things
+  "Every thing, listed."
+  [page]
+  [:main (for [t (:value (webapp/ask! page api/things {}))] [:li (:name t)])])
+
+;; the entry declares the app, and no table at all
 (defn ^:app/entry app []
-  (webapp/wiring
-   {:webapp/state  state                       ; your atom
-    :webapp/routes [["/"           index]      ; a bare fn IS a screen
-                    ["/things"     things]
-                    ["/things/:id" {:render  thing          ; a screen that
-                                    :request thing-request  ; asks for its
-                                    :derive  unwrap}]]      ; own data
-    :webapp/chrome (fn [state inner] [:div [nav state] inner])}))
+  {:webapp/state  state                       ; your atom
+   :webapp/chrome (fn [state inner] [:div [nav state] inner])})
 ```
 
 That is the whole application. **The goal is that your own code declares no
@@ -30,19 +31,26 @@ That is the whole application. **The goal is that your own code declares no
 aspiration -- `query_surface`'s `:webapp` section reports the count, and zero is
 the claim being true.
 
-## Routes are a table, not a function
+## A page declares its own address
 
-A routing *function* answers only when it is called, with a path, at runtime. So
-nothing can list your screens, join a link to one, or check that the server
-serves what the browser routes. Declaring the table is what makes all three
-possible, and a function is refused.
+The address lives on the function that renders it, exactly as `:http/path` and
+`:cli/command` live on the forms that implement them. Everything follows from
+that one placement: a write gate refuses two pages claiming one address,
+`/api/webapp/paths` publishes them, and the reference graph answers *which
+endpoints does this page call*.
 
-**The table is addresses, not screens.** A row's screen is not unique and a
-screen's row is not unique -- one screen answers at several URLs the moment you
-have a lens bar, a print view, or a detail page that also takes an optional
-segment. Anything that reasons "one row per screen" is wrong: a count, a
-completeness check, a generated index. Derive both numbers from the table rather
-than asserting a literal.
+**You do not write a route table.** Both entries derive it from the markers --
+the browser's is generated into the entry the build writes, the headless one is
+scanned off the loaded vars. The address used to appear twice, as a marker and
+as a `:webapp/routes` row, with nothing to notice when the two disagreed. (A
+declared `:webapp/routes` still wins, for an app with a reason to build its
+own.)
+
+**The addresses are addresses, not pages.** A page's address is not unique and
+an address's page is not unique -- one page answers at several URLs the moment
+you have a lens bar, a print view, or a detail page that also takes an optional
+segment. Anything that reasons "one address per page" is wrong: a count, a
+completeness check, a generated index.
 
 !!! tip "Prefer a row to a runtime table of what could exist"
     The tempting alternative for a lens is to peel the trailing segment off,
@@ -54,28 +62,32 @@ than asserting a literal.
     nothing to consult: an address no row matches is not-found, the same answer
     the server gives.
 
-## A screen is a function of state
+## A page is a function of one map
 
 ```clj
-(defn thing [state]
-  [:article [:h1 (str "Thing " (:id (:params state)))]])
+(defn ^{:webapp/path "/things/:id"} thing
+  "One thing, in detail."
+  [{:keys [params]}]
+  [:article [:h1 (str "Thing " (:id params))]])
 ```
 
-`:webapp/view` is **derived** and declaring one is refused. A row points at the
-screen itself, so the `:screen` keyword that used to have to agree in three
-separate places -- the router returned it, the view cased on it, the fetch
-received it, with nothing checking any of the three -- has nothing left to
-mistype.
+The map is the app's own declaration plus `:state` and `:params`, so a page
+reads what it needs and nothing else has to be threaded to it.
 
-**A screen is only called when its data is ready**, so it never writes the
-three-way case on load status. `:webapp/loading`, `:webapp/failed` and
-`:webapp/not-found` are declared screens with plain framework defaults, and your
-`:webapp/chrome` decides *where* they sit. The split is structural: not-found
-replaces the whole page, so the framework can render it outright; loading and
-failed replace one pane while the rest of the app stays up, and placement is
-layout, which is the one thing this capability does not take.
+`:webapp/view` is **derived** and declaring one is refused. The address points
+at the page function itself, so the `:screen` keyword that used to have to
+agree in three separate places -- the router returned it, the view cased on it,
+the fetch received it, with nothing checking any of the three -- has nothing
+left to mistype.
 
-## A screen names its own request
+`:webapp/loading`, `:webapp/failed` and `:webapp/not-found` are declared screens
+with plain framework defaults, and your `:webapp/chrome` decides *where* they
+sit. The split is structural: not-found replaces the whole page, so the
+framework can render it outright; loading and failed replace one pane while the
+rest of the app stays up, and placement is layout, which is the one thing this
+capability does not take.
+
+## A page asks for what it needs
 
 ```clj
 ;; an endpoint DESCRIPTOR — one def, generated, carrying its own contract
@@ -85,30 +97,42 @@ layout, which is the one thing this capability does not take.
    :http/params   #{:id :depth}
    :rest/response contracts/thing})
 
-;; and the request a screen names
-(defn thing-request [params]
-  (assoc (endpoint/request thing (select-keys params [:id :depth]))
-         :http/headers {"Authorization" (str "Bearer " @token)}))
+;; and a page that asks for it, while rendering
+(defn ^{:webapp/path "/things/:id"} thing-page
+  "One thing."
+  [{:keys [params] :as page}]
+  (let [{:keys [status value]} (webapp/ask! page api/thing {:id (:id params)})]
+    (if (= :ready status)
+      [:article [:h1 (:name value)]]
+      [:article "…"])))
 ```
 
-`:request` is a pure `(fn [params] -> request | nil)` in `.cljc`, so **which
-call a URL makes is a fact an in-image test reads**. slopp turns the request
-into a finished URL and performs it; the browser entry supplies the performer,
-so you never write `js/fetch`.
+`ask!` is **start-if-absent**: it answers `{:status :value}` and starts the load
+if nobody has. That is what makes it safe to call from a render -- the page
+re-runs when the answer lands, asks again, and finds it already there. Ask for
+as many endpoints as you like, wherever you like; there is no per-page request
+slot to fit them into, and no declaration beside the address that could describe
+only one of them.
 
-A nil request declines and starts no load at all -- a screen with nothing to ask
-for renders immediately rather than spinning. `:derive` shapes that screen's own
-answer, and runs inside the freshness guard, so an abandoned load never pays for
-it. An unknown key inside a screen map is refused: `:reqeust` is not a crash, it
-is a screen that renders with no data forever at a URL that matched.
+slopp turns the descriptor into a finished URL and performs it; the browser
+entry supplies the performer, so you never write `js/fetch`. Which endpoint a
+page calls is a fact the reference graph reads, which is why
+`/api/webapp/paths` can publish it without anybody declaring it twice.
 
-`:check` is how a screen refuses what it was sent -- `(fn [response] -> nil |
+**Nothing evicts a load, so `stale!` is yours to call.** After a write that
+changes what an endpoint answers, `(webapp/stale! page api/thing {:id id})`
+drops that entry and the next `ask!` re-fetches it. An automatic sweep of what
+a render did not ask for is the obvious rule, and it is exactly the kind slopp
+declines to guess at: a wrong eviction shows an empty pane an app cannot
+explain.
+
+`:check` is how a load refuses what it was sent -- `(fn [response] -> nil |
 message)`, where nil accepts and a message makes the load `:failed` carrying it,
-with `:derive` never run. It runs inside the freshness guard too, so a
-superseded answer is not validated either.
+with `:xform` never run. It runs inside the freshness guard, so a superseded
+answer is not validated either.
 
 !!! warning "A rejection is a value, never a throw"
-    Validating inside `:derive` and throwing gives you two behaviours from one
+    Validating inside `:xform` and throwing gives you two behaviours from one
     function. Headless the performer calls `ok` synchronously, so the throw
     escapes `load!` and takes the driver with it. In a page `ok` is called from
     inside a `.then`, so the same throw lands in the shim's `.catch` and renders
@@ -154,62 +178,42 @@ Read both, never the value alone. "Nobody asked" and "answered nil" are
 different facts about the world, and `(if (:data s) ...)` cannot tell them
 apart -- which is how a silent retry loop gets built on a failing endpoint.
 
-On navigation, `:loads` is emptied and `:webapp/address-keys` are dropped with
-the route. **Every other key survives** -- a plain state key outlives a screen by
-saying nothing.
+On navigation, `:webapp/address-keys` are dropped with the route. **Every
+other key survives -- loads included** -- and a plain state key outlives a page
+by saying nothing.
 
 !!! warning "Do not read that as 'state is wiped'"
     It is the sentence that sends a reader with a nav rail to move the value
-    *into* `:loads` to protect it, which is the one action that makes it start
-    dying on every navigation. `:webapp/address-keys` is for the keys that must
-    die with a route; `:webapp/session-loads` is for a load you want the load
-    machinery for *and* want to outlive a screen.
+    *into* `:loads` to protect it. `:webapp/address-keys` is for the keys that
+    must die with a route; everything else is yours until you drop it.
 
-### A load that belongs to no screen is declared too
+### A load that belongs to no page needs no declaration
 
-```clj
-:webapp/session-loads {:modules {:request (fn [state params]
-                                             {:http/url "/api/modules"
-                                              :webapp/base (str "/api/p/" (:slug params))})
-                                 :derive  :names}
-                       :user    {}}
-```
+A nav pane, a signed-in user, anything read on several pages: every page that
+shows it calls `ask!` for it, the first call starts it, and the rest find it
+already there. There is no session-load declaration, because there is nothing
+left for one to say.
 
-Note which `boot` this is. `:webapp/boot` -- the app's own pure `(fn [state]
-state)` -- is unchanged. The `:boot` that gained a url is the one on the
-headless driver contract, and `slopp.webapp/driver` derives it for you; you only
-write that signature if you hand `slopp.cljnx/open!` a page by hand.
+That deleted a real trap along with the key. `:webapp/session-loads` named
+which loads survived a navigation -- a membership rule honoured by the
+framework's own `arrive` and by nothing else -- so the load machinery travelled
+to an app that navigated with its own code and the scope guarantee did not. One
+app read that sentence three times without noticing it named a function they
+never called. A guarantee stated where it is *implemented* reads as
+unconditional at the point it is *consumed*.
 
-slopp starts each one at page load, after `:webapp/boot` and before routing --
-boot first because a session request reads the state boot established (a token,
-say), and routing last because the first screen may read a session load and
-rendering before they are in flight shows a flash of empty chrome.
+Note which `boot` is which. `:webapp/boot` -- the app's own pure `(fn [state]
+state)` -- is unchanged. The `:boot` that takes a url is the one on the headless
+driver contract, and `slopp.webapp/driver` derives it for you; you only write
+that signature if you hand `slopp.cljnx/open!` a page by hand.
 
-A session `:request` takes **state** *and* **the route captures of the address
-the app started at**. A session load has no address of its own -- which is not
-the same as being independent of the address. A hub whose upstream is chosen by
-the slug in the url has a nav pane that is session-scoped and address-dependent
-at once; without the captures it asks the origin, which that hub does not serve,
-and the pane stays empty for the life of the session.
-
-Matching is not rendering, so this costs neither ordering reason above: the
-address is turned into captures before the session loads, and the screen is
-still shown last. Captures are `{}` when the app started at no address, never
-nil. A nil request
-declines, which is how a load waits for a sign-in. Declaring one with no
-`:request` -- `:user` above -- scopes it without starting it, for the load you
-begin yourself.
-
-This is the piece that stops a nav rail being the last thing forcing a `:cljs`
-namespace on an app: `load!` takes `(fn [ok err])`, so a load nothing declares
-has to be hand-written where the wiring is, and in a browser that means
-ClojureScript.
-
-`webapp/load!` is public, because *scope* is your question and the *machinery*
-is not. Run your own loads through it and you get the state model, a minted
-freshness token and the supersession guard; the alternative is what one app
-measured before this existed, where a load kept outside the machinery acquired
-`(nil? value)` as its guard, a silent retry loop, and no token.
+`webapp/load!` is public, because *what* you load is your question and the
+*machinery* is not. `ask!` is the layer over it; run something through `load!`
+directly when you are starting a load `ask!` cannot express, and you still get
+the state model, a minted freshness token and the supersession guard. The
+alternative is what one app measured before this existed, where a load kept
+outside the machinery acquired `(nil? value)` as its guard, a silent retry loop,
+and no token.
 
 ## Links carry no mount point
 
@@ -360,7 +364,7 @@ gets:
    :rest/response app.client.contracts/order})
 ```
 
-Turn one into a request with `slopp.rest.endpoint/request` and drop that into a
+Turn one into a request with `slopp.http.endpoint/request` and drop that into a
 row's `:request`. The capability decides the shape and there is no flag: which
 artifact is useful *follows* from who performs the request, and a store that
 has declared that should not have to declare it twice.
@@ -417,8 +421,8 @@ Turning the capability on arms these:
   prefixes the server answers for. A deep link the server does not serve 404s on
   a hard refresh, and works perfectly until someone reloads.
 - **`webapp-request-paths-are-served`** -- the other half of a route reference.
-  A literal `:href` is joined against the served table; a screen's
-  an endpoint descriptor's `:http/path` is the same claim in a different key. The failure is quiet: the
+  A literal `:href` is joined against the served table; an endpoint
+  descriptor's `:http/path` is the same claim in a different key. The failure is quiet: the
   URL routes, the screen renders, chrome and nav are fine, and one pane always
   fails to load while everything around it works -- so it gets reported as
   slowness rather than as a missing endpoint. Two declarations stop it asking:
@@ -437,25 +441,33 @@ Turning the capability on arms these:
   waiting to be asked, and it is silent at zero. Advisory, never a refusal: a
   browser-only binding with no portable form is a real answer, and there is no
   marker to silence it because the finding *is* the inventory.
-- **`query_surface`'s `:webapp` section** -- every address, the screen that
-  renders it and the URL it loads, every declared session load, every action
-  with its kind, and the `:cljs` count.
+- **`query_surface`'s `:webapp` section** -- every address, the page that
+  renders it, the endpoints that page calls, every action with its kind, and
+  the `:cljs` count.
 
 !!! note "What the surface could not read, it names"
-    Everything here is read from *literals* in your store, so a declaration
-    written as a var (`:webapp/actions actions`) or built with a `cond->` is
-    skipped rather than guessed at. Every skip lands in `:unreadable`, whether
-    it cost a whole section or one entry -- because an entry quietly dropped
-    reads as an app that declares fewer than it does, and an empty
-    `:webapp/actions` is worse still: `[]` is an affirmative claim of
-    emptiness, not an absence. Silence there means everything read cleanly.
+    The addresses are metadata on your pages, so they cannot be half-declared.
+    `:webapp/actions` is still a map literal, and a declaration written as a
+    var (`:webapp/actions actions`) or built with a `cond->` is skipped rather
+    than guessed at. Every skip lands in `:unreadable`, whether it cost a whole
+    section or one entry -- because an entry quietly dropped reads as an app
+    that declares fewer than it does, and an empty `:webapp/actions` is worse
+    still: `[]` is an affirmative claim of emptiness, not an absence. Silence
+    there means everything read cleanly.
 
 ## Vendoring
 
-An app that declares `:webapp/client-routes` is using the browser framework, so
-slopp vendors `slopp/webapp*` into its tree and declares what that framework
-itself requires. A `^:app/entry` alone does **not** trigger it: a page declares
-*here is an entry a reader can open*, which a server-rendered app wants too.
+An app that declares a `:webapp/path`, a `:webapp/shell` or
+`:webapp/client-routes` is using the browser framework, so slopp vendors
+`slopp/webapp*` into its tree and declares what that framework itself requires.
+A `^:app/entry` alone does **not** trigger it: a page declares *here is an entry
+a reader can open*, which a server-rendered app wants too.
+
+**A family arrives with the families it requires.** `webapp` requires `http`,
+because a browser app has to be served -- so a store vendored the browser family
+is vendored the server one too. It has to be: `slopp.webapp` itself reaches into
+`slopp.http.endpoint`, and a family handed over without what it requires lands
+intact and then fails inside itself.
 
 The two axes move independently and conflating them produces wrong predictions.
 *Which* families a store gets is re-derived on every image launch from the

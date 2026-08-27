@@ -216,7 +216,7 @@ Building a request refuses the same thing before it leaves, naming the key
 without a round trip:
 
 ```clojure
-(slopp.rest.endpoint/request api/form {:id "f1" :depth 2 :slug "demo"})
+(slopp.http.endpoint/request api/form {:id "f1" :depth 2 :slug "demo"})
 ;; throws: this endpoint's contract does not name [:slug]
 ```
 

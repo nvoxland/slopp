@@ -1813,10 +1813,13 @@ the hiccup they rendered from as `:http/hiccup`, which is what lets `cljnx`
 drive a page as STRUCTURE rather than as escaped markup. (`html-response` is
 the same wrapper for a value you build in code.)
 
-**A single-page app declares `:webapp/shell "<bundle url>"` on its document,
-and the framework completes it**: the `<script>` goes at the end of the
-`[:head …]` you wrote, and the mount prefix is stamped on your mount point as
-`data-base`. Those are the only two things it adds — they are the two facts a
+**A single-page app declares `:webapp/shell true` on its document, and the
+framework completes it**: the `<script>` goes at the end of the `[:head …]`
+you wrote, and the mount prefix is stamped on your mount point as `data-base`.
+**The bundle URL is DERIVED**, from the compile output joined to the static
+mount that serves it — it used to be the marker's value, so every shell
+repeated a fact only the build knows and a rename of the mount left a
+`<script>` pointing at a 404. Those are the only two things it adds — they are the two facts a
 stored value CANNOT hold, since an app served at `/p/x/store` cannot tell that
 from its own url. Your side of the contract is a `[:head …]` and a mount point
 (`[:div {:id "app"}]`, or the `#app` shorthand); a document missing either
@@ -1904,20 +1907,21 @@ Cypress/Playwright territory someday).
   `public/cljs/main.js`, served at a URL you choose via a static mount).
   Compile-error-as-oracle: analyzer warnings and hard errors are anchored to
   the owning store form. **Do not write the `<script>` yourself** — declare
-  `:webapp/shell "/js/main.js"` on the shell document and the framework injects
-  it into the `[:head …]` you wrote, with the mount prefix beside it. A
-  top-level `(defonce _ (main))` self-starts the bundle, so the page needs no
-  inline JS.
-  **Address it by what it IS, not by what built it** — `/js/main.js`, not
-  `/assets/cljs/main.js`. A URL is an address that ends up in bookmarks and
-  caches; `cljs` names a toolchain you might change, and nothing about
-  serving JavaScript changes if you do.
+  `:webapp/shell true` on the shell document and the framework injects it into
+  the `[:head …]` you wrote, with the mount prefix beside it. A top-level
+  `(defonce _ (main))` self-starts the bundle, so the page needs no inline JS.
+  **You do not write the bundle URL either.** It is derived from the compile
+  output and the static mount that serves it, so there is nothing to keep in
+  agreement: rename the mount and the `<script>` follows. A shell assembled
+  with no mount serving the bundle REFUSES, which is the failure a typed url
+  used to turn into a script tag pointing at a 404.
+  **Address it by what it IS, not by what built it** — mount the bundle at
+  `/js/main.js`, not `/assets/cljs/main.js`. A URL ends up in bookmarks and
+  caches; `cljs` names a toolchain you might change, and nothing about serving
+  JavaScript changes if you do.
   **A `:src` you write in hiccup is a route reference** —
   `http-dangling-route-refs` checks it like an `:href`, so a script or image
-  you link but never mount fails `done` instead of 404ing silently. A
-  `:webapp/shell` bundle url is NOT checked that way: it is a marker value, not
-  hiccup, so a typo there is a script tag pointing at a 404. Confirm it against
-  `query_surface` yourself.
+  you link but never mount fails `done` instead of 404ing silently.
 - **slopp provisions its OWN toolchain — you never `deps_add` the compiler or
   malli.** There are TWO dep configs: **yours** (the `deps_add` manifest —
   application libraries, delta-tracked, in `deps_list`) and **slopp's** (the
@@ -2035,42 +2039,51 @@ stop being the assumption once the app grows.
 declare the app; slopp owns the loop.
 
 ```clojure
+;; A PAGE declares its own address. Nothing lists the addresses anywhere
+;; else — a build reads these markers to write the browser's route table,
+;; `/api/webapp/paths` publishes them, and a write gate refuses two pages
+;; claiming one address.
+(defn ^{:webapp/path "/things"} things-page
+  "Every thing, listed."
+  [page]
+  [:main (for [t (:value (webapp/ask! page api/things {}))] [:li (:name t)])])
+
+(defn ^{:webapp/path "/things/:id"} thing-page
+  "One thing."
+  [{:keys [params] :as page}]
+  (let [{:keys [status value]} (webapp/ask! page api/thing {:id (:id params)})]
+    (if (= :ready status) [:main (:name value)] [:main "…"])))
+
 ;; the entry returns the DECLARATION — slopp wires it. Both entries derive
 ;; from this one value: `cljnx/driver-for` for a headless drive, `dom/mount!`
 ;; for the browser. Returning `(webapp/wiring …)` yourself is REFUSED, because
 ;; a wired map already carries the derived `:webapp/view`.
 (defn ^:app/entry app []
   {:webapp/state  state                         ; your atom
-   :webapp/routes [["/"            index]       ; a TABLE, not a function
-                   ["/things"      things]      ; a bare fn IS a screen
-                   ["/things/:id"  {:render  thing         ; a screen that
-                                    :request thing-request ; asks for its
-                                    :check   valid?        ; own data, and
-                                    :derive  unwrap}]]     ; vets the answer
    :webapp/chrome (fn [state inner] [:div [nav state] inner])})
 ```
 
-- **Routes are DATA and a function is refused.** A function answers only when
-  called, so nothing can list your screens, join a link to one, or check that
-  the server serves what the browser routes. The table is what makes all three
-  possible, and `query_surface`'s `:webapp` section is what draws it.
-- **A row names the screen FUNCTION.** There is no `:screen` keyword agreeing
-  in three places — routes returning it, a view casing on it, a fetch receiving
-  it — which is a rename away from a blank pane at a url that looks right. A
-  keyword target is refused: it is `ifn?`, so it would call cleanly and render
-  nothing.
-- **A screen that fetches names its own `:request`** — `(fn [params] -> request
-  | nil)`, pure, `:cljc`. slopp turns it into a finished URL and performs it;
-  the browser entry supplies the performer, so **you never write `js/fetch`**.
-  A nil request declines and starts no load, so a screen with nothing to ask
-  for renders immediately rather than spinning. `:derive` shapes that screen's
-  own answer, inside the freshness guard, so an abandoned load never pays for
-  it. Unknown keys in a screen map are refused: `:reqeust` is not a crash, it
-  is a screen with no data forever at a url that matched.
+- **A page declares its address, and the entry declares no table.** The
+  address used to appear twice — a `^{:webapp/path …}` marker AND a
+  `:webapp/routes` row — with nothing to notice when they disagreed. Both
+  entries derive the table from the markers now: the browser's is generated by
+  the build, the headless one is scanned off the loaded vars. A declared
+  `:webapp/routes` still wins, for an app with a reason to build its own.
+- **A page is a FUNCTION of one map**: `{:state :params}` plus everything the
+  app declared. There is no `:screen` keyword agreeing in three places —
+  routes returning it, a view casing on it, a fetch receiving it — which is a
+  rename away from a blank pane at a url that looks right.
+- **A page ASKS for what it needs, while rendering**: `(webapp/ask! page
+  descriptor params)` answers `{:status :value}` and STARTS the load if nobody
+  has. Start-if-absent is what makes it safe to call from a render — the page
+  re-runs when the answer lands and finds it already there. Ask for as many as
+  you like, wherever you like; there is no per-screen `:request` slot to fit
+  them into. `(webapp/stale! page descriptor params)` drops one so the next
+  ask re-fetches, which is what you call after a write.
 - **An endpoint is ONE var — a DESCRIPTOR — and a request is built from it.**
   `generate_client` emits `(def form {:http/method :get :http/path
   "/api/form/:id" :http/params #{:id :depth} :rest/response contracts/…})`, and
-  `(slopp.rest.endpoint/request form {:id "f1"})` answers `{:http/method
+  `(slopp.http.endpoint/request form {:id "f1"})` answers `{:http/method
   :http/url}` plus `:http/body` and the contracts. The address is RESOLVED
   there, once: both performers — `fetch` in a page, `slopp.rest.client/call!`
   on a server — receive a finished url and decide nothing about it. Add
@@ -2089,7 +2102,7 @@ declare the app; slopp owns the loop.
   reads as a missing form rather than a wrong url.
 
   **A param the descriptor does not name is REFUSED**, once, in
-  `slopp.rest.endpoint/request` — not copied into every generated endpoint. A
+  `slopp.http.endpoint/request` — not copied into every generated endpoint. A
   descriptor with no `:http/params` enumerates nothing and guards nothing,
   because a guard built from a gap refuses what the boundary accepts.
 - **A non-2xx is a FAILURE, and slopp is the one that knows.** `fetch` rejects
@@ -2097,14 +2110,16 @@ declare the app; slopp owns the loop.
   success path and the screen renders the error page's body as data. That
   check lives in `:cljc` where a test watches it, which is the whole reason
   the performer is not yours.
-- **A screen REFUSES a bad answer with `:check`, never by throwing.**
+- **A load REFUSES a bad answer with `:check`, never by throwing.**
   `(fn [response] -> nil | message)` — nil accepts, a message makes the load
-  `:failed` carrying it, and `:derive` never runs. Validating inside `:derive`
-  and throwing gives you two behaviours from one function: headless the
-  performer calls `ok` synchronously so the throw escapes `load!` and takes the
-  driver with it, while in a page it lands in the shim's `.catch` and renders a
-  failure screen. A `:cljc` form cannot catch on both platforms — D3 denies the
-  reader conditional — so the failure channel is a return value.
+  `:failed` carrying it, and `:xform` never runs. (`load!` is the layer under
+  `ask!`; reach for it directly only when you are starting something `ask!`
+  cannot express.) Validating inside `:xform` and throwing gives you two
+  behaviours from one function: headless the performer calls `ok`
+  synchronously so the throw escapes `load!` and takes the driver with it,
+  while in a page it lands in the shim's `.catch` and renders a failure
+  screen. A `:cljc` form cannot catch on both platforms — D3 denies the reader
+  conditional — so the failure channel is a return value.
 - **A DESCRIPTOR's path is JOINED against what you serve**
   (`webapp-request-paths-are-served`). Naming an endpoint that does not
   exist fails quietly — the url routes, the screen renders, one pane never loads
@@ -2164,27 +2179,27 @@ declare the app; slopp owns the loop.
   NAVIGATION, and the route table already separates it from a POST to your
   server. Such a form submits as a full page load, which is correct — it lands
   on the client route and the app boots there.
-- **On navigation, `:loads` is emptied and `:webapp/address-keys` are dropped
-  with the route — every other key survives.** A plain state key outlives a
-  screen by saying nothing, which is what a nav rail wants. Do NOT read this as
-  "state is wiped": the reader who does moves the value INTO `:loads` to protect
-  it, which is the one action that makes it start dying on every navigation.
-- **A load that belongs to no screen is DECLARED**, and slopp starts it at page
-  load: `:webapp/session-loads {:modules {:request (fn [state params] {…})
-  :derive …}}`. Its `:request` takes STATE **and the route captures of the
-  address the app started at** — because *no address OF ITS OWN* is not the
-  same as *independent of THE address*. A hub whose upstream is chosen by the
-  slug in the url has a nav pane that is session-scoped and address-dependent
-  at once; without the captures it asked the origin, got a 404, and showed an
-  empty pane for the life of every session. Captures are `{}` when there is no
-  address, never nil.
+- **On navigation, `:webapp/address-keys` are dropped with the route and every
+  other key survives — LOADS INCLUDED.** A plain state key outlives a screen by
+  saying nothing, which is what a nav rail wants. Do NOT read this as "state is
+  wiped".
+- **There is no session-load declaration, because there is nothing left for one
+  to say.** A nav pane, a signed-in user, anything read on several pages: every
+  page that shows it calls `ask!` for it, the first call starts it, and the
+  rest find it already there. That deleted `:webapp/session-loads` and the
+  membership rule it carried — which used to be honoured by `arrive` and by
+  nothing else, so an app that navigated with its own code got no scope
+  guarantee from declaring it.
+- **Nothing evicts a load, so `stale!` is yours to call.** After a write that
+  changes what an endpoint answers, `(webapp/stale! page descriptor params)`
+  drops that entry and the next `ask!` re-fetches. An automatic sweep of what
+  a render did not ask for is the obvious rule and it is exactly the kind slopp
+  will not guess at: a wrong eviction shows an empty pane an app cannot explain.
   **Which `boot`?** `:webapp/boot` — the app's own pure `(fn [state] state)` —
   is unchanged. The `:boot` that gained a url is the one on the headless DRIVER
   contract, which `slopp.webapp/driver` derives for you; you write that
   signature only if you hand `slopp.cljnx/open!` a page by hand. The two names
-  are one word apart and only one of them moved. Declaring a load with no `:request` scopes it without
-  starting it, for the one you begin yourself after a sign-in. This is what
-  stops a nav rail being the last thing forcing `:cljs` on an app.
+  are one word apart and only one of them moved.
 - **Read a load with `load-status` AND `load-value`, never value alone.** Four
   states — `:absent :loading :ready :failed` — because "nobody asked" and
   "answered nil" are different facts and `(if (:data s) …)` cannot tell them
