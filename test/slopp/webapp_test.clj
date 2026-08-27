@@ -1923,3 +1923,37 @@
            (:webapp/path (webapp/addressed "/p/demo"
                                            {:webapp/path "https://other.example/api/x"
                                             :webapp/base "/p/other"}))))))
+
+(deftest a-REQUEST-to-a-WILDCARD-endpoint-substitutes-the-remainder
+  ;; The fourth parser of one grammar, found by walking the callers after the
+  ;; generated fetch wrapper turned out to have the same hole. `request-url`
+  ;; read `(str/starts-with? s ":")` and nothing else, so a request naming a
+  ;; wildcard endpoint asked for the literal characters.
+  ;;
+  ;; **A remainder is not a segment, and the encoding is where that bites.**
+  ;; `encode-component` escapes `/` — correctly, because in a SEGMENT a slash
+  ;; is data trying to become structure. In a remainder it IS structure: the
+  ;; matcher decodes each segment on its own and THEN joins, so the builder has
+  ;; to encode each on its own and then join, or the round trip stops closing.
+  (let [at (fn [path params] (webapp/request-url {:webapp/path path
+                                                  :webapp/path-params params}))]
+
+    (testing "** substitutes, and its slashes stay structure"
+      (is (= "/p/demo/api/form/f1" (at "/p/:slug/api/**" {:slug "demo" :* "form/f1"}))))
+
+    (testing "each sub-segment is still encoded on its own"
+      ;; the round trip the matchers already hold up their end of: a `!` in a
+      ;; name is escaped, a `/` between names is not
+      (is (= "/p/demo/api/register%21/x" (at "/p/:slug/api/**" {:slug "demo" :* "register!/x"}))))
+
+    (testing "** with nothing to supply is the endpoint's own root"
+      ;; `**` matches zero segments, so a request that omits it is legal — and
+      ;; must not produce the string \"null\" or a literal wildcard
+      (is (= "/p/demo/api/" (at "/p/:slug/api/**" {:slug "demo"}))))
+
+    (testing "* is ONE segment, so it encodes whole like a named capture does"
+      (is (= "/files/a%2Fb" (at "/files/*" {:* "a/b"}))
+          "a slash inside a single-segment wildcard is data trying to be structure"))
+
+    (testing "and a path with no parameters is untouched — the control"
+      (is (= "/api/timeline" (at "/api/timeline" {}))))))

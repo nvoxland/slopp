@@ -1053,7 +1053,12 @@
         verb      (str/upper-case (clojure.core/name method))
         req-code  (schema-form request)
         _         response
-        segs      (keep #(when (str/starts-with? % ":") (keyword (subs % 1)))
+        ;; a WILDCARD is a path parameter too, anonymous and under `:*` — the same
+        ;; list `render-wrapper` keeps, and for the same three reasons: the
+        ;; params arglist, the undeclared-key guard, and the value the url
+        ;; cannot be built without
+        segs      (keep #(cond (str/starts-with? % ":") (keyword (subs % 1))
+                              (#{"*" "**"} %)          :*)
                         (str/split path #"/" -1))
         body?     (contains? #{:post :put :patch} method)
         params?   (boolean (or req-code (seq segs)))

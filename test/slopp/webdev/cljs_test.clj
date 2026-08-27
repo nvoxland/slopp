@@ -1431,3 +1431,40 @@
       (let [guarded (wrap "/p/:slug/api/**"
                           {:kind :inline :schema '[:map [:slug :string]]})]
         (is (re-find #"remove #\{[^}]*:\*" guarded) guarded)))))
+
+(deftest a-REQUEST-BUILDER-for-a-wildcard-path-supplies-the-remainder
+  ;; `render-request` is `render-wrapper`'s sibling — one generates a fetch, the
+  ;; other a `:cljc` request map — and both read path segments with
+  ;; `(str/starts-with? % ":")`. Fixing the wrapper alone would have left the
+  ;; webapp half broken in exactly the way the wrapper was, which is this
+  ;; repo's most-repeated failure: a pair split across a round trip with only
+  ;; one end wired.
+  ;;
+  ;; The builder hands `:webapp/path-params` to `request-url` rather than
+  ;; interpolating, so what it owes is the KEY. `:*` absent from its list meant
+  ;; no key, no params arglist, and the undeclared-key guard refusing the one
+  ;; value the url needed.
+  (let [build (fn [path request-keys]
+                (#'cljs/render-request
+                 {:fn-name "proxy" :method :get :path path
+                  :endpoint "demo/proxy" :request nil :response nil
+                  :request-keys request-keys}
+                 nil))
+        many  (build "/p/:slug/api/**" [:slug])]
+
+    (testing "the remainder is passed as a path param, under :*"
+      (is (re-find #":webapp/path-params \{:slug \(:slug params\) :\* \(:\* params\)\}" many)
+          many))
+
+    (testing "the builder takes a params map because of it"
+      (is (re-find #"\n  \[params\]\n" (build "/assets/**" nil))
+          "a path whose only parameter is a wildcard still needs one"))
+
+    (testing "and :* is allowed rather than refused as undeclared"
+      (is (re-find #"remove #\{[^}]*:\*" many) many))
+
+    (testing "the path itself is published verbatim — request-url substitutes"
+      ;; the builder must NOT paste values into the string: `request-url`
+      ;; substitutes segment-wise and encodes each, and a finished path would
+      ;; lose both properties
+      (is (re-find #":webapp/path \"/p/:slug/api/\*\*\"" many) many))))

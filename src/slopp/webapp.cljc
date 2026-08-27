@@ -654,9 +654,25 @@
   [{:webapp/keys [path path-params query]}]
   (let [enc   lang/encode-component
         seg   (fn [s]
-                (if (str/starts-with? s ":")
+                (cond
+                  (str/starts-with? s ":")
                   (enc (get path-params (keyword (subs s 1))))
-                  s))
+
+                  ;; a REMAINDER, not a segment. `encode-component` escapes
+                  ;; `/` — right for a segment, where a slash is data trying
+                  ;; to become structure, and wrong here, where it IS
+                  ;; structure. Both matchers decode each sub-segment on its
+                  ;; own and THEN join, so this encodes each on its own and
+                  ;; then joins, or the round trip stops closing. `**` matches
+                  ;; zero segments, so an absent value is legal and empty
+                  (= s "**")
+                  (str/join "/" (map enc (remove str/blank?
+                                                 (str/split (str (:* path-params)) #"/"))))
+
+                  ;; one segment, so it encodes whole like a named capture
+                  (= s "*") (enc (:* path-params))
+
+                  :else s))
         parts (map seg (str/split (str path) #"/"))
         q     (->> (sort-by key (or query {}))
                    (map (fn [[k v]] (str (enc (name k)) "=" (enc v))))
