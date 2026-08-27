@@ -172,6 +172,15 @@ measurably bleed tokens.
    is no remedy at all for a stale artifact — a running JVM holds the classes
    it loaded at boot. A jar `:behind` by hundreds needs a rebuild and a
    PROCESS restart, and the tool named `restart` will look like it should work.
+   **THREE states, and only the last one decides what you can call:** what you
+   were TOLD shipped, what the jar on disk CARRIES
+   (`unzip -p <jar> META-INF/slopp/head.edn`), and what this process has
+   LOADED — `:host :jar :head` above, with `:behind` counting between them.
+   The middle one looks like success and is not: a consumer read a correct jar
+   off disk, ran `restart`, was told `restarted`, and found the framework
+   function still carrying its old arglist. Ask the IMAGE what it has
+   (`query_eval (:arglists (meta #'slopp.webapp/load-key))`) rather than asking
+   the disk what exists.
    **And when you tell someone ELSE the fix landed, name the artifact it landed
    in.** "Shipped" and "running where you are" are two facts, and an instruction
    in the present tense — *revert your workaround* — collapses them: you cannot
