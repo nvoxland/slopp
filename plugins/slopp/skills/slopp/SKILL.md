@@ -2067,12 +2067,31 @@ declare the app; slopp owns the loop.
   own answer, inside the freshness guard, so an abandoned load never pays for
   it. Unknown keys in a screen map are refused: `:reqeust` is not a crash, it
   is a screen with no data forever at a url that matched.
-- **A request is data, and the URL is built where a test can read it**:
-  `{:webapp/method :get :webapp/path "/api/things/:id" :webapp/path-params {…}
-  :webapp/query {…} :webapp/body {…} :webapp/headers {…}}`. Substitution is
-  segment-wise and every value is percent-encoded, so a `/` in a value is data
-  rather than structure. Headers are how a token travels — it is state, not
-  schema, so nothing about an endpoint declaration can produce it.
+- **An endpoint is ONE var — a DESCRIPTOR — and a request is built from it.**
+  `generate_client` emits `(def form {:http/method :get :http/path
+  "/api/form/:id" :http/params #{:id :depth} :rest/response contracts/…})`, and
+  `(slopp.rest.endpoint/request form {:id "f1"})` answers `{:http/method
+  :http/url}` plus `:http/body` and the contracts. The address is RESOLVED
+  there, once: both performers — `fetch` in a page, `slopp.rest.client/call!`
+  on a server — receive a finished url and decide nothing about it. Add
+  `:http/headers` for a token, which is state rather than schema, so nothing
+  about an endpoint declaration can produce it.
+
+  It is a DEF rather than a function so the reference graph keeps seeing it:
+  `query_depends` on a descriptor answers *which pages call this endpoint*,
+  renames follow it, dead-surface counts it. A url typed at a call site is
+  invisible to all three.
+
+  **Two encoders, because a `/` means two things.** In a `:name` or `*` segment
+  a slash is data trying to become structure and is escaped; in a `**`
+  remainder it IS structure, so each sub-segment is encoded on its own and then
+  joined. Getting that backwards stops the round trip closing in a way that
+  reads as a missing form rather than a wrong url.
+
+  **A param the descriptor does not name is REFUSED**, once, in
+  `slopp.rest.endpoint/request` — not copied into every generated endpoint. A
+  descriptor with no `:http/params` enumerates nothing and guards nothing,
+  because a guard built from a gap refuses what the boundary accepts.
 - **A non-2xx is a FAILURE, and slopp is the one that knows.** `fetch` rejects
   only on a network error, so a hand-written performer hands a 500 to its
   success path and the screen renders the error page's body as data. That
@@ -2086,8 +2105,8 @@ declare the app; slopp owns the loop.
   driver with it, while in a page it lands in the shim's `.catch` and renders a
   failure screen. A `:cljc` form cannot catch on both platforms — D3 denies the
   reader conditional — so the failure channel is a return value.
-- **A request path is JOINED against what you serve**
-  (`webapp-request-paths-are-served`). A screen naming an endpoint that does not
+- **A DESCRIPTOR's path is JOINED against what you serve**
+  (`webapp-request-paths-are-served`). Naming an endpoint that does not
   exist fails quietly — the url routes, the screen renders, one pane never loads
   while everything around it works, so it gets reported as slowness rather than
   as a missing endpoint. Two declarations stop it asking: a whole url for a
@@ -2099,8 +2118,10 @@ declare the app; slopp owns the loop.
   reason your `:href` gets it. An absolute url (scheme, or protocol-relative
   `//`) is left alone.
 - **A request may name its OWN base, and the app's is only the default.**
-  `{:webapp/path "/api/modules" :webapp/base (str "/api/p/" slug)}` is measured
-  from there instead. **Which api a request belongs to is ROUTE STATE**, not
+  `(assoc (endpoint/request modules {}) :webapp/base (str "/api/p/" slug))` is
+  measured from there instead. `:webapp/base` keeps the browser prefix on
+  purpose — a MOUNT is the one genuinely browser-shaped thing in a request, and
+  it is the only key the addressing step reads. **Which api a request belongs to is ROUTE STATE**, not
   configuration: a client-routed app switches which upstream it reads without a
   page load, and the app-level base is stamped once at load — so no value
   delivered that way can be right for an app that talks to more than one.
@@ -2114,9 +2135,7 @@ declare the app; slopp owns the loop.
   `:webapp/base ""` means the origin — which is what the retired
   `:webapp/from-origin` boolean used to say. **That flag is gone, not
   deprecated**: nothing reads it, so a request still carrying it is addressed
-  under the app's base like any other. A request naming a
-  base is skipped by `webapp-request-paths-are-served`, since it is addressed
-  at somewhere this store does not answer for.
+  under the app's base like any other.
 - **The table is ADDRESSES, not screens** — a row's screen is not unique and a
   screen's row is not unique. One screen answers at several urls the moment you
   have a lens bar, a print view, an alternate rendering, or a detail page that
@@ -2327,8 +2346,8 @@ that. Neither store reads the other.
   wrong one and looks right doing it.
 - **Calling an upstream FROM YOUR SERVER: `slopp.rest.client/call!`.** The
   same builder your browser client uses, performed on the JVM:
-  `(rest.client/call! {:rest/base-url "https://up"} (api/thing-request {:id 1})
-  {:check api/thing-check})` → `{:status :headers :body}`, body decoded by what
+  `(rest.client/call! {:rest/base-url "https://up"} (endpoint/request api/thing {:id 1})
+  {:check check-fn})` → `{:status :headers :body}`, body decoded by what
   the far side declared. Pass `:requester` to swap in
   `slopp.http.client/fake-requester` and no socket opens.
   **It handles what a raw socket does not:** a timeout is always set

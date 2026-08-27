@@ -78,12 +78,17 @@ layout, which is the one thing this capability does not take.
 ## A screen names its own request
 
 ```clj
+;; an endpoint DESCRIPTOR — one def, generated, carrying its own contract
+(def thing
+  {:http/method   :get
+   :http/path     "/api/things/:id"
+   :http/params   #{:id :depth}
+   :rest/response contracts/thing})
+
+;; and the request a screen names
 (defn thing-request [params]
-  {:webapp/method      :get
-   :webapp/path        "/api/things/:id"
-   :webapp/path-params {:id (:id params)}
-   :webapp/query       {:depth "2"}
-   :webapp/headers     {"Authorization" (str "Bearer " @token)}})
+  (assoc (endpoint/request thing (select-keys params [:id :depth]))
+         :http/headers {"Authorization" (str "Bearer " @token)}))
 ```
 
 `:request` is a pure `(fn [params] -> request | nil)` in `.cljc`, so **which
@@ -164,7 +169,7 @@ saying nothing.
 
 ```clj
 :webapp/session-loads {:modules {:request (fn [state params]
-                                             {:webapp/path "/api/modules"
+                                             {:http/url "/api/modules"
                                               :webapp/base (str "/api/p/" (:slug params))})
                                  :derive  :names}
                        :user    {}}
@@ -221,7 +226,8 @@ while a POST to `/api/save` matches no row and is left alone. Such a form
 submits as a full page load, which is correct: it lands on the client route and
 the app boots there.
 
-**A request carries the mount point too.** Write `:webapp/path "/api/things"`
+**A request carries the mount point too.** Write `:http/path "/api/things"` on
+the descriptor
 and slopp addresses it under your base before performing it, exactly as it does
 an `:href`; an absolute url (a scheme, or the protocol-relative `//` a CDN link
 takes) is left alone. That makes three base-aware paths -- the pushed url, the
@@ -232,8 +238,8 @@ When a request is *not* measured from your mount point, say where it is
 measured from:
 
 ```clj
-{:webapp/path "/api/modules" :webapp/base (str "/api/p/" slug)}
-{:webapp/path "/api/projects" :webapp/base ""}          ; the origin
+(assoc (endpoint/request modules {}) :webapp/base (str "/api/p/" slug))
+(assoc (endpoint/request projects {}) :webapp/base "")   ; the origin
 ```
 
 That is the escape an absolute URL cannot cover -- an app calling a different
@@ -341,41 +347,40 @@ gaps, so a canned performer left in your wiring for tests cannot ship to a page.
 generate_client {}
 ```
 
-With `webapp` on, this emits **two `.cljc` namespaces** rather than the `.cljs`
-fetch wrappers a server-rendered client gets:
+With `webapp` on, this emits **one `.cljc` namespace** of endpoint
+descriptors rather than the `.cljs` fetch wrappers a server-rendered client
+gets:
 
 ```clj
-;; app.client.api — request builders, requiring NOTHING
-(defn ^{:generated "shop.api/get-order"} ^:export get-order-request [params]
-  {:webapp/method      :get
-   :webapp/path        "/api/orders/:id"
-   :webapp/path-params {:id (:id params)}
-   :webapp/query       (dissoc params :id)})
-
-;; app.client.checks — contract checks, which reach malli
-(defn ^{:generated "shop.api/get-order"} ^:export get-order-check [response]
-  ;; nil when the contract holds, a message when it does not
-  …)
+;; app.client.api — one def per endpoint, reaching only the contracts
+(def ^{:generated "shop.api/get-order"} ^:export get-order
+  {:http/method   :get
+   :http/path     "/api/orders/:id"
+   :http/params   #{:id :depth}
+   :rest/response app.client.contracts/order})
 ```
 
-Drop the builder into a row's `:request` and the check into its `:check`. The
-capability decides the shape and there is no flag: which artifact is useful
-*follows* from who performs the request, and a store that has declared that
-should not have to declare it twice.
+Turn one into a request with `slopp.rest.endpoint/request` and drop that into a
+row's `:request`. The capability decides the shape and there is no flag: which
+artifact is useful *follows* from who performs the request, and a store that
+has declared that should not have to declare it twice.
 
-!!! note "Two namespaces, because two tiers"
-    A builder requires nothing and returns a map. A check reaches malli, which
-    the functional-core gate reads as IO. Shipped together, the builders
-    inherit the checks' tier — and an app whose views are `:pure` then cannot
-    name them at all, so it hand-writes every request map instead: correct by
-    inspection rather than by construction, which is the drift generation
-    exists to remove. The requests namespace is declared `:pure` for you.
+!!! note "One namespace, because a schema referenced is data"
+    This used to be two: builders here and contract checks in a sibling,
+    because a check calls malli and the functional-core gate reads that as IO.
+    Shipped together, the builders inherited the tier and an app whose views
+    are `:pure` could not name them at all.
 
-Two things this buys beyond tidiness. The builders are **portable**, so which
+    A descriptor *references* its schema instead of validating against it, so
+    it is data, so the split has no cause left. The response contract now
+    travels on the same var that carries the address -- which is also why
+    there is no longer a second var to keep in step.
+
+Two things this buys beyond tidiness. A descriptor is **portable**, so which
 URL a screen will ask for is an ordinary in-image value rather than a string
-assembled in a browser. And the checks are the response validation back — it
-used to live in the wrappers, and when the framework took over performing it
-went with them.
+assembled in a browser. And it carries `:rest/response`, which is the response
+validation back -- that used to live in the fetch wrappers, and when the
+framework took over performing it went with them.
 
 When the contract came from **somebody else's server** (`generate_client` with a
 `from` url), each builder carries `^{:http/external-path …}` naming that url, so
@@ -413,7 +418,7 @@ Turning the capability on arms these:
   a hard refresh, and works perfectly until someone reloads.
 - **`webapp-request-paths-are-served`** -- the other half of a route reference.
   A literal `:href` is joined against the served table; a screen's
-  `:webapp/path` is the same claim in a different key. The failure is quiet: the
+  an endpoint descriptor's `:http/path` is the same claim in a different key. The failure is quiet: the
   URL routes, the screen renders, chrome and nav are fine, and one pane always
   fails to load while everything around it works -- so it gets reported as
   slowness rather than as a missing endpoint. Two declarations stop it asking:

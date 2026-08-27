@@ -212,20 +212,22 @@ General HTTP content is unaffected: a page declares no contract, so `?utm=x` on
 a link meets no schema at all. That was not true before `:rest/path` and
 `:http/path` split, and it is why closing is safe now and was not then.
 
-A generated builder refuses the same thing before the request leaves, naming the
-key without a round trip:
+Building a request refuses the same thing before it leaves, naming the key
+without a round trip:
 
 ```clojure
-(api/form-request {:id "f1" :depth 2 :slug "demo"})
-;; throws: form-request: this endpoint's contract does not name [:slug]
+(slopp.rest.endpoint/request api/form {:id "f1" :depth 2 :slug "demo"})
+;; throws: this endpoint's contract does not name [:slug]
 ```
 
-That guard is plain set membership emitted from the contract's declared keys --
-no malli, which is what keeps the builder namespace requiring nothing and
-reachable from `:pure` views. Path segments stay allowed whether or not the
-contract names them, since the builder needs them to build the URL.
+That guard is plain set membership against the descriptor's `:http/params` --
+no malli, and it lives in *one* function rather than being emitted into every
+generated endpoint. Path segments stay allowed whether or not the contract
+names them, since the URL cannot be built without them. A descriptor with no
+`:http/params` enumerates nothing and guards nothing: a guard built from a gap
+would refuse what the boundary accepts.
 
-Regenerate after upgrading (`generate_client`), or your builders keep the older,
+Regenerate after upgrading (`generate_client`), or your descriptors keep the older,
 permissive shape. Nothing prompts you: the staleness advisory watches for
 *contract* drift, and the contract has not changed.
 

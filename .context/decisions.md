@@ -5573,6 +5573,71 @@ docstring says every rate it reports is a lower bound, and a test asserts the
 docstring says it. Open in
 `ideas/observation/the-read-meter-cannot-see-a-read-only-session.md`.
 
+### D-endpoint-descriptor — one var per endpoint, carrying its own contract (2026-08-26)
+
+`generate_client` emits ONE `def` per endpoint — a DESCRIPTOR — and
+`slopp.rest.endpoint/request` turns one into a request:
+
+```clojure
+(def ^{:generated "hub/form"} ^:export form
+  {:http/method   :get
+   :http/path     "/api/form/:id"
+   :http/params   #{:id :depth}
+   :rest/response contracts/form-view})
+
+(endpoint/request form {:id "f1"})
+;; => {:http/method :get :http/url "/api/form/f1" :rest/response …}
+```
+
+**What it replaced.** Two generated vars in two namespaces: a `-request`
+builder that DISCARDED the response schema entirely and used the request schema
+only as a boolean, plus a `-check` beside it holding the real contract. The two
+facts about an endpoint that always travel together were kept apart — and not
+because they belong apart. A check calls malli, malli reads as IO under the
+functional-core gate, and a builder shipped beside one was tiered out of reach
+of the `:pure` views that name it.
+
+**A descriptor REFERENCES its schemas rather than calling them, so it is data,
+so the tier question does not arise.** The descriptor namespace requires the
+contracts namespace and nothing else; only whoever performs the request
+validates. That is the whole reason one namespace could replace two: the split
+existed to keep a library's tier off the builders, and naming a schema calls no
+library.
+
+**Still a VAR, not a bare path string**, because the reference graph is the
+other half of the value: `query_depends` on a descriptor answers *which pages
+call this endpoint*, renames follow it, dead-surface counts it. A url typed at
+a call site is invisible to all three.
+
+**The request keys stopped wearing `webapp`'s prefix.**
+`:webapp/method`/`:path`/`:body`/`:query`/`:headers` became `:http/*`, because
+`slopp.rest.client/call!` — a server-side HTTP client with no browser anywhere
+— takes the identical map and declared `[:webapp/path :string]` in its own
+schema. A key namespaced for the browser capability was the request shape for
+server-to-server calls, which is misfiled by this repo's own rule that a marker
+takes the prefix of whatever READS it. `:webapp/base` stayed: a MOUNT is the
+one genuinely browser-shaped fact in a request, and `addressed` is the only
+thing that reads it.
+
+**The address is resolved ONCE.** A request carries `:http/url`, finished and
+percent-encoded, so `slopp.webapp/request-url` is deleted rather than moved.
+Both performers receive the same value and decide nothing about it — which also
+closes the class of bug where two clients of one endpoint encoded differently.
+`:http/path-params` and `:http/query` do not exist on a request; they are
+inputs to building one.
+
+**The param guard moved from generated code into one function.** It was emitted
+per endpoint into two renderers; it now reads `:http/params` off the descriptor
+in `endpoint/request`. The `:cljs` fetch wrapper keeps its own copy, and that is
+not an oversight: a wrapper performs its own fetch and never sees a descriptor.
+
+**Consequences elsewhere.** `rules.webapp/request-paths` reads `:http/path`
+from map literals — descriptors — rather than `:webapp/path` from request maps,
+which makes the served-path join read a `def` that is always readable instead
+of depending on where an app assembles a map. Its `own-base` escape went with
+the key it read; a foreign descriptor declares `^:http/external-path`, which
+generation emits.
+
 ### D-route-grammar — two anonymous wildcards, end-only, positional precedence (2026-08-26)
 
 A route path is segments, and three are special: `:name` captures one segment,
