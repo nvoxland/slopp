@@ -1404,3 +1404,28 @@ and the endpoint's (d36877). From outside a process, "on an older jar" and
 they attached to `a-served-route-table-outlives-the-store-it-came-from.md`: a
 listener that named the store revision its table came from would end the
 ambiguity for whoever is standing outside it.
+
+## 2026-08-27 — a fixture page reached a consumer's published surface
+
+`/api/webapp/paths` on slopp's own store published
+`slopp.cljnx-test/fixture-things-page` — a test fixture written that morning to
+prove `driver-for` finds a marked page. Found by a consumer fetching the
+document, not by any check here.
+
+`rules.webapp/page-routes` iterated every namespace. `api.reads/app-namespaces`
+states the rule for every other publisher and names the reason in its own
+docstring — *TEST namespaces are excluded there, which is right here too: a
+fixture endpoint is not surface* — and the page traversal was written without
+it. Both `page-routes` and `page-calls` fixed; `cljnx/marked-pages`, the
+image-side reader of the same marker, got the same exclusion.
+
+**The published document was the mild half.** `page-routes` is what
+`build/webapp-launcher-source` reads to generate a browser app's route table,
+so a fixture page would have shipped an address into a consuming application,
+rendering a test's hiccup at a url nobody wrote. Nothing would have reported it:
+the address routes, the page renders.
+
+The same measurement found the listener staleness recorded in
+`.context/design-disciplines.md` — one consumer fetch, two defects, neither
+reachable from inside this repo's own checks.
+

@@ -3649,3 +3649,42 @@ reach for it**: `clojure -T:build uber` will not jar a materialization older
 than the store, and names the two-step fix (`build {dir …}` then `uber`). That
 refusal is why this was a missing message rather than a wrong artifact.
 
+## An overlap window is measured at the REPLACEMENT, not at the retirement (2026-08-27)
+
+The rule for retiring a published address was: ship the new one working,
+announce it, then delete the old one — three steps, and the middle one is the
+one that pays. It was followed. `/api/rest/paths` shipped one jar before
+`/api/contracts` was deleted.
+
+Then the consumer fetched the replacement against the producer's own listener
+and got a 500 on all three new documents, with the old address already 404. No
+address on that app could generate a client. The overlap covered the RENAME and
+not the replacement WORKING.
+
+**The consumer's rule, taken as written: "the new address ships one jar
+earlier" is only protective if someone fetched it.** They had fetched
+`/api/rest/paths` only against their own store, which is the store that worked.
+
+**The producer-side check is one line and it is the twin of the one I already
+owe them**: slopp's own app is a slopp store, so `curl` your own replacement
+before retiring what it replaces. Check the artifact, not the intention — the
+same sentence, pointed the other way.
+
+### The diagnosis, because the guess was reasonable and wrong
+
+Their read was "data-dependent — your store has the data that breaks it", from
+a true observation: the same code served 200 on their store and 500 on mine.
+The actual cause was a listener that had been up since before the wave, serving
+a mixed image.
+
+**The disproof was already in their own table.** `/api/webapp/routes` answered
+200 on my process, and that endpoint had been deleted from the store two
+milestones earlier. A process serving a deleted endpoint is not a process with a
+data-dependent bug; it is a process running code that no longer exists.
+
+The generalisable half: **when the same code answers differently on two stores,
+one candidate is the data and one is the IMAGE, and the image is the cheaper to
+rule out.** Nothing in a 500 says which — the reviewer listener answers
+`{"error":"internal server error"}` with no detail, by design — so the tell has
+to come from a route that should not exist at all.
+
