@@ -1081,6 +1081,23 @@
                  " above touches them, so nothing checks their contract: "
                  (pr-str (vec (remove tested plain)))))))
 
+    (testing "and a documented QUERY PARAMETER changes the answer"
+      ;; A 200 proves the endpoint answers; it proves nothing about whether the
+      ;; request reached the read. `?prefix=` shipped INERT — the read took
+      ;; `[:params :prefix]` where this surface puts `:query-params` — and both
+      ;; layers were green: the document's own filtering is tested by calling
+      ;; it with a prefix, and this list asked for the path with none.
+      ;;
+      ;; Two covered halves and an uncovered joint. The joint is where a
+      ;; consumer enters, so it is asked here, over the real pipeline.
+      (let [rows #(mapv :key (:config (edn/read-string (:body (GET %)))))]
+        (is (seq (rows "/api/config")) "no settings at all — this would be vacuous")
+        (is (< (count (rows "/api/config?prefix=http"))
+               (count (rows "/api/config")))
+            "?prefix did not narrow — the filter is documented and inert")
+        (is (= [] (rows "/api/config?prefix=nosuch"))
+            "a prefix nothing matches answered rows, so the filter stopped applying")))
+
     (testing "and the client's view is what a consumer would actually parse"
       ;; guard the guard: if `call` handed back the pre-wire value these
       ;; assertions would pass while proving nothing about the wire

@@ -400,6 +400,5 @@
   Reads the store and nothing else: a setting's owner, default and doc are
   declared in the capability registry, and its value is in the store's config.
   Neither needs a loaded var, which is why this has no image half."
-  [ctx req]
-  (config-document (:store @(:session ctx))
-                   (get-in req [:params :prefix])))
+  [ctx {:keys [query-params]}]
+  (config-document (:store @(:session ctx)) (:prefix query-params)))

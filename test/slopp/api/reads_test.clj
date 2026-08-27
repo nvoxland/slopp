@@ -198,3 +198,40 @@
       ;; the failure that turns a filter into a footgun: a typo'd block
       ;; showing the whole page reads as though the filter did not apply
       (is (= [] (:config (api.reads/config-document st "nosuch")))))))
+
+(deftest the-PREFIX-a-page-SENDS-reaches-the-filter
+  ;; The document's own filtering is covered above, exhaustively, by calling
+  ;; `config-document` with a prefix. That proved the derivation and NOT the
+  ;; wiring, and the wiring is where it broke: `config-read` reached into
+  ;; `[:params :prefix]` while every sibling read on this surface takes
+  ;; `:query-params`. So `?prefix=http.auth` answered all twenty settings —
+  ;; the exact failure the document's docstring warns about one paragraph
+  ;; earlier, shipped by the test that warns about it.
+  ;;
+  ;; A filter tested only through its own function is a filter tested with the
+  ;; request removed, and the request is the half a consumer supplies. This
+  ;; test enters where the consumer does.
+  (let [st  (-> (store/empty-store)
+                (assoc-in [:config "capabilities" :values "http.port"] "8080")
+                (assoc-in [:config "capabilities" :values "webapp.enabled"] "true"))
+        ctx {:session (atom {:store st})}
+        ask (fn [req] (mapv :key (:config (api.reads/config-read ctx req))))]
+
+    (testing "a prefix on the QUERY STRING narrows, as the endpoint documents"
+      (is (every? #(str/starts-with? % "http.")
+                  (ask {:query-params {:prefix "http"}}))
+          (pr-str (ask {:query-params {:prefix "http"}}))))
+
+    (testing "and narrowing is VISIBLE — fewer rows than the whole document"
+      ;; `every?` alone is true of a filter that answers nothing, and true of
+      ;; one that answers everything if every key happens to match. The claim
+      ;; is that the request CHANGED the answer.
+      (is (< (count (ask {:query-params {:prefix "http"}}))
+             (count (ask {})))
+          "the prefix made no difference — the filter is inert"))
+
+    (testing "no prefix is the whole document, not an empty one"
+      (is (some #{"webapp.enabled"} (ask {}))))
+
+    (testing "a prefix nothing matches is empty THROUGH the request too"
+      (is (= [] (ask {:query-params {:prefix "nosuch"}}))))))
