@@ -1471,3 +1471,30 @@ async startup so a second session need not race the first. The single
 non-concurrent component was a hook writing a file with a constant name, and
 it was enough to defeat all of it. Concurrency held everywhere it was
 designed; it failed at the one seam nobody modelled as shared state.
+
+## 2026-08-27 — Move A shipped a white page, and a green suite could not see it
+
+The first store to migrate to the page-function model got a blank hub: document
+served, bundle loaded, `wiring` throwing `:webapp/routes is a declared TABLE,
+not a function` at startup.
+
+Cause: the store OWNED its browser mount (for a `:boot` that read `data-base`
+off the DOM), so `build!` skipped generating the entry — and the generated
+entry is what supplies the route table from the pages' `:webapp/path` markers.
+The skip notice said *no browser entry generated* and did not say *and the
+table went with it*.
+
+**The message it threw was about the wrong thing.** `:webapp/routes` was
+ABSENT, and the guard it reached said "a table of rows", which reads as a type
+error. A real app spent that message looking for a type it had not passed.
+
+**Their whole suite was green**, because `cljnx/driver-for` fills the table by
+scanning loaded vars. Recorded as a discipline in
+`.context/design-disciplines.md`: one reader silently repairing what another
+requires.
+
+They fixed it by deleting the hand-written mount — the DOM read was redundant,
+since the value was a route capture on every address the app answers — which
+removed their last `:cljs` namespace entirely. The capability's stated goal
+arrived by way of its worst failure.
+

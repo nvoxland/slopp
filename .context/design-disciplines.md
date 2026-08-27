@@ -3688,3 +3688,49 @@ rule out.** Nothing in a 500 says which — the reviewer listener answers
 `{"error":"internal server error"}` with no detail, by design — so the tell has
 to come from a route that should not exist at all.
 
+## One reader that silently repairs what another requires (2026-08-27)
+
+Move A removed `:webapp/routes` from a browser app's entry: a page declares its
+own address and both entries derive the table. Both entries — except that only
+one of them does.
+
+```
+cljnx/driver-for    (update entry :webapp/routes #(or % (marked-pages)))   FILLS
+webapp.dom/mount!   (wiring (merge declared {…effects}))                   does not
+```
+
+For a store with a GENERATED browser entry the launcher supplies the table and
+both paths work. For a store that owns its own mount — which slopp deliberately
+supports, and which skips generating the entry — the browser gets no table and
+`wiring` throws at startup. A WHITE PAGE.
+
+**Every headless drive stayed green**, because `driver-for` re-derived the
+table on every call. The consuming store's own guard test — whose docstring
+calls it *"the only thing standing between a bad declaration and a blank
+browser page"* — derives through `driver-for`, so it could not have caught
+this. It was found by a human loading the page.
+
+**The asymmetry is the defect, not the missing fill.** A repair in one reader
+of a declaration means the two readers disagree about what a valid declaration
+IS, and the one that repairs is the one the tests use. That converts a whole
+suite from evidence into decoration for exactly the configuration that is
+broken.
+
+**Removing the fill is NOT the answer here, and that is worth knowing before
+reaching for it.** The ordinary case — a generated entry — has no table on the
+entry at all, so a `driver-for` that refused would fail every headless drive of
+every correct app. The fill is right; what was missing is that nothing told the
+store which side of the asymmetry it had landed on.
+
+So the fix is at the two moments a person is actually looking:
+
+- the build's skip notice now says **the route table goes with the entry**, and
+  that a headless drive cannot tell you;
+- `wiring`'s missing-key refusal for `:webapp/routes` names what was going to
+  supply it, why this store did not get one, and why the suite is green.
+
+**The general rule: when two readers of one declaration differ, the difference
+must be visible from the side that is weaker.** A repair is a fine thing for a
+reader to do; a repair nobody downstream can detect is how a test suite comes
+to prove something about a code path that does not ship.
+
