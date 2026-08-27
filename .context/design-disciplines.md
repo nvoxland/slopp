@@ -3550,3 +3550,34 @@ are all the same shape, it swept one property N times.
 Related: [[Only BREAKING the subject finds a green that could not have failed]]
 — same family, one step earlier. That one asks whether an assertion can fail at
 all; this one asks whether the assertions you wrote are all asking one question.
+
+### The corollary: a DELETED reader is never in the count
+
+Same exchange, one message later. slopp-ui checked their own store before
+following my "regenerate, every wrapper changes" instruction and found nothing
+to change — because with `webapp` on, generation emits `:cljc` request BUILDERS
+rather than `:cljs` fetch wrappers, and the encoding happens later in
+`request-url`. **The fifth bug could not reach their store: there is no url
+string in their generated namespace for an encoder to be missing from.**
+
+That split was argued on other grounds entirely — with `webapp` on the
+framework performs every request, so a fetch wrapper is surface nothing calls,
+and it is `:cljs`, so it is what `webapp-client-code` reports and an author is
+then told to justify. It was an argument about DEAD SURFACE. It also removed
+the second place a url gets built, in every store that took it.
+
+> The fix for "two things must agree" is usually to delete one of them, and the
+> deletions keep paying.
+
+**And the payoff is structurally invisible.** Eight readers and five bugs is
+the number where the derivation was NOT collapsed; the readers that were never
+written cannot appear in any count, so a discipline that removes them looks
+less valuable than one that fixes them. When weighing "check the agreement" against
+"delete one side", the second option is always undercounted by exactly the
+evidence it prevents.
+
+The instruction was also just wrong, and that is worth its own line: **an
+instruction to a consumer needs the scope its subject has.** "Regenerate, every
+wrapper changes" sent a store to look for a diff that could not exist, where
+"every FETCH wrapper changes; a webapp store's builders are unaffected and its
+fix arrives with the jar" would not have.
