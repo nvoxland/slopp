@@ -35,10 +35,9 @@
         ;; names: pure, in :cljc, so which call a url makes is readable here
         things {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
                                         [:li (:name t)])])
-                :request (fn [_params] {:webapp/path "/api/things"})}
+                :request (fn [_params] {:http/url "/api/things"})}
         thing  {:render  (fn [s] [:p (str "Thing " (:id (:params s)))])
-                :request (fn [params] {:webapp/path        "/api/things/:id"
-                                       :webapp/path-params {:id (:id params)}})}
+                :request (fn [params] {:http/url (str "/api/things/" (:id params))})}
         app    (webapp/wiring
                 {:webapp/state     state
                  :webapp/routes    [["/things"     things]
@@ -49,7 +48,7 @@
                  ;; `js/fetch`; here it answers from memory by URL, exactly as a
                  ;; server does — which is the seam that makes the loop drivable
                  :webapp/call      (fn [request ok _err]
-                                     (let [url (webapp/request-url request)]
+                                     (let [url (:http/url request)]
                                        (swap! asked conj url)
                                        (ok (when (= "/api/things" url)
                                              [{:name "Anvil"} {:name "Rope"}]))))})
@@ -1167,59 +1166,6 @@
         (is (re-find #"Fetching your things" (pr-str ((:webapp/view a2) @s2)))
             (pr-str ((:webapp/view a2) @s2)))))))
 
-(deftest a-request-becomes-a-FINISHED-url-where-a-test-can-read-it
-  ;; The performer seam's pure half. slopp-ui's `url-parts` splits a request into
-  ;; `[:lit …]`/`[:enc …]` pieces so their browser performer "has nothing left to
-  ;; decide" — and slopp can go one step further, because
-  ;; `slopp.lang/encode-component` is already `:cljc`: the performer receives a
-  ;; COMPLETE url and does nothing but fetch it.
-  ;;
-  ;; Their docstring says why it cannot live in the browser, and it is the
-  ;; sentence this test exists for:
-  ;;
-  ;;   The performer lives in the one namespace the JVM oracle cannot reach, so
-  ;;   anything it decides is something no test can see. The concrete bug: a
-  ;;   performer doing `str/replace` on `:m` would corrupt `/api/:module/:m`, and
-  ;;   that would ship — the string is assembled in a browser and asserted
-  ;;   nowhere.
-  (let [url webapp/request-url]
-
-    (testing "a path with no params is itself"
-      (is (= "/api/modules" (url {:webapp/path "/api/modules"}))))
-
-    (testing "SEGMENT-WISE substitution, which is the bug they already paid for"
-      ;; `(str/replace "/api/:module/:m" ":m" "y")` gives "/api/yodule/y" —
-      ;; a parameter whose name is a PREFIX of another corrupts the path, and
-      ;; the result looks like a url
-      (is (= "/api/x/y" (url {:webapp/path "/api/:module/:m"
-                              :webapp/path-params {:module "x" :m "y"}}))))
-
-    (testing "a value cannot BREAK OUT of its segment, which is the security half"
-      ;; percent-of escapes every non-unreserved ASCII character, so a slash in
-      ;; a value is data rather than structure. This is why the derivation is
-      ;; here and not in a namespace whose only verification is that it compiled
-      (is (= "/api/module/a%2Fb" (url {:webapp/path "/api/module/:m"
-                                       :webapp/path-params {:m "a/b"}})))
-      (is (= "/api/module/a%3Fq%3D1" (url {:webapp/path "/api/module/:m"
-                                           :webapp/path-params {:m "a?q=1"}})))
-      (is (= "/api/module/a%26b" (url {:webapp/path "/api/module/:m"
-                                       :webapp/path-params {:m "a&b"}}))))
-
-    (testing "the query is appended and encoded, and absent when there is none"
-      (is (= "/api/search?q=a%20b" (url {:webapp/path "/api/search"
-                                         :webapp/query {:q "a b"}})))
-      (is (= "/api/search" (url {:webapp/path "/api/search" :webapp/query {}}))
-          "an empty query must not leave a trailing ? — a url that differs from
-           the one a reader typed is a cache key nobody predicted"))
-
-    (testing "and a param the path does not name is a QUERY key, not silence"
-      ;; dropping it would send a request missing an argument the caller
-      ;; supplied, which reaches them as a wrong answer rather than an error
-      (is (= "/api/module/x?depth=2"
-             (url {:webapp/path "/api/module/:m"
-                   :webapp/path-params {:m "x"}
-                   :webapp/query {:depth "2"}}))))))
-
 (deftest a-screen-is-a-VALUE-and-it-names-its-own-REQUEST
   ;; The last thing forcing a real browser app into ClojureScript: `js/fetch`.
   ;; `:webapp/fetch` was app-supplied and took the SCREEN, so every app wrote a
@@ -1233,9 +1179,12 @@
   (let [state (atom {})
         calls (atom [])
         thing {:render  (fn [s] [:p (str "Thing " (:name (webapp/load-value s :main)))])
-               :request (fn [params] {:webapp/method      :get
-                                      :webapp/path        "/api/things/:id"
-                                      :webapp/path-params {:id (:id params)}})}
+               ;; the url arrives RESOLVED — an app builds one with
+               ;; `slopp.rest.endpoint/request` from a descriptor; written by
+               ;; hand here because the subject is the SCREEN naming its own
+               ;; request, not how the request was assembled
+               :request (fn [params] {:http/method :get
+                                      :http/url (str "/api/things/" (:id params))})}
         plain (fn [_s] [:p "Plain, and it asks for nothing"])
         app   (webapp/wiring
                {:webapp/state  state
@@ -1249,7 +1198,7 @@
     (testing "the screen's own :request decides the call, and it is a finished URL"
       (cljnx/visit! s "/things/42")
       (is (= 1 (count @calls)) "the screen asked for its data exactly once")
-      (is (= "/api/things/42" (webapp/request-url (first @calls)))
+      (is (= "/api/things/42" (:http/url (first @calls)))
           "the params the route captured are the ones the request substitutes")
       (is (re-find #"Thing Anvil" (cljnx/text s)) (cljnx/text s)))
 
@@ -1272,7 +1221,7 @@
             app (webapp/wiring
                  {:webapp/state  st
                   :webapp/routes [["/thing" {:render (fn [s] [:p (webapp/load-value s :main)])
-                                             :request (fn [_] {:webapp/path "/api/thing"})
+                                             :request (fn [_] {:http/url "/api/thing"})
                                              :derive  (fn [v] (str "derived:" (:name v)))}]]
                   :webapp/call   (fn [_rq ok _err] (ok {:name "Anvil"}))})
             s2  (cljnx/open! (webapp/driver app))]
@@ -1318,18 +1267,23 @@
   ;; Naming the encoder rather than running it is the part that matters. A
   ;; `(if body …)` in the shim would be a decision nothing can check; a `:json`
   ;; keyword chosen here is one this test reads.
+  ;;
+  ;; The keys are `:http/*` because a request is an HTTP request:
+  ;; `slopp.rest.client/call!` sends the identical map server-to-server with no
+  ;; browser anywhere, so wearing `webapp`'s prefix was a claim about who reads
+  ;; it that was never true.
   (testing "a GET names NO encoder, so the shim sends no body at all"
     ;; `fetch` throws on a GET carrying a body, so this is not tidiness — a
     ;; request that quietly acquires an empty body stops working entirely
-    (let [init (webapp/request-init {:webapp/path "/api/things"})]
+    (let [init (webapp/request-init {:http/url "/api/things"})]
       (is (= "GET" (:method init)) (pr-str init))
       (is (= :none (:encode init)) (pr-str init))
       (is (nil? (:body init)) (pr-str init))))
 
   (testing "a request WITH a body names the json encoder and says so in a header"
-    (let [init (webapp/request-init {:webapp/method :put
-                                     :webapp/path   "/api/things/1"
-                                     :webapp/body   {:name "Anvil"}})]
+    (let [init (webapp/request-init {:http/method :put
+                                     :http/url    "/api/things/1"
+                                     :http/body   {:name "Anvil"}})]
       (is (= "PUT" (:method init)) (pr-str init))
       (is (= :json (:encode init)) (pr-str init))
       (is (= {:name "Anvil"} (:body init)) (pr-str init))
@@ -1339,13 +1293,13 @@
     ;; a token is STATE, not schema — it cannot be derived from an endpoint
     ;; declaration, so the shape has to carry headers or an authenticated app
     ;; falls straight back to writing its own fetch
-    (let [init (webapp/request-init {:webapp/path    "/api/me"
-                                     :webapp/headers {"Authorization" "Bearer t"}})]
+    (let [init (webapp/request-init {:http/url     "/api/me"
+                                     :http/headers {"Authorization" "Bearer t"}})]
       (is (= "Bearer t" (get (:headers init) "Authorization")) (pr-str init)))
-    (let [init (webapp/request-init {:webapp/method  :post
-                                     :webapp/path    "/api/upload"
-                                     :webapp/body    "raw"
-                                     :webapp/headers {"Content-Type" "text/plain"}})]
+    (let [init (webapp/request-init {:http/method  :post
+                                     :http/url     "/api/upload"
+                                     :http/body    "raw"
+                                     :http/headers {"Content-Type" "text/plain"}})]
       (is (= "text/plain" (get (:headers init) "Content-Type"))
           (str "a declared content type must win, or an app can never send"
                " anything but json: " (pr-str init)))))
@@ -1353,8 +1307,8 @@
   (testing "a body of FALSE or nil are different requests"
     ;; the nil-pun this framework keeps removing, in the one place it would
     ;; silently drop a value: `false` is a body somebody meant to send
-    (is (= :json (:encode (webapp/request-init {:webapp/path "/x" :webapp/body false}))))
-    (is (= :none (:encode (webapp/request-init {:webapp/path "/x" :webapp/body nil})))))
+    (is (= :json (:encode (webapp/request-init {:http/url "/x" :http/body false}))))
+    (is (= :none (:encode (webapp/request-init {:http/url "/x" :http/body nil})))))
 
   (testing "the ENCODER follows the declared content type"
     ;; json is the default and was briefly the only thing sendable, which is
@@ -1362,23 +1316,23 @@
     ;; `application/edn`, so a framework that can only send json cannot POST to
     ;; the endpoints slopp itself serves
     (is (= :edn (:encode (webapp/request-init
-                          {:webapp/path    "/x"
-                           :webapp/body    {:a 1}
-                           :webapp/headers {"Content-Type" "application/edn"}}))))
+                          {:http/url     "/x"
+                           :http/body    {:a 1}
+                           :http/headers {"Content-Type" "application/edn"}}))))
     (is (= :json (:encode (webapp/request-init
-                           {:webapp/path    "/x"
-                            :webapp/body    {:a 1}
-                            :webapp/headers {"Content-Type" "application/json; charset=utf-8"}})))
+                           {:http/url     "/x"
+                            :http/body    {:a 1}
+                            :http/headers {"Content-Type" "application/json; charset=utf-8"}})))
         "the parameters come off before the lookup, the same as on the way back")
     (is (= :text (:encode (webapp/request-init
-                           {:webapp/path    "/x"
-                            :webapp/body    "raw"
-                            :webapp/headers {"Content-Type" "text/plain"}})))
+                           {:http/url     "/x"
+                            :http/body    "raw"
+                            :http/headers {"Content-Type" "text/plain"}})))
         (str "a type slopp does not encode for sends the body AS GIVEN — which"
              " is honest, where guessing json would corrupt it"))
     (is (= :none (:encode (webapp/request-init
-                           {:webapp/path    "/x"
-                            :webapp/headers {"Content-Type" "application/edn"}})))
+                           {:http/url     "/x"
+                            :http/headers {"Content-Type" "application/edn"}})))
         "a declared type on a request with NO body still sends no body"))
 
   (testing "a content-type header is reduced to the MEDIA TYPE a decoder is keyed by"
@@ -1527,19 +1481,24 @@
   ;; So this makes the base-aware paths three-for-three, with no new vocabulary:
   ;; an app writes `/api/modules` and gets its own mount point for the same
   ;; reason its `:href` does.
+  ;;
+  ;; The request carries `:http/url` — RESOLVED, by
+  ;; `slopp.rest.endpoint/request` — so the mount is applied to a finished
+  ;; address. `:webapp/base` keeps the browser prefix because a mount is the
+  ;; one genuinely browser-shaped fact in the request.
   (let [called (atom [])
         state  (atom {})
         screen {:render  (fn [_s] [:p "x"])
-                :request (fn [_p] {:webapp/path "/api/things"})}
+                :request (fn [_p] {:http/url "/api/things"})}
         app    (webapp/wiring
                 {:webapp/state       state
                  :webapp/base        "/p/demo"
                  :webapp/routes      [["/things" screen]]
                  :webapp/actions     {:thing/save {:effectful? true}}
-                 :webapp/request-for (fn [_s _a] {:webapp/method :put
-                                                  :webapp/path   "/api/things/1"})
+                 :webapp/request-for (fn [_s _a] {:http/method :put
+                                                  :http/url    "/api/things/1"})
                  :webapp/call        (fn [rq ok _err]
-                                       (swap! called conj (webapp/request-url rq))
+                                       (swap! called conj (:http/url rq))
                                        (ok nil))})]
 
     (testing "a SCREEN's request is fetched under the mount point"
@@ -1565,11 +1524,11 @@
                 {:webapp/state  st
                  :webapp/base   "/p/demo"
                  :webapp/routes [["/rates" {:render  (fn [_s] [:p "r"])
-                                            :request (fn [_p] {:webapp/path "https://api.example.com/v1/rates"})}]
+                                            :request (fn [_p] {:http/url "https://api.example.com/v1/rates"})}]
                                  ["/proto" {:render  (fn [_s] [:p "p"])
-                                            :request (fn [_p] {:webapp/path "//cdn.example.com/x.json"})}]]
+                                            :request (fn [_p] {:http/url "//cdn.example.com/x.json"})}]]
                  :webapp/call   (fn [rq ok _err]
-                                  (swap! called conj (webapp/request-url rq))
+                                  (swap! called conj (:http/url rq))
                                   (ok nil))})]
         (webapp/navigate! a2 "/rates" false)
         (webapp/navigate! a2 "/proto" false)
@@ -1593,12 +1552,12 @@
                 {:webapp/state  st
                  :webapp/base   "/p/demo"
                  :webapp/routes [["/mine"   {:render  (fn [_s] [:p "m"])
-                                             :request (fn [_p] {:webapp/path "/api/modules"})}]
+                                             :request (fn [_p] {:http/url "/api/modules"})}]
                                  ["/theirs" {:render  (fn [_s] [:p "t"])
-                                             :request (fn [_p] {:webapp/path "/api/projects"
+                                             :request (fn [_p] {:http/url "/api/projects"
                                                                 :webapp/base ""})}]]
                  :webapp/call   (fn [rq ok _err]
-                                  (swap! called conj (webapp/request-url rq))
+                                  (swap! called conj (:http/url rq))
                                   (ok nil))})]
         (webapp/navigate! a4 "/mine" false)
         (webapp/navigate! a4 "/theirs" false)
@@ -1614,7 +1573,7 @@
                 {:webapp/state  st
                  :webapp/routes [["/things" screen]]
                  :webapp/call   (fn [rq ok _err]
-                                  (swap! called conj (webapp/request-url rq))
+                                  (swap! called conj (:http/url rq))
                                   (ok nil))})]
         (webapp/navigate! a3 "/things" false)
         (is (= ["/api/things"] @called) (pr-str @called))))))
@@ -1647,8 +1606,8 @@
                  :webapp/routes        [["/code" (fn [s] [:p (str "code "
                                                                   (webapp/load-value s :modules))])]]
                  :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [s _p] {:webapp/path    "/api/modules"
-                                                                      :webapp/headers {"Authorization" (:token s)}})
+                 :webapp/session-loads {:modules {:request (fn [s _p] {:http/url     "/api/modules"
+                                                                      :http/headers {"Authorization" (:token s)}})
                                                   :derive  :names}
                                         ;; declared session-scoped, started by
                                         ;; the app itself — no :request
@@ -1659,20 +1618,14 @@
 
     (testing "page load starts every session load that names a request"
       (webapp/start! app "/p/demo/code" "")
-      (is (= ["/p/demo/api/modules"] (mapv webapp/request-url @called))
+      (is (= ["/p/demo/api/modules"] (mapv :http/url @called))
           (str "a declared session load did not start, or started at the wrong"
                " address: " (pr-str @called)))
       (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
       (is (= ["a" "b"] (webapp/load-value @state :modules))
           "the :derive did not run on a session load"))
 
-    (testing "and BOOT ran first, so its state is what the request reads"
-      ;; the order start! already documents, now with something that depends on
-      ;; it: a token established by boot is what an authenticated session load
-      ;; must carry, and routing first would send the request without one
-      (is (= "abc" (get-in (first @called) [:webapp/headers "Authorization"]))
-          (pr-str (first @called))))
-(testing "a session request reaches the ROUTE CAPTURES of the address"
+    (testing "a session request reaches the ROUTE CAPTURES of the address"
       ;; The case this was built for, measured in production first: a hub
       ;; serving one shell at the root, whose nav pane is a session load and
       ;; whose upstream is chosen by the slug in the url. The load has no
@@ -1686,13 +1639,13 @@
                   {:webapp/state         st
                    :webapp/routes        [["/p/:slug/store" (fn [_s] [:p "s"])]]
                    :webapp/session-loads {:nav {:request (fn [_s p]
-                                                           {:webapp/path "/api/modules"
+                                                           {:http/url "/api/modules"
                                                             :webapp/base (str "/p/" (:slug p))})}}
                    :webapp/call          (fn [rq ok _err]
                                            ;; `fetch!` addresses before performing, so this is the url a
                                            ;; browser would fetch. Addressing again would re-apply the
                                            ;; base the request still carries.
-                                           (swap! seen conj (webapp/request-url rq))
+                                           (swap! seen conj (:http/url rq))
                                            (ok nil))})]
         (webapp/start! a3 "/p/demo/store" "")
         (is (= ["/p/demo/api/modules"] @seen)
@@ -1708,7 +1661,7 @@
                    :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
                    :webapp/session-loads {:nav {:request (fn [_s p]
                                                            (reset! seen p)
-                                                           {:webapp/path "/api/x"})}}
+                                                           {:http/url "/api/x"})}}
                    :webapp/call          (fn [_rq ok _err] (ok nil))})]
         (webapp/start! a4 "/nowhere" "")
         (is (= {} @seen) (pr-str @seen))))
@@ -1717,7 +1670,7 @@
       ;; the order start! already documents, now with something that depends on
       ;; it: a token established by boot is what an authenticated session load
       ;; must carry, and routing first would send the request without one
-      (is (= "abc" (get-in (first @called) [:webapp/headers "Authorization"]))
+      (is (= "abc" (get-in (first @called) [:http/headers "Authorization"]))
           (pr-str (first @called))))
 
     (testing "a load declared with NO request is scoped but not started"
@@ -1740,7 +1693,7 @@
                 {:webapp/state         st
                  :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
                  :webapp/session-loads {:me {:request (fn [s _p] (when (:token s)
-                                                                   {:webapp/path "/api/me"}))}}
+                                                                   {:http/url "/api/me"}))}}
                  :webapp/call          (fn [_rq ok _err] (swap! hit inc) (ok nil))})]
         (webapp/start! a2 "/x" "")
         (is (= 0 @hit) "an unarmed session load fetched anyway")
@@ -1779,10 +1732,10 @@
                  :webapp/routes        [["/code" (fn [s] [:main "rail: "
                                                           (str (webapp/load-value s :modules))])]]
                  :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [_s _p] {:webapp/path "/api/modules"})
+                 :webapp/session-loads {:modules {:request (fn [_s _p] {:http/url "/api/modules"})
                                                   :derive  :names}}
                  :webapp/call          (fn [rq ok _err]
-                                         (swap! called conj (webapp/request-url rq))
+                                         (swap! called conj (:http/url rq))
                                          (ok {:names "web ops"}))})
         s      (cljnx/open! (webapp/driver app))]
 
@@ -1808,10 +1761,10 @@
                      {:webapp/state         (atom {})
                       :webapp/routes        [["/p/:slug/store" (fn [_s] [:main "s"])]]
                       :webapp/session-loads {:nav {:request (fn [_s p]
-                                                              {:webapp/path "/api/modules"
+                                                              {:http/url "/api/modules"
                                                                :webapp/base (str "/p/" (:slug p))})}}
                       :webapp/call          (fn [rq ok _err]
-                                              (swap! sink conj (webapp/request-url rq))
+                                              (swap! sink conj (:http/url rq))
                                               (ok nil))}))]
         (cljnx/open! (webapp/driver (wire drive)) "/p/demo/store")
         (webapp/start! (wire page) "/p/demo/store" "")
@@ -1886,22 +1839,25 @@
              (set (keys (cljnx/driver-for declared))))))))
 
 (deftest a-REQUEST-may-name-the-base-it-is-measured-from
+  ;; `:http/url` because a request is an HTTP request; `:webapp/base` keeps the
+  ;; browser prefix because a MOUNT is the one genuinely browser-shaped fact in
+  ;; it, and this is the only thing that reads it.
   (testing "absent, the app's own mount point applies, exactly as before"
     (is (= "/p/demo/api/things"
-           (:webapp/path (webapp/addressed "/p/demo" {:webapp/path "/api/things"})))))
+           (:http/url (webapp/addressed "/p/demo" {:http/url "/api/things"})))))
   (testing "present, it WINS — the request is measured from the api it belongs to"
     (is (= "/p/other/api/things"
-           (:webapp/path (webapp/addressed "/p/demo"
-                                           {:webapp/path "/api/things"
-                                            :webapp/base "/p/other"})))
+           (:http/url (webapp/addressed "/p/demo"
+                                        {:http/url "/api/things"
+                                         :webapp/base "/p/other"})))
         "a client-routed app switches which upstream it is reading WITHOUT a
          page load, so no value stamped once at load can be right — the app's
          base is a default, not the answer"))
   (testing "empty means the ORIGIN, which is what :webapp/from-origin said"
     (is (= "/api/projects"
-           (:webapp/path (webapp/addressed "/p/demo"
-                                           {:webapp/path "/api/projects"
-                                            :webapp/base ""})))))
+           (:http/url (webapp/addressed "/p/demo"
+                                        {:http/url "/api/projects"
+                                         :webapp/base ""})))))
   (testing "the RETIRED flag is not read — no backwards compatibility"
     ;; `:webapp/from-origin` was a boolean escape from a field that could not
     ;; hold two values. `:webapp/base ""` says the same thing as a VALUE, so
@@ -1913,47 +1869,13 @@
     ;; `capabilities-test/every-capability-key-declares-its-owner` already
     ;; take about retired spellings: they resolve to nothing.
     (is (= "/p/demo/api/projects"
-           (:webapp/path (webapp/addressed "/p/demo"
-                                           {:webapp/path "/api/projects"
-                                            :webapp/from-origin true})))
+           (:http/url (webapp/addressed "/p/demo"
+                                        {:http/url "/api/projects"
+                                         :webapp/from-origin true})))
         "a retired marker waives nothing while reading as though it does —
          which is worse than its absence, so it reads as absent"))
   (testing "an absolute url is still left alone, whatever base is named"
     (is (= "https://other.example/api/x"
-           (:webapp/path (webapp/addressed "/p/demo"
-                                           {:webapp/path "https://other.example/api/x"
-                                            :webapp/base "/p/other"}))))))
-
-(deftest a-REQUEST-to-a-WILDCARD-endpoint-substitutes-the-remainder
-  ;; The fourth parser of one grammar, found by walking the callers after the
-  ;; generated fetch wrapper turned out to have the same hole. `request-url`
-  ;; read `(str/starts-with? s ":")` and nothing else, so a request naming a
-  ;; wildcard endpoint asked for the literal characters.
-  ;;
-  ;; **A remainder is not a segment, and the encoding is where that bites.**
-  ;; `encode-component` escapes `/` — correctly, because in a SEGMENT a slash
-  ;; is data trying to become structure. In a remainder it IS structure: the
-  ;; matcher decodes each segment on its own and THEN joins, so the builder has
-  ;; to encode each on its own and then join, or the round trip stops closing.
-  (let [at (fn [path params] (webapp/request-url {:webapp/path path
-                                                  :webapp/path-params params}))]
-
-    (testing "** substitutes, and its slashes stay structure"
-      (is (= "/p/demo/api/form/f1" (at "/p/:slug/api/**" {:slug "demo" :* "form/f1"}))))
-
-    (testing "each sub-segment is still encoded on its own"
-      ;; the round trip the matchers already hold up their end of: a `!` in a
-      ;; name is escaped, a `/` between names is not
-      (is (= "/p/demo/api/register%21/x" (at "/p/:slug/api/**" {:slug "demo" :* "register!/x"}))))
-
-    (testing "** with nothing to supply is the endpoint's own root"
-      ;; `**` matches zero segments, so a request that omits it is legal — and
-      ;; must not produce the string \"null\" or a literal wildcard
-      (is (= "/p/demo/api/" (at "/p/:slug/api/**" {:slug "demo"}))))
-
-    (testing "* is ONE segment, so it encodes whole like a named capture does"
-      (is (= "/files/a%2Fb" (at "/files/*" {:* "a/b"}))
-          "a slash inside a single-segment wildcard is data trying to be structure"))
-
-    (testing "and a path with no parameters is untouched — the control"
-      (is (= "/api/timeline" (at "/api/timeline" {}))))))
+           (:http/url (webapp/addressed "/p/demo"
+                                        {:http/url "https://other.example/api/x"
+                                         :webapp/base "/p/other"}))))))

@@ -313,7 +313,7 @@
       ;; would answer neither question
       (let [src2 (str "(ns shop.two)\n\n"
                       "(defn thing \"T.\" [_s] [:p \"thing\"])\n"
-                      "(defn thing-request \"R.\" [_p] {:webapp/path \"/api/thing\"})\n\n"
+                      "(def thing-request {:http/method :get :http/path \"/api/thing\"})\n\n"
                       "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes [[\"/things/:id\" {:render thing :request thing-request}]]})\n")
             rows (:screens (rules.webapp/webapp-report
@@ -357,7 +357,7 @@
       ;; nav rail, a signed-in user. Absent from the screen rows by definition,
       ;; so a report drawing only screens shows an app fetching less than it does
       (let [src4 (str "(ns shop.four)\n\n"
-                      "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
+                      "(def modules-request {:http/method :get :http/path \"/api/modules\"})\n\n"
                       "(defn ^:app/entry app \"A.\" []\n"
                       "  {:webapp/routes        []\n"
                       "   :webapp/session-loads {:modules {:request modules-request}\n"
@@ -491,17 +491,17 @@
 (deftest a-screens-REQUEST-PATH-is-joined-against-what-this-store-SERVES
   ;; The gap wave 4d created, recorded in `index.crossings` at the moment it was
   ;; created rather than found later: a literal `:href` is resolved against the
-  ;; served route table by `http-dangling-route-refs`, and the `:webapp/path`
-  ;; inside a screen's request is the same kind of claim about the same table,
-  ;; made in a different key, with nothing reading it.
+  ;; served route table by `http-dangling-route-refs`, and an endpoint
+  ;; DESCRIPTOR's `:http/path` is the same kind of claim about the same table,
+  ;; with nothing reading it.
   ;;
-  ;; So a screen could name an endpoint this store does not serve, and the only
+  ;; So an app could name an endpoint this store does not serve, and the only
   ;; symptom is a load that always fails — at a url that routes, on a screen
   ;; that renders, in an app where every other pane works.
   ;;
-  ;; **The join is EQUALITY, not `router/match`.** A request path is a PATTERN
-  ;; in the same grammar as `:http/path` — `/api/things/:id`, with the captures
-  ;; supplied separately as `:webapp/path-params` — so matching it as though it
+  ;; **The join is EQUALITY, not `router/match`.** A descriptor's path is a
+  ;; PATTERN in the same grammar as `:http/path` — `/api/things/:id`, resolved
+  ;; against params only when a request is built — so matching it as though it
   ;; were a concrete url would ask the wrong question and answer nil for every
   ;; parameterized endpoint in the store.
   (let [src (str "(ns shop.ui)\n\n"
@@ -511,16 +511,16 @@
                  "(defn ^{:http/method :get :http/path \"/api/things/:id\"\n"
                  "        :http/auth :public :rest/response :string}\n"
                  "  thing \"T.\" [_] {:status 200 :body \"{}\"})\n\n"
-                 "(defn list-request \"R.\" [_p] {:webapp/path \"/api/things\"})\n\n"
-                 "(defn detail-request \"R.\" [p]\n"
-                 "  {:webapp/path \"/api/things/:id\" :webapp/path-params {:id (:id p)}})\n\n"
-                 "(defn typo-request \"R.\" [_p] {:webapp/path \"/api/thing\"})\n\n"
-                 "(defn far-request \"R.\" [_p]\n"
-                 "  {:webapp/path \"https://api.example.com/v1/rates\"})\n")
+                 "(def list-ep {:http/method :get :http/path \"/api/things\"})\n\n"
+                 "(def detail-ep {:http/method :get :http/path \"/api/things/:id\"\n"
+                 "                :http/params #{:id}})\n\n"
+                 "(def typo-ep {:http/method :get :http/path \"/api/thing\"})\n\n"
+                 "(def far-ep {:http/method :get\n"
+                 "             :http/path \"https://api.example.com/v1/rates\"})\n")
         on  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
                       [:config "capabilities" :values "webapp.enabled"] "true")]
 
-    (testing "a request path that names a declared endpoint is served"
+    (testing "a descriptor that names a declared endpoint is served"
       (let [unserved (set (map :path (rules.webapp/request-paths-unserved on)))]
         (is (not (contains? unserved "/api/things")) (pr-str unserved))
         (is (not (contains? unserved "/api/things/:id"))
@@ -531,7 +531,7 @@
     (testing "and a path nothing serves is reported, with the form that names it"
       (let [rows (rules.webapp/request-paths-unserved on)]
         (is (= ["/api/thing"] (mapv :path rows)) (pr-str rows))
-        (is (= 'shop.ui/typo-request (:form (first rows))) (pr-str rows))))
+        (is (= 'shop.ui/typo-ep (:form (first rows))) (pr-str rows))))
 
     (testing "an ABSOLUTE url is somebody else's server and is left alone"
       ;; the escape that keeps this worth having: an app calling a third-party
@@ -540,42 +540,21 @@
       (is (not (contains? (set (map :path (rules.webapp/request-paths-unserved on)))
                           "https://api.example.com/v1/rates"))))
 
-    (testing "an ORIGIN-measured request is not this store's to serve either"
-      ;; the same statement an absolute url makes, in the form a MOUNTED app
-      ;; can actually write: the path is measured from the origin, so it is
-      ;; addressed at whatever sits there — which is not this store, or the
-      ;; declaration would be saying nothing.
-      ;;
-      ;; Said as `:webapp/base ""` rather than the retired `:webapp/from-origin`
-      ;; boolean. Nothing reads that flag any more, so a request still carrying
-      ;; it is joined like any other and reported — which is the correct answer
-      ;; for a marker that waives nothing.
+    (testing "a RESOLVED request is not scanned at all"
+      ;; `slopp.rest.endpoint/request` returns `:http/url`, a finished address
+      ;; with no pattern to join. What this reads is the DESCRIPTOR, which is a
+      ;; `def` and therefore always readable — so the join stopped depending on
+      ;; where an app happens to assemble a map.
       (let [src5 (str "(ns shop.five)\n\n"
                       "(defn hub-request \"R.\" [_p]\n"
-                      "  {:webapp/path \"/api/projects\" :webapp/base \"\"})\n")
+                      "  {:http/url \"/api/projects\" :webapp/base \"\"})\n")
             st   (assoc-in (store/ingest (store/empty-store) 'shop.five src5)
                            [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= [] (rules.webapp/request-paths-unserved st))
             (pr-str (rules.webapp/request-paths-unserved st)))))
-(testing "a request naming its own BASE is not this store's to serve either"
-      ;; the general form of the line above, and the reason it had to become
-      ;; general: a client-routed app switches which upstream it reads WITHOUT
-      ;; a page load, so the base is route state carried on the request. A
-      ;; request that names one is addressed at whatever sits THERE — the same
-      ;; statement from-origin makes, which is now just the empty case of it.
-      (let [src6 (str "(ns shop.six)\n\n"
-                      "(defn project-request \"R.\" [p]\n"
-                      "  {:webapp/path \"/api/modules\"\n"
-                      "   :webapp/base (str \"/p/\" (:slug p))})\n")
-            st   (assoc-in (store/ingest (store/empty-store) 'shop.six src6)
-                           [:config "capabilities" :values "webapp.enabled"] "true")]
-        (is (= [] (rules.webapp/request-paths-unserved st))
-            (str "a request measured from another api was reported against"
-                 " THIS store's routes: "
-                 (pr-str (rules.webapp/request-paths-unserved st))))))
 
     (testing "and a form marked ^:http/external-path is skipped WHOLE"
-      ;; the escape the absolute-url one cannot cover, reported by the app that
+      ;; the escape an absolute url cannot cover, reported by the app that
       ;; needed it: its API is proxied by the PROJECT server under the same
       ;; mount point, so the path is real, served, and not this store's — and
       ;; it cannot be written in full because the prefix is the slug, known
@@ -583,11 +562,12 @@
       ;; permanent-finding failure: a list nobody can clear is a list everybody
       ;; skims.
       ;;
-      ;; Same marker `http-dangling-route-refs` already uses for a link, for
-      ;; the same question, and it carries a REASON rather than a silence
+      ;; GENERATION declares it on every descriptor built from a foreign
+      ;; contract, so the escape is never hand-edited onto generated code —
+      ;; which the next generation would drop silently.
       (let [src2 (str "(ns shop.far)\n\n"
-                      "(defn ^{:http/external-path \"the project server proxies /api/*\"}\n"
-                      "  far-request \"R.\" [_p] {:webapp/path \"/api/modules\"})\n")
+                      "(def ^{:http/external-path \"the project server proxies /api/*\"}\n"
+                      "  far-ep {:http/method :get :http/path \"/api/modules\"})\n")
             st   (assoc-in (store/ingest (store/empty-store) 'shop.far src2)
                            [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (= [] (rules.webapp/request-paths-unserved st))
@@ -605,10 +585,12 @@
             "and with it on, the finding is there — or the line above is vacuous")))
 
     (testing "the finding NAMES the paths this store does serve"
-      ;; a complaint an author cannot act on is one they learn to skim: the
-      ;; endpoint table is right there, and a typo is nearly always one of them
+      ;; a complaint that says only "not served" leaves an author diffing two
+      ;; lists by eye, and the near-miss is the common case — /api/thing for
+      ;; /api/things
       (let [f (first (rules.webapp/webapp-request-paths-are-served-check nil on nil))]
-        (is (re-find #"/api/things" (:teach f)) (pr-str f))))))
+        (is (re-find #"/api/thing\b" (:teach f)) (:teach f))
+        (is (re-find #"/api/things" (:teach f)) (:teach f))))))
 
 (deftest the-CLJS-a-webapp-still-writes-is-reported-at-DONE-not-only-on-request
   ;; The capability's goal stated as a number — "an app that opts into `webapp`
@@ -882,15 +864,12 @@
                                   "  sheet \"S.\" [_] {:status 200})\n"))
                (store/ingest 'shop.ui
                              (str "(ns shop.ui)\n\n"
-                                  "(defn screen-a \"A.\" []\n"
-                                  "  {:request (fn [_] {:webapp/method :get"
-                                  " :webapp/path \"/api/things\"})})\n\n"
-                                  "(defn screen-b \"B.\" []\n"
-                                  "  {:request (fn [_] {:webapp/method :get"
-                                  " :webapp/path \"/css/app.css\"})})\n\n"
-                                  "(defn screen-c \"C.\" []\n"
-                                  "  {:request (fn [_] {:webapp/method :get"
-                                  " :webapp/path \"/api/nope\"})})\n")))]
+                                  "(def ep-a {:http/method :get"
+                                  " :http/path \"/api/things\"})\n\n"
+                                  "(def ep-b {:http/method :get"
+                                  " :http/path \"/css/app.css\"})\n\n"
+                                  "(def ep-c {:http/method :get"
+                                  " :http/path \"/api/nope\"})\n")))]
 
     (testing "an api this store declares is served"
       (is (not-any? #(= "/api/things" (:path %)) (rules.webapp/request-paths-unserved st))

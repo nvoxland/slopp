@@ -146,7 +146,8 @@
   "The `:webapp/call` a real page runs: `js/fetch`, and nothing else.
 
   Every judgement it needs was made in `slopp.webapp`, which is `:cljc` and
-  driven by ordinary tests — the URL by `request-url`, the method, headers and
+  driven by ordinary tests — the URL by `slopp.rest.endpoint/request`, which
+  resolves it before the request is ever performed, the method, headers and
   encoder by `request-init`, the decoder key by `media-type`, and whether the
   answer is data or a failure by `response-outcome`. What is left here is one
   `fetch` and three `get`s, which is why this namespace can be verified by
@@ -167,7 +168,7 @@
                   (fn [value]
                     (let [[kind v] (webapp/response-outcome status value)]
                       ((get {:ok ok :failed err} kind) v))))]
-    (-> (js/fetch (webapp/request-url request)
+    (-> (js/fetch (:http/url request)
                   #js {:method  (:method init)
                        :headers (clj->js (:headers init))
                        :body    ((get encoders (:encode init)) (:body init))})

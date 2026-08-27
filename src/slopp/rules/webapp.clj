@@ -359,19 +359,28 @@
                           " route AT the prefix needs nothing extra.")})))))
 
 (defn ^:export request-paths
-  "Every `:webapp/path` literal this store declares, as
-  `[{:path :form} …]` sorted — `[]` when nothing requests anything.
+  "Every endpoint DESCRIPTOR path this store declares, as `[{:path :form} …]`
+  sorted — `[]` when nothing names an endpoint.
 
   **The other half of a route reference.** A literal `:href` in a view is
-  joined against the served table by `http-dangling-route-refs`; a screen's
-  request names a path in exactly the same way, and until this existed nothing
-  read it. Both are a claim that this store serves something.
+  joined against the served table by `http-dangling-route-refs`; a descriptor's
+  `:http/path` is the same kind of claim about the same table, and until this
+  existed nothing read it. Both are a statement that this store serves
+  something.
+
+  **It reads a DESCRIPTOR, which is a map literal, not a request.** A request
+  carries a finished `:http/url` — `slopp.rest.endpoint/request` resolved it —
+  so it holds no pattern to join and is not scanned. The pattern lives on the
+  descriptor, which is a `def` and therefore always readable, so this no longer
+  depends on where an app happens to assemble its map.
+
+  `:http/path` is also a route MARKER, and the two do not collide: a marker
+  rides the name symbol's metadata and this walks collection structure, which
+  `tree-seq` never descends into. Measured rather than assumed.
 
   **Read from map literals anywhere in the store**, like [[client-routes]] and
-  for the same reason: a request is an ordinary function, so its map can be
-  built in a helper, a `cond`, or beside the screen it belongs to, and a reader
-  that insisted on one shape in one place would report a partial answer as a
-  whole one.
+  for the same reason: a descriptor is ordinary data and an app may build one
+  beside the screen it belongs to.
 
   A non-literal path is SKIPPED rather than guessed at — a computed path is one
   this cannot read, and inventing an answer would make the join quietly partial,
@@ -382,35 +391,23 @@
                 (distinct
                  (for [nsx  (keys (:namespaces st))
                        e    (store/forms st nsx)
-                       ;; `^{:http/external-path "why"}` skips a form WHOLE, the
+                       ;; `^{:http/external-path \"why\"}` skips a form WHOLE, the
                        ;; same marker `rules.http/ui-route-refs` honours for a
-                       ;; link and for the same question. It is the escape the
-                       ;; absolute-url one cannot cover: an API proxied under
-                       ;; this app's own mount point is real, served, and not
-                       ;; this store's — and cannot be written in full when the
-                       ;; prefix is only known at runtime. Without it that app
-                       ;; carries a finding per screen that nothing can clear,
-                       ;; which is how a reader learns to skim the whole list
+                       ;; link and for the same question. It is the escape an
+                       ;; absolute url cannot cover: an API proxied under this
+                       ;; app's own mount point is real, served, and not this
+                       ;; store's — and cannot be written in full when the
+                       ;; prefix is only known at runtime. Generation DECLARES
+                       ;; it on every descriptor built from a foreign contract,
+                       ;; so the escape is never hand-edited onto generated code.
                        :when (not (:http/external-path (store/form-name-meta e)))
                        :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
                        node (tree-seq coll? seq sx)
                        :when (map? node)
-                       :let [p (get node :webapp/path)]
+                       :let [p (get node :http/path)]
                        :when (string? p)]
-                   (cond-> {:path p
-                            :form (symbol (str nsx) (str (:name e)))}
-                     ;; CARRIED rather than filtered here: a request measured
-                     ;; from a base it names is still what a screen LOADS, so
-                     ;; the surface report wants it. Only the served join skips
-                     ;; it, because that base is not this store's to answer for.
-                     ;;
-                     ;; `:webapp/from-origin` used to be carried beside this as
-                     ;; the empty case. It is GONE rather than honoured: the
-                     ;; boolean was an escape from a field that could not hold
-                     ;; two values, and a retired marker read by nothing is
-                     ;; worse than its absence — it waives nothing while reading
-                     ;; as though it does.
-                     (contains? node :webapp/base) (assoc :own-base true)))))))
+                   {:path p
+                    :form (symbol (str nsx) (str (:name e)))})))))
 
 (defn ^:export webapp-report
   "The `webapp` section of `query_surface`: what this browser application IS.
@@ -669,16 +666,11 @@
   ;; is that its findings can be.
   (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
                      (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path own-base]}]
+    (vec (remove (fn [{:keys [path]}]
                    (or (contains? served path)
                        (str/includes? path "://")
-                       ;; the same statement an absolute url makes, in the form
-                       ;; a MOUNTED app can actually write. A client-routed app
-                       ;; switches which upstream it reads without a page load,
-                       ;; so the base is route state on the request; one that
-                       ;; NAMES a base is measured from there, which is not this
-                       ;; store or the declaration says nothing
-                       own-base))
+                       ;; protocol-relative is the same statement one hop along
+                       (str/starts-with? path "//")))
                  (request-paths st)))))
 
 (defn webapp-request-paths-are-served-check

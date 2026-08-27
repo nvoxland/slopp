@@ -610,76 +610,6 @@
                    (not-found state))]
       (prefix-links base routes (chrome state inner)))))
 
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/path :string]
-                          [:webapp/path-params {:optional true} [:maybe [:map-of :keyword :any]]]
-                          [:webapp/query {:optional true} [:maybe [:map-of :keyword :any]]]]]
-                   :string]}
-  request-url
-  "The complete URL a request names — path parameters substituted, query
-  appended, everything percent-encoded.
-
-  **The performer receives a FINISHED string and decides nothing.** That is the
-  whole design: whatever a browser shim computes is computed in the one
-  namespace no JVM test can reach, so every judgement moved here is a judgement
-  a reader can assert on. The app that prompted this had the same rule and
-  stopped one step short — splitting a url into literal and encodable PARTS for
-  its performer to join — because its encoder was `encodeURIComponent` and only
-  existed in the browser. `slopp.lang/encode-component` is `:cljc`, so the join
-  comes here too and the browser is left with `fetch`.
-
-  **Substitution is SEGMENT-WISE, never `str/replace`.** A parameter whose name
-  is a prefix of another corrupts the path: replacing `:m` in `/api/:module/:m`
-  gives `/api/yodule/y`, which is a url, which is why it ships. Their docstring
-  named this before either of us had a use for the fix, and the reason it is
-  worth restating is that the corrupted result LOOKS correct.
-
-  **A value cannot break out of its segment, and that is the security half.**
-  `slopp.lang/percent-of` escapes every character outside RFC 3986's unreserved
-  set, so a `/` in a value is data rather than structure and a `?` does not start
-  a query. A request built in a browser is a string asserted nowhere; built here
-  it is one an ordinary test reads.
-
-  Non-ASCII passes through verbatim — `encode-component`'s documented limit,
-  because asking a character for its code point is the platform question
-  `slopp.lang` exists so nobody has to ask. A browser percent-encodes it as UTF-8
-  before sending, so the wire is right; a caller needing exact bytes for a
-  non-ASCII path segment needs a platform encoder and should say so where it is
-  used.
-
-  **An empty query appends nothing.** A trailing `?` makes a url that differs
-  from the one a reader typed, which is a cache key nobody predicted."
-  [{:webapp/keys [path path-params query]}]
-  (let [enc   lang/encode-component
-        seg   (fn [s]
-                (cond
-                  (str/starts-with? s ":")
-                  (enc (get path-params (keyword (subs s 1))))
-
-                  ;; a REMAINDER, not a segment. `encode-component` escapes
-                  ;; `/` — right for a segment, where a slash is data trying
-                  ;; to become structure, and wrong here, where it IS
-                  ;; structure. Both matchers decode each sub-segment on its
-                  ;; own and THEN join, so this encodes each on its own and
-                  ;; then joins, or the round trip stops closing. `**` matches
-                  ;; zero segments, so an absent value is legal and empty
-                  (= s "**")
-                  (str/join "/" (map enc (remove str/blank?
-                                                 (str/split (str (:* path-params)) #"/"))))
-
-                  ;; one segment, so it encodes whole like a named capture
-                  (= s "*") (enc (:* path-params))
-
-                  :else s))
-        parts (map seg (str/split (str path) #"/"))
-        q     (->> (sort-by key (or query {}))
-                   (map (fn [[k v]] (str (enc (name k)) "=" (enc v))))
-                   (str/join "&"))]
-    (str (str/join "/" parts)
-         (when (seq q) (str "?" q)))))
-
 (defn as-screen
   "The screen VALUE a route row names — a map with `:render`, whatever the row
   was written as.
@@ -1056,9 +986,9 @@
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map
-                          [:webapp/method {:optional true} [:maybe :keyword]]
-                          [:webapp/headers {:optional true} [:maybe [:map-of :string :string]]]
-                          [:webapp/body {:optional true} :any]]]
+                          [:http/method {:optional true} [:maybe :keyword]]
+                          [:http/headers {:optional true} [:maybe [:map-of :string :string]]]
+                          [:http/body {:optional true} :any]]]
                    [:map [:method :string] [:headers [:map-of :string :string]]
                     [:encode :keyword]]]}
   request-init
@@ -1100,7 +1030,7 @@
   back to writing its own `fetch`, which is the whole thing being avoided. A
   declared header WINS over the default content type, which is also what makes
   the table above reachable at all."
-  [{:webapp/keys [method headers body]}]
+  [{:http/keys [method headers body]}]
   (let [has-body? (some? body)
         declared  (media-type (get headers "Content-Type"))]
     {:method  (str/upper-case (name (or method :get)))
@@ -1189,7 +1119,11 @@
   spellings count — a scheme, and the protocol-relative `//` that a CDN link
   takes."
   [base request]
-  (let [p    (:webapp/path request)
+  ;; `:http/url` — the address is RESOLVED before it gets here now, by
+  ;; `slopp.rest.endpoint/request`, so this prefixes a finished url rather
+  ;; than a template. `:webapp/base` stays webapp-prefixed on purpose: a
+  ;; MOUNT is a browser fact and this is the only thing that reads it.
+  (let [p    (:http/url request)
         base (if (contains? request :webapp/base)
                  (:webapp/base request)
                  base)]
@@ -1197,7 +1131,7 @@
              (seq (str base))
              (not (str/includes? p "://"))
              (not (str/starts-with? p "//")))
-      (assoc request :webapp/path (prefixed base p))
+      (assoc request :http/url (prefixed base p))
       request)))
 
 (defn ^:export

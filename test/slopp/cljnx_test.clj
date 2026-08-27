@@ -1393,7 +1393,7 @@
                          [:span (str "at " (:path s))]])
         things  {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
                                          [:li [:a {:href (str "/things/" (:id t))} (:name t)]])])
-                 :request (fn [_params] {:webapp/method :get :webapp/path "/api/things"})}
+                 :request (fn [_params] {:http/method :get :http/url "/api/things"})}
         thing   {:render  (fn [s] [:article
                                    [:h1 (str "Thing " (:id (:params s)))]
                                    [:input {:placeholder "note"
@@ -1401,9 +1401,8 @@
                                             :on {:input [:thing/typed]}}]
                                    [:button {:on {:click [:thing/save]}} "Save"]
                                    [:button {:on {:click [:project/switch "other"]}} "Switch"]])
-                 :request (fn [params] {:webapp/method      :get
-                                        :webapp/path        "/api/things/:id"
-                                        :webapp/path-params {:id (:id params)}})}
+                 :request (fn [params] {:http/method :get
+                                        :http/url (str "/api/things/" (:id params))})}
         app     (webapp/wiring
                  {:webapp/state       state
                   :webapp/base        "/p/demo"
@@ -1414,10 +1413,9 @@
                                        :thing/save     {:effectful? true}
                                        :project/switch {:leaves? true}}
                   :webapp/act         (fn [s _action v] (assoc s :draft v))
-                  :webapp/request-for (fn [s _a] {:webapp/method      :put
-                                                  :webapp/path        "/api/things/:id"
-                                                  :webapp/path-params {:id (:id (:params s))}
-                                                  :webapp/body        (:draft s)})
+                  :webapp/request-for (fn [s _a] {:http/method :put
+                                                  :http/url    (str "/api/things/" (:id (:params s)))
+                                                  :http/body   (:draft s)})
                   :webapp/url-for     (fn [_s a] (str "/p/" (second a)))
                   ;; ONE performer, and it sees BOTH kinds of traffic: the load a
                   ;; screen names and the request a control derives. That is the
@@ -1425,7 +1423,7 @@
                   ;; exactly one of it
                   :webapp/call        (fn [request ok _err]
                                         (swap! called conj request)
-                                        (if (= :put (:webapp/method request))
+                                        (if (= :put (:http/method request))
                                           (ok :saved)
                                           (reset! pending ok)))
                   :webapp/leave!      (fn [u] (swap! left conj u))})
@@ -1456,7 +1454,7 @@
       ;; A request built by `js/fetch` is a string asserted nowhere; built by
       ;; the screen it is this line
       (is (= ["/p/demo/api/things" "/p/demo/api/things/42"]
-             (mapv webapp/request-url @called))
+             (mapv :http/url @called))
           (str "this app is MOUNTED at /p/demo, so its own API is under that"
                " prefix too — a request addressed at the root is a different"
                " application, or nothing: " (pr-str @called))))
@@ -1470,13 +1468,12 @@
 
     (testing "an effectful control makes the request the app DERIVED"
       (cljnx/click! s "Save")
-      (is (= {:webapp/method      :put
-              :webapp/path        "/p/demo/api/things/:id"
-              :webapp/path-params {:id "42"}
-              :webapp/body        "hello"}
+      (is (= {:http/method :put
+              :http/url    "/p/demo/api/things/42"
+              :http/body   "hello"}
              (last @called))
           (pr-str @called))
-      (is (= "/p/demo/api/things/42" (webapp/request-url (last @called)))
+      (is (= "/p/demo/api/things/42" (:http/url (last @called)))
           (str "a control's request is the same shape a screen's is AND takes"
                " the same mount point — addressing one and not the other makes"
                " an app right once and wrong once, which reads as a flaky"

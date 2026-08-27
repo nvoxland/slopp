@@ -21,7 +21,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.rest.client :as rest.client]
             [slopp.rest.contract :as contract]
-            [slopp.http.client :as http.client]))
+            [slopp.http.client :as http.client] [slopp.rest.endpoint :as endpoint]))
 
 (deftest a-server-calls-an-upstream-through-the-same-builder-a-browser-uses
   ;; The gap a consuming store measured: slopp generates a typed client for the
@@ -29,18 +29,18 @@
   ;; contract — it renders it on a screen — and forwards to it with a
   ;; hand-built url string and forty lines nobody wanted to own.
   ;;
-  ;; The generated `:cljc` request BUILDER already works on the JVM; nothing
-  ;; performed it there. This is the performer.
-  (let [thing-request (fn [p] {:webapp/method :get
-                               :webapp/path "/api/things/:id"
-                               :webapp/path-params {:id (:id p)}
-                               :webapp/query {:depth (:depth p)}})
-        up   {:rest/base-url "https://up.test"}
+  ;; The endpoint DESCRIPTOR already works on the JVM; nothing performed it
+  ;; there. This is the performer, and it receives a request whose url was
+  ;; resolved once by `slopp.rest.endpoint/request` — so a browser and a server
+  ;; are handed the identical value and neither decides anything about it.
+  (let [thing {:http/method :get :http/path "/api/things/:id"
+               :http/params #{:id :depth}}
+        up    {:rest/base-url "https://up.test"}
         serve (fn [routes] (http.client/fake-requester "https://up.test" routes))]
 
-    (testing "the builder's map becomes a real call, and the answer is DECODED"
+    (testing "the descriptor's request becomes a real call, and the answer is DECODED"
       (let [r (rest.client/call!
-               up (thing-request {:id "f1" :depth 2})
+               up (endpoint/request thing {:id "f1" :depth 2})
                {:requester (serve {[:get "/api/things/f1?depth=2"]
                                    (fn [_] {:status 200
                                             :headers {"Content-Type" "application/json"}
@@ -52,7 +52,7 @@
 
     (testing "EDN is decoded too, because slopp's own API answers it"
       (let [r (rest.client/call!
-               up {:webapp/method :get :webapp/path "/api/contracts"}
+               up {:http/method :get :http/url "/api/contracts"}
                {:requester (serve {[:get "/api/contracts"]
                                    (fn [_] {:status 200
                                             :headers {"Content-Type" "application/edn"}
@@ -64,7 +64,7 @@
       ;; one throws. Deciding what a 404 means is the caller's, and this
       ;; framework must not take that away
       (let [r (rest.client/call!
-               up {:webapp/method :get :webapp/path "/api/gone"}
+               up {:http/method :get :http/url "/api/gone"}
                {:requester (serve {})})]
         (is (= 404 (:status r)) (pr-str r))))
 
@@ -76,7 +76,7 @@
            clojure.lang.ExceptionInfo #"nothing is listening"
            (rest.client/call!
             {:rest/base-url "https://elsewhere.test"}
-            {:webapp/method :get :webapp/path "/api/x"}
+            {:http/method :get :http/url "/api/x"}
             {:requester (serve {})}))))))
 
 (deftest what-the-framework-handles-that-a-raw-socket-does-not
@@ -89,14 +89,14 @@
         ok (fn [_] {:status 200 :headers {"Content-Type" "application/json"}
                     :body "{}"})]
 
-    (testing "a path that would leave the base REFUSES, rather than being cleaned"
+    (testing "a url that would leave the base REFUSES, rather than being cleaned"
       ;; the request path is the one part an upstream's own data can reach — a
       ;; slug, an id, a name from a previous response. If it can become a
       ;; different HOST then the base was never a boundary
       (doseq [p ["//evil.test/x" "https://evil.test/x" "http://evil.test/x"]]
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo #"cannot leave"
-             (rest.client/call! up {:webapp/method :get :webapp/path p}
+             (rest.client/call! up {:http/method :get :http/url p}
                                 {:requester (constantly {:http/status 200
                                                          :http/headers {}
                                                          :http/body ""})}))
@@ -108,7 +108,7 @@
       ;; gives up. A framework that made calling easy and left this optional
       ;; would have made the wrong thing easy
       (let [seen (atom nil)]
-        (rest.client/call! up {:webapp/method :get :webapp/path "/api/x"}
+        (rest.client/call! up {:http/method :get :http/url "/api/x"}
                            {:requester (fn [req] (reset! seen req) (ok nil)
                                          {:http/status 200 :http/headers {} :http/body ""})})
         (is (pos-int? (:http/timeout-ms @seen))
@@ -116,7 +116,7 @@
       (testing "and a declared one WINS"
         (let [seen (atom nil)]
           (rest.client/call! (assoc up :rest/timeout-ms 250)
-                             {:webapp/method :get :webapp/path "/api/x"}
+                             {:http/method :get :http/url "/api/x"}
                              {:requester (fn [req] (reset! seen req)
                                            {:http/status 200 :http/headers {} :http/body ""})})
           (is (= 250 (:http/timeout-ms @seen)) (pr-str @seen)))))
@@ -124,15 +124,15 @@
     (testing "declared headers travel, which is how auth reaches the upstream"
       (let [seen (atom nil)]
         (rest.client/call! (assoc up :rest/headers {"Authorization" "Bearer t"})
-                           {:webapp/method :get :webapp/path "/api/x"}
+                           {:http/method :get :http/url "/api/x"}
                            {:requester (fn [req] (reset! seen req)
                                          {:http/status 200 :http/headers {} :http/body ""})})
         (is (= "Bearer t" (get (:http/headers @seen) "Authorization")) (pr-str @seen))))
 
     (testing "a body is ENCODED by what the request declares"
       (let [seen (atom nil)]
-        (rest.client/call! up {:webapp/method :post :webapp/path "/api/x"
-                               :webapp/body {:a 1}}
+        (rest.client/call! up {:http/method :post :http/url "/api/x"
+                               :http/body {:a 1}}
                            {:requester (fn [req] (reset! seen req)
                                          {:http/status 200 :http/headers {} :http/body ""})})
         (is (= "{\"a\":1}" (:http/body @seen)) (pr-str @seen))
@@ -145,7 +145,7 @@
       ;; wrong shape travel one more layer before anyone noticed
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"contract"
-           (rest.client/call! up {:webapp/method :get :webapp/path "/api/x"}
+           (rest.client/call! up {:http/method :get :http/url "/api/x"}
                               {:check (fn [_] "expected a :name")
                                :requester (fn [_] {:http/status 200
                                                    :http/headers {"content-type" "application/json"}
@@ -153,7 +153,7 @@
 
     (testing "and a check that passes is invisible"
       (is (= 200 (:status (rest.client/call!
-                           up {:webapp/method :get :webapp/path "/api/x"}
+                           up {:http/method :get :http/url "/api/x"}
                            {:check (constantly nil)
                             :requester (fn [_] {:http/status 200
                                                 :http/headers {"content-type" "application/json"}
@@ -163,8 +163,8 @@
   ;; The docstring claims the typed halves already existed and only needed a
   ;; performer. A test that passes `(constantly nil)` proves the slot is
   ;; called and nothing about that claim — so this wires the actual thing a
-  ;; generated `-check` wraps: `slopp.rest.contract/check-response`, judging
-  ;; the response on what a CLIENT receives.
+  ;; descriptor's `:rest/response` gets judged by:
+  ;; `slopp.rest.contract/check-response`, on what a CLIENT receives.
   (let [schema [:map [:name :string] [:qty :int]]
         check  (partial contract/check-response schema)
         up     {:rest/base-url "https://up.test"}
@@ -174,13 +174,13 @@
                           :http/body body}))]
 
     (testing "an answer that honours the contract passes through decoded"
-      (let [r (rest.client/call! up {:webapp/method :get :webapp/path "/api/x"}
+      (let [r (rest.client/call! up {:http/method :get :http/url "/api/x"}
                                  {:check check
                                   :requester (answer "{\"name\":\"a\",\"qty\":2}")})]
         (is (= {:name "a" :qty 2} (:body r)) (pr-str r))))
 
     (testing "an answer that breaks it throws, carrying the upstream's own words"
-      (let [e (try (rest.client/call! up {:webapp/method :get :webapp/path "/api/x"}
+      (let [e (try (rest.client/call! up {:http/method :get :http/url "/api/x"}
                                       {:check check
                                        :requester (answer "{\"name\":\"a\"}")})
                    nil
@@ -198,7 +198,7 @@
       ;; publishes. Checking it would report a contract violation for a
       ;; response that never claimed to be one, which sends the reader to the
       ;; wrong end of the wire
-      (let [r (rest.client/call! up {:webapp/method :get :webapp/path "/api/x"}
+      (let [r (rest.client/call! up {:http/method :get :http/url "/api/x"}
                                  {:check check
                                   :requester (fn [_] {:http/status 500
                                                       :http/headers {"content-type" "application/json"}

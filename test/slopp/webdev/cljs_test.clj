@@ -899,24 +899,22 @@
       (is (= 2 (count (re-seq #"\(ok! resp\)" src)))
           (str "one wrapper skipped the guard: " src)))))
 
-(deftest a-webapp-store-generates-REQUESTS-and-CHECKS-not-performers
+(deftest a-webapp-store-generates-DESCRIPTORS-not-performers
   ;; Named by the app that adopted the screen value: `generate_client` and
-  ;; `webapp` now overlap. The generated namespace is two things — schemas
+  ;; `webapp` overlap. The generated namespace is two things — schemas
   ;; (`:cljc`) and fetch WRAPPERS (`:cljs`) — and once the framework performs
   ;; every request the wrappers are dead surface. Nine public fns in theirs.
   ;;
-  ;; So a store with `webapp` on gets what it can actually use: REQUEST builders
-  ;; for a row's `:request` and CONTRACT checks for its `:check`. That also
-  ;; restores what 4d took away — their response validation lived in the
-  ;; wrappers, and when the framework took over performing it went with them.
+  ;; So a store with `webapp` on gets what it can actually use: an endpoint
+  ;; DESCRIPTOR per endpoint, carrying the address, the method, the declared
+  ;; params and both contracts.
   ;;
-  ;; **In TWO namespaces, and that is not tidiness.** A builder is a pure data
-  ;; function; a check reaches malli, which the functional-core gate reads as
-  ;; IO. Shipped together, the builders inherit the checks' tier — and the app
-  ;; that tried to use them could not, because its views are `:pure` and the
-  ;; edge to an `:external` namespace is a layering violation. It ended up
-  ;; hand-writing every request map: correct by inspection rather than by
-  ;; construction, which is exactly the drift generation exists to remove.
+  ;; **In ONE namespace, and that is the change.** It was two: builders here,
+  ;; contract checks in a sibling, because a check reaches malli and the
+  ;; functional-core gate reads that as IO — shipped together, the builders
+  ;; inherited the tier and the app they were built for could not name them
+  ;; from its `:pure` views at all. A descriptor REFERENCES its schema instead
+  ;; of validating against it, so it is data, so the split has no cause left.
   (let [wrappers [{:fn-name 'get-order :method :get :path "/api/orders/:id"
                    :endpoint 'shop.api/get-order
                    :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
@@ -929,81 +927,64 @@
                    :endpoint 'shop.api/ping
                    :request  {:kind :none}
                    :response {:kind :none}}]
-        src  (cljs/render-request-ns 'shop.client.api wrappers nil)
-        chk  (cljs/render-check-ns 'shop.client.checks wrappers)]
+        src  (cljs/render-request-ns 'shop.client.api wrappers nil)]
 
-    (testing "one REQUEST builder per endpoint, each carrying its provenance"
+    (testing "one DESCRIPTOR per endpoint, each carrying its provenance"
       (is (re-find #"\(ns shop\.client\.api" src) src)
-      (is (= 3 (count (re-seq #"\(defn \^\{:generated .*?-request" src)))
-          (str "one request builder per endpoint, and the ! is dropped because"
-               " building a request performs nothing: " src))
-      (is (re-find #"\^\{:generated \"shop\.api/get-order\"\}" src) src))
+      (is (= 3 (count (re-seq #"\(def \^\{:generated " src)))
+          (str "one descriptor per endpoint, and the ! is dropped because a"
+               " descriptor performs nothing: " src))
+      (is (re-find #"\^\{:generated \"shop\.api/get-order\"\}" src) src)
+      (is (not (re-find #"\(defn " src))
+          (str "a descriptor is data, not a function: " src)))
 
-    (testing "the builder returns slopp.webapp's request SHAPE"
-      (is (re-find #":webapp/method :get" src) src)
-      (is (re-find #":webapp/path \"/api/orders/:id\"" src) src)
-      (is (re-find #":webapp/path-params \{:id \(:id params\)\}" src)
-          (str "a captured segment must be supplied SEPARATELY, or request-url"
-               " has nothing to substitute: " src)))
+    (testing "it carries the address and the method, not a way to build them"
+      (is (re-find #":http/method   :get" src) src)
+      (is (re-find #":http/path     \"/api/orders/:id\"" src) src))
 
-    (testing "a body verb sends a BODY; anything else sends a query"
-      (is (re-find #":webapp/body params" src) src)
-      (is (re-find #":webapp/query \(dissoc params :id\)" src)
-          (str "a path param must not also arrive as a query key: " src)))
+    (testing "and the DECLARED params, path segments included"
+      ;; the allowlist `slopp.rest.endpoint/request` reads. A path segment is
+      ;; always in it: the url cannot be built without one
+      (is (re-find #":http/params +#\{:id\}" src) src))
 
-    (testing "an endpoint with no request takes NO arguments"
-      ;; `ping` declares nothing, so a builder taking params would invent a
-      ;; parameter the contract does not have
-      (is (re-find #"ping-request\n  \"[^\"]*\"\n  \[\]" src) src))
+    (testing "BOTH contracts ride the same var"
+      ;; the whole reason one namespace can replace two: the thing that
+      ;; validates the answer arrives with the thing that asks the question
+      (is (re-find #":rest/request  shop\.contracts/query" src) src)
+      (is (re-find #":rest/response shop\.contracts/order" src) src))
 
-    (testing "the REQUESTS namespace requires NOTHING, which is what keeps it pure"
-      ;; the friction this split closes: malli is what makes the checks
-      ;; `:external`, and a builder that shipped beside them could not be
-      ;; reached from a `:pure` view at all
-      (is (not (re-find #":require" src))
-          (str "a request builder needs no library to build a map, and a"
-               " require is what would tier it: " src))
+    (testing "an endpoint that declares neither carries neither"
+      ;; `ping` declares nothing, so a descriptor naming a contract would
+      ;; invent one the producer never published
+      (is (re-find #"\^:export ping\n[^{]*\{:http/method +:get\n +:http/path +\"/api/ping\"\}" src) src))
+
+    (testing "the namespace reaches the CONTRACTS and nothing else"
+      ;; the friction the split closed, closed differently: malli is what made
+      ;; the checks `:external`, and referencing a schema calls no malli — so
+      ;; this requires data and stays reachable from a `:pure` view
+      (is (re-find #"\(:require\n            shop\.contracts\)" src) src)
+      (is (not (re-find #"malli" src)) src)
       (is (not (re-find #"m/validate|m/decode" src)) src))
 
-    (testing "and the CHECKS are their own namespace, which may reach malli"
-      (is (re-find #"\(ns shop\.client\.checks" chk) chk)
-      (is (re-find #"malli\.core" chk) chk)
-      (is (re-find #"get-order-check" chk) chk)
-      (is (re-find #"m/validate shop\.contracts/order" chk) chk)
-      (is (not (re-find #"ping-check" chk))
-          "an endpoint with no response contract has nothing to check")
-      (is (not (re-find #"-request" chk))
-          "a builder in the checks namespace would defeat the split"))
-
-    (testing "the check DECODES first, or it validates the wire's shapes"
-      ;; a keyword field arrives from JSON as a string, so validating the raw
-      ;; body fails a contract the server honoured — the false drift report
-      ;; this whole mechanism exists to avoid
-      (is (re-find #"m/decode shop\.contracts/order" chk) chk))
-
-    (testing "a FOREIGN contract's builders carry their own escape"
-      ;; the second friction, and the escape had no reachable form: the
-      ;; advisory reports a generated builder whose path this store does not
-      ;; serve, and its escape is a MARKER on a form nobody may hand-edit,
-      ;; because the next generation would drop it silently.
-      ;;
-      ;; Generation knows where the contract came from, so it declares it —
-      ;; the escape stays a declaration and nothing is hand-edited.
+    (testing "a FOREIGN contract's descriptors carry their own escape"
+      ;; the advisory reports a generated descriptor whose path this store does
+      ;; not serve, and its escape is a MARKER on a form nobody may hand-edit,
+      ;; because the next generation would drop it silently. Generation knows
+      ;; where the contract came from, so it declares it.
       (let [far (cljs/render-request-ns 'shop.client.api wrappers
                                         "http://pub.test/contract")]
         (is (= 3 (count (re-seq #":http/external-path" far)))
-            (str "every builder for somebody else's API must carry it, or the"
-               " advisory reports the ones that did not: " far))
+            (str "every descriptor for somebody else's API must carry it, or the"
+                 " advisory reports the ones that did not: " far))
         (is (re-find #"http://pub\.test/contract" far)
             (str "and the REASON is where the contract came from: " far))))
 
-    (testing "both namespaces are PORTABLE, which is the whole point"
-      (doseq [s [src chk]]
-        (is (not (re-find #"js/" s))
-            (str "generated code that reaches for the browser is code no"
-                 " in-image test can read: " s))
-        (is (= (count (re-seq #"\(" s)) (count (re-seq #"\)" s)))
-            "balanced parens")))))
+    (testing "and it is PORTABLE, which is the whole point"
+      (is (not (re-find #"js/" src))
+          (str "generated code that reaches for the browser is code no"
+               " in-image test can read: " src))
+      (is (= (count (re-seq #"\(" src)) (count (re-seq #"\)" src)))
+          "balanced parens"))))
 
 (deftest ^:external generate-client-follows-WHO-PERFORMS-the-request
   ;; The overlap named by the consuming app: with `webapp` on, the framework
@@ -1031,36 +1012,41 @@
         (let [r (cljs/generate-client! sess :ns 'shopw.client.api)]
           (is (= :cljs (:platform r)) (pr-str r))))
 
-      (testing "with webapp on, it emits the PORTABLE request namespace instead"
+      (testing "with webapp on, it emits the PORTABLE descriptor namespace instead"
         (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
                           :prompt "this store's browser owns routing")
         (let [r   (cljs/generate-client! sess :ns 'shopw.client.api)
-              src (str (store.render/render-ns (:store @sess) 'shopw.client.api))
-              chk (str (store.render/render-ns (:store @sess) 'shopw.client.checks))]
+              src (str (store.render/render-ns (:store @sess) 'shopw.client.api))]
           (is (= :cljc (:platform r))
               (str "a webapp store was handed fetch wrappers its own framework"
                    " makes unreachable: " (pr-str r)))
-          (is (= 'shopw.client.checks (:checks r)) (pr-str r))
-          (is (re-find #"get-order-request" src) src)
+          (is (re-find #"\^:export get-order\n" src) src)
           (is (not (re-find #"js/fetch" src))
               "a webapp store got a performer anyway")
 
-          (testing "the builders are :pure, which is what lets a :pure view name them"
-            ;; the friction this split closes: a check reaches malli, which the
-            ;; functional-core gate reads as IO, so builders shipped beside them
-            ;; inherited that tier and a `:pure` view could not name them at all
+          (testing "ONE namespace, because the contract rides the descriptor"
+            ;; it was two: builders here and contract checks in a sibling,
+            ;; because a check reaches malli and the functional-core gate reads
+            ;; that as IO. A descriptor NAMES its schema instead of validating
+            ;; against it, so the sibling has nothing left to hold.
+            (is (nil? (:checks r))
+                (str "a checks namespace was emitted beside a descriptor that"
+                     " already carries its own :rest/response: " (pr-str r)))
+            (is (re-find #":rest/response shopw\.contracts/order" src) src))
+
+          (testing "and it is :pure, which is what lets a :pure view name it"
             (is (= :pure (tiers/tier-for (:store @sess) 'shopw.client.api))
                 (pr-str (tiers/tier-for (:store @sess) 'shopw.client.api)))
-            ;; the require FORM, not the word: this namespace's docstring names
-            ;; malli to say where the checks went, and prose about a thing is
-            ;; not the thing — the same trap `the-browser-SHIM-cannot-branch`
-            ;; documents and avoids by scanning sexprs
-            (is (not (re-find #"\(:require" src))
-                (str "a require is what would tier the builders: " src)))
-
-          (testing "while the CHECKS are their own namespace and may reach it"
-            (is (re-find #"get-order-check" chk) chk)
-            (is (re-find #"malli\.core" chk) chk))))
+            ;; the require FORM, not the word — the same trap
+            ;; `the-browser-SHIM-cannot-branch` documents and avoids by
+            ;; scanning sexprs. It DOES require now, and that is the point:
+            ;; what it reaches is the CONTRACTS namespace, which is data and
+            ;; costs no tier, where malli would have cost one.
+            (is (re-find #"\(:require\n +shopw\.contracts\)" src)
+                (str "a descriptor names its schemas, so it must reach them: " src))
+            (is (not (re-find #"malli" src))
+                (str "malli is what would tier this out of a :pure view's"
+                     " reach — a schema referenced is data: " src)))))
 
       (finally (ops/close! sess)))))
 
@@ -1093,7 +1079,7 @@
                                               :ns 'shopx.client.api)]
             (is (= :cljs (:platform r)) (pr-str r))))
 
-        (testing "with webapp on, it gets the portable REQUEST namespace"
+        (testing "with webapp on, it gets the portable DESCRIPTOR namespace"
           (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
                             :prompt "this store's browser owns routing")
           (let [r   (cljs/generate-client-from! sess "http://pub.test/contract"
@@ -1102,7 +1088,7 @@
             (is (= :cljc (:platform r))
                 (str "the path a consuming browser app actually reaches still"
                      " emitted wrappers its framework cannot call: " (pr-str r)))
-            (is (re-find #"modules-request" src) src)
+            (is (re-find #"\^:export modules\n" src) src)
             (is (not (re-find #"js/fetch" src))
                 "a webapp store got a performer through the consumer path")))
 
@@ -1216,7 +1202,9 @@
               (str "a webapp store's generated client defaulted into the module"
                    " its browser entry lives in, which closes a cycle the app"
                    " cannot declare its way out of: " (pr-str r)))
-          (is (= 'shopv.wire.checks (:checks r)) (pr-str r))))
+          (is (nil? (:checks r))
+              (str "a descriptor carries its own :rest/response, so there is no"
+                   " sibling checks namespace left to name: " (pr-str r)))))
 
       (testing "and an explicit :ns still wins, because the default is a default"
         (let [r (cljs/generate-client! sess :ns 'shopv.elsewhere.api)]
@@ -1270,16 +1258,20 @@
         (is (not (str/includes? src "json-transformer"))
             (str "and there is no JSON boundary to transform across: " src))))))
 
-(deftest a-BUILDER-refuses-params-its-contract-does-not-name
+(deftest an-endpoint-DECLARES-the-params-it-takes-and-the-guard-reads-them
   ;; The measured failure: a consumer passed the map it had — its own route
   ;; params — and `:slug` fell through to the query string of a service that
   ;; never asked for it. Correct response, correct render, visible only in
   ;; somebody else's access log.
   ;;
   ;; The server closes the same question (D-closed-request). This is the same
-  ;; refusal one layer earlier, where it names the key without a round trip —
-  ;; and it needs no malli, so it stays in the `:cljc` builder namespace that
-  ;; requires NOTHING.
+  ;; refusal one layer earlier, where it names the key without a round trip.
+  ;;
+  ;; **The guard is no longer GENERATED.** It lives once in
+  ;; `slopp.rest.endpoint/request`, which reads `:http/params` off the
+  ;; descriptor — so what generation owes is the allowlist, not a copy of the
+  ;; check per endpoint. The `:cljs` wrapper is the exception and keeps its
+  ;; own, because it performs its own fetch and never sees a descriptor.
   (let [spec {:fn-name 'get-order :method :get :path "/api/orders/:id"
               :endpoint 'shop.api/get-order
               :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
@@ -1287,52 +1279,44 @@
               :response {:kind :none}}
         src  (cljs/render-request-ns 'shop.client.api [spec] nil)]
 
-    (testing "the builder carries the declared key set and refuses anything else"
-      (is (re-find #"remove #\{" src) src)
-      (is (re-find #":depth" src) src))
+    (testing "the descriptor declares the contract's own keys"
+      (is (re-find #":http/params +#\{[^}]*:depth" src) src))
 
-    (testing "a PATH SEGMENT is allowed even when the contract omits it"
-      ;; the builder needs it to build the url at all. Whether the contract
-      ;; ought to name it is the SERVER's question, and closing there already
-      ;; asks it — a builder inventing a stricter rule than the boundary would
-      ;; refuse requests the boundary accepts
-      (is (re-find #"#\{[^}]*:id" src)
+    (testing "a PATH SEGMENT is in the allowlist even when the contract omits it"
+      ;; the url cannot be built without it. Whether the contract ought to name
+      ;; its own segments is the SERVER's question, and closing there already
+      ;; asks it — a stricter rule invented here would refuse what the boundary
+      ;; accepts
+      (is (re-find #":http/params +#\{[^}]*:id" src)
           (str "a captured segment must stay allowed or the url cannot be"
                " built: " src)))
 
-    (testing "the guard names the endpoint and the offending keys"
-      (is (re-find #"get-order-request" src) src)
-      (is (re-find #"does not name" src) src))
+    (testing "and the descriptor carries no guard CODE — the guard is one function"
+      ;; a check emitted per endpoint is a check to keep in step per endpoint,
+      ;; which is what having eight copies of it meant
+      (is (not (re-find #"remove #\{" src)) src)
+      (is (not (re-find #"throw" src)) src))
 
-    (testing "and it still requires NOTHING — the whole reason it is not malli"
-      (is (not (re-find #":require" src)) src)
-      (is (not (re-find #"m/validate" src)) src))
-(testing "the :cljs WRAPPER gets the same guard, because it had the same hole"
+    (testing "the :cljs WRAPPER keeps its own guard, because it had the same hole"
       ;; its `m/validate` looked like the check that was missing and never was
       ;; one: malli map schemas are OPEN, so an undeclared key passed it and
-      ;; always had. A fix reaching only one renderer would have charged every
-      ;; store a regeneration and reached some of them.
-      (let [w (cljs/render-client-ns
-               'shop.client
-               [{:fn-name 'get-order :method :get :path "/api/orders/:id"
-                 :endpoint 'shop.api/get-order
-                 :request  {:kind :var :sym 'shop.contracts/query :ns 'shop.contracts}
-                 :request-keys #{:depth}
-                 :response {:kind :none}}])]
+      ;; always had. And a wrapper performs its own fetch — it never reaches
+      ;; `slopp.rest.endpoint/request`, so the one shared guard cannot cover it.
+      (let [w (cljs/render-client-ns 'shop.client [spec])]
         (is (re-find #"does not name" w) w)
         (is (< (.indexOf w "does not name") (.indexOf w "m/validate"))
             (str "the undeclared check must run BEFORE the typed one, or a"
                  " caller learns about a type error in a key that should never"
                  " have been sent: " w)))))
 
-  (testing "an endpoint whose declared keys are UNKNOWN gets no guard"
+  (testing "an endpoint that enumerates NOTHING declares no allowlist"
     ;; degrade safely: a non-literal or non-map schema means generation cannot
-    ;; enumerate what is allowed, and a guard built from a guess would refuse
-    ;; correct calls. No check beats a wrong one.
+    ;; enumerate what is allowed, and an allowlist built from a guess would make
+    ;; the shared guard refuse correct calls. No guard beats a wrong one.
     (let [spec {:fn-name 'ping :method :get :path "/api/ping"
                 :endpoint 'shop.api/ping
                 :request {:kind :none} :response {:kind :none}}]
-      (is (not (re-find #"remove #\{"
+      (is (not (re-find #":http/params"
                         (cljs/render-request-ns 'shop.client.api [spec] nil)))))))
 
 (deftest fetching-a-contract-is-BOUNDED
@@ -1350,41 +1334,6 @@
                             :http/body "{:slopp/rest-paths-version 1 :paths []}"}))
     (is (pos-int? (:http/timeout-ms @seen))
         (str "an unbounded fetch hangs the tool: " (pr-str @seen)))))
-
-(deftest a-generated-CHECK-decodes-by-what-the-endpoint-ANSWERS
-  ;; The wrapper learned this when `:rest/media-type` landed: `.json` on an EDN
-  ;; body fails on the first character. The CHECK kept transforming through
-  ;; `mt/json-transformer` unconditionally, which is the mirrored mistake and
-  ;; quieter — a json transformer exists to undo what JSON does to a value, and
-  ;; EDN does none of it. Applied to a document that never went through JSON it
-  ;; is at best a no-op and at worst a second opinion about types nobody asked
-  ;; for.
-  ;;
-  ;; It stayed invisible while slopp's own EDN endpoint declared `:string`,
-  ;; because a string survives any transformer. Giving that endpoint a real
-  ;; document schema is what made the question reachable.
-  (let [spec (fn [mt] {:fn-name 'thing :method :get :path "/api/thing"
-                       :endpoint 'shop.api/thing
-                       :media-type mt
-                       :request {:kind :none}
-                       :response {:kind :var :sym 'shop.contracts/thing
-                                  :ns 'shop.contracts}})
-        gen  (fn [mt] (cljs/render-check-ns 'shop.client.checks [(spec mt)]))]
-
-    (testing "a JSON endpoint's check decodes through the json transformer"
-      (is (re-find #"mt/json-transformer" (gen "application/json"))))
-
-    (testing "an EDN endpoint's check validates what it was given"
-      (let [edn (gen "application/edn")]
-        (is (not (re-find #"json-transformer" edn))
-            (str "EDN never went through JSON, so undoing JSON is a second"
-                 " opinion about types nobody asked for: " edn))
-        (is (re-find #"m/validate shop\.contracts/thing" edn) edn)))
-
-    (testing "and a check with no declared media type still assumes JSON"
-      ;; the default everywhere else in generation, kept so nothing changes for
-      ;; an endpoint that never said
-      (is (re-find #"mt/json-transformer" (gen nil))))))
 
 (deftest a-wrapper-for-a-WILDCARD-path-interpolates-the-remainder
   ;; Found by slopp-ui on the grammar change: the generator reads path segments
@@ -1432,42 +1381,39 @@
                           {:kind :inline :schema '[:map [:slug :string]]})]
         (is (re-find #"remove #\{[^}]*:\*" guarded) guarded)))))
 
-(deftest a-REQUEST-BUILDER-for-a-wildcard-path-supplies-the-remainder
-  ;; `render-request` is `render-wrapper`'s sibling — one generates a fetch, the
-  ;; other a `:cljc` request map — and both read path segments with
-  ;; `(str/starts-with? % ":")`. Fixing the wrapper alone would have left the
-  ;; webapp half broken in exactly the way the wrapper was, which is this
-  ;; repo's most-repeated failure: a pair split across a round trip with only
-  ;; one end wired.
+(deftest a-DESCRIPTOR-for-a-wildcard-path-allows-the-remainder
+  ;; `render-request` and `render-wrapper` were siblings — same file, same
+  ;; `segs` expression, one emitting a fetch and one a request map — and both
+  ;; read path segments with `(str/starts-with? % ":")`, so a wildcard was not
+  ;; a path parameter to either. Fixing one and not the other is this repo's
+  ;; most-repeated failure: a pair split across a round trip with only one end
+  ;; wired.
   ;;
-  ;; The builder hands `:webapp/path-params` to `request-url` rather than
-  ;; interpolating, so what it owes is the KEY. `:*` absent from its list meant
-  ;; no key, no params arglist, and the undeclared-key guard refusing the one
-  ;; value the url needed.
-  (let [build (fn [path request-keys]
-                (#'cljs/render-request
-                 {:fn-name "proxy" :method :get :path path
-                  :endpoint "demo/proxy" :request nil :response nil
-                  :request-keys request-keys}
-                 nil))
-        many  (build "/p/:slug/api/**" [:slug])]
+  ;; What the descriptor owes is the ALLOWLIST. The substitution and the
+  ;; encode-whole-versus-encode-each split belong to
+  ;; `slopp.rest.endpoint/request` and are asserted against it.
+  (let [desc (fn [path] (cljs/render-request-ns
+                         'shop.client.api
+                         [{:fn-name 'proxy :method :get :path path
+                           :endpoint 'shop.api/proxy
+                           :request {:kind :none} :response {:kind :none}}]
+                         nil))]
 
-    (testing "the remainder is passed as a path param, under :*"
-      (is (re-find #":webapp/path-params \{:slug \(:slug params\) :\* \(:\* params\)\}" many)
-          many))
+    (testing "** puts :* in the allowlist, so the guard does not refuse it"
+      ;; without this the endpoint is unreachable in both directions at once —
+      ;; the url needs the remainder and the guard rejects the only key that
+      ;; could supply it
+      (is (re-find #":http/params +#\{[^}]*:\*" (desc "/p/:slug/api/**"))
+          (desc "/p/:slug/api/**")))
 
-    (testing "the builder takes a params map because of it"
-      (is (re-find #"\n  \[params\]\n" (build "/assets/**" nil))
-          "a path whose only parameter is a wildcard still needs one"))
+    (testing "and so does a single-segment *"
+      (is (re-find #":http/params +#\{:\*\}" (desc "/files/*")) (desc "/files/*")))
 
-    (testing "and :* is allowed rather than refused as undeclared"
-      (is (re-find #"remove #\{[^}]*:\*" many) many))
-
-    (testing "the path itself is published verbatim — request-url substitutes"
-      ;; the builder must NOT paste values into the string: `request-url`
-      ;; substitutes segment-wise and encodes each, and a finished path would
-      ;; lose both properties
-      (is (re-find #":webapp/path \"/p/:slug/api/\*\*\"" many) many))))
+    (testing "the PATH is published verbatim — the wildcard is resolved later"
+      ;; a descriptor must not paste values into the string: resolution encodes
+      ;; segment-wise, and a finished path would lose that
+      (is (re-find #":http/path +\"/p/:slug/api/\*\*\"" (desc "/p/:slug/api/**"))
+          (desc "/p/:slug/api/**")))))
 
 (deftest a-generated-FETCH-encodes-its-path-the-way-its-SIBLING-does
   ;; Found by taking slopp-ui's rule and running it over my own readers:
@@ -1518,3 +1464,61 @@
         (is (re-find #"\(defn- seg\b" src) src)
         (is (re-find #"\(defn- seg\*" src) src)
         (is (re-find #"encodeURIComponent" src) src)))))
+
+(deftest an-endpoint-is-generated-as-ONE-DESCRIPTOR-carrying-its-contract
+  ;; What replaces the `-request` builder and the `-check` beside it. The
+  ;; builder discarded the response schema entirely and used the request schema
+  ;; only as a boolean, so the two facts about an endpoint that always travel
+  ;; together were emitted into two namespaces — a split that existed to dodge
+  ;; a tier, not because they belong apart.
+  ;;
+  ;; A descriptor REFERENCES its schemas rather than calling malli, so it is
+  ;; data, so it stays `:pure` and a `:pure` view can name it.
+  (let [var-ref (fn [n] {:kind :var :sym (symbol "demo.client.contracts" (str n))})
+        spec    {:fn-name 'form :method :get :path "/api/form/:id"
+                 :endpoint "hub/form" :request-keys [:depth]
+                 :request  (var-ref "form-request")
+                 :response (var-ref "form-response")}
+        src     (#'cljs/render-request spec nil)]
+
+    (testing "one DEF, named for the endpoint and nothing else"
+      ;; not `form-request`: a descriptor is not a function and `(rest/request
+      ;; api/form …)` reads as what it is
+      (is (re-find #"\(def \^\{:generated \"hub/form\"\} \^:export form\b" src) src)
+      (is (not (re-find #"\(defn " src)) src))
+
+    (testing "it carries the address and the method as data"
+      (is (re-find #":http/method +:get" src) src)
+      (is (re-find #":http/path +\"/api/form/:id\"" src) src))
+
+    (testing "and the DECLARED params — the path's own plus the contract's"
+      ;; the allowlist the request guard reads. Path segments are always in it:
+      ;; the url cannot be built without them
+      (is (re-find #":http/params +#\{:depth :id\}" src) src))
+
+    (testing "BOTH schemas travel, which is what retires the checks namespace"
+      (is (re-find #":rest/request +demo\.client\.contracts/form-request" src) src)
+      (is (re-find #":rest/response +demo\.client\.contracts/form-response" src) src))
+
+    (testing "a foreign contract's descriptor says where it came from"
+      ;; `webapp-request-paths-are-served` would otherwise report a path this
+      ;; store genuinely does not serve, and its escape is a marker on a form
+      ;; nobody may hand-edit — so generation declares it
+      (is (re-find #":http/external-path \"generated from the contract published at https://up\.test/api/rest/paths\""
+                   (#'cljs/render-request spec "https://up.test/api/rest/paths"))))
+
+    (testing "an endpoint that enumerates nothing omits the allowlist entirely"
+      ;; nil request-keys means the contract could not be enumerated, and a
+      ;; guard built from a gap refuses what the boundary would accept
+      (let [bare (#'cljs/render-request {:fn-name 'timeline :method :get
+                                         :path "/api/timeline" :endpoint "hub/timeline"}
+                                        nil)]
+        (is (not (re-find #":http/params" bare)) bare)
+        (is (not (re-find #":rest/" bare)) bare)))
+
+    (testing "and a mutating endpoint keeps its plain name — a descriptor performs nothing"
+      (let [bang (#'cljs/render-request {:fn-name 'place! :method :post
+                                         :path "/api/orders" :endpoint "hub/place!"}
+                                        nil)]
+        (is (re-find #"\^:export place\b" bang) bang)
+        (is (not (re-find #"place!" (str/replace bang #"hub/place!" ""))) bang)))))

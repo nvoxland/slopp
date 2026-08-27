@@ -46,9 +46,9 @@
   This is the one part of an outbound call that an UPSTREAM's own data can
   reach — a slug, an id, a name carried over from a previous response — so if
   it can become a different host then the base was never a boundary. Segment
-  VALUES cannot do it (`slopp.webapp/request-url` percent-encodes each one, so
-  a `/` inside a value is data); this guards the path PATTERN, which is the
-  half a builder takes verbatim."
+  VALUES cannot do it (`slopp.rest.endpoint/request` percent-encodes each one,
+  so a `/` inside a value is data); this guards the url it built, whose static
+  half comes from the descriptor verbatim."
   [path]
   (let [p (str path)]
     (cond
@@ -117,8 +117,8 @@
             [:rest/headers {:optional true} [:map-of :string :string]]
             [:rest/timeout-ms {:optional true} :int]]
            [:map
-            [:webapp/path :string]
-            [:webapp/method {:optional true} :keyword]]
+            [:http/url :string]
+            [:http/method {:optional true} :keyword]]
            [:* :any]]
      [:map [:status :int] [:headers [:map-of :string :string]] [:body :any]]]}
   call!
@@ -184,12 +184,13 @@
   the wrong shape travel one more layer before anyone noticed."
   [{:rest/keys [base-url headers timeout-ms]} request & {:keys [check requester]}]
   (let [init (webapp/request-init request)
-        path (checked-path (:webapp/path request))
-        url  (str (str/replace (str base-url) #"/+$" "")
-                  (webapp/request-url (assoc request :webapp/path path)))
+        ;; the url arrives RESOLVED and encoded — `slopp.rest.endpoint/request`
+        ;; built it — so this guards a finished address rather than a template
+        path (checked-path (:http/url request))
+        url  (str (str/replace (str base-url) #"/+$" "") path)
         resp ((or requester http.client/request)
               (cond-> {:http/url url
-                       :http/method (:webapp/method request :get)
+                       :http/method (:http/method request :get)
                        :http/headers (merge (:headers init) headers)
                        :http/timeout-ms (or timeout-ms http.client/default-timeout-ms)}
                 (some? (:body init)) (assoc :http/body (encoded-body init))))

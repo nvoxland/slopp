@@ -48,7 +48,7 @@
   ;; traversal is how they would.
   (let [src (str "(ns shop.ui)\n\n"
                  "(defn things \"Every thing, listed.\" [_s] [:p \"things\"])\n"
-                 "(defn thing-request \"R.\" [_p] {:webapp/path \"/api/thing/:id\"})\n"
+                 "(def thing-request {:http/method :get :http/path \"/api/thing/:id\"})\n"
                  "(defn thing\n  \"One thing,\n   in detail.\"\n  [_s] [:p \"thing\"])\n\n"
                  "(defn ^:app/entry app \"A.\" []\n"
                  "  {:webapp/routes [[\"/things\" things]\n"
