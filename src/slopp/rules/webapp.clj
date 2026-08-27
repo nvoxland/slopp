@@ -20,61 +20,8 @@
   Neighbours: `slopp.rules` holds the registry these are declared in and the
   severity dial; `slopp.rules.http` is the server-side half, which judges
   routes, links and static mounts rather than pages."
-  (:require [rewrite-clj.parser :as p]
-            [slopp.store :as store]
+  (:require [slopp.store :as store]
             [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit] [slopp.http.router :as router] [slopp.index.refs :as refs]))
-
-(defn webapp-client-routes-consequences-check
-  "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
-   changed, once. Inert until the store opts into `webapp`.
-
-   Declaring a client-routed prefix is the single biggest behavioural change
-   available in one piece of metadata, and nothing said so. Before: a bad deep
-   link under the prefix was a 404, resolved and refused by the server. After:
-   the server serves the document (it cannot know the path is bad), the client
-   fetches, gets its own 404, and renders a not-found screen. **The HTTP status
-   for every path under that prefix changed from 404 to 200.**
-
-   That is correct — it is what `:webapp/client-routes` is FOR — but it is a real semantic
-   change that only surfaced here because two existing tests happened to assert
-   the old status.
-
-   Fires only for the episode that ADDED the declaration, like
-   `shell-widening`: it asks once, while the reason is still in context, and
-   cannot decay into a standing warning to scroll past. It teaches rather than
-   checks, and the boundary inventory still reports `:webapp/client-routing` as an
-   UNCHECKED exit — nothing compares the client's route table to the server's,
-   and a teach is not a check.
-
-   **It gated on NOTHING until wave 4**, which is the defect slopp-ui found in
-   `rest`'s four contract advisories one capability over: a check with no
-   capability test runs on every store while the arms report claims its owner
-   controls it. Declaring a client-routed prefix is meaningless without the
-   capability that makes the browser own routing, so the gate is `webapp`."
-  [_session st* changed]
-  (when (capabilities/enabled? st* "webapp")
-    (let [ds       (store/deltas st*)
-          baseline (->> ds (filter #(= :done (:op %))) last :id)
-          old-srcs (when baseline (store/sources-at st* baseline))
-          declares-client-routes?     (fn [form] (when (and (seq? form) (symbol? (second form)))
-                                (:webapp/client-routes (meta (second form)))))]
-      (vec (for [fid changed
-                 :let [e (store/form-by-id st* fid)]
-                 :when (and e (:name e))
-                 :let [new (store/form-sexpr (:node e))
-                       old (some-> (get old-srcs fid) p/parse-string store/form-sexpr)
-                       ps  (declares-client-routes? new)]
-                 ;; only when the declaration is NEW: either the form is new, or
-                 ;; its previous version did not carry one
-                 :when (and ps (not (declares-client-routes? old)))]
-             {:form  (symbol (str (store/ns-of-form-id st* fid)) (str (:name e)))
-              :teach (str "every path under " (pr-str ps) " now answers 200, not 404 —"
-                          " the server serves this document for any path below the"
-                          " prefix and NOT-FOUND moves into the client. Make sure the"
-                          " client renders a not-found screen for a path its own"
-                          " router does not know, or a bad deep link shows a blank"
-                          " pane at a URL that looks valid. The prefix ROOT is not"
-                          " covered by the fallback and still needs its own route")})))))
 
 (defn ^:export page-cljs-reach
   "The `:cljs` namespaces `ns-sym`'s require closure reaches, sorted — empty
@@ -533,52 +480,6 @@
                        :path (str (:http/path m))
                        :handler (symbol (str nsx) (str (:name e)))}))]
     (vec (remove #(router/match shells :get (:path %)) (page-routes st)))))
-
-(defn webapp-client-routes-are-served-check
-  "Done-advisory: pages this store declares that no SHELL answers on a hard
-  load. Inert until the store opts into `webapp`.
-
-  **The blind spot `:webapp/client-routing` has carried since it was
-  registered**, in the inventory's own words: *nothing compares the client's
-  route table to the server's.* Both halves are readable now — a page carries
-  `:webapp/path` and a shell carries `:http/path` — so the comparison exists.
-
-  The failure it reports is the one the only real webapp hit, with eight
-  routes at once: every in-app CLICK keeps working, because that is client
-  routing, and only a refresh or a shared link 404s. So the app is fine for
-  whoever is already inside it and broken for whoever was sent a url — which
-  is the population that never reports bugs, because they assume the link was
-  bad.
-
-  **It hands over no computed prefix, because there is no prefix to declare.**
-  It used to: the author kept a `:webapp/client-routes` list in server space
-  and this named the value they should paste. The shell's own `:http/path` is
-  that declaration now, so the remedy is to widen it or to give the page an
-  address underneath it — both of which are edits to something that already
-  exists.
-
-  **Whole-store, not episode-scoped**, unlike its `webapp-page-reach`
-  neighbour: a page and the shell that serves it are usually not edited
-  together, and the episode that breaks the join is the one that touches only
-  ONE of them.
-
-  Advisory rather than a refusal, for the reason a store mid-migration always
-  gets: the state this fires on is a page and a shell that have not been
-  reconciled, and refusing the writes would block the reconciliation."
-  [_session st* _changed]
-  (when (capabilities/enabled? st* "webapp")
-    (vec (for [{:keys [path page]} (pages-unserved st*)]
-           {:route path
-            :page  page
-            :teach (str "the page " (pr-str path) " is not served on a hard"
-                        " load — clicking to it works, refreshing it or"
-                        " opening a shared link 404s, so the app is fine for"
-                        " whoever is already inside it and broken for whoever"
-                        " was sent a url. A document marked :webapp/shell"
-                        " answers every address its own :http/path covers, and"
-                        " `**` matches zero or more segments — so widening the"
-                        " shell's path, or moving this page underneath it, is"
-                        " the fix. There is nothing extra to declare.")}))))
 
 (defn ^:export page-calls
   "Every ENDPOINT each page reaches, as `{page-symbol [{:endpoint :method

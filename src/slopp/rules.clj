@@ -1040,16 +1040,7 @@
    ;; in-app CLICK works either way — only a refresh or a shared link 404s, so
    ;; the app is fine for whoever is inside it and broken for whoever was sent
    ;; a url, which is the population that never reports it
-   {:key :webapp-client-routes-are-served :severity :advisory :applies-to :production
-    :check #'rules.webapp/webapp-client-routes-are-served-check
-    ;; the two declarations that drift apart are usually not edited together,
-    ;; so the episode that breaks the join touches only ONE of them — this rule
-    ;; is the sweep or it is nothing
-    :sweep true
-    :selftest-note (str "needs webapp.enabled AND two declarations that must"
-                        " disagree — a source-only fixture cannot carry the"
-                        " capability config; covered by rules.webapp-test/"
-                        "a-client-route-the-SERVER-does-not-serve-404s-on-a-hard-load")}
+   
    ;; the OTHER half of a route reference. A literal :href is joined against
    ;; the served table by http-dangling-route-refs; a screen's :webapp/path is
    ;; the same claim about the same table in a different key, and nothing read
@@ -1110,14 +1101,7 @@
    ;; the single biggest behavioural consequence available in one piece of
    ;; metadata, and nothing said it: declaring :webapp/client-routes turns every path under
    ;; the prefix from 404 into 200 and moves not-found into the client.
-   {:key :webapp-client-routes-consequences :severity :advisory :applies-to :production :check #'rules.webapp/webapp-client-routes-consequences-check
-    :sweep (str "states a consequence ONCE, for the episode that declared the"
-                " prefix — there is nobody to tell about a declaration that"
-                " predates the sweep")
-    :selftest-note (str "fires only when the declaration is NEW vs the last-done"
-                        " baseline, so a source-only fixture (which has no"
-                        " baseline) cannot show the transition; covered by"
-                        " api.web-test/declaring-CLIENT-ROUTES-says-what-it-changed")}
+   
    ;; Pattern 1's bug class, with the predicate that finally discriminates:
    ;; not "positional access" (4-5 false positives out of 5) but indexing a
    ;; position whose MEANING depends on an optional earlier element, in code

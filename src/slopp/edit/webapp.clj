@@ -290,3 +290,43 @@
                  " ONE of them and the other is unreachable with nothing to"
                  " say why, because a client route has no 404 to notice."
                  " Change the address, or extend the page that has it")))))))
+
+(defn ^:export ^{:rule/applies-to :production} webapp-client-routes-retired
+  "The retired-spelling gate: `^{:webapp/client-routes [\"/store\"]}` is refused
+  at the write. Inert until `webapp.enabled`, which `edit.gates/gate-check`
+  decides. Returns a teaching string, or nil when clean.
+
+  **The marker no longer serves anything.** It used to make a client-routed
+  document contribute one generated catch-all row per prefix, so a refreshed
+  deep link reached the app. `D-page-marker` replaced that with a shell
+  declaring its OWN `**` path: the fallback IS the declaration, and no row
+  appears in the table that nobody wrote.
+
+  What did not move was the marker's ability to be WRITTEN. So a store went on
+  declaring it, the parse succeeded, and NOTHING was generated — measured on
+  the only app with client-side routing, where sixteen deep links 404d on a
+  refresh while an in-app click to the same address worked. That shape hides:
+  the only way to reach it is the way that works.
+
+  **It is worse than an inert marker, because it also feeds link validation.**
+  `rules.http/dangling-route-refs` treats a declared prefix as covering the
+  links below it, so the declaration did not merely fail to serve — it
+  reported the unserved links as fine. A marker that waives nothing while
+  reading as though it does is worse than its absence; one that waives a CHECK
+  it can no longer honour is worse again.
+
+  Refused rather than swept at `done`, because the failure it prevents has no
+  other symptom: a client route that 404s only on a hard load is invisible from
+  inside the app."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (store/form-name-meta e)]
+      (when (contains? m :webapp/client-routes)
+        (str ns-sym "/" form-name " declares :webapp/client-routes "
+             (pr-str (:webapp/client-routes m))
+             " — that marker is RETIRED and generates nothing, so every"
+             " address under those prefixes 404s on a hard load while an"
+             " in-app click to the same address works. Declare the shell's own"
+             " wildcard instead: ^{:http/path \"/store/**\" :webapp/shell true}"
+             " on the document, and the fallback IS the declaration — there is"
+             " no prefix list left to keep in step with it.")))))

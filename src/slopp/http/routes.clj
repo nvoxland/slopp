@@ -38,11 +38,18 @@
   able to say why. `:kind` rides the row so the dispatcher and the contract
   never re-derive which marker carried the path.
 
-  A var may also carry `:webapp/client-routes` — a vector of path prefixes it serves as the
-  client-routed document — and then contributes one extra catch-all row per
-  prefix (see `client-route-rows`), so a refreshed deep link reaches the app instead of
-  a 404. Scoped deliberately: paths outside every declared prefix still 404,
-  which is the property a root catch-all would destroy."
+  **`:webapp/client-routes` contributes NOTHING here, and this paragraph used
+  to say the opposite.** A var carrying it once produced one extra catch-all
+  row per prefix, so a refreshed deep link reached the app instead of a 404. A
+  shell declares its own `**` path now, so the catch-all IS the declaration and
+  there is nothing to synthesize.
+
+  The prose outlived the code by two milestones and cited a function that had
+  been deleted, which is exactly how a retired marker goes on reading as a live
+  declaration: a store kept declaring it, sixteen deep links 404d on a hard
+  load, and an in-app click to the same address worked. `edit.webapp/webapp-client-routes-retired`
+  refuses the spelling at the write now — but the sentence that misled is this
+  one, so it is the one that had to change."
   [ns-syms]
   (vec
    (mapcat

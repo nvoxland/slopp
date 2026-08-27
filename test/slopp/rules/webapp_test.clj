@@ -14,49 +14,6 @@
 
   Neighbours: `slopp.edit.webapp-test` covers the write-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.rules.webapp :as rules.webapp] [slopp.store :as store]))
 
-(deftest ^:external declaring-CLIENT-ROUTES-says-what-it-changed
-  ;; `:webapp/client-routes` is the biggest behavioural change available in one piece of
-  ;; metadata: every path under the prefix stops being a 404 and starts being a
-  ;; 200, with not-found moving into the client. Nothing said so — the change
-  ;; was noticed only because two existing tests asserted the old status.
-  ;;
-  ;; It fires once, for the episode that DECLARED it, so it cannot decay into a
-  ;; standing warning.
-  ;;
-  ;; The fixture is a `def` holding the whole document, which is what a served
-  ;; document IS now: it carried `:rest/client false` and `:rest/response
-  ;; :string` when a page was an endpoint like any other, and both of those
-  ;; existed only to undo questions a page should never have been asked.
-  (let [sess (external/open!)
-        doc  (fn [extra body]
-               (str "(def ^{:http/method :get :http/path \"/\" :http/auth :public"
-                    extra "}\n"
-                    "  doc \"" body "\"\n"
-                    "  [:html [:head [:title \"D\"]] [:body [:div {:id \"app\"}]]])"))]
-    (try
-      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
-                        :prompt "the browser owns routing here — this turns http on with it")
-      (ops/ingest! sess 'browser.ui
-                   (str "(ns browser.ui)\n" (doc "" "The document.") "\n"))
-      (external/done! sess :label "baseline")
-      (testing "adding the declaration states the consequence"
-        (ops/edit-replace! sess 'browser.ui 'doc
-                           (doc "\n        :webapp/client-routes [\"/store\"]"
-                                "The document.")
-                           :prompt "the client routes /store")
-        (let [f (get-in (external/done! sess :label "client-routes") [:findings :webapp-client-routes-consequences])]
-          (is (some #(= 'browser.ui/doc (:form %)) f) (pr-str f))
-          (is (re-find #"200" (str (:teach (first f)))) (pr-str f))
-          (is (re-find #"(?i)not-found" (str (:teach (first f)))) (pr-str f))))
-      (testing "it does NOT re-fire while the declaration merely stands"
-        (ops/edit-replace! sess 'browser.ui 'doc
-                           (doc "\n        :webapp/client-routes [\"/store\"]"
-                                "The document, reworded.")
-                           :prompt "touch the form without touching the declaration")
-        (let [f (get-in (external/done! sess :label "again") [:findings :webapp-client-routes-consequences])]
-          (is (nil? f) (pr-str f))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external a-page-reaching-cljs-cannot-be-opened-and-done-says-so
   ;; The write gate checks the entry's OWN namespace. That is the shallow half:
   ;; an entry can sit in :cljc and reach a :cljs view, passing the gate and

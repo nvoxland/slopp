@@ -848,7 +848,14 @@ client-deps (merge (:client-deps st) (:client provided))
                      (str/join ", " own-mounts)
                      " already mounts this app, and a second mount over the"
                      " same element renders it twice. Delete the hand-written"
-                     " mount to take the generated entry."))]
+                     " mount to take the generated entry."
+                     " **The ROUTE TABLE goes with it.** The generated entry is"
+                     " what supplies :webapp/routes from your pages'"
+                     " :webapp/path markers, so your own mount must now pass a"
+                     " table to slopp.webapp.dom/mount! — nothing else will."
+                     " A headless drive will NOT tell you: slopp.cljnx/driver-for"
+                     " scans the loaded vars and fills the table itself, so the"
+                     " suite stays green while the browser throws at startup."))]
           (doseq [ns-sym (keys (:namespaces st))]
     (let [file (io/file target (store.render/source-path ns-sym
                                                    (store/platform-for st ns-sym)

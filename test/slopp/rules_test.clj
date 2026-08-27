@@ -1249,7 +1249,12 @@
   ;;
   ;;   page-unreachable   the ^:app/entry entry slopp opens headlessly
   ;;   page-reach         that entry's closure reaching :cljs
-  ;;   client-routes-consequences   what declaring :webapp/client-routes changes about every path
+  ;;   page-address       the address a page declares for itself
+  ;;
+  ;; The third was `client-routes-consequences` — what declaring
+  ;; `:webapp/client-routes` changed about every path beneath it. That marker
+  ;; is retired and refused at the write, so the advisory explaining it went
+  ;; with it; the browser rule at that grain is now the page's own address.
   ;;
   ;; An app that serves HTML and runs no browser app has none of these
   ;; declarations and should not be graded on them; an app whose browser owns
@@ -1268,13 +1273,15 @@
     (testing "each of the three is owned by webapp, by its name"
       (is (= "webapp" (capabilities/rule-owner :webapp-page-unreachable)))
       (is (= "webapp" (capabilities/rule-owner :webapp-page-reach)))
-      (is (= "webapp" (capabilities/rule-owner :webapp-client-routes-consequences))))
+      (is (= "webapp" (capabilities/rule-owner :webapp-page-address))))
 
     (testing "and each is REGISTERED under that name, at its own grain"
       (is (contains? gate-ns :webapp-page-unreachable)
           (str "the write gate must be registered: " (pr-str (sort (keys gate-ns)))))
       (is (contains? done-keys :webapp-page-reach) (pr-str (sort done-keys)))
-      (is (contains? done-keys :webapp-client-routes-consequences) (pr-str (sort done-keys))))
+      (is (contains? gate-ns :webapp-page-address)
+          (str "the page-address gate must be registered: "
+               (pr-str (sort (keys gate-ns))))))
 
     (testing "the http-owned spellings are GONE, not merely shadowed"
       ;; a rename that leaves the old key registered arms both, and a store

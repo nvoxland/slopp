@@ -113,7 +113,7 @@
         page    {:webapp/state  state
                  :webapp/render (fn [_] nil)
                  :webapp/call   (fn [_request ok _err] (reset! pending ok))}
-        key     (webapp/load-key (endpoint/request thing {}))]
+        key     (webapp/load-key (:webapp/base page) (endpoint/request thing {}))]
 
     (testing "before anything is asked, the load is ABSENT"
       (is (= :absent (webapp/load-status @state key)) (pr-str @state)))
@@ -167,7 +167,9 @@
   (let [state   (atom {})
         pending (atom [])
         thing   {:http/method :get :http/path "/api/thing"}
-        key     (webapp/load-key (endpoint/request thing {}))
+        ;; the key is the address this app FETCHES, taken the way `ask!`
+        ;; takes it — base included, even where this fixture's base is nil
+        key     (webapp/load-key nil (endpoint/request thing {}))
         page    {:webapp/state  state
                  :webapp/render (fn [_] nil)
                  :webapp/call   (fn [request ok _err]
@@ -1451,3 +1453,100 @@
              (webapp/wiring {:webapp/state  (atom {})
                              :webapp/routes [["/x" bad]]}))
             (str bad " was accepted as a page"))))))
+
+(deftest a-loads-identity-is-the-address-it-actually-FETCHES
+  ;; Measured by the only app that talks to more than one upstream, on the
+  ;; migration that made it visible:
+  ;;
+  ;;   navigate /p/demo/store   → asks /api/p/demo/api/modules
+  ;;   navigate /p/other/store  → asks NOTHING, renders demo's modules
+  ;;
+  ;; under the other project's name, with no way for a reader to tell. `ask!`
+  ;; keyed on the request's own `:http/url`, and `:webapp/base` — which is
+  ;; WHICH UPSTREAM that url means — was applied afterwards, inside `fetch!`.
+  ;; So two genuinely different fetches were one load.
+  ;;
+  ;; **A cache hit is silent by construction.** No screen can show one and no
+  ;; assertion about a rendered screen can catch it; they found it by reading a
+  ;; recorded list of urls. That is what makes this the load model's own
+  ;; question rather than an app's.
+  ;;
+  ;; `load-key`'s docstring already stated the rule it was breaking — *it is
+  ;; the url that actually distinguishes one fetch from another*. The address
+  ;; is resolved ONCE now, and identity and performance read the same answer.
+  (let [asked   (atom [])
+        wire    (fn [base]
+                  (webapp/wiring
+                   {:webapp/state  (atom {})
+                    :webapp/base   base
+                    :webapp/routes [["/x" (fn [_page] [:main "x"])]]
+                    :webapp/call   (fn [request ok _err]
+                                     (swap! asked conj (:http/url request))
+                                     (ok {:status 200 :body {:names ["m"]}}))}))
+        app     (wire "/p/demo")
+        modules {:http/method :get :http/path "/api/modules"}]
+
+    (testing "the same path under two BASES is two loads, and both are fetched"
+      (webapp/ask! app modules {})
+      (webapp/ask! (assoc app :webapp/base "/p/other") modules {})
+      (is (= ["/p/demo/api/modules" "/p/other/api/modules"] @asked)
+          (str "the second ask answered from the first project's load: "
+               (pr-str @asked))))
+
+    (testing "and asking the SAME one again is still one load"
+      ;; the property start-if-absent exists for — a page is re-run every time
+      ;; a load resolves, so a key that distinguished too finely fetches forever
+      (webapp/ask! app modules {})
+      (is (= 2 (count @asked)) (pr-str @asked)))
+
+    (testing "a request naming its OWN base is keyed by that, not the app's"
+      ;; the narrower declaration wins for identity exactly as it wins for the
+      ;; address — they are the same fact read twice
+      (webapp/ask! app (assoc modules :webapp/base "") {})
+      (is (= ["/p/demo/api/modules" "/p/other/api/modules" "/api/modules"] @asked)
+          (pr-str @asked)))
+
+    (testing "and stale! drops the load that key names"
+      (webapp/stale! app modules {})
+      (webapp/ask! app modules {})
+      (is (= 4 (count @asked)) (pr-str @asked))
+      (is (= "/p/demo/api/modules" (last @asked)) (pr-str @asked)))))
+
+(deftest an-ABSENT-route-table-names-the-CAUSE-not-the-shape
+  ;; Nathan loaded the hub and got a blank page. Document served, bundle
+  ;; loaded, nothing rendered:
+  ;;
+  ;;   mount! → wiring → ":webapp/routes is a declared TABLE, not a function"
+  ;;
+  ;; which reads as *you passed the wrong type* when the truth was *you passed
+  ;; nothing, and nobody was going to*. An app does not write this table; the
+  ;; GENERATED browser entry supplies it from the pages' markers — and the
+  ;; build skips generating that entry when a store mounts the app itself.
+  ;;
+  ;; **A whole test suite could not see it.** `cljnx/driver-for` scans the
+  ;; loaded vars and fills the table, so every headless drive stayed green
+  ;; while the browser threw at startup. The store's own guard test — the one
+  ;; whose docstring called itself the only thing between a bad declaration and
+  ;; a blank page — derives through `driver-for`, so it could not have caught
+  ;; this. One reader silently repairing what the other requires is what made
+  ;; the green meaningless.
+  (let [msg (fn [app] (try (webapp/wiring app) nil
+                           (catch Exception e (ex-message e))))]
+
+    (testing "ABSENT says what was going to supply it, and why nothing did"
+      (let [m (msg {:webapp/state (atom {})})]
+        (is (re-find #"never going to get one" (str m)) (pr-str m))
+        (is (re-find #"generated browser entry" (str m))
+            (str "it must name what supplies the table: " (pr-str m)))
+        (is (re-find #"(?i)mounts the app itself" (str m))
+            (str "and why this store did not get one: " (pr-str m)))
+        (is (re-find #"driver-for" (str m))
+            (str "and that a headless drive will not reproduce it, which is"
+                 " the reason the suite was green: " (pr-str m)))))
+
+    (testing "and a WRONG-TYPED table still says that instead"
+      ;; the two are different mistakes and the messages must not merge — an
+      ;; app that really did pass a routing function needs the old sentence
+      (let [m (msg {:webapp/state (atom {}) :webapp/routes (fn [_path] nil)})]
+        (is (re-find #"not a function" (str m)) (pr-str m))
+        (is (not (re-find #"never going to get one" (str m))) (pr-str m))))))

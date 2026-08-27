@@ -257,3 +257,61 @@
 
     (testing "and a form that declares no page is not this gate's business"
       (is (nil? (gate (land on "(defn plain \"P.\" [x] x)") "plain"))))))
+
+(deftest ^:external a-declaration-that-no-longer-SERVES-refuses-at-the-write
+  ;; Reported by the only app with client-side routing, after migrating to the
+  ;; page marker. `:webapp/client-routes` still parsed, still read as a
+  ;; declaration, and generated NOTHING:
+  ;;
+  ;;   routes: /  /api/deregister  /api/p/:slug/api/**  /api/projects
+  ;;           /api/register  /api/rest/paths  /css/style.css
+  ;;
+  ;; No `/p/**`. So every deep link into the app 404d on a REFRESH while an
+  ;; in-app click to the same address worked — sixteen addresses, and the shape
+  ;; hides because the only way to reach it is the way that works.
+  ;;
+  ;; `D-page-marker` moved serving to `:webapp/shell true` on a `**` path: the
+  ;; shell declares its own wildcard, so the fallback IS the declaration and
+  ;; there is no prefix list to keep in step. What did not move was this
+  ;; marker's ability to be WRITTEN, so a store went on declaring a thing
+  ;; nothing honoured.
+  ;;
+  ;; That is the stance this repo already takes about retired spellings —
+  ;; `:webapp/from-origin`, `slopp.http.auth`: **a marker that waives nothing
+  ;; while reading as though it does is worse than its absence.** Here it was
+  ;; worse still, because it also feeds link validation, so it did not merely
+  ;; fail to serve — it reported the unserved links as fine.
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                        :prompt "the browser owns routing here")
+      (ops/ingest! sess 'ui.shell "(ns ui.shell)\n\n(defn seed \"S.\" [x] x)\n")
+
+      (testing "declaring it is refused, and the refusal carries the migration"
+        (let [r (ops/add-form! sess 'ui.shell
+                               (str "(def ^{:http/method :get :http/path \"/\"\n"
+                                    "       :http/auth :public\n"
+                                    "       :webapp/client-routes [\"/store\"]}\n"
+                                    "  doc\n"
+                                    "  \"The document.\"\n"
+                                    "  [:html [:head [:title \"x\"]] [:body [:div {:id \"app\"}]]])")
+                               :prompt "the retired spelling")]
+          (is (:error r) (pr-str r))
+          (is (re-find #"webapp/shell" (str (:error r)))
+              (str "the refusal must name what replaced it: " (pr-str r)))
+          (is (re-find #"\*\*" (str (:error r)))
+              (str "and that the replacement needs a wildcard path: " (pr-str r)))
+          (is (nil? (store/form-named (:store @sess) 'ui.shell 'doc)))))
+
+      (testing "and the replacement is accepted"
+        ;; a refusal with no named way past it gets worked around rather than
+        ;; obeyed, so the sentence above has to be followable
+        (let [r (ops/add-form! sess 'ui.shell
+                               (str "(def ^{:http/method :get :http/path \"/store/**\"\n"
+                                    "       :http/auth :public :webapp/shell true}\n"
+                                    "  shell\n"
+                                    "  \"The document.\"\n"
+                                    "  [:html [:head [:title \"x\"]] [:body [:div {:id \"app\"}]]])")
+                               :prompt "the replacement")]
+          (is (nil? (:error r)) (pr-str r))))
+      (finally (ops/close! sess)))))

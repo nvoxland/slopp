@@ -894,7 +894,33 @@
         (throw (ex-info (str "an app needs " k
                              (case k
                                :webapp/state  " — its OWN atom, so what a handler changes is what the view re-reads"
-                               :webapp/routes " — a table of [pattern screen] rows; without one no path means anything"))
+                               ;; an app does not WRITE this table: the
+                               ;; generated browser entry supplies it from the
+                               ;; pages' :webapp/path markers, and the build
+                               ;; skips generating that entry when a store
+                               ;; mounts the app itself. So an absent table is
+                               ;; almost never a forgotten key — it is a store
+                               ;; that owns its mount and did not know the
+                               ;; table went with the entry. Saying only "a
+                               ;; table of rows" sent a real app hunting for a
+                               ;; type error it did not have, after a WHITE
+                               ;; PAGE that its whole suite stayed green
+                               ;; through: `cljnx/driver-for` scans the loaded
+                               ;; vars and fills the table, so the headless
+                               ;; drive never reproduces it
+                               :webapp/routes
+                               (str " — and this app was never going to get one."
+                                    " The generated browser entry supplies the"
+                                    " table from your pages' :webapp/path"
+                                    " markers, and slopp skips generating that"
+                                    " entry when your store mounts the app"
+                                    " itself. Delete your own mount to take the"
+                                    " generated entry, or pass :webapp/routes"
+                                    " here yourself. A headless drive will NOT"
+                                    " reproduce this: slopp.cljnx/driver-for"
+                                    " scans the loaded vars and fills the table,"
+                                    " so the suite stays green while the browser"
+                                    " throws at startup")))
                         {:webapp/missing-key k}))))
     ;; :webapp/view is DERIVED and no longer an app's to write. A hand-written
     ;; view is precisely what made `:screen` a keyword agreeing in three places
@@ -919,13 +945,17 @@
     ;; report and gate that exists for `^{:http/path …}` was impossible on this
     ;; side for exactly that reason.
     (when-not (sequential? (:webapp/routes app))
-      (throw (ex-info (str ":webapp/routes is a declared TABLE, not a function —"
-                           " [[\"/things\" things-screen] [\"/things/:id\" thing-screen]]."
-                           " A function answers only when called, so nothing could"
-                           " list this app's screens, join a link to one, or check"
-                           " that the server serves the paths the browser routes."
-                           " Got " (pr-str (type (:webapp/routes app))) ".")
-                      {:webapp/routes-not-a-table true})))
+      (throw (ex-info
+              ;; ABSENT never reaches here — the missing-key guard above owns that
+              ;; case, and owns it because an absent table is a store that
+              ;; mounts the app itself rather than a forgotten key
+              (str ":webapp/routes is a declared TABLE, not a function —"
+                   " [[\"/things\" things-page] [\"/things/:id\" thing-page]]."
+                   " A function answers only when called, so nothing could"
+                   " list this app's pages, join a link to one, or check"
+                   " that the server serves the paths the browser routes."
+                   " Got " (pr-str (type (:webapp/routes app))) ".")
+              {:webapp/routes-not-a-table true})))
     (-> (merge {:webapp/base         ""
                 :webapp/render       (fn [_state] nil)
                 :webapp/push-url!    (fn [_url] nil)
@@ -1381,20 +1411,35 @@
   (begin! app (app-path (:webapp/base app) pathname search))
   (navigate-url! app pathname search false))
 
-(defn ^:export load-key
-  "The key a request loads under — `[method url]`.
+(defn ^:export ^{:breaking-ok "the 1-arity took a request and keyed on its own :http/url, which IS the defect: :webapp/base says which upstream that url means, so two projects' /api/modules were one load and the second rendered the first's data under its name. Keeping it would keep the bug reachable under a name that reads correct — there is no arity here that is right without the base."}
+  load-key
+  "The key a request loads under — `[method url]`, where the url is the one a
+  browser will actually FETCH.
 
   **A request IS its own identity.** Two asks for the same address are the
-  same load, and that is what makes calling `ask` during a render safe: a page
-  is re-run each time a load resolves, so a key derived from anything else
+  same load, and that is what makes calling [[ask!]] during a render safe: a
+  page is re-run each time a load resolves, so a key derived from anything else
   would either start a second fetch or collapse two genuinely different ones.
+
+  **The address is RESOLVED here**, through [[addressed]], and that is the
+  whole of it: `:webapp/base` says WHICH UPSTREAM a path belongs to, so a key
+  taken before the base is applied says two projects' `/api/modules` are one
+  load. Measured on the only app that fronts more than one upstream —
+  navigating to the second project asked for nothing and rendered the first
+  one's data under its name.
+
+  **A cache hit is silent by construction**, which is why this belongs to the
+  load model rather than to an app. No screen can show one, and no assertion
+  about a rendered screen can catch it; it was found by reading a recorded
+  list of urls. A collision here is not a bug an app can defend against.
 
   Not the DESCRIPTOR, which is a generated map: two regenerations produce
   equal maps, so it would work, but it is the url that actually distinguishes
   one fetch from another — a descriptor plus different params is a different
   request and must be a different load."
-  [request]
-  [(:http/method request :get) (:http/url request)])
+  [base request]
+  (let [r (addressed base request)]
+    [(:http/method r :get) (:http/url r)]))
 
 (defn ^:export ask!
   "The load for `descriptor` with `params` — STARTED if nothing has asked for
@@ -1433,7 +1478,7 @@
   a migration, where an automatic rule that guesses wrong costs a rewrite."
   [page descriptor params]
   (let [request (endpoint/request descriptor params)
-        key     (load-key request)
+        key     (load-key (:webapp/base page) request)
         entry   (get-in @(:webapp/state page) [:loads key])]
     (when-not entry
       (fetch! page key {} request))
@@ -1461,5 +1506,5 @@
   happened to load it."
   [page descriptor params]
   (swap! (:webapp/state page) update :loads dissoc
-         (load-key (endpoint/request descriptor params)))
+         (load-key (:webapp/base page) (endpoint/request descriptor params)))
   nil)

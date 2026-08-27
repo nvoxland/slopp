@@ -65,6 +65,9 @@
    {:rule :webapp-page-address :grain :form
     :escape "spell the address the way the router reads it — `:name` for one captured segment, `*` for exactly one, `**` for zero or more, both wildcards anonymous and at the END only. Make the page public: the generated browser entry names the var. And give it an address nothing else claims"
     :teach "a page carries its own address, so the three ways an address silently renders nothing apply to it: a pattern the router has no rule for is never reached, a PRIVATE page cannot be named by the generated entry, and a SECOND claim on one address leaves one page unreachable. None fails loudly, and a client route has no 404 to notice (inert until webapp.enabled)"}
+{:rule :webapp-client-routes-retired :grain :form
+    :escape "declare the shell's OWN wildcard instead — ^{:http/path \"/store/**\" :webapp/shell true} on the document — and the fallback IS the declaration, with no prefix list left to keep in step with it"
+    :teach "`:webapp/client-routes` is RETIRED and generates nothing. It used to make a client-routed document contribute one catch-all row per prefix; a shell declares its own `**` path now, so no row appears in the table that nobody wrote. Left writable it parsed, generated nothing, and 404d every deep link on a hard load while an in-app click to the same address worked — the shape that hides, because the only way to reach it is the way that works. Worse than an inert marker, because a declared prefix also WAIVES the dangling-link check, so it reported the unserved links as fine (inert until webapp.enabled)"}
    {:rule :webapp-page-unreachable :grain :form
     :escape "move the entry — and the routing, derive and view code it reaches — to a :jvm or :cljc namespace, passing the browser-shaped parts in (:fetch, :render, a url pusher); or drop the ^:app/entry marker if this app is not meant to be reviewed headlessly"
     :teach "a ^:app/entry entry may not sit in a :cljs namespace — no JVM can open the app there, so every headless test drives a hand-built lookalike instead, and a lookalike passes while the real screen is wrong. The wiring is portable; only the effects are :cljs (inert until http.enabled)"}
@@ -74,9 +77,7 @@
 {:rule :unknown-marker :grain :done
     :escape "fix the spelling, or move the key into your OWN namespace if it is yours — slopp reads nothing under :web/*, :webapp/*, :cli/*, :rest/*, :rule/* or :malli/* that it does not define"
     :teach "a marker in a namespace slopp OWNS that slopp does not define is a declaration nothing reads — it refuses nothing, generates nothing and changes nothing, while looking exactly like one that works. Usually a typo or a name that used to work: :web/spa became :webapp/client-routes, and a store keeping the old spelling serves fine, clicks fine, and 404s on every refresh and every shared deep link"}
-{:rule :webapp-client-routes-are-served :grain :done
-    :escape "declare a :webapp/client-routes prefix on the document endpoint that covers the route, or give the route a server route of its own. A prefix generates <prefix>/** and covers its own ROOT as well as everything below it"
-    :teach "a client route the server does not serve on a hard load: clicking to it works, refreshing it or opening a shared link 404s. So the app is fine for whoever is already inside it and broken for whoever was sent a url — the population that never reports it, because they assume the link was bad (inert until webapp.enabled)"}
+
    {:rule :webapp-request-paths-are-served :grain :done
     :escape "fix the path to one this store declares (the finding lists them), declare the endpoint, write the WHOLE url if it is a third-party server (an absolute url is never reported), or mark the form ^{:http/external-path \"why\"} when something OUTSIDE this store serves it — a proxied API under the app's own mount point cannot be written in full, because the prefix is known only at runtime"
     :teach "a screen's :webapp/path names an endpoint this store does not serve. It is the other half of a route reference: a literal :href is joined against the served table, and this is the same claim in a different key. The failure is quiet — the url routes, the screen renders, chrome and nav are fine, and one pane always fails to load while everything around it works, so it is reported as slowness rather than as a missing endpoint (inert until webapp.enabled)"}
@@ -190,15 +191,7 @@
                 " that predicate measured 4-5 false positives out of 5; a"
                 " defmethod's dispatch value at index 2 cannot shift and is not"
                 " flagged")}
-   {:rule :webapp-client-routes-consequences :grain :done
-    :escape "nothing to discharge — it states a consequence once, for the episode that declared the prefix"
-    :teach (str "an endpoint gained :webapp/client-routes this episode: every path under the"
-                " declared prefix now answers 200 instead of 404, and NOT-FOUND"
-                " moves into the client. Correct, and what :webapp/client-routes is for — but"
-                " a real semantic change that no surface mentioned, and one that"
-                " two existing tests caught only by asserting the old status."
-                " The prefix ROOT is not covered by the fallback and still needs"
-                " its own route")}
+   
    {:rule :namespace-purpose :grain :done
     :escape "add a docstring to the ns form saying why the namespace exists — or accept it; this is advisory and never blocks"
     :teach (str "a namespace the episode touched states no PURPOSE. Its inventory is"
