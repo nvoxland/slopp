@@ -148,13 +148,15 @@ ordinary git.
 
 `slopp --call <tool> [args]` runs ONE tool call against the store in the
 current directory and prints the result — args as JSON, EDN, or `@file`.
-Set `SLOPP_AGENT=<name>` to give a script one identity across invocations
-(turn state lives in the store, so a `turn_begin` then covers later
-calls; without it each invocation is its own session). Useful shapes:
+Pass `agent` to give a script one identity across invocations (turn state
+lives in the store, so a `turn_begin` under that agent covers later calls;
+omit it and each invocation is its own session). Every tool takes it, and a
+script that means to finish what it started must pass the SAME one to each
+call. Useful shapes:
 
 ```sh
 slopp --call query_project
-SLOPP_AGENT=ci slopp --call commit_point '{"description":"release 1.2"}'
+slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 ```
 

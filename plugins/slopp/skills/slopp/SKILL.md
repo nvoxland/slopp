@@ -335,6 +335,13 @@ because each part surprises somebody:
   back `:status :unlanded` and carries the refusal in `:land`, because the one
   thing worse than a refused milestone is a green one naming a branch that
   does not hold the work. Resolve what `:land` names and call it again.
+- **Identity comes from your harness, before your first write.** Your thread
+  is keyed by `(agent, branch)`, and the agent id is the CONVERSATION your
+  harness is driving — read once when the server starts. So two agents on one
+  store get separate threads without either of them arranging it, and you
+  need set nothing. A harness slopp does not recognise falls back to a
+  generated id, which is correct rather than degraded: that session is
+  nobody's continuation and says so.
 - **Your thread survives the process.** Come back with the same agent
   identity and you resume the same thread, un-landed work and all. Come back
   as somebody else and you correctly see only what has landed. What persists

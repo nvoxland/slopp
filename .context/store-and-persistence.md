@@ -226,12 +226,13 @@ Bounded, so a branch under continuous landing says so rather than spinning.
 write, cache refresh and materialization below resolves through one answer and
 the thread is not a mode the rest of the system knows about.
 
-It resolves LAZILY for the MCP server and EAGERLY everywhere else, and the
-split is about when an identity is settled. An explicit `:slopp.ops/agent-id`
-or `SLOPP_AGENT` is known at open, so `open!` adopts there and loads the store
-from the thread — which means the image boots from the code the session will
-actually work on. The MCP server's identity arrives on the first prompt
-instead, so it adopts lazily and `engine/adopt-line!` resynchronizes when
+It resolves EAGERLY whenever the caller names an identity, which since
+2026-08-27 includes the MCP server: `slopp.mcp/-main` reads the driving
+harness's conversation id from `slopp.project.harness` and passes
+`:slopp.ops/agent-id`, so `open!` adopts the thread there and loads the store
+from it — which means the image boots from the code the session will actually
+work on. A session that names NO agent (a test, a one-shot CLI read) gets a
+generated id and adopts lazily, and `engine/adopt-line!` resynchronizes when
 `absorb-pending-intent!` learns the harness session id.
 
 **That resync exists for the half that does not heal itself.** A session that

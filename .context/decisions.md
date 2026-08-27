@@ -5627,6 +5627,83 @@ changes by RENAMING a key, never by redefining one in place.** A missing
 the paths within the app; `/api/http/paths` marks which of its documents is the
 shell. `slopp.webapp.paths` and its prefix document are deleted.
 
+### D-id-allocation — the FILE allocates id ranges, and nothing infers a counter (2026-08-27)
+
+Every id in a store — `d…` deltas and `f…` forms — comes off one counter.
+`deltas.id` is UNIQUE across the whole journal, so the counter is a property of
+the FILE. It lived in each session's store VALUE and was persisted
+last-writer-wins by whoever wrote next.
+
+**That deadlocked two live sessions.** A session whose line had seen fewer
+deltas wrote a floor BELOW ids the file already held (`meta.next-id` 37863
+against `MAX(deltas.id)` d37868). Every session after it minted a taken id, hit
+the UNIQUE constraint, was caught by `duplicate-delta-id?`, refreshed — and
+minted the SAME id again, twelve times, then threw `commit contention on
+append`. Deterministic, and the error names a race that is not happening, which
+cost each of us about an hour separately. Neither agent could land the fix,
+because the fix lives in the store. Nathan raised the floor by hand to break it.
+
+**Three changes, in order, each landing green on its own.**
+
+1. **The floor became monotonic** (`write-snapshot!`): `MAX(excluded.v,
+   meta.v)` on the `next-id` upsert ONLY. The `meta-fields` loop beside it
+   stays last-writer-wins deliberately — those are per-store values where the
+   last writer is right. Same upsert shape, opposite obligation, which is why
+   the two are not one loop.
+2. **The file became the allocator** (`db/reserve-id-block!`): one transaction
+   advances `meta.next-id` by `id-block-size` and hands back `{:start :limit}`.
+   A session mints inside a range nobody else holds, so two sessions cannot
+   choose the same id — a property of the design rather than a guard that has
+   to fire. `open!` reserves after adopting the thread and before loading the
+   store; the block rides the SESSION (`:id-block`), not the store value,
+   because a full reload replaces the store and must not replace this.
+3. **Inference was deleted** (`store/bump-next-id`, and `store/id-num` behind
+   it). `replay-delta` raised a store's counter past every id it OBSERVED, so
+   a session replaying a foreign delta would have dragged itself into the block
+   that delta came from — manufacturing the exact collision block allocation
+   abolishes, under concurrency only. Found by agent-0e63 reading the draft;
+   it would have shipped.
+
+**Inference existed BECAUSE the counter was inferred from content.** Once the
+file owns the allocator it is not redundant, it is a second source of truth for
+a value that now has one. It was also a workaround for a floor nobody could
+trust, so step 1 had already retired it.
+
+**The MAX upsert STAYS, as the floor of last resort.** `external/open!` passes
+`{:create? false}`, so a session in a directory with no store yet is dirless
+and reserves nothing; the store is materialized by its first write. That
+session's snapshots carry its counter into `meta` monotonically, so a later
+session reserves above it. Two mechanisms, both monotonic, neither able to
+lower the floor.
+
+**Costs, both accepted.**
+
+- **Gaps.** A session exiting mid-block burns the rest. Ids are ADDRESSES, not
+  a resource: nothing counts them, nothing infers a total from one, and the
+  journal already skips (`d37783` → `d37823`).
+- **Ids stop being globally ordered across concurrent sessions.** A holding
+  `[40000,41000)` can write later than B holding `[41000,42000)` and carry the
+  lower id. Verified safe before committing to it: all fourteen journal
+  windowing sites walk by IDENTITY (`drop-while #(not= since (:id %))`), never
+  by magnitude — `report {since}`, `query_changes {from}`, `verify-after`,
+  `episode-span`, `undo!`, `timeline`, `rule-telemetry`, `merge-logs` and the
+  rest. **Anything added later that SORTS by id is reading a total order that
+  no longer exists.**
+
+**Rejected: UUIDv7/ULID.** Mechanically perfect — no allocator, collision-free.
+But `commit_point {target}`, `head.edn` and every milestone line are short ids
+a human reads and types. The product's texture is worth more than the
+elegance.
+
+**Rejected: per-line id prefixes** (`d37868.cb68`). Removes the file-global
+obligation by denying the journal is one sequence, which it is.
+
+**The rule underneath, which bit twice in one day**: a value with a file-global
+obligation must have exactly one writer, and it must be the file. The session
+id has the same shape one layer up — provenance wants it shared across a
+resume, ownership wants it unique per process — which is what the
+conversation-id/worker-id split addresses.
+
 ### D-page-function — a page is a FUNCTION that asks for what it needs (2026-08-27)
 
 The second half of [[D-page-marker]], and the one that made the marker

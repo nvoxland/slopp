@@ -221,7 +221,6 @@ git branch, because GitHub reads it and slopp does not.
 
 | Variable | Effect |
 |---|---|
-| `SLOPP_AGENT` | Identity for CLI invocations, so a script's calls share one session and one turn. |
 | `SLOPP_JAR` | Point the plugin's `slopp` wrapper at a local jar instead of the pinned release. Useful when developing slopp itself. |
 | `CLAUDE_PLUGIN_DATA` | Where the plugin caches the downloaded jar. Falls back to `$XDG_CACHE_HOME/slopp` or `~/.cache/slopp`. |
 

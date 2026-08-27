@@ -1429,3 +1429,45 @@ The same measurement found the listener staleness recorded in
 `.context/design-disciplines.md` — one consumer fetch, two defects, neither
 reachable from inside this repo's own checks.
 
+
+## 2026-08-27 — two live sessions on one store merged identities and THREADS
+
+Found while two Claude sessions worked this store at once — the first time
+that has been done deliberately here. `session_brief` told the second session
+that eleven of the first's un-landed changes were "private to this thread…
+nothing outside this session can see them until it does". They were not its
+changes. Seven code writes to `cljnx`, `webdev.cljs` and `mcp.tools` were
+recorded under the OTHER session's id, bracketed by turns carrying that
+session's verbatim asks — so `report` would attribute a fixture-page fix to a
+performance investigation.
+
+**The mailbox was per-STORE.** `plugins/slopp/hooks/prompt-hook.py` wrote
+`.slopp/pending-intent` at a fixed path; `mcp/absorb-pending-intent!` consumed
+whatever it found on the next tool call. Two sessions, one slot, first server
+to call a tool wins.
+
+**The severity is not provenance.** Absorbing also calls `engine/adopt-line!`,
+so the session that consumed a stranger's intent did not merely mis-stamp a
+delta — it moved onto that agent's THREAD and resynced its store and image
+from that line. `absorb-pending-intent!`'s own docstring promised the opposite
+in as many words: *every delta of one Claude session shares a key and
+concurrent sessions never merge episodes*. The one invariant threads exist to
+hold was stated, documented, and unguarded.
+
+Fixed both halves: a session that has claimed an id leaves a foreign intent on
+disk, and the hook writes `pending-intent.<sid>` alongside the legacy path so
+an unread ask cannot be overwritten by the next session's prompt either.
+Pinned by `mcp-test/an-intent-from-another-session-is-left-for-its-owner` and
+`a-claimed-session-reads-its-own-mailbox-not-the-shared-one`.
+
+**What remains, honestly:** a session with no id yet must read the unscoped
+file, so two sessions starting at the same moment can still swap identities.
+That is strictly better than merging — each stays self-consistent afterward —
+but it is not nothing, and it is filed rather than papered over.
+
+**The general lesson is the routing one.** Every mechanism here was designed
+for concurrency — lock-free CAS, WAL, threads keyed by `(agent, branch)`,
+async startup so a second session need not race the first. The single
+non-concurrent component was a hook writing a file with a constant name, and
+it was enough to defeat all of it. Concurrency held everywhere it was
+designed; it failed at the one seam nobody modelled as shared state.

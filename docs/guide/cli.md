@@ -37,12 +37,14 @@ prints the result. Arguments are JSON, EDN, or `@file`:
 slopp --call query_project
 slopp --call test_run '{"external":true}'
 slopp --call report '{"contains":"invoice"}'
-SLOPP_AGENT=ci slopp --call commit_point '{"description":"release 1.2"}'
+slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
 ```
 
-`SLOPP_AGENT=<name>` gives a script one identity across invocations. Turn state
-lives in the store, so a `turn_begin` under that agent covers later calls;
-without it, each invocation is its own session.
+`agent` names the identity a call works under, and every tool takes it. Turn
+state lives in the store, so a `turn_begin` under that agent covers later calls
+— pass the SAME `agent` to each one. Omit it and every invocation is its own
+session with its own generated id, which is right for a one-shot read and wrong
+for a script that means to finish what it started.
 
 This is the surface for scripts, CI steps, and for answering "how do I check
 this myself" without an MCP client.
