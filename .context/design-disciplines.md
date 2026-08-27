@@ -3734,3 +3734,58 @@ must be visible from the side that is weaker.** A repair is a fine thing for a
 reader to do; a repair nobody downstream can detect is how a test suite comes
 to prove something about a code path that does not ship.
 
+## Two things that must agree, delivered by mechanisms with different latencies (2026-08-27)
+
+Hit twice in one day, from both sides, and the second time the rule I drew from
+the first was wrong.
+
+**Case 1 — the jar and the store.** A consumer's server loads slopp's tool code
+from the jar it booted with, while `--live` hot-reloads slopp's own store code
+into the running process. So a fix to the tool layer reaches a live server in
+seconds and a fix to the VENDORED framework does not move until the jar does.
+One announcement, two arrival times, and no way to tell from inside which half
+you have.
+
+**Case 2 — hot-reload and `open!`.** agent-0e63 landed an ownership lease: the
+`ALTER TABLE lines ADD COLUMN owner_pid` lives in `db/open!`, and the queries
+that read it live beside it. Same `done`, same delta. My running session
+hot-reloaded the QUERIES within seconds and never re-ran `open!`, because a
+live session opens once — so every read that named the column failed against a
+schema that had not migrated.
+
+**The rule I drew from it was wrong, and worth recording as wrong**: I said a
+DDL and its first reader want to be one landed unit. They already were. Landing
+order cannot close a gap that is not about landing order.
+
+agent-0e63's version is the correct one:
+
+> A schema migration and its readers are not deployed by the same mechanism.
+> Code hot-reloads into every live process; DDL runs only at `open!`. So a
+> reader must TOLERATE its column being absent — it cannot assume the migration
+> that ships with it has run.
+
+Their fix is the shape: `adopt-thread!` selects `*` and reads the lease off the
+normalized row, so a store whose `open!` has not run reads nil — unheld — which
+is exactly how adoption behaved before the lease existed. There is no window
+left rather than a smaller one.
+
+**The generalisation: when two halves of one change travel by different
+mechanisms, do not try to synchronise the delivery. Make the faster half work
+when the slower half has not arrived.** Synchronising is not available — a
+running process cannot be made to re-run `open!`, and a consumer's jar is not
+yours to swap — so a design that requires it is a design that fails on a
+schedule nobody controls.
+
+### And a reporting discipline, from getting this wrong twice in two turns
+
+I sent an urgent store-wide-outage alarm on two failed tool calls without
+trying a third; the third would have shown two other read tools working. Then I
+sent an all-clear on ONE read returning `[]`, which was a stale snapshot of a
+store that had the forms all along.
+
+Both messages were confident, and each took the reading that agreed with what I
+already believed. **Behind is not absent.** A store value is a snapshot, and
+reporting "there is no such form" from one read of it is the same error as
+reporting "the store is down" from one failing tool — a conclusion from the
+readers you happened to ask rather than from the ones that would disconfirm it.
+
