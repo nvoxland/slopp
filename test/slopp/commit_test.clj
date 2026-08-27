@@ -160,14 +160,14 @@
           (is (:commit r) (pr-str (dissoc r :test :findings)))
           (is (not= :red (:status r)) (pr-str (dissoc r :test :findings)))))
       (testing "full_check is where the untouched red external spec surfaces"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= :red (:status r)) (pr-str (dissoc r :lint :warnings)))
           (is (= :red (:status (:external r))) (pr-str (:external r)))))
       (testing "and once the spec is honest, full_check is green"
         (ops/edit-replace! sess 'mg.bad-test 'f-t
                            "(deftest ^:external f-t (is (= 1 (bad/f 1))))"
                            :prompt "fix the spec")
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= :green (:status r)) (pr-str (dissoc r :lint :warnings)))))
       (finally (ops/close! sess)))))
 

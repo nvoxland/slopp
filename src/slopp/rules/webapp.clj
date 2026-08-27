@@ -483,41 +483,92 @@
 
 (defn ^:export page-calls
   "Every ENDPOINT each page reaches, as `{page-symbol [{:endpoint :method
-  :path} …]}` — a page that calls none is ABSENT rather than empty.
+  :path :params} …]}` — a page that calls none is ABSENT rather than empty,
+  and so is `:params` on a call that passes no literal.
 
   **What a reader of a browser app actually wants from a page row.** Not which
-  function computes a url: which endpoint this screen talks to. The row used to
-  answer `:request` — the name of a builder var — plus `:loads`, a url derived
-  from whatever single path that builder happened to name.
+  function computes a url: which endpoint this screen talks to, and with what.
+  The row used to answer `:request` — the name of a builder var — plus
+  `:loads`, a url taken from whatever single path that builder named.
 
   Both were wrong in the same direction, and the direction is the shape of the
   framework rather than an oversight. A page makes as many calls as it likes,
-  whenever it likes, and it makes them by naming DESCRIPTORS, which are vars.
-  A declaration beside the route row could only ever describe one of them, and
-  only while somebody kept it in agreement with the code.
+  whenever it likes, by naming DESCRIPTORS. A declaration beside the route row
+  could only ever describe one of them, and only while somebody kept it in
+  agreement with the code.
 
-  So this is the REFERENCE GRAPH: what the page's form references that is an
-  endpoint. It cannot drift from what the page calls, because it is what the
-  page calls — the same argument that put the address on the page rather than
-  in a table.
+  So the endpoints are the REFERENCE GRAPH: what the page's form references
+  that is an endpoint. It cannot drift from what the page calls, because it is
+  what the page calls.
 
-  Absent rather than `[]` for a page that calls nothing, because the two are
-  only the same claim when the derivation is complete, and this one is bounded
-  by what a descriptor is: a map literal with an `:http/path`. A page reaching
-  an endpoint some other way is invisible here, and an empty vector would state
-  otherwise."
+  **`:params` are the LITERAL arguments, and they are policy.** Measured on the
+  first store to render this table: of eighteen asks, fourteen pass no literal
+  at all and four pass exactly one — `:depth 2` because a form page draws its
+  neighbourhood and one hop does not fill it, `:limit 50` sent explicitly AT
+  the endpoint's default because the screen says *showing 20 of 340* and a
+  silently-applied ceiling falsifies that sentence. Neither appears in the
+  endpoint's contract, in the route, or anywhere else, so a reader asking why a
+  page fetches two levels has nowhere else to look.
+
+  A RUNTIME argument is not published — `{:id (:id params)}` is a value this
+  page does not have, and stating one would be a claim rather than a fact.
+  Values travel AS READ: `{:depth 2}` with an integer, because a consumer
+  comparing it against the endpoint's declared type cannot un-stringify a
+  string.
+
+  **Scalars only**, deliberately: a literal collection is arguably literal and
+  is rare enough that admitting it would widen the claim for no measured case.
+
+  **A `:params` map is PARTIAL by construction**, which is why the document
+  publishes a map rather than a rendered call. `:id` is a route capture, so it
+  is correctly absent — and `/api/form/:id?depth=2` is therefore not an address
+  anyone can fetch while looking like one that is a substitution away.
+
+  The whole derivation is bounded by what a descriptor is: a map literal with
+  an `:http/path`. A page reaching an endpoint some other way is invisible
+  here, which is why absent rather than `[]` is the honest empty."
   [st]
   (let [endpoints (into {} (for [{:keys [path method form]} (request-paths st)]
                              [form {:endpoint form :method method :path path}]))
-        ;; the SAME population [[page-routes]] publishes, keyed by form id —
-        ;; including its test-namespace exclusion, which a second traversal
-        ;; here would have had to remember separately
         wanted    (set (map :page (page-routes st)))
-        pages     (into {} (for [nsx  (keys (:namespaces st))
-                                 e    (store/forms st nsx)
-                                 :when (and (:name e)
-                                            (contains? wanted (symbol (str nsx) (str (:name e)))))]
-                             [(:id e) (symbol (str nsx) (str (:name e)))]))]
+        entries   (vec (for [nsx (keys (:namespaces st))
+                             e   (store/forms st nsx)
+                             :when (and (:name e)
+                                        (contains? wanted (symbol (str nsx) (str (:name e)))))]
+                         [(:id e) (symbol (str nsx) (str (:name e))) e]))
+        pages     (into {} (map (juxt first second)) entries)
+        literal?  (fn [v] (or (number? v) (string? v) (keyword? v) (boolean? v)))
+        ;; `(webapp/ask! page api/form {:id (:id params) :depth 2})` — matched
+        ;; on the NAME `ask!` whatever alias spells it, because the alias is
+        ;; the app's choice and the call is the framework's. The descriptor is
+        ;; matched by its own NAME against the endpoints the graph already says
+        ;; this page references, so nothing here has to resolve an alias.
+        asks      (fn [sx]
+                    ;; DESTRUCTURED rather than indexed. `(nth node 2)` on a stored form is
+                    ;; the position where a docstring and a def's value collide, and
+                    ;; a reader meeting it here has to work out that this node is
+                    ;; neither — it is a CALL, `(ask! page descriptor params)`.
+                    (for [node (tree-seq coll? seq sx)
+                          :when (seq? node)
+                          :let  [[verb _page descriptor params] node]
+                          :when (and (symbol? verb)
+                                     (= "ask!" (name verb))
+                                     (symbol? descriptor)
+                                     (map? params))]
+                      [(name descriptor)
+                       (into {} (filter (comp literal? val)) params)]))
+        ;; two asks for one endpoint that disagree about their literals leave
+        ;; no single answer, so the page publishes none — the safe direction,
+        ;; and the same one a computed path takes
+        asked     (into {}
+                        (for [[fid _ e] entries]
+                          [fid (into {}
+                                     (for [[nm ps] (group-by first
+                                                             (asks (try (store/form-sexpr (:node e))
+                                                                        (catch Exception _ nil))))
+                                           :let [vs (distinct (map second ps))]
+                                           :when (= 1 (count vs))]
+                                       [nm (first vs)]))]))]
     (into {}
           (for [[fid rs] (group-by first
                                    (for [r    (refs/refs st)
@@ -525,7 +576,10 @@
                                          :when (and (contains? pages (:from-form r))
                                                     (contains? endpoints t))]
                                      [(:from-form r) (get endpoints t)]))
-                :let [called (vec (sort-by :path (distinct (map second rs))))]
+                :let [called (vec (sort-by :path
+                                           (for [row (distinct (map second rs))
+                                                 :let [p (get-in asked [fid (name (:endpoint row))])]]
+                                             (cond-> row (seq p) (assoc :params p)))))]
                 :when (seq called)]
             [(get pages fid) called]))))
 

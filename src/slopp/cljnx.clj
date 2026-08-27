@@ -910,6 +910,52 @@
                       :when (string? p)]
                   [p @v]))))
 
+^{:unsafe "resolves malli by NAME, for this namespace's standing reason: it
+  ships to EVERY store through capabilities/shipping-common, so a static
+  require would put malli in the vendored deps of a command-line app that will
+  never see a schema. Degrades to nil rather than throwing, so a store without
+  malli gets no checker instead of a broken drive."}
+(defn ^:export response-checker
+  "`(fn [schema value] nil-or-message)` for a HEADLESS drive, or nil when malli
+  cannot be resolved.
+
+  **Why the check lives on this side.** A descriptor carries `:rest/response`,
+  and `slopp.webapp/fetch!` applies a checker if one is supplied — but it does
+  not build one, because that namespace is `:cljc`. Calling malli from there
+  was measured at **555 KB** added to every browser bundle, charged to apps
+  that declare no contract as much as to those that do, for a promise the
+  server already keeps: `slopp.http.dispatch` checks every response under
+  `slopp.rest/validating` before the bytes leave.
+
+  Here it is free — the JVM has malli on the classpath already — and it catches
+  the case a browser check never sees: **a canned FIXTURE that has drifted from
+  the contract it claims to exercise.** That is the failure the only real
+  browser app kept hitting; the bugs it found this week came from fixtures
+  quietly bypassing the machinery they were supposed to be driving.
+
+  What is NOT covered, said plainly: a browser app talking to a THIRD-PARTY api
+  at runtime. Nothing slopp-side validates that server and this checker is not
+  in the page, so such an app supplies its own `:check` — one line, charged to
+  the one app that needs it.
+
+  **Judged on the value AS RECEIVED**, not round-tripped.
+  `slopp.rest.contract/check-response` serializes and re-parses because it
+  judges what a consumer WOULD receive from a value the server still holds. A
+  driven page receives what `:webapp/call` handed it, which is already the
+  arrived shape."
+  []
+  (let [valid? (try (requiring-resolve 'malli.core/validate)
+                    (catch Throwable _ nil))
+        why    (try (requiring-resolve 'malli.core/explain)
+                    (catch Throwable _ nil))]
+    (when (and valid? why)
+      (fn [schema value]
+        (when (and schema (not (valid? schema value)))
+          (str "this endpoint's answer does not match the contract it"
+               " publishes: "
+               (pr-str (mapv (fn [e] {:in (:in e) :got (:value e)})
+                             (:errors (why schema value))))))))))
+
 ^{:unsafe "resolves slopp.webapp/slopp.http by NAME, and a static require is
   impossible here rather than merely inconvenient: this namespace ships to
   EVERY store through capabilities/shipping-common, while the two it derives
@@ -963,7 +1009,14 @@
 
     (:webapp/state entry)
     (let [wire ((requiring-resolve 'slopp.webapp/wiring)
-                (update entry :webapp/routes #(or % (marked-pages))))]
+                (-> entry
+                    (update :webapp/routes #(or % (marked-pages)))
+                    ;; a driven page's canned answers are checked against the
+                    ;; contracts their descriptors publish — see
+                    ;; [[response-checker]] for why the check is HERE and not
+                    ;; in the page. A declared one wins, so an app can supply
+                    ;; its own or opt out with a no-op.
+                    (update :webapp/check-response #(or % (response-checker)))))]
       ((requiring-resolve 'slopp.webapp/driver) wire))
 
     (:http/routes entry)

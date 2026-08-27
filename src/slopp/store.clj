@@ -26,9 +26,14 @@
   "A fresh store value — the empty starting point every session builds on.
   Every fold-field seeds from the registry (slopp.store.fields), so a field
   cannot exist without a declared :init — what each field means lives on its
-  registry entry, not here."
+  registry entry, not here.
+
+  It carries no `:next-id`, and that absence is the point: a store value holds
+  no allocation state, so there is nothing about minting to persist, reload,
+  fork, park, rebase or fall behind with. `gen-id` mints a random name from
+  nothing this map contains."
   []
-  (merge {:namespaces {} :deltas [] :next-id 0}
+  (merge {:namespaces {} :deltas []}
          (fields/field-defaults)))
 
 (defn now-ms
@@ -36,11 +41,43 @@
   [] (System/currentTimeMillis))
 
 (defn gen-id
-  "Mint the next `prefix`-typed id → [id store'] — the store's id counter
-  (public for the deep store packages; `alloc-id` is the external face)."
+  "Mint a `prefix`-typed id → [id store'] (public for the deep store packages;
+  `alloc-id` is the external face).
+
+  **Random, not sequential, and the store comes back UNCHANGED.** There is no
+  counter, so there is nothing to persist, ratchet, reserve or fall behind
+  with. Two writers cannot choose the same name because neither is drawing
+  from anything the other holds — disjointness by construction rather than by
+  arrangement.
+
+  What this replaced, because the reasoning matters more than the diff: a
+  counter lived in each store VALUE (per LINE) while `deltas.id` is UNIQUE
+  across the whole FILE. Every mechanism that tried to reconcile those two
+  facts — a persisted floor, a MAX upsert, per-session reserved blocks —
+  reconciled them incompletely, and twice in one day two live sessions minted
+  the same id, refreshed to the same floor, and minted it again. Twelve
+  attempts, then a throw that said `contention`, which is the word for a race
+  you can WIN. A shared counter is what made retrying meaningless; without
+  one, `deltas.id UNIQUE` catches the rare collision and the next attempt is
+  genuinely different.
+
+  **Safe because ids are already opaque NAMES.** Nothing in this store
+  compares one by magnitude — the fourteen `since`/`from` readers all walk by
+  identity (`drop-while #(not= since (:id %))`), and ordering lives in
+  `parent`, since the journal is a DAG. Sequential ids were producing a total
+  order no reader consumed.
+
+  The prefix stays because ids are read, quoted and typed by PEOPLE — `d…` for
+  a delta, `f…` for a form, `g…` for a group — and a bare hash would cost that
+  for nothing.
+
+  48 bits: about one chance in 55,000 of a repeat across a hundred thousand
+  ids, which the UNIQUE index turns into one honest retry rather than a fault.
+  Effectful, like `now-ms` in this namespace and for the same reason — some
+  facts come from outside the value."
   [store prefix]
-  (let [i (:next-id store)]
-    [(str prefix i) (assoc store :next-id (inc i))]))
+  [(str prefix (subs (.replace (str (java.util.UUID/randomUUID)) "-" "") 0 12))
+   store])
 
 (defn alloc-id
   "Public id allocation (e.g. a `g<n>` group id shared by several deltas)."

@@ -251,8 +251,14 @@
                        :webapp/leave!    (fn [url] (.assign js/location url))
                        :webapp/call      call!}))
         view  (:webapp/view wired)
-        app   (assoc wired :webapp/render
-                     (fn [state] (replicant/render el (view state))))]
+        ;; INSTALLED, not assoc'd. `derived-view` has already closed over
+              ;; `wired`, so an assoc here produces a map this entry holds and
+              ;; the PAGES do not — and a load resolving inside a page would
+              ;; render through whatever the captured map carried. That is a
+              ;; blank pane and a `Loading…` that never clears, with a 200 in
+              ;; the network pane and nothing thrown.
+              app   (webapp/with-render!
+                     wired (fn [state] (replicant/render el (view state))))]
     (replicant/set-dispatch!
      (fn [event-data handler-data]
        (webapp/dispatch! app handler-data (typed-value event-data))))

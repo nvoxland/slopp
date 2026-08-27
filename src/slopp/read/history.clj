@@ -884,3 +884,54 @@
           {:ns ns-sym :name nm :at rid :source (get srcs fid)
            :status (status-at st rid)}
           {:error (str nm " was not present in " ns-sym " at " rid)})))))
+
+(def ^:export verdict-inert-ops
+  "Delta ops that cannot change what a WHOLE-STORE check would say.
+
+  Bookkeeping only: a verdict, a done boundary, a milestone marker, a turn
+  bracket, a run observation, a read-cost record. None is code, a
+  declaration, a dependency or a module edge, so none can move lint, dead
+  surface, layering, the rule sweep or a test.
+
+  **Everything not listed here counts as a change, including an op this set
+  has never heard of.** That direction is deliberate: `content-ops` — forms
+  only — would be the tempting predicate and is too narrow, because a
+  `:config-put` can arm a whole capability's rules, a `:module-edge` changes
+  the architecture graph, and a `:deps-add` changes the manifest, none of
+  which touches a form. A new delta kind must not inherit \"harmless\" by
+  being unclassified; the cost of being wrong here is a stale green."
+  #{:verify :done :commit :turn-begin :turn-end :observe :read-cost})
+
+(defn ^:export standing-full-check
+  "The whole-store verdict that STILL STANDS — the most recent `full_check`
+  result when nothing since it could have changed what it says — or nil.
+
+  A pure fold over the delta log; no instrumentation, because `full_check`
+  already records its verdict as a `:verify` delta scoped `:full-check`.
+
+  **Why this exists.** `full_check` is the most expensive operation slopp
+  performs, ~236s on this store, almost all of it fresh JVM boots in the
+  external tier. Read over its own journal: 325 runs, and 117 of them repeats
+  inside a SINGLE ask — 7.6 hours spent re-asking a question already
+  answered. `commit_point` has always returned an unchanged milestone rather
+  than re-minting one; this is the same courtesy for the slowest thing here.
+
+  Only the most recent whole-store check counts. An older one that a change
+  has since invalidated says nothing about now, and an EPISODE-scoped
+  `:verify` — the kind `done` writes — is not a whole-store verdict at all;
+  reading one as standing would report coverage that never happened.
+
+  Conservative by construction: see `verdict-inert-ops`. Anything not
+  provably bookkeeping means re-run, so the failure mode is a check you did
+  not need rather than a green you did not earn."
+  [store]
+  (let [ds  (vec (:deltas store))
+        at  (->> (map-indexed vector ds)
+                 (keep (fn [[i d]]
+                         (when (and (= :verify (:op d))
+                                    (= :full-check (get-in d [:result :scope])))
+                           i)))
+                 last)]
+    (when at
+      (when (every? #(verdict-inert-ops (:op %)) (subvec ds (inc at)))
+        (:result (nth ds at))))))

@@ -1396,6 +1396,7 @@
       "query_capabilities" (text! (told! session name a (query/query-capabilities session)))
       "query_surface" (text! (told! session name a (query/query-surface session)))
       "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry session :since (:since a))))
+      "query_cost" (text! (told! session name a (query/query-turn-cost session :since (:since a))))
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))
@@ -1427,7 +1428,8 @@
                                                          :agent (:agent a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
-      "full_check" (text! (external/full-check! session :affected (:affected a)))
+      "full_check" (text! (external/full-check! session :affected (:affected a)
+                                                :force (:force a)))
       "edit_requalify" (text! (-> (ops/requalify-boundary-keys!
                                    session (sym :ns) (sym :name)
                                    :to-ns (or (:to-ns a) (:to_ns a))

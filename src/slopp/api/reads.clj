@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -312,3 +312,94 @@
   directly — so this reads the store and nothing else."
   [ctx _]
   (webapp-pages-document (:store @(:session ctx))))
+
+(defn ^:export config-document
+  "How this project is CONFIGURED, as data — one row per setting, narrowed to
+  `prefix` when one is given.
+
+  `{:config [{:key \"http.port\" :owner \"http\" :value \"8080\" :set true
+              :effective \"8080\" :default \"0\" :doc \"…\"}]}`
+
+  **ONE document, not one per capability.** The three path documents split by
+  capability because a project's SURFACE really is owned that way — a
+  `:rest/path` belongs to `rest`. Config does not: it is already a single flat
+  namespaced keyspace, and `http.port` sits beside `webapp.enabled` in one
+  registry. Splitting it would slice something that is not sliced and leave a
+  reader assembling one page from three fetches.
+
+  **`prefix` is the filter a page reaches for when it outgrows one screen**,
+  and it matches the blocks the keys already have — `http` narrows to
+  `http.*`, `http.auth` narrows further. A prefix nothing matches answers
+  EMPTY rather than everything: a filter that silently stops applying reads as
+  a page with no settings under that block, which is the one answer a typo
+  must not produce.
+
+  **Credential VALUES are withheld and the keys are not.**
+  `capabilities/secret-families` declares which families those are; a row from
+  one publishes `:secret true` and drops `:value` and `:effective`, keeping
+  `:key`, `:owner`, `:doc` and `:set`. *This is configured and I am not showing
+  you* is a useful answer to a settings page; *nothing here* would be false.
+
+  That redaction is HERE rather than in `capabilities/report`, and the layer is
+  the point: `query_capabilities` answers an agent that already holds the store
+  and can read the config directly, so redacting there would withhold a value
+  from the one reader entitled to it while protecting nothing. This route
+  answers a remote consumer over a public address, which is the boundary that
+  needs it.
+
+  `:patterns` rides along — the wildcard FAMILIES themselves, which name
+  settable spaces rather than settings — and `:orphaned` when the store holds
+  keys this build no longer knows, because a stored key under a retired name
+  is exactly the diagnosis somebody is looking for and reads as unset
+  otherwise."
+  [store prefix]
+  (let [{:keys [settings patterns owners orphaned]} (capabilities/report store)
+        p       (some-> prefix str str/trim not-empty)
+        keeps?  (fn [k] (or (nil? p)
+                            (= (str k) p)
+                            (str/starts-with? (str k) (str p "."))))
+        secret? (fn [k] (boolean (some #(str/starts-with? (str k) %)
+                                       capabilities/secret-families)))
+        row     (fn [r] (if (secret? (:key r))
+                          (-> r (dissoc :value :effective) (assoc :secret true))
+                          r))
+        narrow  (fn [rows] (vec (filter (comp keeps? :key) rows)))]
+    (cond-> {:config (mapv row (narrow settings))
+             :owners owners}
+      ;; the compiled bundle's url, which is NOT a setting — nothing sets it.
+      ;; `rules.http/bundle-url` joins the compile output to the static mount
+      ;; that serves it, so it belongs BESIDE the config rather than in it.
+      ;;
+      ;; Its own field rather than inside an `:assembly` map, and the reason is
+      ;; the container: a category with one key makes a scope claim it cannot
+      ;; keep. A reader shown `{:bundle …}` under `:assembly` has been told
+      ;; that assembly IS the bundle, so a second fact arriving later reads as
+      ;; *the first was incomplete and nobody said so*. `:bundle` claims only
+      ;; about the bundle and is complete the day it ships.
+      ;;
+      ;; ABSENT when no mount reaches it, which is a real answer rather than a
+      ;; gap: a store may serve its bundle from an ENDPOINT instead, which is
+      ;; what slopp's own reviewer UI does.
+      (rules.http/bundle-url store)
+      (assoc :bundle (rules.http/bundle-url store))
+
+      (seq (narrow patterns))  (assoc :patterns (narrow patterns))
+      (seq (narrow orphaned))  (assoc :orphaned (mapv row (narrow orphaned))))))
+
+(defn ^{:http/read :ui/config} config-read
+  "How the project under review is CONFIGURED — every setting with its owner,
+  narrowed by the request's `prefix`.
+
+  **The one read whose FILTER comes off the request.** Its siblings answer a
+  whole surface and let the consumer slice it, which is right when the answer
+  is dozens of rows. Config is the registry joined with the store and grows
+  with every capability, so the page that renders it filters by block — and
+  filtering server-side is what keeps a narrowed page one fetch rather than a
+  whole document the browser discards most of.
+
+  Reads the store and nothing else: a setting's owner, default and doc are
+  declared in the capability registry, and its value is in the store's config.
+  Neither needs a loaded var, which is why this has no image half."
+  [ctx req]
+  (config-document (:store @(:session ctx))
+                   (get-in req [:params :prefix])))

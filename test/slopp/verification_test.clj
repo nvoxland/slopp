@@ -635,7 +635,7 @@
                              (pr-str (dissoc c :test :findings)))))
       (ops/edit-replace! sess 'fa.one 'f "(defn f \"F.\" [x] (inc x))"
                          :prompt "touch one namespace only")
-      (let [r   (external/full-check! sess :affected true)
+      (let [r   (external/run-full-check! sess :affected true)
             sel (set (map str (get-in r [:external :affected :selected])))]
         (testing "the external tier narrows to what the change can reach"
           (is (seq sel) (pr-str (:external r)))
@@ -687,7 +687,7 @@
                    (str "(ns fc.core (:require [clojure.test :refer [deftest is]]))\n"
                         "(defn f \"F.\" [] 1)\n"
                         "(deftest f-t (is (= 1 (f))))\n"))
-      (let [r (external/full-check! sess)]
+      (let [r (external/run-full-check! sess)]
         (is (number? (:ms r)) (str "the whole-store check must report its cost: " (pr-str (keys r))))
         (is (= :green (:status r)) (pr-str r))
         (let [v (last (filter #(and (= :verify (:op %))
@@ -869,4 +869,70 @@
           (is (pos? (+ (:fail (:test r) 0) (:error (:test r) 0)))
               (str "a red must survive a rename in the same write: "
                    (pr-str (:test r))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-NARROWED-run-records-the-scope-it-actually-covered
+  ;; Sibling of `external-tier-trace-absorbs-into-the-session`, which pins the
+  ;; same thing for a WHOLE-TIER run. This is the narrowed case, and it was
+  ;; the one that mattered and the one that was missing.
+  ;;
+  ;; `done` narrows its impacted ^:external slice with `:only` — test VARS,
+  ;; not namespaces — and that path recorded an EMPTY scope, so
+  ;; `closure-hashes` had nothing to key on and the observation carried no
+  ;; content identity at all. Measured on slopp's own store before the fix:
+  ;; of the last 60 observations, 16 carried a closure. The 44 without were
+  ;; the narrowed runs — which is precisely the population a verdict cache
+  ;; reads, so the cache's own input was the part not being recorded.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'nr.core
+                   (str "(ns nr.core (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn f [x] (inc x))\n"
+                        "(deftest f-t (is (= 2 (f 1))))\n"))
+      (let [r (external/external-test-run! sess :only ['nr.core/f-t])]
+        (is (= :green (:status r)) (pr-str r))
+        (is (= 1 (:ran r)) "the narrowing really did narrow"))
+
+      (testing "the observation names the namespaces the run COVERED"
+        (let [st (:store @sess)
+              d  (last (filter #(= :observe (:op %)) (store/deltas st)))]
+          (is (some? d) "a narrowed run still appends an :observe delta")
+          (is (= '[nr.core] (:scope d))
+              (str "a run narrowed to nr.core/f-t covered nr.core; scope was "
+                   (pr-str (:scope d))))
+          ;; recomputed by the canonical producer, never a literal — same
+          ;; argument as the sibling test: a recorded key a later reader
+          ;; cannot reproduce is worse than no key at all, and this key is
+          ;; what a cache would trust to skip running something.
+          (is (= (engine/closure-hashes st '[nr.core]) (:closure d))
+              (pr-str (:closure d)))
+          (is (seq (:closure d))
+              "an empty closure is not a key — it is the absence of one")))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-STANDING-verdict-recomputes-what-it-only-REPORTED
+  ;; A standing verdict may reuse what it EARNED — the test results, which are
+  ;; a function of store content. It must NOT reuse what it merely REPORTED
+  ;; about live state. `:app`, `:bundle` and `:host-stale` are currency
+  ;; reports about artifacts OUTSIDE the store, and they change with no delta
+  ;; at all: serving an app is not a write, so `verdict-inert-ops` correctly
+  ;; says the verdict still stands — and the verdict would be handed back
+  ;; describing a world that had no app server when it was earned.
+  ;;
+  ;; Found on main as a red `full-check-says-how-far-behind-the-served-app-is`,
+  ;; which asserts the REPORT and so could not say which half was wrong. This
+  ;; asserts both halves at once: still standing, and current anyway.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'fc.core "(ns fc.core)\n(defn ^:unused-ok a \"A.\" [] 1)\n")
+      (external/full-check! sess)
+      (swap! sess assoc :app-server
+             {:serving? true :served-at 0 :url "http://127.0.0.1:9998/"})
+      (let [r (external/full-check! sess)]
+        (is (:standing r)
+            "nothing was written, so the verdict must still STAND — if this
+             fails the fix was to re-run, which throws away the whole point")
+        (is (= "http://127.0.0.1:9998/" (:url (:app r)))
+            (str "the standing verdict reported currency as of when it was"
+                 " EARNED rather than as of now: " (pr-str (:app r)))))
       (finally (ops/close! sess)))))

@@ -795,19 +795,22 @@
         ;; were just read from the db, so accepting them is not a regression
         (when (not= digest (:elements-digest @session))
           (swap! session update :store assoc :namespaces (db/load-elements conn line))))
-      (swap! session assoc :elements-digest digest)
-      ;; …and the id counter, which belongs to the FILE rather than to this
-      ;; line. Another line's write advances it without appearing in this
-      ;; line's suffix, so nothing above would notice — and the next id minted
-      ;; here would collide on the UNIQUE deltas.id. Unconditional on purpose:
-      ;; a commit that lost this race retries through here, and a floor applied
-      ;; only when the suffix moved would leave it retrying forever.
-      (when-let [floor (db/next-id-floor conn)]
-        (swap! session update-in [:store :next-id] max floor)))))
+      (swap! session assoc :elements-digest digest))))
 
 (defn ^:export commit-appended!
   "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
-  retrying across journal/cache races. Returns the committed store'."
+  retrying across journal/cache races. Returns the committed store'.
+
+  **The retry is a race now, not a livelock.** It used to be possible for
+  every attempt to be identical: two sessions drawing ids from one shared
+  counter re-derived the same id each pass and collided twelve times in a row.
+  Ids are random names minted per call, so a losing attempt genuinely differs
+  from the one before it — which is what makes retrying a strategy rather than
+  a ritual.
+
+  Exhausting the retries therefore means one thing, and the throw says it:
+  the branch head moved under every attempt because another writer is landing
+  continuously."
   [session f nses]
   (loop [n 0]
     (let [base (:store @session)
@@ -815,7 +818,12 @@
       (cond
         (try-commit! session base st' nses) st'
         (< n 12) (do (refresh-cache! session) (recur (inc n)))
-        :else (throw (ex-info "commit contention on append" {}))))))
+        :else
+        (throw (ex-info
+                (str "the branch head moved under all 12 attempts — another"
+                     " writer is landing continuously. Ordinary contention on a"
+                     " busy branch: call again.")
+                {:retryable true}))))))
 
 (defn ^:export used-families
   "The capabilities whose framework family `store` USES — the set both the

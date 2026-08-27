@@ -2177,7 +2177,7 @@
         "the annotation the marker exists to produce is still set"))
   (testing "the classification itself did not change — this is a refactor"
     ;; positive control on the refactor: same answer, different home
-    (is (= 32 (count tools/read-only-tools)))
+    (is (= 33 (count tools/read-only-tools)))
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
     (is (not (contains? tools/read-only-tools "ui_serve")))
@@ -2222,7 +2222,7 @@
     (is (not-any? #(contains? % :read-only) tools/tools)))
   (testing "the classification did not change — this is a refactor"
     ;; positive control: same answer, different home
-    (is (= 25 (count tools/image-free-tools)))
+    (is (= 26 (count tools/image-free-tools)))
     (is (contains? tools/image-free-tools "session_brief"))
     (is (contains? tools/image-free-tools "query_git") "a sync-group exception")
     (is (not (contains? tools/image-free-tools "query_eval"))

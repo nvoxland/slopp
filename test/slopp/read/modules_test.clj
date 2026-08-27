@@ -723,11 +723,11 @@
                         "  []\n"
                         "  1)\n"))
       (testing "the must-NOT-flag half — a populated namespace is no husk"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (nil? (:empty-namespaces r)) (pr-str (:empty-namespaces r)))))
       (ops/ingest! sess 'fs.gone "(ns fs.gone)\n")
       (testing "a namespace holding only its ns form is named, with its remedy"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= '[fs.gone] (:empty-namespaces r)) (pr-str r))
           (is (re-find #"ns_delete" (str (:empty-namespaces-note r)))
               (str "a finding whose remedy the reader cannot run is half a"

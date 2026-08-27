@@ -734,11 +734,11 @@
     (try
       (ops/ingest! sess 'fb.core "(ns fb.core)\n(defn ^:unused-ok a \"A.\" [] 1)\n")
       (testing "no app server — nothing to say, and that is most stores"
-        (is (nil? (:app (external/full-check! sess)))))
+        (is (nil? (:app (external/run-full-check! sess)))))
       (testing "serving and behind — the number, and where to look"
         (swap! sess assoc :app-server
                {:serving? true :served-at 0 :url "http://127.0.0.1:9999/"})
-        (let [a (:app (external/full-check! sess))]
+        (let [a (:app (external/run-full-check! sess))]
           (is (pos? (:behind a)) (pr-str a))
           (is (= "http://127.0.0.1:9999/" (:url a))
               (str "a count with no address makes the reader go looking: "
@@ -750,7 +750,7 @@
         (swap! sess assoc :app-server
                {:serving? true :url "http://127.0.0.1:9999/"
                 :served-at (:at (last (store/deltas (:store @sess))))})
-        (let [a (:app (external/full-check! sess))]
+        (let [a (:app (external/run-full-check! sess))]
           (is (= 0 (:behind a)) (pr-str a))))
       (finally (ops/close! sess)))))
 

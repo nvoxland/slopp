@@ -5,7 +5,7 @@
   store source."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.api.reads :as api.reads]))
+            [slopp.api.reads :as api.reads] [clojure.string :as str]))
 
 (deftest a-defs-value-is-not-its-docstring
   ;; Pattern 1, alive in the shipped UI. `form-doc` read `(nth sx 2 nil)` and
@@ -110,3 +110,91 @@
       ;; by RENAMING a key — never by redefining one in place, which is the
       ;; only change a version key could have caught.
       (is (= #{:paths} (set (keys doc))) (pr-str doc)))))
+
+(deftest a-projects-CONFIG-is-ONE-document-filtered-by-PREFIX
+  ;; The settings page asked for a per-capability document, and Nathan changed
+  ;; it to one: config is already a single flat namespaced keyspace
+  ;; (`http.port`, `webapp.enabled`, `http.static./js`), so three documents
+  ;; would slice something that is not sliced. `prefix` is how a page that has
+  ;; grown too large narrows itself — the same blocks the keys already have.
+  ;;
+  ;; **Values of CREDENTIAL families are withheld**, and the key still
+  ;; publishes. This route is `:http/auth :public` like its siblings, and the
+  ;; registry carries `http.auth.static.*`, `http.auth.bearer.*` and
+  ;; `http.auth.oidc.*` — token and client-secret families. *This is
+  ;; configured and I am not showing you* is a useful answer; *nothing here*
+  ;; would be a false one.
+  (let [st  (-> (store/empty-store)
+                (assoc-in [:config "capabilities" :values "http.port"] "8080")
+                (assoc-in [:config "capabilities" :values "webapp.enabled"] "true")
+                (assoc-in [:config "capabilities" :values "http.auth.static.tok-abc"] "admins"))
+        all (api.reads/config-document st nil)
+        by  (fn [doc k] (some #(when (= k (:key %)) %) (:config doc)))]
+
+    (testing "one document, every setting, whatever capability owns it"
+      (is (some #(= "http.port" (:key %)) (:config all)) (pr-str (mapv :key (:config all))))
+      (is (some #(= "webapp.enabled" (:key %)) (:config all))))
+
+    (testing "a row says what it IS, not just what it holds"
+      ;; a reader of a settings page has no other route to the vocabulary
+      (let [row (by all "http.port")]
+        (is (= "8080" (:value row)) (pr-str row))
+        (is (true? (:set row)) (pr-str row))
+        (is (= "http" (:owner row)) (pr-str row))
+        (is (string? (:doc row)) (pr-str row))))
+
+    (testing "a setting nobody set is present, defaulted, and says so"
+      ;; absent rows would make an unconfigured store read as an empty page
+      (let [row (by all "http.host")]
+        (is (some? row) (pr-str (mapv :key (:config all))))
+        (is (not (:set row)) (pr-str row))))
+
+    (testing "a CREDENTIAL family publishes the key and withholds the value"
+      (let [row (by all "http.auth.static.tok-abc")]
+        (is (some? row) "the key must still appear — set-and-hidden is the answer")
+        (is (true? (:secret row)) (pr-str row))
+        (is (true? (:set row)) (pr-str row))
+        (is (nil? (:value row)) (str "a credential reached the wire: " (pr-str row)))
+        (is (nil? (:effective row)) (str "a credential reached the wire: " (pr-str row)))))
+
+    (testing "PREFIX narrows to a block, matching the key's own segments"
+      (let [http (api.reads/config-document st "http")]
+        (is (every? #(str/starts-with? (:key %) "http.") (:config http))
+            (pr-str (mapv :key (:config http))))
+        (is (some #(= "http.port" (:key %)) (:config http)))
+        (is (not-any? #(= "webapp.enabled" (:key %)) (:config http)))))
+
+    (testing "and a DEEPER prefix narrows further"
+      (let [auth (api.reads/config-document st "http.auth")]
+        (is (some #(= "http.auth.static.tok-abc" (:key %)) (:config auth)))
+        (is (not-any? #(= "http.port" (:key %)) (:config auth)))))
+
+    (testing "the compiled bundle's URL is its OWN field, not a category"
+      ;; Asked for as a top-level `:bundle` rather than inside an `:assembly`
+      ;; map, and the reason is the container: a category with one key makes a
+      ;; scope claim it cannot keep. A reader shown `{:bundle …}` under
+      ;; `:assembly` has been told that assembly IS the bundle, so a second
+      ;; fact arriving later reads as *the first was incomplete and nobody
+      ;; said so*. `:bundle` claims only about the bundle and is complete the
+      ;; day it ships.
+      ;;
+      ;; It is NOT a setting — nothing sets it. `rules.http/bundle-url` joins
+      ;; the compile output to the static mount that serves it, so it belongs
+      ;; beside the config rather than in it.
+      (let [served (-> st
+                       (assoc-in [:config "capabilities" :values "http.static./js"]
+                                 "public/cljs"))]
+        (is (= "/js/main.js" (:bundle (api.reads/config-document served nil)))
+            (pr-str (api.reads/config-document served nil)))))
+
+    (testing "and it is ABSENT when no mount reaches the bundle"
+      ;; nil is a real answer: a store may serve its bundle from an ENDPOINT
+      ;; rather than a mount, which is what slopp's own reviewer UI does.
+      ;; Absent rather than nil, so a page renders nothing instead of "null"
+      (is (not (contains? (api.reads/config-document st nil) :bundle))
+          (pr-str (api.reads/config-document st nil))))
+
+    (testing "a prefix nothing matches is EMPTY rather than everything"
+      ;; the failure that turns a filter into a footgun: a typo'd block
+      ;; showing the whole page reads as though the filter did not apply
+      (is (= [] (:config (api.reads/config-document st "nosuch")))))))

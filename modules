@@ -1,5 +1,5 @@
 slopp.addelete: slopp.read slopp.store slopp.ops (test)
-slopp.api: slopp.edit slopp.http slopp.index slopp.read slopp.rest slopp.rules slopp.store slopp.webapp slopp.ops (test) slopp.rest (test) slopp.webdev (test)
+slopp.api: slopp.edit slopp.http slopp.index slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.webapp slopp.ops (test) slopp.rest (test) slopp.webdev (test)
 slopp.branch: slopp.read slopp.store slopp.ops (test)
 slopp.build-native: slopp.build slopp.ops (test)
 slopp.chsig: slopp.edit slopp.store slopp.ops (test)

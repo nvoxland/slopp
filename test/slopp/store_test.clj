@@ -867,3 +867,42 @@
       (is (contains? fields/markers :read-cost)
           (str "an unregistered op makes merge-logs treat it as content: "
                (pr-str fields/markers))))))
+
+(deftest two-stores-from-ONE-BASE-mint-different-ids
+  ;; This is the property `reserve-id-block!`, `next-id-floor`, `meta.next-id`
+  ;; and the MAX upsert all existed to arrange. Arranged, it failed twice in
+  ;; one day: a counter written per-LINE and read per-FILE ratcheted backwards,
+  ;; and two sessions then minted the same id, refreshed to the same floor and
+  ;; minted it again — twelve times, then a throw saying "contention", which is
+  ;; the word for a race you can win.
+  ;;
+  ;; Random ids make it structural. Two writers cannot choose the same id
+  ;; because neither is drawing from anything the other holds, and the rare
+  ;; collision is caught by `deltas.id UNIQUE` — where a retry finally means
+  ;; something, because the next attempt is genuinely different.
+  ;;
+  ;; Safe because ids are already opaque NAMES here: nothing in the store
+  ;; compares one by magnitude, and all fourteen `since`/`from` readers walk by
+  ;; identity. Ordering lives in `parent` — the journal is a DAG.
+  (let [base (store/empty-store)]
+    (testing "the same base twice yields two different ids"
+      (let [[a _] (store/alloc-id base "d")
+            [b _] (store/alloc-id base "d")]
+        (is (not= a b)
+            "two sessions forked from one point must not choose one name")))
+
+    (testing "still TYPED by prefix — ids are quoted, grepped and typed by people"
+      (is (.startsWith ^String (first (store/alloc-id base "d")) "d"))
+      (is (.startsWith ^String (first (store/alloc-id base "f")) "f"))
+      (is (.startsWith ^String (first (store/alloc-id base "g")) "g")))
+
+    (testing "distinct in bulk, from one unchanging base"
+      (let [ids (repeatedly 2000 #(first (store/alloc-id base "d")))]
+        (is (= 2000 (count (distinct ids)))
+            "2000 mints, no repeat — disjointness by construction")))
+
+    (testing "minting reads no counter, so there is none to get wrong"
+      ;; the architectural assertion: a store value carries no allocation state,
+      ;; so nothing can persist it, ratchet it, or fall behind the file
+      (is (= base (second (store/alloc-id base "d")))
+          "the store comes back unchanged"))))

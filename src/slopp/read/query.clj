@@ -534,3 +534,19 @@
                   " one is enabled. query_capabilities lists them all with what"
                   " each would arm; opt in with config_file {path"
                   " \"capabilities\" key \"<name>.enabled\" value \"true\"}")})))
+
+(defn ^:export query-turn-cost
+  "Where THIS store's wall clock went — the three-way split every turn has
+   been recording and nothing has been able to read: `:slopp-ms` inside a
+   tool, `:idle-ms` for the session nobody was in, and `:outside-ms` for
+   agent reasoning plus every non-slopp tool, which the server cannot tell
+   apart and does not pretend to. `:slopp-share` is against ACTIVE time, so a
+   human going to bed does not read as time slopp failed to use.
+
+   Also `:tools` ranked by total cost, `:refused` with its per-tool breakdown
+   (a refusal is a whole round trip that produced nothing), and `:repeats` —
+   tools run more than once inside ONE ask, ranked by what the extra runs
+   cost. Read-only analysis over the delta log; no instrumentation. `:since`
+   (a delta or commit-point id from `query_commits`) windows it."
+  [session & {:keys [since]}]
+  (telemetry/turn-cost (:store @session) :since since))

@@ -338,19 +338,17 @@
   inside the branch's own file, i.e. a fact a store could only state about
   itself.
 
-  **A parked value takes the FILE's id counter on the way out.** Ids are
-  minted from the store value, and a parked one stopped counting when it was
-  parked — so adopting it unchanged re-mints ids the other line has used since,
-  and `deltas.id` is UNIQUE across the journal. That is not a lost race, it is
-  a throw. A LOADED value already carries the file's counter, so this is the
-  one place the two paths differ, and it is the one place they are both
-  produced."
+  A parked value used to need the FILE's id counter grafted onto it here: ids
+  were minted from the store value, so a parked one had stopped counting and
+  adopting it unchanged re-minted ids another line had used since. Ids are
+  random names now, minted per call from nothing the value carries, so a
+  parked store and a freshly loaded one are the same kind of thing again and
+  this is no longer the one place the two paths differ."
   [session nm]
   (let [conn   (:db @session)
         parked (get (:lines @session) nm)]
     (if (map? parked)                    ; ::claimed is a name mid-creation
-      (cond-> parked
-        conn (update-in [:store :next-id] max (or (db/next-id-floor conn) 0)))
+      parked
       (when conn
         (when-let [row (first (filter #(= nm (:name %)) (db/lines conn)))]
           {:store (db/load-store conn (:id row)) :id (:id row)})))))
@@ -574,7 +572,14 @@
   `:idle-ms` is age, not a verdict. Nothing reaps a thread automatically: a
   line holding un-landed work is the one thing in this system that no rule
   should be allowed to throw away on a timer, so the drop stays a decision
-  somebody makes."
+  somebody makes.
+
+  `:held` is whether a LIVE process has the write lease on that row, which is
+  a different question from `:idle-ms` and usually the one being asked. Idle
+  says nobody has touched it lately; held says somebody still could. A thread
+  that is idle AND unheld is the one nobody is coming back to — and that pair,
+  rather than age alone, is what makes a drop an informed decision instead of
+  a guess about somebody else's session."
   [session]
   (if-let [conn (:db @session)]
     (let [branch (engine/session-branch-line session)
@@ -586,7 +591,13 @@
                                  :agent    (:agent t)
                                  :unlanded (db/unlanded-count conn (:id t)
                                                               history/content-ops)
-                                 :idle-ms  (- now (or (:used-at t) now))}
+                                 :idle-ms  (- now (or (:used-at t) now))
+                                 ;; a LIVE process is writing this one. Not the
+                                 ;; same question as `:idle-ms`, and the more
+                                 ;; useful one: idle says nobody has touched it
+                                 ;; lately, held says somebody still could.
+                                 :held     (db/process-live? (:owner-pid t)
+                                                             (:owner-started t))}
                           (= (:id t) mine) (assoc :mine true)))
                       (db/open-threads conn branch))})
     {:threads [] :note "an ephemeral session has no journal, so it holds no threads"}))

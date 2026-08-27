@@ -18,8 +18,15 @@
       (is (some #(re-find #"invalid-arity" (name (:type %))) (:carried r))
           (pr-str r))))
   (testing "the SAME error refuses when it is in the form being written"
-    (let [g-fid (:id (store/form-named (st bad) 'lg.core 'g))
-          r     (lintgate/lint-refusals (st clean) (st bad) ['lg.core] [g-fid])]
+    ;; ONE candidate store, bound once. This used to call `(st bad)` twice —
+    ;; once to look up g's id, once as the store to lint — and compare an id
+    ;; across the two copies. That held only while minting was DETERMINISTIC,
+    ;; which was never a property the test meant to rely on: it asks whether
+    ;; the gate can tell "this finding is in the form you sent" from "this
+    ;; finding is somewhere else", and that question is about one store.
+    (let [cand  (st bad)
+          g-fid (:id (store/form-named cand 'lg.core 'g))
+          r     (lintgate/lint-refusals (st clean) cand ['lg.core] [g-fid])]
       (is (re-find #"in the form you are writing" (str (:refuse r))) (pr-str r))
       (is (re-find #"invalid-arity" (str (:refuse r)))))))
 

@@ -802,4 +802,78 @@
         [:map
          [:endpoint {:doc "the fully-qualified symbol of the endpoint DESCRIPTOR the page names"} :symbol]
          [:method {:doc "the verb that descriptor declares, defaulting to :get"} :keyword]
-         [:path {:doc "the address it names, in the same grammar :http/path uses"} :string]]]]]]]])
+         [:path {:doc "the address it names, in the same grammar :http/path uses"} :string]
+         [:params
+          {:optional true
+           :doc "the LITERAL arguments this page passes to that endpoint, as read — {:depth 2}, not {:depth \"2\"}. POLICY rather than data: it is the only place a decision like fetching two levels deep is written down. PARTIAL by construction, which is why this is a map and not a rendered call — a route capture is not a literal and is correctly absent, so these arguments plus the address are the whole call. ABSENT, not empty, when the page passes no literal at all, which is the common case"}
+          ;; the SCALARS `rules.webapp/page-calls` admits and nothing wider.
+          ;; `:any` would aim the response-drift check at this field and switch
+          ;; it off; the set is not a guess, it is the predicate the derivation
+          ;; filters on
+          [:map-of :keyword [:or :int :double :string :keyword :boolean]]]]]]]]]])
+
+(def config-document
+  "`GET /api/config` — how a project is CONFIGURED, one row per setting.
+
+  **ONE document, not one per capability.** The path documents split by
+  capability because a project's SURFACE is owned that way; config is not. It
+  is a single flat namespaced keyspace — `http.port` beside `webapp.enabled`
+  in one registry — and a page joining four documents would have to know the
+  list of capabilities and would silently omit the fifth the day one ships.
+  `:owner` on every row makes grouping the page's job, which costs nothing.
+
+  **`prefix` narrows to a block** and matches the segments the keys already
+  have: `http` gives `http.*`, `http.auth` narrows further. A prefix nothing
+  matches answers EMPTY, never everything.
+
+  **A credential family publishes its KEY and withholds its VALUE**, marked
+  `:secret true`. `capabilities/secret-families` declares which — declared
+  rather than matched on name fragments, because a denylist is updated by
+  whoever adds the next secret and its failure mode is publishing one."
+  [:map
+   [:config
+    {:doc "one row per setting the registry declares, plus any stored key a wildcard family governs. Narrowed when the request carries a prefix; EMPTY when the prefix matches nothing"}
+    [:sequential
+     [:map
+      [:key {:doc "the setting's full dotted name, e.g. \"http.port\""} :string]
+      [:owner {:doc "the capability that owns it, derived from the key's first segment — never stored beside it, so the label and the name cannot disagree"} :string]
+      [:doc {:optional true :doc "what the setting DOES, from the registry. MARKDOWN"} [:maybe :string]]
+      [:default {:optional true :doc "what it is when nobody sets it, as the registry declares it — a scalar, or absent from a row with no declared default"} [:maybe [:or :int :double :string :boolean :keyword]]]
+      [:effective {:optional true :doc "the value in force — the stored one if set, the default otherwise, PARSED to the type the registry declares. WITHHELD on a secret row"} [:maybe [:or :int :double :string :boolean :keyword]]]
+      [:set {:optional true :doc "true when this store sets it explicitly. Absent means defaulted, which is a different fact from set-to-the-default"} :boolean]
+      [:value {:optional true :doc "the RAW stored string, exactly as config_file wrote it and before any parsing — present only when :set, and WITHHELD on a secret row"} :string]
+      [:secret {:optional true :doc "this key belongs to a declared credential family: the key, owner and :set publish and the value never does"} :boolean]]]]
+   [:owners
+    {:doc "what each owner label MEANS, keyed by the label — the vocabulary the :owner column comes from, riding along because a reader of this document has no other route to it"}
+    [:map-of :string :string]]
+   [:patterns
+    {:optional true
+     :doc "the wildcard FAMILIES themselves — they name settable spaces (http.static.*) rather than settings, so they are not rows. Absent when the prefix matches none"}
+    [:sequential
+     [:map
+      [:key {:doc "the family's pattern, e.g. \"http.static.*\" — the * stands for any single segment a store may name"} :string]
+      [:owner {:doc "the capability that owns the family, from the pattern's first segment"} :string]
+      [:doc {:optional true :doc "what a setting in this family DOES. MARKDOWN"} [:maybe :string]]]]]
+   [:orphaned
+    {:optional true
+     :doc "stored keys this build does not recognise — usually a capability RENAME nobody migrated. Absent when there are none, and that absence is unambiguous because it always computes"}
+    [:sequential
+     [:map
+      [:key {:doc "the stored key, under a name no registry entry claims — nothing reads it"} :string]
+      [:value {:optional true :doc "what it is set to, so the row is a migration instruction rather than a prompt to go and look. WITHHELD on a secret row"} :string]
+      [:secret {:optional true :doc "the orphaned key belongs to a declared credential family, so its value is withheld here too"} :boolean]]]]])
+
+(def config-request
+  "`GET /api/config` — the filter, declared so a generated client carries it.
+
+  `:http/params` on the ENDPOINT reads to nobody: slopp defines no such marker
+  there, and a key in a namespace slopp owns that slopp does not define
+  refuses nothing and generates nothing while looking exactly like one that
+  works. The request CONTRACT is where a parameter becomes visible — it rides
+  the published document, so `generate_client` emits a descriptor that names
+  `:prefix` and `endpoint/request` puts it in the query string."
+  [:map
+   [:prefix
+    {:optional true
+     :doc "narrow to one block of the keyspace, matching the segments the keys already have — \"http\" gives http.*, \"http.auth\" narrows further. Omit for every setting. A prefix nothing matches answers an EMPTY :config rather than everything"}
+    :string]])

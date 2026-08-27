@@ -211,25 +211,16 @@
                          line-id (str ns-sym) pos (name (:kind e)) (:id e)
                          (some-> (:name e) str) (n/string (:node e))
                          (:comment e)])))
-  ;; MONOTONIC, and the only statement here that is. `next-id` is a property
-  ;; of the FILE — `deltas.id` is UNIQUE across the whole journal — while the
-  ;; value carrying it belongs to ONE LINE. Last-writer-wins therefore let a
-  ;; session whose line had seen fewer deltas write a floor BELOW ids the file
-  ;; already held; everyone after it minted a taken id, was caught as a
-  ;; duplicate, refreshed, and minted the same id again. The throw reads
-  ;; "commit contention on append", which names a race that is not happening.
+  ;; No id counter is persisted. It was the one statement here with a
+  ;; FILE-wide obligation carried by a per-LINE value, and every attempt to
+  ;; reconcile those two facts — last-writer-wins, then a monotonic MAX, then
+  ;; per-session reserved blocks — reconciled them incompletely. Ids are
+  ;; random names now, minted per call from nothing the value carries, so
+  ;; there is no number here to get wrong.
   ;;
-  ;; It locked two live sessions out of writing at once, and neither could land
-  ;; the fix, because the fix is this line.
-  ;;
-  ;; The `meta-fields` loop below stays last-writer-wins DELIBERATELY: those
-  ;; are per-store values, where the last writer is the right answer. Same
-  ;; upsert shape, opposite obligation, which is why the two are not one loop.
-  (jdbc/execute! tx ["INSERT INTO meta (k,v) VALUES ('next-id', ?)
-                      ON CONFLICT(k) DO UPDATE
-                        SET v = MAX(CAST(excluded.v AS INTEGER),
-                                    CAST(meta.v AS INTEGER))"
-                     (str (:next-id store))])
+  ;; The `meta-fields` loop below is last-writer-wins and stays that way:
+  ;; those are per-store values, where the last writer IS the right answer.
+  ;; It was never the same obligation, which is why they were never one loop.
   (doseq [{:keys [field meta-key init absent-nil?]} (fields/meta-fields)]
     (let [v (get store field)]
       ;; :absent-nil? fields (the :modules pre-module adoption marker) are
@@ -396,19 +387,26 @@
 
 (defn- row->line
   "A `lines` row as a value. next.jdbc qualifies plain columns by their table,
-  so the keys are normalized once here instead of at every reader."
+  so the keys are normalized once here instead of at every reader.
+
+  The whitelist is deliberate — a `SELECT *` reader should not start carrying
+  whatever the schema gains — so a new column has to be added HERE to be
+  visible anywhere. `:owner-pid`/`:owner-started` are the write LEASE, nil on
+  a row written before it existed."
   [row]
   (let [r (into {} (map (fn [[k v]] [(keyword (name k)) v])) row)]
-    {:id         (:id r)
-     :name       (:name r)
-     :kind       (:kind r)
-     :head       (:head r)
-     :base       (:base r)
-     :parent     (:parent r)
-     :agent      (:agent r)
-     :created-at (:created_at r)
-     :used-at    (:used_at r)
-     :status     (:status r)}))
+    {:id            (:id r)
+     :name          (:name r)
+     :kind          (:kind r)
+     :head          (:head r)
+     :base          (:base r)
+     :parent        (:parent r)
+     :agent         (:agent r)
+     :created-at    (:created_at r)
+     :used-at       (:used_at r)
+     :status        (:status r)
+     :owner-pid     (:owner_pid r)
+     :owner-started (:owner_started r)}))
 
 ^:reads (defn ^:export lines
   "Every line in this store, most-recently-used first.
@@ -598,11 +596,16 @@
 
   There is deliberately no line-less arity. A default would answer for the
   trunk without saying so, which is the failure this whole layer exists to
-  prevent; every caller resolves its line where a reader can see it."
+  prevent; every caller resolves its line where a reader can see it.
+
+  **No id counter is loaded.** \"Or nil if empty\" used to be decided by the
+  presence of the `next-id` meta row, which was quietly doing two jobs: it
+  carried the counter AND marked the store as having been persisted at all.
+  Ids are random names now, so the counter is gone and the marker is stated
+  directly — ANY meta row means `write-snapshot!` has run against this file,
+  because it writes the whole field registry on every persist."
   [conn line-id]
-  (when-let [next-id (some-> (jdbc/execute-one!
-                              conn ["SELECT v FROM meta WHERE k = 'next-id'"])
-                             :meta/v Long/parseLong)]
+  (when (seq (jdbc/execute! conn ["SELECT 1 FROM meta LIMIT 1"]))
     (into
      {:namespaces (load-elements conn line-id)
       :deltas     (mapv row->delta
@@ -615,8 +618,7 @@
                                                 WHERE id IN (SELECT id FROM anc)
                                                 ORDER BY seq")
                                         (line-head conn line-id)]))
-      :next-id    next-id
-      
+
       ;; NOT loaded at open. :blobs is a partial cache by design — file-content
       ;; documents the miss and the db fallback owns it, and put-blobs! is
       ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
@@ -644,23 +646,6 @@
   (pos? (or (:next.jdbc/update-count
              (jdbc/execute-one! conn ["DELETE FROM lines WHERE id = ?" line-id]))
             0)))
-
-^:reads (defn ^:export next-id-floor
-  "The id counter the FILE has reached, or nil for a store with no history.
-
-  Ids are minted from the store VALUE (`store/gen-id` counts `:next-id`), and
-  `deltas.id` is UNIQUE across the whole journal — so the counter is a
-  property of the FILE while the value holding it belongs to one line. Any
-  value that stopped counting re-mints ids another line has already used, and
-  that is not a lost race: it throws.
-
-  This was unreachable while a branch was a separate db file, because two
-  lines could not share a UNIQUE index. It became reachable the moment they
-  shared a journal, and the protection that used to cover the equivalent case
-  — two SERVERS on one line, serialized by the write CAS — is exactly what
-  per-line CAS deliberately removed between lines."
-  [conn]
-  (some-> (get-meta conn "next-id") Long/parseLong))
 
 (defn duplicate-delta-id?
   "Is this SQLException the UNIQUE violation on `deltas.id` — another writer
@@ -739,47 +724,6 @@
     ;; agent was told "commit contention" for what was really a bad statement.
     (catch java.sql.SQLException e
       (if (or (writer-collision? e) (duplicate-delta-id? e)) false (throw e)))))
-
-(defn ^:export adopt-thread!
-  "The thread `agent` is working in on `branch-line-id`, minting one at the
-  branch's HEAD when the agent has none open here.
-
-  Adopt-or-create, keyed by (agent, branch), because that pair is what a
-  private workspace IS. Two agents on one branch must not share a line — that
-  is the isolation the model exists for — and one agent on two branches must
-  not either, or switching branches would drag un-done work across with it.
-  The key is also why nothing needs remembering between sessions: a returning
-  agent asks the same question and gets the same row back.
-
-  It forks at the branch's HEAD, not at the agent's last one, so a thread
-  opened after the branch moved starts from what the branch says NOW. That
-  point is then PINNED for the thread's whole life — the base never moves
-  underneath it, which is what keeps its view stable and its verdict
-  meaningful while work is in progress.
-
-  Only an `open` row is adopted. A landed thread's writes are already on the
-  branch and an abandoned one was discarded deliberately, so re-entering
-  either would resurrect a line whose meaning is settled; the agent gets a
-  fresh one instead.
-
-  Adoption TOUCHES `used_at`. A thread being worked in is current whether or
-  not this session has written to it yet, and `used_at` is the only thing
-  that can say so — a thread that only ever moved on writes would look idle
-  for exactly as long as someone was reading in it."
-  [conn branch-line-id agent]
-  (if-let [id (one-col (jdbc/execute-one!
-                        conn ["SELECT id FROM lines
-                                 WHERE kind = 'thread' AND parent = ? AND agent = ?
-                                   AND status = 'open'
-                               ORDER BY used_at DESC LIMIT 1"
-                              branch-line-id agent]))]
-    (do (jdbc/execute! conn ["UPDATE lines SET used_at = ? WHERE id = ?"
-                             (System/currentTimeMillis) id])
-        id)
-    (create-line! conn {:kind   "thread"
-                        :base   (line-head conn branch-line-id)
-                        :parent branch-line-id
-                        :agent  agent})))
 
 ^:reads (defn ^:export open-threads
   "Every open thread on `branch-line-id`, most-recently-used first.
@@ -932,6 +876,23 @@
                               created_at INTEGER NOT NULL,
                               used_at    INTEGER NOT NULL,
                               status     TEXT NOT NULL)"])
+         ;; The LEASE: which live PROCESS is writing this thread right now.
+         ;; A thread is keyed by (agent, branch) so that one conversation
+         ;; resumed later finds its own un-landed work — which is right, and
+         ;; which also means two processes resuming the SAME conversation key
+         ;; to one row and write it at once, the contention threads exist to
+         ;; abolish. Identity answers "whose work is this"; it cannot answer
+         ;; "who may write it now", and one value could never do both.
+         ;;
+         ;; pid PLUS start time, because pids are reused: the pair identifies
+         ;; a process rather than a slot. Same ADD COLUMN idiom as `parent`
+         ;; and `comment` above — SQLite has no IF NOT EXISTS here, so the
+         ;; throw IS the no-op, and an older store simply has nil owners,
+         ;; which reads as unheld and behaves exactly as it did before.
+         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_pid INTEGER"])
+              (catch java.sql.SQLException _ nil))
+         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_started INTEGER"])
+              (catch java.sql.SQLException _ nil))
          (jdbc/execute! conn [elements-ddl])
          ;; a form OWNS the comment rendered above it (whitespace-is-rendering).
          ;; Same story as `tree` above: SQLite has no ADD COLUMN IF NOT EXISTS,
@@ -1077,57 +1038,129 @@
                        (System/currentTimeMillis) thread-line-id])
     true))
 
-(def ^:export id-block-size
-  "How many ids one reservation hands a session.
+^:reads
+(defn ^:export this-process
+  "This OS process, as `{:pid :started}` — the identity a thread lease is
+  held under.
 
-  Large enough that an ordinary session never comes back — a heavy day on
-  slopp's own store minted about 3,600 — and small enough that the gaps a
-  short-lived session leaves are unremarkable. Ids are ADDRESSES, not a
-  resource: nothing counts them, nothing infers a total from one, and the
-  journal already skips (a milestone at `d37783` followed by one at `d37823`).
-  Spending a block to guarantee disjointness is the trade this makes.
+  Derived rather than minted. A lease has to answer \"is the holder still
+  running\", and only a real process handle can; a UUID in a table can be
+  asked whether it is present, never whether it is alive. `:started` is
+  carried because pids are reused, so the pair identifies a process where
+  the number alone identifies a slot. It is nil on a JVM that will not
+  report a start time, and a nil there makes the lease unverifiable rather
+  than false — see `process-live?`."
+  []
+  (let [h  (java.lang.ProcessHandle/current)
+        si (.orElse (.startInstant (.info h)) nil)]
+    {:pid     (.pid h)
+     :started (some-> ^java.time.Instant si .toEpochMilli)}))
 
-  Exported because it is the UNIT disjointness is measured in: a caller
-  asserting that two sessions hold different ranges has to be able to say how
-  far apart they must be, and a literal repeated in a test is a second
-  declaration of the same number."
-  1000)
+(defn ^:export adopt-thread!
+  "The thread `agent` is working in on `branch-line-id`, minting one at the
+  branch's HEAD when the agent has none open here.
 
-^:reads (defn ^:export reserve-id-block!
-  "Reserve the next disjoint range of ids for this session — `{:start :limit}`,
-  `:limit` EXCLUSIVE.
+  Adopt-or-create, keyed by (agent, branch), because that pair is what a
+  private workspace IS. Two agents on one branch must not share a line — that
+  is the isolation the model exists for — and one agent on two branches must
+  not either, or switching branches would drag un-done work across with it.
+  The key is also why nothing needs remembering between sessions: a returning
+  agent asks the same question and gets the same row back.
 
-  **The FILE allocates, and that is the whole point.** The counter is a
-  property of the journal — `deltas.id` is UNIQUE across all of it — and it
-  used to live in each session's store VALUE, persisted last-writer-wins by
-  whoever wrote next. A session whose line had seen fewer deltas wrote a floor
-  below ids the file already held, and every session after it minted a taken
-  id, was caught as a duplicate, refreshed, and minted the same id again. It
-  locked two live sessions out of writing at once, and neither could land the
-  fix, because the fix lives in the store.
+  It forks at the branch's HEAD, not at the agent's last one, so a thread
+  opened after the branch moved starts from what the branch says NOW. That
+  point is then PINNED for the thread's whole life — the base never moves
+  underneath it, which is what keeps its view stable and its verdict
+  meaningful while work is in progress.
 
-  A reservation removes the sharing rather than guarding it. Two sessions
-  cannot choose the same id because neither was ever holding the other's
-  numbers — a property of the design instead of a check that has to fire.
+  Only an `open` row is adopted. A landed thread's writes are already on the
+  branch and an abandoned one was discarded deliberately, so re-entering
+  either would resurrect a line whose meaning is settled; the agent gets a
+  fresh one instead.
 
-  ONE transaction, so the advance is atomic against every other writer; SQLite
-  serializes writers on the file. A missing or unreadable row floors at 0, so a
-  fresh file allocates from a sane base rather than from nil.
+  **The owner is RECORDED and deliberately NOT acted on.** `owner_pid` /
+  `owner_started` say which process last adopted this line, and `thread_list`
+  reports it as `:held`. Nothing here reads them, and a version that did was
+  reverted on 2026-08-27 the day it shipped.
 
-  **Ids stop being globally ordered across concurrent sessions**, and that is
-  the cost worth stating: A holding `[40000,41000)` can write later than B
-  holding `[41000,42000)` and carry the lower id. Nothing windowing the journal
-  minds — every `since`/`from` walks by IDENTITY (`drop-while #(not= since
-  (:id %))`), never by magnitude, across all fourteen call sites. Anything
-  added later that SORTS by id is reading a total order that no longer exists."
-  [conn]
-  (jdbc/with-transaction [tx conn]
-    (let [start (max 0 (or (some-> (jdbc/execute-one!
-                                    tx ["SELECT v FROM meta WHERE k = 'next-id'"])
-                                   :meta/v Long/parseLong)
-                           0))
-          limit (+ start id-block-size)]
-      (jdbc/execute! tx ["INSERT INTO meta (k,v) VALUES ('next-id', ?)
-                          ON CONFLICT(k) DO UPDATE SET v = excluded.v"
-                         (str limit)])
-      {:start start :limit limit})))
+  It diverted a second LIVE process to a fresh line, to stop two processes
+  resuming one conversation from sharing a thread. Two things were wrong with
+  that. The case it defended is not happening — every live server on this
+  store carries a distinct conversation id, and the duplicate pids that
+  prompted it were a reconnect where the old process had not yet exited. And
+  the case that happens on EVERY session pause is the plugin's Stop hook,
+  which runs `done` through a one-shot process carrying the session's own
+  agent id: a legitimate holder that is not the server, alive for up to its
+  timeout. Diverting there minted a fresh line and left ten changes stranded
+  on the old one, silently, because every write had already reported success.
+
+  The trade was one-sided and pointed the wrong way. Sharing a line costs
+  CONTENTION, which per-line CAS already arbitrates and which this store
+  survived for its whole life. Abandoning one costs WORK, and the agent finds
+  out at a `done` that lands nothing. Keeping the columns costs nothing and
+  `:held` is what made the incident diagnosable at all — so the record stays
+  and the behaviour goes.
+
+  Adoption TOUCHES `used_at`. A thread being worked in is current whether or
+  not this session has written to it yet, and `used_at` is the only thing
+  that can say so — a thread that only ever moved on writes would look idle
+  for exactly as long as someone was reading in it.
+
+  The 4-arity takes the owner explicitly so a test can be a second process
+  without spawning a JVM; the 3-arity — every caller in the store — means
+  \"this process\"."
+  ([conn branch-line-id agent]
+   (adopt-thread! conn branch-line-id agent (this-process)))
+  ([conn branch-line-id agent owner]
+   (let [id   (one-col (jdbc/execute-one!
+                        conn ["SELECT id FROM lines
+                                 WHERE kind = 'thread' AND parent = ? AND agent = ?
+                                   AND status = 'open'
+                               ORDER BY used_at DESC LIMIT 1"
+                              branch-line-id agent]))
+         mine (if id
+                (do (jdbc/execute!
+                     conn ["UPDATE lines SET used_at = ? WHERE id = ?"
+                           (System/currentTimeMillis) id])
+                    id)
+                (create-line! conn {:kind   "thread"
+                                    :base   (line-head conn branch-line-id)
+                                    :parent branch-line-id
+                                    :agent  agent}))]
+     ;; best-effort: a store whose `open!` has not run since the columns
+     ;; shipped has nowhere to write this, and failing to RECORD a lease must
+     ;; never fail the adoption — the record is a diagnostic, not a gate.
+     (try (jdbc/execute! conn ["UPDATE lines SET owner_pid = ?, owner_started = ? WHERE id = ?"
+                               (:pid owner) (:started owner) mine])
+          (catch java.sql.SQLException _ nil))
+     mine)))
+
+^:reads
+(defn ^:export process-live?
+  "Is the process recorded as `pid`/`started` still running?
+
+  This is what lets a lease be a FACT rather than a timeout. `thread_list`
+  promises that nothing reaps a thread on a timer, and a lease that expired
+  after N idle minutes would quietly break that promise for the only thing
+  anybody would notice — the right to write. Asking the operating system
+  costs one syscall and cannot be wrong about a process that is gone.
+
+  A recorded `started` that does not match the live process of that pid means
+  the pid was REUSED and the original is gone, which is the case a bare pid
+  check gets backwards.
+
+  **An unrecorded `started` (nil) counts as LIVE when the pid is present.**
+  Absence of evidence is not evidence the holder died, and the two mistakes
+  are not symmetric: treating a live holder as dead hands two processes one
+  thread, which is the whole defect. Treating a dead one as live costs a
+  fresh thread nobody needed."
+  [pid started]
+  (boolean
+   (when pid
+     (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
+       (and (.isAlive ^java.lang.ProcessHandle h)
+            (or (nil? started)
+                (let [si (.orElse (.startInstant (.info ^java.lang.ProcessHandle h)) nil)]
+                  (or (nil? si)
+                      (= (long started)
+                         (.toEpochMilli ^java.time.Instant si))))))))))

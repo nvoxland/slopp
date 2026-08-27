@@ -333,3 +333,33 @@
    :http/raw true
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
+
+(defn ^{:http/method :get :rest/path "/api/config" :http/auth :public
+        :rest/media-type "application/edn"
+        :rest/request contracts/config-request
+        :rest/response contracts/config-document
+        :http/reads {:doc [:ui/config []]}}
+  config
+  "GET /api/config — how this project is CONFIGURED, as EDN.
+
+  One row per setting, each carrying the capability that OWNS it, so a single
+  page can group by owner without knowing the list of capabilities. That is
+  the reason it is one document rather than one per capability: a page joining
+  four would omit the fifth the day one ships, and `:owner` makes grouping the
+  page's job at no cost.
+
+  `?prefix=http` narrows to a block, matching the segments the keys already
+  have; `?prefix=http.auth` narrows further. A prefix nothing matches answers
+  an EMPTY `:config` rather than everything — a filter that silently stops
+  applying is the one failure that turns a typo into a page nobody questions.
+
+  **A credential family publishes its key and withholds its value**, marked
+  `:secret`. This route is `:public` like its siblings and the registry carries
+  token and client-secret families, so *this is configured and I am not showing
+  you* is the answer a settings page gets. Which families those are is
+  DECLARED, in `capabilities/secret-families`."
+  [req]
+  {:status 200
+   :http/raw true
+   :headers {"Content-Type" "application/edn"}
+   :body (pr-str (:doc (:http/reads req)))})

@@ -619,3 +619,24 @@
             (when (and requires (str/starts-with? n (str capability "-")))
               capability))
           capability-catalog)))
+
+(def ^:export secret-families
+  "Key prefixes whose VALUES are credentials and must never be published.
+
+  Declared as data rather than matched by name, and the difference is the whole
+  point. A denylist of fragments — `token`, `secret`, `password` — has to be
+  updated by whoever adds the next setting, and its failure mode is publishing
+  a credential rather than withholding a boring key. A family declared here is
+  withheld until somebody removes it.
+
+  **This governs the PUBLISHED document, not the store-side tool.**
+  `query_capabilities` runs for an agent that already holds the store and can
+  read the config directly, so redacting there would hide a value from the one
+  reader entitled to it while protecting nothing. `/api/config` answers a
+  REMOTE consumer over a public route, which is a different trust boundary and
+  the only one that needs this.
+
+  What is withheld is the VALUE. The key, its owner, its doc and whether it is
+  SET all still publish — *this is configured and I am not showing you* is a
+  useful answer, and *nothing here* would be a false one."
+  ["http.auth.static." "http.auth.bearer." "http.auth.oidc."])

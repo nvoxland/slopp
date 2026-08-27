@@ -261,3 +261,75 @@
             (str "the turn record must not carry a read fold any more: "
                  (pr-str t)))
         (is (= 1 (:calls t)) (str "and is otherwise untouched: " (pr-str t)))))))
+
+(deftest turn-cost-folds-the-records-that-nothing-has-ever-read
+  ;; `call-timing` has written `:timing` onto every `:turn-end` delta since it
+  ;; shipped, and no surface folds it. Answering "where did the wall clock go"
+  ;; over this store took ~90 minutes of hand-written `query_store` folds on
+  ;; 2026-08-27; it should be one call. Same shape as `rule-telemetry`: a
+  ;; read-only fold over the delta log, no new instrumentation.
+  (let [t1 {:calls 3 :slopp-ms 1000 :outside-ms 2000 :idle-ms 0
+            :elapsed-ms 3000 :slopp-share "33%"
+            :top [{:tool "done" :n 1 :ms 800}
+                  {:tool "query_slice" :n 2 :ms 200}]
+            :refused {:count 1 :pct 33 :by-tool [{:tool "edit_subform" :n 1}]}}
+        t2 {:calls 2 :slopp-ms 500 :outside-ms 500 :idle-ms 10000
+            :elapsed-ms 11000 :slopp-share "50%"
+            :top [{:tool "full_check" :n 2 :ms 500}]
+            :refused {:count 0 :pct 0 :by-tool []}}
+        [s1 _] (store/record-turn (store/empty-store) :turn-end :timing t1)
+        ;; a turn that recorded nothing must not read as a turn that cost zero
+        [s2 _] (store/record-turn s1 :turn-end)
+        [s3 _] (store/record-turn s2 :turn-end :timing t2)
+        c      (telemetry/turn-cost s3)]
+
+    (testing "only measured turns are counted"
+      (is (= 2 (get-in c [:window :turns]))
+          "the un-timed turn is absent, not a zero"))
+
+    (testing "the wall clock splits three ways and stays exhaustive"
+      (is (= 14000 (get-in c [:wall :elapsed-ms])))
+      (is (= 10000 (get-in c [:wall :idle-ms])))
+      (is (= 4000  (get-in c [:wall :active-ms])) "elapsed minus idle")
+      (is (= 1500  (get-in c [:wall :slopp-ms])))
+      (is (= 2500  (get-in c [:wall :outside-ms])))
+      (is (= (get-in c [:wall :elapsed-ms])
+             (+ (get-in c [:wall :slopp-ms])
+                (get-in c [:wall :outside-ms])
+                (get-in c [:wall :idle-ms])))
+          "an unexplained remainder is the bug"))
+
+    (testing "the share is against ACTIVE time, as call-timing takes it"
+      (is (= "37%" (get-in c [:wall :slopp-share]))
+          "1500 of 4000 — a session nobody was in is not time slopp failed to use"))
+
+    (testing "tools rank by what they COST, not by how often they were called"
+      (is (= "done" (:tool (first (:tools c)))) "800ms in one call outranks…")
+      (is (= "query_slice" (:tool (last (:tools c)))) "…200ms in two")
+      (is (= {:tool "full_check" :calls 2 :ms 500 :avg-ms 250}
+             (second (:tools c)))))
+
+    (testing "refusals aggregate across turns"
+      (is (= 5 (get-in c [:calls :total])))
+      (is (= 1 (get-in c [:refused :count])))
+      (is (= 20 (get-in c [:refused :pct])) "1 of 5, over calls not turns")
+      (is (= [{:tool "edit_subform" :n 1}] (get-in c [:refused :by-tool]))))
+
+    (testing "repeats inside ONE ask are ranked by what they COST"
+      ;; the finding this exists for: 114 of 320 full_checks were repeats
+      ;; within a single turn — 7.5 hours of asking the same question twice.
+      ;;
+      ;; Both tools here ran twice in one turn, and only one of them is waste:
+      ;; two reads in an ask is ordinary. Nothing is filtered out, because a
+      ;; cut-off would be a number nobody measured — the ORDER carries the
+      ;; judgement instead, and the expensive one has to come first.
+      (is (= [{:tool "full_check"  :turns 1 :extra 1 :extra-ms 250}
+              {:tool "query_slice" :turns 1 :extra 1 :extra-ms 100}]
+             (:repeats c))
+          "half of each tool's turn cost is attributable to its second run"))
+
+    (testing "since windows to turns AFTER that delta"
+      (let [ids (mapv :id (:deltas s3))
+            c2  (telemetry/turn-cost s3 :since (first ids))]
+        (is (= 1 (get-in c2 [:window :turns]))
+            "only the last timed turn survives the window")))))

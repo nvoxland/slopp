@@ -709,7 +709,7 @@
                         "  [x]\n"
                         "  x)\n"))
       (testing "the must-NOT-flag half — same fixture, two forms earlier"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (empty? (get-in r [:rules :findings])) (pr-str (:rules r)))
           (is (= :green (:status r)) (pr-str (select-keys r [:status :rules])))
           (testing "and it states its population even when clean"
@@ -735,7 +735,7 @@
                           "  \"Hushes.\"\n"
                           "  [x]\n"
                           "  x)\n"))
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= '[fs.quiet] (mapv :ns (get-in r [:rules :findings :namespace-purpose])))
               (pr-str (get-in r [:rules :findings])))
           (is (= :green (:status r))
@@ -750,7 +750,7 @@
                      :prompt "the violation, written once and never touched again")
       (external/done! sess :label "the last episode that will ever see it")
       (testing "full_check names it, red"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= '[fs.core/fetch] (mapv :form (get-in r [:rules :findings :direct-http])))
               (pr-str (:rules r)))
           ;; discriminating: red proves nothing unless every OTHER red-maker is

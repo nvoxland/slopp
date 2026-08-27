@@ -164,18 +164,33 @@
       (is (re-find #":from-b" src)))))
 
 (deftest recreated-fork-path-is-detected-not-swallowed
-  ;; rm -rf fork; cp -r base fork AGAIN: the new copy mints the SAME delta
-  ;; ids as the merged-and-gone old fork. Its work must NOT be silently
-  ;; dropped as "already delivered" — surface an identity error instead.
+  ;; rm -rf fork; cp -r base fork AGAIN. The new copy's work must NOT be
+  ;; silently dropped as "already delivered" — that is corruption, so the
+  ;; merge surfaces an identity error instead.
+  ;;
+  ;; **The collision is now FORCED, and that is the point.** Ids are random,
+  ;; so a recreated fork mints names nothing has seen and its work merges
+  ;; normally: the hazard this guard was written for cannot arise by
+  ;; construction any more. What remains is insurance against a genuine
+  ;; 48-bit collision — rare enough to never plan for, bad enough to keep
+  ;; catching — and insurance nothing exercises is indistinguishable from
+  ;; insurance that does not work. So the test builds the case the world no
+  ;; longer builds for it, rather than passing because it can no longer fail.
   (let [b      (base)
         fork-a (replace! b 'a "(defn a [x] :old-fork-work)")
         m1     (merge/merge-logs b fork-a :from "the-fork-dir")
         main1  (first (merge/record-merge (:store m1) "the-fork-dir" m1))
-        ;; the recreated fork: fresh copy of the SAME base, different work,
-        ;; colliding delta ids
+        ;; the id main1 has already applied from this source
+        delivered (:id (last (:deltas fork-a)))
         fork-b (replace! b 'b "(defn b [x] :new-fork-work)")
-        m2     (merge/merge-logs main1 fork-b :from "the-fork-dir")]
-    (is (:error m2))
+        ;; …worn by DIFFERENT work, which is exactly what a recreated source
+        ;; used to produce for free
+        imposter (let [ds (vec (:deltas fork-b))]
+                   (assoc fork-b :deltas
+                          (conj (pop ds) (assoc (peek ds) :id delivered))))
+        m2     (merge/merge-logs main1 imposter :from "the-fork-dir")]
+    (is (:error m2)
+        "an id we have already merged, carrying content it never had, is refused")
     (is (re-find #"recreated" (:error m2)))))
 
 (deftest move-deltas-replay-order-across-the-merge
@@ -229,7 +244,7 @@
                                       :prompt "their normalize")
         ours   (first (store/remove-form b 'm.core 'c :prompt "we deleted c"))
         r      (merge/merge-logs ours t1)]
-    (is (some? (:next-id (:store r)))
+    (is (map? (:store r))
         "the store survives an all-absent changeset replay")
     (is (re-find #"defn a" (store.render/render-ns (:store r) 'm.core)))))
 
@@ -243,7 +258,7 @@
                         :sources {fid "(defn ty [] 3)"}
                         :prompt "an unmapped cross-line id alias" :at 1})
         r     (merge/merge-logs ours theirs)]
-    (is (some? (:next-id (:store r)))
+    (is (map? (:store r))
         "the store survives an aliased :replace")
     (testing "our aliased form is untouched"
       (is (re-find #"defn b" (store.render/render-ns (:store r) 'm.core))))

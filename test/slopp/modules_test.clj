@@ -1366,7 +1366,7 @@
                    (str "(ns mo.app (:require [mo.core :as core]))\n"
                         "(defn ^:unused-ok use-it \"Uses core.\" [x] (core/shared x))\n"))
       (testing "the must-NOT-flag half — same fixture, one rename earlier"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (nil? (:module-violations r)) (pr-str (:module-violations r)))
           (is (= :green (:status r)) (pr-str r))))
       (testing "the rename that CREATES the violation is not refused"
@@ -1382,7 +1382,7 @@
         (is (re-find #"package-private"
                      (str (edit.modules/module-scan (:store @sess) 'mo.app)))))
       (testing "and full_check names it, red"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= 1 (:count (:module-violations r)))
               (pr-str (:module-violations r)))
           (is (= [{:from-ns 'mo.app :from-var 'use-it

@@ -633,53 +633,6 @@
                   "the fold and the walk are one answer, not two")))))
       (finally (.close conn)))))
 
-(deftest ^:external a-duplicate-delta-id-is-a-lost-race-not-a-fault
-  ;; Ids are minted from a store VALUE and `deltas.id` is UNIQUE across the
-  ;; whole journal, so two lines counting from the same place mint the same id.
-  ;; Per-line CAS deliberately stopped serializing lines against each other —
-  ;; that is the feature — and this is its residue. It is a lost race by every
-  ;; property that matters: another writer took the id, and the loser has to
-  ;; refresh and rebase, which is the path that already exists.
-  ;;
-  ;; It must not be swallowed as a generic SQL fault. `append!` surfaces every
-  ;; other SQLException on purpose, because returning false for a bad statement
-  ;; once told an agent "commit contention" for what was really a broken query.
-  (let [dir  (temp-dir)
-        conn (db/open! dir)]
-    (try
-      (let [s0    (store/ingest (store/empty-store) 'dup.base "(ns dup.base)\n\n(def z 0)\n")
-            trunk (db/trunk-line-id! conn)]
-        (is (true? (db/append! conn s0 (store/deltas s0) ['dup.base] trunk nil)))
-
-        (let [head  (:head (first (filter #(= trunk (:id %)) (db/lines conn))))
-              other (db/create-line! conn {:kind "thread" :base head
-                                           :parent trunk :agent "agent-2"})
-              ;; both lines count from the SAME store value, which is the
-              ;; collision by construction rather than by timing
-              sa    (store/ingest s0 'dup.one "(ns dup.one)\n\n(def a 1)\n")
-              sb    (store/ingest s0 'dup.two "(ns dup.two)\n\n(def b 2)\n")
-              na    (vec (drop (count (store/deltas s0)) (store/deltas sa)))
-              nb    (vec (drop (count (store/deltas s0)) (store/deltas sb)))]
-          (is (= (mapv :id na) (mapv :id nb))
-              "fixture: the two lines really did mint the same delta id")
-          (is (true? (db/append! conn sa na ['dup.one] trunk head)))
-
-          (testing "the second line loses the race rather than throwing"
-            (is (false? (db/append! conn sb nb ['dup.two] other head))))
-
-          (testing "and the loser left nothing behind — the whole write rolled back"
-            (is (nil? (get-in (db/load-store conn other) [:namespaces 'dup.two])))
-            (is (= head (:head (first (filter #(= other (:id %)) (db/lines conn)))))
-                "its head did not move, so the rebase has somewhere to stand"))
-
-          (testing "and rebasing past the file's counter lands"
-            (let [sb2 (store/ingest (assoc s0 :next-id (db/next-id-floor conn))
-                                    'dup.two "(ns dup.two)\n\n(def b 2)\n")
-                  nb2 (vec (drop (count (store/deltas s0)) (store/deltas sb2)))]
-              (is (not= (mapv :id nb) (mapv :id nb2)) "fixture: fresh ids this time")
-              (is (true? (db/append! conn sb2 nb2 ['dup.two] other head)))))))
-      (finally (.close conn)))))
-
 (deftest ^:external an-agent-gets-one-thread-per-branch-and-finds-it-again
   ;; Adoption is keyed by (agent, branch), and every clause of that key is
   ;; load-bearing. "An agent gets a thread" would pass for a system with ONE
@@ -957,125 +910,58 @@
                  reader and a reaper both need it to say"))))
       (finally (.close conn)))))
 
-(deftest ^:external a-shorter-lines-counter-cannot-drag-the-files-id-floor-backwards
-  ;; The id counter is a property of the FILE — `deltas.id` is UNIQUE across
-  ;; the whole journal — and the value holding it belongs to ONE LINE.
-  ;; `write-snapshot!` persisted it last-writer-wins, so a session whose line
-  ;; had seen fewer deltas wrote a LOWER floor than the file had already used.
+(deftest ^:external a-threads-lease-is-recorded-and-never-acted-on
+  ;; The lease says which process last adopted a line. `thread_list` reports
+  ;; it as `:held`, and NOTHING branches on it — a version that did was
+  ;; reverted on 2026-08-27, the day it shipped, and this test is what keeps
+  ;; it reverted.
   ;;
-  ;; Everyone afterwards read that floor, minted an id the journal already
-  ;; held, hit the UNIQUE constraint, was caught as a duplicate, refreshed —
-  ;; and minted the SAME id again. Twelve times, then a throw reading
-  ;; "commit contention on append", which names a race that is not happening.
+  ;; It diverted a second LIVE process to a fresh line. The case that defends
+  ;; against is not happening: every live server on this store carries a
+  ;; distinct conversation id, and the duplicate pids that prompted it were a
+  ;; reconnect where the old process had not yet exited. The case that happens
+  ;; on EVERY session pause is the plugin's Stop hook, which runs `done` from a
+  ;; one-shot process carrying the session's own agent id — a legitimate holder
+  ;; that is not the server. Diverting there stranded ten changes on an
+  ;; abandoned line, silently, because every write had already reported success.
   ;;
-  ;; **It locked two live sessions out of writing at once**, and neither could
-  ;; land the fix, because the fix lives in the store. Measured on this store
-  ;; on 2026-08-27: `meta.next-id` 37863 against `MAX(deltas.id)` d37868, with
-  ;; both open lines counting from the stale value. Nathan raised the floor by
-  ;; hand to break the deadlock.
-  ;;
-  ;; The asymmetry is the whole point and it is why only ONE statement changes:
-  ;; **`next-id` is file-global and every other meta row is per-store**, so
-  ;; last-writer-wins is right for the `meta-fields` loop and wrong here.
-  (let [dir  (temp-dir)
-        conn (db/open! dir)]
+  ;; Sharing a line costs CONTENTION, which per-line CAS arbitrates. Abandoning
+  ;; one costs WORK. That trade is one-sided, so it is made here once and not
+  ;; re-argued at a call site.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        ;; genuinely running, and genuinely not us
+        other (.start (ProcessBuilder. ["sleep" "30"]))]
     (try
-      (let [s0       (assoc (store/ingest (store/empty-store) 'floor.base
-                                          "(ns floor.base)\n\n(def z 0)\n")
-                            :next-id 100)
-            [id1 s1] (store/gen-id s0 "d")
-            [id2 s2] (store/gen-id s1 "d")]
-        (db/persist! conn s2 {:id id1 :op :add :ns 'floor.base :parent nil})
-        (db/persist! conn s2 {:id id2 :op :add :ns 'floor.base :parent id1})
-        (is (= 102 (db/next-id-floor conn))
-            "fixture: the file has reached 102, so 100 and 101 are taken")
+      (let [trunk (db/trunk-line-id! conn)
+            mine  (db/adopt-thread! conn trunk "agent-x")
+            them  {:pid (.pid other) :started nil}]
+        (testing "a live FOREIGN holder does not push anyone onto a new line"
+          (is (= mine (db/adopt-thread! conn trunk "agent-x" them))
+              "same conversation, same thread — the lease is not a gate")
+          (is (= mine (db/adopt-thread! conn trunk "agent-x"))
+              "and this process comes back to the same one after them"))
 
-        ;; a session on a SHORTER line: its own value never counted those two,
-        ;; so the number it persists is behind the file by construction
-        (db/persist! conn s0 {:id "d99" :op :add :ns 'floor.base :parent id2})
+        (testing "but the holder IS recorded, because :held is a diagnostic"
+          (db/adopt-thread! conn trunk "agent-x" them)
+          (let [row (first (filter #(= mine (:id %)) (db/lines conn)))]
+            (is (= (.pid other) (long (:owner-pid row)))
+                "the last adopter is on the row, where thread_list can read it")))
 
-        (testing "the floor does not go backwards"
-          (is (= 102 (db/next-id-floor conn))
-              "a shorter line dragged the file's counter below ids it already holds"))
+        (testing "one thread, not three"
+          (is (= 1 (count (filter #(and (= "thread" (:kind %))
+                                        (= "agent-x" (:agent %))
+                                        (= "open" (:status %)))
+                                  (db/lines conn))))
+              "three adoptions across two processes minted nothing extra")))
 
-        (testing "and the floor still MINTS an id the journal ACCEPTS"
-          ;; the property, rather than the mechanism. A floor that is merely
-          ;; monotonic in the row is not what was lost — a usable id is, and a
-          ;; change that kept the row honest while breaking `gen-id` would pass
-          ;; the assertion above on its own.
-          ;;
-          ;; ROUND-TRIPPED rather than checked for numeric freedom, which is
-          ;; the sharper form of the same idea: what the wedge took away was
-          ;; "an append succeeds", and `deltas.id` is the only thing entitled
-          ;; to say whether an id is free.
-          (let [floor      (db/next-id-floor conn)
-                [minted s] (store/gen-id (assoc s0 :next-id floor) "d")]
-            (is (not (contains? #{id1 id2} minted))
-                (str "the next id off the floor is one the journal already"
-                     " holds: " minted))
-            (db/persist! conn s {:id minted :op :add :ns 'floor.base :parent "d99"})
-            (is (= (inc floor) (db/next-id-floor conn))
-                "the round trip landed and carried the floor with it"))))
-      (finally (.close conn)))))
-
-(deftest ^:external a-session-mints-inside-its-OWN-block-even-after-replaying-anothers
-  ;; Block allocation: the FILE owns the id allocator. A session reserves a
-  ;; disjoint range at open and mints inside it, so two sessions cannot choose
-  ;; the same id — not because a guard caught them, but because neither was
-  ;; ever holding the other's numbers.
-  ;;
-  ;; That replaces a floor every writer had to be honest about. The monotonic
-  ;; `MAX()` upsert stopped a shorter line dragging the floor backwards, and it
-  ;; is still a shared mutable number read by everyone; this removes the
-  ;; sharing.
-  ;;
-  ;; **The hazard is `store/bump-next-id`, and it is why this test exists.**
-  ;; `replay-delta` called it on every FOREIGN delta, so a store value INFERRED
-  ;; its counter from ids it merely observed:
-  ;;
-  ;;   A holds [40000,41000)   B holds [41000,42000) and writes d41500
-  ;;   A replays B's delta → A's counter becomes 41501 → A mints inside B's block
-  ;;
-  ;; Block allocation would have manufactured the exact collision it exists to
-  ;; abolish, and only under concurrency — the shape nobody is watching for.
-  ;;
-  ;; Inference existed BECAUSE the counter was derived from content. Once the
-  ;; file owns the allocator it is not redundant, it is a second source of
-  ;; truth for a value that now has one.
-  (let [dir  (temp-dir)
-        conn (db/open! dir)]
-    (try
-      (let [s0 (store/ingest (store/empty-store) 'block.base "(ns block.base)\n\n(def z 0)\n")
-            a0 (db/reserve-id-block! conn)
-            b0 (db/reserve-id-block! conn)]
-
-        (testing "two reservations are disjoint and ordered"
-          (is (< (:start a0) (:limit a0)) (pr-str a0))
-          (is (>= (:start b0) (:limit a0))
-              (str "B's block overlaps A's: " (pr-str [a0 b0]))))
-
-        (let [sa (assoc s0 :next-id (:start a0))
-              sb (assoc s0 :next-id (:start b0))
-              [ida _] (store/gen-id sa "d")
-              [idb _] (store/gen-id sb "d")]
-
-          (testing "and the ids each mints are different without either checking"
-            (is (not= ida idb) (str ida " " idb)))
-
-          (testing "replaying the OTHER session's delta does not move my counter"
-            ;; the whole finding, as an assertion
-            (let [;; a MARKER op: replay-delta appends it and does nothing else,
-                  ;; which is exactly the branch that called `bump-next-id`.
-                  ;; No content to reconstruct, so the counter is all that is
-                  ;; under test
-                  d       {:id idb :op :done :ns 'block.base}
-                  sa'     (store/replay-delta sa d)
-                  [next _] (store/gen-id sa' "d")]
-              (is (< (:next-id sa') (:limit a0))
-                  (str "replaying a foreign delta pushed this session's counter"
-                       " out of its own block: " (:next-id sa') " limit "
-                       (:limit a0)))
-              (is (not= next idb)
-                  (str "the next id this session mints is one the other session"
-                       " already used: " next))))))
-      (finally (.close conn)))))
+      (testing "liveness still answers honestly — thread_list's :held reads it"
+        (is (true? (db/process-live? (:pid (db/this-process))
+                                     (:started (db/this-process)))))
+        (is (false? (db/process-live? 2147483646 1))
+            "a pid nothing is running is not live")
+        (is (false? (db/process-live? (:pid (db/this-process)) 1))
+            "a MISMATCHED start time means the pid was reused"))
+      (finally
+        (.destroyForcibly other)
+        (.close conn)))))

@@ -712,3 +712,63 @@
                                        "  [_p] [:ul (:http/path api/thing)])\n")))]
         (is (= {} (rules.webapp/page-calls st2))
             (pr-str (rules.webapp/page-calls st2)))))))
+
+(deftest a-CALL-names-the-LITERAL-arguments-the-page-passes
+  ;; Asked for by the store that renders the Pages table, and argued from its
+  ;; own eighteen asks: fourteen pass no literal at all, four pass exactly one
+  ;; — `:depth 2` and `:limit 50` — and **all four are POLICY rather than
+  ;; data**. `:depth 2` because a form page draws its neighbourhood and one hop
+  ;; does not fill it; `:limit 50` sent explicitly AT the endpoint's default,
+  ;; because the screen says "showing 20 of 340" and a silently-applied ceiling
+  ;; is what falsifies that sentence.
+  ;;
+  ;; Neither is visible in the endpoint's contract, in the route, or anywhere
+  ;; else. A reader asking *why does this page fetch two levels* has no other
+  ;; place to look, which is what makes it worth publishing.
+  ;;
+  ;; **A MAP, not a rendered call**, and their reason is structural: the params
+  ;; are PARTIAL by construction. `:id` is a route capture, so it is correctly
+  ;; absent — and `/api/form/:id?depth=2` is therefore not an address anyone
+  ;; can fetch, while looking like one that is a substitution away. The map
+  ;; says *this page always asks with depth 2, and the rest comes from the
+  ;; address*, which is true.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'shop.api
+                             (str "(ns shop.api)\n\n"
+                                  "(def form \"One form.\"\n"
+                                  "  {:http/method :get :http/path \"/api/form/:id\"})\n\n"
+                                  "(def modules \"All.\"\n"
+                                  "  {:http/method :get :http/path \"/api/modules\"})\n"))
+               (store/ingest 'shop.ui
+                             (str "(ns shop.ui (:require [shop.api :as api]\n"
+                                  "                      [slopp.webapp :as webapp]))\n\n"
+                                  "(defn ^{:webapp/path \"/form/:id\"} form-page \"A form.\"\n"
+                                  "  [{:keys [params] :as page}]\n"
+                                  "  [:main (webapp/ask! page api/form {:id (:id params) :depth 2})\n"
+                                  "         (webapp/ask! page api/modules {})])\n")))
+        by (into {} (map (juxt :endpoint identity))
+                 (get (rules.webapp/page-calls st) 'shop.ui/form-page))]
+
+    (testing "a literal argument is published, as READ"
+      ;; an integer, not \"2\" — a consumer comparing it against the endpoint's
+      ;; declared type cannot un-stringify a string
+      (is (= {:depth 2} (:params (by 'shop.api/form)))
+          (pr-str (by 'shop.api/form))))
+
+    (testing "and a RUNTIME argument is not, because it is not a fact about the page"
+      ;; `:id` comes from the address; publishing it would state a value this
+      ;; page does not have
+      (is (not (contains? (:params (by 'shop.api/form)) :id))
+          (pr-str (by 'shop.api/form))))
+
+    (testing "a call with no literals has NO :params key rather than an empty one"
+      ;; fourteen of their eighteen are this. `{}` on every row reads as *this
+      ;; page passes no parameters* rather than *the derivation saw no literal
+      ;; ones*, which is the same absent-not-empty rule :calls itself follows
+      (is (not (contains? (by 'shop.api/modules) :params))
+          (pr-str (by 'shop.api/modules))))
+
+    (testing "and the row still carries what it always did"
+      (is (= {:endpoint 'shop.api/modules :method :get :path "/api/modules"}
+             (by 'shop.api/modules))
+          (pr-str (by 'shop.api/modules))))))

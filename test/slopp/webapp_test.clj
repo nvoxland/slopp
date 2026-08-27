@@ -1550,3 +1550,110 @@
       (let [m (msg {:webapp/state (atom {}) :webapp/routes (fn [_path] nil)})]
         (is (re-find #"not a function" (str m)) (pr-str m))
         (is (not (re-find #"never going to get one" (str m))) (pr-str m))))))
+
+(deftest a-load-that-RESOLVES-renders-through-the-render-attached-AFTER-wiring
+  ;; Nathan loaded the hub. The white page was gone and it said `Loading…`
+  ;; forever: `/api/projects` answered 200, the load went `:ready`, and the DOM
+  ;; stayed on the loading branch. No console error, because nothing failed.
+  ;;
+  ;; `:webapp/view` is DERIVED, so a browser entry cannot supply a render until
+  ;; after `wiring` — it needs the view to render. But `derived-view` closed
+  ;; over the app map AS IT WAS, so the map a PAGE receives carried the
+  ;; DECLARED render. `ask!` takes its app from the page, `fetch!` from `ask!`,
+  ;; `load!` calls `(render @state)` on it — the declared one. For any store
+  ;; whose entry declares a placeholder render (which is correct for the
+  ;; headless entry) a resolving load rendered into nothing.
+  ;;
+  ;; **Move A is what exposed it**: load-starting moved INTO the render, so the
+  ;; only app in scope became the closure's. Before, `navigate!` and `start!`
+  ;; started loads and were called with the MOUNTED app.
+  ;;
+  ;; **Nothing caught it, and the reason generalises.** Every headless drive is
+  ;; green because `slopp.cljnx` calls the view explicitly on each step and
+  ;; never relies on the render callback — so the browser is the only reader
+  ;; that depends on `:webapp/render`, and it is the only reader nothing can
+  ;; test. The consuming store's own first simulation PASSED and was wrong,
+  ;; because it passed the render INTO the declaration, where the closure sees
+  ;; it. **A fixture that supplies the render as part of the declaration cannot
+  ;; see this**, which is why this one attaches it after.
+  (let [renders (atom [])
+        pending (atom [])
+        state   (atom {})
+        thing   {:http/method :get :http/path "/api/thing"}
+        wired   (webapp/wiring
+                 {:webapp/state  state
+                  :webapp/routes [["/" (fn [page]
+                                         (webapp/ask! page thing {})
+                                         [:main "x"])]]
+                  ;; the placeholder a headless entry correctly declares
+                  :webapp/render (fn [_state] (swap! renders conj :DECLARED))
+                  :webapp/call   (fn [_req ok _err] (swap! pending conj ok))})
+        view    (:webapp/view wired)
+        app     (webapp/with-render! wired (fn [st]
+                                            (swap! renders conj :MOUNTED)
+                                            (view st)))]
+
+    (webapp/start! app "/" "")
+
+    (testing "the page asked, so there is a load in flight to resolve"
+      ;; without this the assertions below pass by never having a callback
+      (is (= 1 (count @pending)) (pr-str @pending)))
+
+    (testing "and when it RESOLVES the mounted render runs, not the declared one"
+      (reset! renders [])
+      ((first @pending) {:names ["a"]})
+      (is (some #{:MOUNTED} @renders)
+          (str "a resolving load rendered through the app captured at WIRING"
+               " time, so the DOM never saw it: " (pr-str @renders)))
+      (is (not (some #{:DECLARED} @renders))
+          (str "the declared placeholder ran instead of the mounted render: "
+               (pr-str @renders))))
+
+    (testing "and the load really did land"
+      ;; the half that makes the above a rendering claim rather than a
+      ;; fetching one — state going :ready was never the broken part
+      (is (= :ready (webapp/load-status @state
+                                        (webapp/load-key nil (endpoint/request thing {}))))
+          (pr-str @state)))))
+
+(deftest the-FAILED-default-names-the-loads-that-actually-failed
+  ;; It read `(:error (:main (:loads state)))`. There is no `:main` load under
+  ;; `ask!` — a load is keyed by the ADDRESS it fetches — so the framework's
+  ;; own fallback rendered an empty `<p>` for every failure, and the consuming
+  ;; store wrote its own rather than use it.
+  ;;
+  ;; Residue of the one-load-per-screen model: `:main` was the name of the load
+  ;; a screen declared, and when a page began asking for as many as it needed
+  ;; the key stopped existing while the reader kept looking for it. A default
+  ;; that renders nothing is worse than no default, because an app that has not
+  ;; thought about failures gets silence instead of something honest.
+  ;;
+  ;; A page can now have SEVERAL loads and only some of them failed, so the
+  ;; default names WHICH — the address is the thing a reader needs and the old
+  ;; one did not print even when it worked.
+  (let [failed (:webapp/failed
+                (webapp/wiring {:webapp/state  (atom {})
+                                :webapp/routes [["/" (fn [_p] [:main "x"])]]}))
+        state  {:loads {[:get "/api/thing"]   {:status :failed
+                                               :error "the endpoint's answer does not match"}
+                        [:get "/api/other"]   {:status :ready :value 1}
+                        [:post "/api/broken"] {:status :failed :error "500"}}}
+        text   (pr-str (failed state))]
+
+    (testing "every failed load's error appears"
+      (is (re-find #"does not match" text) text)
+      (is (re-find #"500" text) text))
+
+    (testing "and each is named by the ADDRESS that failed"
+      ;; a page with several loads renders this once; without the address a
+      ;; reader cannot tell which pane is empty because of which failure
+      (is (re-find #"/api/thing" text) text)
+      (is (re-find #"/api/broken" text) text))
+
+    (testing "a load that SUCCEEDED is not reported as a failure"
+      (is (not (re-find #"/api/other" text)) text))
+
+    (testing "and a state with nothing failed still renders something honest"
+      ;; the default is reached because a PAGE chose to show it, so it must not
+      ;; render an empty element when the page's own reason is not in :loads
+      (is (seq (pr-str (failed {:loads {}})))))))

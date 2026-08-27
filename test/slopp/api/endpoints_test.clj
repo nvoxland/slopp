@@ -32,7 +32,13 @@
         ;; endpoints declare are performed by slopp.api.reads, so a context
         ;; holding only slopp.api.endpoints answers 500 and tests nothing real
         ctx (server/context (atom {:store st}))
-        GET (fn [uri] (slopp.http/handle! ctx {:request-method :get :uri uri}))]
+        GET (fn [uri] (slopp.http/handle! ctx {:request-method :get :uri uri}))
+        ;; the store's OWN id for a form. Ids are random names now, so a
+        ;; literal cannot be written down — and what the literals were pinning
+        ;; survives in a better form: that the outline row carries the address
+        ;; the form ACTUALLY has, checked against the store rather than against
+        ;; a number that merely happened to be stable.
+        fid (fn [ns-sym nm] (:id (store/form-named st ns-sym nm)))]
     (testing "GET /api/namespaces — every namespace, sorted, as JSON data"
       ;; 2, not 1: the `ns` form is a top-level form in the store like any
       ;; other, which is slopp's model rather than an off-by-one. /store has
@@ -56,17 +62,18 @@
                 :tier "external"
                 ;; :form-id is the row's ADDRESS — the outline links to the form
                 ;; page with it, and that page is keyed by id because ids
-                ;; survive an edit and names do not. Asserted EXACTLY: over a
-                ;; fresh empty-store ingest the ids are deterministic, and they
-                ;; are zero-based and store-wide rather than per-namespace.
-                ;; Both facts were guessed wrong first and corrected by this
-                ;; assertion, which is the argument for pinning the value
-                ;; instead of checking that it is a string.
-                :forms [{:name "demo.core" :form-id "f0" :kind "ns" :sig nil
+                ;; survive an edit and names do not. Checked against the STORE's
+                ;; own id rather than a literal: ids are random names now, so
+                ;; "zero-based" has stopped being a fact about them. The two
+                ;; claims worth keeping outlived it — that the row carries the
+                ;; address the form really has (this assertion), and that ids
+                ;; are store-wide rather than per-namespace (asserted below by
+                ;; disjointness, which needs no determinism to state).
+                :forms [{:name "demo.core" :form-id (fid 'demo.core 'demo.core) :kind "ns" :sig nil
                          :private? false :doc nil :schema nil
                          :mass 3 :calls [] :callers-out 0 :callers-out-test 0
                          :effectful? false :exported? false}
-                        {:name "hello" :form-id "f1" :kind "defn" :sig ["[x]"]
+                        {:name "hello" :form-id (fid 'demo.core 'hello) :kind "defn" :sig ["[x]"]
                          :private? false :doc "Says hi." :schema nil
                          ;; (defn hello "Says hi." [x] x) — seven sexpr nodes,
                          ;; and the docstring is ONE of them however long it
@@ -85,6 +92,20 @@
             "nothing tests this fixture, and that reports as an empty list rather
              than a missing key — the page should be able to SAY untested")
         (is (m/validate contracts/ns-outline (:body r)))))
+    (testing "a form id is STORE-WIDE, not per-namespace"
+      ;; The second half of what the old literal ids pinned. It used to be
+      ;; visible in the numbers — demo.util starting at f3 rather than at f0 —
+      ;; and random names cannot show it. Stated directly instead: no id is
+      ;; reused across namespaces, which is what makes an id a permalink and
+      ;; is the fact that was guessed wrong before anything asserted it.
+      (let [ids (fn [ns-nm] (->> (:body (GET (str "/api/ns/" ns-nm)))
+                                 :forms (map :form-id) set))
+            a   (ids "demo.core")
+            b   (ids "demo.util")]
+        (is (= 2 (count a)))
+        (is (= 2 (count b)))
+        (is (not-any? a b)
+            "two namespaces ingested into one store share no form id")))
     (testing "a form with no docstring carries an explicit nil, not a missing key"
       ;; :maybe in the contract is the promise; this is the promise being kept
       (let [r (GET "/api/ns/demo.util")]
@@ -93,11 +114,11 @@
                 ;; ids continue across the second ingest rather than restarting per
                 ;; namespace — a form id is store-wide, which is what makes it
                 ;; a permalink
-                :forms [{:name "demo.util" :form-id "f3" :kind "ns" :sig nil
+                :forms [{:name "demo.util" :form-id (fid 'demo.util 'demo.util) :kind "ns" :sig nil
                          :private? false :doc nil :schema nil
                          :mass 3 :calls [] :callers-out 0 :callers-out-test 0
                          :effectful? false :exported? false}
-                        {:name "undocumented" :form-id "f4" :kind "defn" :sig ["[x]"]
+                        {:name "undocumented" :form-id (fid 'demo.util 'undocumented) :kind "defn" :sig ["[x]"]
                          :private? false :doc nil :schema nil
                          :mass 6 :calls [] :callers-out 0 :callers-out-test 0
                          :effectful? false :exported? false}]
@@ -278,7 +299,8 @@
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
                "/api/search"
-               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"}
+               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
+                 "/api/config"}
              (set (keys by-path)))))
 
     (testing "every capability's publisher is IN the typed document, so a
@@ -370,7 +392,7 @@
           ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
                    "modules" "module" "search"
-                   "rest-paths" "http-paths" "webapp-paths"}
+                   "rest-paths" "http-paths" "webapp-paths" "config"}
                  (set (:wrappers out)))
               (pr-str out)))
 
@@ -999,7 +1021,12 @@
                               "(ns demo.core)\n\n(defn hello \"Says hi.\" [x] x)\n")
                 (store/ingest 'demo.util "(ns demo.util)\n\n(defn undocumented [x] x)\n"))
         ctx (server/context (atom {:store st}))
-        GET (fn [path] (slopp.rest/call ctx {:method :get :path path}))]
+        GET (fn [path] (slopp.rest/call ctx {:method :get :path path}))
+        ;; the form page is addressed by ID, and ids are random names — so the
+        ;; path has to be built from the store rather than written down. A
+        ;; literal here would 404, and a 404 in this list reads as "the
+        ;; endpoint broke its contract" rather than "the test lost the address".
+        hello-id (:id (store/form-named st 'demo.core 'hello))]
 
     (testing "every endpoint a bare store can answer honours its own contract"
       ;; EVERY endpoint a bare store can answer, not a sample. Exhaustive over
@@ -1014,7 +1041,7 @@
                     "/api/modules"
                     "/api/timeline"
                     "/api/search?q=hello"
-                    "/api/form/f1"
+                    (str "/api/form/" hello-id)
                     "/api/source/demo.core/hello"
                     "/api/module/demo.core"]]
         (let [r (GET path)]

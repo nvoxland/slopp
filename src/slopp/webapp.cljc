@@ -809,9 +809,12 @@
   identity by default).
 
   Three STATE SCREENS, all `(fn [state] hiccup)` and all defaulted, for the
-  three moments a screen cannot render against: `:webapp/not-found` (no row
-  matched), `:webapp/loading` (the `:main` load is out) and `:webapp/failed` (it
-  failed). Defaulted rather than left blank because slopp knows which state it
+  three moments a page cannot render against: `:webapp/not-found` (no row
+  matched), `:webapp/loading` (something it asked for is still out) and
+  `:webapp/failed` (something it asked for failed — the default names every
+  failed load by the address that failed). The framework renders only
+  `not-found` itself; a PAGE decides when the other two apply, because only it
+  knows which of its loads it is waiting on. Defaulted rather than left blank because slopp knows which state it
   is in, and a blank pane is indistinguishable from a screen whose content is
   empty. Declaring one replaces the copy; deciding WHERE it sits is chrome's,
   and [[derived-view]] says why that line falls there.
@@ -852,7 +855,7 @@
                   :webapp/not-found :webapp/loading :webapp/failed
                   :webapp/render :webapp/push-url! :webapp/call
                   :webapp/request-for :webapp/act :webapp/actions
-                  :webapp/address-keys :webapp/boot
+                  :webapp/address-keys :webapp/boot :webapp/check-response
                   :webapp/url-for :webapp/leave!}
         ;; RETIRED, each carrying its own migration rather than being reported
         ;; as a typo. Both received the SCREEN and cased on it
@@ -995,10 +998,32 @@
                 ;; these by hand, which is the evidence that defaulting them is not
                 ;; picking somebody's spinner
                 :webapp/loading      (fn [_state] [:p [:small "Loading…"]])
+                ;; every FAILED load, named by the address that failed. It read
+                ;; `(:error (:main (:loads state)))` — residue of the model
+                ;; where a screen declared exactly one load called `:main`. A
+                ;; load is keyed by its ADDRESS now and a page asks for as many
+                ;; as it needs, so that key stopped existing while the reader
+                ;; went on looking for it: the framework's own fallback
+                ;; rendered an empty `<p>` for every failure, and the first
+                ;; real app wrote its own rather than use it.
+                ;;
+                ;; The ADDRESS is the half the old one could not print even
+                ;; when it worked. A page showing this has several loads and
+                ;; only some of them failed; which is exactly what a reader
+                ;; needs and what an app should not have to write again.
                 :webapp/failed       (fn [state]
-                                       [:div
-                                        [:h1 "Could not load"]
-                                        [:p (str (:error (:main (:loads state))))]])
+                                       (let [bad (for [[[method url] entry] (:loads state)
+                                                       :when (= :failed (:status entry))]
+                                                   [:p (str (name (or method :get)) " " url
+                                                            " — " (:error entry))])]
+                                         [:div
+                                          [:h1 "Could not load"]
+                                          (if (seq bad)
+                                            (vec (cons :div bad))
+                                            ;; reached because a PAGE chose to
+                                            ;; show it, so silence here would
+                                            ;; be the same defect one step on
+                                            [:p "No load is in a failed state."])]))
                 ;; a headless drive cannot LEAVE — there is no page to hand back
                 ;; to — so the default is the no-op `push-url!` gets, and a test
                 ;; that cares about the switcher supplies a recorder
@@ -1035,18 +1060,49 @@
         ;; the VIEW is derived last, from the parts above, and put where the
         ;; driver and the browser entry both already look for it. One producer:
         ;; a headless drive and a real page render the same function
-        (as-> a (let [view (derived-view a)]
-                  (cond-> (assoc a :webapp/view view)
-                    ;; the DEFAULT render runs the view, and that is not a
-                    ;; convenience: a page ASKS for its data while rendering, so
-                    ;; a no-op render is an app that never fetches anything. In
-                    ;; a page the browser entry overrides this with one that
-                    ;; mounts the result; headless it runs the same view, which
-                    ;; is the rule this capability keeps re-learning — anything
-                    ;; a page load does, a headless drive does too, out of one
-                    ;; producer.
-                    (not (contains? app :webapp/render))
-                    (assoc :webapp/render (fn [state] (view state) nil))))))))
+        (as-> a ;; **The render is an INDIRECTION, and the knot is why.**
+              ;; `:webapp/view` is DERIVED from the app, and a browser entry's
+              ;; render needs the view — so it can only be attached AFTER
+              ;; wiring, while `derived-view` has already closed over the map.
+              ;; A page therefore received the app as it WAS, and a load
+              ;; resolving through it called the render that map carried: the
+              ;; placeholder a headless entry correctly declares. State went
+              ;; `:ready`, the DOM stayed on the loading branch, nothing threw,
+              ;; and a real hub said `Loading…` forever.
+              ;;
+              ;; ONE cell, here, rather than the ordering trick at every mount.
+              ;; The fn stored under `:webapp/render` never changes, so every
+              ;; holder of this map — including the pages the view closed over
+              ;; — resolves to whatever [[with-render!]] last installed.
+              ;;
+              ;; Precedence is INSTALLED > DECLARED > default, the same
+              ;; direction `slopp.webapp.dom/mount!` states for every other
+              ;; plug-in: the effects are not the app's to supply.
+              (let [installed (atom nil)
+                    derived   (atom nil)
+                    ;; the APP's own, not the merged map's — the defaults above supply a
+                    ;; no-op `:webapp/render`, so reading `a` here makes every
+                    ;; app look like it declared one and no page ever runs
+                    declared  (when (contains? app :webapp/render)
+                                (:webapp/render app))
+                    ;; the DEFAULT runs the view, and that is not a
+                    ;; convenience: a page ASKS for its data while rendering,
+                    ;; so a no-op render is an app that never fetches
+                    ;; anything. Headless runs the same view a page does,
+                    ;; which is the rule this capability keeps re-learning —
+                    ;; anything a page load does, a headless drive does too,
+                    ;; out of one producer.
+                    render    (fn [state]
+                                (cond
+                                  @installed (@installed state)
+                                  declared   (declared state)
+                                  :else      (when-let [v @derived] (v state) nil)))
+                    wired     (assoc a
+                                     :webapp/render render
+                                     :webapp/render-cell installed)
+                    view      (derived-view wired)]
+                (reset! derived view)
+                (assoc wired :webapp/view view))))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []} [:cat :int :any] [:tuple :keyword :any]]}
@@ -1283,7 +1339,34 @@
   (when request
     (load! app key
            (fn [ok err] (call (addressed base request) ok err))
-           {:xform (:derive spec) :check (:check spec)})))
+           ;; the DESCRIPTOR's own contract is the default check. `endpoint/request`
+           ;; copies `:rest/response` onto the request, and this used to pass
+           ;; only `spec`'s — so the response half of an endpoint travelled to
+           ;; the door and was discarded, leaving validation with no hook at all
+           ;; on the page path. A caller's explicit `:check` still wins.
+           ;; the DESCRIPTOR's own contract is checked when somebody SUPPLIED a
+           ;; checker. `endpoint/request` copies `:rest/response` onto the
+           ;; request and this used to pass only `spec`'s, so the response half
+           ;; of an endpoint travelled to the door and was discarded.
+           ;;
+           ;; The checker is not built here, and that is a bundle decision
+           ;; rather than a layering one. Validating means CALLING malli, and
+           ;; this namespace is `:cljc` — measured, that put 555 KB into every
+           ;; browser bundle, including apps that declare no contract, for a
+           ;; promise the server already keeps before the bytes leave
+           ;; (`http.dispatch` checks every response under `rest/validating`).
+           ;;
+           ;; So `slopp.cljnx/driver-for` installs it for a HEADLESS drive,
+           ;; where malli is already on the classpath and free — and where it
+           ;; catches the case a browser check never sees: a canned FIXTURE
+           ;; that has drifted from the contract it claims to exercise. A
+           ;; browser app talking to a THIRD-PARTY api, which nothing
+           ;; slopp-side validates, supplies its own `:check`.
+           {:xform (:derive spec)
+            :check (or (:check spec)
+                       (when-let [schema (:rest/response request)]
+                         (when-let [f (:webapp/check-response app)]
+                           (fn [value] (f schema value)))))})))
 
 (defn- begin!
   "Boot the app, returning the state that leaves.
@@ -1508,3 +1591,36 @@
   (swap! (:webapp/state page) update :loads dissoc
          (load-key (:webapp/base page) (endpoint/request descriptor params)))
   nil)
+
+(defn ^:export with-render!
+  "`app` with `render` installed as the one the whole app renders through —
+  returns the same app, so a caller may use either value.
+
+  **This exists because `assoc` cannot do it, and looks like it can.** A
+  browser entry's render needs `:webapp/view`, which [[wiring]] DERIVES — so
+  the render can only be built after wiring, by which time `derived-view` has
+  closed over the app map. `(assoc wired :webapp/render f)` produces a map the
+  entry holds and the PAGES do not: they were handed the map the closure
+  captured, so a load resolving inside a page rendered through whatever that
+  map carried.
+
+  For a store whose entry declares a placeholder render — correct for the
+  headless entry, and what `page/page` does — that meant a resolving load
+  rendered into nothing. State went `:ready`, the DOM stayed on the loading
+  branch, no error was raised because nothing failed, and a real hub said
+  `Loading…` forever with a 200 in the network pane.
+
+  So [[wiring]] stores an INDIRECTION under `:webapp/render` and this resets
+  the cell behind it. Every holder of the map resolves to the same installed
+  fn, whenever it was attached.
+
+  **It OVERRIDES a declared render**, like every other effect the browser entry
+  supplies. An app that rendered itself would be a second render loop, and the
+  headless drive would exercise neither.
+
+  Called by `slopp.webapp.dom/mount!`, and by any store that owns its own
+  mount — which is the case that has to reach for it, because such a store
+  gets no generated entry and is wiring the app by hand."
+  [app render]
+  (reset! (:webapp/render-cell app) render)
+  app)

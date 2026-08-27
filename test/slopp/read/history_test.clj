@@ -84,3 +84,70 @@
         (is (nil? (:verification-ms e2)))
         (is (= {:with-cost 0 :of 1} (:measured e2)))
         (is (= 0 (:cycles e2)))))))
+
+(deftest a-whole-store-verdict-stands-until-something-could-have-changed-it
+  ;; `query_cost` over this store: 325 full_checks at ~236s, and 117 of them
+  ;; were REPEATS inside a single ask — 7.6 hours spent re-asking a question
+  ;; already answered. `commit_point` has always returned an unchanged
+  ;; milestone rather than re-minting one; this is the same courtesy for the
+  ;; most expensive operation slopp performs.
+  ;;
+  ;; The predicate is deliberately CONSERVATIVE. It is not "no form changed" —
+  ;; a `:config-put` can arm a rule, a `:module-edge` changes layering, a
+  ;; `:deps-add` changes the manifest, and each of those can flip a verdict
+  ;; without touching a form. So only provably inert bookkeeping is ignored
+  ;; and anything else, INCLUDING an op this set has never heard of, means
+  ;; re-run. Absence of evidence is not agreement.
+  (let [green {:scope :full-check :status :green :ms 236000 :namespaces 237}
+        chk   {:id "d1" :op :verify :result green}]
+
+    (testing "nothing since the check — the verdict stands"
+      (is (= green (history/standing-full-check
+                    {:deltas [{:id "d0" :op :add} chk]}))))
+
+    (testing "only bookkeeping since — it still stands"
+      ;; a done, a turn boundary and the check's own observations change
+      ;; nothing a whole-store sweep would look at
+      (is (= green (history/standing-full-check
+                    {:deltas [chk
+                              {:id "d2" :op :done}
+                              {:id "d3" :op :turn-end}
+                              {:id "d4" :op :observe}
+                              {:id "d5" :op :read-cost}]}))))
+
+    (testing "a form changed — nothing stands"
+      (is (nil? (history/standing-full-check
+                 {:deltas [chk {:id "d2" :op :replace :ns 'a.core}]}))))
+
+    (testing "a DECLARATION changed — nothing stands either"
+      ;; the case a forms-only predicate would get wrong: no form moved, and
+      ;; the sweep's answer can still differ
+      (is (nil? (history/standing-full-check
+                 {:deltas [chk {:id "d2" :op :config-put}]})))
+      (is (nil? (history/standing-full-check
+                 {:deltas [chk {:id "d2" :op :module-edge}]})))
+      (is (nil? (history/standing-full-check
+                 {:deltas [chk {:id "d2" :op :deps-add}]}))))
+
+    (testing "an op nobody has classified means RE-RUN"
+      ;; the safe direction: a new delta kind must not silently inherit
+      ;; "cannot affect the verdict"
+      (is (nil? (history/standing-full-check
+                 {:deltas [chk {:id "d2" :op :some-future-op}]}))))
+
+    (testing "no whole-store check in this history at all"
+      (is (nil? (history/standing-full-check {:deltas [{:id "d1" :op :add}]})))
+      (is (nil? (history/standing-full-check {:deltas []}))))
+
+    (testing "an EPISODE-scoped verify is not a whole-store verdict"
+      ;; done writes :verify too, and its scope is the episode — reading one
+      ;; of those as standing would report coverage that never happened
+      (is (nil? (history/standing-full-check
+                 {:deltas [{:id "d1" :op :verify :result {:status :green}}]}))))
+
+    (testing "the LATEST whole-store check is the one that stands"
+      (let [red {:scope :full-check :status :red :ms 1}]
+        (is (= green (history/standing-full-check
+                      {:deltas [{:id "d1" :op :verify :result red}
+                                {:id "d2" :op :replace}
+                                chk]})))))))

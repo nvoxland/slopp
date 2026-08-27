@@ -1865,3 +1865,55 @@
         (is (re-find #"fixture things" (cljnx/text s nil {:detail :prose}))
             "the page marked with this address rendered, and no table named it"))
       (finally (remove-ns (ns-name nsx))))))
+
+(deftest a-DRIVEN-page-checks-its-canned-answer-against-the-published-contract
+  ;; `endpoint/request` copies `:rest/response` onto the request and `ask!`
+  ;; dropped it, so response validation had no hook on the page path at all.
+  ;;
+  ;; **It is checked HERE rather than in the page, and that is a bundle
+  ;; decision.** Validating means calling malli, and `slopp.webapp` is `:cljc`
+  ;; — measured, that put 555 KB into every browser bundle, charged to apps
+  ;; declaring no contract as much as to those that do, for a promise the
+  ;; server already keeps before the bytes leave. On this side malli is on the
+  ;; classpath already and costs nothing.
+  ;;
+  ;; And this side catches what a browser check never sees: a canned FIXTURE
+  ;; that has drifted from the contract it claims to exercise. Every bug the
+  ;; only real browser app found this week came from a fixture quietly
+  ;; bypassing the machinery it was supposed to be driving.
+  (let [thing {:http/method   :get
+               :http/path     "/api/thing"
+               :rest/response [:map [:name :string]]}
+        app   (fn [answer]
+                {:webapp/state  (atom {})
+                 :webapp/routes [["/" (fn [page]
+                                        (let [r (slopp.webapp/ask! page thing {})]
+                                          [:main (str (:status r) " "
+                                                      (:error r))]))]]
+                 :webapp/call   (fn [_req ok _err] (ok answer))})]
+
+    (testing "an answer that HONOURS the contract renders ready"
+      (let [s (cljnx/open! (cljnx/driver-for (app {:name "a"})) "/")]
+        (is (re-find #"ready" (cljnx/text s nil {:detail :prose})))))
+
+    (testing "and one that BREAKS it fails the load, naming the contract"
+      ;; the fixture a page would otherwise render as though it were what the
+      ;; endpoint promised
+      (let [s (cljnx/open! (cljnx/driver-for (app {:name 42})) "/")
+            t (cljnx/text s nil {:detail :prose})]
+        (is (re-find #"failed" t) t)
+        (is (re-find #"(?i)contract" t)
+            (str "the failure must say a promise was broken rather than read"
+                 " as a transport error: " t))))
+
+    (testing "an app that declares its OWN checker keeps it"
+      ;; the driver fills a gap and never overrides — an app with a reason to
+      ;; check differently, or not at all, says so
+      (let [seen (atom [])
+            own  (assoc (app {:name 42})
+                        :webapp/check-response
+                        (fn [_schema _value] (swap! seen conj :MINE) nil))
+            s    (cljnx/open! (cljnx/driver-for own) "/")]
+        (is (= [:MINE] @seen) (pr-str @seen))
+        (is (re-find #"ready" (cljnx/text s nil {:detail :prose}))
+            "the app's own checker accepted it and the driver's did not run")))))

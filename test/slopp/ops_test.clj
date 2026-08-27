@@ -1061,7 +1061,7 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'fc.core "(ns fc.core)\n\n(defn ^:export f \"F.\" [] 1)\n")
-      (let [r (external/full-check! sess)
+      (let [r (external/run-full-check! sess)
             c (:checked r)]
         (testing "the fixture is a real store — every count below is 0 on an
                   empty one, which would satisfy the shape while proving nothing"
@@ -2123,3 +2123,39 @@
         (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
         (is (not (contains? got "slopp/http.clj"))
             (str "a prerequisite nobody declared: " (pr-str (keys got))))))))
+
+(deftest ^:external a-whole-store-verdict-is-returned-rather-than-re-earned
+  ;; The fold behind this is unit-tested in read.history-test; what is pinned
+  ;; here is that `full_check` CONSULTS it, and that the two escapes work —
+  ;; because an escape nothing exercises is the same as no escape.
+  ;;
+  ;; Worth the JVM boots this test costs: over this store's own journal,
+  ;; `full_check` ran 325 times and 117 of those were repeats inside a single
+  ;; ask, which is 7.6 hours of re-earning an answer that already stood.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'sc.core "(ns sc.core)\n\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+
+      (testing "the first ask is a real run"
+        (let [r (external/full-check! sess)]
+          (is (nil? (:standing r)) (pr-str (dissoc r :lint :warnings)))
+          (is (some? (:status r)))))
+
+      (testing "asked again with nothing changed, the verdict STANDS"
+        (let [r (external/full-check! sess)]
+          (is (true? (:standing r)) (pr-str (dissoc r :lint :warnings)))
+          (is (some? (:status r)) "and it is a verdict, not an excuse")
+          (is (re-find #"STANDS" (str (:note r)))
+              "the reader is told why no check ran")))
+
+      (testing "force re-earns it"
+        (let [r (external/full-check! sess :force true)]
+          (is (nil? (:standing r)) "a forced ask is a real run")))
+
+      (testing "and any write retires it"
+        ;; the whole predicate in one assertion: after a change, the next ask
+        ;; is a real run again rather than a stale green
+        (ops/ingest! sess 'sc.more "(ns sc.more)\n\n(defn ^:unused-ok g \"G.\" [x] x)\n")
+        (let [r (external/full-check! sess)]
+          (is (nil? (:standing r)) (pr-str (dissoc r :lint :warnings)))))
+      (finally (ops/close! sess)))))

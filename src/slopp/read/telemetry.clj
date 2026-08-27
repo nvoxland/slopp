@@ -271,3 +271,98 @@
   consumer driven by background events — produced rows that could not be
   compared. Rows of two hundred calls are the same unit everywhere."
   200)
+
+(defn ^:export turn-cost
+  "Where this store's wall clock went, folded READ-ONLY over the delta log —
+  no new instrumentation: `call-timing` has been writing `:timing` onto every
+  `:turn-end` since it shipped. Optional `:since` (a delta id) windows to
+  turns AFTER it.
+
+  Returns `{:window :wall :calls :refused :tools :repeats}`.
+
+  **The three-way split is the point, and it is exhaustive.** `:slopp-ms` is
+  time inside a tool, `:idle-ms` is the session nobody was in, and
+  `:outside-ms` is everything else — agent reasoning, every non-slopp tool,
+  the harness — which the server cannot tell apart and does not pretend to.
+  `:slopp-share` is taken against ACTIVE time (elapsed minus idle), because a
+  share against elapsed makes a human going to bed look like time slopp
+  failed to use.
+
+  `:repeats` names a tool run more than once inside ONE ask, which is the
+  question a per-tool total cannot answer: a hundred cheap calls and two
+  expensive ones look alike in a sum, and only one of them is waste. It
+  exists because a first reading of this store found 114 of 320 `full_check`
+  runs were repeats within a single turn — the same whole-store question
+  asked twice, at about four minutes each.
+
+  Ranked by `:extra-ms`, the cost attributable to the runs beyond the first,
+  and NOT filtered. Two reads in one ask is ordinary and two whole-store
+  checks is four minutes wasted; a cut-off that separated them would be a
+  number nobody measured, so the order carries the judgement and the cheap
+  repeats sink to the bottom where they cost the reader nothing.
+
+  **`:tools` is a LOWER BOUND, and knowingly.** `call-timing` keeps only the
+  five costliest tools per turn, so a tool that is never in a turn's top five
+  contributes nothing here however often it ran. That biases the ranking
+  toward expensive tools — which is the direction this fold is read in, so it
+  is reported rather than corrected, but a total here is not a census and a
+  cheap tool's absence is not evidence it was not called.
+
+  A turn with no `:timing` is ABSENT rather than zero: nothing was measured,
+  which is a different fact from nothing having been spent."
+  [store & {:keys [since]}]
+  (let [deltas  (:deltas store)
+        window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
+        ts      (keep :timing window)
+        sum     (fn [k] (reduce + 0 (keep k ts)))
+        elapsed (sum :elapsed-ms)
+        idle    (sum :idle-ms)
+        active  (- elapsed idle)
+        in      (sum :slopp-ms)
+        calls   (sum :calls)
+        refused (sum (comp :count :refused))
+        tally   (fn [rows key-fn val-fn]
+                  (reduce (fn [m r] (update m (key-fn r) (fnil + 0) (val-fn r)))
+                          {} rows))]
+    {:window  {:turns (count ts) :since (or since :all)}
+     :wall    {:elapsed-ms elapsed
+               :idle-ms    idle
+               :active-ms  active
+               :slopp-ms   in
+               :outside-ms (sum :outside-ms)
+               :slopp-share (str (int (* 100 (/ in (double (max 1 active))))) "%")}
+     :calls   {:total calls}
+     :refused {:count   refused
+               :pct     (int (* 100 (/ refused (double (max 1 calls)))))
+               :by-tool (->> (mapcat (comp :by-tool :refused) ts)
+                             (#(tally % :tool :n))
+                             (map (fn [[t n]] {:tool t :n n}))
+                             (sort-by (juxt (comp - :n) :tool))
+                             vec)}
+     :tools   (let [rows (mapcat :top ts)
+                    ms   (tally rows :tool :ms)
+                    n    (tally rows :tool :n)]
+                (->> (keys ms)
+                     (map (fn [t]
+                            {:tool t :calls (n t) :ms (ms t)
+                             :avg-ms (long (/ (ms t) (max 1 (n t))))}))
+                     (sort-by (juxt (comp - :ms) :tool))
+                     vec))
+     :repeats (let [rows (mapcat #(filter (fn [x] (> (:n x) 1)) (:top %)) ts)]
+                (->> (group-by :tool rows)
+                     (map (fn [[t xs]]
+                            {:tool     t
+                             :turns    (count xs)
+                             :extra    (reduce + 0 (map #(dec (:n %)) xs))
+                             ;; what the repeats COST, which is the whole
+                             ;; question: two reads in one ask is ordinary, two
+                             ;; whole-store checks is four minutes of asking
+                             ;; the same thing twice. Ranked rather than
+                             ;; filtered — a threshold here would be a number
+                             ;; nobody measured.
+                             :extra-ms (long (reduce + 0 (map #(* (:ms %)
+                                                                  (/ (dec (:n %))
+                                                                     (double (:n %))))
+                                                              xs)))}))
+                     (sort-by (juxt (comp - :extra-ms) :tool))
+                     vec))}))
