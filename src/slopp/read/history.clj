@@ -22,31 +22,6 @@
   (:require [clojure.string :as str]
             [slopp.store :as store] [rewrite-clj.node :as n]))
 
-(defn verify-after
-  "The `:verify` delta a write PRODUCED: the first one at or after `at-id`,
-  since a write is immediately followed by its verification. Nil when none
-  followed.
-
-  Split out because `status-after` and the per-version COST both need it, and
-  asking the same question at two call sites is this codebase's Pattern 2 —
-  four instances, every one found only after two surfaces had already
-  disagreed about the same fact."
-  [store at-id]
-  (->> (store/deltas store)
-       (drop-while #(not= at-id (:id %)))
-       (filter #(= :verify (:op %)))
-       first))
-
-(defn status-after
-  "The verification outcome a delta PRODUCED: the first `:verify` at or after
-  `at-id` (a write is immediately followed by its verify) — :green / :red /
-  :unknown. This is 'did THIS version land green', vs `status-at`'s 'what
-  was the state standing AT this point'."
-  [store at-id]
-  (if-let [r (:result (verify-after store at-id))]
-    (if (zero? (+ (:fail r 0) (:error r 0))) :green :red)
-    :unknown))
-
 (defn ^:export human-time
   "Epoch ms → \"2026-07-04 09:15\" in the local zone (the human rendering of
   a delta's `:at`; agents keep the raw ms in the store)."
@@ -522,6 +497,31 @@
      :asks            (count (distinct (keep #(or (:prompt %) (:turn-intent %)) vs)))
      :verification-ms (when (seq costs) (reduce + costs))
      :measured        {:with-cost (count costs) :of (count vs)}}))
+
+(defn verify-after
+  "The `:verify` delta a write PRODUCED: the first one at or after `at-id`,
+  since a write is immediately followed by its verification. Nil when none
+  followed.
+
+  Split out because `status-after` and the per-version COST both need it, and
+  asking the same question at two call sites is this codebase's Pattern 2 —
+  four instances, every one found only after two surfaces had already
+  disagreed about the same fact."
+  [store at-id]
+  (->> (store/deltas store)
+       (drop-while #(not= at-id (:id %)))
+       (filter #(= :verify (:op %)))
+       first))
+
+(defn status-after
+  "The verification outcome a delta PRODUCED: the first `:verify` at or after
+  `at-id` (a write is immediately followed by its verify) — :green / :red /
+  :unknown. This is 'did THIS version land green', vs `status-at`'s 'what
+  was the state standing AT this point'."
+  [store at-id]
+  (if-let [r (:result (verify-after store at-id))]
+    (if (zero? (+ (:fail r 0) (:error r 0))) :green :red)
+    :unknown))
 
 (defn ^:export label-ancestors
   "The ancestor prefixes of a `/`-delimited agent label, root-first:

@@ -1829,11 +1829,12 @@
         (is (= (:http/hiccup served) (:body driven))
             "one source, so no second derivation exists to drift")))))
 
-(defn ^{:webapp/path "/cljnx-fixture/things"} fixture-things-page
-  "A page fixture that declares its own address."
-  [_page]
-  [:main [:h1 "fixture things"]])
-
+^{:unsafe "interns a var with no stored form, which is the SUBJECT rather than a
+  shortcut: `marked-pages` scans the loaded IMAGE, so proving it finds a marked
+  page needs a loaded var. Writing one at this namespace's top level is what
+  this test replaced — it made a fixture page part of slopp's own published
+  surface, and made it visible to every other driver-for call in this image.
+  The namespace is created and removed inside the test, so nothing outlives it."}
 (deftest a-page-DECLARES-its-address-and-the-entry-declares-no-table
   ;; The last duplicate address in this framework. A page carried
   ;; `^{:webapp/path "/things"}` — which is what a build, a document and a gate
@@ -1855,8 +1856,12 @@
   ;;
   ;; An explicit `:webapp/routes` still WINS, so a test can pin one table
   ;; without the image's opinion of it.
-  (let [state (atom {})
-        d     (cljnx/driver-for {:webapp/state state})
-        s     (cljnx/open! d "/cljnx-fixture/things")]
-    (is (re-find #"fixture things" (cljnx/text s nil {:detail :prose}))
-        "the page marked with this address rendered, and no table named it")))
+  (let [nsx (create-ns 'slopp.fixture-ui)]
+    (try
+      (intern nsx (with-meta 'things-page {:webapp/path "/fixture/things"})
+              (fn [_page] [:main [:h1 "fixture things"]]))
+      (let [d (cljnx/driver-for {:webapp/state (atom {})})
+            s (cljnx/open! d "/fixture/things")]
+        (is (re-find #"fixture things" (cljnx/text s nil {:detail :prose}))
+            "the page marked with this address rendered, and no table named it"))
+      (finally (remove-ns (ns-name nsx))))))

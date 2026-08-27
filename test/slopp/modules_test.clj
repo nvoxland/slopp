@@ -12,62 +12,6 @@
   (is (= "logi.quoting" (edit.modules/module-of 'logi.quoting.internal)))
   (is (= "scratch" (edit.modules/module-of 'scratch))))
 
-(deftest module-edges-are-crdt-grain
-  (let [base    (store/empty-store)
-        [s1 d1] (store/record-module-edge base "b.app" "a.core" :add
-                                          :prompt "app uses core" :agent "t")
-        [s2 d2] (store/record-module-edge s1 "b.app" "a.util" :add)
-        [s3 d3] (store/record-module-edge s2 "b.app" "a.util" :remove)]
-    (testing "the EDGE is the unit: one semantic delta each, state is the fold"
-      (is (= :module-edge (:op d1)))
-      (is (= {:from "b.app" :to "a.core" :action :add}
-             (select-keys d1 [:from :to :action])))
-      (is (= "app uses core" (:prompt d1)) "the why rides the delta")
-      (is (= {"b.app" #{"a.core" "a.util"}} (:modules s2)))
-      (is (= {"b.app" #{"a.core"}} (:modules s3)) "remove folds out"))
-    (testing "replay-delta reconstructs the fold"
-      (is (= (:modules s2) (:modules (store/replay-delta s1 d2))))
-      (is (= (:modules s3) (:modules (store/replay-delta s2 d3)))))
-    (testing "concurrent adds to the SAME module merge as a union — never a conflict"
-      (let [[ours _]   (store/record-module-edge s1 "b.app" "a.util" :add)
-            [theirs _] (store/record-module-edge s1 "b.app" "a.extra" :add)
-            r          (merge/merge-logs ours theirs :from "fork")]
-        (is (empty? (:conflicts r)) (pr-str (:conflicts r)))
-        (is (= #{"a.core" "a.util" "a.extra"}
-               (get-in r [:store :modules "b.app"])))))
-    (testing "a union that closes a cycle still merges — judging it is the CALLER's"
-      ;; merge-logs can only see the DECLARED manifest, where a -test
-      ;; namespace's fixture requires are edges. Warning from here reported
-      ;; a cycle on every merge into slopp's own main that no production
-      ;; code had, advising a retraction that would have broken the very
-      ;; test that created the edge. api.modules/merge-production-cycle
-      ;; judges the production graph instead — and it can only run after
-      ;; the merge has produced a store, which is why it cannot live here.
-      ;; These stores have no namespaces at all, which is the other half of
-      ;; the same point: nothing at this layer knows what production means.
-      (let [[ours _]   (store/record-module-edge base "x.a" "x.b" :add)
-            [theirs _] (store/record-module-edge base "x.b" "x.a" :add)
-            r          (merge/merge-logs ours theirs :from "fork")]
-        (is (empty? (:conflicts r)))
-        (is (= {"x.a" #{"x.b"} "x.b" #{"x.a"}} (:modules (:store r)))
-            "the union lands — CRDT grain is not conditional on acyclicity")
-        (is (not-any? :modules-cycle (:notes r)) (pr-str (:notes r)))))))
-
-(deftest test-namespaces-see-package-private-deep-vars
-  ;; a -test ns folds into the package it tests — for visibility, not just
-  ;; module edges — so package-private deep helpers stay unit-testable.
-  ;; (found dogfooding the deep-module split: without this, moving a
-  ;; test-referenced helper into a deep ns forces a spurious ^:export.)
-  (let [viol (fn [rows] (seq (edit.modules/module-violations {} rows)))
-        row  (fn [from to] {:from-ns from :from-var 'f :to to})]
-    (testing "a -test ns reaches its subject's package-private deep var"
-      (is (nil? (viol [(row 'a.b-test 'a.b.impl)]))
-          "a.b-test folds to a.b, which shares a.b.impl's parent prefix")
-      (is (nil? (viol [(row 'a.b.c-test 'a.b.c.deep)]))
-          "deeper test folds too"))
-    (testing "a genuine foreign module still can't reach it"
-      (is (some #(= :visibility (:rule %)) (viol [(row 'x.y 'a.b.impl)]))))))
-
 (deftest module-rules-are-recursive-and-declared
   (let [viol (fn [manifest rows] (seq (edit.modules/module-violations manifest rows)))
         row  (fn [from to] {:from-ns from :from-var 'f :to to})]
@@ -120,6 +64,128 @@
           "the refusal names the granted subtree"))
     (testing "same-ns rows are exempt"
       (is (nil? (viol {"b.user" #{}} [(row 'b.user 'b.user)]))))))
+
+(deftest ^:external the-module-lifecycle
+  (let [sess (external/open!)]
+    (try
+      (is (nil? (:error (ops/ingest! sess 'ma.core
+                                     "(ns ma.core)\n(defn shared \"Public.\" [x] x)\n"))))
+      (is (nil? (:error (ops/ingest! sess 'ma.core.impl
+                                     (str "(ns ma.core.impl)\n"
+                                          "(defn hidden \"Package.\" [x] x)\n"
+                                          "(defn ^:export hoisted \"Public via export.\" [x] x)\n"
+                                          "(defn ^{:export \"ma.core\"} scoped \"Module-wide only.\" [x] x)\n"))))
+          "deep ns lands fine — same module")
+      (testing "enforcement is on from birth: declare-then-use"
+        (let [r (ops/ingest! sess 'mb.app
+                             (str "(ns mb.app (:require [ma.core :as core]\n"
+                                  "                     [ma.core.impl :as impl]))\n"
+                                  "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))]
+          (is (re-find #"does not declare ma\.core" (str (:error r))) (pr-str r))
+          (is (re-find #"module_dep \{from \"mb\.app\" to \"ma\.core\"\}" (str (:error r)))
+              "the refusal teaches the semantic verb")))
+      (testing "declaring the edge is a semantic call whose WHY lands in the journal"
+        (let [r (ops/module-dep! sess "mb.app" "ma.core"
+                                 :prompt "the app renders core's data")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:from "mb.app" :to "ma.core" :action :add}
+                 (select-keys r [:from :to :action])))
+          (let [d (last (filter #(= :module-edge (:op %))
+                                (store/deltas (:store @sess))))]
+            (is (= "the app renders core's data" (:prompt d)))))
+        (is (nil? (:error (ops/ingest! sess 'mb.app
+                                       (str "(ns mb.app (:require [ma.core :as core]\n"
+                                            "                     [ma.core.impl :as impl]))\n"
+                                            "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))))
+            "the same ingest now lands"))
+      (testing "re-declaring is idempotent, not journal noise"
+        (is (:already-declared (ops/module-dep! sess "mb.app" "ma.core"))))
+      (testing "an edge that would close a CYCLE is refused with the cycle named"
+        (let [r (ops/module-dep! sess "ma.core" "mb.app" :prompt "nope")]
+          (is (re-find #"(?i)cycle" (str (:error r))) (pr-str r))))
+      (testing "retracting an edge is the same verb and re-arms the gate"
+        (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core" :remove true
+                                           :prompt "trying decoupling"))))
+        (let [r (ops/edit-replace! sess 'mb.app 'use-it
+                                   "(defn use-it \"Uses ma.\" [x] (core/shared (inc x)))"
+                                   :prompt "should be blocked again")]
+          (is (re-find #"does not declare" (str (:error r))) (pr-str r)))
+        (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core"
+                                           :prompt "restored")))))
+      (testing "deep vars are package-private; ^:export hoists into the surface"
+        (let [r (ops/edit-replace! sess 'mb.app 'use-it
+                                   "(defn use-it \"Uses ma.\" [x] (impl/hidden x))"
+                                   :prompt "blocked: package-private")]
+          (is (re-find #"package-private" (str (:error r))) (pr-str r))
+          (is (re-find #"\^:export" (str (:error r))) "the refusal teaches the hoist"))
+        (is (nil? (:error (ops/edit-replace! sess 'mb.app 'use-it
+                                             "(defn use-it \"Uses ma.\" [x] (impl/hoisted x))"
+                                             :prompt "fine: exported")))))
+      (testing "a subtree :export reaches its prefix but not the world"
+        (is (nil? (:error (ops/edit-replace! sess 'ma.core 'shared
+                                             "(defn shared \"Public.\" [x] (ma.core.impl/scoped x))"
+                                             :prompt "fine: ma.core is inside ma.core.*"))))
+        (let [r (ops/edit-replace! sess 'mb.app 'use-it
+                                   "(defn use-it \"Uses ma.\" [x] (impl/scoped x))"
+                                   :prompt "blocked: exported to ma.core.* only")]
+          (is (re-find #"exported only within ma\.core\.\*" (str (:error r)))
+              (pr-str r))))
+      (testing "ns_create of a violating namespace is gated too"
+        (let [r (ops/create-ns! sess 'mc.rogue
+                                :source (str "(ns mc.rogue (:require [ma.core :as core]))\n"
+                                             "(defn steal \"Rogue.\" [x] (core/shared x))\n"))]
+          (is (re-find #"does not declare" (str (:error r))) (pr-str r))))
+      (testing "a public defn without a docstring surfaces at the DONE-POINT (never blocks)"
+        (let [r (ops/edit-replace! sess 'mb.app 'use-it
+                                   "(defn use-it [x] (impl/hoisted x))"
+                                   :prompt "drop the doc")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (not-any? :missing-doc (:warnings r)) "the write stays quiet"))
+        (let [r (external/done! sess :label "docs review")]
+          (is (some #{'mb.app/use-it} (get-in r [:findings :missing-doc]))
+              (pr-str (:findings r)))))
+      (finally (ops/close! sess)))))
+
+(deftest module-edges-are-crdt-grain
+  (let [base    (store/empty-store)
+        [s1 d1] (store/record-module-edge base "b.app" "a.core" :add
+                                          :prompt "app uses core" :agent "t")
+        [s2 d2] (store/record-module-edge s1 "b.app" "a.util" :add)
+        [s3 d3] (store/record-module-edge s2 "b.app" "a.util" :remove)]
+    (testing "the EDGE is the unit: one semantic delta each, state is the fold"
+      (is (= :module-edge (:op d1)))
+      (is (= {:from "b.app" :to "a.core" :action :add}
+             (select-keys d1 [:from :to :action])))
+      (is (= "app uses core" (:prompt d1)) "the why rides the delta")
+      (is (= {"b.app" #{"a.core" "a.util"}} (:modules s2)))
+      (is (= {"b.app" #{"a.core"}} (:modules s3)) "remove folds out"))
+    (testing "replay-delta reconstructs the fold"
+      (is (= (:modules s2) (:modules (store/replay-delta s1 d2))))
+      (is (= (:modules s3) (:modules (store/replay-delta s2 d3)))))
+    (testing "concurrent adds to the SAME module merge as a union — never a conflict"
+      (let [[ours _]   (store/record-module-edge s1 "b.app" "a.util" :add)
+            [theirs _] (store/record-module-edge s1 "b.app" "a.extra" :add)
+            r          (merge/merge-logs ours theirs :from "fork")]
+        (is (empty? (:conflicts r)) (pr-str (:conflicts r)))
+        (is (= #{"a.core" "a.util" "a.extra"}
+               (get-in r [:store :modules "b.app"])))))
+    (testing "a union that closes a cycle still merges — judging it is the CALLER's"
+      ;; merge-logs can only see the DECLARED manifest, where a -test
+      ;; namespace's fixture requires are edges. Warning from here reported
+      ;; a cycle on every merge into slopp's own main that no production
+      ;; code had, advising a retraction that would have broken the very
+      ;; test that created the edge. api.modules/merge-production-cycle
+      ;; judges the production graph instead — and it can only run after
+      ;; the merge has produced a store, which is why it cannot live here.
+      ;; These stores have no namespaces at all, which is the other half of
+      ;; the same point: nothing at this layer knows what production means.
+      (let [[ours _]   (store/record-module-edge base "x.a" "x.b" :add)
+            [theirs _] (store/record-module-edge base "x.b" "x.a" :add)
+            r          (merge/merge-logs ours theirs :from "fork")]
+        (is (empty? (:conflicts r)))
+        (is (= {"x.a" #{"x.b"} "x.b" #{"x.a"}} (:modules (:store r)))
+            "the union lands — CRDT grain is not conditional on acyclicity")
+        (is (not-any? :modules-cycle (:notes r)) (pr-str (:notes r)))))))
 
 (deftest ^:external the-manifest-follows-ns-renames
   (let [sess (external/open!)]
@@ -210,86 +276,20 @@
     (is (= [["z.leaf"] ["z.top"]]
            (:layers (store/module-layers {"z.top" #{"z.leaf"}}))))))
 
-(deftest ^:external the-module-lifecycle
-  (let [sess (external/open!)]
-    (try
-      (is (nil? (:error (ops/ingest! sess 'ma.core
-                                     "(ns ma.core)\n(defn shared \"Public.\" [x] x)\n"))))
-      (is (nil? (:error (ops/ingest! sess 'ma.core.impl
-                                     (str "(ns ma.core.impl)\n"
-                                          "(defn hidden \"Package.\" [x] x)\n"
-                                          "(defn ^:export hoisted \"Public via export.\" [x] x)\n"
-                                          "(defn ^{:export \"ma.core\"} scoped \"Module-wide only.\" [x] x)\n"))))
-          "deep ns lands fine — same module")
-      (testing "enforcement is on from birth: declare-then-use"
-        (let [r (ops/ingest! sess 'mb.app
-                             (str "(ns mb.app (:require [ma.core :as core]\n"
-                                  "                     [ma.core.impl :as impl]))\n"
-                                  "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))]
-          (is (re-find #"does not declare ma\.core" (str (:error r))) (pr-str r))
-          (is (re-find #"module_dep \{from \"mb\.app\" to \"ma\.core\"\}" (str (:error r)))
-              "the refusal teaches the semantic verb")))
-      (testing "declaring the edge is a semantic call whose WHY lands in the journal"
-        (let [r (ops/module-dep! sess "mb.app" "ma.core"
-                                 :prompt "the app renders core's data")]
-          (is (nil? (:error r)) (pr-str r))
-          (is (= {:from "mb.app" :to "ma.core" :action :add}
-                 (select-keys r [:from :to :action])))
-          (let [d (last (filter #(= :module-edge (:op %))
-                                (store/deltas (:store @sess))))]
-            (is (= "the app renders core's data" (:prompt d)))))
-        (is (nil? (:error (ops/ingest! sess 'mb.app
-                                       (str "(ns mb.app (:require [ma.core :as core]\n"
-                                            "                     [ma.core.impl :as impl]))\n"
-                                            "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))))
-            "the same ingest now lands"))
-      (testing "re-declaring is idempotent, not journal noise"
-        (is (:already-declared (ops/module-dep! sess "mb.app" "ma.core"))))
-      (testing "an edge that would close a CYCLE is refused with the cycle named"
-        (let [r (ops/module-dep! sess "ma.core" "mb.app" :prompt "nope")]
-          (is (re-find #"(?i)cycle" (str (:error r))) (pr-str r))))
-      (testing "retracting an edge is the same verb and re-arms the gate"
-        (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core" :remove true
-                                           :prompt "trying decoupling"))))
-        (let [r (ops/edit-replace! sess 'mb.app 'use-it
-                                   "(defn use-it \"Uses ma.\" [x] (core/shared (inc x)))"
-                                   :prompt "should be blocked again")]
-          (is (re-find #"does not declare" (str (:error r))) (pr-str r)))
-        (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core"
-                                           :prompt "restored")))))
-      (testing "deep vars are package-private; ^:export hoists into the surface"
-        (let [r (ops/edit-replace! sess 'mb.app 'use-it
-                                   "(defn use-it \"Uses ma.\" [x] (impl/hidden x))"
-                                   :prompt "blocked: package-private")]
-          (is (re-find #"package-private" (str (:error r))) (pr-str r))
-          (is (re-find #"\^:export" (str (:error r))) "the refusal teaches the hoist"))
-        (is (nil? (:error (ops/edit-replace! sess 'mb.app 'use-it
-                                             "(defn use-it \"Uses ma.\" [x] (impl/hoisted x))"
-                                             :prompt "fine: exported")))))
-      (testing "a subtree :export reaches its prefix but not the world"
-        (is (nil? (:error (ops/edit-replace! sess 'ma.core 'shared
-                                             "(defn shared \"Public.\" [x] (ma.core.impl/scoped x))"
-                                             :prompt "fine: ma.core is inside ma.core.*"))))
-        (let [r (ops/edit-replace! sess 'mb.app 'use-it
-                                   "(defn use-it \"Uses ma.\" [x] (impl/scoped x))"
-                                   :prompt "blocked: exported to ma.core.* only")]
-          (is (re-find #"exported only within ma\.core\.\*" (str (:error r)))
-              (pr-str r))))
-      (testing "ns_create of a violating namespace is gated too"
-        (let [r (ops/create-ns! sess 'mc.rogue
-                                :source (str "(ns mc.rogue (:require [ma.core :as core]))\n"
-                                             "(defn steal \"Rogue.\" [x] (core/shared x))\n"))]
-          (is (re-find #"does not declare" (str (:error r))) (pr-str r))))
-      (testing "a public defn without a docstring surfaces at the DONE-POINT (never blocks)"
-        (let [r (ops/edit-replace! sess 'mb.app 'use-it
-                                   "(defn use-it [x] (impl/hoisted x))"
-                                   :prompt "drop the doc")]
-          (is (nil? (:error r)) (pr-str r))
-          (is (not-any? :missing-doc (:warnings r)) "the write stays quiet"))
-        (let [r (external/done! sess :label "docs review")]
-          (is (some #{'mb.app/use-it} (get-in r [:findings :missing-doc]))
-              (pr-str (:findings r)))))
-      (finally (ops/close! sess)))))
+(deftest test-namespaces-see-package-private-deep-vars
+  ;; a -test ns folds into the package it tests — for visibility, not just
+  ;; module edges — so package-private deep helpers stay unit-testable.
+  ;; (found dogfooding the deep-module split: without this, moving a
+  ;; test-referenced helper into a deep ns forces a spurious ^:export.)
+  (let [viol (fn [rows] (seq (edit.modules/module-violations {} rows)))
+        row  (fn [from to] {:from-ns from :from-var 'f :to to})]
+    (testing "a -test ns reaches its subject's package-private deep var"
+      (is (nil? (viol [(row 'a.b-test 'a.b.impl)]))
+          "a.b-test folds to a.b, which shares a.b.impl's parent prefix")
+      (is (nil? (viol [(row 'a.b.c-test 'a.b.c.deep)]))
+          "deeper test folds too"))
+    (testing "a genuine foreign module still can't reach it"
+      (is (some #(= :visibility (:rule %)) (viol [(row 'x.y 'a.b.impl)]))))))
 
 (deftest fully-qualified-unrequired-calls-hit-the-gate
   ;; kondo emits NO var-usage row for a qualified call into a namespace the
@@ -793,22 +793,6 @@
       (let [st2 (first (store/record-module-tier st "app.core" :external))]
         (is (empty? (tiers/layering-violations st2 'app.core :external)))))))
 
-(deftest ^:external module-platforms-surface-in-query-depends
-  (let [sess (external/open!)]
-    (try
-      (ops/create-ns! sess 'plat.client :source "(ns plat.client)\n"
-                      :platform :cljs :prompt "browser")
-      (ops/create-ns! sess 'plat.shared :source "(ns plat.shared)\n"
-                      :platform :cljc :prompt "portable")
-      (ops/create-ns! sess 'plat.server :source "(ns plat.server)\n(defn ^:unused-ok f [] 1)\n")
-      (let [r (graph/query-depends sess "" :modules true)]
-        (testing "declared platforms surface in the module graph"
-          (is (= :cljs (get (:platforms r) "plat.client")) (pr-str (:platforms r)))
-          (is (= :cljc (get (:platforms r) "plat.shared")) (pr-str (:platforms r))))
-        (testing "an undeclared ns (= :jvm default) is absent, not noise"
-          (is (nil? (get (:platforms r) "plat.server")) (pr-str (:platforms r)))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external module-platform-verb
   (let [sess (external/open!)]
     (try
@@ -843,6 +827,22 @@
   (testing "the load-bearing case: a :cljc form is checked by BOTH worlds"
     (is (gates/rule-applies-to-platform? :clojure :cljc))
     (is (gates/rule-applies-to-platform? :clojurescript :cljc))))
+
+(deftest ^:external module-platforms-surface-in-query-depends
+  (let [sess (external/open!)]
+    (try
+      (ops/create-ns! sess 'plat.client :source "(ns plat.client)\n"
+                      :platform :cljs :prompt "browser")
+      (ops/create-ns! sess 'plat.shared :source "(ns plat.shared)\n"
+                      :platform :cljc :prompt "portable")
+      (ops/create-ns! sess 'plat.server :source "(ns plat.server)\n(defn ^:unused-ok f [] 1)\n")
+      (let [r (graph/query-depends sess "" :modules true)]
+        (testing "declared platforms surface in the module graph"
+          (is (= :cljs (get (:platforms r) "plat.client")) (pr-str (:platforms r)))
+          (is (= :cljc (get (:platforms r) "plat.shared")) (pr-str (:platforms r))))
+        (testing "an undeclared ns (= :jvm default) is absent, not noise"
+          (is (nil? (get (:platforms r) "plat.server")) (pr-str (:platforms r)))))
+      (finally (ops/close! sess)))))
 
 (defn ^{:rule/severity :advisory} fixture-advisory-gate
   "Test fixture: a write gate that declares its OWN default severity as
@@ -964,57 +964,6 @@
         (is (= :instrument (get-in @sess [:store :module-roles "tr.hub"])))
         (is (nil? (get-in @sess [:store :module-roles "tr.core"]))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external the-whole-store-check-names-no-app-type
-  ;; R6 (no `slopp.*` surface may assume a project is a web project), and the
-  ;; sibling of `ops.engine-test/the-write-engine-names-no-app-type` — same
-  ;; rule, the other generic surface. `full_check` answers "is the STORE good",
-  ;; which is a question every project has, and it reached into the WEB tooling
-  ;; for one part of the answer: how far behind the served app image is.
-  ;;
-  ;; **It was a CYCLE before it was anything else.** With the tooling in
-  ;; `slopp.webdev`, the edges run BOTH ways: several the right way (tooling
-  ;; calls the operation surface — that is what tooling does) and this ONE
-  ;; back. `module_dep` cycle-checks adds, so the single edge blocked the whole
-  ;; regroup, and the move to `slopp.webdev` would only have renamed the cycle.
-  ;;
-  ;; And it never needed to be there. `behind` was `(store running)` delegating
-  ;; the count to `read.orient/code-deltas-since`, and `running` is the
-  ;; app-server map already on the session — nothing in it knows the app serves
-  ;; HTTP. So the R6 violation and the cycle had one fix.
-  ;;
-  ;; Why a named test rather than a layering rule: while both namespaces sat in
-  ;; module `slopp.api`, layering could not see this at all — it is a
-  ;; MODULE-grain question, so the drawer hid the violation from the check
-  ;; built to find it, the third time in this restructure. Now that the tooling
-  ;; has its own module the layering check CAN see it, and this test survives
-  ;; the move as the specific statement of what layering states generically.
-  ;; Its sibling `web-tooling-is-reached-only-by-the-transport` states it over
-  ;; the whole image; this one states it about the surface that broke.
-  (let [st  (external/built-store)
-        src (store.render/render-ns st 'slopp.ops.external)
-        pat #"slopp\.webdev"]
-    (testing "there is a population — the vacuity that ate a sibling guard"
-      ;; and it doubles as the guard on the quoted symbol above: a namespace
-      ;; name in a test body is DATA, so a rename walks straight past it and
-      ;; the check silently starts reading nothing
-      (is (< 50 (count (:namespaces st))))
-      (is (re-find #"full-check!" src)
-          "rendered the wrong namespace, or rendered nothing"))
-    (testing "the search pattern still matches something, somewhere"
-      ;; The SAME guard, one level down, and the level this test was missing:
-      ;; the pattern is data too. Phase 3 renamed the web tooling out of
-      ;; `slopp.api`, and the previous pattern — `slopp\.api\.(?:cljs|devserver)`
-      ;; — went on matching nothing, forever, silently. `slopp.mcp` names the
-      ;; tooling on purpose (it is the transport, the one declared exception),
-      ;; so if the pattern stops matching THERE it has stopped matching
-      ;; anywhere and the assertion below is measuring an empty search.
-      (is (seq (re-seq pat (store.render/render-ns st 'slopp.mcp)))
-          "the pattern no longer matches the tooling's own consumer — retarget it"))
-    (testing "the whole-store check names no web-tooling namespace, by any path"
-      ;; require, qualified ref and prose all read the same here on purpose
-      (is (= [] (vec (re-seq pat src)))
-          "the offending mentions are the failure value"))))
 
 (deftest no-shipped-framework-family-reaches-back-into-slopp
   ;; A shipped family is what slopp VENDORS into a user's project: today
@@ -1744,6 +1693,57 @@
         (let [r (ops/module-dep! sess "mc.app" "mc.util" :prompt "as advised")]
           (is (re-find #"CLOSES a dependency cycle" (str (:error r))) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-whole-store-check-names-no-app-type
+  ;; R6 (no `slopp.*` surface may assume a project is a web project), and the
+  ;; sibling of `ops.engine-test/the-write-engine-names-no-app-type` — same
+  ;; rule, the other generic surface. `full_check` answers "is the STORE good",
+  ;; which is a question every project has, and it reached into the WEB tooling
+  ;; for one part of the answer: how far behind the served app image is.
+  ;;
+  ;; **It was a CYCLE before it was anything else.** With the tooling in
+  ;; `slopp.webdev`, the edges run BOTH ways: several the right way (tooling
+  ;; calls the operation surface — that is what tooling does) and this ONE
+  ;; back. `module_dep` cycle-checks adds, so the single edge blocked the whole
+  ;; regroup, and the move to `slopp.webdev` would only have renamed the cycle.
+  ;;
+  ;; And it never needed to be there. `behind` was `(store running)` delegating
+  ;; the count to `read.orient/code-deltas-since`, and `running` is the
+  ;; app-server map already on the session — nothing in it knows the app serves
+  ;; HTTP. So the R6 violation and the cycle had one fix.
+  ;;
+  ;; Why a named test rather than a layering rule: while both namespaces sat in
+  ;; module `slopp.api`, layering could not see this at all — it is a
+  ;; MODULE-grain question, so the drawer hid the violation from the check
+  ;; built to find it, the third time in this restructure. Now that the tooling
+  ;; has its own module the layering check CAN see it, and this test survives
+  ;; the move as the specific statement of what layering states generically.
+  ;; Its sibling `web-tooling-is-reached-only-by-the-transport` states it over
+  ;; the whole image; this one states it about the surface that broke.
+  (let [st  (external/built-store)
+        src (store.render/render-ns st 'slopp.ops.external)
+        pat #"slopp\.webdev"]
+    (testing "there is a population — the vacuity that ate a sibling guard"
+      ;; and it doubles as the guard on the quoted symbol above: a namespace
+      ;; name in a test body is DATA, so a rename walks straight past it and
+      ;; the check silently starts reading nothing
+      (is (< 50 (count (:namespaces st))))
+      (is (re-find #"full-check!" src)
+          "rendered the wrong namespace, or rendered nothing"))
+    (testing "the search pattern still matches something, somewhere"
+      ;; The SAME guard, one level down, and the level this test was missing:
+      ;; the pattern is data too. Phase 3 renamed the web tooling out of
+      ;; `slopp.api`, and the previous pattern — `slopp\.api\.(?:cljs|devserver)`
+      ;; — went on matching nothing, forever, silently. `slopp.mcp` names the
+      ;; tooling on purpose (it is the transport, the one declared exception),
+      ;; so if the pattern stops matching THERE it has stopped matching
+      ;; anywhere and the assertion below is measuring an empty search.
+      (is (seq (re-seq pat (store.render/render-ns st 'slopp.mcp)))
+          "the pattern no longer matches the tooling's own consumer — retarget it"))
+    (testing "the whole-store check names no web-tooling namespace, by any path"
+      ;; require, qualified ref and prose all read the same here on purpose
+      (is (= [] (vec (re-seq pat src)))
+          "the offending mentions are the failure value"))))
 
 (deftest a-visibility-refusal-names-the-var-to-export
   ;; The refusal's one instruction is "mark the target ^:export in its defn",

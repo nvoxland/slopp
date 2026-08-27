@@ -206,6 +206,85 @@
     (.finish b)
     (.writeTree dc ins)))
 
+(defn- set-branch-ref!
+  "Point refs/heads/<nm> at `sha` (CAS; the journal is authoritative, so a
+  lost race is retried against the moved ref — convergence, not failure)."
+  [^Repository repo nm sha]
+  (let [ref-name (str "refs/heads/" nm)
+        new-id   (ObjectId/fromString sha)]
+    (loop [n 0]
+      (let [cur (.resolve repo ref-name)]
+        (when-not (= cur new-id)
+          (let [ru  (doto (.updateRef repo ref-name)
+                      (.setExpectedOldObjectId (or cur (ObjectId/zeroId)))
+                      (.setNewObjectId new-id)
+                      (.setForceUpdate true))
+                res (.name (.update ru))]
+            (cond
+              (#{"NEW" "FORCED" "FAST_FORWARD" "NO_CHANGE"} res) nil
+              (and (= "LOCK_FAILURE" res) (< n 3)) (recur (inc n))
+              :else (throw (ex-info (str "git ref update failed: " res)
+                                    {:ref ref-name :result res})))))))))
+
+(defn- branch-journals
+  "[[name line-id]] for every NAMED line other than main — the branches a
+  projection advertises.
+
+  This used to list `.slopp/branches/` and open each branch's own store.db.
+  A branch is a row in the ONE journal now, so this reads the connection the
+  caller already holds: no directory to scan, nothing to open, and a branch
+  another process created is projected without either of them touching a
+  file."
+  [conn]
+  (for [l (db/lines conn)
+        :when (and (:name l) (not= "main" (:name l)))]
+    [(:name l) (:id l)]))
+
+;; ---------------------------------------------------------------------------
+;; import: git push → slopp (M3)
+;;
+;; The net content change lands as ingests (new files) + ONE verified edit
+;; group; each incoming commit is preserved as a :commit marker carrying its
+;; original sha. Conservative by design — git is a guest writer, and guests
+;; don't get the ambiguous cases (anonymous forms, ns-decl edits, deletions
+;; of whole files): those reject with the reason on the pusher's terminal.
+
+;; ---------------------------------------------------------------------------
+;; smart-HTTP server (M2: clone/fetch; M3 adds receive-pack)
+;;
+;; The protocol endpoints, verbatim from the smart-http spec:
+;;   GET  /slopp.git/info/refs?service=git-upload-pack   → refs advertisement
+;;   POST /slopp.git/git-upload-pack                     → pack negotiation
+;; JGit's UploadPack owns the wire format (setBiDirectionalPipe false =
+;; stateless RPC); we only route bytes. v0 protocol — the Git-Protocol:
+;; version=2 header is deliberately ignored (spec-legal fallback).
+^:reads (defn tree-at
+  "{path text} for the whole tree of commit `sha` — UTF-8 blobs, sorted.
+  Works on any repo handle (the in-memory projection or an on-disk remote)."
+  [^Repository repo sha]
+  (with-open [rw (RevWalk. repo)]
+    (let [tree (.getTree (.parseCommit rw (ObjectId/fromString sha)))]
+      (with-open [tw (TreeWalk. repo)]
+        (.addTree tw tree)
+        (.setRecursive tw true)
+        (loop [m (sorted-map)]
+          (if (.next tw)
+            (recur (assoc m (.getPathString tw)
+                          (String. (.getBytes (.open repo (.getObjectId tw 0)))
+                                   StandardCharsets/UTF_8)))
+            m))))))
+
+^:reads (defn merge-base
+  "The merge base of two commits in `repo`, or nil when the histories are
+  unrelated — standard git ancestry (pull uses it to isolate remote-only
+  changes: diff merge-base→remote-tip, never touching local-only work)."
+  [^Repository repo sha-a sha-b]
+  (with-open [rw (RevWalk. repo)]
+    (.setRevFilter rw RevFilter/MERGE_BASE)
+    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-a)))
+    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-b)))
+    (some-> (.next rw) (.name))))
+
 (defn commit-author
   "The projected commit's author identity for marker `d`: the `:author`
   captured at milestone time ({:name :email} — G5 config), else the legacy
@@ -241,25 +320,111 @@
         (.flush ins)
         (.name cid)))))
 
-(defn- set-branch-ref!
-  "Point refs/heads/<nm> at `sha` (CAS; the journal is authoritative, so a
-  lost race is retried against the moved ref — convergence, not failure)."
-  [^Repository repo nm sha]
-  (let [ref-name (str "refs/heads/" nm)
-        new-id   (ObjectId/fromString sha)]
-    (loop [n 0]
-      (let [cur (.resolve repo ref-name)]
-        (when-not (= cur new-id)
-          (let [ru  (doto (.updateRef repo ref-name)
-                      (.setExpectedOldObjectId (or cur (ObjectId/zeroId)))
-                      (.setNewObjectId new-id)
-                      (.setForceUpdate true))
-                res (.name (.update ru))]
-            (cond
-              (#{"NEW" "FORCED" "FAST_FORWARD" "NO_CHANGE"} res) nil
-              (and (= "LOCK_FAILURE" res) (< n 3)) (recur (inc n))
-              :else (throw (ex-info (str "git ref update failed: " res)
-                                    {:ref ref-name :result res})))))))))
+(defn stamped-milestone
+  "The milestone id a projected commit MESSAGE stamps itself with — the
+  `Slopp-Commit:` trailer `commit-message` writes — or nil for a commit this
+  projection did not mint (an ADOPTED remote commit, from a pull, carries no
+  trailer).
+
+  One producer, one reader, deliberately adjacent. It lets a caller ask the
+  COMMIT which milestone it is rather than trust a sha recorded when the commit
+  was minted, and those are different facts: minting happens whether or not the
+  push that follows it succeeds. On 2026-08-14 a refused push left a pinned sha
+  naming a commit nobody had, and because the pin is first-writer-wins no later
+  projection could correct it. A stamp rides the artifact, so it cannot
+  disagree with the artifact."
+  [message]
+  (when message
+    (second (re-find #"(?m)^Slopp-Commit:[ \t]*(\S+)[ \t]*$" message))))
+
+^:reads (defn message-of
+  "The full message of commit `sha` in `repo`, or nil when the repo does not
+  have that object — which an in-memory projection routinely does not, since
+  it mints its own chain and fetches nothing it was not asked to.
+
+  nil is a real answer here rather than an error: every caller is asking a
+  commit to describe itself, and \"the object is not here\" is one of the
+  outcomes they have to handle."
+  [^Repository repo sha]
+  (when (and repo sha)
+    (let [id (ObjectId/fromString sha)]
+      (when (.has (.getObjectDatabase repo) id)
+        (with-open [rw (RevWalk. repo)]
+          (.getFullMessage (.parseCommit rw id)))))))
+
+(defn- ancestor?
+  "Is `sha-a` reachable from `sha-b` in `repo`? Both objects must be present —
+  ask `message-of` first when that is in doubt."
+  [^Repository repo sha-a sha-b]
+  (with-open [rw (RevWalk. repo)]
+    (.isMergedInto rw
+                   (.parseCommit rw (ObjectId/fromString sha-a))
+                   (.parseCommit rw (ObjectId/fromString sha-b)))))
+
+(defn- commits-past
+  "How many commits `from` reaches that `base` does not, in `repo`. A nil
+  `base` counts the whole reachable history — the honest answer when two
+  chains share nothing."
+  [^Repository repo from base]
+  (with-open [rw (RevWalk. repo)]
+    (.markStart rw (.parseCommit rw (ObjectId/fromString from)))
+    (when base
+      (.markUninteresting rw (.parseCommit rw (ObjectId/fromString base))))
+    (loop [n 0] (if (.next rw) (recur (inc n)) n))))
+
+^:reads (defn divergence
+  "Why a fast-forward push was refused, as a VALUE with declared clauses
+  rather than a status string.
+
+  A refused push answers `REJECTED_NONFASTFORWARD` and nothing else, and the
+  objects that would explain it live in an in-memory projection that dies with
+  the process. Deciding whether ONE such refusal was benign has cost folding
+  the journal to a milestone, re-rendering every path, re-minting the commit
+  and pushing to a scratch repo to reproduce the conditions — for an answer
+  that was one fact. This is that fact, computed where the refusal happens:
+
+      {:projected {:sha … :milestone …}
+       :mirror    {:sha … :milestone …}
+       :base … :ahead n :behind n :contains-mirror-tip? bool :cause …}
+
+  `:cause` is the clause that separates the two stories one status cannot:
+
+  | cause | what happened | remedy |
+  |---|---|---|
+  | `:mirror-ahead` | the destination builds ON this projection — someone else wrote the ref, or this store is behind | pull, or re-project |
+  | `:remint` | both tips stamp the SAME milestone and are different commits: one journal, two mints | the projection is not reproducing itself — investigate before resetting |
+  | `:diverged` | a common base, neither side contains the other | decide which history wins |
+  | `:unrelated` | no common base at all | the destination is a different project's history |
+  | `:no-divergence` | this projection already contains the destination's tip, so ancestry did not cause this refusal | read the status and git's own message |
+  | `:unreadable` | the destination's objects are not in this repo, so only the tips are known | fetch and ask again |
+
+  ABSENCE IS AN ANSWER for containment and for nothing else. An ancestor is
+  reachable, so an object this repo does not have cannot be one — that much is
+  sound with no fetch. The base, the counts and the destination's own stamp all
+  need the object, which is why a caller fetches before asking and why
+  `:unreadable` exists for when it could not."
+  [^Repository repo projected mirror]
+  (let [pm (stamped-milestone (message-of repo projected))]
+    (if-let [mmsg (message-of repo mirror)]
+      (let [mm       (stamped-milestone mmsg)
+            ours?    (ancestor? repo mirror projected)
+            theirs?  (ancestor? repo projected mirror)
+            base     (merge-base repo projected mirror)]
+        {:projected {:sha projected :milestone pm}
+         :mirror    {:sha mirror    :milestone mm}
+         :base      base
+         :ahead     (commits-past repo projected base)
+         :behind    (commits-past repo mirror base)
+         :contains-mirror-tip? ours?
+         :cause     (cond ours?               :no-divergence
+                          theirs?             :mirror-ahead
+                          (nil? base)         :unrelated
+                          (and pm mm (= pm mm)) :remint
+                          :else               :diverged)})
+      {:projected {:sha projected :milestone pm}
+       :mirror    {:sha mirror}
+       :contains-mirror-tip? false
+       :cause :unreadable})))
 
 ^:reads (defn source-tree
   "{path source} for every namespace in `store`, at the paths the projection
@@ -279,37 +444,6 @@
                                                 (store/role-for store n))
                       (store.render/render-ns store n)]))
         (keys (:namespaces store))))
-
-^:reads (defn ^:export milestone-tree
-  "{path content} for the tree the store's LAST milestone projects — folded
-  from the journal and rendered, **with no git repo anywhere**. nil when the
-  store has no milestones yet.
-
-  This is the merge BASE for an import that did not come through git. Export
-  is one-way; import is the narrow case where an external tool changed an
-  export and the change should come back as ordinary tracked form edits, and
-  nothing about that requires the other tool to have used git — it requires a
-  tree of files and a base to diff against. Git supplies a merge-base commit;
-  a directory supplies nothing, and this is the answer the store already had.
-
-  It shares `source-tree` and `commit-paths` with `project-journal!` rather
-  than recomputing them, and that is the whole correctness argument: a base
-  differing from the projection by so much as the generated `deps.edn` would
-  report phantom changes on paths nobody touched, on every import, forever.
-
-  A marker normally targets the delta immediately before it; a retroactive
-  `commit_point {:target …}` names an earlier one, and the fold stops there."
-  [store blob-of]
-  (let [ds     (store/deltas store)
-        marker (last (filter #(= :commit (:op %)) ds))]
-    (when marker
-      (let [upto (or (:target marker) (:id marker))
-            st   (reduce (fn [st d]
-                           (let [st' (or (store/replay-delta st d) st)]
-                             (if (= (:id d) upto) (reduced st') st')))
-                         (store/empty-store) ds)]
-        (commit-paths (source-tree st) (:deps marker) (:files marker)
-                      (:config marker) blob-of)))))
 
 ;; ---------------------------------------------------------------------------
 ;; projection
@@ -397,20 +531,6 @@
       {:parent base :store (store/empty-store) :held {}}
       dv))))
 
-(defn- branch-journals
-  "[[name line-id]] for every NAMED line other than main — the branches a
-  projection advertises.
-
-  This used to list `.slopp/branches/` and open each branch's own store.db.
-  A branch is a row in the ONE journal now, so this reads the connection the
-  caller already holds: no directory to scan, nothing to open, and a branch
-  another process created is projected without either of them touching a
-  file."
-  [conn]
-  (for [l (db/lines conn)
-        :when (and (:name l) (not= "main" (:name l)))]
-    [(:name l) (:id l)]))
-
 (defn ensure-projected!
   "Bring the bare repo up to date with the journals — main + every on-disk
   branch — advancing refs/heads/* to each line's newest milestone. A cloned
@@ -451,153 +571,33 @@
             (set-branch-ref! repo nm sha))
           {:refs refs})))))
 
-;; ---------------------------------------------------------------------------
-;; import: git push → slopp (M3)
-;;
-;; The net content change lands as ingests (new files) + ONE verified edit
-;; group; each incoming commit is preserved as a :commit marker carrying its
-;; original sha. Conservative by design — git is a guest writer, and guests
-;; don't get the ambiguous cases (anonymous forms, ns-decl edits, deletions
-;; of whole files): those reject with the reason on the pusher's terminal.
+^:reads (defn ^:export milestone-tree
+  "{path content} for the tree the store's LAST milestone projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when the
+  store has no milestones yet.
 
-;; ---------------------------------------------------------------------------
-;; smart-HTTP server (M2: clone/fetch; M3 adds receive-pack)
-;;
-;; The protocol endpoints, verbatim from the smart-http spec:
-;;   GET  /slopp.git/info/refs?service=git-upload-pack   → refs advertisement
-;;   POST /slopp.git/git-upload-pack                     → pack negotiation
-;; JGit's UploadPack owns the wire format (setBiDirectionalPipe false =
-;; stateless RPC); we only route bytes. v0 protocol — the Git-Protocol:
-;; version=2 header is deliberately ignored (spec-legal fallback).
-^:reads (defn tree-at
-  "{path text} for the whole tree of commit `sha` — UTF-8 blobs, sorted.
-  Works on any repo handle (the in-memory projection or an on-disk remote)."
-  [^Repository repo sha]
-  (with-open [rw (RevWalk. repo)]
-    (let [tree (.getTree (.parseCommit rw (ObjectId/fromString sha)))]
-      (with-open [tw (TreeWalk. repo)]
-        (.addTree tw tree)
-        (.setRecursive tw true)
-        (loop [m (sorted-map)]
-          (if (.next tw)
-            (recur (assoc m (.getPathString tw)
-                          (String. (.getBytes (.open repo (.getObjectId tw 0)))
-                                   StandardCharsets/UTF_8)))
-            m))))))
+  This is the merge BASE for an import that did not come through git. Export
+  is one-way; import is the narrow case where an external tool changed an
+  export and the change should come back as ordinary tracked form edits, and
+  nothing about that requires the other tool to have used git — it requires a
+  tree of files and a base to diff against. Git supplies a merge-base commit;
+  a directory supplies nothing, and this is the answer the store already had.
 
-(defn- ancestor?
-  "Is `sha-a` reachable from `sha-b` in `repo`? Both objects must be present —
-  ask `message-of` first when that is in doubt."
-  [^Repository repo sha-a sha-b]
-  (with-open [rw (RevWalk. repo)]
-    (.isMergedInto rw
-                   (.parseCommit rw (ObjectId/fromString sha-a))
-                   (.parseCommit rw (ObjectId/fromString sha-b)))))
+  It shares `source-tree` and `commit-paths` with `project-journal!` rather
+  than recomputing them, and that is the whole correctness argument: a base
+  differing from the projection by so much as the generated `deps.edn` would
+  report phantom changes on paths nobody touched, on every import, forever.
 
-(defn- commits-past
-  "How many commits `from` reaches that `base` does not, in `repo`. A nil
-  `base` counts the whole reachable history — the honest answer when two
-  chains share nothing."
-  [^Repository repo from base]
-  (with-open [rw (RevWalk. repo)]
-    (.markStart rw (.parseCommit rw (ObjectId/fromString from)))
-    (when base
-      (.markUninteresting rw (.parseCommit rw (ObjectId/fromString base))))
-    (loop [n 0] (if (.next rw) (recur (inc n)) n))))
-
-^:reads (defn merge-base
-  "The merge base of two commits in `repo`, or nil when the histories are
-  unrelated — standard git ancestry (pull uses it to isolate remote-only
-  changes: diff merge-base→remote-tip, never touching local-only work)."
-  [^Repository repo sha-a sha-b]
-  (with-open [rw (RevWalk. repo)]
-    (.setRevFilter rw RevFilter/MERGE_BASE)
-    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-a)))
-    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-b)))
-    (some-> (.next rw) (.name))))
-
-^:reads (defn message-of
-  "The full message of commit `sha` in `repo`, or nil when the repo does not
-  have that object — which an in-memory projection routinely does not, since
-  it mints its own chain and fetches nothing it was not asked to.
-
-  nil is a real answer here rather than an error: every caller is asking a
-  commit to describe itself, and \"the object is not here\" is one of the
-  outcomes they have to handle."
-  [^Repository repo sha]
-  (when (and repo sha)
-    (let [id (ObjectId/fromString sha)]
-      (when (.has (.getObjectDatabase repo) id)
-        (with-open [rw (RevWalk. repo)]
-          (.getFullMessage (.parseCommit rw id)))))))
-
-(defn stamped-milestone
-  "The milestone id a projected commit MESSAGE stamps itself with — the
-  `Slopp-Commit:` trailer `commit-message` writes — or nil for a commit this
-  projection did not mint (an ADOPTED remote commit, from a pull, carries no
-  trailer).
-
-  One producer, one reader, deliberately adjacent. It lets a caller ask the
-  COMMIT which milestone it is rather than trust a sha recorded when the commit
-  was minted, and those are different facts: minting happens whether or not the
-  push that follows it succeeds. On 2026-08-14 a refused push left a pinned sha
-  naming a commit nobody had, and because the pin is first-writer-wins no later
-  projection could correct it. A stamp rides the artifact, so it cannot
-  disagree with the artifact."
-  [message]
-  (when message
-    (second (re-find #"(?m)^Slopp-Commit:[ \t]*(\S+)[ \t]*$" message))))
-
-^:reads (defn divergence
-  "Why a fast-forward push was refused, as a VALUE with declared clauses
-  rather than a status string.
-
-  A refused push answers `REJECTED_NONFASTFORWARD` and nothing else, and the
-  objects that would explain it live in an in-memory projection that dies with
-  the process. Deciding whether ONE such refusal was benign has cost folding
-  the journal to a milestone, re-rendering every path, re-minting the commit
-  and pushing to a scratch repo to reproduce the conditions — for an answer
-  that was one fact. This is that fact, computed where the refusal happens:
-
-      {:projected {:sha … :milestone …}
-       :mirror    {:sha … :milestone …}
-       :base … :ahead n :behind n :contains-mirror-tip? bool :cause …}
-
-  `:cause` is the clause that separates the two stories one status cannot:
-
-  | cause | what happened | remedy |
-  |---|---|---|
-  | `:mirror-ahead` | the destination builds ON this projection — someone else wrote the ref, or this store is behind | pull, or re-project |
-  | `:remint` | both tips stamp the SAME milestone and are different commits: one journal, two mints | the projection is not reproducing itself — investigate before resetting |
-  | `:diverged` | a common base, neither side contains the other | decide which history wins |
-  | `:unrelated` | no common base at all | the destination is a different project's history |
-  | `:no-divergence` | this projection already contains the destination's tip, so ancestry did not cause this refusal | read the status and git's own message |
-  | `:unreadable` | the destination's objects are not in this repo, so only the tips are known | fetch and ask again |
-
-  ABSENCE IS AN ANSWER for containment and for nothing else. An ancestor is
-  reachable, so an object this repo does not have cannot be one — that much is
-  sound with no fetch. The base, the counts and the destination's own stamp all
-  need the object, which is why a caller fetches before asking and why
-  `:unreadable` exists for when it could not."
-  [^Repository repo projected mirror]
-  (let [pm (stamped-milestone (message-of repo projected))]
-    (if-let [mmsg (message-of repo mirror)]
-      (let [mm       (stamped-milestone mmsg)
-            ours?    (ancestor? repo mirror projected)
-            theirs?  (ancestor? repo projected mirror)
-            base     (merge-base repo projected mirror)]
-        {:projected {:sha projected :milestone pm}
-         :mirror    {:sha mirror    :milestone mm}
-         :base      base
-         :ahead     (commits-past repo projected base)
-         :behind    (commits-past repo mirror base)
-         :contains-mirror-tip? ours?
-         :cause     (cond ours?               :no-divergence
-                          theirs?             :mirror-ahead
-                          (nil? base)         :unrelated
-                          (and pm mm (= pm mm)) :remint
-                          :else               :diverged)})
-      {:projected {:sha projected :milestone pm}
-       :mirror    {:sha mirror}
-       :contains-mirror-tip? false
-       :cause :unreadable})))
+  A marker normally targets the delta immediately before it; a retroactive
+  `commit_point {:target …}` names an earlier one, and the fold stops there."
+  [store blob-of]
+  (let [ds     (store/deltas store)
+        marker (last (filter #(= :commit (:op %)) ds))]
+    (when marker
+      (let [upto (or (:target marker) (:id marker))
+            st   (reduce (fn [st d]
+                           (let [st' (or (store/replay-delta st d) st)]
+                             (if (= (:id d) upto) (reduced st') st')))
+                         (store/empty-store) ds)]
+        (commit-paths (source-tree st) (:deps marker) (:files marker)
+                      (:config marker) blob-of)))))

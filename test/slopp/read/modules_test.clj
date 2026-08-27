@@ -144,21 +144,6 @@
             r  (read.modules/unused-report st '[cr.core])]
         (is (= '[cr.core/helper cr.core/orphan] (:unused r)) (pr-str r))))))
 
-(deftest a-covers-declaration-is-coverage-not-liveness
-  ;; ^{:covers} on a deftest declares which tests reach a form (for the
-  ;; dispatch/data path covered-by can't see statically). It is a COVERAGE
-  ;; claim, not a keep-alive marker — a form whose only reference is a
-  ;; :covers declaration is still dead public surface. The honest liveness
-  ;; marker is ^:entry-point / ^:unused-ok ON THE FORM, kept separate.
-  (let [st (-> (store/empty-store)
-               (store/ingest 'cd.core "(ns cd.core)\n\n(defn dispatched \"D.\" [x] x)\n")
-               (store/ingest 'cd.core-test
-                             (str "(ns cd.core-test (:require [clojure.test :refer [deftest is]]))\n"
-                                  "(deftest ^{:covers \"cd.core/dispatched — via dispatch\"} t (is true))\n")))
-        r  (read.modules/unused-report st '[cd.core])]
-    (is (= '[cd.core/dispatched] (:unused r))
-        (str "a :covers declaration must not exempt from the unused gate: " (pr-str r)))))
-
 (deftest a-carrier-self-reference-does-not-keep-a-form-alive
   ;; regression: a form that carrier-references ITSELF was escaping the
   ;; dead-code gate (the graph's carrier producer lacked self-exclusion).
@@ -325,6 +310,21 @@
     (testing "missing-doc skips a ^:generated public defn, keeps the undocumented real one"
       (is (nil? (edit.modules/missing-doc-warning st 'gc.client 'create-order!)))
       (is (some? (edit.modules/missing-doc-warning st 'gc.client 'orphan))))))
+
+(deftest a-covers-declaration-is-coverage-not-liveness
+  ;; ^{:covers} on a deftest declares which tests reach a form (for the
+  ;; dispatch/data path covered-by can't see statically). It is a COVERAGE
+  ;; claim, not a keep-alive marker — a form whose only reference is a
+  ;; :covers declaration is still dead public surface. The honest liveness
+  ;; marker is ^:entry-point / ^:unused-ok ON THE FORM, kept separate.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'cd.core "(ns cd.core)\n\n(defn dispatched \"D.\" [x] x)\n")
+               (store/ingest 'cd.core-test
+                             (str "(ns cd.core-test (:require [clojure.test :refer [deftest is]]))\n"
+                                  "(deftest ^{:covers \"cd.core/dispatched — via dispatch\"} t (is true))\n")))
+        r  (read.modules/unused-report st '[cd.core])]
+    (is (= '[cd.core/dispatched] (:unused r))
+        (str "a :covers declaration must not exempt from the unused gate: " (pr-str r)))))
 
 (deftest a-namespace-has-to-say-what-it-is-for
   ;; A namespace's INVENTORY is derived — query_project, the module surface

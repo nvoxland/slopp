@@ -426,6 +426,80 @@
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map
+                          [:webapp/state :any]
+                          [:webapp/base {:optional true} :string]
+                          [:webapp/routes :any]
+                          [:webapp/call :any]
+                          [:webapp/render :any]
+                          [:webapp/push-url! :any]]
+                    :string :boolean]
+                   :any]}
+  navigate!
+  "Move `app` to `path`, performing every effect through the app's own plug-ins.
+
+  Nothing here touches a browser, and that is the entire point: `:webapp/render`
+  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
+  a test, so \"following this link pushes that url, asks for that endpoint, and
+  shows loading until it answers\" is an ordinary in-image assertion — including
+  the slow-response race, which in a real browser is a heisenbug you reproduce
+  by throttling the network.
+
+  **The PAGE says what to fetch, while it renders.** It used to be declared: a
+  route row carried one `:request`, and this ran it before rendering. That made
+  a screen able to load exactly one thing, and anything else had to leave the
+  load machinery — which is where the only real webapp's nav pane acquired
+  three of the defects this namespace exists to prevent. A page calls
+  [[ask!]] instead, as many times as it needs and conditionally, so navigating
+  is just arriving and rendering.
+
+  **[[ask!]] is start-if-absent**, which is what makes that safe: the page is
+  re-run on every resolution, and a load already in flight or already answered
+  is not asked for again.
+
+  **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
+  reason travels with the decision because it reads as arbitrary style
+  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
+  only run in a browser would put the whole headless exercise back where it
+  started, which is the one outcome this capability exists to prevent. An app
+  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
+  is for."
+  [{:webapp/keys [state base routes render push-url! address-keys] :as _app}
+   path push?]
+  (when push? (push-url! (prefixed base path)))
+  (swap! state arrive path (match-route routes path) address-keys)
+  (render @state))
+
+(defn- navigate-for!
+  "The driver's `:navigate`, partial'd over `app`.
+
+  A named var rather than a closure inside [[driver]], and the reason is the
+  `!`-naming rule rather than taste: a constructor that builds mutating
+  closures INLINE computes as effectful itself, so the gate would demand
+  `driver!` — a name asserting that calling it does something, when calling it
+  only assembles a map. Naming the behaviours puts the `!` where the mutation
+  actually is and leaves the assembler honest.
+
+  **It takes the url a READER would type — mount point included — and strips it,
+  exactly as a browser click does.** The fake browser follows an `:href` out of
+  the rendered tree, and the render now prefixes in-app links, so the path
+  arriving here carries the mount point and would match no route unprefixed. A
+  headless drive that visited app-relative paths would be exercising a url no
+  browser ever produces, which is the shape of divergence this whole capability
+  exists to prevent.
+
+  A url outside the mount point does NOTHING. [[strip-base]] answers nil there,
+  and routing nil would clear the screen the reader was on — treating a foreign
+  path as ours because it was handed to us.
+
+  Returns the state AFTER the move, because that is what `screen` re-renders."
+  [app _state url]
+  (when-let [path (strip-base (:webapp/base app) url)]
+    (navigate! app path false))
+  @(:webapp/state app))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
                           [:webapp/href {:optional true} [:maybe :string]]
                           [:webapp/button {:optional true} [:maybe :int]]
                           [:webapp/meta? {:optional true} [:maybe :boolean]]
@@ -475,6 +549,72 @@
              (not meta?) (not ctrl?) (not shift?) (not alt?))
     (when-let [path (strip-base base (str href))]
       (when (match-route routes path) path))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/routes :any]] [:map] ifn?]
+                   :any]}
+  click!
+  "Handle a click the browser just delivered: navigate if it is ours, and leave
+  it entirely alone if it is not.
+
+  [[click-target]] answers WHICH clicks are ours; this is what happens next, and
+  it is the half that goes wrong invisibly. Three failures, all of which
+  compile:
+
+  - `preventDefault` on a link that is NOT ours — a link that looks live and
+    does nothing, which is worse than a slow one because nothing reports it.
+  - no `preventDefault` on one that IS — the browser also loads the page, so
+    every in-app click restarts the application and the state it was holding.
+  - navigating without pushing — the address bar disagrees with the screen, and
+    a reload or a shared url lands somewhere else.
+
+  **`prevent!` arrives as a THUNK rather than being called by the shim.** The
+  shim's alternative is `(when (click-target …) (.preventDefault e) …)`, which
+  puts the decision back in the one namespace whose only verification is that it
+  compiled. Passing the effect in means the branch lives here, where a test
+  counts the calls — and \"was the default swallowed for this click and not that
+  one\" becomes an ordinary assertion instead of a thing you check by clicking.
+
+  Returns the path navigated to, or nil — so a caller that wants to know whether
+  the app took the click can ask."
+  [{:webapp/keys [base routes] :as app} click prevent!]
+  (when-let [path (click-target click base routes)]
+    (prevent!)
+    (navigate! app path true)
+    path))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/routes :any]]
+                    [:maybe :string] [:maybe :string] :boolean]
+                   :any]}
+  navigate-url!
+  "Show whatever the browser's URL now names — the app's entry from an ADDRESS
+  rather than from a path.
+
+  Two callers, which is why it exists rather than being inlined at each: the
+  first render at mount, and the back button. Both hand over a `pathname` and a
+  `search` because that is how a browser keeps a url, and both must reach the
+  same routing decision or the screen a reader lands on and the screen they come
+  back to differ.
+
+  **`push?` is false for both**, and the back button is the reason it is a
+  parameter rather than a constant. Pushing on a POP is the bug that makes back
+  appear broken: every press adds a history entry, so the button walks the
+  reader forward through their own history and never leaves the app.
+
+  **A url outside the mount point does NOTHING.** [[app-path]] answers nil there,
+  and routing nil would clear the screen the reader was on — a blank page caused
+  by an address that was never this app's to show.
+
+  The query string is carried, which is [[app-path]]'s whole subject: the two
+  halves of an address live in different properties and a handler that reads one
+  routes `/search?q=rate` to an empty box while LOOKING correct."
+  [{:webapp/keys [base] :as app} pathname search push?]
+  (when-let [path (app-path base pathname search)]
+    (navigate! app path push?)
+    path))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
@@ -1114,146 +1254,6 @@
     (load! app key
            (fn [ok err] (call (addressed base request) ok err))
            {:xform (:derive spec) :check (:check spec)})))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:webapp/state :any]
-                          [:webapp/base {:optional true} :string]
-                          [:webapp/routes :any]
-                          [:webapp/call :any]
-                          [:webapp/render :any]
-                          [:webapp/push-url! :any]]
-                    :string :boolean]
-                   :any]}
-  navigate!
-  "Move `app` to `path`, performing every effect through the app's own plug-ins.
-
-  Nothing here touches a browser, and that is the entire point: `:webapp/render`
-  and `:webapp/push-url!` are `js/…` calls in a real page and recorded values in
-  a test, so \"following this link pushes that url, asks for that endpoint, and
-  shows loading until it answers\" is an ordinary in-image assertion — including
-  the slow-response race, which in a real browser is a heisenbug you reproduce
-  by throttling the network.
-
-  **The PAGE says what to fetch, while it renders.** It used to be declared: a
-  route row carried one `:request`, and this ran it before rendering. That made
-  a screen able to load exactly one thing, and anything else had to leave the
-  load machinery — which is where the only real webapp's nav pane acquired
-  three of the defects this namespace exists to prevent. A page calls
-  [[ask!]] instead, as many times as it needs and conditionally, so navigating
-  is just arriving and rendering.
-
-  **[[ask!]] is start-if-absent**, which is what makes that safe: the page is
-  re-run on every resolution, and a load already in flight or already answered
-  is not asked for again.
-
-  **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
-  reason travels with the decision because it reads as arbitrary style
-  otherwise.** A promise is not a thing the JVM oracle has. A loop that could
-  only run in a browser would put the whole headless exercise back where it
-  started, which is the one outcome this capability exists to prevent. An app
-  whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
-  is for."
-  [{:webapp/keys [state base routes render push-url! address-keys] :as _app}
-   path push?]
-  (when push? (push-url! (prefixed base path)))
-  (swap! state arrive path (match-route routes path) address-keys)
-  (render @state))
-
-(defn- navigate-for!
-  "The driver's `:navigate`, partial'd over `app`.
-
-  A named var rather than a closure inside [[driver]], and the reason is the
-  `!`-naming rule rather than taste: a constructor that builds mutating
-  closures INLINE computes as effectful itself, so the gate would demand
-  `driver!` — a name asserting that calling it does something, when calling it
-  only assembles a map. Naming the behaviours puts the `!` where the mutation
-  actually is and leaves the assembler honest.
-
-  **It takes the url a READER would type — mount point included — and strips it,
-  exactly as a browser click does.** The fake browser follows an `:href` out of
-  the rendered tree, and the render now prefixes in-app links, so the path
-  arriving here carries the mount point and would match no route unprefixed. A
-  headless drive that visited app-relative paths would be exercising a url no
-  browser ever produces, which is the shape of divergence this whole capability
-  exists to prevent.
-
-  A url outside the mount point does NOTHING. [[strip-base]] answers nil there,
-  and routing nil would clear the screen the reader was on — treating a foreign
-  path as ours because it was handed to us.
-
-  Returns the state AFTER the move, because that is what `screen` re-renders."
-  [app _state url]
-  (when-let [path (strip-base (:webapp/base app) url)]
-    (navigate! app path false))
-  @(:webapp/state app))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/routes :any]] [:map] ifn?]
-                   :any]}
-  click!
-  "Handle a click the browser just delivered: navigate if it is ours, and leave
-  it entirely alone if it is not.
-
-  [[click-target]] answers WHICH clicks are ours; this is what happens next, and
-  it is the half that goes wrong invisibly. Three failures, all of which
-  compile:
-
-  - `preventDefault` on a link that is NOT ours — a link that looks live and
-    does nothing, which is worse than a slow one because nothing reports it.
-  - no `preventDefault` on one that IS — the browser also loads the page, so
-    every in-app click restarts the application and the state it was holding.
-  - navigating without pushing — the address bar disagrees with the screen, and
-    a reload or a shared url lands somewhere else.
-
-  **`prevent!` arrives as a THUNK rather than being called by the shim.** The
-  shim's alternative is `(when (click-target …) (.preventDefault e) …)`, which
-  puts the decision back in the one namespace whose only verification is that it
-  compiled. Passing the effect in means the branch lives here, where a test
-  counts the calls — and \"was the default swallowed for this click and not that
-  one\" becomes an ordinary assertion instead of a thing you check by clicking.
-
-  Returns the path navigated to, or nil — so a caller that wants to know whether
-  the app took the click can ask."
-  [{:webapp/keys [base routes] :as app} click prevent!]
-  (when-let [path (click-target click base routes)]
-    (prevent!)
-    (navigate! app path true)
-    path))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/routes :any]]
-                    [:maybe :string] [:maybe :string] :boolean]
-                   :any]}
-  navigate-url!
-  "Show whatever the browser's URL now names — the app's entry from an ADDRESS
-  rather than from a path.
-
-  Two callers, which is why it exists rather than being inlined at each: the
-  first render at mount, and the back button. Both hand over a `pathname` and a
-  `search` because that is how a browser keeps a url, and both must reach the
-  same routing decision or the screen a reader lands on and the screen they come
-  back to differ.
-
-  **`push?` is false for both**, and the back button is the reason it is a
-  parameter rather than a constant. Pushing on a POP is the bug that makes back
-  appear broken: every press adds a history entry, so the button walks the
-  reader forward through their own history and never leaves the app.
-
-  **A url outside the mount point does NOTHING.** [[app-path]] answers nil there,
-  and routing nil would clear the screen the reader was on — a blank page caused
-  by an address that was never this app's to show.
-
-  The query string is carried, which is [[app-path]]'s whole subject: the two
-  halves of an address live in different properties and a handler that reads one
-  routes `/search?q=rate` to an empty box while LOOKING correct."
-  [{:webapp/keys [base] :as app} pathname search push?]
-  (when-let [path (app-path base pathname search)]
-    (navigate! app path push?)
-    path))
 
 (defn- begin!
   "Boot the app, returning the state that leaves.

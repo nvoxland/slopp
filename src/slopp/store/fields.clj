@@ -18,6 +18,40 @@
   [tier]
   ({:reads :internal :effects :external} tier tier))
 
+(def ^:export markers
+  "No-content ops: replay-delta appends them (bookkeeping only) and
+  merge-logs skips them — :verify/:done/:merge silently, the rest with a
+  :skipped note (milestone markers deliberately do not travel; the open
+  decision is frictions #9). A NEW marker op registers here, or foreign
+  sync full-reloads on every sighting of it. Exported: session_brief reads
+  it to exclude markers from the host's code-delta count (review host-F2).
+
+  `:observe` is the second EVIDENCE citizen beside `:verify` — *these tests
+  ran and this is what happened*, which a verification is not. It is
+  bookkeeping for the same reason `:verify` is: it changes no code, so a host
+  that has not loaded one is not behind.
+
+  `:read-cost` is here for the same reason and arrived the same way — as a
+  field on another op that could not carry it. It records what a SPAN of
+  answers cost to send, and it is its own citizen because riding `:turn-end`
+  gave it the turn's rotation gate, which is blind to exactly the spans where
+  reads dominate."
+  #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert
+    :read-cost})
+
+(def silent-markers
+  "The marker subset merge-logs skips without a note — verification and
+  merge bookkeeping whose absence from the receiving line is the norm."
+  #{:verify :done :merge})
+
+(def element-ops
+  "Form/namespace CONTENT ops — the bespoke replay/merge machinery owns
+  them (:trivia merges as a deliberate skip: cosmetic payload, form-id
+  aliasing risk; :ns-delete removes an EMPTY namespace — replay dissocs or
+  full-reloads, and the merge applies it only when the receiving side's
+  copy is also empty)."
+  #{:ingest :replace :add :delete :rename :normalize :move :trivia :ns-delete})
+
 (defn ^:export canonical-platform
   "Canonical spelling of a module's target PLATFORM — :jvm (Clojure on the JVM,
   the default), :cljc (portable: loads on the JVM AND compiles to JS), or :cljs
@@ -27,20 +61,6 @@
   api boundary (module-platform!), so this stays total for the fold/replay path."
   [platform]
   (let [s (name platform)
-        s (if (= \: (first s)) (subs s 1) s)]
-    (keyword s)))
-
-(defn ^:export canonical-role
-  "Canonical spelling of a module's ROLE — :product (the default: the system
-  runs this code and it ships) or :instrument (a HUMAN runs it by hand — a
-  benchmark, a migration script, a mining CLI — so it is materialized outside
-  `src/` and never reaches the jar, R5). Coerces a string or colon-prefixed
-  spelling to the keyword so an MCP/JSON value round-trips, the same way
-  `canonical-tier` and `canonical-platform` do. The two-value validation
-  happens at the api boundary (module-role!), so this stays total for the
-  fold/replay path."
-  [role]
-  (let [s (name role)
         s (if (= \: (first s)) (subs s 1) s)]
     (keyword s)))
 
@@ -68,6 +88,20 @@
               (update f (fn [xs] (mapv #(if (string? %) (symbol %) %) xs)))))
           coord
           symbol-coord-fields))
+
+(defn ^:export canonical-role
+  "Canonical spelling of a module's ROLE — :product (the default: the system
+  runs this code and it ships) or :instrument (a HUMAN runs it by hand — a
+  benchmark, a migration script, a mining CLI — so it is materialized outside
+  `src/` and never reaches the jar, R5). Coerces a string or colon-prefixed
+  spelling to the keyword so an MCP/JSON value round-trips, the same way
+  `canonical-tier` and `canonical-platform` do. The two-value validation
+  happens at the api boundary (module-role!), so this stays total for the
+  fold/replay path."
+  [role]
+  (let [s (name role)
+        s (if (= \: (first s)) (subs s 1) s)]
+    (keyword s)))
 
 (def field-registry
   "Store fold-field → persistence declaration. :init seeds empty-store;
@@ -283,40 +317,6 @@
                                 :key "k" :value "v"}]
                   :sample {:op :config-unset :path "gone" :key "k"}
                   :crossed (fn [st] (not (contains? (:config st) "gone")))}})
-
-(def ^:export markers
-  "No-content ops: replay-delta appends them (bookkeeping only) and
-  merge-logs skips them — :verify/:done/:merge silently, the rest with a
-  :skipped note (milestone markers deliberately do not travel; the open
-  decision is frictions #9). A NEW marker op registers here, or foreign
-  sync full-reloads on every sighting of it. Exported: session_brief reads
-  it to exclude markers from the host's code-delta count (review host-F2).
-
-  `:observe` is the second EVIDENCE citizen beside `:verify` — *these tests
-  ran and this is what happened*, which a verification is not. It is
-  bookkeeping for the same reason `:verify` is: it changes no code, so a host
-  that has not loaded one is not behind.
-
-  `:read-cost` is here for the same reason and arrived the same way — as a
-  field on another op that could not carry it. It records what a SPAN of
-  answers cost to send, and it is its own citizen because riding `:turn-end`
-  gave it the turn's rotation gate, which is blind to exactly the spans where
-  reads dominate."
-  #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert
-    :read-cost})
-
-(def silent-markers
-  "The marker subset merge-logs skips without a note — verification and
-  merge bookkeeping whose absence from the receiving line is the norm."
-  #{:verify :done :merge})
-
-(def element-ops
-  "Form/namespace CONTENT ops — the bespoke replay/merge machinery owns
-  them (:trivia merges as a deliberate skip: cosmetic payload, form-id
-  aliasing risk; :ns-delete removes an EMPTY namespace — replay dissocs or
-  full-reloads, and the merge applies it only when the receiving side's
-  copy is also empty)."
-  #{:ingest :replace :add :delete :rename :normalize :move :trivia :ns-delete})
 
 (defn fold
   "Apply the ONE registered fold for a field-carrying delta to `store` —

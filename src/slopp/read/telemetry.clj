@@ -101,6 +101,88 @@
   payload the agent already consumed."
   200)
 
+(defn ^:export call-timing
+  "A turn's wall clock split into the part slopp spent working, the part it
+  did not, and the part nobody was there for — the pure fold over `calls`,
+  each `{:tool :start :end}` in epoch ms as the wire recorded them.
+
+  Returns `{:calls :slopp-ms :outside-ms :idle-ms :elapsed-ms :slopp-share
+  :top :refused}`, or NIL when nothing was called: a zeroed record would read
+  as \"measured, and the answer was nothing\", which is the conflation
+  D-surface-honesty forbids.
+
+  **`:outside-ms` is not \"thinking time\".** It is the gap between one answer
+  going out and the next call arriving: agent reasoning, every non-slopp tool
+  (file reads, shell, subagents), and the harness, none of which the server
+  can tell apart. Naming it for what it MEASURES rather than what we suspect
+  it contains is the point — and it is the number that was missing. Measured
+  over one real session before this existed: 1,703s elapsed against 390s of
+  recorded verification, so 78% of the wall clock had no producer at all.
+  P7's standing complaint is exactly this: the cost of leaving slopp lands
+  where no slopp metric sees it.
+
+  **`:idle-ms` is the session nobody was in.** A turn rotates on the
+  WRITE-tool gate, so a read-only ask folds into the next writing one and a
+  turn can straddle a human going to bed. Reading the first nine real records
+  found exactly that: 46 calls, 224s of work, 45,501s elapsed, `:slopp-share
+  \"0%\"` — a true division and a false statement, since slopp was most of the
+  time anyone was actually working. Gaps of `idle-gap-ms` or more are counted
+  here instead, and `:slopp-share` is taken against ACTIVE elapsed
+  (`:elapsed-ms` minus `:idle-ms`). The three-way split stays exhaustive; what
+  changes is that the two kinds of not-working are no longer one number.
+
+  `:top` is by total cost, largest first, aggregated per tool — the tool that
+  cost the most may be the one called a hundred times cheaply, and a per-call
+  median hides that."
+  [calls]
+  (when (seq calls)
+    (let [in    (reduce + 0 (map #(- (:end %) (:start %)) calls))
+          span  (- (:end (last calls)) (:start (first calls)))
+          idle  (->> (map (fn [a b] (- (:start b) (:end a))) calls (rest calls))
+                     (filter #(>= % idle-gap-ms))
+                     (reduce + 0))
+          live  (max 1 (- span idle))
+          
+          by    (->> (group-by :tool calls)
+                     (map (fn [[t cs]] {:tool t :n (count cs)
+                                        :ms (reduce + 0 (map #(- (:end %) (:start %)) cs))}))
+                     (sort-by (juxt (comp - :ms) :tool))
+                     vec)]
+      {:calls      (count calls)
+       :slopp-ms   in
+       :outside-ms (- span in idle)
+       :idle-ms    idle
+       :elapsed-ms span
+       :slopp-share (str (int (* 100 (/ in (double live)))) "%")
+       :top        (vec (take 5 by))
+       ;; REFUSED calls — a malformed match, a lint error in the form being
+       ;; written, an arity break. Each is a whole round trip that produced
+       ;; nothing, and they live in the 78% of wall clock spent outside slopp,
+       ;; where nothing had ever counted them. Always present, zero when
+       ;; clean: an absent key would read as unmeasured.
+       ;;
+       ;; `:samples` carries what they SAID. The count alone can only ever
+       ;; support "read that tool's contract"; a classification table written
+       ;; before seeing real messages would be invented rather than derived,
+       ;; and the withdrawn :positional-form-access advisory is what that
+       ;; costs. Bounded and truncated, because a refusal can hand back a
+       ;; whole form and this rides on a delta forever.
+       :refused    (let [r (filter :refused? calls)]
+                     {:count (count r)
+                      :pct   (int (* 100 (/ (count r) (double (count calls)))))
+                      :by-tool (vec (sort-by (juxt (comp - :n) :tool)
+                                             (map (fn [[t cs]] {:tool t :n (count cs)})
+                                                  (group-by :tool r))))
+                      :samples (->> r
+                                    (keep (fn [{:keys [tool error]}]
+                                            (when error
+                                              (let [s (str error)]
+                                                {:tool  tool
+                                                 :error (subs s 0 (min (count s)
+                                                                       refusal-sample-chars))}))))
+                                    (take refusal-samples)
+                                    vec)})})))
+
 (defn ^:export read-cost
   "What a turn's answers COST to send, and whether withholding one saved
   anything — the pure fold over the same `calls` ring `call-timing` reads,
@@ -189,85 +271,3 @@
   consumer driven by background events — produced rows that could not be
   compared. Rows of two hundred calls are the same unit everywhere."
   200)
-
-(defn ^:export call-timing
-  "A turn's wall clock split into the part slopp spent working, the part it
-  did not, and the part nobody was there for — the pure fold over `calls`,
-  each `{:tool :start :end}` in epoch ms as the wire recorded them.
-
-  Returns `{:calls :slopp-ms :outside-ms :idle-ms :elapsed-ms :slopp-share
-  :top :refused}`, or NIL when nothing was called: a zeroed record would read
-  as \"measured, and the answer was nothing\", which is the conflation
-  D-surface-honesty forbids.
-
-  **`:outside-ms` is not \"thinking time\".** It is the gap between one answer
-  going out and the next call arriving: agent reasoning, every non-slopp tool
-  (file reads, shell, subagents), and the harness, none of which the server
-  can tell apart. Naming it for what it MEASURES rather than what we suspect
-  it contains is the point — and it is the number that was missing. Measured
-  over one real session before this existed: 1,703s elapsed against 390s of
-  recorded verification, so 78% of the wall clock had no producer at all.
-  P7's standing complaint is exactly this: the cost of leaving slopp lands
-  where no slopp metric sees it.
-
-  **`:idle-ms` is the session nobody was in.** A turn rotates on the
-  WRITE-tool gate, so a read-only ask folds into the next writing one and a
-  turn can straddle a human going to bed. Reading the first nine real records
-  found exactly that: 46 calls, 224s of work, 45,501s elapsed, `:slopp-share
-  \"0%\"` — a true division and a false statement, since slopp was most of the
-  time anyone was actually working. Gaps of `idle-gap-ms` or more are counted
-  here instead, and `:slopp-share` is taken against ACTIVE elapsed
-  (`:elapsed-ms` minus `:idle-ms`). The three-way split stays exhaustive; what
-  changes is that the two kinds of not-working are no longer one number.
-
-  `:top` is by total cost, largest first, aggregated per tool — the tool that
-  cost the most may be the one called a hundred times cheaply, and a per-call
-  median hides that."
-  [calls]
-  (when (seq calls)
-    (let [in    (reduce + 0 (map #(- (:end %) (:start %)) calls))
-          span  (- (:end (last calls)) (:start (first calls)))
-          idle  (->> (map (fn [a b] (- (:start b) (:end a))) calls (rest calls))
-                     (filter #(>= % idle-gap-ms))
-                     (reduce + 0))
-          live  (max 1 (- span idle))
-          
-          by    (->> (group-by :tool calls)
-                     (map (fn [[t cs]] {:tool t :n (count cs)
-                                        :ms (reduce + 0 (map #(- (:end %) (:start %)) cs))}))
-                     (sort-by (juxt (comp - :ms) :tool))
-                     vec)]
-      {:calls      (count calls)
-       :slopp-ms   in
-       :outside-ms (- span in idle)
-       :idle-ms    idle
-       :elapsed-ms span
-       :slopp-share (str (int (* 100 (/ in (double live)))) "%")
-       :top        (vec (take 5 by))
-       ;; REFUSED calls — a malformed match, a lint error in the form being
-       ;; written, an arity break. Each is a whole round trip that produced
-       ;; nothing, and they live in the 78% of wall clock spent outside slopp,
-       ;; where nothing had ever counted them. Always present, zero when
-       ;; clean: an absent key would read as unmeasured.
-       ;;
-       ;; `:samples` carries what they SAID. The count alone can only ever
-       ;; support "read that tool's contract"; a classification table written
-       ;; before seeing real messages would be invented rather than derived,
-       ;; and the withdrawn :positional-form-access advisory is what that
-       ;; costs. Bounded and truncated, because a refusal can hand back a
-       ;; whole form and this rides on a delta forever.
-       :refused    (let [r (filter :refused? calls)]
-                     {:count (count r)
-                      :pct   (int (* 100 (/ (count r) (double (count calls)))))
-                      :by-tool (vec (sort-by (juxt (comp - :n) :tool)
-                                             (map (fn [[t cs]] {:tool t :n (count cs)})
-                                                  (group-by :tool r))))
-                      :samples (->> r
-                                    (keep (fn [{:keys [tool error]}]
-                                            (when error
-                                              (let [s (str error)]
-                                                {:tool  tool
-                                                 :error (subs s 0 (min (count s)
-                                                                       refusal-sample-chars))}))))
-                                    (take refusal-samples)
-                                    vec)})})))

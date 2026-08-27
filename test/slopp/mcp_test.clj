@@ -625,11 +625,6 @@
   (is (contains? @#'tools/read-only-tools "query_store")
       "plan mode may call it without prompts"))
 
-(use-fixtures :once
-  (fn [run]
-    (reset! @#'mcp/strict-boundary? true)
-    (try (run) (finally (reset! @#'mcp/strict-boundary? false)))))
-
 (deftest the-boundary-refuses-file-line-coordinates
   ;; agents NEVER think in files: no agent-facing response may carry a
   ;; source file:line coordinate or a :row/:col key. The strict-boundary
@@ -652,6 +647,11 @@
       (is (map? (#'mcp/text! {:form 'a.b/c :at "(defn c [])"})) "clean passes")
       (finally (reset! @#'mcp/strict-boundary? false)))))
 
+(use-fixtures :once
+  (fn [run]
+    (reset! @#'mcp/strict-boundary? true)
+    (try (run) (finally (reset! @#'mcp/strict-boundary? false)))))
+
 (deftest ^:external a-compile-failure-crosses-the-wire-anchored
   ;; drives a real compile error THROUGH the wire under the boundary audit:
   ;; the response must anchor (form + snippet) and carry NO coordinate —
@@ -665,22 +665,6 @@
         (is (re-find #"wce\.core/f" r) "the owning form is named")
         (is (re-find #"noSuchStaticThing" r) "a match-ready snippet rides")
         (is (not (re-find #"\.clj:\d" r)) "no file:line in the wire text"))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external ns-create-platform-rides-the-wire
-  (let [sess (external/open!)]
-    (try
-      (testing "ns_create carries a platform on the wire — born :cljs"
-        (let [r (call! sess "ns_create"
-                       {:ns "wcw.client" :source "(ns wcw.client)\n"
-                        :platform "cljs" :prompt "browser code"})]
-          (is (not (re-find #":error" r)) r)))
-      (testing "a js/* form then lands unverified, deferred to the cljs compiler"
-        (let [r (call! sess "edit_add_form"
-                       {:ns "wcw.client" :source "(defn boom [] (js/alert \"hi\"))"
-                        :prompt "client handler"})]
-          (is (re-find #":cljs-deferred-to-compile" r) r)
-          (is (not (re-find #"form failed to compile" r)) r)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external module-purity-rides-the-wire
@@ -993,35 +977,6 @@
           (is (contains? by-name "rename_sweep"))
           (is (contains? by-name "change_signature"))
           (is (contains? by-name "undo"))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external unknown-argument-is-refused
-  ;; The MCP dispatch used to DROP an unrecognised argument — a typo'd flag
-  ;; silently ran a real sweep (dry-run-is-honored-over-the-wire is the
-  ;; incident). Strict validation REFUSES an unknown key, naming it, so a flag
-  ;; cannot evaporate into the opposite of what was asked. A key the dispatch
-  ;; deliberately accepts as an alias (edit_extract :subform) must still pass.
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
-      (testing "an unknown key is refused, names itself and the accepted keys, and NOTHING runs"
-        (let [before (count (store/deltas (:store @sess)))
-              r      (call! sess "rename_sweep" {:from ":uk/target"
-                                                 :to ":uk/renamed"
-                                                 :bogus true})]
-          (is (re-find #"unknown argument" r) r)
-          (is (re-find #":bogus" r) r)
-          (is (re-find #":dry-run" r) "the refusal lists the accepted keys")
-          (is (= before (count (store/deltas (:store @sess))))
-              "a refused call appends NO delta — the sweep must not run")
-          (is (re-find #":uk/target" (query/query-source sess 'uk.core))
-              "and rewrites nothing")))
-      (testing "an alias the dispatch accepts is not treated as unknown"
-        (call! sess "ns_create" {:ns "uk2" :source "(ns uk2)\n(defn f [x] (+ x x 1))\n"})
-        (let [r (edn/read-string (call! sess "edit_extract"
-                                        {:ns "uk2" :from "f" :name "doubled"
-                                         :subform "(+ x x 1)"}))]
-          (is (nil? (:error r)) r)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external dry-run-is-honored-over-the-wire
@@ -1449,6 +1404,22 @@
           (is (= 1 (count (re-seq #"\[a 1\]" (str src)))) src)))
       (finally (ops/close! sess)))))
 
+(deftest ^:external ns-create-platform-rides-the-wire
+  (let [sess (external/open!)]
+    (try
+      (testing "ns_create carries a platform on the wire — born :cljs"
+        (let [r (call! sess "ns_create"
+                       {:ns "wcw.client" :source "(ns wcw.client)\n"
+                        :platform "cljs" :prompt "browser code"})]
+          (is (not (re-find #":error" r)) r)))
+      (testing "a js/* form then lands unverified, deferred to the cljs compiler"
+        (let [r (call! sess "edit_add_form"
+                       {:ns "wcw.client" :source "(defn boom [] (js/alert \"hi\"))"
+                        :prompt "client handler"})]
+          (is (re-find #":cljs-deferred-to-compile" r) r)
+          (is (not (re-find #"form failed to compile" r)) r)))
+      (finally (ops/close! sess)))))
+
 (deftest ^:external one-shot-call-errors-stay-readable
   ;; The turn gate on --call is DELIBERATE (see one-shot-call: reads are free,
   ;; writes carry provenance, and turns are durable across one-shot processes,
@@ -1486,6 +1457,35 @@
   (testing "the rename streak likewise stays on rename calls"
     (let [sess (atom {:slopp.mcp.smells/stats {:renames 4}})]
       (is (nil? (smells/track-hint! sess "query_slice" {}))))))
+
+(deftest ^:external unknown-argument-is-refused
+  ;; The MCP dispatch used to DROP an unrecognised argument — a typo'd flag
+  ;; silently ran a real sweep (dry-run-is-honored-over-the-wire is the
+  ;; incident). Strict validation REFUSES an unknown key, naming it, so a flag
+  ;; cannot evaporate into the opposite of what was asked. A key the dispatch
+  ;; deliberately accepts as an alias (edit_extract :subform) must still pass.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
+      (testing "an unknown key is refused, names itself and the accepted keys, and NOTHING runs"
+        (let [before (count (store/deltas (:store @sess)))
+              r      (call! sess "rename_sweep" {:from ":uk/target"
+                                                 :to ":uk/renamed"
+                                                 :bogus true})]
+          (is (re-find #"unknown argument" r) r)
+          (is (re-find #":bogus" r) r)
+          (is (re-find #":dry-run" r) "the refusal lists the accepted keys")
+          (is (= before (count (store/deltas (:store @sess))))
+              "a refused call appends NO delta — the sweep must not run")
+          (is (re-find #":uk/target" (query/query-source sess 'uk.core))
+              "and rewrites nothing")))
+      (testing "an alias the dispatch accepts is not treated as unknown"
+        (call! sess "ns_create" {:ns "uk2" :source "(ns uk2)\n(defn f [x] (+ x x 1))\n"})
+        (let [r (edn/read-string (call! sess "edit_extract"
+                                        {:ns "uk2" :from "f" :name "doubled"
+                                         :subform "(+ x x 1)"}))]
+          (is (nil? (:error r)) r)))
+      (finally (ops/close! sess)))))
 
 (deftest ^:external module-extract-dry-run-rides-the-wire
   ;; The dry-run IS the safety story: an agent reads the plan before a rename
@@ -2607,4 +2607,74 @@
         (testing "no turn closed to make that happen"
           (is (empty? (filter #(= :turn-end (:op %)) (store/deltas (:store @sess))))
               "the whole point is that this no longer depends on a turn")))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-intent-from-another-session-is-left-for-its-owner
+  ;; Two Claude sessions on one store share ONE mailbox: the prompt hook
+  ;; writes .slopp/pending-intent at a fixed path and whichever server calls a
+  ;; tool next consumes it. Absorbing does not merely mis-stamp a delta — it
+  ;; calls adopt-line!, so the thief SWITCHES ONTO THE OTHER AGENT'S THREAD
+  ;; and resyncs its store and image from that line. That defeats the whole
+  ;; point of threads, whose docstring promises "concurrent sessions never
+  ;; merge episodes".
+  ;;
+  ;; Observed live 2026-08-27 with two sessions on this store: seven writes by
+  ;; one session recorded under the other's id, bracketed by turns carrying
+  ;; the other's verbatim asks, and session_brief reporting the stranger's
+  ;; un-landed work as "private to this thread".
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-two-sessions"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})
+        pi   (io/file dir ".slopp" "pending-intent")]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (io/make-parents pi)
+      ;; this session's own ask — it adopts sess-A as its identity
+      (spit pi "{\"session-id\":\"sess-A\",\"prompt\":\"A's own ask\"}")
+      (call! sess "ns_create" {:ns "two.core"
+                              :source "(ns two.core)\n(defn f [] 1)\n"})
+      (is (= "sess-A" (:agent-id @sess)) "precondition: this session is A")
+      ;; now ANOTHER live session's hook drops ITS ask in the shared mailbox
+      (spit pi "{\"session-id\":\"sess-B\",\"prompt\":\"B's own ask\"}")
+      (call! sess "query_brief" {})
+      (testing "a stranger's intent does not re-identify this session"
+        (is (= "sess-A" (:agent-id @sess))))
+      (testing "and is left on disk for the session it belongs to"
+        (is (true? (.exists pi))))
+      (testing "and never becomes this session's turn intent"
+        (is (not= "B's own ask" (:last-intent @sess))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-claimed-session-reads-its-own-mailbox-not-the-shared-one
+  ;; Leaving a stranger's intent alone is only half the fix. The other half is
+  ;; that the shared file is a single slot: once B's ask sits there unread,
+  ;; A's next prompt OVERWRITES it. Losing an ask is quieter than stealing one
+  ;; and no less wrong, so the hook also writes pending-intent.<sid> and a
+  ;; session that has claimed an id reads that first.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-own-mailbox"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})
+        pi   (io/file dir ".slopp" "pending-intent")
+        mine (io/file dir ".slopp" "pending-intent.sess-A")]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (io/make-parents pi)
+      (spit pi "{\"session-id\":\"sess-A\",\"prompt\":\"A's first ask\"}")
+      (call! sess "ns_create" {:ns "own.core"
+                              :source "(ns own.core)\n(defn f [] 1)\n"})
+      (is (= "sess-A" (:agent-id @sess)) "precondition: this session claimed A")
+      ;; A's hook writes both mailboxes for A's SECOND ask; B's hook then
+      ;; overwrites the shared slot before A's server gets to it.
+      (spit mine "{\"session-id\":\"sess-A\",\"prompt\":\"A's second ask\"}")
+      (spit pi   "{\"session-id\":\"sess-B\",\"prompt\":\"B's own ask\"}")
+      (call! sess "query_brief" {})
+      (testing "A's own ask still reaches A"
+        (is (= "A's second ask" (:last-intent @sess))))
+      (testing "A's mailbox is emptied once read"
+        (is (false? (.exists mine))))
+      (testing "B's ask is still there for B"
+        (is (true? (.exists pi)))
+        (is (re-find #"B's own ask" (slurp pi))))
       (finally (ops/close! sess)))))

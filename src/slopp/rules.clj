@@ -483,59 +483,6 @@
                                      " theatre that reads as verification")})))))
               changed))))))
 
-(defn stored-name-check
-  "Done-advisory: a form's STORED `:name` disagrees with the name its own
-   source defines.
-
-   The store keeps both — `:name` on the element, the source in `:node` — and
-   `store/form-symbol` derives one from the other at every write. When they
-   drift apart the form becomes addressable by ID and not by name, and **every
-   name-addressed surface loses it silently**: `rename_sweep` skips it and
-   reports its own form count as though complete, `edit_subform {form \"x\"}`
-   refuses with `no form named x` (which reads as the caller's mistake), and
-   `:left-behind` prints `:form nil` for the one field a reader navigates by.
-
-   **Why it survived long enough to need a rule.** The rename verbs are split:
-   `ns-rename-changeset` and `qualified-mention-changeset` both produce
-   `{form-id node}` and are applied by ID, so they rewrite these forms
-   correctly, while the prose sweep addresses forms by name and does not. Half
-   the machinery works, the half that does not reports success, and the
-   difference is invisible from either result.
-
-   Measured on slopp's own store the day this landed: 11 forms with no `:name`,
-   6 of them correctly (a `defmethod` has a dispatch value rather than a name,
-   `use-fixtures` defines nothing) and 5 where `form-symbol` on the stored node
-   returns a name the element does not carry.
-
-   **The cause is not yet known, and that is the argument FOR the check rather
-   than against it.** `form-symbol` has one version, ingested with its
-   metadata-wrapper branch already present; `apply-changeset` recomputes both
-   `:name` and `:names` on every entry. Three plausible causes were measured and
-   falsified. So this fires on the state rather than on a suspected writer,
-   which is what a check should do when the invariant is clear and the breach is
-   not: whatever produces the next one, this names it in the act.
-
-   Compares against `form-symbol` and nothing else, deliberately — a second
-   derivation of \"what is this form called\" is how the last one of these
-   started."
-  [_session st* changed]
-  (vec (for [fid changed
-             :let [e (store/form-by-id st* fid)]
-             :when e
-             :let [actual (store/form-symbol (:node e))]
-             :when (not= (:name e) actual)]
-         {:form (symbol (str (store/ns-of-form-id st* fid))
-                        (str (or (:name e) actual fid)))
-          :teach (str "this form's stored :name is " (pr-str (:name e))
-                      " but its source defines " (pr-str actual)
-                      ". Every name-addressed surface — rename_sweep,"
-                      " edit_subform {form}, :left-behind's :form — reaches"
-                      " forms by the stored name, so a form the store cannot"
-                      " name is one they all skip WITHOUT SAYING SO, while"
-                      " id-addressed passes keep working. Rewrite the form"
-                      " (edit_replace_form, or edit_subform addressing it by"
-                      " its id " (pr-str fid) ") to restore agreement")})))
-
 (defn marker-why-check
   "Done-advisory: a changed form carries an escape marker as a BARE keyword,
    so the dial says that a rule was waived and nothing about why.
@@ -775,6 +722,88 @@
                         " would have asked again until someone happened to"
                         " edit one of these forms.")})))))
 
+(defn- enabled?
+  "True when this store has not dialed advisory `e` `:off`
+  (`edit.modules/rule-severity` — the per-store override, else the registry
+  default).
+
+  Its own form because BOTH runners ask it, and a second copy of \"is this rule
+  on\" is a second answer waiting to happen: the whole-store sweep reports which
+  rules it ran, and that list has to be the same list the runner actually ran."
+  [st* {:keys [key severity]}]
+  (not= :off (gates/rule-severity st* key severity)))
+
+(defn- run-checks
+  "Run `entries`' `:check`s over `changed` and return `{:key findings}` for the
+  ones that FIRED (non-empty), each filtered through its declared `:applies-to`
+  (`in-scope`).
+
+  The whole difference between the episode run and the whole-store sweep is
+  WHICH entries and WHICH form ids; every other decision — scope filtering,
+  dropping the clean ones, the shape of the result — is here once so the two
+  cannot answer differently. Callers select their own entries (`enabled?`, plus
+  `:sweep` for the sweep), because which rules ran is something each of them
+  has to REPORT and not merely apply."
+  [session st* changed entries]
+  (into {}
+        (keep (fn [{:keys [key check applies-to]}]
+                (let [r (in-scope (or applies-to :both) (check session st* changed))]
+                  (when (seq r) [key r]))))
+        entries))
+
+(defn stored-name-check
+  "Done-advisory: a form's STORED `:name` disagrees with the name its own
+   source defines.
+
+   The store keeps both — `:name` on the element, the source in `:node` — and
+   `store/form-symbol` derives one from the other at every write. When they
+   drift apart the form becomes addressable by ID and not by name, and **every
+   name-addressed surface loses it silently**: `rename_sweep` skips it and
+   reports its own form count as though complete, `edit_subform {form \"x\"}`
+   refuses with `no form named x` (which reads as the caller's mistake), and
+   `:left-behind` prints `:form nil` for the one field a reader navigates by.
+
+   **Why it survived long enough to need a rule.** The rename verbs are split:
+   `ns-rename-changeset` and `qualified-mention-changeset` both produce
+   `{form-id node}` and are applied by ID, so they rewrite these forms
+   correctly, while the prose sweep addresses forms by name and does not. Half
+   the machinery works, the half that does not reports success, and the
+   difference is invisible from either result.
+
+   Measured on slopp's own store the day this landed: 11 forms with no `:name`,
+   6 of them correctly (a `defmethod` has a dispatch value rather than a name,
+   `use-fixtures` defines nothing) and 5 where `form-symbol` on the stored node
+   returns a name the element does not carry.
+
+   **The cause is not yet known, and that is the argument FOR the check rather
+   than against it.** `form-symbol` has one version, ingested with its
+   metadata-wrapper branch already present; `apply-changeset` recomputes both
+   `:name` and `:names` on every entry. Three plausible causes were measured and
+   falsified. So this fires on the state rather than on a suspected writer,
+   which is what a check should do when the invariant is clear and the breach is
+   not: whatever produces the next one, this names it in the act.
+
+   Compares against `form-symbol` and nothing else, deliberately — a second
+   derivation of \"what is this form called\" is how the last one of these
+   started."
+  [_session st* changed]
+  (vec (for [fid changed
+             :let [e (store/form-by-id st* fid)]
+             :when e
+             :let [actual (store/form-symbol (:node e))]
+             :when (not= (:name e) actual)]
+         {:form (symbol (str (store/ns-of-form-id st* fid))
+                        (str (or (:name e) actual fid)))
+          :teach (str "this form's stored :name is " (pr-str (:name e))
+                      " but its source defines " (pr-str actual)
+                      ". Every name-addressed surface — rename_sweep,"
+                      " edit_subform {form}, :left-behind's :form — reaches"
+                      " forms by the stored name, so a form the store cannot"
+                      " name is one they all skip WITHOUT SAYING SO, while"
+                      " id-addressed passes keep working. Rewrite the form"
+                      " (edit_replace_form, or edit_subform addressing it by"
+                      " its id " (pr-str fid) ") to restore agreement")})))
+
 (defn stale-pattern-check
   "Done-advisory: a REGEX literal in a changed form spells a name in this
    store's OWN namespace family that is neither a namespace nor a prefix of
@@ -849,35 +878,6 @@
                                     (str ". " sugg " is the only namespace with the"
                                          " same last segment")))}
                sugg (assoc :suggest sugg)))))))
-
-(defn- enabled?
-  "True when this store has not dialed advisory `e` `:off`
-  (`edit.modules/rule-severity` — the per-store override, else the registry
-  default).
-
-  Its own form because BOTH runners ask it, and a second copy of \"is this rule
-  on\" is a second answer waiting to happen: the whole-store sweep reports which
-  rules it ran, and that list has to be the same list the runner actually ran."
-  [st* {:keys [key severity]}]
-  (not= :off (gates/rule-severity st* key severity)))
-
-(defn- run-checks
-  "Run `entries`' `:check`s over `changed` and return `{:key findings}` for the
-  ones that FIRED (non-empty), each filtered through its declared `:applies-to`
-  (`in-scope`).
-
-  The whole difference between the episode run and the whole-store sweep is
-  WHICH entries and WHICH form ids; every other decision — scope filtering,
-  dropping the clean ones, the shape of the result — is here once so the two
-  cannot answer differently. Callers select their own entries (`enabled?`, plus
-  `:sweep` for the sweep), because which rules ran is something each of them
-  has to REPORT and not merely apply."
-  [session st* changed entries]
-  (into {}
-        (keep (fn [{:keys [key check applies-to]}]
-                (let [r (in-scope (or applies-to :both) (check session st* changed))]
-                  (when (seq r) [key r]))))
-        entries))
 
 (defn unknown-marker-check
   "Done-advisory: a form carrying a marker in a namespace SLOPP owns that slopp
@@ -1347,6 +1347,71 @@
   [session st* changed]
   (run-checks session st* changed (filter #(enabled? st* %) done-advisories)))
 
+(defn status-affecting-fired?
+  "True when an advisory whose EFFECTIVE severity is `:error` produced a
+   STATUS-AFFECTING finding — a real failure that should flip `test-status` red.
+   Effective severity is the per-store override (`edit.modules/rule-severity`)
+   else the registry default, so a project can dial `key-typos` up to `:error` or
+   `schema-drift` down to `:advisory`. `:advisory`/`:off` never flip status.
+
+   A single finding may opt OUT with `:severity :info`: reported like any other,
+   never status-flipping. Without it an `:error` rule was all-or-nothing, so a
+   rule with both a hard failure and a genuinely informational observation had to
+   drop the latter out of its findings to keep it from flipping — invisible at
+   done, which is where it was worth seeing (`http-dangling-route-refs` and its
+   dynamic refs). An ungraded finding — including a non-map one — flips, so the
+   grade is opt-in and silence still means failure.
+
+   Args: the store (for the config) and the `{:key findings}` map from
+   `run-done-advisories!`."
+  [store advisories]
+  (boolean (some (fn [{:keys [key severity]}]
+                   (and (= :error (gates/rule-severity store key severity))
+                        (some #(not= :info (:severity %)) (get advisories key))))
+                 done-advisories)))
+
+(defn ^:export declared-severities
+  "`{rule-key declared-severity}` across BOTH D9 grains — write gates from
+   `edit.modules/write-gate-severities` (a gate's `:rule/severity` metadata) and
+   done advisories from this namespace's registry `:severity`. The single source
+   `catalog/rule-rows` reports from, so what `query_rules` shows and what
+   refuses a write cannot disagree.
+
+   Built here rather than in the catalog because the catalog is `:pure` and this
+   namespace is `:external`: the data flows out to the leaf, the leaf never
+   reaches into the shell."
+  []
+  (merge (gates/write-gate-severities)
+         (into {} (map (juxt :key :severity)) done-advisories)))
+
+(defn ^:export query-rules
+  "The D9 enforcement catalog for THIS store: every rule with its grain, its
+   EFFECTIVE per-store severity (the `rules` config override else the rule's
+   DECLARED default), how to discharge it, and what it means. The one place to
+   see what's enforced and at what grade — dial any rule with `config_file {path
+   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
+
+   Lives HERE, beside the registries, rather than in `api.query`: the declared
+   default belongs to the code that ENFORCES each rule, and `api.query` is
+   `:pure` while this namespace is `:external` — a query that reports what a
+   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
+   `declared-severities`, so what this reports and what refuses a write cannot
+   disagree.
+
+   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
+   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
+   (block); `:error` has no write-gate meaning and reports as `:refuse`.
+   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
+  [session]
+  (let [st (:store @session)]
+    (mapv (fn [{:keys [rule grain severity] :as r}]
+            (let [eff (gates/rule-severity st rule severity)]
+              (assoc r :severity
+                     (if (= grain :form)
+                       (case eff (:off :advisory) eff :refuse)
+                       eff))))
+          (catalog/rule-rows (declared-severities)))))
+
 (defn ^:export sweep-plan
   "Which sweepable advisories will RUN over `st*`, and which will not with WHY:
   `{:swept [key …] :not-swept [{:rule :why :severity} …]}`.
@@ -1467,68 +1532,3 @@
     (assoc plan
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
-
-(defn status-affecting-fired?
-  "True when an advisory whose EFFECTIVE severity is `:error` produced a
-   STATUS-AFFECTING finding — a real failure that should flip `test-status` red.
-   Effective severity is the per-store override (`edit.modules/rule-severity`)
-   else the registry default, so a project can dial `key-typos` up to `:error` or
-   `schema-drift` down to `:advisory`. `:advisory`/`:off` never flip status.
-
-   A single finding may opt OUT with `:severity :info`: reported like any other,
-   never status-flipping. Without it an `:error` rule was all-or-nothing, so a
-   rule with both a hard failure and a genuinely informational observation had to
-   drop the latter out of its findings to keep it from flipping — invisible at
-   done, which is where it was worth seeing (`http-dangling-route-refs` and its
-   dynamic refs). An ungraded finding — including a non-map one — flips, so the
-   grade is opt-in and silence still means failure.
-
-   Args: the store (for the config) and the `{:key findings}` map from
-   `run-done-advisories!`."
-  [store advisories]
-  (boolean (some (fn [{:keys [key severity]}]
-                   (and (= :error (gates/rule-severity store key severity))
-                        (some #(not= :info (:severity %)) (get advisories key))))
-                 done-advisories)))
-
-(defn ^:export declared-severities
-  "`{rule-key declared-severity}` across BOTH D9 grains — write gates from
-   `edit.modules/write-gate-severities` (a gate's `:rule/severity` metadata) and
-   done advisories from this namespace's registry `:severity`. The single source
-   `catalog/rule-rows` reports from, so what `query_rules` shows and what
-   refuses a write cannot disagree.
-
-   Built here rather than in the catalog because the catalog is `:pure` and this
-   namespace is `:external`: the data flows out to the leaf, the leaf never
-   reaches into the shell."
-  []
-  (merge (gates/write-gate-severities)
-         (into {} (map (juxt :key :severity)) done-advisories)))
-
-(defn ^:export query-rules
-  "The D9 enforcement catalog for THIS store: every rule with its grain, its
-   EFFECTIVE per-store severity (the `rules` config override else the rule's
-   DECLARED default), how to discharge it, and what it means. The one place to
-   see what's enforced and at what grade — dial any rule with `config_file {path
-   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
-
-   Lives HERE, beside the registries, rather than in `api.query`: the declared
-   default belongs to the code that ENFORCES each rule, and `api.query` is
-   `:pure` while this namespace is `:external` — a query that reports what a
-   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
-   `declared-severities`, so what this reports and what refuses a write cannot
-   disagree.
-
-   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
-   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
-   (block); `:error` has no write-gate meaning and reports as `:refuse`.
-   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
-  [session]
-  (let [st (:store @session)]
-    (mapv (fn [{:keys [rule grain severity] :as r}]
-            (let [eff (gates/rule-severity st rule severity)]
-              (assoc r :severity
-                     (if (= grain :form)
-                       (case eff (:off :advisory) eff :refuse)
-                       eff))))
-          (catalog/rule-rows (declared-severities)))))

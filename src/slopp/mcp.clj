@@ -9,12 +9,98 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness]))
 
 (def ^:private protocol-version "2024-11-05")
 
 (def ^:private ^:dynamic *hint*
   "Optional one-line workflow hint, attached to map results (item 3)." nil)
+
+(defn- red? [t]
+  (and t (pos? (+ (:fail t 0) (:error t 0)))))
+
+(defn parse-call-args
+  "Tool arguments for the one-shot --call CLI: nil/blank → {}; \"@path\"
+  reads the file first; the text parses as JSON or EDN (agents emit both)
+  and must yield a map."
+  [s]
+  (let [s (if (and s (str/starts-with? s "@")) (slurp (subs s 1)) s)]
+    (if (str/blank? s)
+      {}
+      (let [v (or (try (json/parse-string s true) (catch Exception _ nil))
+                  (try (edn/read-string s) (catch Exception _ nil)))]
+        (if (map? v)
+          v
+          (throw (ex-info (str "--call args must be a JSON or EDN map (or @file): "
+                               s)
+                          {})))))))
+
+(defn- absorb-pending-intent!
+  "Consume this session's pending intent when the plugin's prompt hook has
+  left one. The hook writes {\"session-id\": …, \"prompt\": …} (a bare string
+  is accepted as prompt-only). The session ADOPTS the harness session id as
+  its identity — unless the environment already named the conversation, which
+  is now the ordinary case and makes this path the FALLBACK — so every delta of one
+  Claude session shares a key and concurrent sessions never merge episodes;
+  the prompt is stashed as the next auto-turn's intent.
+
+  **The mailbox is per-STORE, and two live sessions share the directory.**
+  So the id in the file is a claim of OWNERSHIP, not just a label. Once this
+  session has claimed one, an intent naming a DIFFERENT session is left
+  where it lies: consuming it would take the other agent's identity and,
+  through `adopt-line!`, its THREAD — resyncing this session's store and
+  image off somebody else's line. That is the exact failure this promise
+  ('concurrent sessions never merge episodes') exists to prevent, and it was
+  observed live on 2026-08-27: seven writes by one session recorded under
+  another's id, bracketed by turns carrying the other's verbatim asks.
+
+  A claimed session prefers its OWN `pending-intent.<sid>` file, which is
+  what a current hook writes alongside the legacy path; the unscoped file is
+  still read so an older hook keeps working. An intent carrying no id at all
+  has no owner to offend and is always taken."
+  [session]
+  (when-let [dir (:dir @session)]
+    (let [claimed (:intent-sid @session)
+          scoped  (when claimed
+                    (io/file dir ".slopp" (str "pending-intent." claimed)))
+          legacy  (io/file dir ".slopp" "pending-intent")
+          f       (cond (and scoped (.exists scoped)) scoped
+                        (.exists legacy)              legacy
+                        :else                         nil)]
+      (when f
+        (let [raw (slurp f)
+              {:keys [sid prompt]}
+              (or (try (let [m (json/parse-string raw true)]
+                         (when (map? m)
+                           {:sid (:session-id m) :prompt (:prompt m)}))
+                       (catch Exception _ nil))
+                  {:prompt raw})]
+          ;; Somebody else's ask: leave the file, change nothing. Their server
+          ;; is the one that can answer it.
+          (when-not (and sid claimed (not= sid claimed))
+            (.delete f)
+            (when sid (swap! session assoc :intent-sid sid))
+            (when (and sid (not (:pinned-agent? @session)))
+              (swap! session assoc :agent-id sid)
+              ;; identity settled → the session takes THIS agent's thread.
+              ;; It is the first moment it can: the session opened before the
+              ;; harness id existed, so its store and image were loaded from
+              ;; the branch. If this agent left un-landed work last time, both
+              ;; came from the wrong line — and only the store heals on its
+              ;; own, which would leave verification grading the branch's code
+              ;; against the thread's store.
+              (engine/adopt-line! session))
+            (when-not (str/blank? (or prompt ""))
+              ;; a new ask is a new READER, potentially: /clear and automatic
+              ;; compaction both land here and neither is visible any other
+              ;; way. `told!` scopes its sent-view hashes to this counter, so
+              ;; the first read of a view in a fresh context is always a
+              ;; payload. It bumps for READ-ONLY asks too — turns do not, and
+              ;; a read-only planning ask is where the withholding was first
+              ;; hit.
+              (swap! session #(-> %
+                                  (assoc :pending-intent prompt :last-intent prompt)
+                                  (update ::ask (fnil inc 0)))))))))))
 
 (def ^:private ^:dynamic *spool-session*
   "Bound to the session during tools/call so `text` can spool full
@@ -56,6 +142,19 @@
                                        f)))
                                  f [:expected :actual :message]))
                        fs)))))
+
+(defn- tools-note!
+  "The notifications/tools/list_changed message when the tool registry has
+  DRIFTED from what this session last advertised (a live reload renamed or
+  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
+  client could see it), else nil. Emitting updates the baseline, so each
+  drift notifies exactly once. No baseline (tools/list never served) → nil."
+  [session]
+  (let [h    (hash tools/tools)
+        last (:slopp.mcp/tools-hash @session)]
+    (when (and last (not= last h))
+      (swap! session assoc :slopp.mcp/tools-hash h)
+      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
 
 (def ^:private ^{:ambient-ok "process-global TEST state with no dynamic-var alternative — binding is dialect-banned, and the flag has to reach a boundary crossed on threads other than the one that would bind it; a fixture flips it for the across-the-wire suite and it is off in production"} strict-boundary?
   "When true, the response boundary (text!) THROWS on any file/line
@@ -151,81 +250,168 @@
 
        :else nil))))
 
-(def ^:private ^:dynamic *response-facts*
-  "Bound to an atom during tools/call so whoever shapes the answer can record
-  what it DID: `text!` knows the size gate cut a payload, `told!` knows the
-  knowledge differential withheld one, and `query_detail` knows which id it
-  went back for. None of that is in the return value, and all of it happens
-  several frames below `handle!`, which is the only layer that records a call
-  at all.
+(defn normalize-targets
+  "Normalize `query_source`'s `targets` into `[{:ns sym :name sym?} …]`.
 
-  A recorder rather than a return value because the alternative is a second
-  value threaded out of every tool branch that nothing else reads. It is
-  write-only and per-call: a nil binding (a direct `text!` in a test) simply
-  drops the note." nil)
+  Accepts every UNAMBIGUOUS spelling, because refusing one taught a rule that
+  did not need to exist: `{:ns \"a.b\" :name \"c\"}`, the qualified string
+  `\"a.b/c\"`, a bare `\"a.b\"`, and the symbol `a.b/c` an agent writing EDN
+  reaches for first.
 
-(defn- note-response!
-  "Record `m` about the response being shaped, if anyone is listening."
-  [m]
-  (when *response-facts* (swap! *response-facts* merge m)))
+  Previously only the map worked. A string went `(:ns \"a.b/c\")` → nil →
+  `(symbol nil)`, and the caller got `no conversion to symbol` — a message
+  naming an internal call they never made, with no statement of what WAS
+  accepted. Being liberal at the boundary is the better fix than a better
+  error message.
 
-(defn- text! [x]
-  (when @strict-boundary?
-    (when-let [leak (boundary-leak x)]
-      (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
-                           " agent response: " leak " (agents address by name +"
-                           " snippet, never file:line — anchor it)")
-                      {:leak leak}))))
-  (let [;; FORCED, because one of the two hint sources can only be computed
-        ;; AFTER the tool ran: a write's hint counts what is now un-landed, and
-        ;; `*hint*` is bound before the call. A delay lets that one be decided
-        ;; here, at render time, and memoizes so a second render cannot make it
-        ;; speak twice. A plain string or nil passes through `force` unchanged.
-        h       (force *hint*)
-        x       (cond
-                  (and h (map? x) (nil? (:hint x))) (assoc x :hint h)
-                  (and h (string? x)) (str x "\n\n[hint] " h)
-                  :else x)
-        full    (if (string? x) x (pr-str x))
-        slimmed (let [t (trim-failure-strings x)]
-                  (if (string? t) t (pr-str t)))
-        out     (if (and (= full slimmed) (<= (count full) 8000))
-                  full
-                  (if-let [sess *spool-session*]
-                    (let [id  (spool! sess full)
-                          ;; every branch below withheld part of this answer,
-                          ;; and the id is what a later query_detail names — so
-                          ;; the trim can be scored against the re-fetch it
-                          ;; provoked instead of assumed to have paid
-                          _   (note-response! {:trimmed? true :spooled id})
-                          ;; the spool id travels INTO the marker, so the in-band signal is
-                          ;; actionable rather than only informative: a consumer that
-                          ;; sees :truncated can fetch the rest without parsing the
-                          ;; trailing line it was never going to read
-                          fit (when (> (count slimmed) 8000)
-                                (fit-payload (trim-failure-strings x) 7800 id))]
-                      (cond
-                        ;; slimming alone got it under the gate — send it whole
-                        (<= (count slimmed) 8000)
-                        (str slimmed "\n[trimmed — query_detail {:id \"" id
-                             "\"} returns the full response]")
+  A shape it cannot use is REFUSED rather than dropped: a target that
+  silently vanishes reads as \"that form has no source\", which is a different
+  and false answer."
+  [targets]
+  (mapv
+   (fn [t]
+     (cond
+       (map? t)
+       (cond-> {:ns (symbol (str (:ns t)))}
+         (:name t) (assoc :name (symbol (str (:name t)))))
 
-                        ;; drop whole ITEMS: the body stays parseable and usable,
-                        ;; so a follow-up can be narrow instead of a full re-fetch
-                        fit
-                        (str (:body fit) "\n[" (:note fit)
-                             " — query_detail {:id \"" id "\"} returns all]")
+       (or (string? t) (symbol? t))
+       (let [s (str t)
+             i (str/index-of s "/")]
+         (if (and i (pos? i) (< (inc i) (count s)))
+           {:ns (symbol (subs s 0 i)) :name (symbol (subs s (inc i)))}
+           {:ns (symbol s)}))
 
-                        ;; nothing to drop (a single huge string/scalar)
-                        :else
-                        (str (subs slimmed 0 8000)
-                             "\n[trimmed — query_detail {:id \"" id
-                             "\"} returns the full response]")))
-                    (if (<= (count slimmed) 8000) slimmed full)))]
-    {:content [{:type "text" :text out}]}))
+       :else
+       (throw (ex-info (str "query_source targets: cannot read " (pr-str t)
+                            " — a target is {:ns \"a.b\"} or {:ns \"a.b\" :name \"c\"},"
+                            " or the string/symbol form \"a.b/name\" (\"a.b\" alone"
+                            " gives that namespace's outline)")
+                       {:target t}))))
+   targets))
 
-(defn- red? [t]
-  (and t (pos? (+ (:fail t 0) (:error t 0)))))
+(defn- refusal-text
+  "The message a REFUSED call answered with, or nil if it was not a refusal.
+
+  A refusal arrives in two shapes: a thrown exception, which `handle!` has
+  already marked `:isError`, or slopp's own refusal-as-data, which `text!`
+  pr-strs so the payload opens with `{:error`. This is the whole predicate as
+  well as the message — `:refused?` is `(some? (refusal-text r))` — because
+  asking the same question at two call sites is how they drift, and the
+  failure log has four instances of that shape already.
+
+  It UNDER-counts, deliberately: a result carrying `:error` behind another key
+  reads as clean. That is the safe direction for a waste metric — it will
+  never invent a problem, only miss one. What it must not do is lose a
+  refusal it has already been told about, so an `:isError` with no text still
+  answers non-nil."
+  [r]
+  (let [t (:text (first (:content r)))]
+    (cond
+      (and t (str/starts-with? t "{:error")) t
+      (:isError r) (or t "error")
+      :else nil)))
+
+^:unsafe (defn start-heartbeat!
+  "Start this project checking in with a hub, and record the handle on
+  the session. Never throws; returns the hub url it beats to, or nil.
+
+  `slopp.hub.port` 0 means \"no hub\", and a hub that simply is not running is the
+  ordinary case rather than a failure — the beat retries forever and costs
+  nothing, so the project appears in the picker within one interval of a hub
+  starting later. Registering and keeping alive are the same call, deliberately
+  (D-hub).
+
+  Two session keys, and the split between them is the point.
+  `:hub-configured` is where we BEAT — known immediately, true whether or
+  not anyone is listening. `:hub` is this project's own page on the hub, and
+  it exists only while a hub is answering, because the slug in it comes back on
+  the reply and cannot be fabricated. Every beat rewrites it, so a hub that
+  goes away takes the claim with it.
+
+  One key used to carry both meanings: `:hub` was set here, once, from the
+  configured port. Orientation then advertised an address nobody was serving —
+  and the skill tells an agent to hand that address to a human, so the cost
+  landed on the human every time. The reply had the answer all along; nothing
+  was reading it.
+
+  The banner names the HUB's address, not this project's derived port, because
+  the hub url is the one a human is meant to remember and the derived one is an
+  implementation detail they should never have to type."
+  [session dir url]
+  (try
+    (let [port (capabilities/effective (:store @session) "slopp.hub.port")]
+      (when (and dir port (pos? (long port)))
+        (let [hub    (hub/hub-url port)
+              handle (hub/start! hub
+                                #(hub/payload (:store @session) dir url)
+                                #(let [at (hub/hub-address hub %)]
+                                   (cond
+                                     at (swap! session assoc :hub at
+                                               :hub-refused nil)
+                                     ;; a hub that answered and said NO is the
+                                     ;; drift alarm — keep it, or the brief
+                                     ;; reports absence about a running hub
+                                     (hub/refused? %)
+                                     (swap! session assoc :hub-refused %
+                                            :hub nil)
+                                     :else (swap! session assoc :hub nil
+                                                  :hub-refused nil))))]
+          (swap! session assoc :hub-heartbeat handle :hub-configured hub)
+          (.println System/err ^String (str "slopp hub: " hub
+                                            " (open this to switch projects)"))
+          hub)))
+    (catch Throwable t
+      (.println System/err ^String (str "slopp hub registration unavailable: "
+                                        (.getMessage t)))
+      nil)))
+
+^:unsafe (defn start-ui!
+  "Bring this project's UI listener up beside the MCP server and start its
+  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
+  `{:error …}` — and NEVER throws.
+
+  The listener still serves the LIVE session and still dies with the server.
+  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
+  not blank — it is STALE, showing the warranty as of the last verified run
+  rather than the one being changed, and it would boot a second image to show
+  it. That accuracy is what forces the whole hub design (D-hub): a hub
+  cannot answer for a store, so every project answers for itself and the hub
+  proxies.
+
+  What changed is the ADDRESS. The port is derived from the store dir instead
+  of defaulting to a fixed 7359, so projects on one machine never collide, and
+  a taken port falls back to an ephemeral one — the registered url carries
+  whatever was actually bound. Nobody needs to know this number; the address a
+  human remembers is the hub's.
+
+  The stance every optional listener here takes: the UI is OPTIONAL and MCP
+  is not. A busy port, a missing hub, anything at all — it
+  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
+  carries on. Nothing about a browser page should be able to stop the thing the
+  editor is talking to."
+  ([session] (start-ui! session nil))
+  ([session explicit-port]
+   (let [dir  (:dir @session)
+         want (server/preferred-port dir explicit-port)
+         try! (fn [p] (try (server/serve! session p)
+                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
+         r0   (try! want)
+         ;; a derived port is a PREFERENCE: something else already holding it
+         ;; must not cost this project its UI, so fall back to whatever is free.
+         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
+     ;; ON THE SESSION, so a reader can find it. The stderr
+     ;; banner below goes to the MCP server's log, which most clients never
+     ;; show a human — so autostart without this is a feature nobody can find.
+     ;; session_brief surfaces it, which is where an agent looks and how the
+     ;; human gets told.
+     (when (:url r) (swap! session assoc :ui-url (:url r)))
+     (.println System/err
+               ^String (if (:url r)
+                         (str "slopp UI: " (:url r))
+                         (str "slopp UI unavailable: " (:error r))))
+     (when (:url r) (start-heartbeat! session dir (:url r)))
+     r)))
 
 (def terse-elided
   "The only routed keys the TERSE path drops, and the reason each is not a
@@ -334,62 +520,316 @@
                                        (seq (:external-pending t))
                                        (assoc :external-pending (:external-pending t)))))))))
 
-(defn parse-call-args
-  "Tool arguments for the one-shot --call CLI: nil/blank → {}; \"@path\"
-  reads the file first; the text parses as JSON or EDN (agents emit both)
-  and must yield a map."
-  [s]
-  (let [s (if (and s (str/starts-with? s "@")) (slurp (subs s 1)) s)]
-    (if (str/blank? s)
-      {}
-      (let [v (or (try (json/parse-string s true) (catch Exception _ nil))
-                  (try (edn/read-string s) (catch Exception _ nil)))]
-        (if (map? v)
-          v
-          (throw (ex-info (str "--call args must be a JSON or EDN map (or @file): "
-                               s)
-                          {})))))))
+^:unsafe (defn refresh-app!
+  "Re-serve this project's app on the CURRENT store, or stop a managed server
+  the store has opted out of. nil when there is nothing to do. NEVER throws.
 
-(defn- absorb-pending-intent!
-  "Consume <dir>/.slopp/pending-intent when present. The plugin's prompt
-  hook writes {\"session-id\": …, \"prompt\": …} (a bare string is
-  accepted as prompt-only). The session ADOPTS the harness session id as
-  its identity — unless SLOPP_AGENT pinned one — so every delta of one
-  Claude session shares a key and concurrent sessions never merge
-  episodes; the prompt is stashed as the next auto-turn's intent."
+  Called at each `done` point, which is the grain the whole feature is built
+  around: mid-episode the store is intentionally incomplete, and a browser
+  reloading into a half-written red state teaches the author to ignore it.
+
+  **Opting out is an ACTION, not the absence of one.** The first cut gated on
+  `managed?` and returned, which stops RE-SERVING and never stops SERVING —
+  so after `http.enabled false` the old image kept answering and
+  `session_brief` kept advertising its url, while the config said no managed
+  server existed. Found by slopp-ui, who checked the surface against the
+  config rather than against the page.
+
+  **The same gate as `start-app!`, and that is not redundancy.** A gate on
+  the startup path only would let the second done point start what the first
+  one declined to — the feature would arrive by accident, in a test run,
+  minutes after everything looked fine.
+
+  A store that was never managed and has nothing running reports NOTHING, not
+  even a failure. Most stores are not web projects, and a line at every done
+  point saying so is how a report stops being read.
+
+  `locking` because two done points close together would otherwise both boot,
+  both stop the same predecessor, and race for the port. They queue instead,
+  and nobody waits on them: the call site backgrounds this so `done` returns
+  at its own speed."
   [session]
-  (when-let [dir (:dir @session)]
-    (let [f (io/file dir ".slopp" "pending-intent")]
-      (when (.exists f)
-        (let [raw (slurp f)]
-          (.delete f)
-          (let [{:keys [sid prompt]}
-                (or (try (let [m (json/parse-string raw true)]
-                           (when (map? m)
-                             {:sid (:session-id m) :prompt (:prompt m)}))
-                         (catch Exception _ nil))
-                    {:prompt raw})]
-            (when (and sid (not (:env-agent? @session)))
-              (swap! session assoc :agent-id sid)
-              ;; identity settled → the session takes THIS agent's thread.
-              ;; It is the first moment it can: the session opened before the
-              ;; harness id existed, so its store and image were loaded from
-              ;; the branch. If this agent left un-landed work last time, both
-              ;; came from the wrong line — and only the store heals on its
-              ;; own, which would leave verification grading the branch's code
-              ;; against the thread's store.
-              (engine/adopt-line! session))
-            (when-not (str/blank? (or prompt ""))
-              ;; a new ask is a new READER, potentially: /clear and automatic
-              ;; compaction both land here and neither is visible any other
-              ;; way. `told!` scopes its sent-view hashes to this counter, so
-              ;; the first read of a view in a fresh context is always a
-              ;; payload. It bumps for READ-ONLY asks too — turns do not, and
-              ;; a read-only planning ask is where the withholding was first
-              ;; hit.
-              (swap! session #(-> %
-                                  (assoc :pending-intent prompt :last-intent prompt)
-                                  (update ::ask (fnil inc 0)))))))))))
+  (let [dir (:dir @session)]
+    (if (and dir (live/managed? (:store @session) server/served-namespaces))
+      (locking session
+        (try (live/refresh! session (:store @session) dir)
+             (catch Throwable t
+               {:serving? false :reason (or (.getMessage t) (str t))})))
+      (when-let [running (:app-server @session)]
+        (locking session
+          (try (live/stop! running) (catch Throwable _))
+          (swap! session dissoc :app-server))
+        {:serving? false
+         ;; STOPPED ON PURPOSE, and that has to be legible to the caller:
+         ;; `done` reports a re-serve that BROKE and must not report this,
+         ;; which is indistinguishable without the flag — same :serving?
+         ;; false, same shape of reason, opposite meaning.
+         :stopped true
+         ;; `managed?` is false for two different reasons now, and a stopped
+         ;; server that names the wrong one sends someone to change the
+         ;; wrong thing
+         :reason (if (live/self-served? (:store @session) server/served-namespaces)
+                   (str "this session already serves this store's surface — the"
+                        " managed app server was stopped, because a second one"
+                        " would serve a staler copy of the same pages")
+                   (str "http.enabled is false for this store — the managed app"
+                        " server was stopped"))}))))
+
+^:unsafe (defn start-app!
+  "Bring this project's app server up beside the MCP server, or nil when
+  slopp does not run this store's server. NEVER throws.
+
+  The stance is the UI listener's, for the same reason: **the app server is
+  OPTIONAL and MCP is not.** A busy port, a
+  store that will not load, anything at all — it reports a sentence on
+  stderr (stdout is the JSON-RPC channel) and the server carries on. Nothing
+  about a page in a browser should be able to stop the thing the editor is
+  talking to.
+
+  It goes through `refresh-app!` rather than `live/start!`, so the
+  first serve and every later one are the same code path. A start that
+  differed from a swap would be a second lifecycle, and the two would drift
+  exactly where nobody looks — the first boot of a session is the one nobody
+  re-tests.
+
+  A store that is not managed reports NOTHING, not even a failure. Most
+  stores are not web projects, and a line on every startup saying so is how
+  a banner stops being read."
+  [session]
+  (let [r (refresh-app! session)]
+    (when r
+      (.println System/err
+                ^String (if (:serving? r)
+                          (str "slopp app: " (:url r)
+                               (when-let [ms (:boot-ms r)]
+                                 (str " (image up in " ms "ms)"))
+                               ;; a url with nothing behind it is worse than no
+                               ;; url: the human opens it, gets 404, and has no
+                               ;; reason to suspect the SERVER is fine
+                               (when-let [empty-note (get-in r [:plan :serves-nothing])]
+                                 (str " — but " empty-note)))
+                          (str "slopp app unavailable: " (:reason r)))))
+    r))
+
+(defn- app-note-for
+  "The line `done` should carry about the app server it just re-served, given
+  [[refresh-app!]]'s result — or nil, which is the usual answer.
+
+  Three outcomes and only one of them is news. **Nothing to do** (nil: this
+  store is not one slopp runs, which is most stores) and **it came back up**
+  are both silent, because a line at every done point is how a report stops
+  being read. A re-serve that FAILED is the opposite case: it is news, this
+  done caused it, and this is the only moment the causing change is still in
+  the author's hand.
+
+  **A deliberate stop is not a failure**, and the distinction is the whole
+  reason `:stopped` exists. Opting out of a managed server, or this session
+  already serving the surface itself, both end with `:serving? false` and a
+  reason describing a CORRECT outcome. Reporting those as breakage would put
+  a scary line in front of someone who got exactly what they asked for, and
+  train them to skim the one that matters.
+
+  Reported by the first consumer to lose an app server this way: `done`
+  returned a clean report, the failure appeared only in `session_brief`, and
+  an agent has no reason to make that second call. Action and announcement
+  belonged in the same one."
+  [refreshed]
+  (cond
+    ;; THE BOUND EXPIRED. This used to report nil — "say nothing rather than
+    ;; guess" — which put a re-serve that had not happened into the same
+    ;; silence as a store slopp runs nothing for and a re-serve that worked.
+    ;; Three outcomes, one silence, and two of them fine: a consumer served
+    ;; twenty minutes of old code with every surface reading clean.
+    ;;
+    ;; Guessing was never the alternative. Naming WHICH question went
+    ;; unanswered is, and it costs one line at the rare moment it is true.
+    (= ::refresh-timed-out refreshed)
+    (str "the app re-serve did not finish inside this done's wait — it is"
+         " STILL RUNNING, and this done cannot say whether the image was"
+         " replaced. session_brief reports the outcome: :app-behind 0 means it"
+         " landed, a positive count means the browser is still on the older"
+         " store. Not a failure by itself; a done that stayed silent here"
+         " would have been indistinguishable from one that re-served cleanly.")
+
+    (and (map? refreshed)
+         (false? (:serving? refreshed))
+         (not (:stopped refreshed))
+         (:reason refreshed))
+    (str "the app server slopp runs for this project is DOWN after this done: "
+         (:reason refreshed))
+
+    ;; SERVING AND EMPTY is the fourth outcome, and it hid behind the first
+    ;; three because it looks exactly like success: the port bound, the url is
+    ;; right, and every path 404s. It is news at a done for the same reason a
+    ;; failure is — this done is when it became true, and the change that did
+    ;; it is still in the author's hand.
+    (and (map? refreshed)
+         (:serving? refreshed)
+         (get-in refreshed [:plan :serves-nothing]))
+    (str "the app server slopp runs for this project came back up at "
+         (:url refreshed) " and " (get-in refreshed [:plan :serves-nothing]))))
+
+(def ^:private thread-hint-every
+  "Un-landed changes between reminders that this session's work is private.
+
+  Small enough that a long episode hears it more than once, large enough that
+  an ordinary task — orient, read, a handful of writes, done — hears it
+  exactly once: on the write that made the work private in the first place."
+  25)
+
+(defn thread-hint!
+  "One line saying this session's work is still private, or nil.
+
+  `session_brief` names the thread and nothing else does, so between orienting
+  and `done` the fact that nobody can see your work is true and unstated —
+  and a long episode, where it matters most, is exactly where the brief has
+  scrolled out of context.
+
+  Fires when the un-landed count MOVES: on the change that makes the work
+  private, then every [[thread-hint-every]] changes after. Both halves are the
+  anti-noise design — a reminder on every call is one a reader learns to skip,
+  and one that never repeats is one a long session loses. Counting CHANGES
+  rather than calls means it speaks in proportion to what is at stake instead
+  of to how chatty the session is.
+
+  **Whether a call wrote is asked of the journal, not of a list of tool
+  names.** The first cut gated on `tools/write-tools` — a 17-entry set that
+  does not contain `edit_subform`, the commonest write in the system — so the
+  reminder never fired at all. A derived test cannot fall out of step with the
+  thing it describes, and a read gets its silence for the honest reason:
+  nothing became invisible.
+
+  `done` and `commit_point` stay quiet by name, and that exclusion is about
+  noise rather than detection: a red `done` genuinely does leave everything
+  private, and it says so itself, in the verdict the agent is already reading.
+
+  Keyed to the LINE as well as the count, so a land resets both halves — the
+  fresh thread starts at zero and the next reminder is a real one rather than
+  a leftover measured against a line that no longer exists."
+  [session tool]
+  (when-not (#{"done" "commit_point"} tool)
+    (when-let [conn (:db @session)]
+      (when-let [line (:line @session)]
+        (let [n               (db/unlanded-count conn line history/content-ops)
+              [seen-l seen-n] (::thread-hint-seen @session)
+              prev            (if (= seen-l line) seen-n 0)
+              [said-l said-n] (::thread-hint-at @session)
+              base            (if (= said-l line) said-n 0)]
+          (swap! session assoc ::thread-hint-seen [line n])
+          (when (and (< prev n)
+                     (or (not (::thread-hint-said? @session))
+                         (<= (+ base thread-hint-every) n)))
+            (swap! session assoc ::thread-hint-said? true ::thread-hint-at [line n])
+            (str n (if (= 1 n) " change is" " changes are")
+                 " on your thread and nobody else can see "
+                 (if (= 1 n) "it" "them")
+                 " — not another agent on this branch, not the git projection,"
+                 " not the running server. A green done lands them.")))))))
+
+(defn- foreign-unlanded-note
+  "The line a ONE-SHOT process owes its caller when another thread holds
+  un-landed work — or nil, which is the ordinary case.
+
+  A `--call` process opens its own session and therefore reads the BRANCH. A
+  session working through MCP reads its own THREAD. While that thread holds
+  un-landed writes the two disagree, and nothing said so: the CLI answer looks
+  authoritative because it IS authoritative, about a different store.
+
+  Measured at roughly an hour on the wave that added this. A write-path gate
+  refused a form; the gate was reproduced over the CLI, came back CLEAN, and
+  the contradiction was filed as a mystery. The gate was judging a half-renamed
+  session; the CLI was judging the branch. Both readings were correct, and
+  nothing on either side named the difference.
+
+  **Silent at zero**, which is what makes it worth printing at all: a CI run, a
+  fresh clone, or any store nobody is mid-episode in has no foreign thread and
+  gets no note."
+  [session]
+  (let [rows (->> (:threads (branch/thread-list session))
+                  (remove :mine)
+                  (filter #(pos? (:unlanded % 0))))]
+    (when (seq rows)
+      (str "NOTE — this is a ONE-SHOT read of the BRANCH. "
+           (count rows) " other thread(s) hold "
+           (reduce + (map :unlanded rows))
+           " un-landed write(s) that this process cannot see, because it opened"
+           " the store fresh. A session working through MCP reads its own"
+           " thread, so its answer to this question can differ from this one and"
+           " both be right. If you are diagnosing something a WRITE did, ask"
+           " through that session rather than here."))))
+
+(def ^:private ^:dynamic *response-facts*
+  "Bound to an atom during tools/call so whoever shapes the answer can record
+  what it DID: `text!` knows the size gate cut a payload, `told!` knows the
+  knowledge differential withheld one, and `query_detail` knows which id it
+  went back for. None of that is in the return value, and all of it happens
+  several frames below `handle!`, which is the only layer that records a call
+  at all.
+
+  A recorder rather than a return value because the alternative is a second
+  value threaded out of every tool branch that nothing else reads. It is
+  write-only and per-call: a nil binding (a direct `text!` in a test) simply
+  drops the note." nil)
+
+(defn- note-response!
+  "Record `m` about the response being shaped, if anyone is listening."
+  [m]
+  (when *response-facts* (swap! *response-facts* merge m)))
+
+(defn- text! [x]
+  (when @strict-boundary?
+    (when-let [leak (boundary-leak x)]
+      (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
+                           " agent response: " leak " (agents address by name +"
+                           " snippet, never file:line — anchor it)")
+                      {:leak leak}))))
+  (let [;; FORCED, because one of the two hint sources can only be computed
+        ;; AFTER the tool ran: a write's hint counts what is now un-landed, and
+        ;; `*hint*` is bound before the call. A delay lets that one be decided
+        ;; here, at render time, and memoizes so a second render cannot make it
+        ;; speak twice. A plain string or nil passes through `force` unchanged.
+        h       (force *hint*)
+        x       (cond
+                  (and h (map? x) (nil? (:hint x))) (assoc x :hint h)
+                  (and h (string? x)) (str x "\n\n[hint] " h)
+                  :else x)
+        full    (if (string? x) x (pr-str x))
+        slimmed (let [t (trim-failure-strings x)]
+                  (if (string? t) t (pr-str t)))
+        out     (if (and (= full slimmed) (<= (count full) 8000))
+                  full
+                  (if-let [sess *spool-session*]
+                    (let [id  (spool! sess full)
+                          ;; every branch below withheld part of this answer,
+                          ;; and the id is what a later query_detail names — so
+                          ;; the trim can be scored against the re-fetch it
+                          ;; provoked instead of assumed to have paid
+                          _   (note-response! {:trimmed? true :spooled id})
+                          ;; the spool id travels INTO the marker, so the in-band signal is
+                          ;; actionable rather than only informative: a consumer that
+                          ;; sees :truncated can fetch the rest without parsing the
+                          ;; trailing line it was never going to read
+                          fit (when (> (count slimmed) 8000)
+                                (fit-payload (trim-failure-strings x) 7800 id))]
+                      (cond
+                        ;; slimming alone got it under the gate — send it whole
+                        (<= (count slimmed) 8000)
+                        (str slimmed "\n[trimmed — query_detail {:id \"" id
+                             "\"} returns the full response]")
+
+                        ;; drop whole ITEMS: the body stays parseable and usable,
+                        ;; so a follow-up can be narrow instead of a full re-fetch
+                        fit
+                        (str (:body fit) "\n[" (:note fit)
+                             " — query_detail {:id \"" id "\"} returns all]")
+
+                        ;; nothing to drop (a single huge string/scalar)
+                        :else
+                        (str (subs slimmed 0 8000)
+                             "\n[trimmed — query_detail {:id \"" id
+                             "\"} returns the full response]")))
+                    (if (<= (count slimmed) 8000) slimmed full)))]
+    {:content [{:type "text" :text out}]}))
 
 (def ^:private env-handlers!
   "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
@@ -685,352 +1125,6 @@
          :note "identical to what this session already received — query_detail {id} if you have not"})
       (do (swap! session assoc-in [::told k] h)
           payload))))
-
-(defn normalize-targets
-  "Normalize `query_source`'s `targets` into `[{:ns sym :name sym?} …]`.
-
-  Accepts every UNAMBIGUOUS spelling, because refusing one taught a rule that
-  did not need to exist: `{:ns \"a.b\" :name \"c\"}`, the qualified string
-  `\"a.b/c\"`, a bare `\"a.b\"`, and the symbol `a.b/c` an agent writing EDN
-  reaches for first.
-
-  Previously only the map worked. A string went `(:ns \"a.b/c\")` → nil →
-  `(symbol nil)`, and the caller got `no conversion to symbol` — a message
-  naming an internal call they never made, with no statement of what WAS
-  accepted. Being liberal at the boundary is the better fix than a better
-  error message.
-
-  A shape it cannot use is REFUSED rather than dropped: a target that
-  silently vanishes reads as \"that form has no source\", which is a different
-  and false answer."
-  [targets]
-  (mapv
-   (fn [t]
-     (cond
-       (map? t)
-       (cond-> {:ns (symbol (str (:ns t)))}
-         (:name t) (assoc :name (symbol (str (:name t)))))
-
-       (or (string? t) (symbol? t))
-       (let [s (str t)
-             i (str/index-of s "/")]
-         (if (and i (pos? i) (< (inc i) (count s)))
-           {:ns (symbol (subs s 0 i)) :name (symbol (subs s (inc i)))}
-           {:ns (symbol s)}))
-
-       :else
-       (throw (ex-info (str "query_source targets: cannot read " (pr-str t)
-                            " — a target is {:ns \"a.b\"} or {:ns \"a.b\" :name \"c\"},"
-                            " or the string/symbol form \"a.b/name\" (\"a.b\" alone"
-                            " gives that namespace's outline)")
-                       {:target t}))))
-   targets))
-
-(defn- refusal-text
-  "The message a REFUSED call answered with, or nil if it was not a refusal.
-
-  A refusal arrives in two shapes: a thrown exception, which `handle!` has
-  already marked `:isError`, or slopp's own refusal-as-data, which `text!`
-  pr-strs so the payload opens with `{:error`. This is the whole predicate as
-  well as the message — `:refused?` is `(some? (refusal-text r))` — because
-  asking the same question at two call sites is how they drift, and the
-  failure log has four instances of that shape already.
-
-  It UNDER-counts, deliberately: a result carrying `:error` behind another key
-  reads as clean. That is the safe direction for a waste metric — it will
-  never invent a problem, only miss one. What it must not do is lose a
-  refusal it has already been told about, so an `:isError` with no text still
-  answers non-nil."
-  [r]
-  (let [t (:text (first (:content r)))]
-    (cond
-      (and t (str/starts-with? t "{:error")) t
-      (:isError r) (or t "error")
-      :else nil)))
-
-(defn- tools-note!
-  "The notifications/tools/list_changed message when the tool registry has
-  DRIFTED from what this session last advertised (a live reload renamed or
-  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
-  client could see it), else nil. Emitting updates the baseline, so each
-  drift notifies exactly once. No baseline (tools/list never served) → nil."
-  [session]
-  (let [h    (hash tools/tools)
-        last (:slopp.mcp/tools-hash @session)]
-    (when (and last (not= last h))
-      (swap! session assoc :slopp.mcp/tools-hash h)
-      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
-
-^:unsafe (defn start-heartbeat!
-  "Start this project checking in with a hub, and record the handle on
-  the session. Never throws; returns the hub url it beats to, or nil.
-
-  `slopp.hub.port` 0 means \"no hub\", and a hub that simply is not running is the
-  ordinary case rather than a failure — the beat retries forever and costs
-  nothing, so the project appears in the picker within one interval of a hub
-  starting later. Registering and keeping alive are the same call, deliberately
-  (D-hub).
-
-  Two session keys, and the split between them is the point.
-  `:hub-configured` is where we BEAT — known immediately, true whether or
-  not anyone is listening. `:hub` is this project's own page on the hub, and
-  it exists only while a hub is answering, because the slug in it comes back on
-  the reply and cannot be fabricated. Every beat rewrites it, so a hub that
-  goes away takes the claim with it.
-
-  One key used to carry both meanings: `:hub` was set here, once, from the
-  configured port. Orientation then advertised an address nobody was serving —
-  and the skill tells an agent to hand that address to a human, so the cost
-  landed on the human every time. The reply had the answer all along; nothing
-  was reading it.
-
-  The banner names the HUB's address, not this project's derived port, because
-  the hub url is the one a human is meant to remember and the derived one is an
-  implementation detail they should never have to type."
-  [session dir url]
-  (try
-    (let [port (capabilities/effective (:store @session) "slopp.hub.port")]
-      (when (and dir port (pos? (long port)))
-        (let [hub    (hub/hub-url port)
-              handle (hub/start! hub
-                                #(hub/payload (:store @session) dir url)
-                                #(let [at (hub/hub-address hub %)]
-                                   (cond
-                                     at (swap! session assoc :hub at
-                                               :hub-refused nil)
-                                     ;; a hub that answered and said NO is the
-                                     ;; drift alarm — keep it, or the brief
-                                     ;; reports absence about a running hub
-                                     (hub/refused? %)
-                                     (swap! session assoc :hub-refused %
-                                            :hub nil)
-                                     :else (swap! session assoc :hub nil
-                                                  :hub-refused nil))))]
-          (swap! session assoc :hub-heartbeat handle :hub-configured hub)
-          (.println System/err ^String (str "slopp hub: " hub
-                                            " (open this to switch projects)"))
-          hub)))
-    (catch Throwable t
-      (.println System/err ^String (str "slopp hub registration unavailable: "
-                                        (.getMessage t)))
-      nil)))
-
-^:unsafe (defn start-ui!
-  "Bring this project's UI listener up beside the MCP server and start its
-  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
-  `{:error …}` — and NEVER throws.
-
-  The listener still serves the LIVE session and still dies with the server.
-  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
-  not blank — it is STALE, showing the warranty as of the last verified run
-  rather than the one being changed, and it would boot a second image to show
-  it. That accuracy is what forces the whole hub design (D-hub): a hub
-  cannot answer for a store, so every project answers for itself and the hub
-  proxies.
-
-  What changed is the ADDRESS. The port is derived from the store dir instead
-  of defaulting to a fixed 7359, so projects on one machine never collide, and
-  a taken port falls back to an ephemeral one — the registered url carries
-  whatever was actually bound. Nobody needs to know this number; the address a
-  human remembers is the hub's.
-
-  The stance every optional listener here takes: the UI is OPTIONAL and MCP
-  is not. A busy port, a missing hub, anything at all — it
-  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
-  carries on. Nothing about a browser page should be able to stop the thing the
-  editor is talking to."
-  ([session] (start-ui! session nil))
-  ([session explicit-port]
-   (let [dir  (:dir @session)
-         want (server/preferred-port dir explicit-port)
-         try! (fn [p] (try (server/serve! session p)
-                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
-         r0   (try! want)
-         ;; a derived port is a PREFERENCE: something else already holding it
-         ;; must not cost this project its UI, so fall back to whatever is free.
-         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
-     ;; ON THE SESSION, so a reader can find it. The stderr
-     ;; banner below goes to the MCP server's log, which most clients never
-     ;; show a human — so autostart without this is a feature nobody can find.
-     ;; session_brief surfaces it, which is where an agent looks and how the
-     ;; human gets told.
-     (when (:url r) (swap! session assoc :ui-url (:url r)))
-     (.println System/err
-               ^String (if (:url r)
-                         (str "slopp UI: " (:url r))
-                         (str "slopp UI unavailable: " (:error r))))
-     (when (:url r) (start-heartbeat! session dir (:url r)))
-     r)))
-
-(defn- app-note-for
-  "The line `done` should carry about the app server it just re-served, given
-  [[refresh-app!]]'s result — or nil, which is the usual answer.
-
-  Three outcomes and only one of them is news. **Nothing to do** (nil: this
-  store is not one slopp runs, which is most stores) and **it came back up**
-  are both silent, because a line at every done point is how a report stops
-  being read. A re-serve that FAILED is the opposite case: it is news, this
-  done caused it, and this is the only moment the causing change is still in
-  the author's hand.
-
-  **A deliberate stop is not a failure**, and the distinction is the whole
-  reason `:stopped` exists. Opting out of a managed server, or this session
-  already serving the surface itself, both end with `:serving? false` and a
-  reason describing a CORRECT outcome. Reporting those as breakage would put
-  a scary line in front of someone who got exactly what they asked for, and
-  train them to skim the one that matters.
-
-  Reported by the first consumer to lose an app server this way: `done`
-  returned a clean report, the failure appeared only in `session_brief`, and
-  an agent has no reason to make that second call. Action and announcement
-  belonged in the same one."
-  [refreshed]
-  (cond
-    ;; THE BOUND EXPIRED. This used to report nil — "say nothing rather than
-    ;; guess" — which put a re-serve that had not happened into the same
-    ;; silence as a store slopp runs nothing for and a re-serve that worked.
-    ;; Three outcomes, one silence, and two of them fine: a consumer served
-    ;; twenty minutes of old code with every surface reading clean.
-    ;;
-    ;; Guessing was never the alternative. Naming WHICH question went
-    ;; unanswered is, and it costs one line at the rare moment it is true.
-    (= ::refresh-timed-out refreshed)
-    (str "the app re-serve did not finish inside this done's wait — it is"
-         " STILL RUNNING, and this done cannot say whether the image was"
-         " replaced. session_brief reports the outcome: :app-behind 0 means it"
-         " landed, a positive count means the browser is still on the older"
-         " store. Not a failure by itself; a done that stayed silent here"
-         " would have been indistinguishable from one that re-served cleanly.")
-
-    (and (map? refreshed)
-         (false? (:serving? refreshed))
-         (not (:stopped refreshed))
-         (:reason refreshed))
-    (str "the app server slopp runs for this project is DOWN after this done: "
-         (:reason refreshed))
-
-    ;; SERVING AND EMPTY is the fourth outcome, and it hid behind the first
-    ;; three because it looks exactly like success: the port bound, the url is
-    ;; right, and every path 404s. It is news at a done for the same reason a
-    ;; failure is — this done is when it became true, and the change that did
-    ;; it is still in the author's hand.
-    (and (map? refreshed)
-         (:serving? refreshed)
-         (get-in refreshed [:plan :serves-nothing]))
-    (str "the app server slopp runs for this project came back up at "
-         (:url refreshed) " and " (get-in refreshed [:plan :serves-nothing]))))
-
-^:unsafe (defn refresh-app!
-  "Re-serve this project's app on the CURRENT store, or stop a managed server
-  the store has opted out of. nil when there is nothing to do. NEVER throws.
-
-  Called at each `done` point, which is the grain the whole feature is built
-  around: mid-episode the store is intentionally incomplete, and a browser
-  reloading into a half-written red state teaches the author to ignore it.
-
-  **Opting out is an ACTION, not the absence of one.** The first cut gated on
-  `managed?` and returned, which stops RE-SERVING and never stops SERVING —
-  so after `http.enabled false` the old image kept answering and
-  `session_brief` kept advertising its url, while the config said no managed
-  server existed. Found by slopp-ui, who checked the surface against the
-  config rather than against the page.
-
-  **The same gate as `start-app!`, and that is not redundancy.** A gate on
-  the startup path only would let the second done point start what the first
-  one declined to — the feature would arrive by accident, in a test run,
-  minutes after everything looked fine.
-
-  A store that was never managed and has nothing running reports NOTHING, not
-  even a failure. Most stores are not web projects, and a line at every done
-  point saying so is how a report stops being read.
-
-  `locking` because two done points close together would otherwise both boot,
-  both stop the same predecessor, and race for the port. They queue instead,
-  and nobody waits on them: the call site backgrounds this so `done` returns
-  at its own speed."
-  [session]
-  (let [dir (:dir @session)]
-    (if (and dir (live/managed? (:store @session) server/served-namespaces))
-      (locking session
-        (try (live/refresh! session (:store @session) dir)
-             (catch Throwable t
-               {:serving? false :reason (or (.getMessage t) (str t))})))
-      (when-let [running (:app-server @session)]
-        (locking session
-          (try (live/stop! running) (catch Throwable _))
-          (swap! session dissoc :app-server))
-        {:serving? false
-         ;; STOPPED ON PURPOSE, and that has to be legible to the caller:
-         ;; `done` reports a re-serve that BROKE and must not report this,
-         ;; which is indistinguishable without the flag — same :serving?
-         ;; false, same shape of reason, opposite meaning.
-         :stopped true
-         ;; `managed?` is false for two different reasons now, and a stopped
-         ;; server that names the wrong one sends someone to change the
-         ;; wrong thing
-         :reason (if (live/self-served? (:store @session) server/served-namespaces)
-                   (str "this session already serves this store's surface — the"
-                        " managed app server was stopped, because a second one"
-                        " would serve a staler copy of the same pages")
-                   (str "http.enabled is false for this store — the managed app"
-                        " server was stopped"))}))))
-
-(def ^:private thread-hint-every
-  "Un-landed changes between reminders that this session's work is private.
-
-  Small enough that a long episode hears it more than once, large enough that
-  an ordinary task — orient, read, a handful of writes, done — hears it
-  exactly once: on the write that made the work private in the first place."
-  25)
-
-(defn thread-hint!
-  "One line saying this session's work is still private, or nil.
-
-  `session_brief` names the thread and nothing else does, so between orienting
-  and `done` the fact that nobody can see your work is true and unstated —
-  and a long episode, where it matters most, is exactly where the brief has
-  scrolled out of context.
-
-  Fires when the un-landed count MOVES: on the change that makes the work
-  private, then every [[thread-hint-every]] changes after. Both halves are the
-  anti-noise design — a reminder on every call is one a reader learns to skip,
-  and one that never repeats is one a long session loses. Counting CHANGES
-  rather than calls means it speaks in proportion to what is at stake instead
-  of to how chatty the session is.
-
-  **Whether a call wrote is asked of the journal, not of a list of tool
-  names.** The first cut gated on `tools/write-tools` — a 17-entry set that
-  does not contain `edit_subform`, the commonest write in the system — so the
-  reminder never fired at all. A derived test cannot fall out of step with the
-  thing it describes, and a read gets its silence for the honest reason:
-  nothing became invisible.
-
-  `done` and `commit_point` stay quiet by name, and that exclusion is about
-  noise rather than detection: a red `done` genuinely does leave everything
-  private, and it says so itself, in the verdict the agent is already reading.
-
-  Keyed to the LINE as well as the count, so a land resets both halves — the
-  fresh thread starts at zero and the next reminder is a real one rather than
-  a leftover measured against a line that no longer exists."
-  [session tool]
-  (when-not (#{"done" "commit_point"} tool)
-    (when-let [conn (:db @session)]
-      (when-let [line (:line @session)]
-        (let [n               (db/unlanded-count conn line history/content-ops)
-              [seen-l seen-n] (::thread-hint-seen @session)
-              prev            (if (= seen-l line) seen-n 0)
-              [said-l said-n] (::thread-hint-at @session)
-              base            (if (= said-l line) said-n 0)]
-          (swap! session assoc ::thread-hint-seen [line n])
-          (when (and (< prev n)
-                     (or (not (::thread-hint-said? @session))
-                         (<= (+ base thread-hint-every) n)))
-            (swap! session assoc ::thread-hint-said? true ::thread-hint-at [line n])
-            (str n (if (= 1 n) " change is" " changes are")
-                 " on your thread and nobody else can see "
-                 (if (= 1 n) "it" "them")
-                 " — not another agent on this branch, not the git projection,"
-                 " not the running server. A green done lands them.")))))))
 
 (defn- call-tool! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -1567,100 +1661,6 @@
                            (str/join ", " (map :name tools/tools)))
                       {}))))))
 
-(defn- foreign-unlanded-note
-  "The line a ONE-SHOT process owes its caller when another thread holds
-  un-landed work — or nil, which is the ordinary case.
-
-  A `--call` process opens its own session and therefore reads the BRANCH. A
-  session working through MCP reads its own THREAD. While that thread holds
-  un-landed writes the two disagree, and nothing said so: the CLI answer looks
-  authoritative because it IS authoritative, about a different store.
-
-  Measured at roughly an hour on the wave that added this. A write-path gate
-  refused a form; the gate was reproduced over the CLI, came back CLEAN, and
-  the contradiction was filed as a mystery. The gate was judging a half-renamed
-  session; the CLI was judging the branch. Both readings were correct, and
-  nothing on either side named the difference.
-
-  **Silent at zero**, which is what makes it worth printing at all: a CI run, a
-  fresh clone, or any store nobody is mid-episode in has no foreign thread and
-  gets no note."
-  [session]
-  (let [rows (->> (:threads (branch/thread-list session))
-                  (remove :mine)
-                  (filter #(pos? (:unlanded % 0))))]
-    (when (seq rows)
-      (str "NOTE — this is a ONE-SHOT read of the BRANCH. "
-           (count rows) " other thread(s) hold "
-           (reduce + (map :unlanded rows))
-           " un-landed write(s) that this process cannot see, because it opened"
-           " the store fresh. A session working through MCP reads its own"
-           " thread, so its answer to this question can differ from this one and"
-           " both be right. If you are diagnosing something a WRITE did, ask"
-           " through that session rather than here."))))
-
-(defn call!
-  "One-shot tool invocation against the store at `dir` — the --call CLI's
-  engine and the fallback when no MCP connection exists. Opens a durable
-  session, dispatches ONE tool call, closes. Returns the wire result map
-  ({:content [{:text …}]}; :isError true on tool errors), same as the
-  server would send.
-
-  Writes stay TURN-GATED here, deliberately: provenance is not optional just
-  because the caller is a script. Turns are DURABLE across one-shot processes,
-  so the scripted shape is `--call turn_begin` once, then the writes, then
-  `--call turn_end` — not a turn per call. Reads need nothing.
-
-  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
-  everything here flows through `text!`, whose boundary-leak guard refuses a
-  file:line coordinate, so emitting frames replaced the real diagnostic with a
-  guard exception."
-  [dir tool arguments]
-  (let [session (external/open!
-                 (cond-> {:slopp.ops/dir (str dir)}
-                   ;; a one-shot names its agent in the call, and that name is
-                   ;; the SESSION's identity, not merely the delta's. Turns are
-                   ;; durable across processes and so is the LINE one was opened
-                   ;; on — a fresh identity per process would open a fresh
-                   ;; thread per call, and the turn would be unfindable by the
-                   ;; very write it was opened for.
-                   (:agent arguments)
-                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
-    (swap! session assoc :require-turns? true)
-    (try
-      (let [r (try (call-tool! session {:name tool :arguments arguments})
-                   (catch Exception e
-                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                           msgs  (into [] (comp (take-while some?)
-                                                (map #(str (.getSimpleName (class %))
-                                                           ": " (ex-message %))))
-                                       chain)]
-                       (assoc (text! (str "error: " (str/join " <- " msgs)))
-                              :isError true))))]
-        ;; ...and say what this process could not see. See
-        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-        ;; somebody's thread holds un-landed work that is a different store from
-        ;; the one an MCP session answers from.
-        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-          (update r :content (fnil conj []) {:type "text" :text note})
-          r))
-      (finally (ops/close! session)))))
-
-^:unsafe
-(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
-  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
-  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
-  tool error. args is JSON, EDN, or @file (parse-call-args)."
-  [& [dir tool args-str]]
-  (when (str/blank? tool)
-    (binding [*out* *err*]
-      (println "usage: --call <tool> [<json/edn args or @file>]"))
-    (System/exit 2))
-  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
-    (println (clojure.string/join "\n" (map :text (:content r))))
-    (flush)
-    (System/exit (if (:isError r) 1 0))))
-
 ^:unsafe (defn handle!
   "Dispatch a JSON-RPC request map; return a response map, or nil for
   notifications. Tool exceptions become an `isError` result (so the agent sees
@@ -1752,42 +1752,6 @@
       (.flush out-writer)))
   nil)
 
-^:unsafe (defn start-app!
-  "Bring this project's app server up beside the MCP server, or nil when
-  slopp does not run this store's server. NEVER throws.
-
-  The stance is the UI listener's, for the same reason: **the app server is
-  OPTIONAL and MCP is not.** A busy port, a
-  store that will not load, anything at all — it reports a sentence on
-  stderr (stdout is the JSON-RPC channel) and the server carries on. Nothing
-  about a page in a browser should be able to stop the thing the editor is
-  talking to.
-
-  It goes through `refresh-app!` rather than `live/start!`, so the
-  first serve and every later one are the same code path. A start that
-  differed from a swap would be a second lifecycle, and the two would drift
-  exactly where nobody looks — the first boot of a session is the one nobody
-  re-tests.
-
-  A store that is not managed reports NOTHING, not even a failure. Most
-  stores are not web projects, and a line on every startup saying so is how
-  a banner stops being read."
-  [session]
-  (let [r (refresh-app! session)]
-    (when r
-      (.println System/err
-                ^String (if (:serving? r)
-                          (str "slopp app: " (:url r)
-                               (when-let [ms (:boot-ms r)]
-                                 (str " (image up in " ms "ms)"))
-                               ;; a url with nothing behind it is worse than no
-                               ;; url: the human opens it, gets 404, and has no
-                               ;; reason to suspect the SERVER is fine
-                               (when-let [empty-note (get-in r [:plan :serves-nothing])]
-                                 (str " — but " empty-note)))
-                          (str "slopp app unavailable: " (:reason r)))))
-    r))
-
 ^:unsafe
 (defn -main
   "Start the stdio MCP server. An optional `dir` argument makes the session
@@ -1815,7 +1779,19 @@
                                       ;; so the MCP handshake completes as soon
                                       ;; as the store loads — a slow/contended
                                       ;; boot no longer races the connect timeout
-                                      :slopp.ops/async-image? true}
+                                      :slopp.ops/async-image? true
+                                      ;; WHO is driving this server. Read here
+                                      ;; and nowhere deeper: a child JVM
+                                      ;; inherits the variable, so a session
+                                      ;; opened inside an image or a test
+                                      ;; runner would otherwise claim this
+                                      ;; conversation's thread. This process is
+                                      ;; the only one a harness actually
+                                      ;; spawned. nil when no known harness set
+                                      ;; one, and open! generates an id as before.
+                                      :slopp.ops/agent-id
+                                      (harness/conversation-id
+                                       #(System/getenv %))}
                              dir (assoc :slopp.ops/dir dir)))]
     (swap! session assoc :require-turns? true)   ; real servers enforce turns
     ;; the reviewer UI comes up with the server, always. It serves the LIVE
@@ -1843,3 +1819,65 @@
         ;; here wants exactly that port.
         (live/stop! (:app-server @session))
         (ops/close! session)))))
+
+(defn call!
+  "One-shot tool invocation against the store at `dir` — the --call CLI's
+  engine and the fallback when no MCP connection exists. Opens a durable
+  session, dispatches ONE tool call, closes. Returns the wire result map
+  ({:content [{:text …}]}; :isError true on tool errors), same as the
+  server would send.
+
+  Writes stay TURN-GATED here, deliberately: provenance is not optional just
+  because the caller is a script. Turns are DURABLE across one-shot processes,
+  so the scripted shape is `--call turn_begin` once, then the writes, then
+  `--call turn_end` — not a turn per call. Reads need nothing.
+
+  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
+  everything here flows through `text!`, whose boundary-leak guard refuses a
+  file:line coordinate, so emitting frames replaced the real diagnostic with a
+  guard exception."
+  [dir tool arguments]
+  (let [session (external/open!
+                 (cond-> {:slopp.ops/dir (str dir)}
+                   ;; a one-shot names its agent in the call, and that name is
+                   ;; the SESSION's identity, not merely the delta's. Turns are
+                   ;; durable across processes and so is the LINE one was opened
+                   ;; on — a fresh identity per process would open a fresh
+                   ;; thread per call, and the turn would be unfindable by the
+                   ;; very write it was opened for.
+                   (:agent arguments)
+                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
+    (swap! session assoc :require-turns? true)
+    (try
+      (let [r (try (call-tool! session {:name tool :arguments arguments})
+                   (catch Exception e
+                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                           msgs  (into [] (comp (take-while some?)
+                                                (map #(str (.getSimpleName (class %))
+                                                           ": " (ex-message %))))
+                                       chain)]
+                       (assoc (text! (str "error: " (str/join " <- " msgs)))
+                              :isError true))))]
+        ;; ...and say what this process could not see. See
+        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+        ;; somebody's thread holds un-landed work that is a different store from
+        ;; the one an MCP session answers from.
+        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+          (update r :content (fnil conj []) {:type "text" :text note})
+          r))
+      (finally (ops/close! session)))))
+
+^:unsafe
+(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
+  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
+  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
+  tool error. args is JSON, EDN, or @file (parse-call-args)."
+  [& [dir tool args-str]]
+  (when (str/blank? tool)
+    (binding [*out* *err*]
+      (println "usage: --call <tool> [<json/edn args or @file>]"))
+    (System/exit 2))
+  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
+    (println (clojure.string/join "\n" (map :text (:content r))))
+    (flush)
+    (System/exit (if (:isError r) 1 0))))

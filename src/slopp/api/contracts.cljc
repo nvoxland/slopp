@@ -112,163 +112,6 @@
   the source exactly, so a form renders from tokens alone."
   [:tuple :string :string])
 
-(def change-request
-  "`GET /api/change/:range` — what a caller SENDS.
-
-  Only the path segment. Declared for the reason [[form-request]] gives at
-  length: `:rest/request` is what the caller sends, and a generated wrapper
-  whose params map has no entry for `:range` cannot address the endpoint at
-  all. slopp-ui reported this as one document carrying two conventions, and
-  they were right — `form` declared its parameter and four others did not."
-  [:map
-   [:range {:doc (str "the milestone range to review, `from..to` — two commit"
-                      " point ids. Interpolated into the PATH. Both ends are"
-                      " user input: an unparseable range is a 404, which is a"
-                      " different answer from a range that parsed and changed"
-                      " nothing")} :string]])
-
-(def source-request
-  "`GET /api/source/:ns/:name` — what a caller SENDS.
-
-  Both segments, and both are the address rather than a filter: there is no
-  response without them."
-  [:map
-   [:ns {:doc (str "the namespace holding the form, e.g. `app.core` —"
-                   " interpolated into the PATH")} :string]
-   [:name {:doc (str "the form's name within that namespace. A name can be"
-                     " ambiguous where a namespace holds more than one form"
-                     " answering to it; the response carries the :form-id that"
-                     " resolves it")} :string]])
-
-(def ns-outline-request
-  "`GET /api/ns/:ns` — what a caller SENDS."
-  [:map
-   [:ns {:doc (str "the namespace to outline, e.g. `app.core` — interpolated"
-                   " into the PATH. Unknown is a 404 rather than an empty"
-                   " outline: `{:forms []}` would say the namespace exists and"
-                   " holds nothing, which is a different statement")} :string]])
-
-(def module-request
-  "`GET /api/module/:m` — what a caller SENDS."
-  [:map
-   [:m {:doc (str "the module name — the first TWO namespace segments, e.g."
-                  " `slopp.store`. Interpolated into the PATH. Unknown is a"
-                  " 404 rather than an empty frame, on the same reasoning"
-                  " ns-outline uses")} :string]])
-
-(def form-request
-  "`GET /api/form/:id` — what a caller SENDS.
-
-  `:id` is interpolated into the path; `:view` and `:depth` travel as query
-  parameters, and nothing here says so — the generated client reads the
-  METHOD. `:rest/request` means what the caller sends, and a GET sends a query
-  string for the same reason a POST sends a body.
-
-  It exists because without it the generated wrapper takes a params map and
-  only the path ever reads from it, so `?depth=` answered correctly on the wire
-  and was unreachable through the client — which pushes a consumer toward
-  hand-rolling a fetch, the exact thing `direct-http` refuses and the typed
-  client exists to prevent.
-
-  Both modifiers are `:optional`, and that is the compatibility promise: a
-  wrapper called with only `:id` sends no query string at all, which is the
-  request every link written before these existed already made."
-  [:map
-   [:id {:doc (str "the form's stable id — interpolated into the PATH, not sent as a"
-                   " query parameter, and the only required part of the address")} :string]
-   [:view {:optional true
-           :doc (str "the rendering fidelity to build the response at; travels as a"
-                     " query parameter. Omit for the default — a wrapper called with"
-                     " only :id sends no query string at all, which is the request"
-                     " every link written before these existed already made")} :string]
-   [:depth {:optional true
-            :doc (str "how far to follow the call graph for :callers and :callees;"
-                      " query parameter. Omit for the default")} :int]])
-
-(def neighbour-card
-  "One form on the OTHER end of an edge — a caller or a callee, as a card.
-
-  Declared once for both directions because it is one shape, and declared at
-  all because `[:sequential :map]` is not a type: a bare `:map` validates any
-  map, so the generated client checked every response against it and could
-  never find anything. Reported by slopp-ui after a shape change went silent
-  for weeks one endpoint over.
-
-  The card INLINES what a reader needs in order to decide whether to follow
-  the edge — signature, docstring, recorded why, coverage — because the
-  failure this page exists to avoid is the lonely bubble: arriving cold at a
-  form and having to make one request per neighbour just to learn which of
-  them matters.
-
-  **The optional four are OPTIONAL rather than `:maybe`, measured over 34 real
-  cards.** A form with no docstring OMITS `:doc`; it does not send nil. Getting
-  that backwards writes a contract that refuses valid data, which is the
-  failure mode where the contract becomes the thing you route around."
-  [:map
-   [:form {:doc "the neighbour's qualified name"} :string]
-   [:form-id {:doc "its stable address, for a permalink"} :string]
-   [:ns {:doc "the namespace it lives in"} :string]
-   [:module {:doc "that namespace's module"} :string]
-   [:calls {:doc (str "how many edges run between it and the subject — a COUNT here,"
-                      " unlike a form row's :calls, which lists same-namespace callee"
-                      " NAMES. Same key, two documents, two meanings")} :int]
-   [:warranty {:doc "what is known to have exercised it"}
-    [:map [:covered {:doc "how many tests were OBSERVED running it"} :int]]]
-   [:sig {:optional true :doc "its arglist as one string; absent when it has none"} :string]
-   [:doc {:optional true :doc "its docstring's first line; absent when it has none"} :string]
-   [:why {:optional true :doc "the recorded ask behind its last write; absent when none"} :string]
-   [:via {:optional true
-          :doc (str "how the edge was found — present on a CALLEE, absent on a caller"
-                    " card because callers are grouped by it one level up")} :string]])
-
-(def form-view
-  "`GET /api/form/:id` — one form's permalink model.
-
-  OPEN (malli maps are, by default) and deliberately so: this names the keys
-  the client renders and lets `slopp.api.model/form-view` carry the rest of
-  its card. A closed schema over a model this rich would be a contract that
-  refuses valid data every time the model grew a field — the failure mode
-  where the contract becomes the thing you route around."
-  [:map
-   [:form-id {:doc "the form's stable address — the permalink this view answers for"} :string]
-   [:form {:doc "the form's qualified name, ns/name"} :string]
-   [:name {:doc "the form's own name, unqualified"} :string]
-   [:ns {:doc "the namespace it lives in"} :string]
-   [:view {:doc (str "the rendering FIDELITY this response was built at, echoing"
-                     " ?view= — so a consumer can tell which one it got rather than"
-                     " assuming its request was honoured")} :string]
-   [:views {:doc "every fidelity this form can be requested at"} [:sequential :string]]
-   [:tokens {:doc (str "the form's source as [CLASS TEXT] PAIRS — first element the"
-                       " syntax class (\"keyword\", \"string\", \"comment\"…), second the"
-                       " literal text. Not markup: the server sends classes and text"
-                       " and the client decides what element they become, so no"
-                       " consumer needs a lexer. Concatenating every TEXT reproduces"
-                       " the source exactly, which is what lets a form render from"
-                       " these alone")}
-    [:sequential token]]
-   [:callers {:doc (str "who reaches this form, GROUPED BY HOW — a static call and a"
-                        " declared reference are both callers and are not the same"
-                        " evidence")}
-    [:sequential [:map
-                  [:via {:doc (str "HOW the edge was found: \"static\" is a call written"
-                                   " in the code, \"carrier\" is a reference passed as a"
-                                   " value (#'var, a late-ref), \"declared\" is a marker"
-                                   " naming it. Grouped rather than summed because"
-                                   " they are not the same evidence")} :string]
-                  [:count {:doc "how many callers reach it that way"} :int]
-                  [:forms {:doc "the caller cards reached this way"}
-                   [:sequential neighbour-card]]]]]
-   [:callees {:doc (str "the forms this one reaches, as cards — the other direction"
-                        " of the graph. Each carries its own :via inline, where a"
-                        " caller's sits on the group")}
-    [:sequential neighbour-card]]
-   [:note {:doc (str "the standing caveat on :callers and :callees, in words: the"
-                     " edges come from a SYNTACTIC reader over the store, so they are"
-                     " a FLOOR and not a census — a call reached through a binding or"
-                     " built at runtime is not among them. Render it wherever the"
-                     " edges are shown; a reader who takes a caller list for complete"
-                     " draws the wrong conclusion from a short one")} :string]])
-
 (def timeline
   "`GET /api/timeline` — milestones newest first, plus the working set."
   [:map
@@ -387,6 +230,35 @@
                        " read from a file — there is no file. Canonical formatting,"
                        " so it is the same text every caller gets")} :string]])
 
+(def form-request
+  "`GET /api/form/:id` — what a caller SENDS.
+
+  `:id` is interpolated into the path; `:view` and `:depth` travel as query
+  parameters, and nothing here says so — the generated client reads the
+  METHOD. `:rest/request` means what the caller sends, and a GET sends a query
+  string for the same reason a POST sends a body.
+
+  It exists because without it the generated wrapper takes a params map and
+  only the path ever reads from it, so `?depth=` answered correctly on the wire
+  and was unreachable through the client — which pushes a consumer toward
+  hand-rolling a fetch, the exact thing `direct-http` refuses and the typed
+  client exists to prevent.
+
+  Both modifiers are `:optional`, and that is the compatibility promise: a
+  wrapper called with only `:id` sends no query string at all, which is the
+  request every link written before these existed already made."
+  [:map
+   [:id {:doc (str "the form's stable id — interpolated into the PATH, not sent as a"
+                   " query parameter, and the only required part of the address")} :string]
+   [:view {:optional true
+           :doc (str "the rendering fidelity to build the response at; travels as a"
+                     " query parameter. Omit for the default — a wrapper called with"
+                     " only :id sends no query string at all, which is the request"
+                     " every link written before these existed already made")} :string]
+   [:depth {:optional true
+            :doc (str "how far to follow the call graph for :callers and :callees;"
+                      " query parameter. Omit for the default")} :int]])
+
 (def gaps
   "Where a subject is about to be THIN — counts, never rows.
 
@@ -489,6 +361,43 @@
     [:sequential :string]]
    [:gaps {:doc "where this module is thin"} gaps]])
 
+(def module-index
+  "`GET /api/modules` — the Code landing: one row per module, the layering,
+   and the cycles.
+
+   No canvas. This carried a fully placed `module-picture` — boxes with
+   coordinates, routed edges, an extent — until the reviewer UI became a
+   separate project and demonstrated the cost: it ported a layout namespace
+   and found nothing for it to do, because the layout had already happened
+   here. An API that ships a drawing admits exactly one consumer.
+
+   `:layers` is the compromise, and it is not one: a topological layering is
+   ANALYSIS, it comes from the store's own module graph, and no consumer can
+   recompute it. Placing boxes on those rungs is drawing, and every consumer
+   should get to disagree about it.
+
+   `:cycles` rides alongside rather than inside, because a cycle is a FINDING
+   about the architecture, not a drawing instruction. On a tangled store it is
+   the most useful thing on the screen, and a consumer that only wants the
+   verdict should not have to read geometry to find it."
+  [:map
+   [:modules {:doc "one row per module, sorted by name"} [:sequential module-row]]
+   [:layers {:doc (str "the TOPOLOGICAL layering, deepest first: each entry is the"
+                       " modules at that depth, and a module's dependencies are all"
+                       " in earlier entries. This is ANALYSIS — the store's own"
+                       " module graph, which no consumer can recompute — and it is"
+                       " deliberately not a drawing: placing boxes on these rungs is"
+                       " yours, and every consumer should get to disagree about it")}
+    [:sequential [:sequential :string]]]
+   [:cycles {:doc (str "dependency cycles, each entry the modules caught in one."
+                       " Empty is the healthy case and the usual one. Alongside"
+                       " :layers rather than inside it because a cycle is a FINDING"
+                       " about the architecture, not a drawing instruction — on a"
+                       " tangled store it is the most useful thing on the screen,"
+                       " and a consumer that only wants the verdict should not have"
+                       " to read geometry to find it")}
+    [:sequential [:sequential :string]]]])
+
 (def module-detail
   "`GET /api/module/:m` — one module from the inside: its namespaces, how they
   depend on each other, and the edges that cross its boundary.
@@ -554,43 +463,6 @@
     [:sequential [:sequential :string]]]
    [:cycles {:doc (str "dependency cycles among this module's own namespaces, each"
                        " entry the namespaces caught in one. Empty is healthy")}
-    [:sequential [:sequential :string]]]])
-
-(def module-index
-  "`GET /api/modules` — the Code landing: one row per module, the layering,
-   and the cycles.
-
-   No canvas. This carried a fully placed `module-picture` — boxes with
-   coordinates, routed edges, an extent — until the reviewer UI became a
-   separate project and demonstrated the cost: it ported a layout namespace
-   and found nothing for it to do, because the layout had already happened
-   here. An API that ships a drawing admits exactly one consumer.
-
-   `:layers` is the compromise, and it is not one: a topological layering is
-   ANALYSIS, it comes from the store's own module graph, and no consumer can
-   recompute it. Placing boxes on those rungs is drawing, and every consumer
-   should get to disagree about it.
-
-   `:cycles` rides alongside rather than inside, because a cycle is a FINDING
-   about the architecture, not a drawing instruction. On a tangled store it is
-   the most useful thing on the screen, and a consumer that only wants the
-   verdict should not have to read geometry to find it."
-  [:map
-   [:modules {:doc "one row per module, sorted by name"} [:sequential module-row]]
-   [:layers {:doc (str "the TOPOLOGICAL layering, deepest first: each entry is the"
-                       " modules at that depth, and a module's dependencies are all"
-                       " in earlier entries. This is ANALYSIS — the store's own"
-                       " module graph, which no consumer can recompute — and it is"
-                       " deliberately not a drawing: placing boxes on these rungs is"
-                       " yours, and every consumer should get to disagree about it")}
-    [:sequential [:sequential :string]]]
-   [:cycles {:doc (str "dependency cycles, each entry the modules caught in one."
-                       " Empty is the healthy case and the usual one. Alongside"
-                       " :layers rather than inside it because a cycle is a FINDING"
-                       " about the architecture, not a drawing instruction — on a"
-                       " tangled store it is the most useful thing on the screen,"
-                       " and a consumer that only wants the verdict should not have"
-                       " to read geometry to find it")}
     [:sequential [:sequential :string]]]])
 
 (def search-request
@@ -691,6 +563,134 @@
                         " what makes a single mixed list honest. Name-exact 1.0,"
                         " name-prefix 0.9, name-substring 0.8, doc 0.5, why 0.4,"
                         " source 0.2")} :double]]]]])
+
+(def neighbour-card
+  "One form on the OTHER end of an edge — a caller or a callee, as a card.
+
+  Declared once for both directions because it is one shape, and declared at
+  all because `[:sequential :map]` is not a type: a bare `:map` validates any
+  map, so the generated client checked every response against it and could
+  never find anything. Reported by slopp-ui after a shape change went silent
+  for weeks one endpoint over.
+
+  The card INLINES what a reader needs in order to decide whether to follow
+  the edge — signature, docstring, recorded why, coverage — because the
+  failure this page exists to avoid is the lonely bubble: arriving cold at a
+  form and having to make one request per neighbour just to learn which of
+  them matters.
+
+  **The optional four are OPTIONAL rather than `:maybe`, measured over 34 real
+  cards.** A form with no docstring OMITS `:doc`; it does not send nil. Getting
+  that backwards writes a contract that refuses valid data, which is the
+  failure mode where the contract becomes the thing you route around."
+  [:map
+   [:form {:doc "the neighbour's qualified name"} :string]
+   [:form-id {:doc "its stable address, for a permalink"} :string]
+   [:ns {:doc "the namespace it lives in"} :string]
+   [:module {:doc "that namespace's module"} :string]
+   [:calls {:doc (str "how many edges run between it and the subject — a COUNT here,"
+                      " unlike a form row's :calls, which lists same-namespace callee"
+                      " NAMES. Same key, two documents, two meanings")} :int]
+   [:warranty {:doc "what is known to have exercised it"}
+    [:map [:covered {:doc "how many tests were OBSERVED running it"} :int]]]
+   [:sig {:optional true :doc "its arglist as one string; absent when it has none"} :string]
+   [:doc {:optional true :doc "its docstring's first line; absent when it has none"} :string]
+   [:why {:optional true :doc "the recorded ask behind its last write; absent when none"} :string]
+   [:via {:optional true
+          :doc (str "how the edge was found — present on a CALLEE, absent on a caller"
+                    " card because callers are grouped by it one level up")} :string]])
+
+(def form-view
+  "`GET /api/form/:id` — one form's permalink model.
+
+  OPEN (malli maps are, by default) and deliberately so: this names the keys
+  the client renders and lets `slopp.api.model/form-view` carry the rest of
+  its card. A closed schema over a model this rich would be a contract that
+  refuses valid data every time the model grew a field — the failure mode
+  where the contract becomes the thing you route around."
+  [:map
+   [:form-id {:doc "the form's stable address — the permalink this view answers for"} :string]
+   [:form {:doc "the form's qualified name, ns/name"} :string]
+   [:name {:doc "the form's own name, unqualified"} :string]
+   [:ns {:doc "the namespace it lives in"} :string]
+   [:view {:doc (str "the rendering FIDELITY this response was built at, echoing"
+                     " ?view= — so a consumer can tell which one it got rather than"
+                     " assuming its request was honoured")} :string]
+   [:views {:doc "every fidelity this form can be requested at"} [:sequential :string]]
+   [:tokens {:doc (str "the form's source as [CLASS TEXT] PAIRS — first element the"
+                       " syntax class (\"keyword\", \"string\", \"comment\"…), second the"
+                       " literal text. Not markup: the server sends classes and text"
+                       " and the client decides what element they become, so no"
+                       " consumer needs a lexer. Concatenating every TEXT reproduces"
+                       " the source exactly, which is what lets a form render from"
+                       " these alone")}
+    [:sequential token]]
+   [:callers {:doc (str "who reaches this form, GROUPED BY HOW — a static call and a"
+                        " declared reference are both callers and are not the same"
+                        " evidence")}
+    [:sequential [:map
+                  [:via {:doc (str "HOW the edge was found: \"static\" is a call written"
+                                   " in the code, \"carrier\" is a reference passed as a"
+                                   " value (#'var, a late-ref), \"declared\" is a marker"
+                                   " naming it. Grouped rather than summed because"
+                                   " they are not the same evidence")} :string]
+                  [:count {:doc "how many callers reach it that way"} :int]
+                  [:forms {:doc "the caller cards reached this way"}
+                   [:sequential neighbour-card]]]]]
+   [:callees {:doc (str "the forms this one reaches, as cards — the other direction"
+                        " of the graph. Each carries its own :via inline, where a"
+                        " caller's sits on the group")}
+    [:sequential neighbour-card]]
+   [:note {:doc (str "the standing caveat on :callers and :callees, in words: the"
+                     " edges come from a SYNTACTIC reader over the store, so they are"
+                     " a FLOOR and not a census — a call reached through a binding or"
+                     " built at runtime is not among them. Render it wherever the"
+                     " edges are shown; a reader who takes a caller list for complete"
+                     " draws the wrong conclusion from a short one")} :string]])
+
+(def change-request
+  "`GET /api/change/:range` — what a caller SENDS.
+
+  Only the path segment. Declared for the reason [[form-request]] gives at
+  length: `:rest/request` is what the caller sends, and a generated wrapper
+  whose params map has no entry for `:range` cannot address the endpoint at
+  all. slopp-ui reported this as one document carrying two conventions, and
+  they were right — `form` declared its parameter and four others did not."
+  [:map
+   [:range {:doc (str "the milestone range to review, `from..to` — two commit"
+                      " point ids. Interpolated into the PATH. Both ends are"
+                      " user input: an unparseable range is a 404, which is a"
+                      " different answer from a range that parsed and changed"
+                      " nothing")} :string]])
+
+(def source-request
+  "`GET /api/source/:ns/:name` — what a caller SENDS.
+
+  Both segments, and both are the address rather than a filter: there is no
+  response without them."
+  [:map
+   [:ns {:doc (str "the namespace holding the form, e.g. `app.core` —"
+                   " interpolated into the PATH")} :string]
+   [:name {:doc (str "the form's name within that namespace. A name can be"
+                     " ambiguous where a namespace holds more than one form"
+                     " answering to it; the response carries the :form-id that"
+                     " resolves it")} :string]])
+
+(def ns-outline-request
+  "`GET /api/ns/:ns` — what a caller SENDS."
+  [:map
+   [:ns {:doc (str "the namespace to outline, e.g. `app.core` — interpolated"
+                   " into the PATH. Unknown is a 404 rather than an empty"
+                   " outline: `{:forms []}` would say the namespace exists and"
+                   " holds nothing, which is a different statement")} :string]])
+
+(def module-request
+  "`GET /api/module/:m` — what a caller SENDS."
+  [:map
+   [:m {:doc (str "the module name — the first TWO namespace segments, e.g."
+                  " `slopp.store`. Interpolated into the PATH. Unknown is a"
+                  " 404 rather than an empty frame, on the same reasoning"
+                  " ns-outline uses")} :string]])
 
 (def rest-paths-document
   "`GET /api/rest/paths` — every `:rest/path` form this project serves, with

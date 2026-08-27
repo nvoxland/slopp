@@ -22,106 +22,6 @@
             [slopp.index.normalize :as normalize]
             [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp]))
 
-(defn reap-idle-images!
-  "Stop parked branch images idle past the session TTL (the session's reaper
-  timer calls this periodically; callable directly). Returns {:reaped n}."
-  [session]
-  (let [ttl     (:branch-image-ttl-ms @session 600000)
-        now     (System/currentTimeMillis)
-        victims (volatile! #{})]
-    (swap! session update :lines
-           (fn [lines]
-             (into {}
-                   (map (fn [[nm line]]
-                          (if (and (:image line)
-                                   (> (- now (:last-used line 0)) ttl))
-                            (do (vswap! victims conj (:image line))
-                                [nm (dissoc line :image)])
-                            [nm line])))
-                   lines)))
-    (doseq [img @victims] (repl/stop! img))
-    {:reaped (count @victims)}))
-
-(defn adopt-modules!
-  "ADOPTION (internal — never a tool, never explicit): derive the module
-  manifest from the CURRENT actual dependency graph — kondo-resolved, so
-  :refer'd calls count — and record it as one delta per edge. Called once by
-  open! for a populated store whose db predates the module system (:modules
-  nil); the result has zero VIOLATIONS by construction, so adoption never
-  breaks working code — the gate then blocks DRIFT until the agent declares
-  new edges (module_dep).
-
-  It is NOT acyclic by construction, and `:cycles` reports what it derived.
-  A module is the first two segments, so `pb.app` calling `pa.core` while
-  `pa.core.impl` calls back into `pb.app` closes a module cycle with no
-  namespace cycle anywhere — a codebase Clojure loads happily. Since
-  module_dep cycle-checks every add, a store grown under the gate cannot
-  tangle, which makes adoption the one moment a knot can enter and the one
-  moment anybody is looking at the manifest.
-
-  Judged on PRODUCTION edges through the same `module-layers` the module
-  graph reads, so a second derivation cannot drift from what the graph
-  shows. `:cycles` is [] when clean, never nil; `:note` rides along only
-  when there is something to say.
-
-  An edge only `-test` namespaces cross is adopted as a TEST-ONLY edge, so
-  the manifest a project inherits does not open its production graph on a
-  fixture's behalf. Adopting those as ordinary edges is how slopp's own
-  manifest came to claim `slopp.index` and `slopp.store` depend on
-  `slopp.api`."
-  [session & {:keys [agent]}]
-  (let [{:keys [production test]} (edit.modules/derive-module-edges (:store @session))
-        record (fn [s [m deps] test-only]
-                 (reduce (fn [s2 dep]
-                           (first (store/record-module-edge
-                                   s2 m dep :add
-                                   :test-only test-only
-                                   :prompt (str "module adoption: "
-                                                (if test-only
-                                                  "edge crossed by -test namespaces ONLY"
-                                                  "edge derived from the actual dependency graph"))
-                                   :agent agent)))
-                         s (sort deps)))]
-    (engine/commit-appended!
-     session
-     (fn [base]
-       (as-> (update base :modules #(or % {})) $
-         (reduce #(record %1 %2 nil) $ (sort production))
-         (reduce #(record %1 %2 true) $ (sort test))))
-     [])
-    (let [cycles (vec (:cycles (store/module-layers
-                                (into {} (map (fn [[m ds]] [m (vec ds)])) production))))]
-      (cond-> {:modules (count production)
-               :edges   (reduce + 0 (map count (vals production)))
-               :test-edges (reduce + 0 (map count (vals test)))
-               :cycles cycles}
-        (seq cycles)
-        (assoc :note
-               (str (count cycles)
-                    (if (= 1 (count cycles)) " module cycle" " module cycles")
-                    " came in with the code: "
-                    (str/join "; " (map #(str/join " ⇄ " %) cycles))
-                    ". Nothing is broken and nothing loads in a circle — a"
-                    " module is the first two segments, so this is a"
-                    " cross-module call in each direction. It cannot be"
-                    " introduced later, since declaring an edge that closes a"
-                    " cycle is refused, so untangling means moving what"
-                    " crosses and then module_dep {from … to … remove true}."))))))
-
-(defn await-image!
-  "Block until the session's background image boot has finished, then return
-  the session (its image live). A synchronously-opened session (the default)
-  carries no ready-promise and returns immediately. A boot FAILURE delivered
-  to the promise is RETHROWN here — with the async-boot server path the MCP
-  connection is already up by the time the image loads, so a boot error
-  surfaces on the first oracle/write call instead of killing the server at
-  startup (which is what let a slow store race the MCP connect timeout)."
-  [session]
-  (when-let [p (:image-ready @session)]
-    (let [r (deref p)]
-      (when (instance? Throwable r) (throw r))))
-  session)
-
 (defn close! "Release everything the session owns and return nil: its image, a warm spare
   still booting, the SQLite connection, every per-branch line's image and
   connection, and the idle-image reaper timer.
@@ -311,45 +211,6 @@
                     [])
   {:turn :open :agent agent :intent intent})
 
-(defn flush-reads!
-  "Fold whatever the read ring has accumulated onto a `:read-cost` delta and
-  clear it. Returns the record, or nil when nothing was written.
-
-  Flushes when the ring has reached `telemetry/read-flush-calls`, or on any
-  `force?`. **The POLICY is here and the PERMISSION is at the caller** — the
-  wire knows whether writing a delta is legal at this moment and knows nothing
-  about spans; this knows the reverse. Splitting it the other way put the
-  threshold in the wire, where a second caller would have had to know the
-  number too.
-
-  **The read ring is not the timing ring, and the difference is the point.**
-  `:slopp.read.telemetry/calls` is cleared at every `turn-begin!` so an ask
-  measures only its own clock. The read rows must NOT share that lifecycle:
-  turns rotate only when a user prompt arrived and a write tool followed, so a
-  read-only ask closes no turn and an event-driven session closes no turn —
-  and those are exactly the spans where reads dominate. Measured the day the
-  read record shipped riding `:turn-end`: two stores, 321 and 118 closed
-  turns, zero read records between them. So the rows accumulate across turns
-  and leave only here.
-
-  **Call this only from a path that already writes.** Every read tool declares
-  `readOnlyHint` on the wire and a harness may run it unprompted on that
-  promise; appending a journal delta from one would break it. That leaves one
-  span genuinely unrecordable — a session that never calls a write tool at all
-  — and the honest handling is to say so rather than to record it anyway. It
-  is named in [[slopp.lab.reads/read-ledger]], where someone reading a number
-  needs to know it.
-
-  Nothing to flush → nil and no delta, for the reason the fold itself returns
-  nil on an empty ring: an empty record reads as a span that cost nothing."
-  [session & {:keys [force?]}]
-  (let [ring (:slopp.read.telemetry/reads @session)]
-    (when (or force? (<= telemetry/read-flush-calls (count ring)))
-      (when-let [reads (telemetry/read-cost ring)]
-        (engine/commit-appended! session #(store/record-read-cost % reads) [])
-        (swap! session dissoc :slopp.read.telemetry/reads)
-        reads))))
-
 (defn turn-end!
   "Close `agent`'s turn (stable or not — a red turn is still history), and
   record where the turn's WALL CLOCK went.
@@ -414,18 +275,6 @@
       (if (:err r)                                  ; F-3c2: never a silent []
         {:error (:err r)}
         (:values r)))))
-
-^:reads (defn query-call
-  "Observe-only INVOKE of one var in the live image: `(query-call session
-  'app.core/f 1 2)` — the structured face of the common query-eval case.
-  The var reference is CARRIED (a quoted symbol in a designated position —
-  renames, moves, and the unused gate all see it) instead of hidden in an
-  eval string; args must be printable data (they cross the nREPL boundary
-  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
-  expressions."
-  [session qsym & args]
-  (query-eval session
-              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
 
 ^:reads (defn query-observe
   "Run `driver-code` (observe-gated) while capturing the args and return value
@@ -1237,239 +1086,6 @@ recompiled (engine/after-write! session ns-sym)]
                                  " routes to the external tier automatically)")))
              t0)))
 
-(defn- require-orphaned-registrar?
-  "After a require to `lib` has been dropped, would a COLD LOAD lose a
-   registration? True when `lib` is an in-store namespace whose require-closure
-   registers something (defmethod / extend-* / deftype / defrecord …) AND
-   nothing else in the store still requires it — so dropping this require
-   orphans it and its registrations never run again. The in-image suite cannot
-   see this break: the registration is already loaded in the live image, so a
-   green in-image verdict is not enough to prove the require dead."
-  [st lib]
-  (boolean
-   (and (contains? (:namespaces st) lib)
-        (not (some (fn [nsx] (contains? (set (store/ns-requires st nsx)) lib))
-                   (keys (:namespaces st))))
-        (some store/method-carrying?
-              (mapcat #(store/forms st %) (store/ns-closure st lib))))))
-
-(defn prune-requires!
-  "Done-point require hygiene — the agent never manages unused requires; done
-   does, and there is deliberately no MCP tool for it. For each require kondo
-   reports unused (`done/unused-requires`), TRY removing it and re-verify.
-
-   Removing a kondo-unused require cannot break COMPILATION — nothing used it —
-   so the only ways it can break are (1) a test the removal's own affected set
-   catches, or (2) a load effect a cold load would lose: an orphaned in-store
-   target whose closure REGISTERS something (a defmethod the reference graph
-   can't see). The live image already has that registration loaded, so a green
-   in-image verdict does NOT prove the require dead — `require-orphaned-registrar?`
-   is the static backstop.
-
-   Genuinely dead → drop it. Load-bearing (or the removal went red) → restore it
-   WITH a `^:side-effect` marker, so it no longer reads as unused and done never
-   re-tries it. Returns `{:pruned [lib …] :kept [lib …]}`."
-  [session ns-sym & {:keys [prompt agent]}]
-  (reduce
-   (fn [acc {:keys [lib marked]}]
-     (let [r    (remove-require! session ns-sym lib
-                                 :prompt (or prompt (str "done: try pruning unused require " lib))
-                                 :agent agent)
-           red? (let [t (:test r)]
-                  (boolean (and t (or (pos? (:fail t 0)) (pos? (:error t 0))))))]
-       (cond
-         ;; couldn't remove it at all (conflict/refusal) — leave it untouched
-         (or (:error r) (:conflict r))
-         (update acc :kept conj lib)
-
-         ;; removing it broke a test, or would lose a registration on cold load:
-         ;; restore it, marked, so it is not reported unused or re-tried
-         (or red? (require-orphaned-registrar? (:store @session) lib))
-         (do (add-require! session ns-sym marked
-                           :prompt (str "done: keep load-bearing require " lib
-                                        " (removing it breaks a cold load) — marked ^:side-effect")
-                           :agent agent)
-             (update acc :kept conj lib))
-
-         :else
-         (update acc :pruned conj lib))))
-   {:pruned [] :kept []}
-   (done/unused-requires (:store @session) ns-sym)))
-
-(defn fix-declares!
-  "Declare hygiene at the done-point. The write pipeline OWNS form ordering, so
-  this no longer reorders anything itself (it used to carry a second,
-  conservative single-form mover that gave up on cases the topological sort
-  handles). It DROPS `ns-sym`'s declares and lets `edit/resolve-cold-load`
-  re-establish what is genuinely needed — a topological reorder (Kahn over THE
-  reference graph), or the pipeline's own MARKED auto-declare for a real cycle.
-  Net effect: a satisfied declare vanishes, PHANTOM names (a var an earlier
-  move lifted out — they mint unbound vars) vanish with it, a legacy
-  hand-written declare MIGRATES to a pipeline-owned marked one that says why,
-  and a stale auto-declare disappears once its cycle breaks. No-ops when the
-  rendered namespace would be unchanged. One atomic group, verified."
-  [session ns-sym & {:keys [prompt agent]}]
-  (let [st    (:store @session)
-        decls (filter (fn [f]
-                        (and (nil? (:name f))
-                             (= 'declare (try (first (n/sexpr (:node f)))
-                                              (catch Exception _ nil)))))
-                      (store/forms st ns-sym))]
-    (if (empty? decls)
-      {:removed 0 :note "no declares"}
-      (let [[gid st0] (store/alloc-id st "g")
-            stripped  (reduce (fn [s d]
-                                (or (first (store/remove-form s ns-sym (:id d)
-                                                              :prompt (or prompt "fix-declares")
-                                                              :group gid :agent agent))
-                                    s))
-                              st0 decls)
-            rz  (edit/resolve-cold-load stripped ns-sym
-                                        :prompt (or prompt "fix-declares: pipeline owns ordering")
-                                        :agent agent)
-            st' (or (:store rz) stripped)]
-        (cond
-          ;; the pipeline could not make it load without the declares — leave
-          ;; the namespace exactly as it was
-          (edit/cold-load-errors st' [ns-sym])
-          {:removed 0 :note "declares still required — left as-is"}
-
-          ;; nothing would actually change: don't churn the journal
-          (= (store.render/render-ns st ns-sym) (store.render/render-ns st' ns-sym))
-          {:removed 0 :note "already tidy"}
-
-          :else
-          (if-not (engine/try-commit! session st st' [ns-sym])
-            {:conflict {:reason "store changed during fix-declares — retry"}}
-            (let [summary (engine/run-verification! session ns-sym nil)]
-              (engine/commit-appended! session
-                                        #(store/record-verification % ns-sym summary) [])
-              {:removed (count decls) :test summary})))))))
-
-(defn cleanup!
-  "Run the done-point's TIDY over one namespace, on demand: normalize every
-  form (conservative, behavior-preserving rewrites), then declare hygiene via
-  `fix-declares!` — definitions reordered above their callers, a legacy or
-  stale `(declare …)` retired, phantom names pruned. One verified pass.
-
-  You should rarely need this. The write pipeline owns ordering and declares
-  from the FIRST write, and `done` runs the same tidy over everything you
-  touched — so code written through slopp arrives clean. Reach for it on code
-  that predates those invariants (an ingested file-based namespace), or when a
-  legacy declare is blocking you mid-episode: two elements then share a name,
-  which the name-addressed edit tools cannot resolve.
-
-  Returns `{:ns :normalized n :rewrites [{:form :applied}] :declares n}`, or
-  `{:error …}` — nothing is committed unless the tidied namespace compiles."
-  [session ns-sym & {:keys [prompt agent]}]
-  (let [st       (:store @session)
-        rewrites (vec (for [f (store/forms st ns-sym)
-                            :let [{:keys [node applied]}
-                                  (normalize/normalize-form (:node f))]
-                            :when (seq applied)]
-                        {:form-id (:id f)
-                         :form    (symbol (str ns-sym) (str (or (:name f) (:id f))))
-                         :node    node
-                         :applied applied}))
-        normed   (when (seq rewrites)
-                   (let [changeset (into {} (map (juxt :form-id :node)) rewrites)
-                         [st' _]   (store/apply-changeset
-                                    st :normalize ns-sym changeset
-                                    :prompt (or prompt "cleanup: normalize")
-                                    :agent agent)]
-                     (if-let [err (:err (engine/hot-load-all! session st'
-                                                               (keys changeset)))]
-                       {:error (str "cleanup: normalization would not compile — "
-                                    err)}
-                       (if-not (engine/try-commit! session st st' [ns-sym])
-                         {:conflict {:reason "store changed during cleanup — retry"}}
-                         {:ok true}))))]
-    (cond
-      (:error normed)    normed
-      (:conflict normed) normed
-      :else
-      (let [d (fix-declares! session ns-sym
-                             :prompt (or prompt "cleanup: declare hygiene")
-                             :agent agent)]
-        (cond-> {:ns         ns-sym
-                 :normalized (count rewrites)
-                 :rewrites   (mapv #(select-keys % [:form :applied]) rewrites)
-                 :declares   (:removed d 0)
-                 :purity     (tiers/tier-report (:store @session) ns-sym)
-                 ;; the done-time advisories, re-run over the WHOLE namespace.
-                 ;; They already fired for anything written through slopp since
-                 ;; the rule existed — what they have never seen is code that
-                 ;; PREDATES the rule (ingested, or written before the advisory
-                 ;; was added). That is exactly this tool's job.
-                 :advisories (let [st* (:store @session)]
-                               (rules/run-done-advisories!
-                                session st* (mapv :id (store/forms st* ns-sym))))
-                 ;; the rest of the enforcement surface, replayed over EXISTING
-                 ;; code: kondo lint, dead public surface, undocumented public
-                 ;; surface, and the per-form WRITE gates (module / tier /
-                 ;; schema / namespaced-keys). Each normally fires only as code
-                 ;; is written, so a form predating a rule was never subject to
-                 ;; it. Reported, never auto-applied — every one needs judgment.
-                 :lint       (let [st* (:store @session)]
-                               (vec (done/anchored-lint
-                                     session (mapv :id (store/forms st* ns-sym)))))
-                 :unused     (vec (:unused (read.modules/unused-report
-                                            (:store @session) [ns-sym])))
-                 :undocumented
-                 (let [st* (:store @session)]
-                   (vec (keep #(:var (edit.modules/missing-doc-warning st* ns-sym (:name %)))
-                              (filter :name (store/forms st* ns-sym)))))
-                 :gates
-                 (let [st* (:store @session)]
-                   (vec (for [f (store/forms st* ns-sym)
-                              :when (:name f)
-                              :let [g (gates/gate-check st* ns-sym (:name f))
-                                    hits (remove nil? (cons (:refuse g) (:advisories g)))]
-                              :when (seq hits)]
-                          {:form (symbol (str ns-sym) (str (:name f)))
-                           :teach (vec hits)})))}
-          (:conflict d) (assoc :conflict (:conflict d))
-          (:test d)     (assoc :test (:test d)))))))
-
-(defn cleanup-all!
-  "Run `cleanup!` over EVERY namespace in the store — the MIGRATION surface.
-
-  Per-namespace is the wrong grain for a migration, because you do not know
-  which namespaces predate a rule. Two cases need this: adopting slopp on an
-  existing codebase (nothing in it was ever subject to any gate), and landing
-  a slopp upgrade that ADDS a rule (every existing form predates it).
-
-  Applies the tidy everywhere it is needed, and aggregates what tidying cannot
-  fix. Returns `{:namespaces n :normalized n :declares n :findings [{:ns …}]}`
-  — `:findings` carries only namespaces with something to report, each with
-  whichever of `:lint :unused :undocumented :gates :advisories` fired, so a
-  clean store returns an empty vector rather than 100 empty rows.
-
-  Reports; it never auto-fixes a finding. Dead surface, a missing docstring, a
-  gate violation and an ambient atom each need a human decision — and the last
-  is often correct as written."
-  [session & {:keys [prompt agent]}]
-  (let [nses (sort (keys (:namespaces (:store @session))))
-        rs   (mapv #(cleanup! session %
-                              :prompt (or prompt "cleanup-all: migration sweep")
-                              :agent agent)
-                   nses)]
-    (if-let [bad (first (filter :error rs))]
-      bad
-      {:namespaces (count rs)
-       :normalized (reduce + 0 (map #(:normalized % 0) rs))
-       :declares   (reduce + 0 (map #(:declares % 0) rs))
-       :findings
-       (vec (keep (fn [r]
-                    (let [hit (cond-> {}
-                                (seq (:lint r))         (assoc :lint (:lint r))
-                                (seq (:unused r))       (assoc :unused (:unused r))
-                                (seq (:undocumented r)) (assoc :undocumented (:undocumented r))
-                                (seq (:gates r))        (assoc :gates (:gates r))
-                                (seq (:advisories r))   (assoc :advisories (:advisories r)))]
-                      (when (seq hit) (assoc hit :ns (:ns r)))))
-                  rs))})))
-
 ^:reads (defn query-commits
   "Milestones, newest first:
   [{:commit :description :target :status :agent :at :sha}]. The list rung
@@ -1520,37 +1136,6 @@ recompiled (engine/after-write! session ns-sym)]
   [session]
   (:deps (:store @session)))
 
-(defn deps-manifest
-  "The dependency manifest as an AGENT should read it: `{:deps {lib coord}}`,
-  plus `:host-override` naming any declaration slopp's own server process
-  cannot honor because it bundles that library itself.
-
-  Separate from `deps-list` on purpose. `deps-list` is the accessor — the
-  store's data, which other code and tests build on, and the host's classpath
-  is not part of it. This is the SURFACE, and the surface carries an
-  obligation the accessor does not: `deps_list` is the one answer an inherited
-  store ever gives about its dependencies, so a declaration that is inert in
-  the running server has to be visible here or nowhere.
-
-  It briefly also carried `:framework-drift`, for a store pinning
-  `io.github.nvoxland/slopp-web` at a version other than the slopp serving it.
-  That finding is retired with the coord it described: slopp supplies the
-  framework itself now (D-framework-injection), no store declares it, and
-  slopp-web was never published so none ever can. A report for a state that
-  cannot occur is worse than no report — it teaches a shape of problem that
-  does not exist."
-  [session]
-  (let [deps (deps-list session)
-        over (boot/host-lib-divergence deps (boot/bundled-libs))]
-    (cond-> {:deps deps}
-      (seq over)
-      (assoc :host-override over
-             :host-override-note
-             (str "slopp's own server process bundles these at the :in-force"
-                  " version and cannot displace them. Your declarations still"
-                  " govern the oracle image, the test suite and anything"
-                  " build! produces")))))
-
 (defn- record-pure!
   "Mark each of `syms` pure/un-pure in ONE appended commit (N :deps-pure deltas)."
   [session syms pure? {:keys [agent prompt]}]
@@ -1561,174 +1146,6 @@ recompiled (engine/after-write! session ns-sym)]
                                                                :agent agent :prompt prompt)))
                               base syms))
                     []))
-
-(defn- adopt-published-tiers!
-  "Adopt the purity tiers the libraries on the image's classpath PUBLISHED,
-  returning the namespaces newly marked pure (a vector, possibly empty).
-
-  A tier is a declaration in the producer's store and nothing in the code, so
-  before this a consumer saw every namespace of a published library as
-  undeclared — hence `:external` — and its own correct functions were flagged
-  effectful for calling them. Worse than the warning was its SUGGESTION:
-  rename `picker` to `picker!`, which would have mislabelled four correct pure
-  functions to compensate for a declaration that never shipped.
-
-  Only `:pure` is adopted. `:external` is already the default, and `:internal`
-  is a statement about in-process state that means nothing across a jar
-  boundary — the consumer cannot reset a dependency's caches.
-
-  Adopting the producer's word is better founded than the alternative the
-  consumer has otherwise: `deps_pure` asks them to assert purity about code
-  they did not write and cannot check, while the producer's tier was VERIFIED
-  against the forms when it was declared. Reported as `:adopted-pure` either
-  way — a silent change to what the effect gate flags is the kind of thing
-  someone should be able to see happen.
-
-  Read through the IMAGE, which is where the new jar actually landed: the
-  server never added it to its own classpath."
-  [session {:keys [agent]}]
-  (let [code  (str "(mapv slurp (enumeration-seq (.getResources"
-                   " (clojure.lang.RT/baseLoader) \""
-                   read.modules/tiers-resource-path "\")))")
-        res   (try (first (repl/eval! (:image @session) code))
-                   (catch Throwable _ nil))
-        tiers (reduce (fn [acc s]
-                        (if (string? s)
-                          (merge acc (try (edn/read-string s)
-                                          (catch Throwable _ nil)))
-                          acc))
-                      {}
-                      (when (coll? res) res))
-        known (:dep-pure (:store @session))
-        fresh (vec (sort (distinct (for [[path tier] tiers
-                                         :when (= :pure tier)
-                                         :let  [nsx (symbol (str path))]
-                                         :when (not (contains? known nsx))]
-                                     nsx))))]
-    (when (seq fresh)
-      (record-pure! session fresh true
-                    {:agent  agent
-                     :prompt (str "adopted from a dependency's published purity"
-                                  " tiers (" read.modules/tiers-resource-path ")")}))
-    fresh))
-
-(defn- shadowed-dep-namespaces!
-  "Of `nses`, those provided by MORE than one place on the image's classpath —
-  `{ns [url …]}`, or nil. The declared coord did not win those.
-
-  `add-libs` appends to a `DynamicClassLoader`, which delegates to its PARENT
-  first, and everything the host jar carries lives in that parent. So a
-  dependency can resolve perfectly and still not govern: measured on slopp's
-  own store, the manifest declares metosin/malli 0.16.4 while
-  `malli/core.cljc` resolves out of slopp.jar both before AND after a
-  successful add of exactly that coord.
-
-  Fixing that is a packaging change — shading, a slim launcher, or a
-  child-first loader — and none of those belong in `deps_add`. Saying it does:
-  a manifest that reads as satisfied while a different version is in force is
-  precisely what D-surface-honesty forbids, and it is invisible from every
-  surface a consumer has. The FIRST url is the one in force."
-  [session nses]
-  (when (seq nses)
-    (let [code (str "(into {} (for [n '" (pr-str (vec nses))
-                    " :let [b (clojure.string/replace"
-                    " (clojure.string/replace (str n) \".\" \"/\") \"-\" \"_\")"
-                    " us (mapcat #(enumeration-seq"
-                    " (.getResources (clojure.lang.RT/baseLoader) (str b %)))"
-                    " [\".clj\" \".cljc\"])]"
-                    " :when (> (count us) 1)] [n (mapv str us)]))")
-          res  (try (first (repl/eval! (:image @session) code))
-                    (catch Throwable _ nil))]
-      (when (and (map? res) (seq res)) res))))
-
-(defn deps-add!
-  "Declare external dependency `lib` (a symbol like `org.clojure/data.json`)
-  at `coord` (a deps.edn coordinate map, e.g. `{:mvn/version \"2.5.0\"}`).
-  Records a `:deps-add` delta (materialized to the store's manifest), then
-  HOT-adds the jar to the running image via add-libs — no restart; on failure
-  it restarts. Returns {:added lib :coord :hot true|:restarted true} | {:error}.
-
-  A coord carrying `:exclusions` RESTARTS rather than hot-adds. `add-libs`
-  silently ignores exclusions and a fresh JVM honors them, so hot-adding leaves
-  the oracle running a classpath no fresh JVM can reproduce: the in-image suite
-  goes green with the excluded jar present while every external shard, `build!`
-  and native fail to load. An image that can run what a fresh JVM cannot LOAD is
-  the cold-load failure class, and the cheapest place to not have it is here.
-
-  `:host-override` names a library slopp's OWN process bundles at a different
-  version. It is not a warning about this store — the declaration governs the
-  oracle, the test suite and every built artifact — but the server process
-  cannot honor it, because a jar its parent classloader already holds cannot be
-  displaced. Saying so is the whole point: the alternative is two processes
-  quietly running different code with every surface reporting agreement.
-
-  With `:client true` the dep is BUILD-ONLY (the ClojureScript compiler): it
-  records to the separate `:client-deps` manifest, is NOT analyzed and NOT
-  hot-loaded, and routes to the `:cljs` alias in the generated deps.edn — so it
-  never enters the running oracle nor ships in the jar (D-web-cljs)."
-  [session lib coord & {:keys [agent prompt client]}]
-  (cond
-    (not (symbol? lib))
-    {:error "dependency lib must be a symbol like org.clojure/data.json"}
-    (not (and (map? coord) (seq coord)))
-    {:error "dependency coord must be a non-empty map like {:mvn/version \"1.2.3\"}"}
-
-    :else
-    (let [coord (fields/canonical-coord coord)]      ; JSON has no symbol type
-      (if client
-        (do (engine/commit-appended! session
-                                      #(first (store/record-client-dep
-                                               % lib coord :agent agent :prompt prompt))
-                                      [])
-            {:added lib :coord coord :client true})
-        (let [surf (project.deps/analyze-dep! session lib coord)]             ; M4: API surface
-          (engine/commit-appended! session
-                                    #(first (store/record-deps-add
-                                             % lib coord :agent agent :prompt prompt
-                                             :namespaces (:namespaces surf)))  ; M3: dep-ns index
-                                    [])
-          (let [base (cond-> {:added lib :coord coord}
-                       surf (assoc :namespaces (vec (:namespaces surf))
-                                   :vars (count (:vars surf))))
-                res  (if (seq (:exclusions coord))
-                       (do (engine/fresh-image! session)
-                           (assoc base :restarted true
-                                  :note (str "restarted rather than hot-added: add-libs ignores"
-                                             " :exclusions but a fresh JVM honors them, so the"
-                                             " image would have run a classpath no build or"
-                                             " external shard could reproduce")))
-                       (if-let [hot (repl/add-libs! (:image @session) {lib coord})]
-                         (do (engine/fresh-image! session) ; hot add failed → faithful restart
-                             (assoc base :restarted true :note (:err hot)))
-                         (assoc base :hot true)))
-                ;; friction 2: only now is the jar on the image's classpath,
-                ;; so only now can its published tiers be read
-                adopted (adopt-published-tiers! session {:agent agent})
-                ;; friction 15a: it RESOLVED — but did it win? Anything the host
-                ;; jar already provides sits earlier on the classpath.
-                shadowed (shadowed-dep-namespaces! session (:namespaces surf))
-                overridden (boot/host-lib-divergence {lib coord} (boot/bundled-libs))]
-            (cond-> res
-              (seq adopted) (assoc :adopted-pure adopted)
-              (seq overridden)
-              (assoc :host-override overridden
-                     :host-override-note
-                     (str "slopp's own server process bundles this library at"
-                          " the :in-force version and cannot displace it — a jar"
-                          " the parent classloader already holds stays. Your"
-                          " declaration still governs the oracle image, the test"
-                          " suite and anything build! produces, so the two can"
-                          " run different code; pin to the bundled version if"
-                          " that matters here"))
-              (seq shadowed)
-              (assoc :shadowed shadowed
-                     :shadowed-note
-                     (str "these namespaces are provided by something EARLIER"
-                          " on the classpath, so the version you declared is"
-                          " NOT the one in force — the first url listed is."
-                          " add-libs appends to a classloader that delegates"
-                          " to its parent first, and the host jar is that"
-                          " parent")))))))))
 
 (defn deps-pure!
   "Assert a dependency is PURE — narrowing M3's effectful-by-default boundary so
@@ -1814,162 +1231,6 @@ recompiled (engine/after-write! session ns-sym)]
                          :prompt (or prompt
                                      (str "revert to " (:delta target)))
                          :agent agent))))))
-
-(defn undo!
-  "Walk back your own recent writes — the reach-for-it-without-thinking undo.
-  Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
-  content writes, `:to \"d123\"` undoes everything of yours after that delta.
-  `:to` also takes a NAMED anchor — `:last-commit` (scrap everything since the
-  last milestone — the usual dead-end rollback) or `:last-done` (back to your
-  last done point) — as a keyword or the same string over the wire. One atomic
-  verified group, recorded as honest provenance rather than erased.
-
-  Delta addressing is the point. `revert-form!` looks a form up by name, so it
-  can never undo a DELETE — there is no name left to find. The log still holds
-  the source, so undo puts it back. Forms another agent also wrote in the span
-  are SKIPPED and reported in `:skipped-shared`, never stomped, which is what
-  makes this safe to reach for while others are working.
-
-  **`:deltas n` counts over the LOG, and REFUSES rather than reaching past.**
-  Markers are transparent, but a delta whose op undo cannot invert
-  (`:rename-ns`, `:move-forms`, `:ns-delete`, `:config-put`, a `module_*`
-  declaration, anything that changes more than form sources) stops it, named
-  in `:blocked` with nothing reverted. It used to count over the FILTERED
-  sequence, so *the last one* meant *the last one that passed the filter*: it
-  stepped over the head and reverted an older write while returning
-  `:reverted 1` and `:skipped-shared []`. Reported by a consumer whose
-  already-shipped CSS fix was rolled back underneath them and reached their
-  user as a screenshot of a bug that had been fixed. Measured afterwards: 20
-  op types and 1218 deltas in slopp's own store were steppable, so an
-  ordinary `ns_rename` was enough to arm it.
-
-  The conservative op set is not the bug and is unchanged: undo inverts form
-  SOURCES, and a `:rename-ns` also re-keys the namespace, so inverting it here
-  would restore the text under the new name. Not being able to undo something
-  is fine; reaching past it is not.
-
-  `:to` still walks forward from an anchor the caller named explicitly, which
-  is a different request: there the address is right and the coverage may be
-  partial.
-
-  Returns `{:reverted n :undid [delta-ids] :skipped-shared [...]}`, or
-  `{:reverted 0 :blocked [{:delta :op :why}] :note ...}`."
-  [session & {:keys [deltas to agent prompt]}]
-  (let [st       (:store @session)
-        ;; undo means "walk back MY writes"; with no explicit agent that is the
-        ;; session's own id — what every live write is tagged with. Left nil,
-        ;; `mine?` counted every delta as mine while `others` counted every
-        ;; real-agent delta as someone else's, so a session's own forms were
-        ;; skipped as :skipped-shared, leaving the store red. One agent, one
-        ;; ownership test.
-        agent    (or agent (:agent-id @session))
-        all      (store/deltas st)
-        ;; :last-commit / :last-done name the two anchors worth rolling back to
-        ;; without knowing a delta id — accepted as keyword or wire string.
-        commit-anchor? (contains? #{:last-commit "last-commit" ":last-commit"} to)
-        done-anchor?   (contains? #{:last-done "last-done" ":last-done"} to)
-        to       (cond
-                   commit-anchor?
-                   (:id (last (filter #(= :commit (:op %)) all)))
-                   done-anchor?
-                   (:id (last (filter #(= :done (:op %)) all)))
-                   :else to)
-        mine?    (fn [d] (and (contains? history/content-ops (:op d))
-                              (= agent (:agent d))))
-        ;; POSITIONAL addressing counts over the LOG. `(take-last n (filter
-        ;; mine? all))` counted over the SURVIVORS, so "the last one" meant
-        ;; "the last one that passed the filter" — a different delta, chosen
-        ;; silently, then reverted while reporting `:reverted 1` and
-        ;; `:skipped-shared []`. Markers are transparent, because nobody means
-        ;; "undo my :verify"; a marker that also carries content — :merge — is
-        ;; not.
-        transparent? (fn [d] (and (contains? fields/markers (:op d))
-                                  (not (contains? history/content-ops (:op d)))))
-        recent   (when-not to
-                   (take-last (max 1 (or deltas 1)) (remove transparent? all)))
-        blocked  (vec (for [d recent :when (not (mine? d))]
-                        {:delta (:id d) :op (:op d)
-                         :why (if (= agent (:agent d))
-                                (str "undo inverts form SOURCES, and " (:op d)
-                                     " changes more than sources — reverting it"
-                                     " here would half-undo it")
-                                (str "written by "
-                                     (or (:agent d) "another agent")))}))
-        target   (if to
-                   (first (filter mine? (rest (drop-while #(not= to (:id %)) all))))
-                   (first recent))]
-    (cond
-      (and (or commit-anchor? done-anchor?) (nil? to))
-      {:reverted 0
-       :note (str "no " (if commit-anchor? "commit" "done")
-                  " to roll back to")}
-
-      ;; BEFORE the not-target case: a blocked head is not "nothing to undo",
-      ;; it is "the thing you named cannot be undone". Reported as a refusal
-      ;; because the ADDRESS is what is wrong — you asked for the last n
-      ;; writes, and reaching past them to revert something OLDER is doing
-      ;; something adjacent to what was asked. `undo` is the tool an agent
-      ;; reaches for at the moment it knows it made a mistake; that is the one
-      ;; behaviour it must never have.
-      (seq blocked)
-      {:reverted 0
-       :blocked blocked
-       :note (str "refused, nothing was reverted: the last "
-                  (count recent) " delta(s) include "
-                  (count blocked) " that undo cannot invert — "
-                  (str/join ", " (map #(str (:delta %) " (" (name (:op %)) ")")
-                                      blocked))
-                  ". Reverting past them would have restored an OLDER write"
-                  " while reporting success, which is what this refusal"
-                  " exists to prevent. To reach the earlier work anyway,"
-                  " name the span explicitly with :to <delta>; to address one"
-                  " form, edit_revert it by name.")}
-
-      (not target)
-      {:reverted 0
-       :note (if to
-               (str "nothing of yours after " to)
-               "no writes of yours to undo")}
-
-      :else
-      (let [from    (:id target)
-            changes (history/query-changes session :agent agent :from from)
-            span    (drop-while #(not= from (:id %)) all)
-            others  (into #{}
-                          (mapcat history/delta-fids)
-                          (filter #(and (contains? history/content-ops (:op %))
-                                        (not (mine? %)))
-                                  span))
-            {:keys [steps shared]} (history/revert-steps changes others)]
-        (cond
-          (empty? (:forms changes))
-          {:reverted 0 :note (str "nothing of yours changed since " from)}
-
-          (empty? steps)
-          {:reverted 0 :skipped-shared shared
-           :note "every changed form is shared with other agents"}
-
-          :else
-          (let [r (edit-group! session steps
-                               :prompt (or prompt (str "undo back to " from))
-                               :agent agent)]
-            (if (or (:error r) (:conflict r))
-              r
-              (let [undid-ids (mapv :id (filter mine? span))
-                    reverted  (vec (remove (set shared) (map :form (:forms changes))))]
-                ;; mark the dead end so it stays findable: what was scrapped
-                ;; and (if given) why. A vanished exploration teaches nothing.
-                (engine/commit-appended!
-                 session
-                 (fn [base] (first (store/record-revert base :why prompt
-                                                        :forms reverted
-                                                        :undid undid-ids
-                                                        :agent agent)))
-                 [])
-                (assoc r
-                       :reverted (count steps)
-                       :undid undid-ids
-                       :skipped-shared shared)))))))))
 
 (defn revert-episode!
   "Scrap the agent's episode: roll every form it changed since its last
@@ -2158,321 +1419,55 @@ recompiled (engine/after-write! session ns-sym)]
                        :test     summary
                        :affected (or affected :all)})))))))))
 
-(defn- add-require-node
-  "Candidate-store helper: add require `spec-str` to `nsx`'s ns form,
-  returning the updated store (unchanged when the spec can't land — the
-  compile gate downstream reports honestly)."
-  [st nsx spec-str & {:keys [prompt group agent]}]
-  (let [decl (store/form-named st nsx nsx)
-        r    (when decl (edit/add-require-source (n/string (:node decl)) spec-str))]
-    (if (or (nil? r) (:error r))
-      st
-      (or (first (store/replace-node st nsx nsx
-                                     (first (n/children (p/parse-string-all (:src r))))
-                                     :prompt prompt :group group :agent agent))
-          st))))
+(defn fix-declares!
+  "Declare hygiene at the done-point. The write pipeline OWNS form ordering, so
+  this no longer reorders anything itself (it used to carry a second,
+  conservative single-form mover that gave up on cases the topological sort
+  handles). It DROPS `ns-sym`'s declares and lets `edit/resolve-cold-load`
+  re-establish what is genuinely needed — a topological reorder (Kahn over THE
+  reference graph), or the pipeline's own MARKED auto-declare for a real cycle.
+  Net effect: a satisfied declare vanishes, PHANTOM names (a var an earlier
+  move lifted out — they mint unbound vars) vanish with it, a legacy
+  hand-written declare MIGRATES to a pipeline-owned marked one that says why,
+  and a stale auto-declare disappears once its cycle breaks. No-ops when the
+  rendered namespace would be unchanged. One atomic group, verified."
+  [session ns-sym & {:keys [prompt agent]}]
+  (let [st    (:store @session)
+        decls (filter (fn [f]
+                        (and (nil? (:name f))
+                             (= 'declare (try (first (n/sexpr (:node f)))
+                                              (catch Exception _ nil)))))
+                      (store/forms st ns-sym))]
+    (if (empty? decls)
+      {:removed 0 :note "no declares"}
+      (let [[gid st0] (store/alloc-id st "g")
+            stripped  (reduce (fn [s d]
+                                (or (first (store/remove-form s ns-sym (:id d)
+                                                              :prompt (or prompt "fix-declares")
+                                                              :group gid :agent agent))
+                                    s))
+                              st0 decls)
+            rz  (edit/resolve-cold-load stripped ns-sym
+                                        :prompt (or prompt "fix-declares: pipeline owns ordering")
+                                        :agent agent)
+            st' (or (:store rz) stripped)]
+        (cond
+          ;; the pipeline could not make it load without the declares — leave
+          ;; the namespace exactly as it was
+          (edit/cold-load-errors st' [ns-sym])
+          {:removed 0 :note "declares still required — left as-is"}
 
-(defn- remove-require-node
-  "Candidate-store helper, symmetric with `add-require-node`: drop `lib`'s
-  require spec from `nsx`'s ns form, returning the updated store (unchanged
-  when the spec can't be dropped — the compile gate downstream reports
-  honestly)."
-  [st nsx lib & {:keys [prompt group agent]}]
-  (let [decl (store/form-named st nsx nsx)
-        r    (when decl (edit/remove-require-source (n/string (:node decl)) lib))]
-    (if (or (nil? r) (:error r))
-      st
-      (or (first (store/replace-node st nsx nsx
-                                     (first (n/children (p/parse-string-all (:src r))))
-                                     :prompt prompt :group group :agent agent))
-          st))))
+          ;; nothing would actually change: don't churn the journal
+          (= (store.render/render-ns st ns-sym) (store.render/render-ns st' ns-sym))
+          {:removed 0 :note "already tidy"}
 
-(defn move-forms!
-  "Move `form-names` from `from-ns` into `to-ns` — NEW or EXISTING — the
-  general relocation refactor (clj-surgeon's :extract!, slopp-grade, v2).
-  Callers EVERYWHERE (production + tests) are
-  rewritten to alias-qualified calls and gain the require — addressed by
-  FORM ID, because a defmethod body defines no var and a caller set keyed on
-  a name dropped those silently; `:callers-unrewritten` reports any the pass
-  did not change, so the count is readable against its population; the moved defs are publicized (module-grain
-  visibility replaces var privacy); the target gets only the requires the
-  moved code uses. Dependency direction is analyzed: stay→moved adds the
-  require back to from-ns, moved→stay qualifies stay refs instead, a
-  two-way split refuses (real cycle). Cross-module edges the move's own
-  rewires necessitate are AUTO-DECLARED (the move's prompt rides each
-  :module-edge delta — the move IS the declared intent), refusing only a
-  cycle-closer; `:export true` marks moved vars ^:export when the deep
-  target must stay callable from outside its subtree. One atomic group +
-  changeset, compile-gated, verified across every touched namespace.
-  The one thing that verification structurally cannot see is REPORTED
-  instead: `:shadowed` names each moved call dequalified onto a LOCAL of the
-  same name — valid Clojure that calls the local, so it compiles and stays
-  green while the behaviour changes."
-  [session from-ns form-names to-ns & {:keys [prompt agent export]}]
-  (let [st   (:store @session)
-        plan (refactor/move-plan st from-ns form-names to-ns {:export export})]
-    (if (:error plan)
-      (select-keys plan [:error])
-      (let [manifest (edit.modules/modules-manifest st)
-            rows     (map (fn [r]
-                            (assoc r :to-export
-                                   (if (= (symbol (str to-ns)) (:to r))
-                                     ;; PER VAR, and the option WIDENS rather
-                                     ;; than replaces. A var that is already
-                                     ;; ^:export keeps that level through the
-                                     ;; move — its node carries its own
-                                     ;; metadata — so claiming otherwise made
-                                     ;; the move refuse on visibility until the
-                                     ;; flag was re-passed for something
-                                     ;; already true, and passing it then
-                                     ;; exported every moved var alike. Read
-                                     ;; off FROM-NS, where the var still lives:
-                                     ;; to-ns does not hold it until this lands.
-                                     (or export
-                                         (edit.modules/export-level
-                                          st (symbol (str from-ns)) (:to-name r)))
-                                     (edit.modules/export-level
-                                      st (:to r) (:to-name r)))))
-                          (:module-rows plan))
-            ;; edges the move's rewires necessitate are part of its intent
-            tmanif   (edit.modules/module-test-manifest st)
-            ;; WHICH crossings still need declaring is asked of the canonical
-            ;; rule, not re-derived here. The re-derivation this replaces read
-            ;; the PRODUCTION manifest alone, so a crossing declared
-            ;; {test-only true} looked undeclared, was charged to the move, and
-            ;; refused as a cycle — module_dep's own docstring says a test-only
-            ;; edge "is NOT a production edge, so no cycle question applies to
-            ;; it". It fired hardest on the move that cannot possibly need an
-            ;; edge: a WITHIN-module one, where source and target share a module
-            ;; and every crossing is exactly what it was before.
-            edges    (->> (edit.modules/module-violations manifest tmanif rows)
-                          (filter #(= :undeclared-edge (:rule %)))
-                          (map (fn [v] [(edit.modules/module-of (:from-ns v))
-                                        (edit.modules/module-of (:target-ns v))]))
-                          distinct vec)
-            cyclic   (seq (filter (fn [[a b]] (store/module-path manifest b a))
-                                  edges))
-            manifest' (reduce (fn [m [a b]] (update m a (fnil conj #{}) b))
-                              manifest edges)
-            viols    (edit.modules/module-violations manifest' tmanif rows)
-            refusal  (cond
-                       cyclic
-                       (str "the move would close a module dependency cycle ("
-                            (str/join ", " (map (fn [[a b]] (str a " → " b))
-                                                cyclic))
-                            ") — move the shared piece the other way, or"
-                            " restructure the callers first")
-
-                       viols
-                       (str (str/join "; " (map :error viols))
-                            (when (and (not export)
-                                       (every? #(= :visibility (:rule %)) viols))
-                              " — or pass export: true to hoist the moved vars")))]
-        (if refusal
-          {:error refusal}
-          (let [[gid st-g] (store/alloc-id st "g")
-                ;; 0. the auto-declared edges, each carrying the move's why
-                st0 (reduce (fn [s [a b]]
-                              (first (store/record-module-edge
-                                      s a b :add
-                                      :prompt (or prompt (str "move-forms: " from-ns " → " to-ns))
-                                      :agent agent)))
-                            st-g edges)
-                ;; 0b. a namespace born from a move is born UNDECLARED, and
-                ;; undeclared is :external by absence of a claim — so forms
-                ;; that just left a :pure core arrive in the shell, and the
-                ;; split invents a core→shell dependency out of nothing. The
-                ;; honest default is what was true one delta ago: the source's
-                ;; governing tier. Recorded BEFORE the ingest, so the moved
-                ;; forms are verified against it on the way in.
-                ;;
-                ;; Only from a source that CARRIES a claim, and only when the
-                ;; target would otherwise be governed differently. An
-                ;; undeclared source mints nothing — stamping :external there
-                ;; would defeat a deliberate move INTO a pure subtree, where
-                ;; the right outcome is the gate refusing impure forms.
-                ;; `ns_rename` has no equivalent gap: it RELOCATES a
-                ;; declaration rather than copying it, and the asymmetry
-                ;; between the two relocation verbs was invisible until a
-                ;; whole-store check named the namespace that did NOT change.
-                st0 (let [src (symbol (str from-ns))]
-                      (if (and (:new-ns? plan)
-                               (tiers/tier-declared? st src)
-                               (not= (tiers/tier-for st src)
-                                     (tiers/tier-for st to-ns)))
-                        (first (store/record-module-tier
-                                st0 (str to-ns) (tiers/tier-for st src)
-                                :prompt (or prompt
-                                            (str "move-forms: " from-ns " → " to-ns))
-                                :agent agent))
-                        st0))
-                ;; 1. the target: ingest new, or append + requires to existing
-                st1 (if (:new-ns? plan)
-                      (store/ingest st0 to-ns (:new-src plan) :agent agent)
-                      (let [st* (reduce (fn [s node]
-                                          (or (first (store/append-form
-                                                      s to-ns node
-                                                      :prompt prompt :group gid
-                                                      :agent agent))
-                                              s))
-                                        st0 (:append plan))]
-                        (reduce (fn [s spec]
-                                  (add-require-node s to-ns spec
-                                                    :prompt prompt :group gid
-                                                    :agent agent))
-                                st* (:to-require-adds plan))))
-                ;; 2. callers gain [to-ns :as alias]
-                st2 (reduce (fn [s [nsx spec]]
-                              (add-require-node s nsx spec
-                                                :prompt prompt :group gid
-                                                :agent agent))
-                            st1 (:require-adds plan))
-                ;; 3. every rewritten caller, ONE changeset (multi-ns)
-                [st3 _] (if (seq (:rewrites plan))
-                          (store/apply-changeset
-                           st2 :move-forms from-ns
-                           (into {} (map (fn [[fid m]] [fid (:node m)]))
-                                 (:rewrites plan))
-                           :prompt prompt :agent agent)
-                          [st2 nil])
-                ;; 4. the moved forms leave home
-                st4 (reduce (fn [s nm]
-                              (or (first (store/remove-form s from-ns nm
-                                                            :prompt prompt
-                                                            :group gid :agent agent))
-                                  s))
-                            st3 (:removals plan))
-                ;; 4b. the requires the move just orphaned leave with them.
-                ;; A sequential move is what surfaced this: a caller rewritten
-                ;; to `external/author-identity` moved in the NEXT batch and
-                ;; took the reference with it, and the cold-load gate then
-                ;; REFUSED a state the move itself had created.
-                st4 (reduce (fn [s lib]
-                              (remove-require-node s from-ns lib
-                                                   :prompt prompt :group gid
-                                                   :agent agent))
-                            st4 (:from-require-drops plan))
-                ;; 4c. and the mirror: a rewritten caller left referencing
-                ;; nothing in from-ns drops that require. Left behind, a
-                ;; :pure caller keeps inheriting from-ns's TIER for a
-                ;; dependency it no longer has.
-                st4 (reduce (fn [s nsx]
-                              (remove-require-node s nsx from-ns
-                                                   :prompt prompt :group gid
-                                                   :agent agent))
-                            st4 (:caller-require-drops plan))
-                ;; the PIPELINE owns ordering. The planner no longer mints a
-                ;; declare for the moved set: a source ns may have ordered
-                ;; caller-before-callee behind a declare that STAYS BEHIND, so
-                ;; the target can land with a forward ref — resolve-cold-load
-                ;; reorders it (or inserts the pipeline's own MARKED declare
-                ;; 4d. the PROSE follows the move: a docstring naming
-                ;; from-ns/x must become to-ns/x. Qualified references only —
-                ;; a bare name may be a domain word. This is the d9077 class
-                ;; at its source: `analyze` moved namespaces and two guidance
-                ;; surfaces kept naming its pre-move address.
-                st4 (let [cs (refactor/qualified-mention-changeset
-                              st4
-                              (into {} (for [nm (:moved plan)]
-                                         [(symbol (str from-ns) (str nm))
-                                          (symbol (str to-ns) (str nm))]))
-                              {})]
-                      (if (seq cs)
-                        (first (store/apply-changeset st4 :move-forms from-ns cs
-                                                      :prompt prompt :agent agent))
-                        st4))
-                ;; for a genuine cycle). Same one call fix-declares! makes.
-                st4 (if-let [rz (edit/resolve-cold-load
-                                 st4 to-ns
-                                 :prompt (or prompt (str "move-forms: " from-ns
-                                                         " → " to-ns))
-                                 :agent agent)]
-                      (:store rz)
-                      st4)
-                touched (vec (distinct
-                              (into [from-ns to-ns]
-                                    (concat (map :ns (vals (:rewrites plan)))
-                                            (keys (:require-adds plan))))))
-                ;; defs before callers (X2): target forms, then decls, then rewrites
-                ordered (distinct
-                         (concat (map :id (store/forms st4 to-ns))
-                                 (keep #(:id (store/form-named st4 % %))
-                                       (keys (:require-adds plan)))
-                                 (keys (:rewrites plan))))
-                hl       (engine/hot-load-all! session st4 ordered)
-                ;; the COLD-load gate, which a move needs more than any other write:
-                ;; it is the one operation that reorders NAMESPACE dependencies,
-                ;; and hot-loading structurally cannot see a require cycle
-                ;; because the vars already exist in the image. A move once
-                ;; committed `[slopp/api] -> slopp/api/external -> [slopp/api]`
-                ;; and verified GREEN over it.
-                load-err (or (:err hl) (edit/cold-load-errors st4 touched))]
-            (if load-err
-              (do (engine/fresh-image! session)
-                  (edit/compile-error st4 load-err "move failed to compile: "))
-              (if-not (engine/try-commit! session st st4 touched)
-                (do (engine/fresh-image! session)
-                    {:conflict {:reason "store changed during move — retry"}})
-                (do (doseq [nm (:removals plan)]
-                      (repl/eval! (:image @session)
-                                  (format "(ns-unmap '%s '%s)" from-ns nm)))
-                    (let [moved-q (into (set (map #(symbol (str from-ns) (str %))
-                                                  (:moved plan)))
-                                        (map #(symbol (str to-ns) (str %)))
-                                        (:moved plan))
-                          summary (engine/run-verification!
-                                   session touched nil
-                                   :edited (into moved-q
-                                                 (map (fn [[_ m]]
-                                                        (symbol (str (:ns m)) (str (:name m)))))
-                                                 (:rewrites plan)))]
-                      (engine/commit-appended! session
-                                        #(store/record-verification
-                                          % touched summary)
-                                        [])
-                      (let [;; POSTCONDITION, read back from the store this move actually
-                            ;; COMMITTED rather than from its plan. The gate pre-check
-                            ;; consults the PLANNED export, so a marker pass that skips a
-                            ;; name — it once skipped every meta-wrapped one, leaving
-                            ;; `^:dynamic` vars unexported — passes the gate and surfaces
-                            ;; a session later, somewhere else.
-                            miss (read.modules/unlanded-exports (:store @session) rows)]
-                        (cond-> {:moved-to to-ns
-                                 :moved (:moved plan)
-                                 :rewrote (count (:rewrites plan))
-                                 :callers (vec (sort (distinct (map :ns (vals (:rewrites plan))))))
-                                 :group gid
-                                 :test summary}
-                          (seq edges) (assoc :edges-declared edges)
-                          ;; the population beside :rewrote. Every row is a
-                          ;; form the reference graph says calls a moved name
-                          ;; and this pass did not change — sometimes right (a
-                          ;; quoted target is left whole on purpose), never
-                          ;; something the count alone would have said.
-                          (seq (:callers-unrewritten plan))
-                          (assoc :callers-unrewritten (:callers-unrewritten plan))
-                          ;; the one thing this move did that NOTHING
-                          ;; downstream can catch: the compile gate is happy,
-                          ;; the suite is green, and the call reaches a
-                          ;; different thing than it did before.
-                          (seq (:shadowed plan))
-                          (assoc :shadowed (:shadowed plan)
-                                 :shadowed-note
-                                 (str "a dequalified call landed on a LOCAL of"
-                                      " the same name. This COMPILES and stays"
-                                      " green — the call now reaches the local"
-                                      " rather than the var, so the behaviour"
-                                      " changed and no test can see it. Rename"
-                                      " the local, or the moved var, in each"
-                                      " row above."))
-                          (seq miss)
-                          (assoc :export-not-landed miss
-                                 :export-note
-                                 (str "the move planned an export for "
-                                      (str/join ", " miss)
-                                      " and the committed store carries no marker —"
-                                      " mark the name(s) ^:export directly; callers"
-                                      " outside the subtree will not resolve them"))))))))))))))
+          :else
+          (if-not (engine/try-commit! session st st' [ns-sym])
+            {:conflict {:reason "store changed during fix-declares — retry"}}
+            (let [summary (engine/run-verification! session ns-sym nil)]
+              (engine/commit-appended! session
+                                        #(store/record-verification % ns-sym summary) [])
+              {:removed (count decls) :test summary})))))))
 
 (defn ns-rename!
   "Rename a WHOLE namespace: its ns decl, every require clause, and every
@@ -2683,70 +1678,25 @@ recompiled (engine/after-write! session ns-sym)]
                                  " absent where that caller already spells another lib"
                                  " that way.")))))))))))))
 
-(defn affected-test-nses
-  "The PROVABLE verification slice: test namespaces (any ns holding a
-  deftest) whose require-closure reaches a form changed since the last
-  MILESTONE — a test can only exercise code it can load. Returns
-  {:changed-nses [...] :selected [...]}; empty :selected = nothing since
-  the milestone can affect any test. Full-suite confidence stays the
-  milestone gate's job."
+(defn reap-idle-images!
+  "Stop parked branch images idle past the session TTL (the session's reaper
+  timer calls this periodically; callable directly). Returns {:reaped n}."
   [session]
-  (let [st      (:store @session)
-        last-c  (:id (last (filter #(= :commit (:op %)) (store/deltas st))))
-        changed (into #{}
-                      (keep #(store/ns-of-form-id st %))
-                      (forms-changed-since st last-c))]
-    {:changed-nses (vec (sort changed))
-     :selected     (engine/test-nses-reaching st changed)}))
-
-(defn last-judged-done
-  "The most recent verdict that actually JUDGED something (`:test-status`
-  `:red` or `:green`), or nil — from a `:done` delta or from a whole-store
-  `full_check`, whichever came last.
-
-  Exists because `done` is episode-scoped: calling it twice with no writes
-  between yields `:none` the second time — nothing changed, so nothing was
-  checked. Without this a RED done could be laundered by simply committing
-  afterwards: the milestone runs its own done, gets `:none`, and publishes.
-  The last real verdict stands until new work supersedes it.
-
-  **A green `full_check` is such a verdict (friction 14).** Reading only
-  `:done` deltas left a trap with no way out: an episode whose changed forms
-  have no covering tests — a rename, a docstring, a `:cljs` edit — judges
-  `:none`, so `commit_point` reaches back to a verdict that can be arbitrarily
-  old, and every subsequent done judges `:none` too. The store got greener
-  while the milestone stayed refused, and the whole-store check — broader,
-  slower, more authoritative — could not clear what the narrower one left
-  behind. Now it can, and a later `done` supersedes it in turn: most recent
-  judgement wins, whichever kind it is.
-
-  Only `:scope :full-check` counts. `record-verification` also lands on
-  ordinary writes, and those are form-scoped — a per-write green says nothing
-  about the store.
-
-  Returns the whole findings map rather than the status alone so a standing
-  red can still NAME what was wrong — a refusal that cannot say why is a
-  refusal an agent cannot act on. The full_check verdict carries only what its
-  delta recorded, and deliberately not its namespace count or wall time:
-  `commit_point` builds its refusal reason from whichever keys are present and
-  non-zero, so an informational count would make a refusal say `namespaces`
-  as though that were the thing that fired."
-  [store]
-  (->> (store/deltas store)
-       (keep (fn [d]
-               (cond
-                 (and (= :done (:op d))
-                      (#{:red :green} (:test-status (:findings d))))
-                 (:findings d)
-
-                 (and (= :verify (:op d))
-                      (= :full-check (:scope (:result d)))
-                      (#{:red :green} (:status (:result d))))
-                 (let [r (:result d)]
-                   (cond-> {:test-status (:status r) :scope :full-check}
-                     (pos? (:lint-errors r 0))
-                     (assoc :lint-errors (:lint-errors r)))))))
-       last))
+  (let [ttl     (:branch-image-ttl-ms @session 600000)
+        now     (System/currentTimeMillis)
+        victims (volatile! #{})]
+    (swap! session update :lines
+           (fn [lines]
+             (into {}
+                   (map (fn [[nm line]]
+                          (if (and (:image line)
+                                   (> (- now (:last-used line 0)) ttl))
+                            (do (vswap! victims conj (:image line))
+                                [nm (dissoc line :image)])
+                            [nm line])))
+                   lines)))
+    (doseq [img @victims] (repl/stop! img))
+    {:reaped (count @victims)}))
 
 (defn file-put!
   "Track a NON-CODE file on the store's files manifest — it rides every
@@ -2841,27 +1791,6 @@ recompiled (engine/after-write! session ns-sym)]
   {:files (into (sorted-map)
                 (map (fn [[p e]] [p (if (map? e) (:bytes e) (count e))]))
                 (:files (:store @session)))})
-
-(defn set-comment!
-  "Set (or clear, with blank `text`) the comment rendered above form `nm`.
-
-  A different shape from the positional predecessor it replaces: trivia was
-  placed BEFORE a form and owned by nobody, a comment is owned BY the form.
-  That removes the positional question entirely — no anchor, no run to
-  replace, and a merge reconciles it as ordinary content on a form identity.
-
-  No image work and no verification: a comment changes what a namespace
-  RENDERS, never what it means. Returns {:delta :ns :name} | {:error} |
-  {:conflict}."
-  [session ns-sym nm text & {:keys [prompt agent]}]
-  (let [base (:store @session)
-        r    (store/set-comment base ns-sym nm text :prompt prompt :agent agent)]
-    (if (:error r)
-      r
-      (let [[st' d] r]
-        (if-not (engine/try-commit! session base st' [ns-sym])
-          {:conflict {:reason "store changed concurrently — retry"}}
-          {:delta (:id d) :ns (str ns-sym) :name (str nm)})))))
 
 ^:reads (defn file-get
   "A manifest file's content — current, or as of a past delta via `:at`
@@ -3077,28 +2006,6 @@ recompiled (engine/after-write! session ns-sym)]
            :note  (str "no examples — pass :code (a driver expression) to observe"
                        " real calls and get value-true assertions instead of holes")})))
     (edit/missing-form-error (:store @session) ns-sym nm)))
-
-(defn remember-observation!
-  "Persist what an observation SAW (up to two {:args :ret} captures) under
-  store meta observed/<ns>/<name> — interface cards surface them as
-  :examples, the strongest behavior line a card can carry (examples don't
-  lie; prose can). Called by the MCP layer after query_observe; a no-op
-  for ephemeral sessions or empty captures.
-
-  Writes THROUGH: the db row is the durable copy (reloaded by
-  `session/load-observations` at open) and the session's `:observed` map is
-  the working one that `orient/form-card` reads. Both, or a card in this
-  session would not see what was just observed."
-  [session ns-sym nm observe-result]
-  (when-let [calls (seq (:calls observe-result))]
-    (let [k   (str "observed/" ns-sym "/" nm)
-          raw (pr-str (vec (take 2 calls)))]
-      (swap! session assoc-in [:observed k] raw)
-      (when-let [conn (:db @session)]
-        (try
-          (db/set-meta! conn k raw)
-          (catch Exception _ nil)))))
-  nil)
 
 ^:reads (defn session-brief
   "THE one-call orientation, task-shaped (knowledge-differential stance):
@@ -3420,320 +2327,93 @@ recompiled (engine/after-write! session ns-sym)]
        (seq intents) (assoc :intents intents)
        (seq dead)    (assoc :dead-ends dead)))))
 
-(defn module-role!
-  "Declare a module's ROLE — what KIND of code this is, which decides whether
-  it ships: :product (the default) is code the system runs, materialized under
-  `src/` and carried into the jar; :instrument is code a HUMAN runs by hand — a
-  benchmark, a seeding script, a mining CLI — materialized under `instruments/`
-  instead, so any build that jars `src` leaves it out, and excluded from the
-  architecture view so a harness cannot sit at the apex of what it measures
-  (R5). One :module-role delta carrying its why (:prompt); last write per
-  module wins. Namespace grain, like module_purity — the most-specific
-  declaration governs. Read roles via query_depends {modules true}.
+(defn remember-observation!
+  "Persist what an observation SAW (up to two {:args :ret} captures) under
+  store meta observed/<ns>/<name> — interface cards surface them as
+  :examples, the strongest behavior line a card can carry (examples don't
+  lie; prose can). Called by the MCP layer after query_observe; a no-op
+  for ephemeral sessions or empty captures.
 
-  `remove: true` RETIRES a declaration: absent is not the same claim as
-  :product, and the rename and delete paths both need the difference."
-  [session module role & {:keys [prompt agent remove]}]
-  (let [module (str module)
-        ;; every surface spells roles WITH the colon, and MCP/JSON carries a
-        ;; string, so accept both rather than minting a bad keyword
-        role   (fields/canonical-role (or role "product"))
-        modish (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
-    (cond
-      (not modish)
-      {:error (str "modules are the first TWO segments of a namespace"
-                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
-                   (pr-str module))}
+  Writes THROUGH: the db row is the durable copy (reloaded by
+  `session/load-observations` at open) and the session's `:observed` map is
+  the working one that `orient/form-card` reads. Both, or a card in this
+  session would not see what was just observed."
+  [session ns-sym nm observe-result]
+  (when-let [calls (seq (:calls observe-result))]
+    (let [k   (str "observed/" ns-sym "/" nm)
+          raw (pr-str (vec (take 2 calls)))]
+      (swap! session assoc-in [:observed k] raw)
+      (when-let [conn (:db @session)]
+        (try
+          (db/set-meta! conn k raw)
+          (catch Exception _ nil)))))
+  nil)
 
-      remove
-      (if (contains? (:module-roles (:store @session)) module)
-        (let [st' (engine/commit-appended!
-                   session
-                   #(first (store/record-module-role % module nil :action :remove
-                                                    :prompt prompt :agent agent))
-                   [])]
-          {:module module :action :removed :roles (:module-roles st')})
-        {:error (str module " has no role declaration — nothing to remove."
-                     " Undeclared already means :product.")})
+(defn adopt-modules!
+  "ADOPTION (internal — never a tool, never explicit): derive the module
+  manifest from the CURRENT actual dependency graph — kondo-resolved, so
+  :refer'd calls count — and record it as one delta per edge. Called once by
+  open! for a populated store whose db predates the module system (:modules
+  nil); the result has zero VIOLATIONS by construction, so adoption never
+  breaks working code — the gate then blocks DRIFT until the agent declares
+  new edges (module_dep).
 
-      (not (#{:product :instrument} role))
-      {:error (str "role must be :product or :instrument — got " (pr-str role)
-                   ". :product = the system runs it and it ships (the default);"
-                   " :instrument = a HUMAN runs it by hand, so it is"
-                   " materialized outside src/ and never reaches the jar.")}
+  It is NOT acyclic by construction, and `:cycles` reports what it derived.
+  A module is the first two segments, so `pb.app` calling `pa.core` while
+  `pa.core.impl` calls back into `pb.app` closes a module cycle with no
+  namespace cycle anywhere — a codebase Clojure loads happily. Since
+  module_dep cycle-checks every add, a store grown under the gate cannot
+  tangle, which makes adoption the one moment a knot can enter and the one
+  moment anybody is looking at the manifest.
 
-      :else
-      ;; a role is an ASSERTION ABOUT THE CODE, so check it against the code —
-      ;; the same bar module_purity meets. :instrument MOVES the namespaces out
-      ;; of src/, so the one thing that must not be true is that product code
-      ;; requires them. Unchecked, the break surfaces at a CONSUMER's load
-      ;; time, naming a namespace this store plainly has.
-      (let [st      (:store @session)
-            members (filter #(or (= module (str %))
-                                 (str/starts-with? (str %) (str module ".")))
-                            (keys (:namespaces st)))
-            needed  (when (= :instrument role)
-                      (vec (sort (distinct
-                                  (for [other (keys (:namespaces st))
-                                        :when (and (not (store.render/test-ns? other))
-                                                   (not= :instrument
-                                                         (store/role-for st other))
-                                                   (not (some #{other} members)))
-                                        :when (some (set members)
-                                                    (store/ns-requires st other))]
-                                    (str other))))))]
-        (if (seq needed)
-          {:error (str "cannot declare " module " :instrument — "
-                       (str/join ", " needed)
-                       (if (= 1 (count needed)) " requires" " require")
-                       " it, and product code cannot depend on code that does"
-                       " not ship. Move what they need into a product module,"
-                       " or declare those callers :instrument too."
-                       " (A -test requirer would be fine: a test does not ship"
-                       " either.)")
-           :required-by needed}
-          (let [st' (engine/commit-appended!
-                     session
-                     #(first (store/record-module-role % module role
-                                                       :prompt prompt :agent agent))
-                     [])]
-            {:module module :role role
-             :roles (:module-roles st')
-             :verified (if (= :instrument role) [:no-product-requirer] [])
-             :unverified [:human-runs-it]
-             :note (if (= :instrument role)
-                     (str "no product namespace requires " module
-                          ", so moving it out of src/ breaks no load. That a"
-                          " HUMAN rather than the system runs it is the part"
-                          " nothing here can check — it is your claim.")
-                     (str module " is :product, which is also what an absent"
-                          " declaration means. Declare it only to overrule a"
-                          " broader :instrument above it."))}))))))
+  Judged on PRODUCTION edges through the same `module-layers` the module
+  graph reads, so a second derivation cannot drift from what the graph
+  shows. `:cycles` is [] when clean, never nil; `:note` rides along only
+  when there is something to say.
 
-(defn module-platform!
-  "Declare a module's target PLATFORM — the client wave's router (D-web-cljs):
-  :jvm (Clojure on the JVM, the default), :cljc (portable — loads on the JVM AND
-  compiles to JS), or :cljs (ClojureScript only — compiled to JS, never loaded
-  into the JVM oracle). One :module-platform delta carrying its why (:prompt);
-  last write per module wins. Namespace grain, like module_purity — the
-  most-specific declaration governs. Read platforms via query_depends
-  {modules true}.
-
-  A `:cljs` declaration additionally reports the `^:app/entry` entries it
-  STRANDS (`:stranded-pages` + `:warning`): stranding happens with no write to
-  the page, so the page's own done has nothing to hang the finding on, and
-  the write that does the stranding is the one surface that can name it at
-  the moment it happens."
-  [session module platform & {:keys [prompt agent remove]}]
-  (let [module   (str module)
-        ;; every surface spells platforms WITH the colon, and MCP/JSON carries
-        ;; a string, so accept both (nil defaults to :jvm) rather than minting
-        ;; a bad keyword
-        platform (keyword (str/replace (name (or platform :jvm)) #"^:" ""))
-        modish   (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
-    (cond
-      (not modish)
-      {:error (str "modules are the first TWO segments of a namespace"
-                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
-                   (pr-str module))}
-
-      ;; RETIRE, matching module_dep and module_purity. Declaring :jvm is not
-      ;; the same statement as making no claim: an explicit :jvm on a
-      ;; namespace nobody compiles is noise a register view has to carry.
-      remove
-      (if (contains? (:module-platforms (:store @session)) module)
-        (let [st' (engine/commit-appended!
-                   session
-                   #(first (store/record-module-platform % module nil :action :remove
-                                                        :prompt prompt :agent agent))
-                   [])]
-          {:module module :action :removed :platforms (:module-platforms st')})
-        {:error (str module " has no platform declaration — nothing to remove."
-                     " Undeclared already means :jvm.")})
-
-      (not (#{:jvm :cljc :cljs} platform))
-      {:error (str "platform must be :jvm, :cljc, or :cljs — got "
-                   (pr-str platform)
-                   ". :jvm = Clojure on the JVM (default); :cljc = portable"
-                   " (loads on the JVM AND compiles to JS); :cljs = ClojureScript"
-                   " only (compiled to JS, never loaded into the oracle).")}
-
-      :else
-      ;; `already` is read BEFORE the commit advances the session — bound
-      ;; after it, the diff compares the new store to itself and the report
-      ;; is empty forever (caught in review of this very change).
-      (let [already  (when (= :cljs platform)
-                       (set (map :page (rules.webapp/stranded-pages (:store @session)))))
-            st'      (engine/commit-appended!
-                      session
-                      #(first (store/record-module-platform % module platform
-                                                            :prompt prompt :agent agent))
-                      [])
-            ;; only pages THIS declaration stranded — a standing stranding
-            ;; belongs to the declaration that caused it, and re-reporting it
-            ;; on every later one buries the new fact under the old (B-F6)
-            ;; NOT clojure.core/remove — the :remove kwarg SHADOWS it here, and
-            ;; calling the shadow is an NPE on every :cljs declaration; the
-            ;; whole external tier went red on it in one theme
-            stranded (when (= :cljs platform)
-                       (seq (filter #(not (contains? already (:page %)))
-                                    (rules.webapp/stranded-pages st'))))]
-        ;; This verb checks NOTHING about the code — it records a routing fact.
-        ;; Whether a :cljc/:cljs namespace actually compiles for its declared
-        ;; platform is compile_client's answer, and it can arrive much later.
-        ;; An empty :verified is the honest shape (D-surface-honesty).
-        (cond-> {:module module :platform platform
-                 :platforms (:module-platforms st')
-                 :verified []
-                 :unverified [:compilation]
-                 :note (str "the platform is RECORDED, not verified: nothing here checks"
-                            " that " module " compiles for :" (name platform)
-                            ". compile_client is what proves it, and its warnings anchor"
-                            " to the owning form.")}
-          stranded (assoc :stranded-pages (vec stranded)
-                          :warning (str "this declaration leaves "
-                                        (count stranded)
-                                        " ^:app/entry entr"
-                                        (if (= 1 (count stranded)) "y" "ies")
-                                        " unreachable from a JVM — the closure now"
-                                        " reaches :cljs, so the screen tool and every"
-                                        " headless test fall back to lookalikes."
-                                        " Move or split what the page reaches.")))))))
-
-(defn- shadow-warning
-  "A warning when `ns-sym` names a namespace a CLASSPATH resource already owns
-   — slopp's own code, or a dependency's — and the store does not yet define it.
-
-   Why it warns and does not refuse: overriding a slopp namespace is a
-   supported capability. `slopp.image.testmain` is how a store supplies its own
-   trace runner, and `build!` materializes the store's version over slopp's. A
-   refusal would break a documented extension point to prevent a naming
-   mistake.
-
-   Why it warns at all: `slopp.kernel.boot` loads store namespaces BEFORE slopp's own,
-   so a shadowing namespace that does not define everything the real one does
-   breaks the server at its next boot — and the store is then unopenable by the
-   only tool that could remove it. That happened: a project defined
-   `slopp.review.views` with two of its own views, and the next boot died on
-   `No such var: views/module-graph`.
-
-   The check is CLASSPATH ownership, not `find-ns`: a namespace an earlier
-   store hot-loaded into this process is interned here too, and treating that
-   as a collision false-flags a fresh store reusing a name."
-  [store ns-sym]
-  (when-not (contains? (:namespaces store) ns-sym)
-    (let [base (-> (str ns-sym) (str/replace "-" "_") (str/replace "." "/"))]
-      (when (some #(io/resource (str base %)) [".clj" ".cljc" ".cljs"])
-        {:kind :shadows-classpath-ns
-         :ns ns-sym
-         :message (str ns-sym " SHADOWS a namespace already on the classpath "
-                       "(slopp's own, or a dependency's). Your store's version "
-                       "loads FIRST, so anything the real one defines and yours "
-                       "does not will break at the next server boot — and a "
-                       "store that cannot boot cannot be edited. Deliberate "
-                       "overrides are fine (slopp.image.testmain is one); if "
-                       "this was not deliberate, pick a name your project owns.")}))))
-
-;; --- query.* (read) ---
-
-;; --- verification (D1 tracing + D5 restart-as-diagnostic) ---
-
-;; --- edit.* / runtime ---
-
-;; ---------------------------------------------------------------------------
-;; External dependencies (Tier 1) — the per-store manifest
-
-;; --- Phase 4 m3: branches within one repo -------------------------------
-(defn module-tier!
-  "Declare a module's purity TIER — the functional-core gate's dial (D9):
-  :pure (referentially transparent), :internal (may mutate IN-PROCESS state
-  only — a memo, a registry), :external (IO — the periphery; unrestricted).
-  Legacy spellings :reads/:effects are accepted and stored canonically as
-  :internal/:external. One :module-tier delta carrying its why (:prompt); last
-  write per module wins. Declaring :external (or never declaring) leaves a
-  module ungated. Read tiers via query_depends {modules true}."
-  [session module tier & {:keys [prompt agent remove]}]
-  (let [module (str module)
-        ;; every surface — this docstring, the tool description, query_depends'
-        ;; output — spells tiers WITH the colon, so accept that spelling too
-        ;; rather than turning ":pure" into ::pure and refusing it
-        tier   (tiers/canonical-tier
-                (keyword (str/replace (name (or tier "")) #"^:" "")))
-        ;; namespace grain, not just module grain: a pure CORE routinely lives
-        ;; one level below an effectful module (slopp.api holds seven fully-pure
-        ;; namespaces). At module grain that core cannot be named, so nothing
-        ;; enforces it — and the tier's whole job is to make agents MOVE code
-        ;; into core/shell shape, which it cannot do if it cannot describe it.
-        modish (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
-    (cond
-      (not modish)
-      {:error (str "modules are the first TWO segments of a namespace"
-                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
-                   (pr-str module))}
-
-      ;; RETIRE, matching module_dep's `remove: true`. The store op has always
-      ;; supported this (ns_rename needs it, so an orphaned declaration does
-      ;; not outlive its namespace); nothing exposed it, so a mis-declared
-      ;; tier could be overwritten but never withdrawn — and overwriting with
-      ;; :external is not the same statement as making no claim at all.
-      remove
-      (if (contains? (:module-tiers (:store @session)) module)
-        (let [st' (engine/commit-appended!
-                   session
-                   #(first (store/record-module-tier % module nil :action :remove
-                                                    :prompt prompt :agent agent))
-                   [])]
-          {:module module :action :removed :tiers (:module-tiers st')})
-        {:error (str module " has no tier declaration — nothing to remove."
-                     " Undeclared already means :external (ungated).")})
-
-      (not (#{:pure :internal :external} tier))
-      {:error (str "tier must be :pure, :internal, or :external — got "
-                   (pr-str tier)
-                   ". :pure = referentially transparent; :internal = may mutate"
-                   " IN-PROCESS state (a memo, a registry) but touches nothing"
-                   " outside; :external = IO (files, subprocesses, network, db)."
-                   " (:reads and :effects are legacy spellings of :internal and"
-                   " :external.)")}
-
-      ;; a tier is an ASSERTION ABOUT THE CODE, so check it against the
-      ;; code. Gating only future writes let :pure land on a module full of
-      ;; effects — a marker that lies, which is worse than no marker.
-      :else
-      (let [bad (tiers/tier-violations (:store @session) module tier)]
-        (if (seq bad)
-          {:error (str "cannot declare " module " :" (name tier) " — "
-                       (count bad) " existing form(s) already exceed it: "
-                       (str/join ", " (map (comp str :form) (take 5 bad)))
-                       (when (> (count bad) 5)
-                         (str " (+" (- (count bad) 5) " more)"))
-                       ". Move the effects to a periphery namespace, or declare"
-                       " a looser tier. The first: " (:why (first bad)))
-           :violations (mapv :form bad)}
-          (let [st' (engine/commit-appended!
-                     session
-                     #(first (store/record-module-tier % module tier
-                                                       :prompt prompt :agent agent))
-                     [])]
-            ;; D-surface-honesty at declaration grain. This call checked the FORMS
-            ;; in the governed namespaces and nothing else. Layering — does this
-            ;; namespace REQUIRE a looser tier? — is deliberately not checked
-            ;; here (its verdict changes as legitimate work continues, which is
-            ;; the D-rule-grain test for a check that does not belong at write
-            ;; grain). The omission is fine; being silent about it is not.
-            {:module module :tier tier
-             :tiers (:module-tiers st')
-             :verified (if (= :external tier) [] [:forms])
-             :unverified [:layering]
-             :note (if (= :external tier)
-                     (str ":external asserts nothing about the code, so nothing"
-                          " was checked. Layering — whether these namespaces"
-                          " require a LOOSER tier — is a whole-graph property"
-                          " and is reported by full_check.")
-                     (str "the forms already in " module " were checked against :"
-                          (name tier) ". Layering — whether they require a LOOSER"
-                          " tier — is a whole-graph property reported by"
-                          " full_check, not at write grain."))}))))))
+  An edge only `-test` namespaces cross is adopted as a TEST-ONLY edge, so
+  the manifest a project inherits does not open its production graph on a
+  fixture's behalf. Adopting those as ordinary edges is how slopp's own
+  manifest came to claim `slopp.index` and `slopp.store` depend on
+  `slopp.api`."
+  [session & {:keys [agent]}]
+  (let [{:keys [production test]} (edit.modules/derive-module-edges (:store @session))
+        record (fn [s [m deps] test-only]
+                 (reduce (fn [s2 dep]
+                           (first (store/record-module-edge
+                                   s2 m dep :add
+                                   :test-only test-only
+                                   :prompt (str "module adoption: "
+                                                (if test-only
+                                                  "edge crossed by -test namespaces ONLY"
+                                                  "edge derived from the actual dependency graph"))
+                                   :agent agent)))
+                         s (sort deps)))]
+    (engine/commit-appended!
+     session
+     (fn [base]
+       (as-> (update base :modules #(or % {})) $
+         (reduce #(record %1 %2 nil) $ (sort production))
+         (reduce #(record %1 %2 true) $ (sort test))))
+     [])
+    (let [cycles (vec (:cycles (store/module-layers
+                                (into {} (map (fn [[m ds]] [m (vec ds)])) production))))]
+      (cond-> {:modules (count production)
+               :edges   (reduce + 0 (map count (vals production)))
+               :test-edges (reduce + 0 (map count (vals test)))
+               :cycles cycles}
+        (seq cycles)
+        (assoc :note
+               (str (count cycles)
+                    (if (= 1 (count cycles)) " module cycle" " module cycles")
+                    " came in with the code: "
+                    (str/join "; " (map #(str/join " ⇄ " %) cycles))
+                    ". Nothing is broken and nothing loads in a circle — a"
+                    " module is the first two segments, so this is a"
+                    " cross-module call in each direction. It cannot be"
+                    " introduced later, since declaring an edge that closes a"
+                    " cycle is refused, so untangling means moving what"
+                    " crosses and then module_dep {from … to … remove true}."))))))
 
 (defn module-dep!
   "Declare or retract ONE module dependency edge — the semantic verb behind
@@ -3863,29 +2543,428 @@ recompiled (engine/after-write! session ns-sym)]
                               " edge is declared or the call restructured. "
                               axes))))))))
 
-(defn- sweep-left-behind
-  "Forms still binding `kname` through a `from-ns`-qualified `:keys`
-  destructuring — what a keyword sweep did not reach.
+(defn affected-test-nses
+  "The PROVABLE verification slice: test namespaces (any ns holding a
+  deftest) whose require-closure reaches a form changed since the last
+  MILESTONE — a test can only exercise code it can load. Returns
+  {:changed-nses [...] :selected [...]}; empty :selected = nothing since
+  the milestone can affect any test. Full-suite confidence stays the
+  milestone gate's job."
+  [session]
+  (let [st      (:store @session)
+        last-c  (:id (last (filter #(= :commit (:op %)) (store/deltas st))))
+        changed (into #{}
+                      (keep #(store/ns-of-form-id st %))
+                      (forms-changed-since st last-c))]
+    {:changed-nses (vec (sort changed))
+     :selected     (engine/test-nses-reaching st changed)}))
 
-  Read off the store AFTER the write, over the OLD key: whatever still names
-  it was, by construction, not rewritten. That is a reality check rather than
-  a claim about what the changeset meant to do, and it is the same discipline
-  `ns_rename`'s `:left-behind` runs on.
+(defn- add-require-node
+  "Candidate-store helper: add require `spec-str` to `nsx`'s ns form,
+  returning the updated store (unchanged when the spec can't land — the
+  compile gate downstream reports honestly)."
+  [st nsx spec-str & {:keys [prompt group agent]}]
+  (let [decl (store/form-named st nsx nsx)
+        r    (when decl (edit/add-require-source (n/string (:node decl)) spec-str))]
+    (if (or (nil? r) (:error r))
+      st
+      (or (first (store/replace-node st nsx nsx
+                                     (first (n/children (p/parse-string-all (:src r))))
+                                     :prompt prompt :group group :agent agent))
+          st))))
 
-  Text-prefiltered on the entry's own spelling before parsing, because this
-  runs over every form in the store and the entry cannot be bound without
-  being written."
-  [st kname from-ns]
-  (let [entry (str (refactor/keys-entry from-ns))]
-    (vec (for [nsx (sort (keys (:namespaces st)))
-               e   (store/forms st nsx)
-               :when (:name e)
-               :let [src (n/string (:node e))]
-               :when (and (str/includes? src entry)
-                          (str/includes? src kname)
-                          (refactor/destructures-key? src kname from-ns))]
-           {:ns nsx :form (:name e) :via :destructuring
-            :text (str "{" entry " [" kname "]}")}))))
+^:reads (defn query-call
+  "Observe-only INVOKE of one var in the live image: `(query-call session
+  'app.core/f 1 2)` — the structured face of the common query-eval case.
+  The var reference is CARRIED (a quoted symbol in a designated position —
+  renames, moves, and the unused gate all see it) instead of hidden in an
+  eval string; args must be printable data (they cross the nREPL boundary
+  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
+  expressions."
+  [session qsym & args]
+  (query-eval session
+              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
+
+;; --- query.* (read) ---
+
+;; --- verification (D1 tracing + D5 restart-as-diagnostic) ---
+
+;; --- edit.* / runtime ---
+
+;; ---------------------------------------------------------------------------
+;; External dependencies (Tier 1) — the per-store manifest
+
+;; --- Phase 4 m3: branches within one repo -------------------------------
+(defn module-tier!
+  "Declare a module's purity TIER — the functional-core gate's dial (D9):
+  :pure (referentially transparent), :internal (may mutate IN-PROCESS state
+  only — a memo, a registry), :external (IO — the periphery; unrestricted).
+  Legacy spellings :reads/:effects are accepted and stored canonically as
+  :internal/:external. One :module-tier delta carrying its why (:prompt); last
+  write per module wins. Declaring :external (or never declaring) leaves a
+  module ungated. Read tiers via query_depends {modules true}."
+  [session module tier & {:keys [prompt agent remove]}]
+  (let [module (str module)
+        ;; every surface — this docstring, the tool description, query_depends'
+        ;; output — spells tiers WITH the colon, so accept that spelling too
+        ;; rather than turning ":pure" into ::pure and refusing it
+        tier   (tiers/canonical-tier
+                (keyword (str/replace (name (or tier "")) #"^:" "")))
+        ;; namespace grain, not just module grain: a pure CORE routinely lives
+        ;; one level below an effectful module (slopp.api holds seven fully-pure
+        ;; namespaces). At module grain that core cannot be named, so nothing
+        ;; enforces it — and the tier's whole job is to make agents MOVE code
+        ;; into core/shell shape, which it cannot do if it cannot describe it.
+        modish (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
+    (cond
+      (not modish)
+      {:error (str "modules are the first TWO segments of a namespace"
+                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
+                   (pr-str module))}
+
+      ;; RETIRE, matching module_dep's `remove: true`. The store op has always
+      ;; supported this (ns_rename needs it, so an orphaned declaration does
+      ;; not outlive its namespace); nothing exposed it, so a mis-declared
+      ;; tier could be overwritten but never withdrawn — and overwriting with
+      ;; :external is not the same statement as making no claim at all.
+      remove
+      (if (contains? (:module-tiers (:store @session)) module)
+        (let [st' (engine/commit-appended!
+                   session
+                   #(first (store/record-module-tier % module nil :action :remove
+                                                    :prompt prompt :agent agent))
+                   [])]
+          {:module module :action :removed :tiers (:module-tiers st')})
+        {:error (str module " has no tier declaration — nothing to remove."
+                     " Undeclared already means :external (ungated).")})
+
+      (not (#{:pure :internal :external} tier))
+      {:error (str "tier must be :pure, :internal, or :external — got "
+                   (pr-str tier)
+                   ". :pure = referentially transparent; :internal = may mutate"
+                   " IN-PROCESS state (a memo, a registry) but touches nothing"
+                   " outside; :external = IO (files, subprocesses, network, db)."
+                   " (:reads and :effects are legacy spellings of :internal and"
+                   " :external.)")}
+
+      ;; a tier is an ASSERTION ABOUT THE CODE, so check it against the
+      ;; code. Gating only future writes let :pure land on a module full of
+      ;; effects — a marker that lies, which is worse than no marker.
+      :else
+      (let [bad (tiers/tier-violations (:store @session) module tier)]
+        (if (seq bad)
+          {:error (str "cannot declare " module " :" (name tier) " — "
+                       (count bad) " existing form(s) already exceed it: "
+                       (str/join ", " (map (comp str :form) (take 5 bad)))
+                       (when (> (count bad) 5)
+                         (str " (+" (- (count bad) 5) " more)"))
+                       ". Move the effects to a periphery namespace, or declare"
+                       " a looser tier. The first: " (:why (first bad)))
+           :violations (mapv :form bad)}
+          (let [st' (engine/commit-appended!
+                     session
+                     #(first (store/record-module-tier % module tier
+                                                       :prompt prompt :agent agent))
+                     [])]
+            ;; D-surface-honesty at declaration grain. This call checked the FORMS
+            ;; in the governed namespaces and nothing else. Layering — does this
+            ;; namespace REQUIRE a looser tier? — is deliberately not checked
+            ;; here (its verdict changes as legitimate work continues, which is
+            ;; the D-rule-grain test for a check that does not belong at write
+            ;; grain). The omission is fine; being silent about it is not.
+            {:module module :tier tier
+             :tiers (:module-tiers st')
+             :verified (if (= :external tier) [] [:forms])
+             :unverified [:layering]
+             :note (if (= :external tier)
+                     (str ":external asserts nothing about the code, so nothing"
+                          " was checked. Layering — whether these namespaces"
+                          " require a LOOSER tier — is a whole-graph property"
+                          " and is reported by full_check.")
+                     (str "the forms already in " module " were checked against :"
+                          (name tier) ". Layering — whether they require a LOOSER"
+                          " tier — is a whole-graph property reported by"
+                          " full_check, not at write grain."))}))))))
+
+(defn undo!
+  "Walk back your own recent writes — the reach-for-it-without-thinking undo.
+  Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
+  content writes, `:to \"d123\"` undoes everything of yours after that delta.
+  `:to` also takes a NAMED anchor — `:last-commit` (scrap everything since the
+  last milestone — the usual dead-end rollback) or `:last-done` (back to your
+  last done point) — as a keyword or the same string over the wire. One atomic
+  verified group, recorded as honest provenance rather than erased.
+
+  Delta addressing is the point. `revert-form!` looks a form up by name, so it
+  can never undo a DELETE — there is no name left to find. The log still holds
+  the source, so undo puts it back. Forms another agent also wrote in the span
+  are SKIPPED and reported in `:skipped-shared`, never stomped, which is what
+  makes this safe to reach for while others are working.
+
+  **`:deltas n` counts over the LOG, and REFUSES rather than reaching past.**
+  Markers are transparent, but a delta whose op undo cannot invert
+  (`:rename-ns`, `:move-forms`, `:ns-delete`, `:config-put`, a `module_*`
+  declaration, anything that changes more than form sources) stops it, named
+  in `:blocked` with nothing reverted. It used to count over the FILTERED
+  sequence, so *the last one* meant *the last one that passed the filter*: it
+  stepped over the head and reverted an older write while returning
+  `:reverted 1` and `:skipped-shared []`. Reported by a consumer whose
+  already-shipped CSS fix was rolled back underneath them and reached their
+  user as a screenshot of a bug that had been fixed. Measured afterwards: 20
+  op types and 1218 deltas in slopp's own store were steppable, so an
+  ordinary `ns_rename` was enough to arm it.
+
+  The conservative op set is not the bug and is unchanged: undo inverts form
+  SOURCES, and a `:rename-ns` also re-keys the namespace, so inverting it here
+  would restore the text under the new name. Not being able to undo something
+  is fine; reaching past it is not.
+
+  `:to` still walks forward from an anchor the caller named explicitly, which
+  is a different request: there the address is right and the coverage may be
+  partial.
+
+  Returns `{:reverted n :undid [delta-ids] :skipped-shared [...]}`, or
+  `{:reverted 0 :blocked [{:delta :op :why}] :note ...}`."
+  [session & {:keys [deltas to agent prompt]}]
+  (let [st       (:store @session)
+        ;; undo means "walk back MY writes"; with no explicit agent that is the
+        ;; session's own id — what every live write is tagged with. Left nil,
+        ;; `mine?` counted every delta as mine while `others` counted every
+        ;; real-agent delta as someone else's, so a session's own forms were
+        ;; skipped as :skipped-shared, leaving the store red. One agent, one
+        ;; ownership test.
+        agent    (or agent (:agent-id @session))
+        all      (store/deltas st)
+        ;; :last-commit / :last-done name the two anchors worth rolling back to
+        ;; without knowing a delta id — accepted as keyword or wire string.
+        commit-anchor? (contains? #{:last-commit "last-commit" ":last-commit"} to)
+        done-anchor?   (contains? #{:last-done "last-done" ":last-done"} to)
+        to       (cond
+                   commit-anchor?
+                   (:id (last (filter #(= :commit (:op %)) all)))
+                   done-anchor?
+                   (:id (last (filter #(= :done (:op %)) all)))
+                   :else to)
+        mine?    (fn [d] (and (contains? history/content-ops (:op d))
+                              (= agent (:agent d))))
+        ;; POSITIONAL addressing counts over the LOG. `(take-last n (filter
+        ;; mine? all))` counted over the SURVIVORS, so "the last one" meant
+        ;; "the last one that passed the filter" — a different delta, chosen
+        ;; silently, then reverted while reporting `:reverted 1` and
+        ;; `:skipped-shared []`. Markers are transparent, because nobody means
+        ;; "undo my :verify"; a marker that also carries content — :merge — is
+        ;; not.
+        transparent? (fn [d] (and (contains? fields/markers (:op d))
+                                  (not (contains? history/content-ops (:op d)))))
+        recent   (when-not to
+                   (take-last (max 1 (or deltas 1)) (remove transparent? all)))
+        blocked  (vec (for [d recent :when (not (mine? d))]
+                        {:delta (:id d) :op (:op d)
+                         :why (if (= agent (:agent d))
+                                (str "undo inverts form SOURCES, and " (:op d)
+                                     " changes more than sources — reverting it"
+                                     " here would half-undo it")
+                                (str "written by "
+                                     (or (:agent d) "another agent")))}))
+        target   (if to
+                   (first (filter mine? (rest (drop-while #(not= to (:id %)) all))))
+                   (first recent))]
+    (cond
+      (and (or commit-anchor? done-anchor?) (nil? to))
+      {:reverted 0
+       :note (str "no " (if commit-anchor? "commit" "done")
+                  " to roll back to")}
+
+      ;; BEFORE the not-target case: a blocked head is not "nothing to undo",
+      ;; it is "the thing you named cannot be undone". Reported as a refusal
+      ;; because the ADDRESS is what is wrong — you asked for the last n
+      ;; writes, and reaching past them to revert something OLDER is doing
+      ;; something adjacent to what was asked. `undo` is the tool an agent
+      ;; reaches for at the moment it knows it made a mistake; that is the one
+      ;; behaviour it must never have.
+      (seq blocked)
+      {:reverted 0
+       :blocked blocked
+       :note (str "refused, nothing was reverted: the last "
+                  (count recent) " delta(s) include "
+                  (count blocked) " that undo cannot invert — "
+                  (str/join ", " (map #(str (:delta %) " (" (name (:op %)) ")")
+                                      blocked))
+                  ". Reverting past them would have restored an OLDER write"
+                  " while reporting success, which is what this refusal"
+                  " exists to prevent. To reach the earlier work anyway,"
+                  " name the span explicitly with :to <delta>; to address one"
+                  " form, edit_revert it by name.")}
+
+      (not target)
+      {:reverted 0
+       :note (if to
+               (str "nothing of yours after " to)
+               "no writes of yours to undo")}
+
+      :else
+      (let [from    (:id target)
+            changes (history/query-changes session :agent agent :from from)
+            span    (drop-while #(not= from (:id %)) all)
+            others  (into #{}
+                          (mapcat history/delta-fids)
+                          (filter #(and (contains? history/content-ops (:op %))
+                                        (not (mine? %)))
+                                  span))
+            {:keys [steps shared]} (history/revert-steps changes others)]
+        (cond
+          (empty? (:forms changes))
+          {:reverted 0 :note (str "nothing of yours changed since " from)}
+
+          (empty? steps)
+          {:reverted 0 :skipped-shared shared
+           :note "every changed form is shared with other agents"}
+
+          :else
+          (let [r (edit-group! session steps
+                               :prompt (or prompt (str "undo back to " from))
+                               :agent agent)]
+            (if (or (:error r) (:conflict r))
+              r
+              (let [undid-ids (mapv :id (filter mine? span))
+                    reverted  (vec (remove (set shared) (map :form (:forms changes))))]
+                ;; mark the dead end so it stays findable: what was scrapped
+                ;; and (if given) why. A vanished exploration teaches nothing.
+                (engine/commit-appended!
+                 session
+                 (fn [base] (first (store/record-revert base :why prompt
+                                                        :forms reverted
+                                                        :undid undid-ids
+                                                        :agent agent)))
+                 [])
+                (assoc r
+                       :reverted (count steps)
+                       :undid undid-ids
+                       :skipped-shared shared)))))))))
+
+(defn cleanup!
+  "Run the done-point's TIDY over one namespace, on demand: normalize every
+  form (conservative, behavior-preserving rewrites), then declare hygiene via
+  `fix-declares!` — definitions reordered above their callers, a legacy or
+  stale `(declare …)` retired, phantom names pruned. One verified pass.
+
+  You should rarely need this. The write pipeline owns ordering and declares
+  from the FIRST write, and `done` runs the same tidy over everything you
+  touched — so code written through slopp arrives clean. Reach for it on code
+  that predates those invariants (an ingested file-based namespace), or when a
+  legacy declare is blocking you mid-episode: two elements then share a name,
+  which the name-addressed edit tools cannot resolve.
+
+  Returns `{:ns :normalized n :rewrites [{:form :applied}] :declares n}`, or
+  `{:error …}` — nothing is committed unless the tidied namespace compiles."
+  [session ns-sym & {:keys [prompt agent]}]
+  (let [st       (:store @session)
+        rewrites (vec (for [f (store/forms st ns-sym)
+                            :let [{:keys [node applied]}
+                                  (normalize/normalize-form (:node f))]
+                            :when (seq applied)]
+                        {:form-id (:id f)
+                         :form    (symbol (str ns-sym) (str (or (:name f) (:id f))))
+                         :node    node
+                         :applied applied}))
+        normed   (when (seq rewrites)
+                   (let [changeset (into {} (map (juxt :form-id :node)) rewrites)
+                         [st' _]   (store/apply-changeset
+                                    st :normalize ns-sym changeset
+                                    :prompt (or prompt "cleanup: normalize")
+                                    :agent agent)]
+                     (if-let [err (:err (engine/hot-load-all! session st'
+                                                               (keys changeset)))]
+                       {:error (str "cleanup: normalization would not compile — "
+                                    err)}
+                       (if-not (engine/try-commit! session st st' [ns-sym])
+                         {:conflict {:reason "store changed during cleanup — retry"}}
+                         {:ok true}))))]
+    (cond
+      (:error normed)    normed
+      (:conflict normed) normed
+      :else
+      (let [d (fix-declares! session ns-sym
+                             :prompt (or prompt "cleanup: declare hygiene")
+                             :agent agent)]
+        (cond-> {:ns         ns-sym
+                 :normalized (count rewrites)
+                 :rewrites   (mapv #(select-keys % [:form :applied]) rewrites)
+                 :declares   (:removed d 0)
+                 :purity     (tiers/tier-report (:store @session) ns-sym)
+                 ;; the done-time advisories, re-run over the WHOLE namespace.
+                 ;; They already fired for anything written through slopp since
+                 ;; the rule existed — what they have never seen is code that
+                 ;; PREDATES the rule (ingested, or written before the advisory
+                 ;; was added). That is exactly this tool's job.
+                 :advisories (let [st* (:store @session)]
+                               (rules/run-done-advisories!
+                                session st* (mapv :id (store/forms st* ns-sym))))
+                 ;; the rest of the enforcement surface, replayed over EXISTING
+                 ;; code: kondo lint, dead public surface, undocumented public
+                 ;; surface, and the per-form WRITE gates (module / tier /
+                 ;; schema / namespaced-keys). Each normally fires only as code
+                 ;; is written, so a form predating a rule was never subject to
+                 ;; it. Reported, never auto-applied — every one needs judgment.
+                 :lint       (let [st* (:store @session)]
+                               (vec (done/anchored-lint
+                                     session (mapv :id (store/forms st* ns-sym)))))
+                 :unused     (vec (:unused (read.modules/unused-report
+                                            (:store @session) [ns-sym])))
+                 :undocumented
+                 (let [st* (:store @session)]
+                   (vec (keep #(:var (edit.modules/missing-doc-warning st* ns-sym (:name %)))
+                              (filter :name (store/forms st* ns-sym)))))
+                 :gates
+                 (let [st* (:store @session)]
+                   (vec (for [f (store/forms st* ns-sym)
+                              :when (:name f)
+                              :let [g (gates/gate-check st* ns-sym (:name f))
+                                    hits (remove nil? (cons (:refuse g) (:advisories g)))]
+                              :when (seq hits)]
+                          {:form (symbol (str ns-sym) (str (:name f)))
+                           :teach (vec hits)})))}
+          (:conflict d) (assoc :conflict (:conflict d))
+          (:test d)     (assoc :test (:test d)))))))
+
+(defn cleanup-all!
+  "Run `cleanup!` over EVERY namespace in the store — the MIGRATION surface.
+
+  Per-namespace is the wrong grain for a migration, because you do not know
+  which namespaces predate a rule. Two cases need this: adopting slopp on an
+  existing codebase (nothing in it was ever subject to any gate), and landing
+  a slopp upgrade that ADDS a rule (every existing form predates it).
+
+  Applies the tidy everywhere it is needed, and aggregates what tidying cannot
+  fix. Returns `{:namespaces n :normalized n :declares n :findings [{:ns …}]}`
+  — `:findings` carries only namespaces with something to report, each with
+  whichever of `:lint :unused :undocumented :gates :advisories` fired, so a
+  clean store returns an empty vector rather than 100 empty rows.
+
+  Reports; it never auto-fixes a finding. Dead surface, a missing docstring, a
+  gate violation and an ambient atom each need a human decision — and the last
+  is often correct as written."
+  [session & {:keys [prompt agent]}]
+  (let [nses (sort (keys (:namespaces (:store @session))))
+        rs   (mapv #(cleanup! session %
+                              :prompt (or prompt "cleanup-all: migration sweep")
+                              :agent agent)
+                   nses)]
+    (if-let [bad (first (filter :error rs))]
+      bad
+      {:namespaces (count rs)
+       :normalized (reduce + 0 (map #(:normalized % 0) rs))
+       :declares   (reduce + 0 (map #(:declares % 0) rs))
+       :findings
+       (vec (keep (fn [r]
+                    (let [hit (cond-> {}
+                                (seq (:lint r))         (assoc :lint (:lint r))
+                                (seq (:unused r))       (assoc :unused (:unused r))
+                                (seq (:undocumented r)) (assoc :undocumented (:undocumented r))
+                                (seq (:gates r))        (assoc :gates (:gates r))
+                                (seq (:advisories r))   (assoc :advisories (:advisories r)))]
+                      (when (seq hit) (assoc hit :ns (:ns r)))))
+                  rs))})))
 
 (defn requalify-boundary-keys!
   "Namespace a module-external fn's OPTION KEYS in one verified intent: its
@@ -3985,6 +3064,357 @@ recompiled (engine/after-write! session ns-sym)]
               :else          (let [r (edit-group! session steps :prompt why :agent agent)]
                                (if (:error r) r (merge r report))))))))))
 
+(defn last-judged-done
+  "The most recent verdict that actually JUDGED something (`:test-status`
+  `:red` or `:green`), or nil — from a `:done` delta or from a whole-store
+  `full_check`, whichever came last.
+
+  Exists because `done` is episode-scoped: calling it twice with no writes
+  between yields `:none` the second time — nothing changed, so nothing was
+  checked. Without this a RED done could be laundered by simply committing
+  afterwards: the milestone runs its own done, gets `:none`, and publishes.
+  The last real verdict stands until new work supersedes it.
+
+  **A green `full_check` is such a verdict (friction 14).** Reading only
+  `:done` deltas left a trap with no way out: an episode whose changed forms
+  have no covering tests — a rename, a docstring, a `:cljs` edit — judges
+  `:none`, so `commit_point` reaches back to a verdict that can be arbitrarily
+  old, and every subsequent done judges `:none` too. The store got greener
+  while the milestone stayed refused, and the whole-store check — broader,
+  slower, more authoritative — could not clear what the narrower one left
+  behind. Now it can, and a later `done` supersedes it in turn: most recent
+  judgement wins, whichever kind it is.
+
+  Only `:scope :full-check` counts. `record-verification` also lands on
+  ordinary writes, and those are form-scoped — a per-write green says nothing
+  about the store.
+
+  Returns the whole findings map rather than the status alone so a standing
+  red can still NAME what was wrong — a refusal that cannot say why is a
+  refusal an agent cannot act on. The full_check verdict carries only what its
+  delta recorded, and deliberately not its namespace count or wall time:
+  `commit_point` builds its refusal reason from whichever keys are present and
+  non-zero, so an informational count would make a refusal say `namespaces`
+  as though that were the thing that fired."
+  [store]
+  (->> (store/deltas store)
+       (keep (fn [d]
+               (cond
+                 (and (= :done (:op d))
+                      (#{:red :green} (:test-status (:findings d))))
+                 (:findings d)
+
+                 (and (= :verify (:op d))
+                      (= :full-check (:scope (:result d)))
+                      (#{:red :green} (:status (:result d))))
+                 (let [r (:result d)]
+                   (cond-> {:test-status (:status r) :scope :full-check}
+                     (pos? (:lint-errors r 0))
+                     (assoc :lint-errors (:lint-errors r)))))))
+       last))
+
+(defn- remove-require-node
+  "Candidate-store helper, symmetric with `add-require-node`: drop `lib`'s
+  require spec from `nsx`'s ns form, returning the updated store (unchanged
+  when the spec can't be dropped — the compile gate downstream reports
+  honestly)."
+  [st nsx lib & {:keys [prompt group agent]}]
+  (let [decl (store/form-named st nsx nsx)
+        r    (when decl (edit/remove-require-source (n/string (:node decl)) lib))]
+    (if (or (nil? r) (:error r))
+      st
+      (or (first (store/replace-node st nsx nsx
+                                     (first (n/children (p/parse-string-all (:src r))))
+                                     :prompt prompt :group group :agent agent))
+          st))))
+
+(defn move-forms!
+  "Move `form-names` from `from-ns` into `to-ns` — NEW or EXISTING — the
+  general relocation refactor (clj-surgeon's :extract!, slopp-grade, v2).
+  Callers EVERYWHERE (production + tests) are
+  rewritten to alias-qualified calls and gain the require — addressed by
+  FORM ID, because a defmethod body defines no var and a caller set keyed on
+  a name dropped those silently; `:callers-unrewritten` reports any the pass
+  did not change, so the count is readable against its population; the moved defs are publicized (module-grain
+  visibility replaces var privacy); the target gets only the requires the
+  moved code uses. Dependency direction is analyzed: stay→moved adds the
+  require back to from-ns, moved→stay qualifies stay refs instead, a
+  two-way split refuses (real cycle). Cross-module edges the move's own
+  rewires necessitate are AUTO-DECLARED (the move's prompt rides each
+  :module-edge delta — the move IS the declared intent), refusing only a
+  cycle-closer; `:export true` marks moved vars ^:export when the deep
+  target must stay callable from outside its subtree. One atomic group +
+  changeset, compile-gated, verified across every touched namespace.
+  The one thing that verification structurally cannot see is REPORTED
+  instead: `:shadowed` names each moved call dequalified onto a LOCAL of the
+  same name — valid Clojure that calls the local, so it compiles and stays
+  green while the behaviour changes."
+  [session from-ns form-names to-ns & {:keys [prompt agent export]}]
+  (let [st   (:store @session)
+        plan (refactor/move-plan st from-ns form-names to-ns {:export export})]
+    (if (:error plan)
+      (select-keys plan [:error])
+      (let [manifest (edit.modules/modules-manifest st)
+            rows     (map (fn [r]
+                            (assoc r :to-export
+                                   (if (= (symbol (str to-ns)) (:to r))
+                                     ;; PER VAR, and the option WIDENS rather
+                                     ;; than replaces. A var that is already
+                                     ;; ^:export keeps that level through the
+                                     ;; move — its node carries its own
+                                     ;; metadata — so claiming otherwise made
+                                     ;; the move refuse on visibility until the
+                                     ;; flag was re-passed for something
+                                     ;; already true, and passing it then
+                                     ;; exported every moved var alike. Read
+                                     ;; off FROM-NS, where the var still lives:
+                                     ;; to-ns does not hold it until this lands.
+                                     (or export
+                                         (edit.modules/export-level
+                                          st (symbol (str from-ns)) (:to-name r)))
+                                     (edit.modules/export-level
+                                      st (:to r) (:to-name r)))))
+                          (:module-rows plan))
+            ;; edges the move's rewires necessitate are part of its intent
+            tmanif   (edit.modules/module-test-manifest st)
+            ;; WHICH crossings still need declaring is asked of the canonical
+            ;; rule, not re-derived here. The re-derivation this replaces read
+            ;; the PRODUCTION manifest alone, so a crossing declared
+            ;; {test-only true} looked undeclared, was charged to the move, and
+            ;; refused as a cycle — module_dep's own docstring says a test-only
+            ;; edge "is NOT a production edge, so no cycle question applies to
+            ;; it". It fired hardest on the move that cannot possibly need an
+            ;; edge: a WITHIN-module one, where source and target share a module
+            ;; and every crossing is exactly what it was before.
+            edges    (->> (edit.modules/module-violations manifest tmanif rows)
+                          (filter #(= :undeclared-edge (:rule %)))
+                          (map (fn [v] [(edit.modules/module-of (:from-ns v))
+                                        (edit.modules/module-of (:target-ns v))]))
+                          distinct vec)
+            cyclic   (seq (filter (fn [[a b]] (store/module-path manifest b a))
+                                  edges))
+            manifest' (reduce (fn [m [a b]] (update m a (fnil conj #{}) b))
+                              manifest edges)
+            viols    (edit.modules/module-violations manifest' tmanif rows)
+            refusal  (cond
+                       cyclic
+                       (str "the move would close a module dependency cycle ("
+                            (str/join ", " (map (fn [[a b]] (str a " → " b))
+                                                cyclic))
+                            ") — move the shared piece the other way, or"
+                            " restructure the callers first")
+
+                       viols
+                       (str (str/join "; " (map :error viols))
+                            (when (and (not export)
+                                       (every? #(= :visibility (:rule %)) viols))
+                              " — or pass export: true to hoist the moved vars")))]
+        (if refusal
+          {:error refusal}
+          (let [[gid st-g] (store/alloc-id st "g")
+                ;; 0. the auto-declared edges, each carrying the move's why
+                st0 (reduce (fn [s [a b]]
+                              (first (store/record-module-edge
+                                      s a b :add
+                                      :prompt (or prompt (str "move-forms: " from-ns " → " to-ns))
+                                      :agent agent)))
+                            st-g edges)
+                ;; 0b. a namespace born from a move is born UNDECLARED, and
+                ;; undeclared is :external by absence of a claim — so forms
+                ;; that just left a :pure core arrive in the shell, and the
+                ;; split invents a core→shell dependency out of nothing. The
+                ;; honest default is what was true one delta ago: the source's
+                ;; governing tier. Recorded BEFORE the ingest, so the moved
+                ;; forms are verified against it on the way in.
+                ;;
+                ;; Only from a source that CARRIES a claim, and only when the
+                ;; target would otherwise be governed differently. An
+                ;; undeclared source mints nothing — stamping :external there
+                ;; would defeat a deliberate move INTO a pure subtree, where
+                ;; the right outcome is the gate refusing impure forms.
+                ;; `ns_rename` has no equivalent gap: it RELOCATES a
+                ;; declaration rather than copying it, and the asymmetry
+                ;; between the two relocation verbs was invisible until a
+                ;; whole-store check named the namespace that did NOT change.
+                st0 (let [src (symbol (str from-ns))]
+                      (if (and (:new-ns? plan)
+                               (tiers/tier-declared? st src)
+                               (not= (tiers/tier-for st src)
+                                     (tiers/tier-for st to-ns)))
+                        (first (store/record-module-tier
+                                st0 (str to-ns) (tiers/tier-for st src)
+                                :prompt (or prompt
+                                            (str "move-forms: " from-ns " → " to-ns))
+                                :agent agent))
+                        st0))
+                ;; 1. the target: ingest new, or append + requires to existing
+                st1 (if (:new-ns? plan)
+                      (store/ingest st0 to-ns (:new-src plan) :agent agent)
+                      (let [st* (reduce (fn [s node]
+                                          (or (first (store/append-form
+                                                      s to-ns node
+                                                      :prompt prompt :group gid
+                                                      :agent agent))
+                                              s))
+                                        st0 (:append plan))]
+                        (reduce (fn [s spec]
+                                  (add-require-node s to-ns spec
+                                                    :prompt prompt :group gid
+                                                    :agent agent))
+                                st* (:to-require-adds plan))))
+                ;; 2. callers gain [to-ns :as alias]
+                st2 (reduce (fn [s [nsx spec]]
+                              (add-require-node s nsx spec
+                                                :prompt prompt :group gid
+                                                :agent agent))
+                            st1 (:require-adds plan))
+                ;; 3. every rewritten caller, ONE changeset (multi-ns)
+                [st3 _] (if (seq (:rewrites plan))
+                          (store/apply-changeset
+                           st2 :move-forms from-ns
+                           (into {} (map (fn [[fid m]] [fid (:node m)]))
+                                 (:rewrites plan))
+                           :prompt prompt :agent agent)
+                          [st2 nil])
+                ;; 4. the moved forms leave home
+                st4 (reduce (fn [s nm]
+                              (or (first (store/remove-form s from-ns nm
+                                                            :prompt prompt
+                                                            :group gid :agent agent))
+                                  s))
+                            st3 (:removals plan))
+                ;; 4b. the requires the move just orphaned leave with them.
+                ;; A sequential move is what surfaced this: a caller rewritten
+                ;; to `external/author-identity` moved in the NEXT batch and
+                ;; took the reference with it, and the cold-load gate then
+                ;; REFUSED a state the move itself had created.
+                st4 (reduce (fn [s lib]
+                              (remove-require-node s from-ns lib
+                                                   :prompt prompt :group gid
+                                                   :agent agent))
+                            st4 (:from-require-drops plan))
+                ;; 4c. and the mirror: a rewritten caller left referencing
+                ;; nothing in from-ns drops that require. Left behind, a
+                ;; :pure caller keeps inheriting from-ns's TIER for a
+                ;; dependency it no longer has.
+                st4 (reduce (fn [s nsx]
+                              (remove-require-node s nsx from-ns
+                                                   :prompt prompt :group gid
+                                                   :agent agent))
+                            st4 (:caller-require-drops plan))
+                ;; the PIPELINE owns ordering. The planner no longer mints a
+                ;; declare for the moved set: a source ns may have ordered
+                ;; caller-before-callee behind a declare that STAYS BEHIND, so
+                ;; the target can land with a forward ref — resolve-cold-load
+                ;; reorders it (or inserts the pipeline's own MARKED declare
+                ;; 4d. the PROSE follows the move: a docstring naming
+                ;; from-ns/x must become to-ns/x. Qualified references only —
+                ;; a bare name may be a domain word. This is the d9077 class
+                ;; at its source: `analyze` moved namespaces and two guidance
+                ;; surfaces kept naming its pre-move address.
+                st4 (let [cs (refactor/qualified-mention-changeset
+                              st4
+                              (into {} (for [nm (:moved plan)]
+                                         [(symbol (str from-ns) (str nm))
+                                          (symbol (str to-ns) (str nm))]))
+                              {})]
+                      (if (seq cs)
+                        (first (store/apply-changeset st4 :move-forms from-ns cs
+                                                      :prompt prompt :agent agent))
+                        st4))
+                ;; for a genuine cycle). Same one call fix-declares! makes.
+                st4 (if-let [rz (edit/resolve-cold-load
+                                 st4 to-ns
+                                 :prompt (or prompt (str "move-forms: " from-ns
+                                                         " → " to-ns))
+                                 :agent agent)]
+                      (:store rz)
+                      st4)
+                touched (vec (distinct
+                              (into [from-ns to-ns]
+                                    (concat (map :ns (vals (:rewrites plan)))
+                                            (keys (:require-adds plan))))))
+                ;; defs before callers (X2): target forms, then decls, then rewrites
+                ordered (distinct
+                         (concat (map :id (store/forms st4 to-ns))
+                                 (keep #(:id (store/form-named st4 % %))
+                                       (keys (:require-adds plan)))
+                                 (keys (:rewrites plan))))
+                hl       (engine/hot-load-all! session st4 ordered)
+                ;; the COLD-load gate, which a move needs more than any other write:
+                ;; it is the one operation that reorders NAMESPACE dependencies,
+                ;; and hot-loading structurally cannot see a require cycle
+                ;; because the vars already exist in the image. A move once
+                ;; committed `[slopp/api] -> slopp/api/external -> [slopp/api]`
+                ;; and verified GREEN over it.
+                load-err (or (:err hl) (edit/cold-load-errors st4 touched))]
+            (if load-err
+              (do (engine/fresh-image! session)
+                  (edit/compile-error st4 load-err "move failed to compile: "))
+              (if-not (engine/try-commit! session st st4 touched)
+                (do (engine/fresh-image! session)
+                    {:conflict {:reason "store changed during move — retry"}})
+                (do (doseq [nm (:removals plan)]
+                      (repl/eval! (:image @session)
+                                  (format "(ns-unmap '%s '%s)" from-ns nm)))
+                    (let [moved-q (into (set (map #(symbol (str from-ns) (str %))
+                                                  (:moved plan)))
+                                        (map #(symbol (str to-ns) (str %)))
+                                        (:moved plan))
+                          summary (engine/run-verification!
+                                   session touched nil
+                                   :edited (into moved-q
+                                                 (map (fn [[_ m]]
+                                                        (symbol (str (:ns m)) (str (:name m)))))
+                                                 (:rewrites plan)))]
+                      (engine/commit-appended! session
+                                        #(store/record-verification
+                                          % touched summary)
+                                        [])
+                      (let [;; POSTCONDITION, read back from the store this move actually
+                            ;; COMMITTED rather than from its plan. The gate pre-check
+                            ;; consults the PLANNED export, so a marker pass that skips a
+                            ;; name — it once skipped every meta-wrapped one, leaving
+                            ;; `^:dynamic` vars unexported — passes the gate and surfaces
+                            ;; a session later, somewhere else.
+                            miss (read.modules/unlanded-exports (:store @session) rows)]
+                        (cond-> {:moved-to to-ns
+                                 :moved (:moved plan)
+                                 :rewrote (count (:rewrites plan))
+                                 :callers (vec (sort (distinct (map :ns (vals (:rewrites plan))))))
+                                 :group gid
+                                 :test summary}
+                          (seq edges) (assoc :edges-declared edges)
+                          ;; the population beside :rewrote. Every row is a
+                          ;; form the reference graph says calls a moved name
+                          ;; and this pass did not change — sometimes right (a
+                          ;; quoted target is left whole on purpose), never
+                          ;; something the count alone would have said.
+                          (seq (:callers-unrewritten plan))
+                          (assoc :callers-unrewritten (:callers-unrewritten plan))
+                          ;; the one thing this move did that NOTHING
+                          ;; downstream can catch: the compile gate is happy,
+                          ;; the suite is green, and the call reaches a
+                          ;; different thing than it did before.
+                          (seq (:shadowed plan))
+                          (assoc :shadowed (:shadowed plan)
+                                 :shadowed-note
+                                 (str "a dequalified call landed on a LOCAL of"
+                                      " the same name. This COMPILES and stays"
+                                      " green — the call now reaches the local"
+                                      " rather than the var, so the behaviour"
+                                      " changed and no test can see it. Rename"
+                                      " the local, or the moved var, in each"
+                                      " row above."))
+                          (seq miss)
+                          (assoc :export-not-landed miss
+                                 :export-note
+                                 (str "the move planned an export for "
+                                      (str/join ", " miss)
+                                      " and the committed store carries no marker —"
+                                      " mark the name(s) ^:export directly; callers"
+                                      " outside the subtree will not resolve them"))))))))))))))
+
 (defn delete-ns!
   "Remove namespace `ns-sym` from the store — the retirement half creation
   never had (a mistaken scaffold used to ride every projection and build
@@ -4050,6 +3480,169 @@ recompiled (engine/after-write! session ns-sym)]
                         (format "(remove-ns '%s)" ns-sym))
             (cond-> {:deleted (str ns-sym) :delta did}
               (seq orphans) (assoc :retired (mapv first orphans)))))))))
+
+(defn await-image!
+  "Block until the session's background image boot has finished, then return
+  the session (its image live). A synchronously-opened session (the default)
+  carries no ready-promise and returns immediately. A boot FAILURE delivered
+  to the promise is RETHROWN here — with the async-boot server path the MCP
+  connection is already up by the time the image loads, so a boot error
+  surfaces on the first oracle/write call instead of killing the server at
+  startup (which is what let a slow store race the MCP connect timeout)."
+  [session]
+  (when-let [p (:image-ready @session)]
+    (let [r (deref p)]
+      (when (instance? Throwable r) (throw r))))
+  session)
+
+(defn module-platform!
+  "Declare a module's target PLATFORM — the client wave's router (D-web-cljs):
+  :jvm (Clojure on the JVM, the default), :cljc (portable — loads on the JVM AND
+  compiles to JS), or :cljs (ClojureScript only — compiled to JS, never loaded
+  into the JVM oracle). One :module-platform delta carrying its why (:prompt);
+  last write per module wins. Namespace grain, like module_purity — the
+  most-specific declaration governs. Read platforms via query_depends
+  {modules true}.
+
+  A `:cljs` declaration additionally reports the `^:app/entry` entries it
+  STRANDS (`:stranded-pages` + `:warning`): stranding happens with no write to
+  the page, so the page's own done has nothing to hang the finding on, and
+  the write that does the stranding is the one surface that can name it at
+  the moment it happens."
+  [session module platform & {:keys [prompt agent remove]}]
+  (let [module   (str module)
+        ;; every surface spells platforms WITH the colon, and MCP/JSON carries
+        ;; a string, so accept both (nil defaults to :jvm) rather than minting
+        ;; a bad keyword
+        platform (keyword (str/replace (name (or platform :jvm)) #"^:" ""))
+        modish   (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
+    (cond
+      (not modish)
+      {:error (str "modules are the first TWO segments of a namespace"
+                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
+                   (pr-str module))}
+
+      ;; RETIRE, matching module_dep and module_purity. Declaring :jvm is not
+      ;; the same statement as making no claim: an explicit :jvm on a
+      ;; namespace nobody compiles is noise a register view has to carry.
+      remove
+      (if (contains? (:module-platforms (:store @session)) module)
+        (let [st' (engine/commit-appended!
+                   session
+                   #(first (store/record-module-platform % module nil :action :remove
+                                                        :prompt prompt :agent agent))
+                   [])]
+          {:module module :action :removed :platforms (:module-platforms st')})
+        {:error (str module " has no platform declaration — nothing to remove."
+                     " Undeclared already means :jvm.")})
+
+      (not (#{:jvm :cljc :cljs} platform))
+      {:error (str "platform must be :jvm, :cljc, or :cljs — got "
+                   (pr-str platform)
+                   ". :jvm = Clojure on the JVM (default); :cljc = portable"
+                   " (loads on the JVM AND compiles to JS); :cljs = ClojureScript"
+                   " only (compiled to JS, never loaded into the oracle).")}
+
+      :else
+      ;; `already` is read BEFORE the commit advances the session — bound
+      ;; after it, the diff compares the new store to itself and the report
+      ;; is empty forever (caught in review of this very change).
+      (let [already  (when (= :cljs platform)
+                       (set (map :page (rules.webapp/stranded-pages (:store @session)))))
+            st'      (engine/commit-appended!
+                      session
+                      #(first (store/record-module-platform % module platform
+                                                            :prompt prompt :agent agent))
+                      [])
+            ;; only pages THIS declaration stranded — a standing stranding
+            ;; belongs to the declaration that caused it, and re-reporting it
+            ;; on every later one buries the new fact under the old (B-F6)
+            ;; NOT clojure.core/remove — the :remove kwarg SHADOWS it here, and
+            ;; calling the shadow is an NPE on every :cljs declaration; the
+            ;; whole external tier went red on it in one theme
+            stranded (when (= :cljs platform)
+                       (seq (filter #(not (contains? already (:page %)))
+                                    (rules.webapp/stranded-pages st'))))]
+        ;; This verb checks NOTHING about the code — it records a routing fact.
+        ;; Whether a :cljc/:cljs namespace actually compiles for its declared
+        ;; platform is compile_client's answer, and it can arrive much later.
+        ;; An empty :verified is the honest shape (D-surface-honesty).
+        (cond-> {:module module :platform platform
+                 :platforms (:module-platforms st')
+                 :verified []
+                 :unverified [:compilation]
+                 :note (str "the platform is RECORDED, not verified: nothing here checks"
+                            " that " module " compiles for :" (name platform)
+                            ". compile_client is what proves it, and its warnings anchor"
+                            " to the owning form.")}
+          stranded (assoc :stranded-pages (vec stranded)
+                          :warning (str "this declaration leaves "
+                                        (count stranded)
+                                        " ^:app/entry entr"
+                                        (if (= 1 (count stranded)) "y" "ies")
+                                        " unreachable from a JVM — the closure now"
+                                        " reaches :cljs, so the screen tool and every"
+                                        " headless test fall back to lookalikes."
+                                        " Move or split what the page reaches.")))))))
+
+(defn- require-orphaned-registrar?
+  "After a require to `lib` has been dropped, would a COLD LOAD lose a
+   registration? True when `lib` is an in-store namespace whose require-closure
+   registers something (defmethod / extend-* / deftype / defrecord …) AND
+   nothing else in the store still requires it — so dropping this require
+   orphans it and its registrations never run again. The in-image suite cannot
+   see this break: the registration is already loaded in the live image, so a
+   green in-image verdict is not enough to prove the require dead."
+  [st lib]
+  (boolean
+   (and (contains? (:namespaces st) lib)
+        (not (some (fn [nsx] (contains? (set (store/ns-requires st nsx)) lib))
+                   (keys (:namespaces st))))
+        (some store/method-carrying?
+              (mapcat #(store/forms st %) (store/ns-closure st lib))))))
+
+(defn prune-requires!
+  "Done-point require hygiene — the agent never manages unused requires; done
+   does, and there is deliberately no MCP tool for it. For each require kondo
+   reports unused (`done/unused-requires`), TRY removing it and re-verify.
+
+   Removing a kondo-unused require cannot break COMPILATION — nothing used it —
+   so the only ways it can break are (1) a test the removal's own affected set
+   catches, or (2) a load effect a cold load would lose: an orphaned in-store
+   target whose closure REGISTERS something (a defmethod the reference graph
+   can't see). The live image already has that registration loaded, so a green
+   in-image verdict does NOT prove the require dead — `require-orphaned-registrar?`
+   is the static backstop.
+
+   Genuinely dead → drop it. Load-bearing (or the removal went red) → restore it
+   WITH a `^:side-effect` marker, so it no longer reads as unused and done never
+   re-tries it. Returns `{:pruned [lib …] :kept [lib …]}`."
+  [session ns-sym & {:keys [prompt agent]}]
+  (reduce
+   (fn [acc {:keys [lib marked]}]
+     (let [r    (remove-require! session ns-sym lib
+                                 :prompt (or prompt (str "done: try pruning unused require " lib))
+                                 :agent agent)
+           red? (let [t (:test r)]
+                  (boolean (and t (or (pos? (:fail t 0)) (pos? (:error t 0))))))]
+       (cond
+         ;; couldn't remove it at all (conflict/refusal) — leave it untouched
+         (or (:error r) (:conflict r))
+         (update acc :kept conj lib)
+
+         ;; removing it broke a test, or would lose a registration on cold load:
+         ;; restore it, marked, so it is not reported unused or re-tried
+         (or red? (require-orphaned-registrar? (:store @session) lib))
+         (do (add-require! session ns-sym marked
+                           :prompt (str "done: keep load-bearing require " lib
+                                        " (removing it breaks a cold load) — marked ^:side-effect")
+                           :agent agent)
+             (update acc :kept conj lib))
+
+         :else
+         (update acc :pruned conj lib))))
+   {:pruned [] :kept []}
+   (done/unused-requires (:store @session) ns-sym)))
 
 (defn module-extract!
   "Pull `ns-syms` (each with its subtree and `-test` siblings) under
@@ -4254,6 +3847,284 @@ recompiled (engine/after-write! session ns-sym)]
       {:declared js-name :version (:version spec) :format (:format spec)
        :file (:file spec) :sha (:sha entry) :bytes (alength bs)})))
 
+(defn set-comment!
+  "Set (or clear, with blank `text`) the comment rendered above form `nm`.
+
+  A different shape from the positional predecessor it replaces: trivia was
+  placed BEFORE a form and owned by nobody, a comment is owned BY the form.
+  That removes the positional question entirely — no anchor, no run to
+  replace, and a merge reconciles it as ordinary content on a form identity.
+
+  No image work and no verification: a comment changes what a namespace
+  RENDERS, never what it means. Returns {:delta :ns :name} | {:error} |
+  {:conflict}."
+  [session ns-sym nm text & {:keys [prompt agent]}]
+  (let [base (:store @session)
+        r    (store/set-comment base ns-sym nm text :prompt prompt :agent agent)]
+    (if (:error r)
+      r
+      (let [[st' d] r]
+        (if-not (engine/try-commit! session base st' [ns-sym])
+          {:conflict {:reason "store changed concurrently — retry"}}
+          {:delta (:id d) :ns (str ns-sym) :name (str nm)})))))
+
+(defn- shadow-warning
+  "A warning when `ns-sym` names a namespace a CLASSPATH resource already owns
+   — slopp's own code, or a dependency's — and the store does not yet define it.
+
+   Why it warns and does not refuse: overriding a slopp namespace is a
+   supported capability. `slopp.image.testmain` is how a store supplies its own
+   trace runner, and `build!` materializes the store's version over slopp's. A
+   refusal would break a documented extension point to prevent a naming
+   mistake.
+
+   Why it warns at all: `slopp.kernel.boot` loads store namespaces BEFORE slopp's own,
+   so a shadowing namespace that does not define everything the real one does
+   breaks the server at its next boot — and the store is then unopenable by the
+   only tool that could remove it. That happened: a project defined
+   `slopp.review.views` with two of its own views, and the next boot died on
+   `No such var: views/module-graph`.
+
+   The check is CLASSPATH ownership, not `find-ns`: a namespace an earlier
+   store hot-loaded into this process is interned here too, and treating that
+   as a collision false-flags a fresh store reusing a name."
+  [store ns-sym]
+  (when-not (contains? (:namespaces store) ns-sym)
+    (let [base (-> (str ns-sym) (str/replace "-" "_") (str/replace "." "/"))]
+      (when (some #(io/resource (str base %)) [".clj" ".cljc" ".cljs"])
+        {:kind :shadows-classpath-ns
+         :ns ns-sym
+         :message (str ns-sym " SHADOWS a namespace already on the classpath "
+                       "(slopp's own, or a dependency's). Your store's version "
+                       "loads FIRST, so anything the real one defines and yours "
+                       "does not will break at the next server boot — and a "
+                       "store that cannot boot cannot be edited. Deliberate "
+                       "overrides are fine (slopp.image.testmain is one); if "
+                       "this was not deliberate, pick a name your project owns.")}))))
+
+(defn- adopt-published-tiers!
+  "Adopt the purity tiers the libraries on the image's classpath PUBLISHED,
+  returning the namespaces newly marked pure (a vector, possibly empty).
+
+  A tier is a declaration in the producer's store and nothing in the code, so
+  before this a consumer saw every namespace of a published library as
+  undeclared — hence `:external` — and its own correct functions were flagged
+  effectful for calling them. Worse than the warning was its SUGGESTION:
+  rename `picker` to `picker!`, which would have mislabelled four correct pure
+  functions to compensate for a declaration that never shipped.
+
+  Only `:pure` is adopted. `:external` is already the default, and `:internal`
+  is a statement about in-process state that means nothing across a jar
+  boundary — the consumer cannot reset a dependency's caches.
+
+  Adopting the producer's word is better founded than the alternative the
+  consumer has otherwise: `deps_pure` asks them to assert purity about code
+  they did not write and cannot check, while the producer's tier was VERIFIED
+  against the forms when it was declared. Reported as `:adopted-pure` either
+  way — a silent change to what the effect gate flags is the kind of thing
+  someone should be able to see happen.
+
+  Read through the IMAGE, which is where the new jar actually landed: the
+  server never added it to its own classpath."
+  [session {:keys [agent]}]
+  (let [code  (str "(mapv slurp (enumeration-seq (.getResources"
+                   " (clojure.lang.RT/baseLoader) \""
+                   read.modules/tiers-resource-path "\")))")
+        res   (try (first (repl/eval! (:image @session) code))
+                   (catch Throwable _ nil))
+        tiers (reduce (fn [acc s]
+                        (if (string? s)
+                          (merge acc (try (edn/read-string s)
+                                          (catch Throwable _ nil)))
+                          acc))
+                      {}
+                      (when (coll? res) res))
+        known (:dep-pure (:store @session))
+        fresh (vec (sort (distinct (for [[path tier] tiers
+                                         :when (= :pure tier)
+                                         :let  [nsx (symbol (str path))]
+                                         :when (not (contains? known nsx))]
+                                     nsx))))]
+    (when (seq fresh)
+      (record-pure! session fresh true
+                    {:agent  agent
+                     :prompt (str "adopted from a dependency's published purity"
+                                  " tiers (" read.modules/tiers-resource-path ")")}))
+    fresh))
+
+(defn- shadowed-dep-namespaces!
+  "Of `nses`, those provided by MORE than one place on the image's classpath —
+  `{ns [url …]}`, or nil. The declared coord did not win those.
+
+  `add-libs` appends to a `DynamicClassLoader`, which delegates to its PARENT
+  first, and everything the host jar carries lives in that parent. So a
+  dependency can resolve perfectly and still not govern: measured on slopp's
+  own store, the manifest declares metosin/malli 0.16.4 while
+  `malli/core.cljc` resolves out of slopp.jar both before AND after a
+  successful add of exactly that coord.
+
+  Fixing that is a packaging change — shading, a slim launcher, or a
+  child-first loader — and none of those belong in `deps_add`. Saying it does:
+  a manifest that reads as satisfied while a different version is in force is
+  precisely what D-surface-honesty forbids, and it is invisible from every
+  surface a consumer has. The FIRST url is the one in force."
+  [session nses]
+  (when (seq nses)
+    (let [code (str "(into {} (for [n '" (pr-str (vec nses))
+                    " :let [b (clojure.string/replace"
+                    " (clojure.string/replace (str n) \".\" \"/\") \"-\" \"_\")"
+                    " us (mapcat #(enumeration-seq"
+                    " (.getResources (clojure.lang.RT/baseLoader) (str b %)))"
+                    " [\".clj\" \".cljc\"])]"
+                    " :when (> (count us) 1)] [n (mapv str us)]))")
+          res  (try (first (repl/eval! (:image @session) code))
+                    (catch Throwable _ nil))]
+      (when (and (map? res) (seq res)) res))))
+
+(defn deps-add!
+  "Declare external dependency `lib` (a symbol like `org.clojure/data.json`)
+  at `coord` (a deps.edn coordinate map, e.g. `{:mvn/version \"2.5.0\"}`).
+  Records a `:deps-add` delta (materialized to the store's manifest), then
+  HOT-adds the jar to the running image via add-libs — no restart; on failure
+  it restarts. Returns {:added lib :coord :hot true|:restarted true} | {:error}.
+
+  A coord carrying `:exclusions` RESTARTS rather than hot-adds. `add-libs`
+  silently ignores exclusions and a fresh JVM honors them, so hot-adding leaves
+  the oracle running a classpath no fresh JVM can reproduce: the in-image suite
+  goes green with the excluded jar present while every external shard, `build!`
+  and native fail to load. An image that can run what a fresh JVM cannot LOAD is
+  the cold-load failure class, and the cheapest place to not have it is here.
+
+  `:host-override` names a library slopp's OWN process bundles at a different
+  version. It is not a warning about this store — the declaration governs the
+  oracle, the test suite and every built artifact — but the server process
+  cannot honor it, because a jar its parent classloader already holds cannot be
+  displaced. Saying so is the whole point: the alternative is two processes
+  quietly running different code with every surface reporting agreement.
+
+  With `:client true` the dep is BUILD-ONLY (the ClojureScript compiler): it
+  records to the separate `:client-deps` manifest, is NOT analyzed and NOT
+  hot-loaded, and routes to the `:cljs` alias in the generated deps.edn — so it
+  never enters the running oracle nor ships in the jar (D-web-cljs)."
+  [session lib coord & {:keys [agent prompt client]}]
+  (cond
+    (not (symbol? lib))
+    {:error "dependency lib must be a symbol like org.clojure/data.json"}
+    (not (and (map? coord) (seq coord)))
+    {:error "dependency coord must be a non-empty map like {:mvn/version \"1.2.3\"}"}
+
+    :else
+    (let [coord (fields/canonical-coord coord)]      ; JSON has no symbol type
+      (if client
+        (do (engine/commit-appended! session
+                                      #(first (store/record-client-dep
+                                               % lib coord :agent agent :prompt prompt))
+                                      [])
+            {:added lib :coord coord :client true})
+        (let [surf (project.deps/analyze-dep! session lib coord)]             ; M4: API surface
+          (engine/commit-appended! session
+                                    #(first (store/record-deps-add
+                                             % lib coord :agent agent :prompt prompt
+                                             :namespaces (:namespaces surf)))  ; M3: dep-ns index
+                                    [])
+          (let [base (cond-> {:added lib :coord coord}
+                       surf (assoc :namespaces (vec (:namespaces surf))
+                                   :vars (count (:vars surf))))
+                res  (if (seq (:exclusions coord))
+                       (do (engine/fresh-image! session)
+                           (assoc base :restarted true
+                                  :note (str "restarted rather than hot-added: add-libs ignores"
+                                             " :exclusions but a fresh JVM honors them, so the"
+                                             " image would have run a classpath no build or"
+                                             " external shard could reproduce")))
+                       (if-let [hot (repl/add-libs! (:image @session) {lib coord})]
+                         (do (engine/fresh-image! session) ; hot add failed → faithful restart
+                             (assoc base :restarted true :note (:err hot)))
+                         (assoc base :hot true)))
+                ;; friction 2: only now is the jar on the image's classpath,
+                ;; so only now can its published tiers be read
+                adopted (adopt-published-tiers! session {:agent agent})
+                ;; friction 15a: it RESOLVED — but did it win? Anything the host
+                ;; jar already provides sits earlier on the classpath.
+                shadowed (shadowed-dep-namespaces! session (:namespaces surf))
+                overridden (boot/host-lib-divergence {lib coord} (boot/bundled-libs))]
+            (cond-> res
+              (seq adopted) (assoc :adopted-pure adopted)
+              (seq overridden)
+              (assoc :host-override overridden
+                     :host-override-note
+                     (str "slopp's own server process bundles this library at"
+                          " the :in-force version and cannot displace it — a jar"
+                          " the parent classloader already holds stays. Your"
+                          " declaration still governs the oracle image, the test"
+                          " suite and anything build! produces, so the two can"
+                          " run different code; pin to the bundled version if"
+                          " that matters here"))
+              (seq shadowed)
+              (assoc :shadowed shadowed
+                     :shadowed-note
+                     (str "these namespaces are provided by something EARLIER"
+                          " on the classpath, so the version you declared is"
+                          " NOT the one in force — the first url listed is."
+                          " add-libs appends to a classloader that delegates"
+                          " to its parent first, and the host jar is that"
+                          " parent")))))))))
+
+(defn deps-manifest
+  "The dependency manifest as an AGENT should read it: `{:deps {lib coord}}`,
+  plus `:host-override` naming any declaration slopp's own server process
+  cannot honor because it bundles that library itself.
+
+  Separate from `deps-list` on purpose. `deps-list` is the accessor — the
+  store's data, which other code and tests build on, and the host's classpath
+  is not part of it. This is the SURFACE, and the surface carries an
+  obligation the accessor does not: `deps_list` is the one answer an inherited
+  store ever gives about its dependencies, so a declaration that is inert in
+  the running server has to be visible here or nowhere.
+
+  It briefly also carried `:framework-drift`, for a store pinning
+  `io.github.nvoxland/slopp-web` at a version other than the slopp serving it.
+  That finding is retired with the coord it described: slopp supplies the
+  framework itself now (D-framework-injection), no store declares it, and
+  slopp-web was never published so none ever can. A report for a state that
+  cannot occur is worse than no report — it teaches a shape of problem that
+  does not exist."
+  [session]
+  (let [deps (deps-list session)
+        over (boot/host-lib-divergence deps (boot/bundled-libs))]
+    (cond-> {:deps deps}
+      (seq over)
+      (assoc :host-override over
+             :host-override-note
+             (str "slopp's own server process bundles these at the :in-force"
+                  " version and cannot displace them. Your declarations still"
+                  " govern the oracle image, the test suite and anything"
+                  " build! produces")))))
+
+(defn- sweep-left-behind
+  "Forms still binding `kname` through a `from-ns`-qualified `:keys`
+  destructuring — what a keyword sweep did not reach.
+
+  Read off the store AFTER the write, over the OLD key: whatever still names
+  it was, by construction, not rewritten. That is a reality check rather than
+  a claim about what the changeset meant to do, and it is the same discipline
+  `ns_rename`'s `:left-behind` runs on.
+
+  Text-prefiltered on the entry's own spelling before parsing, because this
+  runs over every form in the store and the entry cannot be bound without
+  being written."
+  [st kname from-ns]
+  (let [entry (str (refactor/keys-entry from-ns))]
+    (vec (for [nsx (sort (keys (:namespaces st)))
+               e   (store/forms st nsx)
+               :when (:name e)
+               :let [src (n/string (:node e))]
+               :when (and (str/includes? src entry)
+                          (str/includes? src kname)
+                          (refactor/destructures-key? src kname from-ns))]
+           {:ns nsx :form (:name e) :via :destructuring
+            :text (str "{" entry " [" kname "]}")}))))
+
 (defn realias!
   "Rename ONE namespace's require alias as a single atomic intent: the `:as`
   in its `ns` form and every `alias/sym` in its bodies, through `edit-group!`
@@ -4284,6 +4155,96 @@ recompiled (engine/after-write! session ns-sym)]
                            :agent agent)]
         (cond-> (assoc r :sites (:sites plan) :lib (:lib plan))
           (seq (:left-behind plan)) (assoc :left-behind (:left-behind plan)))))))
+
+(defn module-role!
+  "Declare a module's ROLE — what KIND of code this is, which decides whether
+  it ships: :product (the default) is code the system runs, materialized under
+  `src/` and carried into the jar; :instrument is code a HUMAN runs by hand — a
+  benchmark, a seeding script, a mining CLI — materialized under `instruments/`
+  instead, so any build that jars `src` leaves it out, and excluded from the
+  architecture view so a harness cannot sit at the apex of what it measures
+  (R5). One :module-role delta carrying its why (:prompt); last write per
+  module wins. Namespace grain, like module_purity — the most-specific
+  declaration governs. Read roles via query_depends {modules true}.
+
+  `remove: true` RETIRES a declaration: absent is not the same claim as
+  :product, and the rename and delete paths both need the difference."
+  [session module role & {:keys [prompt agent remove]}]
+  (let [module (str module)
+        ;; every surface spells roles WITH the colon, and MCP/JSON carries a
+        ;; string, so accept both rather than minting a bad keyword
+        role   (fields/canonical-role (or role "product"))
+        modish (re-matches #"[^.\s]+(\.[^.\s]+)*" module)]
+    (cond
+      (not modish)
+      {:error (str "modules are the first TWO segments of a namespace"
+                   " (\"logi.parcel\", not \"logi.parcel.impl\") — got "
+                   (pr-str module))}
+
+      remove
+      (if (contains? (:module-roles (:store @session)) module)
+        (let [st' (engine/commit-appended!
+                   session
+                   #(first (store/record-module-role % module nil :action :remove
+                                                    :prompt prompt :agent agent))
+                   [])]
+          {:module module :action :removed :roles (:module-roles st')})
+        {:error (str module " has no role declaration — nothing to remove."
+                     " Undeclared already means :product.")})
+
+      (not (#{:product :instrument} role))
+      {:error (str "role must be :product or :instrument — got " (pr-str role)
+                   ". :product = the system runs it and it ships (the default);"
+                   " :instrument = a HUMAN runs it by hand, so it is"
+                   " materialized outside src/ and never reaches the jar.")}
+
+      :else
+      ;; a role is an ASSERTION ABOUT THE CODE, so check it against the code —
+      ;; the same bar module_purity meets. :instrument MOVES the namespaces out
+      ;; of src/, so the one thing that must not be true is that product code
+      ;; requires them. Unchecked, the break surfaces at a CONSUMER's load
+      ;; time, naming a namespace this store plainly has.
+      (let [st      (:store @session)
+            members (filter #(or (= module (str %))
+                                 (str/starts-with? (str %) (str module ".")))
+                            (keys (:namespaces st)))
+            needed  (when (= :instrument role)
+                      (vec (sort (distinct
+                                  (for [other (keys (:namespaces st))
+                                        :when (and (not (store.render/test-ns? other))
+                                                   (not= :instrument
+                                                         (store/role-for st other))
+                                                   (not (some #{other} members)))
+                                        :when (some (set members)
+                                                    (store/ns-requires st other))]
+                                    (str other))))))]
+        (if (seq needed)
+          {:error (str "cannot declare " module " :instrument — "
+                       (str/join ", " needed)
+                       (if (= 1 (count needed)) " requires" " require")
+                       " it, and product code cannot depend on code that does"
+                       " not ship. Move what they need into a product module,"
+                       " or declare those callers :instrument too."
+                       " (A -test requirer would be fine: a test does not ship"
+                       " either.)")
+           :required-by needed}
+          (let [st' (engine/commit-appended!
+                     session
+                     #(first (store/record-module-role % module role
+                                                       :prompt prompt :agent agent))
+                     [])]
+            {:module module :role role
+             :roles (:module-roles st')
+             :verified (if (= :instrument role) [:no-product-requirer] [])
+             :unverified [:human-runs-it]
+             :note (if (= :instrument role)
+                     (str "no product namespace requires " module
+                          ", so moving it out of src/ breaks no load. That a"
+                          " HUMAN rather than the system runs it is the part"
+                          " nothing here can check — it is your claim.")
+                     (str module " is :product, which is also what an absent"
+                          " declaration means. Declare it only to overrule a"
+                          " broader :instrument above it."))}))))))
 
 (defn- unwritten-requires
   "The namespaces `requires` names that this store does not have YET and that
@@ -4661,3 +4622,42 @@ recompiled (engine/after-write! session ns-sym)]
                       (seq pats)   (assoc :patterns-rewritten pats)
                       (seq left)   (assoc :left-behind left)
                       note         (assoc :note note))))))))))))
+
+(defn flush-reads!
+  "Fold whatever the read ring has accumulated onto a `:read-cost` delta and
+  clear it. Returns the record, or nil when nothing was written.
+
+  Flushes when the ring has reached `telemetry/read-flush-calls`, or on any
+  `force?`. **The POLICY is here and the PERMISSION is at the caller** — the
+  wire knows whether writing a delta is legal at this moment and knows nothing
+  about spans; this knows the reverse. Splitting it the other way put the
+  threshold in the wire, where a second caller would have had to know the
+  number too.
+
+  **The read ring is not the timing ring, and the difference is the point.**
+  `:slopp.read.telemetry/calls` is cleared at every `turn-begin!` so an ask
+  measures only its own clock. The read rows must NOT share that lifecycle:
+  turns rotate only when a user prompt arrived and a write tool followed, so a
+  read-only ask closes no turn and an event-driven session closes no turn —
+  and those are exactly the spans where reads dominate. Measured the day the
+  read record shipped riding `:turn-end`: two stores, 321 and 118 closed
+  turns, zero read records between them. So the rows accumulate across turns
+  and leave only here.
+
+  **Call this only from a path that already writes.** Every read tool declares
+  `readOnlyHint` on the wire and a harness may run it unprompted on that
+  promise; appending a journal delta from one would break it. That leaves one
+  span genuinely unrecordable — a session that never calls a write tool at all
+  — and the honest handling is to say so rather than to record it anyway. It
+  is named in [[slopp.lab.reads/read-ledger]], where someone reading a number
+  needs to know it.
+
+  Nothing to flush → nil and no delta, for the reason the fold itself returns
+  nil on an empty ring: an empty record reads as a span that cost nothing."
+  [session & {:keys [force?]}]
+  (let [ring (:slopp.read.telemetry/reads @session)]
+    (when (or force? (<= telemetry/read-flush-calls (count ring)))
+      (when-let [reads (telemetry/read-cost ring)]
+        (engine/commit-appended! session #(store/record-read-cost % reads) [])
+        (swap! session dissoc :slopp.read.telemetry/reads)
+        reads))))

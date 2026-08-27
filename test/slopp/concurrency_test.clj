@@ -5,7 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
             [slopp.store :as store]
-            [slopp.ops :as ops] [slopp.ops.engine :as engine] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
+            [slopp.ops :as ops] [slopp.ops.engine :as engine] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db]))
 
 (def seed
   (str "(ns cc.core)\n"
@@ -159,6 +159,63 @@
                 (testing "the losing session's image answers with the winner"
                   (is (= [:winner] (ops/query-eval a "(ch.core/f 1)"))
                       "the image kept the loser's code after the conflict")))
+              (finally (ops/close! b))))
+          (finally (ops/close! a))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external two-sessions-on-one-store-MINT-FROM-DISJOINT-BLOCKS
+  ;; The allocator, wired in. `reserve-id-block!` made disjointness possible;
+  ;; this is the assertion that a real session actually uses it.
+  ;;
+  ;; Before it, every session read one shared counter out of `meta`, minted
+  ;; from it, and wrote its own value back. Two sessions therefore started from
+  ;; the same number, and the only thing between them and a collision was the
+  ;; UNIQUE index on `deltas.id` — which is a guard firing, not a design
+  ;; holding. When the shared number went STALE the guard fired forever and
+  ;; locked both live sessions out of writing at once.
+  ;;
+  ;; A reservation removes the sharing instead of guarding it.
+  (let [dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-idblock-" (System/nanoTime))]
+    (try
+      ;; the store has to EXIST before two sessions can share it —
+      ;; `external/open!` passes `{:create? false}`, so a dir with no db
+      ;; yields a DIRLESS session with nothing to reserve from. That is the
+      ;; real shape too: a second session cannot arrive at a store the first
+      ;; has not materialized.
+      (.close (db/open! dir))
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "blk-a"})]
+        (try
+          (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "blk-b"})]
+            (try
+              (let [na (:next-id (:store @a))
+                    nb (:next-id (:store @b))]
+
+                (testing "each session opens holding its own range"
+                  (is (not= na nb)
+                      (str "both sessions opened on the same counter: " na))
+                  (is (>= (Math/abs (long (- nb na))) db/id-block-size)
+                      (str "the ranges overlap: " na " " nb)))
+
+                (testing "and a session that WRITES after a foreign write stays in its block"
+                  ;; the real path: a write refreshes the cache first, and the
+                  ;; refresh falls back to a full `load-store` for ops it
+                  ;; cannot replay. A loaded line view carries whatever the
+                  ;; file's counter happens to be, so a session adopting it
+                  ;; would silently begin minting inside another session's
+                  ;; block — the collision this abolishes, through the back
+                  ;; door.
+                  (ops/ingest! b 'blk.other "(ns blk.other)\n\n(defn q \"Q.\" [x] x)\n")
+                  (ops/ingest! a 'blk.mine "(ns blk.mine)\n\n(defn p \"P.\" [x] x)\n")
+                  (let [now (:next-id (:store @a))]
+                    (is (> now na) "the session minted nothing at all")
+                    (is (< now (+ na db/id-block-size))
+                        (str "this session's counter left its own block: " now
+                             " started at " na))))
+
+                (testing "and no id appears twice in the journal it can see"
+                  (let [ids (mapv :id (store/deltas (:store @a)))]
+                    (is (= (count ids) (count (distinct ids))) (pr-str ids)))))
               (finally (ops/close! b))))
           (finally (ops/close! a))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

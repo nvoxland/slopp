@@ -47,85 +47,6 @@
     (when-let [[_ rel] (re-matches re (str path))]
       (symbol (-> rel (str/replace "/" ".") (str/replace "_" "-"))))))
 
-(defn- checked-out-branch
-  "The branch checked out at local WORKING repo `url` (nil for bare repos,
-  real remotes, or no repo at all) — read from .git/HEAD. JGit will happily
-  move a checked-out ref under a live working tree; push must refuse it."
-  [url]
-  (let [s (str url)]
-    (when-not (re-find #"^[a-z+]+://" s)
-      (let [head (io/file s ".git" "HEAD")]
-        (when (.exists head)
-          (second (re-find #"ref: refs/heads/(\S+)" (slurp head))))))))
-
-(defn- resolve-remote
-  "A store's saved remote may be RELATIVE (import! saves \".\": the store's
-  own containing repo) — resolve it against the store dir, not the CWD."
-  [dir target]
-  (let [s (str target)]
-    (if (or (str/blank? s)
-            (re-find #"^[a-z+]+://" s)
-            (.isAbsolute (io/file s)))
-      target
-      (str (io/file (str dir) s)))))
-
-(defn push!
-  "Push the store at `dir`'s projection to a git remote: `:url` the first
-  time (saved as `git-remote` meta), the saved remote thereafter. The DEST
-  branch is `slopp/<:branch>` (default slopp/main) — the
-  ownership boundary: slopp owns that ONE branch; humans keep main (and
-  everything else) with regular git and merge across. Refused while pull
-  conflicts stand, and refused onto the checked-out branch of a local
-  working repo. Returns {:pushed sha :status s :remote url :remote-branch b}
-  | {:error msg}."
-  [dir & {:keys [url token branch]}]
-  (let [ctx (git/open-ctx! dir)]
-    (try
-      (let [conn    (:slopp.git/map-conn ctx)
-            target  (resolve-remote dir (or url (db/get-meta conn "git-remote")))
-            rbranch (str "slopp/" (or branch "main"))
-            q       (db/quarantine-list conn)]
-        (cond
-          (str/blank? (str target))
-          {:error "no remote configured — pass :url once (it is saved as git-remote)"}
-
-          (seq q)
-          {:error (str "unresolved git conflicts (" (count q) ": "
-                       (str/join ", " (map :path q))
-                       ") — inspect with git_conflicts, merge via edit tools, then git_resolve")}
-
-          (= rbranch (checked-out-branch target))
-          {:error (str "refs/heads/" rbranch " is checked out in the working repo at "
-                       target " — pushing would move the ref under a live working"
-                       " tree. Check out a different branch there, or push from a"
-                       " checkout (git_push mirrors slopp/* without touching the"
-                       " working tree).")}
-
-          :else
-          (let [r     (git.client/push-to-remote! ctx target
-                                           :token token :remote-branch rbranch)
-                saved (db/get-meta conn "git-remote")]
-            ;; save the FIRST url as the default; a one-off push elsewhere
-            ;; must never silently rewrite it (it broke the user's normal
-            ;; push flow, 2026-07-14)
-            (when (and (not (:error r)) (nil? saved))
-              (db/set-meta! conn "git-remote" (str target)))
-            (assoc r :remote (str target)
-                   :default-remote (or saved (str target))))))
-      (finally (git/close-ctx! ctx)))))
-
-^:reads
-(defn- empty-store?
-  "True when `dir`'s existing store.db holds NOTHING — no namespaces, no
-  deltas, no files. The MCP server auto-creates exactly this when it serves
-  a fresh dir; clone/import must treat it as fresh, not refuse it."
-  [dir]
-  (with-open [conn (db/open! dir)]
-    (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
-      (and (empty? (:namespaces st))
-           (empty? (:deltas st))
-           (empty? (:files st))))))
-
 (defn form-entries
   "Ordered [{:name sym-or-nil :src str}] for each top-level FORM in `source`
   (trivia dropped — the pull diff/merge granularity is the form)."
@@ -274,6 +195,23 @@
                       (note! (str path ": applied, but trivia differs from the remote")))
                     (applied! ns-sym))))))))))
 
+^:reads (defn conflicts
+  "Unresolved pull conflicts for the store at `dir` — each row carries the
+  raw remote file so the agent can merge it: [{:path :ns :source :sha
+  :reason :at}]."
+  [dir]
+  (with-open [conn (db/open! dir)]
+    (db/quarantine-list conn)))
+
+(defn resolve!
+  "Mark a pull conflict resolved — the agent has merged/adapted the remote
+  content through the edit tools (or decided against it). nil `path` clears
+  everything. Returns the remaining {:conflicts [...]}."
+  [dir path]
+  (with-open [conn (db/open! dir)]
+    (db/quarantine-clear! conn path)
+    {:conflicts (db/quarantine-list conn)}))
+
 (defn- apply-files!
   "Absorb remote changes to NON-CODE files (base→tip), dispatching on what
   the path IS rather than treating every one as an opaque blob:
@@ -361,151 +299,97 @@
                             " marked hunks, file_put the result, then"
                             " git_resolve:\n" conflict))))))))
 
-(defn- apply-trees!
-  "Absorb the difference between two trees into the live session: diff
-  `treeM`→`treeT` (both plain {path content}), deps first, then namespaces in
-  the incoming tree's dependency order, then close the episode with a
-  milestone. Conflicts land in quarantine (push blocks until resolved).
+(defn- checked-out-branch
+  "The branch checked out at local WORKING repo `url` (nil for bare repos,
+  real remotes, or no repo at all) — read from .git/HEAD. JGit will happily
+  move a checked-out ref under a live working tree; push must refuse it."
+  [url]
+  (let [s (str url)]
+    (when-not (re-find #"^[a-z+]+://" s)
+      (let [head (io/file s ".git" "HEAD")]
+        (when (.exists head)
+          (second (re-find #"ref: refs/heads/(\S+)" (slurp head))))))))
 
-  `opts`: `:agent`, `:origin` (what the quarantined copy came FROM — a commit
-  sha for a pull, a directory for an import), `:label` (the milestone
-  description), `:extra` (extra marker fields — a pull chains `:git-sha`), and
-  `:retry` (the verb to name when the done gate refuses).
+(defn- resolve-remote
+  "A store's saved remote may be RELATIVE (import! saves \".\": the store's
+  own containing repo) — resolve it against the store dir, not the CWD."
+  [dir target]
+  (let [s (str target)]
+    (if (or (str/blank? s)
+            (re-find #"^[a-z+]+://" s)
+            (.isAbsolute (io/file s)))
+      target
+      (str (io/file (str dir) s)))))
 
-  **This is the whole of import, and none of it is git.** `store.merge` is
-  three strings in and one out, `apply-ns!`/`apply-deps!`/`apply-files!` take
-  plain maps, and the gate below is the ordinary one. A pull is one caller —
-  it produces its two trees with `git/tree-at` — and a directory is another,
-  which is the point: git became a CONSUMER of import rather than its
-  definition."
-  [session treeM treeT {:keys [agent origin label extra retry]}]
-  (let [conn    (:db @session)
-        changed (into []
-                      (comp (distinct)
-                            (filter #(not= (get treeM %) (get treeT %))))
-                      (concat (keys treeM) (keys treeT)))
-        results (volatile! {:applied [] :conflicts [] :notes []})
-        conflict! (fn [path ns-sym reason]
-                    (db/quarantine-put! conn {:path path :ns ns-sym
-                                              :source (get treeT path)
-                                              :sha origin :reason reason})
-                    (vswap! results update :conflicts conj
-                            {:path path :reason reason}))
-        applied!  (fn [n] (vswap! results update :applied conj n))
-        note!     (fn [s] (vswap! results update :notes conj s))]
-    (when (not= (get treeM "deps.edn") (get treeT "deps.edn"))
-      (apply-deps! session treeM treeT conflict! agent))
-    (apply-files! session treeM treeT changed conflict! note! agent)
-    (let [by-ns (into {} (keep (fn [p] (when-let [n' (path-ns p)] [n' p]))) changed)
-          srcs  (into {} (map (fn [[n' p]] [n' (or (get treeT p) (get treeM p) "")])) by-ns)]
-      (doseq [ns-sym (boot/dependency-order srcs)
-              :let [path (by-ns ns-sym)]]
-        (apply-ns! session ns-sym path (get treeM path) (get treeT path)
-                   conflict! applied! note! agent)))
-    ;; NO :target. `commit_point :target` is a pure retroactive marker that runs
-    ;; no done at all, so imported work — the one kind that never had to
-    ;; satisfy a single gate on its way in — was the only work here closing
-    ;; without the episode check. An external tool can write something that
-    ;; loads and is still not valid slopp, and each form compiling is exactly
-    ;; what the per-write verification already told us.
-    ;;
-    ;; The changes STAY applied on the branch on a red verdict, which is the
-    ;; same place an agent's own red work sits: they arrived through the
-    ;; ordinary verbs and are ordinary form edits. What is withheld is the
-    ;; MILESTONE, because that is what a push projects and nothing downstream
-    ;; re-judges it — `push!` refuses unresolved conflicts and a checked-out
-    ;; branch, and does not look at status at all.
-    (let [m   (external/commit-point! session label :agent agent :extra extra)
-          out {:pulled    (:applied @results)
-               :conflicts (:conflicts @results)
-               :notes     (:notes @results)}]
-      (if (= :red (:status m))
-        (assoc out
-               :status   :red
-               :findings (:findings m)
-               :error
-               (str "the imported changes ARE applied — "
-                    (count (:applied @results))
-                    " namespace(s), as ordinary form edits on this branch — and"
-                    " the done gate REFUSED them, so no milestone was recorded"
-                    " and the import is not closed. " (:error m)
-                    " Fix them here the way you would fix your own work, then"
-                    " run " retry " again: the diff is already applied so it"
-                    " re-applies nothing, and the milestone it mints then"
-                    " carries the marker this one could not."))
-        (assoc out :marker (:commit m))))))
+(defn push!
+  "Push the store at `dir`'s projection to a git remote: `:url` the first
+  time (saved as `git-remote` meta), the saved remote thereafter. The DEST
+  branch is `slopp/<:branch>` (default slopp/main) — the
+  ownership boundary: slopp owns that ONE branch; humans keep main (and
+  everything else) with regular git and merge across. Refused while pull
+  conflicts stand, and refused onto the checked-out branch of a local
+  working repo. Returns {:pushed sha :status s :remote url :remote-branch b}
+  | {:error msg}."
+  [dir & {:keys [url token branch]}]
+  (let [ctx (git/open-ctx! dir)]
+    (try
+      (let [conn    (:slopp.git/map-conn ctx)
+            target  (resolve-remote dir (or url (db/get-meta conn "git-remote")))
+            rbranch (str "slopp/" (or branch "main"))
+            q       (db/quarantine-list conn)]
+        (cond
+          (str/blank? (str target))
+          {:error "no remote configured — pass :url once (it is saved as git-remote)"}
 
-(defn- apply-pull!
-  "The pull body once fetch/merge-base decided there IS something to absorb:
-  produce the two trees from git and hand them to `apply-trees!`. The remote
-  tip becomes a `:git-sha` chain node, so our next milestone parents on it and
-  pushes stay fast-forward.
+          (seq q)
+          {:error (str "unresolved git conflicts (" (count q) ": "
+                       (str/join ", " (map :path q))
+                       ") — inspect with git_conflicts, merge via edit tools, then git_resolve")}
 
-  This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
-  and a label. Everything import actually does is below it and touches no
-  repository."
-  [session ctx url mb tip agent]
-  (let [repo (:slopp.git/repo ctx)]
-    (assoc (apply-trees! session
-                         (git/tree-at repo mb)
-                         (git/tree-at repo tip)
-                         {:agent  agent
-                          :origin tip
-                          :label  (str "pull " (subs tip 0 8) " from " url)
-                          :extra  {:git-sha tip}
-                          :retry  "git_pull"})
-           :base tip)))
+          (= rbranch (checked-out-branch target))
+          {:error (str "refs/heads/" rbranch " is checked out in the working repo at "
+                       target " — pushing would move the ref under a live working"
+                       " tree. Check out a different branch there, or push from a"
+                       " checkout (git_push mirrors slopp/* without touching the"
+                       " working tree).")}
 
-(defn pull!
-  "Absorb the remote's changes since the last common point into the LIVE
-  session: fetch, merge-base against our projected tip, 3-way apply at form
-  granularity (remote wins where we're clean; both-touched → quarantined
-  CONFLICT, our version stays live, push blocks until git_resolve), then
-  record the remote tip as a `:git-sha` chain marker. Returns
-  {:pulled [nses] :conflicts [{:path :reason}] :notes [..] :base tip :marker id}
-  | {:up-to-date true} | {:error msg}."
-  [session & {:keys [token agent]}]
-  (let [dir (:dir @session)]
-    (if-not dir
-      {:error "pull needs a durable session (a store dir)"}
-      (let [ctx (git/open-ctx! dir)]
-        (try
-          (let [url (resolve-remote dir (db/get-meta (:slopp.git/map-conn ctx) "git-remote"))]
-            (if (str/blank? (str url))
-              {:error "no remote configured — git_push with :url (or clone) first"}
-              (let [ours (get-in (git/ensure-projected! ctx) [:refs "main"])
-                    tip  (:tip (git.client/fetch-remote! (:slopp.git/repo ctx) url :token token
-                                              :branch (str "slopp/" (:branch @session "main"))))]
-                (cond
-                  (nil? tip)   {:error (str "remote has no slopp/"
-                                        (:branch @session "main")
-                                        " branch: " url)}
-                  (nil? ours)  {:error "nothing to pull onto — no local milestones or clone base"}
-                  (= tip ours) {:up-to-date true}
-                  :else
-                  (let [mb (git/merge-base (:slopp.git/repo ctx) ours tip)]
-                    (cond
-                      (nil? mb)  {:error "unrelated histories — was the remote rewritten? re-clone"}
-                      (= mb tip) {:up-to-date true}
-                      :else      (apply-pull! session ctx url mb tip agent)))))))
-          (finally (git/close-ctx! ctx)))))))
+          :else
+          (let [r     (git.client/push-to-remote! ctx target
+                                           :token token :remote-branch rbranch)
+                saved (db/get-meta conn "git-remote")]
+            ;; save the FIRST url as the default; a one-off push elsewhere
+            ;; must never silently rewrite it (it broke the user's normal
+            ;; push flow, 2026-07-14)
+            (when (and (not (:error r)) (nil? saved))
+              (db/set-meta! conn "git-remote" (str target)))
+            (assoc r :remote (str target)
+                   :default-remote (or saved (str target))))))
+      (finally (git/close-ctx! ctx)))))
 
-^:reads (defn conflicts
-  "Unresolved pull conflicts for the store at `dir` — each row carries the
-  raw remote file so the agent can merge it: [{:path :ns :source :sha
-  :reason :at}]."
+^:reads
+(defn- empty-store?
+  "True when `dir`'s existing store.db holds NOTHING — no namespaces, no
+  deltas, no files. The MCP server auto-creates exactly this when it serves
+  a fresh dir; clone/import must treat it as fresh, not refuse it."
   [dir]
   (with-open [conn (db/open! dir)]
-    (db/quarantine-list conn)))
+    (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
+      (and (empty? (:namespaces st))
+           (empty? (:deltas st))
+           (empty? (:files st))))))
 
-(defn resolve!
-  "Mark a pull conflict resolved — the agent has merged/adapted the remote
-  content through the edit tools (or decided against it). nil `path` clears
-  everything. Returns the remaining {:conflicts [...]}."
-  [dir path]
-  (with-open [conn (db/open! dir)]
-    (db/quarantine-clear! conn path)
-    {:conflicts (db/quarantine-list conn)}))
+^:reads (defn- slopp-branch?
+  "Does the git checkout at `dir` carry any slopp/* mirror branch (local or
+  origin-tracking)? The marker of a slopp-published repo — auto-import keys
+  on it so plain git repos are never touched."
+  [dir]
+  (let [repo (-> (org.eclipse.jgit.storage.file.FileRepositoryBuilder.)
+                 (.setGitDir (io/file dir ".git"))
+                 (.build))]
+    (try
+      (boolean (or (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/heads/slopp/"))
+                   (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/remotes/origin/slopp/"))))
+      (finally (.close repo)))))
 
 ^:reads (defn alignment
   "Q12: PROOF that the published slopp branch is the store's latest
@@ -711,19 +595,6 @@
                  " (or clone the published repo) first, then git_pull brings"
                  " slopp/<branch> down")}))
 
-^:reads (defn- slopp-branch?
-  "Does the git checkout at `dir` carry any slopp/* mirror branch (local or
-  origin-tracking)? The marker of a slopp-published repo — auto-import keys
-  on it so plain git repos are never touched."
-  [dir]
-  (let [repo (-> (org.eclipse.jgit.storage.file.FileRepositoryBuilder.)
-                 (.setGitDir (io/file dir ".git"))
-                 (.build))]
-    (try
-      (boolean (or (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/heads/slopp/"))
-                   (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/remotes/origin/slopp/"))))
-      (finally (.close repo)))))
-
 (defn path-declarations
   "The declarations a projected TREE carries in its PATHS — `{:platforms
   {ns-str platform} :roles {module-str :instrument}}` over `paths`.
@@ -877,6 +748,170 @@
           {:error (str "clone failed: " (ex-message e))})
         (finally (.close repo))))))
 
+(defn import!
+  "THE onboarding command: inside a git checkout (main checked out, the
+  human's files on disk), build `.slopp/store.db` from the repo's slopp
+  BRANCH — found on local heads or the checkout's remote-tracking refs — and
+  configure the store to sync against the LOCAL repo (`git-remote \".\"`,
+  resolved relative to the store dir). Only `.slopp/` is created; the
+  working dir stays the human's checkout, and origin interaction stays with
+  regular git. Returns {:dir :namespaces :base :branch :remote} | {:error}."
+  [dir & {:keys [token branch agent]}]
+  (if-not (.exists (io/file dir ".git"))
+    {:error (str dir " is not a git checkout — clone the repo first"
+                 " (or use clone <url> <dir> for a fresh fileless store)")}
+    (let [r (clone! (str dir) (str dir) :token token :branch branch :agent agent)]
+      (if (:error r)
+        r
+        (do (with-open [conn (db/open! dir)]
+              (db/set-meta! conn "git-remote" "."))
+            (assoc r :remote "."))))))
+
+(defn maybe-auto-import!
+  "Serve-time onboarding: when `dir` is a git checkout carrying a slopp
+  branch and its store is absent or EMPTY, import the branch into the
+  store — the zero-ceremony path for `git clone` then serve. Anything
+  else (plain repos, stores with content, import failures) is a nil
+  no-op; serving must never be blocked by this."
+  [dir]
+  (try
+    (when (and (.exists (io/file dir ".git"))
+               (or (not (.exists (io/file dir ".slopp" "store.db")))
+                   (empty-store? dir))
+               (slopp-branch? dir))
+      (let [r (import! dir)]
+        (when-not (:error r) r)))
+    (catch Exception _ nil)))
+
+(defn- apply-trees!
+  "Absorb the difference between two trees into the live session: diff
+  `treeM`→`treeT` (both plain {path content}), deps first, then namespaces in
+  the incoming tree's dependency order, then close the episode with a
+  milestone. Conflicts land in quarantine (push blocks until resolved).
+
+  `opts`: `:agent`, `:origin` (what the quarantined copy came FROM — a commit
+  sha for a pull, a directory for an import), `:label` (the milestone
+  description), `:extra` (extra marker fields — a pull chains `:git-sha`), and
+  `:retry` (the verb to name when the done gate refuses).
+
+  **This is the whole of import, and none of it is git.** `store.merge` is
+  three strings in and one out, `apply-ns!`/`apply-deps!`/`apply-files!` take
+  plain maps, and the gate below is the ordinary one. A pull is one caller —
+  it produces its two trees with `git/tree-at` — and a directory is another,
+  which is the point: git became a CONSUMER of import rather than its
+  definition."
+  [session treeM treeT {:keys [agent origin label extra retry]}]
+  (let [conn    (:db @session)
+        changed (into []
+                      (comp (distinct)
+                            (filter #(not= (get treeM %) (get treeT %))))
+                      (concat (keys treeM) (keys treeT)))
+        results (volatile! {:applied [] :conflicts [] :notes []})
+        conflict! (fn [path ns-sym reason]
+                    (db/quarantine-put! conn {:path path :ns ns-sym
+                                              :source (get treeT path)
+                                              :sha origin :reason reason})
+                    (vswap! results update :conflicts conj
+                            {:path path :reason reason}))
+        applied!  (fn [n] (vswap! results update :applied conj n))
+        note!     (fn [s] (vswap! results update :notes conj s))]
+    (when (not= (get treeM "deps.edn") (get treeT "deps.edn"))
+      (apply-deps! session treeM treeT conflict! agent))
+    (apply-files! session treeM treeT changed conflict! note! agent)
+    (let [by-ns (into {} (keep (fn [p] (when-let [n' (path-ns p)] [n' p]))) changed)
+          srcs  (into {} (map (fn [[n' p]] [n' (or (get treeT p) (get treeM p) "")])) by-ns)]
+      (doseq [ns-sym (boot/dependency-order srcs)
+              :let [path (by-ns ns-sym)]]
+        (apply-ns! session ns-sym path (get treeM path) (get treeT path)
+                   conflict! applied! note! agent)))
+    ;; NO :target. `commit_point :target` is a pure retroactive marker that runs
+    ;; no done at all, so imported work — the one kind that never had to
+    ;; satisfy a single gate on its way in — was the only work here closing
+    ;; without the episode check. An external tool can write something that
+    ;; loads and is still not valid slopp, and each form compiling is exactly
+    ;; what the per-write verification already told us.
+    ;;
+    ;; The changes STAY applied on the branch on a red verdict, which is the
+    ;; same place an agent's own red work sits: they arrived through the
+    ;; ordinary verbs and are ordinary form edits. What is withheld is the
+    ;; MILESTONE, because that is what a push projects and nothing downstream
+    ;; re-judges it — `push!` refuses unresolved conflicts and a checked-out
+    ;; branch, and does not look at status at all.
+    (let [m   (external/commit-point! session label :agent agent :extra extra)
+          out {:pulled    (:applied @results)
+               :conflicts (:conflicts @results)
+               :notes     (:notes @results)}]
+      (if (= :red (:status m))
+        (assoc out
+               :status   :red
+               :findings (:findings m)
+               :error
+               (str "the imported changes ARE applied — "
+                    (count (:applied @results))
+                    " namespace(s), as ordinary form edits on this branch — and"
+                    " the done gate REFUSED them, so no milestone was recorded"
+                    " and the import is not closed. " (:error m)
+                    " Fix them here the way you would fix your own work, then"
+                    " run " retry " again: the diff is already applied so it"
+                    " re-applies nothing, and the milestone it mints then"
+                    " carries the marker this one could not."))
+        (assoc out :marker (:commit m))))))
+
+(defn- apply-pull!
+  "The pull body once fetch/merge-base decided there IS something to absorb:
+  produce the two trees from git and hand them to `apply-trees!`. The remote
+  tip becomes a `:git-sha` chain node, so our next milestone parents on it and
+  pushes stay fast-forward.
+
+  This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
+  and a label. Everything import actually does is below it and touches no
+  repository."
+  [session ctx url mb tip agent]
+  (let [repo (:slopp.git/repo ctx)]
+    (assoc (apply-trees! session
+                         (git/tree-at repo mb)
+                         (git/tree-at repo tip)
+                         {:agent  agent
+                          :origin tip
+                          :label  (str "pull " (subs tip 0 8) " from " url)
+                          :extra  {:git-sha tip}
+                          :retry  "git_pull"})
+           :base tip)))
+
+(defn pull!
+  "Absorb the remote's changes since the last common point into the LIVE
+  session: fetch, merge-base against our projected tip, 3-way apply at form
+  granularity (remote wins where we're clean; both-touched → quarantined
+  CONFLICT, our version stays live, push blocks until git_resolve), then
+  record the remote tip as a `:git-sha` chain marker. Returns
+  {:pulled [nses] :conflicts [{:path :reason}] :notes [..] :base tip :marker id}
+  | {:up-to-date true} | {:error msg}."
+  [session & {:keys [token agent]}]
+  (let [dir (:dir @session)]
+    (if-not dir
+      {:error "pull needs a durable session (a store dir)"}
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [url (resolve-remote dir (db/get-meta (:slopp.git/map-conn ctx) "git-remote"))]
+            (if (str/blank? (str url))
+              {:error "no remote configured — git_push with :url (or clone) first"}
+              (let [ours (get-in (git/ensure-projected! ctx) [:refs "main"])
+                    tip  (:tip (git.client/fetch-remote! (:slopp.git/repo ctx) url :token token
+                                              :branch (str "slopp/" (:branch @session "main"))))]
+                (cond
+                  (nil? tip)   {:error (str "remote has no slopp/"
+                                        (:branch @session "main")
+                                        " branch: " url)}
+                  (nil? ours)  {:error "nothing to pull onto — no local milestones or clone base"}
+                  (= tip ours) {:up-to-date true}
+                  :else
+                  (let [mb (git/merge-base (:slopp.git/repo ctx) ours tip)]
+                    (cond
+                      (nil? mb)  {:error "unrelated histories — was the remote rewritten? re-clone"}
+                      (= mb tip) {:up-to-date true}
+                      :else      (apply-pull! session ctx url mb tip agent)))))))
+          (finally (git/close-ctx! ctx)))))))
+
 (defn import-dir!
   "Absorb a DIRECTORY of files into the live session as ordinary tracked form
   edits — three-way against the store's last milestone, through the same
@@ -940,41 +975,6 @@
                            " the exported base nor a namespace, and were left"
                            " alone: " (str/join ", " (take 5 (sort out)))
                            (when (> (count out) 5) " …"))))))))))
-
-(defn import!
-  "THE onboarding command: inside a git checkout (main checked out, the
-  human's files on disk), build `.slopp/store.db` from the repo's slopp
-  BRANCH — found on local heads or the checkout's remote-tracking refs — and
-  configure the store to sync against the LOCAL repo (`git-remote \".\"`,
-  resolved relative to the store dir). Only `.slopp/` is created; the
-  working dir stays the human's checkout, and origin interaction stays with
-  regular git. Returns {:dir :namespaces :base :branch :remote} | {:error}."
-  [dir & {:keys [token branch agent]}]
-  (if-not (.exists (io/file dir ".git"))
-    {:error (str dir " is not a git checkout — clone the repo first"
-                 " (or use clone <url> <dir> for a fresh fileless store)")}
-    (let [r (clone! (str dir) (str dir) :token token :branch branch :agent agent)]
-      (if (:error r)
-        r
-        (do (with-open [conn (db/open! dir)]
-              (db/set-meta! conn "git-remote" "."))
-            (assoc r :remote "."))))))
-
-(defn maybe-auto-import!
-  "Serve-time onboarding: when `dir` is a git checkout carrying a slopp
-  branch and its store is absent or EMPTY, import the branch into the
-  store — the zero-ceremony path for `git clone` then serve. Anything
-  else (plain repos, stores with content, import failures) is a nil
-  no-op; serving must never be blocked by this."
-  [dir]
-  (try
-    (when (and (.exists (io/file dir ".git"))
-               (or (not (.exists (io/file dir ".slopp" "store.db")))
-                   (empty-store? dir))
-               (slopp-branch? dir))
-      (let [r (import! dir)]
-        (when-not (:error r) r)))
-    (catch Exception _ nil)))
 
 (defn -main
   "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"

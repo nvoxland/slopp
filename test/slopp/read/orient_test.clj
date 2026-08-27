@@ -522,24 +522,6 @@
         (str "name the verb that builds a fresh verification image: "
              (pr-str line)))))
 
-(deftest the-currency-record-says-which-artifact-is-answering
-  ;; :host said which MODE this process runs in and never which CODE. "Am I
-  ;; running the slopp that has the fix" was therefore unanswerable from the
-  ;; brief, and six incidents answered it by hand — one of them wrongly,
-  ;; reading a jar mid-write.
-  ;;
-  ;; It rides on `info` the way :host-drift does, for the same reason: both are
-  ;; facts about THIS process that only a caller holding the store can finish.
-  (testing "absent when the process cannot say — a checkout, a bare -M run"
-    (is (not (contains? (orient/host-brief {:mode :live :booted-at 100} 0 false nil)
-                        :jar))
-        "no stamp is not a claim of currency"))
-  (testing "present, verbatim, when it is"
-    (let [h (orient/host-brief {:mode :live :booted-at 100
-                                :jar {:head "d23479" :behind 12}}
-                               0 false nil)]
-      (is (= {:head "d23479" :behind 12} (:jar h))))))
-
 (deftest jar-currency-compares-only-when-the-two-heads-share-a-store
   ;; Three claims, not two — the same discipline current-boot-info holds for
   ;; :host-drift. "I did not look" must not render as "I looked and it was
@@ -565,6 +547,24 @@
         (is (= h1 (:head r)))
         (is (= (orient/code-deltas-since st (:at (first ds))) (:behind r))
             "the same counter the host and the served app report, not a fourth spelling")))))
+
+(deftest the-currency-record-says-which-artifact-is-answering
+  ;; :host said which MODE this process runs in and never which CODE. "Am I
+  ;; running the slopp that has the fix" was therefore unanswerable from the
+  ;; brief, and six incidents answered it by hand — one of them wrongly,
+  ;; reading a jar mid-write.
+  ;;
+  ;; It rides on `info` the way :host-drift does, for the same reason: both are
+  ;; facts about THIS process that only a caller holding the store can finish.
+  (testing "absent when the process cannot say — a checkout, a bare -M run"
+    (is (not (contains? (orient/host-brief {:mode :live :booted-at 100} 0 false nil)
+                        :jar))
+        "no stamp is not a claim of currency"))
+  (testing "present, verbatim, when it is"
+    (let [h (orient/host-brief {:mode :live :booted-at 100
+                                :jar {:head "d23479" :behind 12}}
+                               0 false nil)]
+      (is (= {:head "d23479" :behind 12} (:jar h))))))
 
 (deftest a-suspect-verdict-names-the-edit-that-made-it-suspect
   ;; "Something is stale, restart" is a fix with no diagnosis, and the reader

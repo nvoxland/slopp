@@ -715,3 +715,43 @@
       ;; absent, not `[]` — an empty vector is an affirmative claim, and the
       ;; two are the same only when the derivation is complete
       (is (nil? (get calls 'shop.ui/quiet-page)) (pr-str calls)))))
+
+(deftest a-page-in-a-TEST-namespace-is-not-this-applications-surface
+  ;; Measured on slopp's own store, by a consumer fetching `/api/webapp/paths`
+  ;; against it: the document published `slopp.cljnx-test/fixture-things-page`,
+  ;; a fixture written that morning to prove the router finds a marked page.
+  ;;
+  ;; `app-namespaces` states the rule for every other publisher and says why —
+  ;; it is built on `web-endpoint-rows`, "and TEST namespaces are excluded
+  ;; there, which is right here too: a fixture endpoint is not surface." The
+  ;; page traversal was written without that filter.
+  ;;
+  ;; **The published document is the mild half.** `page-routes` is also what
+  ;; the build reads to generate a browser app's route table, so a fixture
+  ;; would ship an address into a real application — reachable, rendering a
+  ;; test's hiccup, at a url nobody wrote.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'shop.ui
+                             (str "(ns shop.ui)\n\n"
+                                  "(defn ^{:webapp/path \"/things\"} things \"T.\" [_p] [:ul])\n"))
+               (store/ingest 'shop.ui-test
+                             (str "(ns shop.ui-test)\n\n"
+                                  "(defn ^{:webapp/path \"/fixture\"} fixture \"F.\" [_p] [:ul])\n")))]
+
+    (testing "the application's page is published and the fixture is not"
+      (is (= ["/things"] (mapv :path (rules.webapp/page-routes st)))
+          (pr-str (rules.webapp/page-routes st))))
+
+    (testing "and the same holds for what each page CALLS"
+      ;; one traversal's rule applied in two places is one place too many, but
+      ;; a fixture page carrying calls would put them in the surface as well
+      (let [st2 (-> st
+                    (store/ingest 'shop.api
+                                  (str "(ns shop.api)\n\n"
+                                       "(def thing \"E.\" {:http/method :get :http/path \"/api/t\"})\n"))
+                    (store/ingest 'shop.ui-test
+                                  (str "(ns shop.ui-test (:require [shop.api :as api]))\n\n"
+                                       "(defn ^{:webapp/path \"/fixture\"} fixture \"F.\"\n"
+                                       "  [_p] [:ul (:http/path api/thing)])\n")))]
+        (is (= {} (rules.webapp/page-calls st2))
+            (pr-str (rules.webapp/page-calls st2)))))))

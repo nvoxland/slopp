@@ -151,33 +151,6 @@
                     summary             (assoc :test summary))
                   t0)))))))))
 
-^:reads (defn line-view
-  "A line's `{:store :id :image}` by NAME — from the session's parked entry if
-  it has one, else loaded from its row in the journal. nil if no such line.
-
-  This used to OPEN a db file under `.slopp/branches/<name>`. A line is a row
-  now, so the lookup happens in the store the session already has open, and
-  the id it carries is the branch's identity — which used to be a meta row
-  inside the branch's own file, i.e. a fact a store could only state about
-  itself.
-
-  **A parked value takes the FILE's id counter on the way out.** Ids are
-  minted from the store value, and a parked one stopped counting when it was
-  parked — so adopting it unchanged re-mints ids the other line has used since,
-  and `deltas.id` is UNIQUE across the journal. That is not a lost race, it is
-  a throw. A LOADED value already carries the file's counter, so this is the
-  one place the two paths differ, and it is the one place they are both
-  produced."
-  [session nm]
-  (let [conn   (:db @session)
-        parked (get (:lines @session) nm)]
-    (if (map? parked)                    ; ::claimed is a name mid-creation
-      (cond-> parked
-        conn (update-in [:store :next-id] max (or (db/next-id-floor conn) 0)))
-      (when conn
-        (when-let [row (first (filter #(= nm (:name %)) (db/lines conn)))]
-          {:store (db/load-store conn (:id row)) :id (:id row)})))))
-
 (defn boot-line-image!
   "A fresh image loaded with `store` (consumes the warm spare when ready).
   Returns {:image handle} or {:error msg}."
@@ -294,6 +267,94 @@
                                               id)))))
                   {:branch nm :from branch :id id}))))))))
 
+(defn ^:export branch-delete!
+  "Drop branch `nm` (never the one you are on): its parked image, its line row
+  and its materialization.
+
+  The DELTAS stay, unreachable from any head. Deleting a branch used to mean
+  deleting a directory that held a whole copy of the store, so it destroyed
+  history; now it drops a pointer, and the work it named remains in the
+  journal for anything that still knows a delta id."
+  [session nm]
+  (let [nm   (str nm)
+        conn (:db @session)
+        {:keys [branch lines]} @session
+        row  (when conn (first (filter #(= nm (:name %)) (db/lines conn))))]
+    (cond
+      (= nm branch)
+      {:error "cannot delete the branch you are on"}
+
+      (not (or (contains? lines nm) row))
+      {:error (str "no branch named " nm)}
+
+      :else
+      (do (some-> (get-in lines [nm :image]) repl/stop!)
+          (swap! session update :lines dissoc nm)
+          (when row (db/delete-line! conn (:id row)))
+          {:deleted nm}))))
+
+(defn ^:export query-branches
+  "Every line in the repo: the current one, this session's parked lines, and
+  the named lines in the journal it has not loaded.
+
+  The third group used to be a directory listing of `.slopp/branches/`. It is
+  a SELECT now, which is why a branch another server created shows up here
+  without either process touching the filesystem — they share one journal, and
+  a line is a row in it."
+  [session]
+  (let [{:keys [branch lines store]} @session
+        conn    (:db @session)
+        rows    (when conn (filterv :name (db/lines conn)))
+        by-name (into {} (map (juxt :name identity)) rows)
+        info    (fn [nm st line]
+                  (cond-> {:name nm}
+                    st (assoc :head   (:id (last (store/deltas st)))
+                              :deltas (count (store/deltas st)))
+                    (:id line) (assoc :id (:id line))
+                    (:image line) (assoc :image :parked)))]
+    {:current  branch
+     :branches (vec (concat
+                     [(let [bid (engine/session-branch-line session)]
+                        ;; the BRANCH's id and head, not the session's. Those
+                        ;; are the same line until a thread is adopted, and
+                        ;; after that reporting the session's would print a
+                        ;; private line's identity under a branch's name — and
+                        ;; a head containing work the branch does not have.
+                        (cond-> (assoc (info branch store {:id bid}) :image :live)
+                          conn (assoc :head (db/line-head conn bid))))]
+                     (for [[nm line] (sort-by key lines) :when (map? line)]
+                       (info nm (:store line) line))
+                     (for [nm (sort (remove (set (conj (keys lines) branch))
+                                            (keys by-name)))]
+                       {:name nm :id (:id (by-name nm))})))}))
+
+^:reads (defn line-view
+  "A line's `{:store :id :image}` by NAME — from the session's parked entry if
+  it has one, else loaded from its row in the journal. nil if no such line.
+
+  This used to OPEN a db file under `.slopp/branches/<name>`. A line is a row
+  now, so the lookup happens in the store the session already has open, and
+  the id it carries is the branch's identity — which used to be a meta row
+  inside the branch's own file, i.e. a fact a store could only state about
+  itself.
+
+  **A parked value takes the FILE's id counter on the way out.** Ids are
+  minted from the store value, and a parked one stopped counting when it was
+  parked — so adopting it unchanged re-mints ids the other line has used since,
+  and `deltas.id` is UNIQUE across the journal. That is not a lost race, it is
+  a throw. A LOADED value already carries the file's counter, so this is the
+  one place the two paths differ, and it is the one place they are both
+  produced."
+  [session nm]
+  (let [conn   (:db @session)
+        parked (get (:lines @session) nm)]
+    (if (map? parked)                    ; ::claimed is a name mid-creation
+      (cond-> parked
+        conn (update-in [:store :next-id] max (or (db/next-id-floor conn) 0)))
+      (when conn
+        (when-let [row (first (filter #(= nm (:name %)) (db/lines conn)))]
+          {:store (db/load-store conn (:id row)) :id (:id row)})))))
+
 (defn ^:export branch-switch!
   "Checkout with LINE-OWNED images: the outgoing line PARKS its image intact
   (its REPL state included — inactive lines are immutable, so a parked image
@@ -363,67 +424,6 @@
         (merge-into-session! session (:store target)
                              (str "branch:" nm "#" (or (:id target) "unknown")))
         {:error (str "no branch named " nm)}))))
-
-(defn ^:export branch-delete!
-  "Drop branch `nm` (never the one you are on): its parked image, its line row
-  and its materialization.
-
-  The DELTAS stay, unreachable from any head. Deleting a branch used to mean
-  deleting a directory that held a whole copy of the store, so it destroyed
-  history; now it drops a pointer, and the work it named remains in the
-  journal for anything that still knows a delta id."
-  [session nm]
-  (let [nm   (str nm)
-        conn (:db @session)
-        {:keys [branch lines]} @session
-        row  (when conn (first (filter #(= nm (:name %)) (db/lines conn))))]
-    (cond
-      (= nm branch)
-      {:error "cannot delete the branch you are on"}
-
-      (not (or (contains? lines nm) row))
-      {:error (str "no branch named " nm)}
-
-      :else
-      (do (some-> (get-in lines [nm :image]) repl/stop!)
-          (swap! session update :lines dissoc nm)
-          (when row (db/delete-line! conn (:id row)))
-          {:deleted nm}))))
-
-(defn ^:export query-branches
-  "Every line in the repo: the current one, this session's parked lines, and
-  the named lines in the journal it has not loaded.
-
-  The third group used to be a directory listing of `.slopp/branches/`. It is
-  a SELECT now, which is why a branch another server created shows up here
-  without either process touching the filesystem — they share one journal, and
-  a line is a row in it."
-  [session]
-  (let [{:keys [branch lines store]} @session
-        conn    (:db @session)
-        rows    (when conn (filterv :name (db/lines conn)))
-        by-name (into {} (map (juxt :name identity)) rows)
-        info    (fn [nm st line]
-                  (cond-> {:name nm}
-                    st (assoc :head   (:id (last (store/deltas st)))
-                              :deltas (count (store/deltas st)))
-                    (:id line) (assoc :id (:id line))
-                    (:image line) (assoc :image :parked)))]
-    {:current  branch
-     :branches (vec (concat
-                     [(let [bid (engine/session-branch-line session)]
-                        ;; the BRANCH's id and head, not the session's. Those
-                        ;; are the same line until a thread is adopted, and
-                        ;; after that reporting the session's would print a
-                        ;; private line's identity under a branch's name — and
-                        ;; a head containing work the branch does not have.
-                        (cond-> (assoc (info branch store {:id bid}) :image :live)
-                          conn (assoc :head (db/line-head conn bid))))]
-                     (for [[nm line] (sort-by key lines) :when (map? line)]
-                       (info nm (:store line) line))
-                     (for [nm (sort (remove (set (conj (keys lines) branch))
-                                            (keys by-name)))]
-                       {:name nm :id (:id (by-name nm))})))}))
 
 (defn ^:export land-thread!
   "Land the session's thread onto its branch, and put the session on a fresh

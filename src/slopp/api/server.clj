@@ -131,30 +131,6 @@
    :http/perform-ctx {:session session
                       :served-namespaces served-namespaces}})
 
-(defn ^:export context
-  "The reviewer API's dispatch context, assembled ONE way — over `session`.
-
-  **This exists because there were seventeen.** Every test that drove these
-  endpoints built its own `slopp.http/context` inline, and `serve!` built a
-  third; none of them wrapped, so the whole typed surface was served and
-  exercised with nothing honouring a single declared contract. One of those
-  tests opens by claiming *\"the response is validated against the SAME schema
-  var the generated client validates with\"*, which was false for as long as it
-  had been written.
-
-  `slopp.rest/validating` is what makes that claim true, and it is here rather
-  than at each call site for the reason a consuming store measured: an app that
-  can be stood up two ways will eventually be stood up both, and only one of
-  them will validate. Theirs was — production wrapped, the test path did not,
-  and a test that started a real server and asserted 200 passed while the
-  served endpoint was answering 500.
-
-  `slopp.http/context` now REFUSES a route that declares a contract with no
-  validator, so this cannot silently drift back; what this adds is that there
-  is one place to keep right."
-  [session]
-  (slopp.http/context (serving-opts session)))
-
 (defn ^:export serve!
   "Serve the reviewer UI on `port` over the CALLER's session, and return
   `{:url :port}` — or `{:error :port}` when the port is taken.
@@ -198,3 +174,27 @@
       (if-let [d (slopp.http/bind-diagnosis port e)]
         {:error d :port port}
         (throw e)))))
+
+(defn ^:export context
+  "The reviewer API's dispatch context, assembled ONE way — over `session`.
+
+  **This exists because there were seventeen.** Every test that drove these
+  endpoints built its own `slopp.http/context` inline, and `serve!` built a
+  third; none of them wrapped, so the whole typed surface was served and
+  exercised with nothing honouring a single declared contract. One of those
+  tests opens by claiming *\"the response is validated against the SAME schema
+  var the generated client validates with\"*, which was false for as long as it
+  had been written.
+
+  `slopp.rest/validating` is what makes that claim true, and it is here rather
+  than at each call site for the reason a consuming store measured: an app that
+  can be stood up two ways will eventually be stood up both, and only one of
+  them will validate. Theirs was — production wrapped, the test path did not,
+  and a test that started a real server and asserted 200 passed while the
+  served endpoint was answering 500.
+
+  `slopp.http/context` now REFUSES a route that declares a contract with no
+  validator, so this cannot silently drift back; what this adds is that there
+  is one place to keep right."
+  [session]
+  (slopp.http/context (serving-opts session)))

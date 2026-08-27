@@ -106,12 +106,112 @@
   [n cores]
   (max 1 (min 4 (quot cores 2) (quot n 8))))
 
+(defn ^{:export "slopp.verification"} read-traces
+  "Merge the form traces this run's shards wrote into the built `dir` (#121):
+  {qualified-test-sym #{qualified-form-sym ...}}, or **nil** when none were
+  written.
+
+  nil, not {}: 'the external tier traced nothing' and 'the external tier did
+  not trace' are different claims, and only the second is true of a store
+  whose build carries no trace runner. An empty map would absorb as evidence.
+
+  `merge-with into` because the run is round-robin SHARDED across concurrent
+  JVMs in one dir — each shard emits a partial map, and a test seen by two of
+  them must union its forms rather than have half of them dropped."
+  [dir]
+  (let [fs (->> (.listFiles (io/file dir))
+                (filter #(str/starts-with? (.getName ^java.io.File %)
+                                           testmain/trace-file-prefix)))]
+    (when (seq fs)
+      (->> fs
+           (map #(edn/read-string (slurp %)))
+           (apply merge-with into)))))
+
 (def shard-timeout-ms
   "Upper bound for one test-runner JVM. A hung ^:external test used to block
   sh/sh forever — wedging done! and the milestone gate with it. Test failures
   PARSE; the only thing this deadline ever kills is a JVM that stopped
   talking."
   (* 20 60 1000))
+
+(defn anchor-output
+  "Runner output made boundary-safe: file.clj:LINE coordinates lose the line
+  suffix (a bare file name is not a coordinate and passes the response
+  audit; agents anchor by name + snippet, and a crash tail's value is the
+  MESSAGE, not the line number)."
+  [s]
+  (str/replace (str s) #"(\.clj[cx]?):\d+(?::\d+)?" "$1"))
+
+(defn ^:export balance-shards
+  "Split `nses` into `n` shards balanced by IMAGE BOOTS rather than by index.
+
+  Shards run concurrently, so the external tier's wall time is its SLOWEST
+  shard, not the average — and a shard's cost is dominated by how many fresh
+  image subprocesses its tests boot (~1.15s of Clojure loading each, and that
+  boot IS the isolation the tier exists for). Round-robin by index ignored
+  that. Measured on slopp's own suite: 402 boots across 52 test namespaces
+  split `[139 100 90 73]`, so one shard still had 66 boots to go after the
+  fastest had finished. Longest-first gives `[101 101 100 100]` — 27% off the
+  critical path for the same work on the same cores.
+
+  This is NOT the warm-pool dead end — keeping images alive to skip boot — which
+  rescheduled boot work into CPU that was not idle and measured zero gain. It
+  removes idle time that already exists, and adds no concurrency.
+
+  The weights come from THE reference graph, not a source scan, so they track
+  the code and cannot drift. The order is total (weight, then name), so the
+  split is deterministic — a shard assignment that varied between runs would
+  make a flake unreproducible.
+
+  **Balanced boots are not balanced time, and a better-looking proxy made it
+  WORSE.** This split produces `[132 133 133 133]` boots — textbook — while the
+  shards hold `[78 15 14 13]` namespaces and run `[43.3s 108.1s 134.0s
+  217.1s]`. A namespace that boots nothing weighs ZERO and packs for free,
+  which looks like the bug.
+
+  It is not. Pricing a BASE per namespace plus a heavy term for tests that
+  shell a whole project was built and measured TWICE: `264s` and `275s` against
+  this weight's `217s`. Those 78 light namespaces really are nearly free —
+  43.3s across all of them, ~0.55s each — so pricing them at a boot apiece
+  spread them into the shards already carrying the expensive tests.
+
+  **The spread is not a packing failure.** It is a few namespaces costing
+  enormously more than the rest, and no split of four shards goes below the
+  single most expensive one. Fixing it needs per-namespace MEASUREMENT, which
+  the store does not record today (`:observe` deltas carry status, not time) —
+  not a cleverer proxy. Read `:cost` on an external result for what the current
+  split achieves."
+  [store nses n]
+  (let [w    (frequencies (map :from-ns
+                               (concat (refs/refs-to store 'slopp.ops.external/open!)
+                                       (refs/refs-to store 'slopp.ops/open!))))
+        cost (fn [grp] (reduce + 0 (map #(get w % 0) grp)))]
+    (reduce (fn [shards x]
+              (let [i (apply min-key #(cost (nth shards %)) (range (count shards)))]
+                (update shards i conj x)))
+            (vec (repeat n []))
+            (sort-by (juxt #(- (get w % 0)) str) nses))))
+
+(defn ^:export only-shards
+  "Split `only` — qualified test vars — into at most `n` shards, along
+  NAMESPACE lines and weighted the same way whole-namespace shards are.
+
+  A namespace cannot straddle two shards. The shard command passes `-n` per
+  namespace alongside `-v` per var, and cognitect's var filter resolves a name
+  only within a DISCOVERED namespace, so splitting one namespace's vars across
+  shards would silently drop tests.
+
+  **Why this exists.** Narrowing and sharding used to be mutually exclusive:
+  with `:only` set, `full-set` was nil, `par` fell to 1, and the run was one
+  serial JVM. So a narrowed run of 130 tests cost more than the sharded full
+  suite, and `done` deferred instead — measured, on 37.5% of recent calls,
+  with six of fifteen deferrals in the 52–136 range. The trace map had
+  identified those tests correctly; the runner simply could not act on the
+  answer. This is the runner catching up to the index."
+  [store only n]
+  (let [by-ns  (group-by #(symbol (namespace (symbol (str %)))) only)
+        shards (balance-shards store (keys by-ns) n)]
+    (filterv seq (mapv #(vec (mapcat by-ns %)) shards))))
 
 (defn ^{:export "slopp.verification"} reap!
   "Kill `proc` and everything it spawned. Returns nil once they are GONE.
@@ -190,76 +290,21 @@
                       "ms — killed, with every process it had spawned")
             :err ""})))))
 
-(defn ^:export balance-shards
-  "Split `nses` into `n` shards balanced by IMAGE BOOTS rather than by index.
+(defn ^{:export "slopp.verification"} run-shard!
+  "Shell one test shard: a fresh `clojure -M<alias>` over `grp`'s namespaces
+  in the materialized `dir`, bounded by `shard-timeout-ms` via `run-cmd!`.
+  The seam the shard-death retry rides.
 
-  Shards run concurrently, so the external tier's wall time is its SLOWEST
-  shard, not the average — and a shard's cost is dominated by how many fresh
-  image subprocesses its tests boot (~1.15s of Clojure loading each, and that
-  boot IS the isolation the tier exists for). Round-robin by index ignored
-  that. Measured on slopp's own suite: 402 boots across 52 test namespaces
-  split `[139 100 90 73]`, so one shard still had 66 boots to go after the
-  fastest had finished. Longest-first gives `[101 101 100 100]` — 27% off the
-  critical path for the same work on the same cores.
-
-  This is NOT the warm-pool dead end — keeping images alive to skip boot — which
-  rescheduled boot work into CPU that was not idle and measured zero gain. It
-  removes idle time that already exists, and adds no concurrency.
-
-  The weights come from THE reference graph, not a source scan, so they track
-  the code and cannot drift. The order is total (weight, then name), so the
-  split is deterministic — a shard assignment that varied between runs would
-  make a flake unreproducible.
-
-  **Balanced boots are not balanced time, and a better-looking proxy made it
-  WORSE.** This split produces `[132 133 133 133]` boots — textbook — while the
-  shards hold `[78 15 14 13]` namespaces and run `[43.3s 108.1s 134.0s
-  217.1s]`. A namespace that boots nothing weighs ZERO and packs for free,
-  which looks like the bug.
-
-  It is not. Pricing a BASE per namespace plus a heavy term for tests that
-  shell a whole project was built and measured TWICE: `264s` and `275s` against
-  this weight's `217s`. Those 78 light namespaces really are nearly free —
-  43.3s across all of them, ~0.55s each — so pricing them at a boot apiece
-  spread them into the shards already carrying the expensive tests.
-
-  **The spread is not a packing failure.** It is a few namespaces costing
-  enormously more than the rest, and no split of four shards goes below the
-  single most expensive one. Fixing it needs per-namespace MEASUREMENT, which
-  the store does not record today (`:observe` deltas carry status, not time) —
-  not a cleverer proxy. Read `:cost` on an external result for what the current
-  split achieves."
-  [store nses n]
-  (let [w    (frequencies (map :from-ns
-                               (concat (refs/refs-to store 'slopp.ops.external/open!)
-                                       (refs/refs-to store 'slopp.ops/open!))))
-        cost (fn [grp] (reduce + 0 (map #(get w % 0) grp)))]
-    (reduce (fn [shards x]
-              (let [i (apply min-key #(cost (nth shards %)) (range (count shards)))]
-                (update shards i conj x)))
-            (vec (repeat n []))
-            (sort-by (juxt #(- (get w % 0)) str) nses))))
-
-(defn ^:export only-shards
-  "Split `only` — qualified test vars — into at most `n` shards, along
-  NAMESPACE lines and weighted the same way whole-namespace shards are.
-
-  A namespace cannot straddle two shards. The shard command passes `-n` per
-  namespace alongside `-v` per var, and cognitect's var filter resolves a name
-  only within a DISCOVERED namespace, so splitting one namespace's vars across
-  shards would silently drop tests.
-
-  **Why this exists.** Narrowing and sharding used to be mutually exclusive:
-  with `:only` set, `full-set` was nil, `par` fell to 1, and the run was one
-  serial JVM. So a narrowed run of 130 tests cost more than the sharded full
-  suite, and `done` deferred instead — measured, on 37.5% of recent calls,
-  with six of fifteen deferrals in the 52–136 range. The trace map had
-  identified those tests correctly; the runner simply could not act on the
-  answer. This is the runner catching up to the index."
-  [store only n]
-  (let [by-ns  (group-by #(symbol (namespace (symbol (str %)))) only)
-        shards (balance-shards store (keys by-ns) n)]
-    (filterv seq (mapv #(vec (mapcat by-ns %)) shards))))
+  With `only` (qualified test vars), the shard runs just those — `-n` per
+  namespace AND `-v` per var, because cognitect's var filter resolves a name
+  only within a namespace it has discovered. `grp` must still name every
+  namespace `only` mentions; `only-shards` builds both halves together."
+  ([alias dir grp] (run-shard! alias dir grp nil))
+  ([alias dir grp only]
+   (run-cmd! (concat [repl/clojure-bin (str "-M" alias)]
+                     (mapcat #(vector "-n" (str %)) grp)
+                     (mapcat #(vector "-v" (str %)) only))
+             dir)))
 
 (defn ^{:export "slopp.verification"} shard-cost
   "The external tier's cost broken into the parts that decide whether NARROWING
@@ -328,48 +373,3 @@
                          " Re-weighting the split was tried against this spread"
                          " and measured WORSE, twice."))
                   " Materializing the project cost " (secs build-ms) " on top.")})))
-
-(defn ^{:export "slopp.verification"} run-shard!
-  "Shell one test shard: a fresh `clojure -M<alias>` over `grp`'s namespaces
-  in the materialized `dir`, bounded by `shard-timeout-ms` via `run-cmd!`.
-  The seam the shard-death retry rides.
-
-  With `only` (qualified test vars), the shard runs just those — `-n` per
-  namespace AND `-v` per var, because cognitect's var filter resolves a name
-  only within a namespace it has discovered. `grp` must still name every
-  namespace `only` mentions; `only-shards` builds both halves together."
-  ([alias dir grp] (run-shard! alias dir grp nil))
-  ([alias dir grp only]
-   (run-cmd! (concat [repl/clojure-bin (str "-M" alias)]
-                     (mapcat #(vector "-n" (str %)) grp)
-                     (mapcat #(vector "-v" (str %)) only))
-             dir)))
-
-(defn ^{:export "slopp.verification"} read-traces
-  "Merge the form traces this run's shards wrote into the built `dir` (#121):
-  {qualified-test-sym #{qualified-form-sym ...}}, or **nil** when none were
-  written.
-
-  nil, not {}: 'the external tier traced nothing' and 'the external tier did
-  not trace' are different claims, and only the second is true of a store
-  whose build carries no trace runner. An empty map would absorb as evidence.
-
-  `merge-with into` because the run is round-robin SHARDED across concurrent
-  JVMs in one dir — each shard emits a partial map, and a test seen by two of
-  them must union its forms rather than have half of them dropped."
-  [dir]
-  (let [fs (->> (.listFiles (io/file dir))
-                (filter #(str/starts-with? (.getName ^java.io.File %)
-                                           testmain/trace-file-prefix)))]
-    (when (seq fs)
-      (->> fs
-           (map #(edn/read-string (slurp %)))
-           (apply merge-with into)))))
-
-(defn anchor-output
-  "Runner output made boundary-safe: file.clj:LINE coordinates lose the line
-  suffix (a bare file name is not a coordinate and passes the response
-  audit; agents anchor by name + snippet, and a crash tail's value is the
-  MESSAGE, not the line number)."
-  [s]
-  (str/replace (str s) #"(\.clj[cx]?):\d+(?::\d+)?" "$1"))

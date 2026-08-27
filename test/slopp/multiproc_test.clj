@@ -140,12 +140,27 @@
         ;; the reader replays the suffix onto its trailing copy of b
         suffix (drop (count (store/deltas b)) (store/deltas w))
         r      (reduce store/replay-delta b suffix)]
-    (testing "replay reproduces the writer's store exactly"
+    (testing "replay reproduces the writer's CONTENT and history exactly"
       (is (some? r))
       (is (= (slopp.store.render/render-ns w 'ir.core)
              (slopp.store.render/render-ns r 'ir.core)))
-      (is (= (:next-id w) (:next-id r)))
       (is (= (store/deltas w) (store/deltas r))))
+
+    (testing "and deliberately NOT the writer's id counter"
+      ;; This asserted `(= (:next-id w) (:next-id r))` and passed, because
+      ;; `replay-delta` raised the reader's counter past every id it observed.
+      ;; That inference is gone: the FILE allocates id ranges now
+      ;; (`store.db/reserve-id-block!`), so a reader adopting the writer's
+      ;; counter would be a session minting inside another session's block —
+      ;; the exact collision the allocator exists to abolish, appearing only
+      ;; under concurrency.
+      ;;
+      ;; The reader's counter is its OWN, untouched by what it replayed.
+      (is (= (:next-id b) (:next-id r))
+          (str "replaying a foreign suffix moved this store's counter: "
+               (:next-id b) " → " (:next-id r)))
+      (is (not= (:next-id w) (:next-id r))
+          "fixture: the writer really did mint ids the reader never claimed"))
     (testing ":ingest in the suffix replays too — it used to force a reload"
       ;; The fallback was honest while `:ingest` recorded no per-form sources:
       ;; the elements table was the only account of what a namespace held. It

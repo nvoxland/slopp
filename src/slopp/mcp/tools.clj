@@ -507,7 +507,7 @@
     :description "The LEGACY sweep: elements that predate a rule slopp now enforces and that no ordinary tool can reach — hand-written (declare …) the ordering pipeline cannot see, two elements in one namespace defining ONE name (a form-addressed edit cannot say which you mean, and the last wins at load), and metadata that looks like one of slopp's dials but is not (^:unusedok waives nothing while reading as though it does). Every finding carries the call that fixes it. A THIRD question: full_check asks whether the store is CORRECT, store_health what it COSTS in bytes, this what is in here that the current rules would never have let in. Reach for it right after adopting an existing codebase (git_clone / import), where every form predates every rule — a store written entirely through slopp is normally clean."
     :inputSchema {:type "object" :properties {}}}
    {:name "ui_serve"
-    :description "Serve THIS project's own API listener — /api/* as JSON, plus this project's own SURFACE as EDN, one document per capability: /api/rest/paths (typed endpoints and their schemas), /api/http/paths (the content it serves — usually empty), /api/webapp/paths (the paths its browser owns — usually empty) and /api/webapp/routes (the addresses that browser routes to, from the declared client route table). It has NO pages in it: `/` answers 404, so a human handed this url sees JSON. The screens live in the HUB, a separate application that renders every page and fronts this project at /p/<slug>/ (D-hub part 4) — when the answer is for a human, hand over session_brief's :hub, not its :ui. Served on the LIVE session, so warranty and observed examples are the ones this session actually has; a process that opened the same store fresh would show every form as covered by nothing. Returns {:url :port}. `port` pins the address for THIS run only — there is no capability for it, because this port is an output: DERIVED from the store dir so several projects on one machine never collide, stable across restarts, and reported rather than set. 7359 is slopp.hub.port, a different setting and a real one; `stop: true` shuts it down. Serving again EVICTS the running server rather than hunting for a free port, and a port someone else holds comes back as a sentence, not a stack trace."
+    :description "Serve THIS project's own API listener — /api/* as JSON, plus this project's own SURFACE as EDN, one document per capability: /api/rest/paths (typed endpoints and their schemas), /api/http/paths (the content it serves — usually empty), /api/webapp/paths (the addresses its browser routes to, one row per :webapp/path page, with the endpoints each page calls — usually empty). It has NO pages in it: `/` answers 404, so a human handed this url sees JSON. The screens live in the HUB, a separate application that renders every page and fronts this project at /p/<slug>/ (D-hub part 4) — when the answer is for a human, hand over session_brief's :hub, not its :ui. Served on the LIVE session, so warranty and observed examples are the ones this session actually has; a process that opened the same store fresh would show every form as covered by nothing. Returns {:url :port}. `port` pins the address for THIS run only — there is no capability for it, because this port is an output: DERIVED from the store dir so several projects on one machine never collide, stable across restarts, and reported rather than set. 7359 is slopp.hub.port, a different setting and a real one; `stop: true` shuts it down. Serving again EVICTS the running server rather than hunting for a free port, and a port someone else holds comes back as a sentence, not a stack trace."
     :inputSchema {:type "object"
                   :properties {:port {:type "integer"}
                                :stop {:type "boolean"}}}}
@@ -612,6 +612,97 @@
     :description "Mark a pull conflict resolved (omit path = all). Unblocks git_push."
     :inputSchema {:type "object" :properties {:path {:type "string"}}}}])
 
+(def cheat-sheet
+  "slopp cheat-sheet
+TURN:    turn_begin {agent, intent: <user's verbatim ask>} FIRST -- writes are
+         refused without an open turn; turn_end {agent} when done (red is ok)
+ORIENT:  query_project (everything, one call) · query_search {pattern} (the grep)
+         query_source {targets [{ns name}]} (form source) · query_depends {on ns/name}
+OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
+         query_observe {ns name code} (capture args/returns flowing through a fn)
+WRITE:   work like a REPL: small individual writes, each verifies and returns
+         :test — mid-episode reds are normal; stale callers ride :carried-errors
+         until done re-checks them.
+         edit_add_form / edit_replace_form {ns name source prompt}
+         edit_rename {ns old new}   <- never rename by editing call sites
+         edit_extract {ns from form name} · edit_move {ns name before}
+         ns_create {ns requires?|source?}  <- NEW namespace: scaffold+grow, or whole source at once
+         ns_add_require / ns_remove_require  <- never hand-edit the ns form
+RULES:   every write must compile -- but form ORDER is not your job: write
+         forms in any order; the pipeline moves definitions above their
+         callers and mints any (declare) itself. Yours are refused.
+         red-first TDD = write the failing test FIRST (missing fns land as
+         :red-first stubs and fail honestly), then implement
+READ RESULTS: {:ok true ...} terse green · :failures = why (expected/actual)
+         :diagnosis :genuine = real red, yours · :staleness-detected = healed
+         :warnings = fix with edit_rename per :suggest · :untested = add a test
+         (draft_test {ns name code} drafts one from OBSERVED calls)
+SHARE:   git_push {url?} (milestones -> a normal git remote; url saved once)
+         git_pull (3-way absorb: remote wins where you're clean; both-touched =
+         conflict, yours stays live, push blocked until git_resolve {path})
+         import_dir {dir} (same absorb from a DIRECTORY — a zip, a scratch
+         tree, another tool's output; no git involved on either side)
+         config {key value?} (user.name/user.email = milestone author identity)
+FINISH:  done {label} (tidies, lints, marks the unit boundary)
+         commit_point {description} <- MILESTONE: green-gated, the grain a
+         human diffs and reverts to; coarser than done-points and turns")
+
+(def single-write-tools #{"edit_replace_form" "edit_add_form"})
+
+(def write-tools
+  (into single-write-tools
+        ["edit_delete_form" "edit_rename" "edit_extract"
+         "edit_move" "ns_add_require" "ns_remove_require" "ns_create"
+         "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
+         "deps_pure" "change_signature" "ns_realias"]))
+
+(def extra-accepted-arg-keys
+  "Per-tool ALIASES the dispatch in slopp.mcp/call-tool! reads via
+   (or (:canonical a) (:alias a)) — deliberately kept OUT of the advertised
+   inputSchema so agents learn the one canonical key, but accepted (not refused
+   as unknown) when a client sends the alias. call-tool! is the source of truth;
+   the arg-forgiveness tests pin every entry, so a missed alias REDS the suite
+   rather than silently refusing documented behaviour."
+  {"edit_rename"    #{:name :from :to}
+   "edit_subform"   #{:from :to :after}
+   "edit_extract"   #{:source :subform}
+   "rename_sweep"   #{:dry_run}
+   "edit_requalify" #{:dry_run}})
+
+(def wire-keys
+  "Every key a write result may carry to the agent — ONE list, replacing the
+  fourteen hand-maintained `select-keys` allowlists in `call-tool!`.
+
+  **The union is safe, and that is the whole argument.** A key absent from a
+  result is absent from the output whatever the allowlist says, so a per-tool
+  list never protected anything — each was an independent guess at what that
+  one operation returns. What they did instead was lose things: `:dry-run`'s
+  payload, `:drift`, `:external-pending` and a `:fix` hint have each been
+  built, tested and correct one layer down while the agent saw the old
+  behaviour. `summarize`'s docstring has recorded that happening three times;
+  the fourth is what produced this.
+
+  Measured before consolidating: 14 lists, 39 distinct keys, and exactly TWO
+  (`:error`, `:test`) appearing in all of them.
+
+  Bulk payloads are not excluded here but by `summarize`, which strips
+  `:source`/`:sources`/`:node` off deltas — a size concern, not a routing one,
+  and it belongs where the shaping happens."
+  #{;; refusals and the recovery they name
+    :error :conflict :note :hint :suggestion :source-now :fix
+    ;; what landed
+    :delta :deltas :group :forms :affected :renamed :renamed-namespaces
+    :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
+    :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
+    :extracted :step :to-ns :keys :unknown-shape
+    ;; what a realias moved, and what it declined to
+    :sites :lib :left-behind
+    ;; what it cost and whether to believe it
+    :test :ms :untested :image-healed :red-first :red-first-arity :carried-errors
+    :warnings :existing-warnings :advisories :drift :manual
+    ;; a preview's whole point
+    :dry-run :in-code :in-strings})
+
 (defn classify
   "`entries` with `k` resolved — `default?` unless an entry already states its
   own.
@@ -658,28 +749,6 @@
          (-> env-tools         (classify :read-only false) (classify :image-free false))
          (-> sync-tools        (classify :read-only false) (classify :image-free false))]))
 
-(def image-free-tools
-  "Tools that answer from the STORE VALUE + in-process analysis alone — they
-  touch neither the owned image nor a write path, so the MCP dispatch serves
-  them WITHOUT waiting for the async image boot (the server claims ready as
-  soon as the store loads; orientation and reading are instant). Everything
-  else — the oracle tools (query_eval/query_call/query_observe/
-  query_macroexpand/query_store, which eval in the image) and every write —
-  `api/await-image!`s the boot first.
-
-  DERIVED from [[classified]], not maintained. It was a set of 25 name strings
-  living three hundred lines from the descriptors it classified: adding a
-  store-value read was TWO writes, and forgetting the second is silent — the
-  tool works and merely waits for a boot it never needed.
-
-  Being CONSERVATIVE is still safe and still the rule, but it is now stated per
-  tool rather than by omission: a tool marked `:image-free false` waits for the
-  boot; one wrongly marked true would touch a not-yet-live image. `store_doctor`
-  and `store_health` are deliberately NOT image-free even though they only read
-  — the conservative side of a judgement, which is worth being able to see on
-  the entry."
-  (into #{} (comp (filter :image-free) (map :name)) classified))
-
 (def read-only-tools
   "Tool names that never modify the STORE — advertised with the MCP
   readOnlyHint annotation so clients (Claude Code plan mode, permission
@@ -713,18 +782,27 @@
             (:read-only t) (assoc :annotations {:readOnlyHint true})))
         classified))
 
-(def extra-accepted-arg-keys
-  "Per-tool ALIASES the dispatch in slopp.mcp/call-tool! reads via
-   (or (:canonical a) (:alias a)) — deliberately kept OUT of the advertised
-   inputSchema so agents learn the one canonical key, but accepted (not refused
-   as unknown) when a client sends the alias. call-tool! is the source of truth;
-   the arg-forgiveness tests pin every entry, so a missed alias REDS the suite
-   rather than silently refusing documented behaviour."
-  {"edit_rename"    #{:name :from :to}
-   "edit_subform"   #{:from :to :after}
-   "edit_extract"   #{:source :subform}
-   "rename_sweep"   #{:dry_run}
-   "edit_requalify" #{:dry_run}})
+(def image-free-tools
+  "Tools that answer from the STORE VALUE + in-process analysis alone — they
+  touch neither the owned image nor a write path, so the MCP dispatch serves
+  them WITHOUT waiting for the async image boot (the server claims ready as
+  soon as the store loads; orientation and reading are instant). Everything
+  else — the oracle tools (query_eval/query_call/query_observe/
+  query_macroexpand/query_store, which eval in the image) and every write —
+  `api/await-image!`s the boot first.
+
+  DERIVED from [[classified]], not maintained. It was a set of 25 name strings
+  living three hundred lines from the descriptors it classified: adding a
+  store-value read was TWO writes, and forgetting the second is silent — the
+  tool works and merely waits for a boot it never needed.
+
+  Being CONSERVATIVE is still safe and still the rule, but it is now stated per
+  tool rather than by omission: a tool marked `:image-free false` waits for the
+  boot; one wrongly marked true would touch a not-yet-live image. `store_doctor`
+  and `store_health` are deliberately NOT image-free even though they only read
+  — the conservative side of a judgement, which is worth being able to see on
+  the entry."
+  (into #{} (comp (filter :image-free) (map :name)) classified))
 
 (defn accepted-arg-keys
   "The full set of argument keys tool `name` accepts: its inputSchema
@@ -747,81 +825,3 @@
   [name arguments]
   (when-let [acc (accepted-arg-keys name)]
     (seq (remove acc (keys arguments)))))
-
-(def cheat-sheet
-  "slopp cheat-sheet
-TURN:    turn_begin {agent, intent: <user's verbatim ask>} FIRST -- writes are
-         refused without an open turn; turn_end {agent} when done (red is ok)
-ORIENT:  query_project (everything, one call) · query_search {pattern} (the grep)
-         query_source {targets [{ns name}]} (form source) · query_depends {on ns/name}
-OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
-         query_observe {ns name code} (capture args/returns flowing through a fn)
-WRITE:   work like a REPL: small individual writes, each verifies and returns
-         :test — mid-episode reds are normal; stale callers ride :carried-errors
-         until done re-checks them.
-         edit_add_form / edit_replace_form {ns name source prompt}
-         edit_rename {ns old new}   <- never rename by editing call sites
-         edit_extract {ns from form name} · edit_move {ns name before}
-         ns_create {ns requires?|source?}  <- NEW namespace: scaffold+grow, or whole source at once
-         ns_add_require / ns_remove_require  <- never hand-edit the ns form
-RULES:   every write must compile -- but form ORDER is not your job: write
-         forms in any order; the pipeline moves definitions above their
-         callers and mints any (declare) itself. Yours are refused.
-         red-first TDD = write the failing test FIRST (missing fns land as
-         :red-first stubs and fail honestly), then implement
-READ RESULTS: {:ok true ...} terse green · :failures = why (expected/actual)
-         :diagnosis :genuine = real red, yours · :staleness-detected = healed
-         :warnings = fix with edit_rename per :suggest · :untested = add a test
-         (draft_test {ns name code} drafts one from OBSERVED calls)
-SHARE:   git_push {url?} (milestones -> a normal git remote; url saved once)
-         git_pull (3-way absorb: remote wins where you're clean; both-touched =
-         conflict, yours stays live, push blocked until git_resolve {path})
-         import_dir {dir} (same absorb from a DIRECTORY — a zip, a scratch
-         tree, another tool's output; no git involved on either side)
-         config {key value?} (user.name/user.email = milestone author identity)
-FINISH:  done {label} (tidies, lints, marks the unit boundary)
-         commit_point {description} <- MILESTONE: green-gated, the grain a
-         human diffs and reverts to; coarser than done-points and turns")
-
-(def single-write-tools #{"edit_replace_form" "edit_add_form"})
-
-(def write-tools
-  (into single-write-tools
-        ["edit_delete_form" "edit_rename" "edit_extract"
-         "edit_move" "ns_add_require" "ns_remove_require" "ns_create"
-         "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
-         "deps_pure" "change_signature" "ns_realias"]))
-
-(def wire-keys
-  "Every key a write result may carry to the agent — ONE list, replacing the
-  fourteen hand-maintained `select-keys` allowlists in `call-tool!`.
-
-  **The union is safe, and that is the whole argument.** A key absent from a
-  result is absent from the output whatever the allowlist says, so a per-tool
-  list never protected anything — each was an independent guess at what that
-  one operation returns. What they did instead was lose things: `:dry-run`'s
-  payload, `:drift`, `:external-pending` and a `:fix` hint have each been
-  built, tested and correct one layer down while the agent saw the old
-  behaviour. `summarize`'s docstring has recorded that happening three times;
-  the fourth is what produced this.
-
-  Measured before consolidating: 14 lists, 39 distinct keys, and exactly TWO
-  (`:error`, `:test`) appearing in all of them.
-
-  Bulk payloads are not excluded here but by `summarize`, which strips
-  `:source`/`:sources`/`:node` off deltas — a size concern, not a routing one,
-  and it belongs where the shaping happens."
-  #{;; refusals and the recovery they name
-    :error :conflict :note :hint :suggestion :source-now :fix
-    ;; what landed
-    :delta :deltas :group :forms :affected :renamed :renamed-namespaces
-    :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
-    :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
-    :extracted :step :to-ns :keys :unknown-shape
-    ;; what a realias moved, and what it declined to
-    :sites :lib :left-behind
-    ;; what it cost and whether to believe it
-    :test :ms :untested :image-healed :red-first :red-first-arity :carried-errors
-    :warnings :existing-warnings :advisories :drift :manual
-    ;; a preview's whole point
-    :dry-run :in-code :in-strings})

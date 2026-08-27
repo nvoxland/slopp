@@ -1521,3 +1521,52 @@
                                         nil)]
         (is (re-find #"\^:export place\b" bang) bang)
         (is (not (re-find #"place!" (str/replace bang #"hub/place!" ""))) bang)))))
+
+(deftest ^:external a-regeneration-that-REPLACES-every-wrapper-says-so
+  ;; Reported by a consumer who did it: hunting for a live contract, they
+  ;; pointed `generate_client` at their own hub instead of the API they consume,
+  ;; and it replaced thirteen reviewer descriptors with five hub ones and
+  ;; reported success. Their own mistake, and cheap to make loud.
+  ;;
+  ;; A regeneration that drops every name it previously wrote and shares none
+  ;; with the new set is far more likely a wrong URL than a real contract
+  ;; change. So the result NAMES what it dropped and says which shape it was.
+  ;;
+  ;; Reported, never refused. A real API can legitimately rename everything at
+  ;; once, and a refusal would make the tool wrong about the case it is
+  ;; guessing at — the point is that the agent reads the answer, not that the
+  ;; tool decides.
+  (let [first-doc {:paths [{:method :get :path "/api/forms" :name 'forms
+                            :response [:map [:names :string]]}
+                           {:method :get :path "/api/modules" :name 'modules
+                            :response [:map [:names :string]]}]}
+        other-doc {:paths [{:method :get :path "/api/projects" :name 'projects
+                            :response [:map [:names :string]]}]}
+        sess      (external/open!)]
+    (try
+      (testing "the first generation drops nothing, because there was nothing"
+        (let [r (with-redefs [cljs/fetch-contract (fn [& _] first-doc)]
+                  (cljs/generate-client-from! sess "http://api.test/contract"
+                                              :ns 'shopz.client.api))]
+          (is (= 2 (:endpoints r)) (pr-str r))
+          (is (nil? (:dropped r)) (pr-str r))))
+
+      (testing "a regeneration against the WRONG url names every wrapper it removed"
+        (let [r (with-redefs [cljs/fetch-contract (fn [& _] other-doc)]
+                  (cljs/generate-client-from! sess "http://hub.test/contract"
+                                              :ns 'shopz.client.api))]
+          (is (= ["forms" "modules"] (:dropped r)) (pr-str r))
+          (is (re-find #"(?i)different api|wrong url" (str (:dropped-note r)))
+              (str "the drop is reported without saying what it usually means: "
+                   (pr-str r)))))
+
+      (testing "and a genuine ADDITION says nothing, because nothing was lost"
+        (let [r (with-redefs [cljs/fetch-contract
+                              (fn [& _] {:paths (concat (:paths other-doc)
+                                                        (:paths first-doc))})]
+                  (cljs/generate-client-from! sess "http://hub.test/contract"
+                                              :ns 'shopz.client.api))]
+          (is (nil? (:dropped r)) (pr-str r))
+          (is (nil? (:dropped-note r)) (pr-str r))))
+
+      (finally (ops/close! sess)))))

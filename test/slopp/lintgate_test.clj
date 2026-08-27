@@ -5,11 +5,11 @@
             [slopp.edit :as edit]
             [slopp.store :as store] [slopp.index :as index] [slopp.edit.lintgate :as lintgate]))
 
-(defn- st [src] (store/ingest (store/empty-store) 'lg.core src))
-
 (def clean "(ns lg.core)\n(defn f [x] x)\n(defn g [] (f 1))\n")
 
 (def bad   "(ns lg.core)\n(defn f [x] x)\n(defn g [] (f 1 2))\n")
+
+(defn- st [src] (store/ingest (store/empty-store) 'lg.core src))
 
 (deftest introducing-an-arity-error-is-refused
   (testing "an arity error in a form NOT being written CARRIES (REPL flow)"

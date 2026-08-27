@@ -26,6 +26,53 @@
   (let [s (str s)]
     (if (<= (count s) n) s (str (subs s 0 n) "…"))))
 
+(defn ^:export fit-report
+  "G13 at the gate boundary — by AGGREGATION, never amputation: an
+  over-budget report first trims asks to 1/row, then ROLLS CHANGES UP by
+  namespace ({:ns :forms :ops :asks}) — the information survives at a
+  coarser grain and report {contains} expands any group. Amputation
+  (take 20 of the rollup) is the last resort for pathological stores.
+  (eval9: the take-20 amputation CAUSED the handoff fan-out — agents went
+  hunting for what the report dropped.)"
+  [r]
+  (let [fits? #(<= (count (pr-str %)) 6500)]
+    (if (fits? r)
+      r
+      (let [slim (update r :changes
+                         (fn [cs] (mapv #(update % :asks (comp vec (partial take 1))) cs)))]
+        (if (fits? slim)
+          (assoc slim :note "asks trimmed to 1/row — report {contains} narrows")
+          (let [rolled (->> (:changes slim)
+                            (group-by :ns)
+                            (mapv (fn [[nsx rows]]
+                                    {:ns nsx :forms (count rows)
+                                     :ops (vec (distinct (mapcat :ops rows)))
+                                     :asks (vec (take 1 (distinct (mapcat :asks rows))))}))
+                            (sort-by (comp str :ns)))
+                slim2  (assoc slim :changes (vec rolled)
+                              :note "changes rolled up by namespace — report {contains <ns or word>} expands a group")]
+            (if (fits? slim2)
+              slim2
+              (-> slim2
+                  (update :changes #(vec (take 20 %)))
+                  (assoc :note (str "rolled up by namespace, showing 20 of "
+                                    (count rolled) " — {contains} narrows"))))))))))
+
+(defn ^:export code-deltas-since
+  "How many CODE deltas landed after `at` (epoch ms) — the host-currency
+  count, and the ONLY spelling of it.
+
+  Markers (`store.fields/markers`: :verify :done :commit :merge :revert, the
+  turn pair) are bookkeeping, not code: a host that has not \"loaded\" a :done
+  delta is not behind on anything. A nil `at` counts everything rather than
+  skipping the question, because a missing boot timestamp must never read as
+  a clean bill of health."
+  [store at]
+  (let [at (or at 0)]
+    (count (filter #(and (> (:at % 0) at)
+                         (not (contains? fields/markers (:op %))))
+                   (store/deltas store)))))
+
 (def ^:private doc-summary-cap
   "The character budget for a doc summary. Composites carry MANY of these, so
   one verbose docstring must not eat the result."
@@ -127,38 +174,6 @@
         teach (assoc :teach teach)
         examples (assoc :examples examples)))))
 
-(defn ^:export fit-report
-  "G13 at the gate boundary — by AGGREGATION, never amputation: an
-  over-budget report first trims asks to 1/row, then ROLLS CHANGES UP by
-  namespace ({:ns :forms :ops :asks}) — the information survives at a
-  coarser grain and report {contains} expands any group. Amputation
-  (take 20 of the rollup) is the last resort for pathological stores.
-  (eval9: the take-20 amputation CAUSED the handoff fan-out — agents went
-  hunting for what the report dropped.)"
-  [r]
-  (let [fits? #(<= (count (pr-str %)) 6500)]
-    (if (fits? r)
-      r
-      (let [slim (update r :changes
-                         (fn [cs] (mapv #(update % :asks (comp vec (partial take 1))) cs)))]
-        (if (fits? slim)
-          (assoc slim :note "asks trimmed to 1/row — report {contains} narrows")
-          (let [rolled (->> (:changes slim)
-                            (group-by :ns)
-                            (mapv (fn [[nsx rows]]
-                                    {:ns nsx :forms (count rows)
-                                     :ops (vec (distinct (mapcat :ops rows)))
-                                     :asks (vec (take 1 (distinct (mapcat :asks rows))))}))
-                            (sort-by (comp str :ns)))
-                slim2  (assoc slim :changes (vec rolled)
-                              :note "changes rolled up by namespace — report {contains <ns or word>} expands a group")]
-            (if (fits? slim2)
-              slim2
-              (-> slim2
-                  (update :changes #(vec (take 20 %)))
-                  (assoc :note (str "rolled up by namespace, showing 20 of "
-                                    (count rolled) " — {contains} narrows"))))))))))
-
 (def stuck-reload-attempts
   "Consecutive failed reload polls after which a namespace is STUCK rather
   than retrying — three.
@@ -169,6 +184,70 @@
   genuine transient (a half-written db page, a contended read) without leaving
   room for false hope."
   3)
+
+(defn ^:export behind
+  "How many CODE changes the SERVED app image is behind the store — `0` when
+  it is current, `nil` when there is no answer.
+
+  This is the HOST-CURRENCY question one image over, so it is deliberately
+  the same count: [[slopp.read.orient/code-deltas-since]], whose docstring
+  calls itself \"the ONLY spelling of it\". Delegating rather than filtering
+  here is the whole point — this store already carries four near-copies of
+  the no-content op set, and a fifth that drifted by one op would report a
+  different number for the same staleness.
+
+  The filtering is not a nicety. Markers are 8383 of this store's ~17400
+  deltas and `:verify` alone is 6441, because every write appends one. A raw
+  delta count would report roughly twice the changes anyone actually made,
+  and a number that overstates is a number people stop reading.
+
+  **`0` is an answer and must be reported.** The question this exists for is
+  \"is the page I am about to look at built from what I just wrote?\", and
+  staying silent when the answer is yes puts the reader back where they
+  started — hand-checking something the system knows. Silence is reserved for
+  \"nothing is serving\", which is most stores.
+
+  **A running map with no `:served-at` answers nil, and that is the opposite
+  default from `code-deltas-since`.** There, a missing boot stamp counts
+  everything, because a host that cannot say when it booted must not read as
+  current. Here the caller has already established something IS serving, so
+  an absent stamp is a slopp bug rather than a stale app — and reporting a
+  freshly-served app as maximally behind would send someone to re-serve a
+  thing that is already right.
+
+  Reported by slopp-ui, twice, and the second bite is the expensive one: a
+  restyled page passed `full_check`, `compile_client` and a bundle copy, and
+  the served stylesheet was still the old one. Markup that has moved on from
+  its stylesheet does not render as an old page — it renders as a broken one."
+  [store running]
+  (when (:serving? running)
+    (when-let [at (:served-at running)]
+      (code-deltas-since store at))))
+
+(defn ^:export jar-currency
+  "What the running ARTIFACT is, placed against `store` — `{:head id}` always,
+  plus `:behind n` when this store is the one it came from. Nil `head` → nil.
+
+  `head` is [[slopp.kernel.boot/jar-head]]'s answer: the store head the jar was
+  built from, or nil in a process that is not running one.
+
+  **`:behind` is ABSENT rather than 0 when the head is foreign**, and this is
+  the case the obvious version gets wrong. slopp's jar serves projects that are
+  not slopp, so a head from one store and a delta log from another share
+  nothing; counting deltas after that head's timestamp in THIS log would
+  measure how fast the reader has been writing and report it as the tool's age.
+  The identity still travels, because it is exactly what a human compares by
+  hand across two stores — which is how the six incidents behind this were
+  eventually solved, expensively.
+
+  The count is [[code-deltas-since]] and nothing else. Three artifacts now
+  report staleness — the host, the served app, this — and a fourth spelling
+  that drifted by one op would answer the same question three different ways."
+  [store head]
+  (when head
+    (let [d (first (filter #(= head (:id %)) (store/deltas store)))]
+      (cond-> {:head head}
+        d (assoc :behind (code-deltas-since store (:at d)))))))
 
 (defn- one-cause
   "The single edit every drifted row agrees on, as a clause — nil when they
@@ -358,21 +437,6 @@
         (:jar info)            (assoc :jar (:jar info))
         note                   (assoc :note note)))))
 
-(defn ^:export code-deltas-since
-  "How many CODE deltas landed after `at` (epoch ms) — the host-currency
-  count, and the ONLY spelling of it.
-
-  Markers (`store.fields/markers`: :verify :done :commit :merge :revert, the
-  turn pair) are bookkeeping, not code: a host that has not \"loaded\" a :done
-  delta is not behind on anything. A nil `at` counts everything rather than
-  skipping the question, because a missing boot timestamp must never read as
-  a clean bill of health."
-  [store at]
-  (let [at (or at 0)]
-    (count (filter #(and (> (:at % 0) at)
-                         (not (contains? fields/markers (:op %))))
-                   (store/deltas store)))))
-
 (defn ^:export host-warning
   "The host code-currency record for a VERDICT — nil unless the process
   producing that verdict is running code the store has moved past.
@@ -471,70 +535,6 @@
                       " the host is current. That is the SERVING process, so the"
                       " `restart` tool does not settle it; the next poll retries"
                       " and the MCP server coming up again is the certain fix")))))))
-
-(defn ^:export jar-currency
-  "What the running ARTIFACT is, placed against `store` — `{:head id}` always,
-  plus `:behind n` when this store is the one it came from. Nil `head` → nil.
-
-  `head` is [[slopp.kernel.boot/jar-head]]'s answer: the store head the jar was
-  built from, or nil in a process that is not running one.
-
-  **`:behind` is ABSENT rather than 0 when the head is foreign**, and this is
-  the case the obvious version gets wrong. slopp's jar serves projects that are
-  not slopp, so a head from one store and a delta log from another share
-  nothing; counting deltas after that head's timestamp in THIS log would
-  measure how fast the reader has been writing and report it as the tool's age.
-  The identity still travels, because it is exactly what a human compares by
-  hand across two stores — which is how the six incidents behind this were
-  eventually solved, expensively.
-
-  The count is [[code-deltas-since]] and nothing else. Three artifacts now
-  report staleness — the host, the served app, this — and a fourth spelling
-  that drifted by one op would answer the same question three different ways."
-  [store head]
-  (when head
-    (let [d (first (filter #(= head (:id %)) (store/deltas store)))]
-      (cond-> {:head head}
-        d (assoc :behind (code-deltas-since store (:at d)))))))
-
-(defn ^:export behind
-  "How many CODE changes the SERVED app image is behind the store — `0` when
-  it is current, `nil` when there is no answer.
-
-  This is the HOST-CURRENCY question one image over, so it is deliberately
-  the same count: [[slopp.read.orient/code-deltas-since]], whose docstring
-  calls itself \"the ONLY spelling of it\". Delegating rather than filtering
-  here is the whole point — this store already carries four near-copies of
-  the no-content op set, and a fifth that drifted by one op would report a
-  different number for the same staleness.
-
-  The filtering is not a nicety. Markers are 8383 of this store's ~17400
-  deltas and `:verify` alone is 6441, because every write appends one. A raw
-  delta count would report roughly twice the changes anyone actually made,
-  and a number that overstates is a number people stop reading.
-
-  **`0` is an answer and must be reported.** The question this exists for is
-  \"is the page I am about to look at built from what I just wrote?\", and
-  staying silent when the answer is yes puts the reader back where they
-  started — hand-checking something the system knows. Silence is reserved for
-  \"nothing is serving\", which is most stores.
-
-  **A running map with no `:served-at` answers nil, and that is the opposite
-  default from `code-deltas-since`.** There, a missing boot stamp counts
-  everything, because a host that cannot say when it booted must not read as
-  current. Here the caller has already established something IS serving, so
-  an absent stamp is a slopp bug rather than a stale app — and reporting a
-  freshly-served app as maximally behind would send someone to re-serve a
-  thing that is already right.
-
-  Reported by slopp-ui, twice, and the second bite is the expensive one: a
-  restyled page passed `full_check`, `compile_client` and a bundle copy, and
-  the served stylesheet was still the old one. Markup that has moved on from
-  its stylesheet does not render as an old page — it renders as a broken one."
-  [store running]
-  (when (:serving? running)
-    (when-let [at (:served-at running)]
-      (code-deltas-since store at))))
 
 (defn ^:export bundle-currency
   "What the compiled BUNDLE at `path` is, placed against `store` — `{:sha …
