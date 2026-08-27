@@ -334,7 +334,9 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/config" :http/auth :public
+(defn ^{:rest/unconstrained-ok
+        "`:config → :default` and `:config → :effective` ONLY. A setting's value has the type ITS OWN registry entry declares — most are scalars and http.auth.providers is a SET — so there is no common type to name, and the registry is open: the next capability may declare a map. Constraining them to a scalar union was tried and REFUSED a real document, 500ing this endpoint against its own contract. Every other field here IS named: :value is the raw stored string, :owners is string to string, :orphaned/:value is a string."}
+        ^{:http/method :get :rest/path "/api/config" :http/auth :public
         :rest/media-type "application/edn"
         :rest/request contracts/config-request
         :rest/response contracts/config-document

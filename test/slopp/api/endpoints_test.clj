@@ -1038,6 +1038,7 @@
                     "/api/rest/paths"
                     "/api/http/paths"
                     "/api/webapp/paths"
+                    "/api/config"
                     "/api/modules"
                     "/api/timeline"
                     "/api/search?q=hello"
@@ -1049,6 +1050,36 @@
               (str path " did not honour its declared :rest/response once "
                    "serialized — a 500 here IS the contract violation, and the "
                    "explain is on stderr: " (pr-str (:body r)))))))
+
+    (testing "and the LIST above covers every endpoint that needs no fixture data"
+      ;; The list is hand-kept and its own docstring calls it exhaustive. That
+      ;; is a CLAIM, and it went stale the first time somebody added an
+      ;; endpoint: `/api/config` shipped, 500d against its own contract on the
+      ;; live listener, and this suite stayed green because the path was in no
+      ;; list. A green that proves nothing about a new endpoint is worse than
+      ;; a red, because it is read as coverage.
+      ;;
+      ;; So the claim is checked. Every route with no path CAPTURE needs no
+      ;; fixture data and must be tested above; the parameterised ones stay
+      ;; hand-written because they need an id or a name this store has to
+      ;; build. Adding an endpoint now fails HERE, naming it, instead of
+      ;; failing in a browser.
+      (let [tested (set (map #(first (str/split % #"\?"))
+                            ["/api/namespaces" "/api/ns/demo.core" "/api/rest/paths"
+                             "/api/http/paths" "/api/webapp/paths" "/api/config"
+                             "/api/modules" "/api/timeline" "/api/search"
+                             "/api/form" "/api/source" "/api/module"]))
+            plain  (for [row (:http/routes ctx)
+                         :let [p (str (:path row))]
+                         :when (and (str/starts-with? p "/api/")
+                                    (not (str/includes? p ":"))
+                                    (not (str/includes? p "*")))]
+                     p)]
+        (is (seq plain) "no routes found — this check would be vacuous")
+        (is (empty? (remove tested plain))
+            (str "these endpoints answer without fixture data and no assertion"
+                 " above touches them, so nothing checks their contract: "
+                 (pr-str (vec (remove tested plain)))))))
 
     (testing "and the client's view is what a consumer would actually parse"
       ;; guard the guard: if `call` handed back the pre-wire value these
