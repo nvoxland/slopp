@@ -5573,6 +5573,60 @@ docstring says every rate it reports is a lower bound, and a test asserts the
 docstring says it. Open in
 `ideas/observation/the-read-meter-cannot-see-a-read-only-session.md`.
 
+### D-page-marker — a page declares its own address, a shell declares that it is one (2026-08-26)
+
+A client route is `^{:webapp/path "/store/form/:id"}` on the function that
+renders it. A shell is `^{:http/path "/store/**" :webapp/shell true}` on the
+document that serves it. Nothing else is declared.
+
+**What it replaced.** Three declarations of one fact in two coordinate systems:
+a `:webapp/routes` VECTOR inside the `^:app/entry` fn, a hand-written
+`:webapp/client-routes` PREFIX list in server space, and — because the
+generated catch-all needed a segment below the prefix — a second explicit
+server route for each section's own root.
+
+**Everything downstream became a lookup.**
+
+- `pages-unserved` asks `router/match` whether a shell's pattern covers a page.
+  Both sides are one coordinate system, so the every-suffix-split guessing
+  `client-routes-unserved` needed has nothing left to resolve.
+- The `**` grammar covers a section's own root, so the third declaration went
+  away as a property of the pattern rather than as a better-enforced rule.
+- `client-route-rows` is deleted: a shell declares its own wildcard, so the
+  fallback IS the declaration and no row appears in the table that nobody
+  wrote — which is what every document publisher had been filtering back out.
+- **`:unreadable` deleted itself.** It existed only because a route table was a
+  VALUE inside a fn body, so a table built in pieces could not be read whole. A
+  marker is metadata on a name and cannot be half-declared. The two real
+  absences the first store with a browser app measured were evidence the
+  DECLARATION was in the wrong place, and were filed as "improve the reader".
+- The page table gets write gates for the first time (`webapp-page-address`):
+  an unmatchable pattern, a private page, a second claim on one address. None
+  of the three fails loudly, and a client route has no 404 to notice.
+
+**`:webapp/shell` became a boolean and the framework supplies the bundle**,
+derived by `rules.http/bundle-url` from the compile output plus the
+`http.static.*` mounts — both halves were already declared, so the url is a
+join rather than something typed on every shell route. A shell with no
+reachable bundle refuses at ASSEMBLY, where a broken shell already refuses; the
+alternative is a blank page on every route, found by whoever loads it first.
+The managed dev server had to learn the option too, or every app with a shell
+would fail to assemble on it — caught by the completeness test over the
+generated `serve!` call, on the first new option since it was written.
+
+**No document carries a version key** (Nathan, 2026-08-26): *API compatibility
+is the responsibility of the API in coordination with the client. We are not
+caring about our API compatibility at the moment and just migrating both halves
+together. Let's not introduce a different versioning system of our own.*
+Nothing ever branched on one — it existed so a consumer could REFUSE rather
+than misread. The rule that replaces it, and the one to hold onto: **a document
+changes by RENAMING a key, never by redefining one in place.** A missing
+`:paths` is what `generate_client` now refuses on.
+
+**`/api/webapp/routes` is absorbed into `/api/webapp/paths`**, which is purely
+the paths within the app; `/api/http/paths` marks which of its documents is the
+shell. `slopp.webapp.paths` and its prefix document are deleted.
+
 ### D-endpoint-descriptor — one var per endpoint, carrying its own contract (2026-08-26)
 
 `generate_client` emits ONE `def` per endpoint — a DESCRIPTOR — and

@@ -2298,31 +2298,29 @@ boundary — the producer publishes its shape and the consumer generates from
 that. Neither store reads the other.
 
 - **Producer: serve `slopp.rest.paths/paths-document`.** It takes your
-  served namespace list and returns `{:slopp/rest-paths-version 1 :paths […]}`
+  served namespace list and returns `{:paths […]}`
   — method, path, name, the handler's QUALIFIED symbol, its docstring,
   `:media-type`, `:effectful?`, `:auth`, and the
   request/response schemas as VALUES. Publish it at `/api/rest/paths`: the
   convention is `/api/<capability>/<what it lists>`, so a consumer that learns
-  one address learns `/api/http/paths`, `/api/webapp/paths` and
-  `/api/webapp/routes` too. Each
-  capability has its own document and its own version, because they gain keys
-  on their own schedules and no consumer wants every kind listed together.
+  one address learns `/api/http/paths` and `/api/webapp/paths` too. Each
+  capability has its own document, because they gain keys on their own
+  schedules and no consumer wants every kind listed together.
 
-  **A capability may publish more than one document, and the webapp pair is
-  the case to know.** `/api/webapp/paths` lists the PREFIXES a served document
-  declares it owns (`:webapp/client-routes`) — server-side, answering *who
-  serves this path*. `/api/webapp/routes` lists what the browser then routes
-  to inside them (`:webapp/routes`) — answering *what screens are there*. One
-  prefix and twenty screens is ordinary, so neither is a summary of the other.
-  `/api/webapp/routes` is also the one document derived from the STORE rather
-  than from loaded vars: a route table lives inside the `^:app/entry` fn's
-  return value, so only a literal in the source says what it holds. That is
-  why it carries `:unreadable` — a table built in pieces and named by a var
-  contributes there, and a consumer rendering the rows without that line may
-  be showing fewer screens than the app has. It does NOT say the rows are
-  gone: every map literal in the store is scanned, so the same table may be
-  declared literally elsewhere and reported from there. It says this
-  declaration contributed nothing, which is the honest half of the claim. Serve it as EDN with `:http/raw true`,
+  **`/api/webapp/paths` is purely the paths WITHIN the app** — one row per
+  `:webapp/path` page, naming the function that renders it and what that page
+  is. `/api/http/paths` says what the SERVER hands a browser, and marks which
+  of those documents is the shell; this says what the browser then does with
+  it, which the other cannot, because a client-routed app is one server route
+  and a dozen addresses.
+
+  **No document carries a version key.** Nothing branched on one — it existed
+  so a consumer could refuse rather than misread — and API compatibility is a
+  coordination between an API and its client rather than something a framework
+  invents. The rule that replaces it: **a document changes by RENAMING a key,
+  never by redefining one in place.** A consumer that cannot find `:paths` has
+  met a document it does not know, which is the signal `generate_client`
+  refuses on. Serve it as EDN with `:http/raw true`,
   `Content-Type: application/edn`, and `^{:rest/media-type "application/edn"}`
   so a generated wrapper reads text rather than attempting JSON. It ships in the
   `slopp-web` slim jar, so any app can publish, not just one whose code lives in
@@ -2686,8 +2684,7 @@ things and giving out the wrong one wastes someone's time:
 
 - `:ui` is THIS project's own listener, and it serves `/api/*` — JSON, plus
   its own surface as EDN, one document per capability: `/api/rest/paths`,
-  `/api/http/paths`, `/api/webapp/paths` and `/api/webapp/routes` (the last
-  three are usually empty). It is already running (the server starts
+  `/api/http/paths` and `/api/webapp/paths` (the last two are usually empty). It is already running (the server starts
   it at boot), it runs on your live session so warranty and observed examples
   are the ones you actually have, and it has no pages in it at all. A human
   opening it sees JSON.
