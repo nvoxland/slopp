@@ -262,28 +262,23 @@
 (defn ^{:http/method :get :rest/path "/api/webapp/paths" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/webapp-paths-document
-        :rest/unconstrained-ok
-        ":auth is an app's own :http/auth declaration verbatim, whose grammar
-         is open by design, so no narrower shape is true of all of them.
-         PERMANENT for the same reason its two siblings are."
         :http/reads {:doc [:ui/webapp-paths []]}}
   webapp-paths
-  "GET /api/webapp/paths — the paths this project's BROWSER owns, as EDN.
+  "GET /api/webapp/paths — the pages this project's BROWSER routes to, as EDN.
 
-  One row per DECLARED `:webapp/client-routes` prefix. A prefix is not a
-  server route: it says *the document at this address is what serves client
-  routes under here*, and the framework generates a scoped catch-all so a
-  refreshed deep link reaches the app instead of a 404. Those catch-alls are
-  not published — a row nobody wrote reads exactly like a route an author
-  typed.
+  One row per `:webapp/path` form, naming the function that renders it and
+  what that page is.
 
-  **A form appears here AND in `/api/http/paths`, deliberately.** The same var
-  is a served document and the owner of browser-side paths; the two documents
-  answer different questions and neither is a subset of the other. There is no
-  union document and there will not be one — separate schemas per kind is what
-  lets each gain keys on its own schedule.
+  **The client-side half of the content surface.** `/api/http/paths` says what
+  the SERVER hands a browser; this says what the browser then does with it,
+  which `/api/http/paths` cannot, because a client-routed app is one server
+  route and a dozen addresses.
 
-  `[]` unless the project's browser owns routing, which most do not."
+  It used to publish the server-side PREFIXES a document declared it owned.
+  That mechanism is gone: a shell declares its own `**` path, so the fallback
+  IS the declaration and there is no prefix list to publish.
+
+  `[]` unless the project has a browser app, which most do not."
   [req]
   {:status 200
    :http/raw true
@@ -338,33 +333,3 @@
   consumer toward the hand-rolled fetch `direct-http` refuses."
   [req]
   {:status 200 :body (:results (:http/reads req))})
-
-(defn ^{:http/method :get :rest/path "/api/webapp/routes" :http/auth :public
-        :rest/media-type "application/edn"
-        :rest/response contracts/webapp-routes-document
-        :http/reads {:doc [:ui/webapp-routes []]}}
-  webapp-routes
-  "GET /api/webapp/routes — the addresses this project's BROWSER routes to, as
-  EDN.
-
-  One row per pattern in the declared `:webapp/routes` table, naming what
-  renders it, what that screen is, and which url it loads.
-
-  **A different question from `/api/webapp/paths`.** That publishes the
-  PREFIXES a document declares it owns — server-side, *who serves this path*.
-  This publishes what the browser routes to inside them — *what screens are
-  there*. One prefix and twenty routes is an ordinary shape, so neither
-  document is a summary of the other.
-
-  Alone among the capability documents it is derived from the STORE, because a
-  route table lives inside the entry fn's return value and only source says
-  what it holds. `:unreadable` carries the cost of that: a table built in
-  pieces and named by a var cannot be read, and a consumer that renders
-  `:routes` without it may be showing fewer screens than the app has.
-
-  `[]` unless the project has a browser app, which most do not."
-  [req]
-  {:status 200
-   :http/raw true
-   :headers {"Content-Type" "application/edn"}
-   :body (pr-str (:doc (:http/reads req)))})

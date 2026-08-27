@@ -401,9 +401,8 @@
   ;; path is not somebody else's server — but it is CHECKED rather than
   ;; declared, which is strictly better: a marker asserts, a join verifies.
   (let [src (str "(ns browser.ui)\n\n"
-                 "(defn screen \"S.\" [_s] [:p \"s\"])\n\n"
-                 "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes [[\"/store/ns/:ns\" screen]]})\n\n"
+                 "(defn ^{:webapp/path \"/store/ns/:ns\"} screen\n"
+                 "  \"S.\" [_a _p] [:p \"s\"])\n\n"
                  "(defn ns-link \"N.\" [] [:a {:href \"/store/ns/shop.core\"} \"ns\"])\n\n"
                  "(defn plain \"P.\" [] [:a {:href \"/served-by-nobody\"} \"x\"])\n")
         s     (store/ingest (store/empty-store) 'browser.ui src)
@@ -787,10 +786,10 @@
   ;; In one consuming store the escape was on THIRTEEN views, every one
   ;; discharged with the same accurate sentence. That is what this retires.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
-                 "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes [[\"/store\" things]\n"
-                 "                   [\"/store/form/:id\" things]]})\n\n"
+                 "(defn ^{:webapp/path \"/store\"} things\n"
+                 "  \"T.\" [_a _p] [:p \"things\"])\n\n"
+                 "(defn ^{:webapp/path \"/store/form/:id\"} form-page\n"
+                 "  \"F.\" [_a _p] [:p \"form\"])\n\n"
                  "(defn nav \"N.\" [_s]\n"
                  "  [:nav [:a {:href \"/store\"} \"Store\"]\n"
                  "        [:a {:href \"/store/form/f1\"} \"A form\"]\n"
@@ -831,10 +830,10 @@
   ;; the same question of the client table, or eighteen of nineteen markers stay
   ;; on for exactly the reason they went on.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                 "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes [[\"/store/form/:id\" s]\n"
-                 "                   [\"/store/ns/:ns\" s]]})\n\n"
+                 "(defn ^{:webapp/path \"/store/form/:id\"} form-page\n"
+                 "  \"F.\" [_a _p] [:p \"s\"])\n\n"
+                 "(defn ^{:webapp/path \"/store/ns/:ns\"} ns-page\n"
+                 "  \"N.\" [_a _p] [:p \"s\"])\n\n"
                  "(defn links \"L.\" [r]\n"
                  "  [:nav [:a {:href (str \"/store/form/\" (:id r))} \"form\"]\n"
                  "        [:a {:href (str \"/store/ns/\" (:ns r))} \"ns\"]\n"

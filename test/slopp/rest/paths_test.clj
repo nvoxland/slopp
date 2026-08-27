@@ -97,7 +97,7 @@
       ;; This is a different document at a different address; continuing the
       ;; old counter would claim a lineage it does not have, and the old
       ;; document is still served this jar for a consumer to migrate off.
-      (is (= 1 (:slopp/rest-paths-version doc)))
+      (is (= #{:paths} (set (keys doc))) (pr-str (keys doc)))
       (is (not (contains? doc :slopp/contract-version)) (pr-str (keys doc))))
 
     (testing "an endpoint is addressed by method AND path — one path serves two verbs"
@@ -209,31 +209,33 @@
       (is (every? #(contains? % :auth) (:paths doc))
           (pr-str (remove #(contains? % :auth) (:paths doc)))))))
 
-(deftest required-keys-are-what-a-VERSION-buys-and-EFFECTFULNESS-is-derived
-  ;; The version field exists so a consumer can refuse a shape it does not
-  ;; know, and it cannot do that job while it is constant. That rule was
-  ;; learned the expensive way on this document's predecessor: `:handler`,
-  ;; `:doc`, `:media-type` and `:auth` all arrived while
-  ;; `:slopp/contract-version` stayed 1, so a version-1 document was never ONE
-  ;; shape and a consumer holding a schema could not tell which it would get.
-  ;; Reported by a store that fronts projects on other slopp releases.
+(deftest every-endpoint-carries-the-keys-a-CONSUMER-cannot-do-without
+  ;; This used to be a statement about a VERSION: the field existed so a
+  ;; consumer could refuse a shape it did not know, and the rule was that
+  ;; adding a required key moves it. That was learned expensively on this
+  ;; document's predecessor — `:handler`, `:doc`, `:media-type` and `:auth`
+  ;; all arrived while `:slopp/contract-version` stayed 1, so a version-1
+  ;; document was never ONE shape and a consumer holding a schema could not
+  ;; tell which it would get.
   ;;
-  ;; **This document starts at 1 rather than inheriting 2.** It is a different
-  ;; document at a different address, and carrying the old counter forward
-  ;; would claim a lineage it does not have. What it does inherit is the rule:
-  ;; adding a REQUIRED key moves the version, or the key ships
-  ;; `{:optional true}`.
+  ;; **There is no version key now**, because nothing ever branched on one and
+  ;; API compatibility is a coordination between an API and its client rather
+  ;; than a mechanism a framework invents. What replaces it is narrower and
+  ;; enforceable here: a document changes by RENAMING a key, never by
+  ;; redefining one in place — so the keys below are asserted directly, and a
+  ;; consumer that finds them missing has met a document it does not know.
   (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
         by-addr (into {} (map (juxt (juxt :method :path) identity)) (:paths doc))]
 
-    (testing "its own version, at 1"
-      (is (= 1 (:slopp/rest-paths-version doc))))
+    (testing "the envelope is the rows and nothing else"
+      (is (= #{:paths} (set (keys doc))) (pr-str (keys doc))))
 
-    (testing "every endpoint carries the keys the version is a promise about"
+    (testing "every endpoint carries the keys a consumer cannot generate without"
       (doseq [k [:handler :doc :media-type :auth :effectful?]]
         (is (every? #(contains? % k) (:paths doc))
-            (str k " is required at this version — that is what a version"
-                 " BUYS: " (pr-str (remove #(contains? % k) (:paths doc)))))))
+            (str k " is missing from an endpoint, so a consumer holding this"
+                 " document cannot call it: "
+                 (pr-str (remove #(contains? % k) (:paths doc)))))))
 
     (testing ":effectful? is DERIVED, not the marker verbatim"
       ;; slopp's own ten endpoints declare `:http/effectful` zero times, so

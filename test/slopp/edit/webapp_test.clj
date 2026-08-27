@@ -8,7 +8,7 @@
   `webapp` turns `http` on with it — `webapp` requires being served — so the
   fixtures say the narrower thing and get the broader one.
 
-  Neighbours: `slopp.rules.webapp-test` covers the done-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store :as store]))
+  Neighbours: `slopp.rules.webapp-test` covers the done-grain half." (:require [clojure.test :refer [deftest is testing]] [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store :as store] [slopp.edit.webapp :as edit.webapp]))
 
 (deftest ^:external a-page-the-jvm-cannot-open-refuses-at-the-write
   ;; The architecture rule, enforced rather than suggested. `^:app/entry` marks
@@ -198,3 +198,62 @@
                                :prompt "a click handler, which is portable")]
           (is (nil? (:error r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest a-page-ADDRESS-that-cannot-work-refuses-at-the-write
+  ;; A page carries its own address now, so the address needs the gates an
+  ;; address has always had. Three ways one silently renders nothing:
+  ;;
+  ;;   a pattern the router has no rule for  → matches nothing, 404s
+  ;;   a PRIVATE page                        → generation cannot name it
+  ;;   a second claim on one address         → one of the two is dead
+  ;;
+  ;; None of them fails loudly. All three read as a page that exists.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.ui "(ns shop.ui)\n")
+                     "capabilities" :manifest "webapp.enabled" "true"))
+        land (fn [st src] (store/ingest st 'shop.more (str "(ns shop.more)\n\n" src "\n")))
+        page (fn [path] (str "(defn ^{:webapp/path \"" path "\"} screen"
+                             " \"S.\" [_app _params] [:main \"s\"])"))
+        gate (fn [st nm] (edit.webapp/webapp-page-address st 'shop.more (symbol nm)))]
+
+    (testing "a pattern the router cannot match refuses, naming the grammar"
+      (let [r (gate (land on (page "/things/*id")) "screen")]
+        (is (some? r) "an unmatchable page address must not land")
+        (is (re-find #"\*\*" (str r))
+            (str "the refusal has to carry the replacement: " r))))
+
+    (testing "a PRIVATE page refuses — generation cannot name what it cannot see"
+      (let [r (gate (land on (str "(defn- ^{:webapp/path \"/x\"} screen"
+                                  " \"S.\" [_app _params] [:main \"s\"])"))
+                    "screen")]
+        (is (some? r) (pr-str r))
+        (is (re-find #"(?i)private" (str r)) (str r))))
+
+    (testing "a SECOND claim on one address refuses, naming the owner"
+      ;; the same question `http-route-collision` asks about a server route,
+      ;; and the answer matters more here: the browser matches one and the
+      ;; other is unreachable with nothing to say why
+      (let [two (-> on
+                    (store/ingest 'shop.ui
+                                  (str "(ns shop.ui)\n\n"
+                                       "(defn ^{:webapp/path \"/x\"} first-one"
+                                       " \"F.\" [_a _p] [:main])\n"))
+                    (land (str "(defn ^{:webapp/path \"/x\"} screen"
+                               " \"S.\" [_app _params] [:main \"s\"])")))
+            r   (gate two "screen")]
+        (is (some? r) (pr-str r))
+        (is (re-find #"shop\.ui/first-one" (str r)) (str r))))
+
+    (testing "the same form RE-LANDING is not a collision"
+      ;; the replace case: a page editing itself is not a second claim
+      (let [st (land on (page "/x"))]
+        (is (nil? (gate st "screen")) (pr-str (gate st "screen")))))
+
+    (testing "and every legal address lands — the control"
+      (doseq [p ["/x" "/x/y" "/x/:id" "/x/:id/edit" "/x/*" "/x/**" "/"]]
+        (is (nil? (gate (land on (page p)) "screen"))
+            (str p " is in the grammar and must land: "
+                 (pr-str (gate (land on (page p)) "screen"))))))
+
+    (testing "and a form that declares no page is not this gate's business"
+      (is (nil? (gate (land on "(defn plain \"P.\" [x] x)") "plain"))))))

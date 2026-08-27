@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.webapp.paths :as webapp.paths] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -257,91 +257,49 @@
   [ctx _]
   (http.paths/paths-document (app-namespaces (:store @(:session ctx)))))
 
-(defn ^:export webapp-routes-document
-  "The addresses a project's BROWSER routes to, as data — one row per pattern
-  in its declared `:webapp/routes` table.
+(defn ^:export webapp-pages-document
+  "The pages a project's BROWSER routes to, as data — one row per
+  `:webapp/path` form.
 
-  `{:slopp/webapp-routes-version 1
-    :routes [{:path \"/things/:id\" :screen my.ui/thing :doc \"…\"
-              :request my.ui/thing-request :loads \"/api/thing/:id\"}]
-    :unreadable []}`
+  `{:paths [{:path \"/store/form/:id\" :page my.ui/form-page :doc \"…\"}]}`
 
   **The client-side half of the content surface.** `/api/http/paths` answers
   what the server hands a browser; it cannot answer what the browser then does
   with it, because a client-routed app is ONE server route and a dozen
-  addresses. The dozen are what a reader navigating the app actually sees, and
-  nothing published them.
+  addresses. The dozen are what a reader navigating the app actually sees.
 
-  **Derived from the STORE, unlike its three siblings.** A route table lives
-  inside the zero-arg entry fn's return value, so a loaded var says nothing
-  about it without being CALLED — and calling an application's entry to build
-  an index is a side effect taken for a listing. `webapp-report` reads the
-  literal from the source instead, which is also what `query_surface` shows:
-  one derivation, so the tool and this document cannot drift apart.
+  **Derived from var METADATA, like every other surface this store publishes.**
+  A page carries its own address, so this reads the same kind of declaration
+  `/api/rest/paths` and `/api/http/paths` read. It used to derive from a
+  `:webapp/routes` vector inside the entry fn — a VALUE, so a table built in
+  pieces was unreadable and the document carried an `:unreadable` key to say
+  so. That key is gone with its cause: metadata cannot be half-declared.
 
-  `:doc` is the RENDER function's docstring, de-indented and whole — the
-  column that answers what an address is for. A reader scanning a list of
-  paths is asking exactly that, and the path alone never says.
+  **No version key.** Nothing branched on one; it existed so a consumer could
+  refuse rather than misread. API compatibility is a coordination between an
+  API and its client, and both halves of this one migrate together — so the
+  rule that replaces it is that a document changes by RENAMING a key, never by
+  redefining one in place.
 
-  `:unreadable` is every `:webapp/*` declaration the reader could not take
-  literally — a table built in pieces and named by a var among them. It does
-  NOT claim the rows are missing: every map literal in the store is scanned,
-  so the same table may be declared literally elsewhere and reported from
-  there. Measured on the first store to have one, whose entry builds its table
-  with `mapv` and whose rows all landed anyway. What it says is that this
-  declaration contributed nothing — and an empty `:routes` is an affirmative
-  claim of emptiness rather than an absence, so without this key a partial
-  answer and a complete one look identical. It covers actions and session
-  loads as well as routes because all three come off one traversal; splitting
-  the list by sniffing its sentences would be a second thing to keep in step.
-
-  `[]` on a store whose `webapp` capability is off, which is most of them — a
-  project with no browser app must not be described as having one."
+  `[]` unless the project has a browser app, which most do not."
   [store]
-  (let [report (rules.webapp/webapp-report store)
-        screen-doc
-        (fn [sym]
-          (let [nsx (some-> sym namespace symbol)]
-            ;; a screen written with an ALIAS keeps the alias — resolving one
-            ;; means reading the ns form — so the lookup has to miss quietly
-            ;; rather than assume the namespace part names a store namespace
-            (when (and nsx (contains? (:namespaces store) nsx))
-              (some-> (store/form-named store nsx (symbol (name sym)))
-                      form-doc
-                      http.paths/undent))))]
-    {:slopp/webapp-routes-version 1
-     :routes     (vec (for [row  (:screens report)
-                            :let [d (screen-doc (:screen row))]]
-                        ;; `:kind` is what lets `query_surface` draw a screen
-                        ;; beside a command; a document that lists one kind has
-                        ;; nothing to tell apart
-                        (cond-> (dissoc row :kind)
-                          d (assoc :doc d))))
-     :unreadable (vec (:unreadable report))}))
+  {:paths (mapv (fn [{:keys [path page doc]}]
+                  (cond-> {:path path :page page}
+                    doc (assoc :doc (http.paths/undent doc))))
+                (rules.webapp/page-routes store))})
 
 (defn ^{:http/read :ui/webapp-paths} webapp-paths-read
-  "The paths the project's BROWSER owns — one row per declared
-  `:webapp/client-routes` prefix.
+  "The pages the project's BROWSER routes to — one row per `:webapp/path`
+  form.
 
-  Same split as its two siblings. A form here also appears in
-  [[http-paths-read]]'s document: it is a served page AND the owner of paths
-  the server has no route for. The two answer different questions and neither
-  is a subset of the other, which is why there is no union document."
+  **Purely the paths WITHIN the app.** It used to publish the server-side
+  PREFIXES a document declared it owned, which described a mechanism that no
+  longer exists: a shell declares its own `**` path, so the fallback is the
+  declaration and there is no prefix list to keep.
+
+  **The one read here with no image half.** Its siblings ask the store WHICH
+  namespaces and the loaded image WHAT, because schemas and page values live
+  only on loaded vars. A page's address is metadata, which the store holds
+  directly — so this reads the store and nothing else."
   [ctx _]
-  (webapp.paths/paths-document (app-namespaces (:store @(:session ctx)))))
-
-(defn ^{:http/read :ui/webapp-routes} webapp-routes-read
-  "The addresses the project's BROWSER routes to — one row per pattern in its
-  declared `:webapp/routes` table.
-
-  **The one read here with no image half.** Its three siblings ask the store
-  WHICH namespaces and the loaded image WHAT, because schemas and page values
-  live only on loaded vars. A route table lives inside the entry fn's return
-  value, so the image would have to be made to CALL an application's entry to
-  answer — a side effect taken for a listing. The store holds the literal.
-
-  A different question from [[webapp-paths-read]], which publishes the
-  server-side PREFIXES a document declares it owns. This one is what the
-  browser routes to inside them."
-  [ctx _]
-  (webapp-routes-document (:store @(:session ctx))))
+  (webapp-pages-document (:store @(:session ctx))))

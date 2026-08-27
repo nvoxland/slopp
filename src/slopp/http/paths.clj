@@ -100,7 +100,7 @@
   Publishing something other than what the app answers with would be the one
   failure this document cannot afford."
   [ns-syms]
-  {:slopp/http-paths-version 1
+  {;; NO version key — see `slopp.rest.paths/paths-document` for why.
    :paths
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]

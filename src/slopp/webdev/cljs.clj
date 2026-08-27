@@ -493,35 +493,6 @@
                 (str/starts-with? (str path) (str v))))
          (get-in store [:config "capabilities" :values]))))
 
-(def ^:private supported-documents
-  "The published-document envelopes this generator can read: `{[version-key
-  version] rows-key}`.
-
-  **What varies here is the ENVELOPE, not the rows.** `/api/rest/paths` and
-  the retiring `/api/contracts` carry byte-identical endpoint rows — verified
-  independently by the consuming store, 40,749 bytes either way — and differ
-  only in what the version key is called and what the rows sit under. So
-  reading both is two lookups, not the defaults-for-every-moved-key
-  compatibility code that was refused while this was a single number
-  (Nathan: *\"there is no consumer besides slopp-ui at this point, and I'd
-  rather manually update them than add in compatibility code\"*). That refusal
-  still stands for a document whose ROWS differ; this is not one.
-
-  **The old row exists because `/api/contracts` serves for one more release**,
-  and it goes with that endpoint. It is not a compatibility path: nothing
-  negotiates, and the point of the overlap is that a consumer can repoint AND
-  regenerate on the same jar. Without this row they could do the first and not
-  the second — half a migration, and no way to report the retirement safe.
-  Found exactly that way, by the only real consumer, on the overlap's first
-  outing: the endpoint was right, the document was right, and the thing that
-  broke was a tool nobody had listed as a consumer.
-
-  A document at any other version yields no wrappers and a problem naming what
-  it found. **That refusal is the field working**: a generator that guessed at
-  a shape it does not know would fail later, somewhere else, with nothing
-  pointing back here."
-  {[:slopp/rest-paths-version 1] :paths})
-
 (defn ^:export render-contracts-ns
   "Render the generated CONTRACTS namespace source (a string) from
    [[contract->plan]]'s `:defs` — one plain `def` per published schema.
@@ -983,9 +954,12 @@
    A consumer that generated anyway from a shape it does not know would fail
    later, somewhere else, with nothing pointing back to here."
   [document contracts-ns]
-  (if-let [rows-key (some (fn [[[vkey v] rows]]
-                            (when (= v (vkey document)) rows))
-                          supported-documents)]
+  (if-let [;; the ROWS key is the whole envelope now. A document carries no
+                  ;; version: nothing branched on one, and a document changes
+                  ;; by RENAMING a key rather than by redefining one in place
+                  ;; — so a missing `:paths` IS the signal that this is a
+                  ;; shape generation does not know.
+                  rows-key (when (contains? document :paths) :paths)]
     (reduce
      (fn [acc {:keys [method path name request response media-type]}]
        (let [base    (symbol (str/replace (str name) #"!$" ""))
@@ -1040,15 +1014,14 @@
      ;; Identical rows either way, so everything below reads the same
      (rows-key document))
     {:defs [] :wrappers []
-     :problems [{:issue :unsupported-contract-version
-                 ;; what the document actually SAID, under whichever key it
-                 ;; used. EMPTY means the envelope is neither of these — which
-                 ;; is what a consumer pointed at a future release sees, and
-                 ;; the case a bare nil could not tell from a missing key
-                 :version (into {} (keep (fn [[[vkey _] _]]
-                                           (when-let [v (vkey document)] [vkey v]))
-                                         supported-documents))
-                 :supported (vec (keys supported-documents))}]}))
+     :problems [{:issue :unrecognised-document
+                 ;; what the document actually CARRIES, so a reader can see
+                 ;; what arrived rather than only that it was wrong. A
+                 ;; consumer pointed at a future release sees keys it does
+                 ;; not know here, which is the case a bare nil could not
+                 ;; tell from an empty response.
+                 :keys (vec (sort (map str (keys document))))
+                 :expected :paths}]}))
 
 (defn ^:private render-request
   "One endpoint as a DESCRIPTOR — a source string, a plain `def`, `:cljc`.

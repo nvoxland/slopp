@@ -150,7 +150,7 @@
                     (http.client/request
                      {:http/url (str "http://127.0.0.1:" (:port r) "/api/rest/paths")})))
               paths (set (map :path (:paths doc)))]
-          (is (= 1 (:slopp/rest-paths-version doc)))
+          (is (= #{:paths} (set (keys doc))) (pr-str (keys doc)))
           (is (contains? paths "/api/timeline")
               "a server that forgot to thread its session publishes nothing")
           (is (contains? paths "/api/modules")
@@ -168,7 +168,7 @@
                    (:http/body
                     (http.client/request
                      {:http/url (str "http://127.0.0.1:" (:port r) "/api/rest/paths")})))]
-          (is (= 1 (:slopp/rest-paths-version doc)))
+          (is (= #{:paths} (set (keys doc))) (pr-str (keys doc)))
           (is (empty? (:paths doc))
               (str "the listener's own surface is the MCP server's, not this"
                    " project's: " (pr-str (map :path (:paths doc))))))

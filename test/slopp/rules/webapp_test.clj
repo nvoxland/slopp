@@ -104,173 +104,6 @@
                 "naming the namespace that stranded it is the finding — the entry is fine"))))
       (finally (ops/close! sess)))))
 
-(deftest the-declared-CLIENT-ROUTE-TABLE-is-readable-from-the-store
-  ;; What step B bought, collected: an app's client routes are a value now, so
-  ;; anything can join against them. `^:webapp/client-path` exists because they were
-  ;; not — `rules.http/ui-route-refs` says so in its own docstring:
-  ;;
-  ;;   teaching the check to SEE the prefixing is not possible in general,
-  ;;   because the base arrives through an ordinary function call
-  ;;
-  ;; That stopped being true when slopp took over the prefixing. A literal in a
-  ;; view is a CLIENT ROUTE KEY, and this is the table it is a key into.
-  (let [src (str "(ns shop.ui)\n\n"
-                 "(defn things \"T.\" [_s] [:p \"things\"])\n\n"
-                 "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/state (atom {})\n"
-                 "   :webapp/routes [[\"/store\" things]\n"
-                 "                   [\"/store/form/:id\" things]]})\n")
-        st  (store/ingest (store/empty-store) 'shop.ui src)]
-
-    (testing "the patterns come back, and nothing else does"
-      (is (= ["/store" "/store/form/:id"] (rules.webapp/client-routes st))))
-
-    (testing "a store with no browser app has no client routes"
-      ;; and answers EMPTY rather than nil, so a caller joining against it does
-      ;; not have to tell "no webapp" apart from "a webapp routing nothing"
-      (let [plain (store/ingest (store/empty-store) 'shop.plain
-                                "(ns shop.plain)\n\n(defn f \"F.\" [x] x)\n")]
-        (is (= [] (rules.webapp/client-routes plain)))))
-
-    (testing "a row whose pattern is not a literal string is SKIPPED, not guessed"
-      ;; a computed pattern is one this cannot read, and inventing an answer
-      ;; would make the join silently partial — which is worse than a link
-      ;; reported as dangling, because that at least gets looked at
-      (let [computed (store/ingest (store/empty-store) 'shop.dyn
-                                   (str "(ns shop.dyn)\n\n"
-                                        "(def base \"/store\")\n\n"
-                                        "(defn s \"S.\" [_] [:p])\n\n"
-                                        "(defn ^:app/entry app \"A.\" []\n"
-                                        "  {:webapp/routes [[base s] [\"/real\" s]]})\n"))]
-        (is (= ["/real"] (rules.webapp/client-routes computed)))))))
-
-(deftest a-client-route-the-SERVER-does-not-serve-404s-on-a-hard-load
-  ;; `:webapp/client-routing`'s blind spot, stated in the inventory itself:
-  ;; *nothing compares the client's route table to the server's.* The failure is
-  ;; the one the consuming app hit for real — eight client routes that worked on
-  ;; every in-app click and 404'd on refresh or on a shared link, because the
-  ;; document's declared prefixes and the client's table had drifted apart.
-  ;;
-  ;; **The comparison is on the prefix's TAIL, and it has to be.** A declared
-  ;; prefix is in SERVER space (`/p/:slug/store`) and a client route is in APP
-  ;; space (`/store/form/:id`), because the mount point is a deployment fact the
-  ;; store cannot know. What is decidable is whether some suffix of the prefix
-  ;; is a leading segment of the client route — which is exactly the question
-  ;; the generated catch-all answers.
-  (let [app-src (fn [prefixes routes]
-                  (str "(ns shop.ui)\n\n"
-                       "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                       "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                       "        :webapp/client-routes " (pr-str prefixes) "}\n"
-                       "  doc \"D.\" [_] {:status 200 :body \"<html>\"})\n\n"
-                       "(defn ^:app/entry app \"A.\" []\n"
-                       "  {:webapp/routes " routes "})\n"))
-        check   (fn [prefixes routes]
-                  (rules.webapp/client-routes-unserved
-                   (store/ingest (store/empty-store) 'shop.ui
-                                 (app-src prefixes routes))))]
-
-    (testing "a client route BELOW a declared prefix is served by the fallback"
-      (is (= [] (check ["/p/:slug/store"]
-                       "[[\"/store/form/:id\" s]]"))))
-
-    (testing "a client route under NO declared prefix is reported"
-      ;; the eight-routes-404 failure, caught before a reader meets it
-      (is (= ["/settings/:tab"]
-             (check ["/p/:slug/store"]
-                    "[[\"/store/form/:id\" s] [\"/settings/:tab\" s]]"))))
-
-    (testing "the prefix ROOT is served by the fallback now, and used to not be"
-      ;; The gotcha this check was written to enforce, DELETED rather than
-      ;; enforced better. `["/store"]` generated `/store/*client-path`, and a
-      ;; named splat needed at least one segment below it — so `/store` 404'd
-      ;; while `/store/form/9` answered, and the author owed a second explicit
-      ;; server route for the root of every section. The rule lived in three
-      ;; docstrings and one escape text; nothing carried it to an author who
-      ;; had read none of them.
-      ;;
-      ;; `**` matches zero or more, so a declared prefix answers for itself.
-      (is (= [] (check ["/p/:slug/store"] "[[\"/store\" s]]"))))
-
-    (testing "a store with no declared prefixes reports every client route"
-      ;; not silence: an app whose browser owns routes and whose document
-      ;; declares none is the whole failure, not an app with nothing to check
-      (is (= ["/store"] (check [] "[[\"/store\" s]]"))))
-
-    (testing "and a store with no client routes reports nothing"
-      (is (= [] (check ["/p/:slug/store"] "[]"))))))
-
-(deftest the-prefixes-an-app-should-declare-are-DERIVABLE
-  ;; The plan for this step was "derive `:webapp/client-routes` from the client
-  ;; table so the two cannot drift", and the obstacle looked fatal: a prefix is
-  ;; in SERVER space and a client route is in APP space, and the mount point is
-  ;; a deployment fact no store knows.
-  ;;
-  ;; It is not. **The document's own `:http/path` IS the mount point**, and the
-  ;; document is the form carrying `:webapp/client-routes` — the only unambiguous
-  ;; way to name it. Identifying it any other way was the first cut's bug: it
-  ;; took the alphabetically-first endpoint, which was the same form in these
-  ;; fixtures and `/` in the first real store.
-  (let [src (fn [routes]
-              (str "(ns shop.ui)\n\n"
-                   "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                   ;; sorts first, is not the document
-                   "(defn ^{:http/method :get :http/path \"/\"} root \"R.\" [_] {})\n\n"
-                   "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                   "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
-                   "  doc \"D.\" [_] {})\n\n"
-                   "(defn ^:app/entry app \"A.\" []\n"
-                   "  {:webapp/routes " routes "})\n"))
-        at  (fn [routes] (rules.webapp/derived-client-route-prefixes
-                          (store/ingest (store/empty-store) 'shop.ui (src routes))))]
-
-    (testing "the document's own path is the mount point, and the rest is the table"
-      (is (= ["/p/:slug/change" "/p/:slug/endpoints" "/p/:slug/store"]
-             (at (str "[[\"/store\" s] [\"/store/form/:id\" s]"
-                      " [\"/change/:range\" s] [\"/endpoints\" s]]")))))
-
-    (testing "one prefix per TOP-LEVEL segment, not one per route"
-      ;; /store and /store/form/:id are one prefix: the catch-all under /store
-      ;; answers both, and listing them separately would be three declarations
-      ;; where one serves
-      (is (= ["/p/:slug/store"]
-             (at "[[\"/store\" s] [\"/store/form/:id\" s] [\"/store/ns/:ns\" s]]"))))
-
-    (testing "the app ROOT contributes nothing, because a prefix needs a segment"
-      ;; `["/"]` would generate `//**`, which is not a path — and the document
-      ;; already answers its own url
-      (is (= [] (at "[[\"/\" s]]"))))
-
-    (testing "a document mounted at the ROOT derives a path, not a doubled slash"
-      ;; Measured on the first real store to have a browser app, whose hub is
-      ;; served at `/`: the join produced `//p`, which is not a path either.
-      ;; The advisory that exists to tell an author which prefixes to declare
-      ;; was naming one no router can match — and being advisory-only, nothing
-      ;; ever went red over it.
-      (let [root (store/ingest (store/empty-store) 'shop.ui
-                               (str "(ns shop.ui)\n\n"
-                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:http/method :get :http/path \"/\"\n"
-                                    "        :webapp/client-routes [\"/p\"]}\n"
-                                    "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:app/entry app \"A.\" []\n"
-                                    "  {:webapp/routes [[\"/p/:slug\" s] [\"/p/:slug/pages\" s]]})\n"))]
-        (is (= ["/p"] (rules.webapp/derived-client-route-prefixes root)))))
-
-    (testing "an app that declares NO prefix has no mount point, and says nothing"
-      ;; the honest limit. Without a declaration there is no form to read the
-      ;; mount from, and guessing at one — the first endpoint, the ^:app/entry
-      ;; entry — is exactly the bug this rewrite fixed. The advisory names the
-      ;; app-space segments instead, which is the half that IS known
-      (let [none (store/ingest (store/empty-store) 'shop.ui
-                               (str "(ns shop.ui)\n\n"
-                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"}\n"
-                                    "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:app/entry app \"A.\" []\n"
-                                    "  {:webapp/routes [[\"/store\" s]]})\n"))]
-        (is (= [] (rules.webapp/derived-client-route-prefixes none)))))))
-
 (deftest the-webapp-section-reports-what-a-BROWSER-APP-IS
   ;; The fifth thing a capability is — PORT, ADAPTER, FAKE, GATES, SURFACE
   ;; REPORT — and the only one `webapp` has never had. Its readers are the
@@ -377,116 +210,6 @@
       ;; until a store can answer how much it writes. Zero here, and a store
       ;; that has drifted says so
       (is (= 0 (:cljs (rules.webapp/webapp-report on)))))))
-
-(deftest the-mount-point-is-the-form-that-DECLARES-client-routes
-  ;; Reported by slopp-ui on the first real run, with three false positives and
-  ;; a malformed remedy: `:declare ["//change" "//endpoints" "//store"]`.
-  ;;
-  ;; **Their store separates two forms my fixtures had merged.** `^:app/entry` is
-  ;; the HEADLESS entry — zero-arg, `:cljc`, carrying canned fixtures, and NOT a
-  ;; route, because `:app/entry` means "an entry `screen` can open" and a store
-  ;; may mark a page that is served by something else. The document is a
-  ;; different form, and it is the one carrying `:webapp/client-routes`.
-  ;;
-  ;; The cause was worse than "read the wrong marker": the derivation read NO
-  ;; marker. It took the alphabetically-first endpoint path in the store — `/`
-  ;; in theirs — which is how a mount point became the empty string and every
-  ;; derived prefix gained a doubled slash. The docstring meanwhile explained
-  ;; that it "picks the FIRST document by name … a store with two ^:app/entry
-  ;; entries is already refused", which describes a selection the code did not
-  ;; make. A justification for behaviour that does not exist is the shape this
-  ;; week has been about, arriving in my own new form.
-  (let [src (str "(ns shop.ui)\n\n"
-                 "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                 ;; sorts FIRST and is not the document — the trap
-                 "(defn ^{:http/method :get :http/path \"/\"} root \"R.\" [_] {})\n\n"
-                 "(defn ^{:http/method :get :http/path \"/api/things\"} api \"A.\" [_] {})\n\n"
-                 ;; the prefix ROOT's own route — the catch-all under
-                 ;; /p/:slug/store needs a segment below it, so this is the
-                 ;; remedy the advisory names and the one it must be able to SEE
-                 "(defn ^{:http/method :get :http/path \"/p/:slug/store\"} sroot \"S.\" [_] {})\n\n"
-                 ;; the DOCUMENT: it declares the client routes
-                 "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                 "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
-                 "  doc \"D.\" [_] {})\n\n"
-                 ;; the HEADLESS entry, a different form with no server path
-                 "(defn ^:app/entry page \"P.\" []\n"
-                 "  {:webapp/routes [[\"/\" s] [\"/store\" s] [\"/store/form/:id\" s]]})\n")
-        st  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
-                      [:config "capabilities" :values "webapp.enabled"] "true")]
-
-    (testing "the mount point comes from the form DECLARING client routes"
-      (is (= ["/p/:slug/store"] (rules.webapp/derived-client-route-prefixes st))
-          "not the first endpoint by path, and not the ^:app/entry entry"))
-
-    (testing "no doubled slash, which is what a wrong mount point looks like"
-      (is (not-any? #(re-find #"//" %)
-                    (rules.webapp/derived-client-route-prefixes st))))
-
-    (testing "an EXPLICIT server route is coverage, which the remedy already said"
-      ;; `/store` is a prefix root, so the generated catch-all does not answer
-      ;; it — and the advisory's own escape text says "or give it a server route
-      ;; of its own". The check did not look for one, so it reported three
-      ;; routes as unserved that a socket test proves are served
-      (is (= [] (rules.webapp/client-routes-unserved st))
-          (str "the client root maps to the document's own path, and /store to"
-               " the declared prefix — both are real server routes: "
-               (pr-str (rules.webapp/client-routes-unserved st)))))
-
-    (testing "and a route with NO coverage of either kind is still reported"
-      ;; the arm that keeps the fix from being a blanket pass
-      (let [gap (assoc-in
-                 (store/ingest (store/empty-store) 'shop.ui
-                               (str "(ns shop.ui)\n\n"
-                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                                    "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
-                                    "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:app/entry page \"P.\" []\n"
-                                    "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
-                 [:config "capabilities" :values "webapp.enabled"] "true")]
-        (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))
-(testing "a prefix whose ROOT is not a client route needs no server route"
-      ;; slopp-ui's third case, and it is correct rather than a gap. Their
-      ;; `/change` prefix exists only to generate the catch-all: the client
-      ;; table has `/change/:range` and no bare `/change` screen, so arm 1
-      ;; covers everything under it and arm 2 has nothing to do.
-      ;;
-      ;; Worth a fixture because the two shapes are indistinguishable from the
-      ;; DECLARATION and opposite in what they require:
-      ;;
-      ;;   root IS a client route      → needs its own server route
-      ;;   root is NOT a client route  → needs nothing
-      ;;
-      ;; The check gets this right by never asking about a path the app does not
-      ;; route — which is correct by construction and therefore easy to break
-      ;; while refactoring, since nothing else asserts it
-      (let [no-root (assoc-in
-                     (store/ingest (store/empty-store) 'shop.ui
-                                   (str "(ns shop.ui)\n\n"
-                                        "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                        "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                                        "        :webapp/client-routes [\"/p/:slug/change\"]}\n"
-                                        "  doc \"D.\" [_] {})\n\n"
-                                        "(defn ^:app/entry page \"P.\" []\n"
-                                        "  {:webapp/routes [[\"/change/:range\" s]]})\n"))
-                     [:config "capabilities" :values "webapp.enabled"] "true")]
-        (is (= [] (rules.webapp/client-routes-unserved no-root))
-            "a prefix with no root screen is a catch-all generator and nothing more")))
-
-    (testing "and a route with NO coverage of either kind is still reported"
-      ;; the arm that keeps the fix from being a blanket pass
-      (let [gap (assoc-in
-                 (store/ingest (store/empty-store) 'shop.ui
-                               (str "(ns shop.ui)\n\n"
-                                    "(defn s \"S.\" [_st] [:p \"s\"])\n\n"
-                                    "(defn ^{:http/method :get :http/path \"/p/:slug\"\n"
-                                    "        :webapp/client-routes [\"/p/:slug/store\"]}\n"
-                                    "  doc \"D.\" [_] {})\n\n"
-                                    "(defn ^:app/entry page \"P.\" []\n"
-                                    "  {:webapp/routes [[\"/settings/:tab\" s]]})\n"))
-                 [:config "capabilities" :values "webapp.enabled"] "true")]
-        (is (= ["/settings/:tab"] (rules.webapp/client-routes-unserved gap)))))))
 
 (deftest a-screens-REQUEST-PATH-is-joined-against-what-this-store-SERVES
   ;; The gap wave 4d created, recorded in `index.crossings` at the moment it was
@@ -884,3 +607,120 @@
     (testing "a path nothing declares is still reported, or the join says nothing"
       (is (= ["/api/nope"] (mapv :path (rules.webapp/request-paths-unserved st)))
           (pr-str (rules.webapp/request-paths-unserved st))))))
+
+(deftest a-PAGE-declares-its-own-address-and-the-store-can-always-read-it
+  ;; The change this whole wave is about, at its smallest. A client route used
+  ;; to live in a `:webapp/routes` VECTOR inside the `^:app/entry` fn's return
+  ;; value — so reading it meant scanning map literals, a table built in pieces
+  ;; was unreadable, and `:unreadable` existed to say so.
+  ;;
+  ;; A marker on the function that renders the page is readable by
+  ;; construction: `store/form-name-meta` answers for every form, always. Same
+  ;; placement `:rest/path` and `:http/path` already use, and from it the same
+  ;; things follow — write gates, `query_surface`, a published document, the
+  ;; reference graph.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things\n"
+                 "  \"Every thing, listed.\"\n"
+                 "  [_app _params] [:main \"things\"])\n\n"
+                 "(defn ^{:webapp/path \"/things/:id\"} thing\n"
+                 "  \"One thing.\"\n"
+                 "  [_app _params] [:main \"thing\"])\n\n"
+                 "(defn plain \"Not a page.\" [x] x)\n")
+        st  (store/ingest (store/empty-store) 'shop.ui src)]
+
+    (testing "every marked form is a page, sorted by address"
+      (is (= ["/things" "/things/:id"] (mapv :path (rules.webapp/page-routes st)))))
+
+    (testing "each row names the function that renders it, qualified"
+      (is (= '[shop.ui/things shop.ui/thing]
+             (mapv :page (rules.webapp/page-routes st)))))
+
+    (testing "and its docstring, which is what a reader scanning addresses wants"
+      (is (= ["Every thing, listed." "One thing."]
+             (mapv :doc (rules.webapp/page-routes st)))))
+
+    (testing "an unmarked form is not a page"
+      (is (not-any? #(= 'shop.ui/plain (:page %)) (rules.webapp/page-routes st))))
+
+    (testing "a store with no browser app answers [] and never nil"
+      ;; so a caller joining against it never has to tell \"no pages\" from
+      ;; \"could not read them\" — which is the question `:unreadable` existed
+      ;; to answer and no longer has to
+      (is (= [] (rules.webapp/page-routes (store/empty-store)))))
+
+    (testing "a COMPUTED table is not a thing that can happen any more"
+      ;; the whole reason this replaces the literal scan. There is no
+      ;; expression to compute: a marker is metadata on a name, so a store
+      ;; cannot half-declare its pages
+      (let [built (store/ingest (store/empty-store) 'shop.two
+                                (str "(ns shop.two)\n\n"
+                                     "(defn s \"S.\" [_a _p] [:p])\n\n"
+                                     "(def table (mapv identity [[\"/x\" s]]))\n\n"
+                                     "(defn ^:app/entry app \"A.\" []\n"
+                                     "  {:webapp/routes table})\n"))]
+        (is (= [] (rules.webapp/page-routes built))
+            (str "a table nobody marked is not a page table — the addresses"
+                 " are on the FORMS now: "
+                 (pr-str (rules.webapp/page-routes built))))))))
+
+(deftest a-PAGE-the-server-does-not-serve-404s-on-a-hard-load
+  ;; `:webapp/client-routing`'s blind spot, and the failure the only real
+  ;; webapp hit with eight routes at once: every in-app CLICK keeps working,
+  ;; because that is client routing, and only a refresh or a shared link 404s.
+  ;; So the app is fine for whoever is already inside it and broken for whoever
+  ;; was sent a url — the population that never reports it, because they assume
+  ;; the link was bad.
+  ;;
+  ;; **The join is now `router/match` against the SHELL routes**, and that is
+  ;; the whole simplification. It used to compare a page path in APP space
+  ;; against a hand-written prefix in SERVER space, which is why it tried every
+  ;; suffix split of the prefix and guessed. A page declares its address the
+  ;; way a document declares its own, so both sides are one coordinate system
+  ;; and the question is just: does a shell's pattern cover this?
+  (let [src (fn [shell-path pages]
+              (str "(ns shop.ui)\n\n"
+                   "(def ^{:http/method :get :http/path \"" shell-path "\"\n"
+                   "       :http/auth :public :webapp/shell true}\n"
+                   "  shell [:html [:head] [:body [:div {:id \"app\"}]]])\n\n"
+                   (apply str
+                          (map-indexed
+                           (fn [i p]
+                             (str "(defn ^{:webapp/path \"" p "\"} page" i
+                                  " \"P.\" [_a _p] [:main \"p\"])\n"))
+                           pages))))
+        on  (fn [shell-path pages]
+              (assoc-in (store/ingest (store/empty-store) 'shop.ui (src shell-path pages))
+                        [:config "capabilities" :values "webapp.enabled"] "true"))]
+
+    (testing "a page a shell's wildcard covers is served"
+      (is (= [] (mapv :path (rules.webapp/pages-unserved
+                             (on "/store/**" ["/store" "/store/form/:id"])))))
+      (is (= [] (mapv :path (rules.webapp/pages-unserved
+                             (on "/**" ["/anything" "/deep/er/still"]))))))
+
+    (testing "and one it does not is reported, with the page that declares it"
+      (let [rows (rules.webapp/pages-unserved
+                  (on "/store/**" ["/store/form/:id" "/settings/:tab"]))]
+        (is (= ["/settings/:tab"] (mapv :path rows)) (pr-str rows))
+        (is (= 'shop.ui/page1 (:page (first rows))) (pr-str rows))))
+
+    (testing "a store with NO shell reports every page"
+      ;; not silence: an app whose browser owns routing and whose server serves
+      ;; no shell is the whole failure, not an app with nothing to check
+      (let [none (assoc-in (store/ingest
+                            (store/empty-store) 'shop.ui
+                            (str "(ns shop.ui)\n\n"
+                                 "(defn ^{:webapp/path \"/store\"} page0"
+                                 " \"P.\" [_a _p] [:main])\n"))
+                           [:config "capabilities" :values "webapp.enabled"] "true")]
+        (is (= ["/store"] (mapv :path (rules.webapp/pages-unserved none))))))
+
+    (testing "and a store with no pages reports nothing"
+      (is (= [] (rules.webapp/pages-unserved (on "/store/**" [])))))
+
+    (testing "the shell's own ROOT is covered, because ** matches zero segments"
+      ;; the rule that used to need a second explicit server route per section,
+      ;; deleted by the grammar rather than enforced better
+      (is (= [] (mapv :path (rules.webapp/pages-unserved
+                             (on "/store/**" ["/store"]))))))))

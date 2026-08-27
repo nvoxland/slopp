@@ -99,7 +99,11 @@
   serving EDN would otherwise be generated a wrapper that calls `.json` and
   fails on the first character."
   [ns-syms]
-  {:slopp/rest-paths-version 1
+  {;; NO version key. Nothing branched on one — it existed so a consumer
+   ;; could refuse rather than misread — and API compatibility is a
+   ;; coordination between an API and its client rather than a mechanism the
+   ;; framework invents. The rule that replaces it: a document changes by
+   ;; RENAMING a key, never by redefining one in place.
    :paths
    (vec (for [row  (routes/from-namespaces ns-syms)
               :let [m (meta (:handler row))]

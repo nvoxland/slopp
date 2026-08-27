@@ -73,45 +73,43 @@
         (is (var? (get effects :user/insert)))
         (is (= {:user/id "7"} ((get reads :user/by-id) {} "7")))))))
 
-(deftest client-route-fallback-serves-deep-links-without-swallowing-404s
+(deftest a-SHELL-serves-deep-links-without-swallowing-404s
   ;; A client-routed app owns paths the server has no route for: /store/ns/foo
   ;; is real to the browser and meaningless to the router, so a refresh 404s.
   ;; The fix is not a catch-all — a catch-all at the root serves the app
   ;; document for EVERY unmatched path, and an app that can never 404 has no
   ;; way to tell a typo from a page.
   ;;
-  ;; So it is DECLARED, per prefix: `:webapp/client-routes ["/store"]` says "I am the
-  ;; document for client routes under /store", and nothing else changes.
-  (let [doc  {:handler :app :method :get :path "/" :auth :public}
-        rows (concat [doc
-                      {:handler :ns-page :method :get :path "/store/ns/:ns" :auth :public}]
-                     (routes/client-route-rows doc ["/store" "/change"]))]
-    (testing "one catch-all row per declared prefix, same handler"
-      (is (= 2 (count (routes/client-route-rows doc ["/store" "/change"]))))
-      (is (every? #(= :app (:handler %)) (routes/client-route-rows doc ["/store" "/change"]))))
+  ;; **It is DECLARED, and now it is declared ONCE, by the shell itself.** The
+  ;; document says `:http/path "/store/**"` and `:webapp/shell true`; the
+  ;; wildcard IS the fallback. That replaced a `:webapp/client-routes` prefix
+  ;; list which generated one catch-all row per prefix — rows nobody wrote,
+  ;; which every document publisher then had to filter back out, and which
+  ;; a reader could not tell from a route an author typed.
+  (let [rows [{:handler :app :method :get :path "/store/**" :auth :public
+               :webapp/shell true}
+              {:handler :ns-page :method :get :path "/store/ns/:ns" :auth :public}]]
+
     (testing "a real route still wins — the fallback never steals it"
+      ;; positional precedence, not a rule of its own: a static segment beats
+      ;; a wildcard at the same depth whatever order the rows arrive in
       (is (= :ns-page (:handler (router/match rows :get "/store/ns/demo.core")))))
+
     (testing "a deep client route the server has no row for gets the document"
       (is (= :app (:handler (router/match rows :get "/store/form/f123/detail")))))
-    (testing "and a path outside every declared prefix still 404s"
+
+    (testing "the shell's own ROOT is covered, because ** matches zero segments"
+      ;; this used to need a SECOND explicit route per section: the generated
+      ;; catch-all needed a segment below the prefix, so /store 404'd while
+      ;; /store/form/9 answered — and the url an author was most likely to
+      ;; share was the one that broke
+      (is (= :app (:handler (router/match rows :get "/store")))))
+
+    (testing "and a path outside the shell still 404s"
       ;; THE assertion that matters. A fallback that swallows this is worse
-      ;; than no fallback: the app loses its only way to say "no such thing".
+      ;; than no fallback: the app loses its only way to say \"no such thing\".
       (is (nil? (router/match rows :get "/nonsense")))
-      (is (nil? (router/match rows :get "/api/typo"))))
-    (testing "the prefix ROOT is covered too, which it did not used to be"
-      ;; The change `**` bought. The generated pattern was `<prefix>/*name`,
-      ;; and a named splat needed at least one segment below it — so `/store`
-      ;; 404'd while `/store/form/9` answered. An author had to declare a
-      ;; second, explicit route for the root of every client-routed section,
-      ;; and the url they were most likely to SHARE was the one that broke.
-      ;;
-      ;; `**` matches zero or more, so the prefix answers for itself. Nothing
-      ;; outside the prefix changed: that is the assertion above, and it is
-      ;; still the one that matters.
-      (is (= :app (:handler (router/match rows :get "/store")))
-          "the declared prefix answers its own root")
-      (is (= "" (get-in (router/match rows :get "/store") [:path-params :*]))
-          "with an EMPTY remainder — the app routes it client-side from there"))))
+      (is (nil? (router/match rows :get "/api/typo"))))))
 
 (deftest a-row-carries-the-CONTRACT-its-endpoint-declared
   ;; The row is what the dispatcher holds at request time, and until now it

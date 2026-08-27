@@ -715,7 +715,6 @@
   design. See the endpoint's `:rest/unconstrained-ok` for why that is
   permanent rather than pending."
   [:map
-   [:slopp/rest-paths-version {:doc "the document format's version — a consumer that does not know it should generate nothing"} :int]
    [:paths
     {:doc "every :rest/path endpoint this project serves; content is absent by KIND and there is no opt-out"}
     [:sequential
@@ -749,7 +748,6 @@
   and the page that declares nothing is the shell, which is the most important
   page in most stores."
   [:map
-   [:slopp/http-paths-version {:doc "the document format's version — a consumer that does not know it should render nothing"} :int]
    [:paths
     {:doc "every :http/path form this project serves. EMPTY is the common case — most projects serve no content of their own, and a consumer must render that well"}
     [:sequential
@@ -768,66 +766,32 @@
       [:shell {:optional true :doc "present when this page BOOTS an application — the url of the compiled bundle the framework injects into it"} :string]]]]])
 
 (def webapp-paths-document
-  "`GET /api/webapp/paths` — the paths a project's BROWSER owns, one row per
-  declared `:webapp/client-routes` prefix. **Version 1.**
-
-  A prefix is not a server route. `:webapp/client-routes [\"/store\"]` says *I
-  am the document for client routes under /store*, and the framework generates
-  a scoped catch-all so a refreshed deep link reaches the app instead of a
-  404. What is published is what the author DECLARED — the catch-alls are not
-  rows anybody wrote, and three `/store/**` entries would read as surface
-  somebody did.
-
-  **A form appears here AND in `/api/http/paths`, deliberately.** The var is a
-  served document and also the owner of browser-side paths; the two documents
-  answer different questions and neither is a subset of the other. There is no
-  union document and there will not be one — separate schemas per kind is the
-  point."
-  [:map
-   [:slopp/webapp-paths-version {:doc "the document format's version — a consumer that does not know it should render nothing"} :int]
-   [:paths
-    {:doc "one row per DECLARED client-route prefix. EMPTY unless the project's browser owns routing — most do not"}
-    [:sequential
-     [:map
-      [:prefix {:doc "the declared path prefix the browser owns, e.g. \"/store\". Paths outside every prefix still 404, which is the property a root catch-all would destroy"} :string]
-      [:document-path {:doc "the SERVER route of the document that serves this prefix — where the browser fetches the page that then routes client-side"} :string]
-      [:name {:doc "the document def's own name, unqualified"} :symbol]
-      [:handler {:doc "the fully-qualified symbol of the def that owns this prefix"} :symbol]
-      [:doc {:doc "that def's docstring, de-indented and whole — MARKDOWN"} [:maybe :string]]
-      [:auth {:doc "the route's :http/auth policy verbatim — never nil, because the auth gate refuses a route that declares none"} :any]
-      [:shell {:optional true :doc "the url of the compiled bundle the framework injects, when the document declares one. Absent means the browser owns these paths without slopp building its code"} :string]]]]])
-
-(def webapp-routes-document
-  "`GET /api/webapp/routes` — the addresses a project's BROWSER routes to, one
-  row per pattern in its declared `:webapp/routes` table. **Version 1.**
+  "`GET /api/webapp/paths` — the pages a project's BROWSER routes to, one row
+  per `:webapp/path` form.
 
   The client-side half of the content surface. `/api/http/paths` says what the
   server hands a browser; a client-routed app is ONE server route and a dozen
   addresses, and the dozen are what a reader navigating it sees.
 
-  **Not the same question as `/api/webapp/paths`, and the two are easy to
-  confuse.** That one publishes the PREFIXES a document declares it owns —
-  server-side, one row per `:webapp/client-routes` entry, answering *who
-  serves this path*. This one publishes what the browser routes to INSIDE
-  those prefixes, answering *what screens are there*. A store may have one
-  prefix and twenty routes.
+  **It used to publish server-side PREFIXES**, which described a mechanism
+  that no longer exists: a shell declares its own `**` path, so the fallback
+  IS the declaration and there is no prefix list to keep in step.
 
-  Rows are derived from the store rather than from a loaded var: a route table
-  lives inside the entry fn's return value, so nothing on a var says what it
-  holds without calling it. That has one consequence a consumer must render —
-  only a LITERAL table can be read, and `:unreadable` names every declaration
-  that was not one."
+  **No version key**, on this or any sibling. Nothing branched on one — it
+  existed so a consumer could refuse rather than misread. API compatibility is
+  a coordination between an API and its client, and both halves of this one
+  migrate together; the rule that replaces it is that a document changes by
+  RENAMING a key, never by redefining one in place.
+
+  **No `:unreadable` either.** That key existed because the route table was a
+  value inside the entry fn, so a table built in pieces could not be read
+  whole. A page carries its address as metadata, which cannot be
+  half-declared."
   [:map
-   [:slopp/webapp-routes-version {:doc "the document format's version — a consumer that does not know it should render nothing"} :int]
-   [:routes
-    {:doc "one row per declared client route PATTERN, sorted by path. EMPTY unless the project has a browser app — most do not"}
+   [:paths
+    {:doc "one row per page the browser routes to, sorted by address. EMPTY unless the project has a browser app — most do not"}
     [:sequential
      [:map
-      [:path {:doc "the client route pattern, e.g. \"/things/:id\" — an address inside the browser app, not a server route"} :string]
-      [:screen {:optional true :doc "the fully-qualified symbol of the fn that RENDERS this address. Absent when the row declares an address with no :render — still an address the app owns, so the row is published anyway"} :symbol]
-      [:doc {:optional true :doc "that render fn's docstring, de-indented and whole — MARKDOWN. Absent when it has none, or when the screen is named through an alias this could not resolve"} :string]
-      [:request {:optional true :doc "the fully-qualified symbol of the fn that builds what this screen fetches, when the row names one"} :symbol]
-      [:loads {:optional true :doc "the url that request names, as a url rather than as the var that computes one. Absent when a request BUILDS its path instead of naming a literal"} :string]]]]
-   [:unreadable
-    {:doc "every :webapp/* declaration in this store that could not be read as a literal, as sentences. NOT a claim that the rows are missing: the reader scans every map literal in the store, so the same table may be declared literally elsewhere and reported from there. It says only that THIS declaration contributed nothing — so a consumer showing routes without showing this may be showing fewer screens than the app has, and cannot tell from :routes alone"}
-    [:sequential :string]]])
+      [:path {:doc "the address the BROWSER routes to, e.g. \"/store/form/:id\" — written as the browser sees it, the same coordinate system :http/path uses"} :string]
+      [:page {:doc "the fully-qualified symbol of the function that renders this page"} :symbol]
+      [:doc {:optional true :doc "that function's docstring, de-indented and whole — MARKDOWN. Absent when it has none"} :string]]]]])

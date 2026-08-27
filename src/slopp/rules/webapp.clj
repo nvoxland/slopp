@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit] [slopp.http.router :as router]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
@@ -132,231 +132,40 @@
                           :cljs cljs})))))
                changed))))
 
-(defn ^{:export "slopp.rules"} client-routes
-  "Every client route PATTERN this store declares, sorted — `[]` when it has no
-  browser app.
+(defn ^:export page-routes
+  "Every PAGE this store declares, as `[{:path :page :doc} …]` sorted by
+  address — `[]` when it has no browser app.
 
-  **The value that retires an escape hatch.** `rules.http/ui-route-refs` skips
-  any form marked `^:webapp/client-path`, and its docstring says exactly why:
-  *teaching the check to SEE the prefixing is not possible in general, because
-  the base arrives through an ordinary function call.* That stopped being true
-  when the framework took over the prefixing — a literal `:href` in a view is now
-  a CLIENT ROUTE KEY, and this is the table it is a key into.
+  A page is a form carrying `^{:webapp/path \"/things/:id\"}`: the address the
+  BROWSER routes to, in the same grammar and the same coordinate system as
+  `:http/path`.
 
-  In one consuming store that escape was on thirteen views, every one discharged
-  with the same sentence. Thirteen copies of one accurate justification is one
-  missing mechanism wearing thirteen hats; this is the mechanism.
+  **The marker is on the form that renders the page**, which is where
+  `:rest/path`, `:http/path` and `:cli/command` already are, and everything
+  follows from that one placement: write gates, `query_surface`, a published
+  document, and a reference graph that answers *which endpoints does this page
+  call*.
 
-  **Read from `:webapp/routes` literals anywhere in the store**, rather than from
-  the `^:app/entry` entry alone. A big app builds its table in pieces and
-  concatenates them, and a reader that insisted on one literal in one place would
-  report a partial table as the whole one — the shape that makes a join silently
-  incomplete.
+  **It replaces reading a `:webapp/routes` VECTOR out of the entry fn**, and
+  the difference is not stylistic. A table inside a fn body is a value, so a
+  big app builds it in pieces and names a var among them — and a reader that
+  only understands literals reports a partial table as the whole one. That is
+  what `:unreadable` existed to say. Metadata on a name is readable by
+  construction, so a store cannot half-declare its pages and there is nothing
+  left for that key to report.
 
-  **A row whose pattern is not a literal string is SKIPPED rather than guessed
-  at.** A computed pattern is one this cannot read; inventing an answer would
-  make the join quietly partial, which is worse than a link reported as dangling,
-  because a dangling report at least gets looked at.
-
-  `[]` and never nil, so a caller joining against it does not have to tell \"no
-  webapp\" apart from \"a webapp that routes nothing\"."
+  `[]` and never nil, so a caller joining against it does not have to tell
+  \"no browser app\" from \"a browser app that routes nothing\"."
   [st]
-  (vec (sort (distinct
-              (for [nsx  (keys (:namespaces st))
-                    e    (store/forms st nsx)
-                    :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
-                    node (tree-seq coll? seq sx)
-                    :when (map? node)
-                    row  (get node :webapp/routes)
-                    :when (and (vector? row) (string? (first row)))]
-                (first row))))))
-
-(defn ^{:export "slopp.rules"} client-routes-unserved
-  "The client routes this store declares that its own document does NOT serve on
-  a hard load, sorted — `[]` when every one is covered.
-
-  **The join `:webapp/client-routing` records as its blind spot**, in the
-  inventory's own words: *nothing compares the client's route table to the
-  server's.* The failure is not hypothetical — the one real app hit it with
-  eight routes at once. Every in-app click kept working, because that is client
-  routing; only a refresh or a shared link 404'd, so the app looked fine to
-  whoever was already in it and broken to whoever was sent a url.
-
-  **Two ways a client route is served, and the check has to know both.**
-
-  1. **The generated catch-all.** A declared prefix becomes `<prefix>/**`, so
-     the prefix and everything below it is answered. The comparison is on the
-     prefix's TAIL, because a prefix is in SERVER space (`/p/:slug/store`) and a
-     client route is in APP space (`/store/form/:id`); what is decidable is
-     whether some suffix of the prefix is a leading segment of the route.
-
-     It used to be STRICTLY below, and that was a property of the pattern
-     rather than of routing: a named splat needed at least one segment under
-     it, so a declared prefix did not answer for its own root. `**` matches
-     zero or more, and the rule went away rather than being enforced better.
-  2. **An EXPLICIT server route.** Still a way to serve a client route — an app
-     may cover one without declaring any prefix at all — though it is no longer
-     the only way to cover a prefix ROOT. This arm was added because that
-     remedy was the advisory's own escape text and this check did not look for
-     it, which cost three false positives on the first real store against the
-     app's own socket test proving all three answer. **A remedy the check
-     cannot see is a remedy that produces findings for taking it**, which is
-     worse than not offering it.
-
-  The client ROOT is the document's own url, so a document at `/p/:slug` serves
-  the client route `/` by existing.
-
-  **Both reads of `:http/path` here are CONTENT reads, not oversights.** A
-  client route is served by a document on a hard load — the mount, and any
-  explicit route covering a prefix root — and a `:rest/path` api can serve
-  neither. So this asks the content marker rather than `route-path`, unlike the
-  request-path join next door, which asks both because a screen may legitimately
-  fetch an asset.
-
-  Advisory rather than a refusal, for the reason a store mid-migration always
-  gets: the state this fires on is a table and a declaration that have not been
-  reconciled, and refusing the writes would block the reconciliation."
-  [st]
-  (let [segs     (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
-        marked   (for [nsx (keys (:namespaces st))
-                       e   (store/forms st nsx)
-                       :when (:name e)
-                       :let [m (store/form-name-meta e)]]
-                   m)
-        prefixes (mapcat :webapp/client-routes marked)
-        ;; every path the server declares outright
-        served   (set (map str (keep :http/path marked)))
-        ;; the mount is the document's own path, and the document is the form
-        ;; carrying the prefixes — the one unambiguous way to name it
-        mounts   (for [m marked
-                       :when (and (seq (:webapp/client-routes m)) (:http/path m))]
-                   (str (:http/path m)))
-        explicit? (fn [route]
-                    (boolean (some #(or (contains? served (str % route))
-                                        (and (= "/" route) (contains? served %)))
-                                   mounts)))
-        ;; the mount point is unknown from a prefix alone, so every split of one
-        ;; is a candidate for where app space begins
-        tails    (for [pfx  prefixes
-                       :let [ps (segs pfx)]
-                       n    (range (count ps))]
-                   (vec (drop n ps)))
-        below?   (fn [route]
-                   (let [rs (segs route)]
-                     (boolean
-                      (some (fn [tail]
-                              ;; AT or below. The generated fallback is
-                              ;; `<prefix>/**` and `**` matches ZERO or more
-                              ;; segments, so a declared prefix answers for its
-                              ;; own root — it did not when the pattern was a
-                              ;; named splat, and that gap is what arm 2 below
-                              ;; existed to let an author close by hand
-                              (and (<= (count tail) (count rs))
-                                   (= tail (vec (take (count tail) rs)))))
-                            tails))))]
-    (vec (sort (remove #(or (below? %) (explicit? %)) (client-routes st))))))
-
-(defn ^{:export "slopp.rules"} derived-client-route-prefixes
-  "The `:webapp/client-routes` prefixes this store's client table IMPLIES, sorted —
-  `[]` when no form declares any.
-
-  **The mount point turned out not to be a deployment fact.** A prefix is in
-  SERVER space (`/p/:slug/store`), a client route is in APP space
-  (`/store/form/:id`), and where the app is mounted looked like a property of how
-  it is served. It is not — **the document's own `:http/path` IS the mount
-  point**, declared beside the prefixes an author keeps by hand:
-
-      the document's :http/path  +  each top-level segment of the client table
-
-  **`:http/path` DELIBERATELY, not `route-path`.** The mount is a DOCUMENT —
-  the SPA shell a hard load lands on — so it is content by kind, and a
-  `:rest/path` api must never be picked as one. Before the api/content split
-  that read as the only available marker; it is a statement now, and the
-  partition makes it enforceable rather than hopeful.
-
-  **The document is the form carrying `:webapp/client-routes`**, and identifying it
-  any other way is wrong in a store that separates its forms. The first cut took
-  the alphabetically-first endpoint path, which was the same form in slopp's own
-  fixtures and `/` in the first real store — so every derived prefix came back
-  with a doubled slash. It is NOT the `^:app/entry` entry either: that marker
-  means *an entry `screen` can open*, and a store may mark a headless entry that
-  no route serves, which the first real store does.
-
-  **One prefix per top-level SEGMENT, not one per route.** `/store` and
-  `/store/form/:id` are one prefix, because the generated catch-all under
-  `/store` answers both; listing them separately would be three declarations
-  where one serves.
-
-  **The app root contributes nothing.** `/` would generate `//**`,
-  which is not a path — and the document already answers its own url.
-
-  **Reported, never enforced.** An app may legitimately serve only some of its
-  client routes as deep links: a section reachable only from inside the app is a
-  real design. Rewriting the declaration would take that choice away. What an
-  author should not do is arrive at a gap by FORGETTING, so slopp computes the
-  answer and leaves declining it to them."
-  [st]
-  (let [segs (fn [s] (vec (remove str/blank? (str/split (str s) #"/"))))
-        doc  (first (sort (for [nsx (keys (:namespaces st))
-                                e   (store/forms st nsx)
-                                :when (:name e)
-                                :let [m (store/form-name-meta e)]
-                                :when (and (seq (:webapp/client-routes m))
-                                           (:http/path m))]
-                            (str (:http/path m)))))
-        tops (distinct (keep (comp first segs) (client-routes st)))]
-    (if doc
-      ;; the mount's own trailing slash is stripped before the join: a
-      ;; document served at `/` is the commonest shape there is, and
-      ;; `(str "/" "/" "p")` is `//p` — not a path, named by the one
-      ;; mechanism that exists to tell an author what to declare
-      (vec (sort (map #(str (str/replace doc #"/+$" "") "/" %) tops)))
-      [])))
-
-(defn webapp-client-routes-are-served-check
-  "Done-advisory: client routes this store declares that its own document does
-  not serve on a hard load. Inert until the store opts into `webapp`.
-
-  **The blind spot `:webapp/client-routing` has carried since it was
-  registered**, in the inventory's own words: *nothing compares the client's
-  route table to the server's.* Both halves are readable now — the client table
-  is data and the prefixes are metadata — so the comparison exists.
-
-  The failure it reports is the one the only real webapp hit, with eight routes
-  at once: every in-app CLICK keeps working, because that is client routing, and
-  only a refresh or a shared link 404s. So the app is fine for whoever is already
-  inside it and broken for whoever was sent a url — which is the population that
-  never reports bugs, because they assume the link was bad.
-
-  **Whole-store, not episode-scoped**, unlike its `webapp-page-reach` neighbour:
-  the two declarations that drift apart are usually not edited together, and the
-  episode that breaks the join is the one that touches only ONE of them.
-
-  Advisory rather than a refusal, for the reason a store mid-migration always
-  gets: the state this fires on is a table and a declaration that have not been
-  reconciled yet, and refusing the writes would block the reconciliation."
-  [_session st* _changed]
-  (when (capabilities/enabled? st* "webapp")
-    (let [want (derived-client-route-prefixes st*)]
-      (vec (for [route (client-routes-unserved st*)]
-             {:route route
-              ;; the finding carries the ANSWER, not just the complaint: the
-              ;; prefixes are computable from the document's own :http/path plus
-              ;; the client table, so there is no reason to make an author work
-              ;; out what to paste
-              :declare want
-              :teach (str "the client route " (pr-str route) " is not served on a"
-                          " hard load — clicking to it works, refreshing it or"
-                          " opening a shared link 404s, so the app is fine for"
-                          " whoever is already inside it and broken for whoever"
-                          " was sent a url."
-                          (when (seq want)
-                            (str " Your client table and this document's own"
-                                 " path imply :webapp/client-routes "
-                                 (pr-str want) "."))
-                          " A declared prefix generates <prefix>/** and covers"
-                          " its own ROOT as well as everything below it, so a"
-                          " route AT the prefix needs nothing extra.")})))))
+  (vec (sort-by :path
+                (for [nsx  (keys (:namespaces st))
+                      e    (store/forms st nsx)
+                      :when (:name e)
+                      :let [p (:webapp/path (store/form-name-meta e))]
+                      :when (string? p)]
+                  {:path p
+                   :page (symbol (str nsx) (str (:name e)))
+                   :doc  (store/form-docstring (:node e))}))))
 
 (defn ^:export request-paths
   "Every endpoint DESCRIPTOR path this store declares, as `[{:path :form} …]`
@@ -880,3 +689,88 @@
                                   (when-let [q (some-> (namespace node) symbol)]
                                     (= 'slopp.webapp (get aliases q q))))]
                    (symbol (str nsx) (str (:name e))))))))
+
+(defn ^{:export "slopp.rules"} pages-unserved
+  "The [[page-routes]] no SHELL in this store answers on a hard load, sorted —
+  `[]` when every page is covered.
+
+  **The join `:webapp/client-routing` records as its blind spot**, in the
+  inventory's own words: *nothing compares the client's route table to the
+  server's.* The failure is the one the only real webapp hit, with eight
+  routes at once — every in-app CLICK keeps working, because that is client
+  routing, and only a refresh or a shared link 404s. So the app is fine for
+  whoever is already inside it and broken for whoever was sent a url, which is
+  the population that never reports it because they assume the link was bad.
+
+  **Asked with `router/match`, against the shell routes themselves.** That is
+  the whole simplification this replaces: the old join compared a page path in
+  APP space against a hand-written prefix in SERVER space, so it could not
+  tell where app space began and tried EVERY suffix split of the prefix. A
+  page declares its address the way a document declares its own, so both sides
+  are one coordinate system and the question is just whether a shell's pattern
+  covers this one.
+
+  A shell's `**` matches zero segments, so a section's own root is covered by
+  the same declaration that covers everything below it. That used to need a
+  second explicit server route per section — a rule that lived in three
+  docstrings and reached no author.
+
+  Advisory rather than a refusal, for the reason a store mid-migration always
+  gets: the state this fires on is a page and a shell that have not been
+  reconciled, and refusing the writes would block the reconciliation."
+  [st]
+  (let [shells (vec (for [nsx (keys (:namespaces st))
+                          e   (store/forms st nsx)
+                          :when (:name e)
+                          :let [m (store/form-name-meta e)]
+                          :when (and (:webapp/shell m) (:http/path m))]
+                      {:method :get
+                       :path (str (:http/path m))
+                       :handler (symbol (str nsx) (str (:name e)))}))]
+    (vec (remove #(router/match shells :get (:path %)) (page-routes st)))))
+
+(defn webapp-client-routes-are-served-check
+  "Done-advisory: pages this store declares that no SHELL answers on a hard
+  load. Inert until the store opts into `webapp`.
+
+  **The blind spot `:webapp/client-routing` has carried since it was
+  registered**, in the inventory's own words: *nothing compares the client's
+  route table to the server's.* Both halves are readable now — a page carries
+  `:webapp/path` and a shell carries `:http/path` — so the comparison exists.
+
+  The failure it reports is the one the only real webapp hit, with eight
+  routes at once: every in-app CLICK keeps working, because that is client
+  routing, and only a refresh or a shared link 404s. So the app is fine for
+  whoever is already inside it and broken for whoever was sent a url — which
+  is the population that never reports bugs, because they assume the link was
+  bad.
+
+  **It hands over no computed prefix, because there is no prefix to declare.**
+  It used to: the author kept a `:webapp/client-routes` list in server space
+  and this named the value they should paste. The shell's own `:http/path` is
+  that declaration now, so the remedy is to widen it or to give the page an
+  address underneath it — both of which are edits to something that already
+  exists.
+
+  **Whole-store, not episode-scoped**, unlike its `webapp-page-reach`
+  neighbour: a page and the shell that serves it are usually not edited
+  together, and the episode that breaks the join is the one that touches only
+  ONE of them.
+
+  Advisory rather than a refusal, for the reason a store mid-migration always
+  gets: the state this fires on is a page and a shell that have not been
+  reconciled, and refusing the writes would block the reconciliation."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    (vec (for [{:keys [path page]} (pages-unserved st*)]
+           {:route path
+            :page  page
+            :teach (str "the page " (pr-str path) " is not served on a hard"
+                        " load — clicking to it works, refreshing it or"
+                        " opening a shared link 404s, so the app is fine for"
+                        " whoever is already inside it and broken for whoever"
+                        " was sent a url. A document marked :webapp/shell"
+                        " answers every address its own :http/path covers, and"
+                        " `**` matches zero or more segments — so widening the"
+                        " shell's path, or moving this page underneath it, is"
+                        " the fix. There is nothing extra to declare.")}))))

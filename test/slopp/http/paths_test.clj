@@ -47,7 +47,7 @@
 
     (testing "the document names its own version, so a consumer can refuse a
               shape it does not know"
-      (is (= 1 (:slopp/http-paths-version doc))))
+      (is (= #{:paths} (set (keys doc))) (pr-str (keys doc))))
 
     (testing "every :http/path form and nothing typed"
       (is (= #{"/p/shell" "/p/fragment" "/p/style.css"} (set (keys by))))
@@ -113,6 +113,6 @@
   ;; so this is the answer a consumer renders most often and the one a test
   ;; most easily does not have.
   (let [doc (http.paths/paths-document ['slopp.http.routes])]
-    (is (= 1 (:slopp/http-paths-version doc)))
+    (is (= #{:paths} (set (keys doc))) (pr-str (keys doc)))
     (is (= [] (:paths doc))
         "an empty vector, not nil and not a missing key: a consumer maps over it")))

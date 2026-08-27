@@ -221,3 +221,72 @@
              " because slopp's browser shim normalises the event once for every"
              " app. A function on a control that carries no value (a button) is"
              " portable and this gate ignores it.")))))
+
+(defn ^:export ^{:rule/applies-to :production} webapp-page-address
+  "The page-address gate: a `^{:webapp/path …}` form whose address cannot
+  work is refused at the write. Inert until `webapp.enabled`, which
+  `edit.gates/gate-check` decides — not this gate. Returns a teaching string,
+  or nil when clean.
+
+  A page carries its own address now, so the address needs the gates an
+  address has always had. Three ways one silently renders nothing, and none of
+  them fails loudly:
+
+  - **a pattern the router has no rule for** — `*name`, `*.css`, a wildcard in
+    the middle. `slopp.http.router/match` is pure, so it contributes no rows
+    and the page is simply never reached.
+  - **a PRIVATE page** — the generated browser entry names the var, and it
+    cannot name what it cannot see.
+  - **a SECOND claim on one address** — the browser matches one of them and
+    the other is unreachable with nothing to say why. The same question
+    `http-route-collision` asks about a server route; the answer matters more
+    here, because a client route has no 404 to notice.
+
+  The same form RE-LANDING is not a collision, which is the replace case."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m    (store/form-name-meta e)
+          path (:webapp/path m)
+          ;; `defn-` puts privacy in the HEAD, not in the name's metadata — a
+          ;; stored form has never been evaluated, so the `:private true` the
+          ;; macro would attach is not there to read. Both spellings, or the
+          ;; arm passes on the one authors actually write.
+          head (first (try (store/form-sexpr (:node e)) (catch Exception _ nil)))]
+      (when (string? path)
+        (let [segs (vec (remove str/blank? (str/split path #"/")))
+              bad  (first (for [[i s] (map-indexed vector segs)
+                                :when (and (str/includes? s "*")
+                                           (or (not (#{"*" "**"} s))
+                                               (not= i (dec (count segs)))))]
+                            s))
+              other (some (fn [[nsx nm p id]]
+                            (when (and (= p path) (not= id (:id e)))
+                              (symbol (str nsx) (str nm))))
+                          (for [nsx (keys (:namespaces candidate))
+                                x   (store/forms candidate nsx)
+                                :when (:name x)
+                                :let [pm (:webapp/path (store/form-name-meta x))]
+                                :when (string? pm)]
+                            [nsx (:name x) pm (:id x)]))]
+          (cond
+            bad
+            (str ns-sym "/" form-name " declares the page address " path
+                 " — \"" bad "\" is not a pattern the router has, so this page"
+                 " is never reached and nothing says why. The grammar is"
+                 " `:name` (one segment, captured), `*` (exactly one segment)"
+                 " and `**` (zero or more), with both wildcards ANONYMOUS and"
+                 " at the END only — a named splat like *path is now `**`, and"
+                 " there is no partial-segment globbing")
+
+            (or (:private m) (= 'defn- head))
+            (str ns-sym "/" form-name " is marked :webapp/path but ^:private —"
+                 " the generated browser entry names this var to route to it,"
+                 " and it cannot name what it cannot see. Make it public, or"
+                 " drop the marker if this is a helper rather than a page")
+
+            other
+            (str ns-sym "/" form-name " claims the page address " path
+                 " but " other " already answers there — the browser matches"
+                 " ONE of them and the other is unreachable with nothing to"
+                 " say why, because a client route has no 404 to notice."
+                 " Change the address, or extend the page that has it")))))))

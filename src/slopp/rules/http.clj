@@ -707,8 +707,8 @@
         ;; `web.routes-test/the-CLIENT-and-SERVER-matchers-agree-about-the-pattern-grammar`,
         ;; so using one to read the other's patterns is a checked equivalence
         ;; rather than an assumption.
-        client-rows   (mapv (fn [p] {:method :get :path p})
-                            (rules.webapp/client-routes store))
+        client-rows   (mapv (fn [{:keys [path]}] {:method :get :path path})
+                            (rules.webapp/page-routes store))
         client-routed? (fn [path] (boolean (router/match client-rows :get path)))
         served? (fn [{:keys [kind method path]}]
                   (case kind
