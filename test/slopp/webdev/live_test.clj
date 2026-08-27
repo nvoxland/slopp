@@ -455,6 +455,7 @@
                    :adapter :http-kit :max-body-bytes 42
                    :context-builder 'demo.sys/deps
                    :validate? true
+                   :bundle "/assets/cljs/main.js"
                    :static {"/assets" "public"} :static-dir "/tmp/x"}
         generated (->> (edn/read-string {:default (fn [_ v] v)}
                                         (live/serve-code plan))

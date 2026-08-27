@@ -89,7 +89,7 @@
   own reviewer UI hit it immediately, because the endpoints and their read
   performers live in different namespaces on purpose."
   [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes wrap-context]
-    :webapp/keys [base]}]
+    :webapp/keys [base bundle]}]
   (let [ctx ((or wrap-context identity)
              (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
                       :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
@@ -97,7 +97,11 @@
                       :http/perform-ctx perform-ctx
                       :http/max-body-bytes (or max-body-bytes 1048576)}
                auth-config (assoc :http/auth-config auth-config)
-               base (assoc :webapp/base base)))
+               base (assoc :webapp/base base)
+               ;; the bundle a shell injects — carried on the CONTEXT beside
+               ;; the mount point, because both are deployment facts and
+               ;; neither is something a page can know about itself
+               bundle (assoc :webapp/bundle bundle)))
         ;; A route DECLARING a contract that nothing on this context honours.
         ;; The same question `missing` asks below of a declared read, and the
         ;; answer matters more: a missing performer answers 500, while a missing
@@ -163,7 +167,21 @@
     ;; the page first, for an app that was already wrong when it came up.
     (doseq [row   (distinct (:http/routes ctx))
             :when (:webapp/shell row)]
-      (html/complete-shell (var-get (:handler row)) (:webapp/shell row) base))
+      ;; a shell with no bundle serves a document whose script never loads —
+      ;; a blank page on every route, and the app was already wrong when it
+      ;; came up. The row declares THAT it is a shell; the bundle is the
+      ;; app's, stated once here beside the mount point, so this is the only
+      ;; place the pair can be checked against each other
+      (when-not (string? bundle)
+        (throw (ex-info (str (:path row) " declares :webapp/shell but this"
+                             " context names no :webapp/bundle — a shell whose"
+                             " script never loads is a blank page on every"
+                             " route. Pass :webapp/bundle \"<url of the"
+                             " compiled bundle>\" where you pass :webapp/base;"
+                             " it is a deployment fact, which is why it is not"
+                             " on the page")
+                        {:webapp/no-bundle (:path row)})))
+      (html/complete-shell (var-get (:handler row)) bundle base))
     ctx))
 
 (defn handle!

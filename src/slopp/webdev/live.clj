@@ -158,6 +158,12 @@
      ;; of the app — it is an unusable one, and the project it happened to
      ;; switched the managed server off rather than reading it as a bug.
      :static          (rules.http/static-mounts store)
+     ;; the url a shell injects, JOINED from the compile output and the
+     ;; mounts above rather than typed on every shell route. nil when no
+     ;; mount reaches the bundle, which `slopp.http/context` refuses at
+     ;; assembly if anything declares itself a shell — the honest failure,
+     ;; where a blank page on every route is the alternative
+     :bundle          (rules.http/bundle-url store)
      ;; whether the served app HONOURS its declared contracts. Read here rather
      ;; than in serve-code for the same reason every other derivation is: the
      ;; plan is what production and the dev server both answer from, and a
@@ -353,6 +359,12 @@
                          :http/adapter    (:adapter plan)}
                   (:max-body-bytes plan)
                   (assoc :http/max-body-bytes (:max-body-bytes plan))
+                  ;; a shell declares THAT it is one; this is the url it
+                  ;; injects. Dropping it would make every app with a shell
+                  ;; refuse to assemble on the managed server — the loud
+                  ;; failure, but a failure the dev server would own
+                  (:bundle plan)
+                  (assoc :webapp/bundle (:bundle plan))
                   ;; where `rest.enabled` stops being a line in a config file.
                   ;; The app writes no serve! call, so the capability switch has
                   ;; to reach the GENERATED one or the boundary exists and

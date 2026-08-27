@@ -814,3 +814,35 @@
         :when msg]
     {:form  (symbol (str nsx) (str nm))
      :teach msg}))
+
+(def ^:export compiled-bundle-path
+  "Where `compile_client` writes the browser bundle by default, as a
+  files-manifest path.
+
+  Here rather than in the compiler because two things need it and neither
+  should ask the other: the compiler WRITES it, and [[bundle-url]] derives the
+  url a shell injects FROM it. A second copy of this string is how a store
+  compiles to one path and serves another."
+  "public/cljs/main.js")
+
+(defn ^:export bundle-url
+  "The url this store's compiled browser bundle is served at, or nil when no
+  static mount reaches it.
+
+  **Derived, because both halves are already declared.** `compile_client`
+  writes to [[compiled-bundle-path]] and `http.static.*` says which url prefix
+  serves which manifest prefix — so the url a shell injects is a JOIN, not a
+  fact anybody should be typing. It used to be typed: `:webapp/shell` held the
+  url on every shell route, which made two shells two copies and left a store
+  that moved its mount hunting for them.
+
+  nil is a real answer and a caller must treat it as one: a store may compile a
+  bundle and serve it from an ENDPOINT rather than a mount, which is what
+  slopp's own reviewer UI does. `slopp.http/context` refuses a shell with no
+  bundle at assembly, so an app in that position passes `:webapp/bundle`
+  itself — the derivation is the default, not the only way."
+  [store]
+  (some (fn [[url-prefix path-prefix]]
+          (when (str/starts-with? compiled-bundle-path (str path-prefix "/"))
+            (str url-prefix (subs compiled-bundle-path (count path-prefix)))))
+        (static-mounts store)))

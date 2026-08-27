@@ -210,8 +210,10 @@
       (= :content (:kind row))
       (html/content-response
        (let [value (var-get (:handler row))]
-         (if-let [bundle (:webapp/shell row)]
-           (html/complete-shell value bundle (:webapp/base ctx))
+         (if (:webapp/shell row)
+           ;; the row DECLARES it is a shell; WHICH bundle is a deployment
+           ;; fact the app states once on the context, beside the mount point
+           (html/complete-shell value (:webapp/bundle ctx) (:webapp/base ctx))
            value))
        (:http/media-type row))
 

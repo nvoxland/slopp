@@ -59,7 +59,7 @@
   "User-agent: *\nDisallow:\n")
 
 (def ^{:http/method :get :http/path "/" :http/auth :public
-       :webapp/shell "/js/main.js"}
+       :webapp/shell true}
   t-shell
   "The SPA shell. The app writes the WHOLE document — title, meta, stylesheet,
   mount point — and writes neither the bundle script nor the mount prefix,
@@ -79,6 +79,9 @@
 
 (deftest facade-assembles-and-enforces
   (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       ;; this namespace declares a shell, and a
+                                       ;; shell with no bundle refuses at assembly
+                                       :webapp/bundle "/js/main.js"
                                        :http/wrap-context honouring})]
     (testing "context derives the route table from var metadata"
       (is (= {"/api/w/mine/:owner" :rest, "/" :content
@@ -99,6 +102,7 @@
 
 (deftest content-is-a-VALUE-the-dispatcher-serves-not-a-handler-it-calls
   (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       :webapp/bundle "/js/main.js"
                                        :http/wrap-context honouring})]
     (testing "hiccup content renders, and keeps its structure for a headless drive"
       (let [r (slopp.http/handle! ctx {:request-method :get :uri "/about"})]
@@ -121,7 +125,11 @@
 (deftest a-webapp-SHELL-is-completed-by-the-framework
   (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
                                   :http/wrap-context honouring
-                                  :webapp/base "/p/demo"})
+                                  :webapp/base   "/p/demo"
+                                  ;; the row declares THAT it is a shell; which
+                                  ;; bundle is a deployment fact, stated once
+                                  ;; here beside the mount point
+                                  :webapp/bundle "/js/main.js"})
         r    (slopp.http/handle! ctx {:request-method :get :uri "/"})
         body (str (:body r))]
     (is (= 200 (:status r)) (pr-str r))
@@ -147,9 +155,10 @@
        clojure.lang.ExceptionInfo #"no mount point"
        (slopp.http/context
         {:http/namespaces []
+         :webapp/bundle "/js/main.js"
          :http/routes [{:handler #'t-broken-shell :kind :content :method :get
                         :path "/bad" :auth :public
-                        :webapp/shell "/js/main.js"}]}))
+                        :webapp/shell true}]}))
       "assembly and not the first request: a shell is checked once, where the
        app comes up, rather than answering 500 to whoever loads it first"))
 
@@ -163,6 +172,9 @@
   serve-round-trips-the-facade
   (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
                          :http/wrap-context honouring
+                         ;; this namespace declares a shell, and a shell with
+                         ;; no bundle refuses at assembly
+                         :webapp/bundle "/js/main.js"
                          :http/port 0})
         http (java.net.http.HttpClient/newHttpClient)
         resp (.send http
@@ -184,6 +196,7 @@
   (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
                          :http/wrap-context honouring
                          :http/adapter :http-kit
+                         :webapp/bundle "/js/main.js"
                          :http/port 0})
         http (java.net.http.HttpClient/newHttpClient)
         resp (.send http
@@ -205,6 +218,7 @@
                          :http/wrap-context honouring
                          :http/adapter :http-kit
                          :http/port 0
+                         :webapp/bundle "/js/main.js"
                          :http/auth-config {:auth/providers [:bearer]
                                            :auth/bearer {"ada" {:secret "tok-ada"
                                                                 :groups ["dev"]}}}})
@@ -436,6 +450,7 @@
     ;; the guard must not fire on the ordinary case, including a route with
     ;; no declared reads at all
     (is (map? (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                   :webapp/bundle "/js/main.js"
                                    :http/wrap-context honouring})))))
 
 (defn reader-contract
@@ -555,6 +570,9 @@
       ;; deciding it from a map that does not have one yet
       (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
                                    :http/port 0
+                                   ;; this namespace declares a shell, and a
+                                   ;; shell with no bundle refuses at assembly
+                                   :webapp/bundle "/js/main.js"
                                    :http/wrap-context wrap})]
         (try
           (is (some? (:http/routes @seen)) (pr-str (keys @seen)))
@@ -674,3 +692,36 @@
                            {:http/routes [{:method :get :path "/hi" :auth :public
                                            :handler (fn [_] {:status 200 :body [:p "hi"]})}]}
                            {:request-method :get :uri "/hi"})))))))
+
+(deftest a-SHELL-declares-that-it-IS-one-and-the-framework-supplies-the-bundle
+  ;; `:webapp/shell` used to hold the bundle URL, so every shell route repeated
+  ;; a fact about the BUILD — where the compiled JavaScript is served — in a
+  ;; declaration about a PAGE. Two shells meant two copies, and a store that
+  ;; moved its static mount had to find them.
+  ;;
+  ;; The page's own statement is "I am the shell". Which bundle is the app's,
+  ;; declared once where it is assembled, beside the mount point — the other
+  ;; deployment fact a document has no business knowing.
+  (let [shell (with-meta 'shell {:http/method :get :http/path "/x/**"
+                                 :http/auth :public :webapp/shell true})]
+    (is (true? (:webapp/shell (meta shell)))
+        "the marker is a boolean — a route says it is a shell, not where a build put its output")
+
+    (testing "the framework injects the bundle it was given"
+      (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                      :http/wrap-context honouring
+                                      :webapp/base   "/p/demo"
+                                      :webapp/bundle "/js/main.js"})
+            body (str (:body (slopp.http/handle! ctx {:request-method :get :uri "/"})))]
+        (is (str/includes? body "src=\"/js/main.js\"") body)))
+
+    (testing "and a shell with NO bundle configured refuses at ASSEMBLY"
+      ;; the same place a broken shell already refuses, and for the same
+      ;; reason: an app that comes up serving a document with no script is one
+      ;; whose every page is blank, and the first reader is a worse place to
+      ;; find that out than the boot
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"(?i)bundle"
+           (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                :http/wrap-context honouring
+                                :webapp/base "/p/demo"}))))))
