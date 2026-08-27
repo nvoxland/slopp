@@ -3509,3 +3509,44 @@ The structural remedy is usually to move the authority OUT of reach of the
 input: assemble in one function both paths call ([[D-declared-is-served]]),
 route the fixture the way the real server routes, publish the version from the
 code that changes when the shape does.
+
+## Enumerating the READERS is not coverage — cross them with the PROPERTIES
+
+slopp-ui, 2026-08-26, correcting a count I had just published as complete.
+
+Landing the route-grammar rework, I asked *how many readers of the path grammar
+are there?*, found six across two stores, fixed the three that were wrong, and
+said so. They went and checked their own fourth reader, `url-parts`, and it was
+wrong — in a way neither of us had looked for.
+
+**Why it survived the sweep is the finding.** `url-parts` INTERPOLATED the
+wildcard correctly. They had checked that, and quoted the passing result to me
+as evidence it was fine. Interpolation was the only angle either of us used,
+because it was the angle the first bug had been found from. The second property
+— *encode the value WHOLE, or encode each sub-segment and join?* — was never
+asked of it.
+
+> A reader that is right about the thing you checked is the hardest place for a
+> bug to be.
+
+The rule they drew, which is the reusable half:
+
+> **Enumerate the readers, then enumerate the PROPERTIES, and cross them. Three
+> readers × one property is not coverage of three readers.**
+
+It paid immediately in both directions. Applying the second property to my own
+four found a FIFTH wrong reader: `webdev.cljs/render-client-ns` emitted
+`(defn- url [p] (str @base p))` and interpolated path values raw, while its
+sibling generator handed the same values to `request-url`, which percent-encodes
+each one. Two generated clients for one API, one encoding and one not — and the
+endpoint that exposes it is `/api/source/:ns/:name`, whose `:name` is a VAR
+NAME, the exact parameter that produced the `register%21` incident.
+
+**The property axis is usually the one that goes unenumerated**, because the
+reader list is a grep and the property list is a thought. The tell is that
+every reader was checked against the same predicate; if the sweep's assertions
+are all the same shape, it swept one property N times.
+
+Related: [[Only BREAKING the subject finds a green that could not have failed]]
+— same family, one step earlier. That one asks whether an assertion can fail at
+all; this one asks whether the assertions you wrote are all asking one question.
