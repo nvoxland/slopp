@@ -311,7 +311,7 @@
     (testing "request validation on a body verb; response validation both; path param substituted"
       (is (re-find #"m/validate shop\.contracts/order params" src) "request validated out")
       (is (re-find #"m/decode shop\.contracts/order" src) "response decoded in")
-      (is (re-find #"\(str \"/api/orders/\" \(:id params\)\)" src) "path param interpolated"))
+      (is (re-find #"\(str \"/api/orders/\" \(seg \(:id params\)\)\)" src) "path param interpolated"))
     (testing "every fetch goes through a BASE the app can set, so a slopp app
               can be served under a path prefix (D-hub part 2). Default \"\"
               is exactly today's behaviour — an app served at the root emits
@@ -770,7 +770,7 @@
       ;; stay byte-identical: this namespace is regenerated wholesale and
       ;; diffed by eye, so a cosmetic churn across every endpoint is noise
       ;; that hides the one line that actually moved.
-      (is (re-find #"\(url \(str \"/api/form/\" \(:id params\) \(qs \(dissoc params :id\)\)\)\)" get-)
+      (is (re-find #"\(url \(str \"/api/form/\" \(seg \(:id params\)\) \(qs \(dissoc params :id\)\)\)\)" get-)
           get-)
       (is (re-find #"\(url \"/api/things\"\)" bare) bare))
     (testing "and the runtime helper the wrapper calls actually exists"
@@ -838,7 +838,7 @@
       ;; published contract lost the publisher's var names, so the remote path
       ;; re-derives `form-request` from the endpoint). The url is the part that
       ;; must not depend on which producer you came through.
-      (is (= "url (str \"/api/form/\" (:id params) (qs (dissoc params :id)))"
+      (is (= "url (str \"/api/form/\" (seg (:id params)) (qs (dissoc params :id)))"
              (url-of local))
           (url-of local))
       (is (= (url-of local) (url-of remote))
@@ -1408,7 +1408,7 @@
         one  (wrap "/p/:slug/api/*" nil)]
 
     (testing "the remainder is interpolated, not printed"
-      (is (re-find #"\(url \(str \"/p/\" \(:slug params\) \"/api/\" \(:\* params\)\)\)" many)
+      (is (re-find #"\(url \(str \"/p/\" \(seg \(:slug params\)\) \"/api/\" \(seg\* \(:\* params\)\)\)\)" many)
           many)
       (is (not (re-find #"\*\*\"" many))
           (str "a literal wildcard in the url reaches the server as the"
@@ -1468,3 +1468,53 @@
       ;; substitutes segment-wise and encodes each, and a finished path would
       ;; lose both properties
       (is (re-find #":webapp/path \"/p/:slug/api/\*\*\"" many) many))))
+
+(deftest a-generated-FETCH-encodes-its-path-the-way-its-SIBLING-does
+  ;; Found by taking slopp-ui's rule and running it over my own readers:
+  ;; *enumerate the readers, then enumerate the PROPERTIES, and cross them.*
+  ;; Three readers × one property is not coverage of three readers.
+  ;;
+  ;; The property I never asked about was ENCODING. Both generators build a
+  ;; url for the same API and they did it differently:
+  ;;
+  ;;   render-request → request-url   percent-encodes each segment
+  ;;   render-wrapper → (url (str …)) interpolated RAW
+  ;;
+  ;; Two clients of one endpoint disagreeing about what a value means is the
+  ;; same failure as the two matchers disagreeing about a pattern, and this
+  ;; store has a scar for it: `/api/source/:ns/:name` takes a VAR NAME, which
+  ;; is exactly the parameter that produced `register%21` arriving as a form
+  ;; nobody had defined.
+  (let [wrap (fn [path] (#'cljs/render-wrapper
+                         {:fn-name "src" :method :get :path path
+                          :endpoint "demo/src" :request nil :response nil}))]
+
+    (testing "a named segment is encoded, so a value cannot break out of it"
+      (is (re-find #"\(str \"/api/source/\" \(seg \(:ns params\)\) \"/\" \(seg \(:name params\)\)\)"
+                   (wrap "/api/source/:ns/:name"))
+          (wrap "/api/source/:ns/:name")))
+
+    (testing "a REMAINDER is encoded per sub-segment, because its slashes are structure"
+      ;; the three-branch rule `request-url` needed: encode-whole for a
+      ;; segment, encode-each-then-join for a remainder. Encoded whole, a
+      ;; remainder arrives as %2F and the matcher — which decodes each
+      ;; sub-segment and THEN joins — never closes the round trip
+      (is (re-find #"\(seg\* \(:\* params\)\)" (wrap "/p/:slug/api/**"))
+          (wrap "/p/:slug/api/**")))
+
+    (testing "a single-segment wildcard encodes whole, like a named capture"
+      (is (re-find #"\(seg \(:\* params\)\)" (wrap "/files/*")) (wrap "/files/*")))
+
+    (testing "a path with no parameters gains nothing — no churn where nothing moved"
+      (is (re-find #"\(url \"/api/timeline\"\)" (wrap "/api/timeline"))))
+
+    (testing "and both helpers actually exist in the rendered namespace"
+      ;; the half that would otherwise ship wrappers calling nothing — the
+      ;; same guard `qs` already has
+      (let [src (cljs/render-client-ns
+                 'demo.client.api
+                 [{:fn-name "src" :method :get :path "/api/source/:ns/:name"
+                   :endpoint "demo/src" :request nil :response nil}])]
+        (is (re-find #"\(defn- seg\b" src) src)
+        (is (re-find #"\(defn- seg\*" src) src)
+        (is (re-find #"encodeURIComponent" src) src)))))

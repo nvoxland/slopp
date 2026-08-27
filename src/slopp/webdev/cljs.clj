@@ -229,7 +229,15 @@
       (pr-str path)
       (let [parts     (mapcat (fn [s]
                                 (if (param? s)
-                                  [(list (as-key s) 'params)]
+                                  ;; ENCODED, and which encoder depends on
+                                  ;; whether a `/` in the value is data or
+                                  ;; structure. Raw interpolation let a value
+                                  ;; break out of its own segment, and it made
+                                  ;; this generator disagree with `render-request`
+                                  ;; — two clients of one endpoint, one
+                                  ;; encoding and one not
+                                  [(list (if (= s "**") 'seg* 'seg)
+                                         (list (as-key s) 'params))]
                                   [s]))
                               segs)
             joined    (interpose "/" parts)
@@ -400,6 +408,29 @@
          "(defonce ^:export base (atom \"\"))\n\n"
          "(defn ^:export set-base! [b] (reset! base b))\n\n"
          "(defn- url [p] (str @base p))\n\n"
+         ;; Path values are ENCODED, and which encoder depends on whether a
+         ;; `/` in the value is data or structure. Raw interpolation let a
+         ;; value break out of its own segment — and `/api/source/:ns/:name`
+         ;; takes a VAR NAME, the exact parameter that once arrived as
+         ;; `register%21` and resolved to nothing.
+         ;;
+         ;; It also made this generator disagree with `render-request`, whose
+         ;; builders hand path params to `request-url` and get per-segment
+         ;; encoding. Two clients of one endpoint, one encoding and one not.
+         ;;
+         ;; Helpers rather than inline, for `url` and `qs`'s reason: a fix
+         ;; applied at eight interpolation sites misses the ninth.
+         "(defn- seg\n"
+         "  \"One path segment, percent-encoded: a / in a VALUE is data trying to\n"
+         "   become structure, and the router decodes each segment on its own.\"\n"
+         "  [v] (js/encodeURIComponent (str v)))\n\n"
+         "(defn- seg*\n"
+         "  \"A ** remainder — each sub-segment encoded on its own and THEN joined,\n"
+         "   because here a / IS structure. Empty for an absent remainder, since\n"
+         "   ** matches zero segments and a url has to be able to stop.\"\n"
+         "  [v]\n"
+         "  (let [s (str (or v \"\"))]\n"
+         "    (if (= \"\" s) \"\" (.join (.map (.split s \"/\") seg) \"/\"))))\n\n"
          ;; `js/fetch` REJECTS only on a network error, so a 500 resolves and a
          ;; wrapper that goes straight to `.json` hands the error page's body to
          ;; `m/decode` — which fails validation and rejects with "… response
