@@ -288,12 +288,23 @@ client-deps (merge (:client-deps st) (:client provided))
               ;; is no second setting to keep in agreement with it.
               own-mounts (when (seq page-rows) (rules.webapp/own-mount-nses st))
 
+              ;; the table the PAGES declare, which the entry fn no longer carries.
+              ;; Their namespaces join the require list for the same reason:
+              ;; the entry used to name every page, so the closure reached
+              ;; them, and now nothing in it does
+              route-rows (when (seq page-rows)
+                           (vec (for [{:keys [path page]} (rules.webapp/page-routes st)]
+                                  [path page])))
+
               client-entry
               (when (and (= 1 (count page-rows)) (empty? own-mounts))
                 (let [{:keys [page closure]} (first page-rows)
+                      nses (vec (sort (into (set closure)
+                                            (map #(symbol (namespace (second %))))
+                                            route-rows)))
                       f (io/file target "cljs-src" "native" "client.cljs")]
                   (io/make-parents f)
-                  (spit f (build/webapp-launcher-source page closure))
+                  (spit f (build/webapp-launcher-source page nses route-rows))
                   "cljs-src/native/client.cljs"))
 
               ;; said out loud, because the other failure is the quiet one: a

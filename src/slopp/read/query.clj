@@ -484,7 +484,7 @@
         m     (cond-> {}
                 (seq cli) (assoc :cli cli)
                 (seq rest) (assoc :rest rest)
-                ;; the SCREENS are the section; actions, session loads and the
+                ;; the SCREENS are the section; actions and the
                 ;; :cljs count ride beside them the way :http/static rides
                 ;; beside routes. Keyed on screens rather than on the capability
                 ;; being enabled, so an app that turned webapp on and declared
@@ -493,11 +493,6 @@
                 (seq (:screens wapp))
                 (assoc :webapp (:screens wapp)
                        :webapp/actions (:actions wapp)
-                       ;; the fetches that belong to NO screen — a nav rail, a
-                       ;; signed-in user. Absent from the screen rows by
-                       ;; definition, so a surface drawing only screens shows an
-                       ;; app fetching less than it does
-                       :webapp/session-loads (:session-loads wapp)
                        ;; the goal stated as a number. "An app that opts into
                        ;; webapp writes no ClojureScript" is an aspiration until
                        ;; a store can answer how much it writes

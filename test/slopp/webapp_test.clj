@@ -6,7 +6,7 @@
   wiring on a JVM. A test that needed a bundle would prove the opposite."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.webapp :as webapp]
-            [slopp.cljnx :as cljnx] [clojure.string :as str]))
+            [slopp.cljnx :as cljnx] [clojure.string :as str] [slopp.http.endpoint :as endpoint]))
 
 (deftest a-DYNAMIC-page-can-be-READ-without-a-browser-or-a-compile
   ;; The standing constraint on this whole wave, asserted rather than described:
@@ -33,11 +33,16 @@
         ;; on load-status — the framework renders those states and chrome
         ;; places them. What is left is the screen itself, and the REQUEST it
         ;; names: pure, in :cljc, so which call a url makes is readable here
-        things {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
-                                        [:li (:name t)])])
-                :request (fn [_params] {:http/url "/api/things"})}
-        thing  {:render  (fn [s] [:p (str "Thing " (:id (:params s)))])
-                :request (fn [params] {:http/url (str "/api/things/" (:id params))})}
+        things (fn [page]
+                 (let [ts (webapp/ask! page {:http/method :get
+                                             :http/path "/api/things"} {})]
+                   [:ul (for [t (:value ts)] [:li (:name t)])]))
+        thing  (fn [{:keys [params] :as page}]
+                 (webapp/ask! page {:http/method :get
+                                    :http/path "/api/things/:id"
+                                    :http/params #{:id}}
+                              {:id (:id params)})
+                 [:p (str "Thing " (:id params))])
         app    (webapp/wiring
                 {:webapp/state     state
                  :webapp/routes    [["/things"     things]
@@ -91,79 +96,63 @@
 (deftest a-load-that-has-not-been-ASKED-is-not-a-load-that-answered-NIL
   ;; slopp-ui caught this on the first read, and half their diagnosis applied.
   ;; I claimed `arrive` bumps rather than clears; they read that as losing
-  ;; display honesty. It does not — `arrive` clears `:data`, so the previous
-  ;; screen's answers never show under the new url.
+  ;; display honesty.
   ;;
-  ;; **What it did lose is the four-state load model**, and that is the real
-  ;; defect. A token COUNTER answers "is this answer still wanted" and nothing
-  ;; else, so `:absent` — nothing has been requested for this screen yet — was
-  ;; never representable. A view could only ask `(if (:data s) …)`, which reads
-  ;; an unasked load and a load that answered NIL as the same thing. That is
-  ;; the nil-pun the model exists to remove, in the framework that exists to
-  ;; remove nil-puns.
+  ;; **What was at stake is the four-state load model.** A token COUNTER
+  ;; answers "is this answer still wanted" and nothing else, so `:absent` —
+  ;; nothing has been requested — was never representable. A view could only
+  ;; ask `(if (:data s) …)`, which reads an unasked load and a load that
+  ;; answered NIL as the same thing. That is the nil-pun the model exists to
+  ;; remove, in the framework that exists to remove nil-puns.
   ;;
-  ;; Three concerns, three mechanisms, and I had merged two:
-  ;;   display honesty  — clearing the previous screen's data
-  ;;   what is KNOWN    — :absent -> :loading -> :ready | :failed
-  ;;   supersession     — a token minted per request, checked on arrival
+  ;; The states are per-REQUEST now rather than per-screen — a page asks for
+  ;; several — but the distinction is the same one and is what a page cases on.
   (let [state   (atom {})
         pending (atom nil)
-        thing   {:render  (fn [_s] [:p "thing"])
-                 :request (fn [_params] {:webapp/path "/api/thing"})}
-        app     (webapp/wiring
-                 {:webapp/state  state
-                  :webapp/routes [["/thing" thing]]
-                  ;; hold the callback so the LOADING moment is observable —
-                  ;; a call that answers synchronously never has one
-                  :webapp/call   (fn [_request ok _err] (reset! pending ok))})]
+        thing   {:http/method :get :http/path "/api/thing"}
+        page    {:webapp/state  state
+                 :webapp/render (fn [_] nil)
+                 :webapp/call   (fn [_request ok _err] (reset! pending ok))}
+        key     (webapp/load-key (endpoint/request thing {}))]
 
     (testing "before anything is asked, the load is ABSENT"
-      (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
+      (is (= :absent (webapp/load-status @state key)) (pr-str @state)))
 
     (testing "while the request is out it is LOADING — a moment the reader can see"
-      (webapp/navigate! app "/thing" false)
-      (is (= :loading (webapp/load-status @state :main)) (pr-str @state)))
+      ;; held callback, so the loading moment is observable: a call that
+      ;; answers synchronously never has one
+      (is (= :loading (:status (webapp/ask! page thing {}))) (pr-str @state)))
 
     (testing "an answer of NIL is READY, and that is the whole point"
       ;; :ready-with-nil and :absent are different statements about the world:
       ;; "this screen has no things" versus "nobody has asked yet"
       (@pending nil)
-      (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
-      (is (nil? (webapp/load-value @state :main)) (pr-str @state)))
+      (is (= :ready (webapp/load-status @state key)) (pr-str @state))
+      (is (nil? (webapp/load-value @state key)) (pr-str @state)))
 
-    (testing "navigating away makes it ABSENT again, not stale-READY"
-      ;; the true statement about the new screen: nothing has been requested
-      ;; for it. Leaving it :ready would say the new screen had answered
-      (webapp/navigate! app "/nowhere" false)
-      (is (= :absent (webapp/load-status @state :main)) (pr-str @state)))
-
-    (testing "a screen that names NO request never leaves :absent"
-      ;; the fourth state earns its keep here: a screen with nothing to fetch
-      ;; is not loading, has not failed, and has not answered. Anything else
-      ;; would be a spinner with no end or a lie about an answer
-      (let [st  (atom {})
-            a3  (webapp/wiring {:webapp/state  st
-                                :webapp/routes [["/static" (fn [_s] [:p "static"])]]})]
-        (webapp/navigate! a3 "/static" false)
-        (is (= :absent (webapp/load-status @st :main)) (pr-str @st))))
+    (testing "asking again finds it READY rather than fetching again"
+      ;; start-if-absent: a page re-runs on every resolution, so this is the
+      ;; property that keeps a page with one load from spinning
+      (reset! pending nil)
+      (is (= :ready (:status (webapp/ask! page thing {}))))
+      (is (nil? @pending) "a ready load was fetched again"))
 
     (testing "and a failure is FAILED, distinct from both"
-      (webapp/navigate! app "/thing" false)
-      (let [err (atom nil)
-            app2 (webapp/wiring
-                  {:webapp/state  state
-                   :webapp/routes [["/thing" thing] ["/other" thing]]
-                   :webapp/call   (fn [_request _ok e] (reset! err e))})]
-        (webapp/navigate! app2 "/thing" false)
+      (let [st  (atom {})
+            err (atom nil)
+            p2  {:webapp/state  st
+                 :webapp/render (fn [_] nil)
+                 :webapp/call   (fn [_request _ok e] (reset! err e))}]
+        (webapp/ask! p2 thing {})
         (@err "no")
-        (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
-        (is (= "no" (get-in @state [:loads :main :error])) (pr-str @state))))))
+        (is (= :failed (webapp/load-status @st key)) (pr-str @st))
+        (is (= "no" (get-in @st [:loads key :error])) (pr-str @st))))))
 
-(deftest a-SUPERSEDED-answer-does-not-land-on-the-screen-that-replaced-it
+(deftest a-SUPERSEDED-answer-does-not-land-on-the-load-that-replaced-it
   ;; I placed `:load-seq` outside `:loads` on the argument that a token drawn
-  ;; from the map `arrive` empties would restart at 1 every navigation — so a
-  ;; slow answer from the previous screen would match the new screen's first
-  ;; request and land on it. Then I shipped it without asserting that failure.
+  ;; from a map that gets emptied would restart at 1 — so a slow answer from
+  ;; an earlier request would match a later one and land on it. Then I shipped
+  ;; it without asserting that failure.
   ;;
   ;; slopp-ui pinned the same property on their side and, checking their
   ;; coverage rather than claiming it, found the test that LOOKS like it covers
@@ -171,53 +160,47 @@
   ;; superseded token instead of producing one, so it asserts the guard and
   ;; never the token supply.
   ;;
-  ;; So this produces the collision the honest way: navigate, hold the first
-  ;; screen's callback, navigate again, then answer the FIRST one.
-  ;;
-  ;; **MEASURED rather than reasoned**, by breaking the subject: moving the
-  ;; counter inside `:loads` — the map `arrive` empties — makes both
-  ;; navigations mint token 1, and `:data-from-a` lands on screen `b` with
-  ;; the load marked `:ready`. The other two tests in this namespace stay
-  ;; green through that break, so this is the only cover for the placement.
-  (let [state    (atom {})
-        pending  (atom [])
-        screen-a {:render  (fn [_s] [:p "a"])
-                  :request (fn [_p] {:webapp/path "/api/a"})}
-        screen-b {:render  (fn [_s] [:p "b"])
-                  :request (fn [_p] {:webapp/path "/api/b"})}
-        app      (webapp/wiring
-                  {:webapp/state  state
-                   :webapp/routes [["/a" screen-a] ["/b" screen-b]]
-                   :webapp/call   (fn [request ok _err]
-                                    (swap! pending conj [request ok]))})]
+  ;; So this produces the collision the honest way. Two screens sharing one
+  ;; `:main` key was the old shape; a load is keyed by its REQUEST now, so the
+  ;; collision that remains is the one that matters — the same address asked
+  ;; again after a [[stale!]], with the first answer still in flight.
+  (let [state   (atom {})
+        pending (atom [])
+        thing   {:http/method :get :http/path "/api/thing"}
+        key     (webapp/load-key (endpoint/request thing {}))
+        page    {:webapp/state  state
+                 :webapp/render (fn [_] nil)
+                 :webapp/call   (fn [request ok _err]
+                                  (swap! pending conj [request ok]))}]
 
-    (webapp/navigate! app "/a" false)
-    (webapp/navigate! app "/b" false)
+    (webapp/ask! page thing {})
+    (webapp/stale! page thing {})
+    (webapp/ask! page thing {})
 
-    (testing "POSITIVE CONTROL: the second navigation really emptied and re-minted"
+    (testing "POSITIVE CONTROL: the re-ask really produced a SECOND request"
       ;; without this the collision cannot arise and every assertion below
       ;; passes vacuously — which is the exact defect this test exists about
       (is (= 2 (count @pending)) (pr-str (count @pending)))
-      (is (= ["/api/a" "/api/b"] (mapv (comp :webapp/path first) @pending))
-          "each screen asked for its OWN endpoint")
-      (is (= (:render screen-b) (:render (:screen @state))) (pr-str (:path @state)))
-      (is (= :loading (webapp/load-status @state :main)) (pr-str @state)))
+      (is (= ["/api/thing" "/api/thing"] (mapv (comp :http/url first) @pending)))
+      (is (= :loading (webapp/load-status @state key)) (pr-str @state)))
 
-    (testing "the FIRST screen's answer arrives late and is dropped"
-      (let [[_ ok-a] (first @pending)]
-        (ok-a :data-from-a))
-      (is (nil? (webapp/load-value @state :main))
-          (str "a superseded answer landing is the stale-screen failure: " (pr-str @state)))
-      (is (= :loading (webapp/load-status @state :main))
-          (str "and it must not mark the NEW screen ready either: " (pr-str @state))))
+    (testing "the FIRST answer arrives late and is dropped"
+      (let [[_ ok-1] (first @pending)]
+        (ok-1 :data-from-the-first))
+      (is (nil? (webapp/load-value @state key))
+          (str "a superseded answer landing is the stale-screen failure: "
+               (pr-str @state)))
+      (is (= :loading (webapp/load-status @state key))
+          (str "and it must not mark the live request ready either: "
+               (pr-str @state))))
 
-    (testing "while the SECOND screen's answer still lands"
+    (testing "while the SECOND answer still lands"
       ;; the arm that makes the drop a discrimination rather than a blanket
       ;; refusal — a guard that dropped everything would satisfy the above
-      (let [[_ ok-b] (second @pending)]
-        (ok-b :data-from-b))
-      (is (= :data-from-b (webapp/load-value @state :main)) (pr-str @state))
-      (is (= :ready (webapp/load-status @state :main)) (pr-str @state)))))
+      (let [[_ ok-2] (second @pending)]
+        (ok-2 :data-from-the-second))
+      (is (= :data-from-the-second (webapp/load-value @state key)) (pr-str @state))
+      (is (= :ready (webapp/load-status @state key)) (pr-str @state)))))
 
 (deftest an-EFFECTFUL-action-goes-through-the-call-plugin-not-the-reducer
   ;; slopp-ui's second scar, and the reason `driver` refused rather than
@@ -396,112 +379,27 @@
         (is (true? (:kept @state))
             (str "and touches nothing it was not told about: " (pr-str @state)))))
 
-    (testing "the loop's OWN machinery clears regardless of the declaration"
-      ;; :data, :error and :loads are written by the loop, so clearing them is
-      ;; not a membership decision about the app's state — an app cannot opt a
-      ;; screen's fetched answer into surviving the screen.
+    (testing "LOADS are not address-scoped at all any more, and that is not this rule"
+      ;; They used to be cleared on every navigation except the ones
+      ;; `:webapp/session-loads` declared — a membership rule an app had to
+      ;; write, which existed because a screen's data was started BY the
+      ;; navigation and so obviously belonged to it.
       ;;
-      ;; Routed to NOWHERE on purpose: with no screen there is no fetch, so
-      ;; :absent is observable. On a routed screen the default fetch answers
-      ;; synchronously and the load is :ready before anything can look — which
-      ;; is correct, and is why asserting :absent there would have been
-      ;; asserting the wrong thing rather than finding a bug.
+      ;; A page ASKS for what it needs while rendering, so a load's lifetime is
+      ;; answered by whether anything still asks: the next page re-asks and
+      ;; finds it already there, and what nobody wants sits until `stale!`
+      ;; drops it. The declaration AND the escape an app reached for when the
+      ;; scope rule pushed a load out of the building both go.
       (let [state (atom {})
             app   (webapp/wiring {:webapp/state        state
                                   :webapp/routes       []
                                   :webapp/address-keys #{}})]
-        (swap! state assoc :loads {:main {:status :ready :value [:old]}})
+        (swap! state assoc :loads {[:get "/api/x"] {:status :ready :value [:old]}})
         (webapp/navigate! app "/search" false)
-        (is (= :absent (webapp/load-status @state :main))
-            (str "nothing has been requested for this screen, which is the true"
-                 " statement and the one a bumped token cannot make: "
-                 (pr-str @state)))
-        (is (nil? (webapp/load-value @state :main))
-            (str "and the previous screen's answer goes with the status — an app"
-                 " opts a load into surviving by naming it in :webapp/session-loads,"
-                 " not by the loop deciding: " (pr-str @state)))))))
-
-(deftest a-SESSION-scoped-load-keeps-the-machinery-it-would-otherwise-lose
-  ;; slopp-ui disagreed with the boundary I asked them to disagree with, and the
-  ;; evidence is a defect in their app that exists BECAUSE they obeyed my rule.
-  ;;
-  ;; I had written: the loop writes `:loads`, so the loop clears it, and an app
-  ;; cannot opt a fetched answer into surviving the screen. That reasons from
-  ;; AUTHORSHIP, and it conflates two things the loop owns. It owns a load's
-  ;; MACHINERY — four states, the token, the supersession guard — which is not
-  ;; negotiable. It was also deciding the load's SCOPE, and scope is the
-  ;; address-vs-session question only the app can answer.
-  ;;
-  ;; Their module nav is fetched once and used on every Code screen. Because
-  ;; `:loads` was emptied on every navigation they kept it outside `:loads`, and
-  ;; outside `:loads` it got NONE of the machinery. What that produced, in the
-  ;; one load the framework was not allowed to cover:
-  ;;
-  ;;   - `(nil? (:modules @state))` as the guard — the nil-pun, so absent,
-  ;;     failed and answered-with-nothing are one value
-  ;;   - a silent retry loop: the catch swallows, the value stays nil, and every
-  ;;     later navigation fetches again. A failing endpoint is hit once per
-  ;;     navigation forever and the reader is told nothing
-  ;;   - no freshness token, in the one place that app fetches outside the loop
-  ;;
-  ;; Three of the defects this namespace exists to prevent, caused by the scope
-  ;; rule sending the load out of the building.
-  (let [state  (atom {})
-        calls  (atom 0)
-        answer (atom nil)
-        app    (webapp/wiring
-                {:webapp/state         state
-                 :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
-                                        ["/change" (fn [_s] [:p "change"])]
-                                        ["/other"  (fn [_s] [:p "other"])]]
-                 ;; declared with no :request: scoped, and STARTED by the app.
-                 ;; That is exactly what the old SET meant and all this test is
-                 ;; about — starting one at page load is its own test
-                 :webapp/session-loads {:modules {}}})
-        fetch! (fn [ok err]
-                 (swap! calls inc)
-                 (reset! answer [ok err]))]
-
-    (testing "a session load gets the four states like any other"
-      (is (= :absent (webapp/load-status @state :modules)) (pr-str @state))
-      (webapp/load! app :modules fetch!)
-      (is (= :loading (webapp/load-status @state :modules)) (pr-str @state))
-      ((first @answer) [:a :b])
-      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
-      (is (= [:a :b] (webapp/load-value @state :modules)) (pr-str @state)))
-
-    (testing "and it SURVIVES navigation, which is the whole disagreement"
-      (webapp/navigate! app "/code" false)
-      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
-      (is (= [:a :b] (webapp/load-value @state :modules)) (pr-str @state)))
-
-    (testing "while an ordinary load does not"
-      (webapp/load! app :other fetch!)
-      ((first @answer) :something)
-      (is (= :ready (webapp/load-status @state :other)))
-      (webapp/navigate! app "/ns" false)
-      (is (= :absent (webapp/load-status @state :other)) (pr-str @state)))
-
-    (testing "a FAILED session load stays failed — which is what stops the retry loop"
-      ;; the defect in their app: a swallowed failure leaves the value nil, the
-      ;; guard reads nil as never-asked, and every navigation fetches again. A
-      ;; recorded :failed is a state an app can guard on and a reader can be told
-      (let [s2  (atom {})
-            n   (atom 0)
-            cbs (atom nil)
-            app2 (webapp/wiring
-                  {:webapp/state         s2
-                   :webapp/routes        [["/code"   (fn [_s] [:p "code"])]
-                                          ["/change" (fn [_s] [:p "code"])]]
-                   :webapp/session-loads {:modules {}}})]
-        (webapp/load! app2 :modules (fn [ok err] (swap! n inc) (reset! cbs [ok err])))
-        ((second @cbs) "boom")
-        (is (= :failed (webapp/load-status @s2 :modules)) (pr-str @s2))
-        (webapp/navigate! app2 "/code" false)
-        (is (= :failed (webapp/load-status @s2 :modules))
-            (str "a failure that survives is one an app can decline to retry: "
-                 (pr-str @s2)))
-        (is (= 1 @n) "and nothing re-fetched it behind the app's back")))))
+        (is (= :ready (webapp/load-status @state [:get "/api/x"]))
+            (str "a load survives a navigation: what the next page still wants"
+                 " it re-asks for and finds, and stale! is the explicit drop: "
+                 (pr-str @state)))))))
 
 (deftest the-mount-PREFIX-goes-on-and-comes-off-symmetrically
   ;; An app served behind a proxy is mounted under a prefix it cannot work out
@@ -660,10 +558,12 @@
         pushed    (atom [])
         prevented (atom 0)
         things    (fn [_s] [:p "things"])
-        search    (fn [s] [:p (str "search " (:q (:params s)))])
+        search    (fn [page] [:p (str "search " (:q (:params page)))])
         ;; a row's target is normalised to a screen VALUE, so the fn an app
         ;; wrote is that screen's `:render`
-        showing   (fn [] (:render (:screen @state)))
+        ;; a row names the PAGE FUNCTION itself, so :screen IS the fn an app
+        ;; wrote — there is no wrapper to look inside
+        showing   (fn [] (:screen @state))
         app       (webapp/wiring
                    {:webapp/state     state
                     :webapp/base      "/p/x"
@@ -800,7 +700,7 @@
       (is (= "abc" (:session @state))
           "arriving must not clear what boot established — a session token
            cleared on the first navigation is a page that logs itself out")
-      (is (= things (:render (:screen @state)))))
+      (is (= things (:screen @state))))
 
     (testing "and an app that declares no boot still starts"
       ;; the default has to be a function rather than nil, or every caller —
@@ -811,7 +711,7 @@
                                :webapp/routes [["/anything" ok]]})]
         (is (fn? (:webapp/boot a2)))
         (webapp/start! a2 "/anything" "")
-        (is (= ok (:render (:screen @s2))))))))
+        (is (= ok (:screen @s2)))))))
 
 (deftest a-page-with-no-MOUNT-POINT-is-refused-by-NAME
   ;; The server's template renders `<div id="app">` and the bundle mounts into
@@ -908,8 +808,8 @@
 
     (testing "navigation routes through the declared table"
       (webapp/navigate! app "/things/42" false)
-      (is (= thing (:render (:screen @state)))
-          "a row written as a bare fn IS that screen's :render")
+      (is (= thing (:screen @state))
+          "a row names the PAGE FUNCTION itself — there is no wrapper to look inside")
       (is (= {:id "42"} (:params @state))))
 
     (testing "a click is OURS only when the table routes it"
@@ -947,7 +847,7 @@
   ;; keyword left to mistype.
   (let [state (atom {})
         things (fn [_s] [:ul [:li "Anvil"]])
-        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        thing  (fn [page] [:p (str "Thing " (:id (:params page)))])
         app   (webapp/wiring
                {:webapp/state  state
                 :webapp/routes [["/things"     things]
@@ -1003,7 +903,7 @@
       ;; because nothing went wrong. Same for a map, a set or a vector
       (doseq [target [:things 'things {} #{} []]]
         (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo #"(?i)screen"
+             clojure.lang.ExceptionInfo #"(?i)page"
              (webapp/wiring {:webapp/state  (atom {})
                              :webapp/routes [["/things" target]]}))
             (str (pr-str target) " is callable and renders nothing"))))))
@@ -1087,176 +987,6 @@
               (str "render and click disagree under base " (pr-str base)
                    " — href was " (pr-str href))))))))
 
-(deftest the-framework-defaults-the-CONTENT-of-a-load-state-and-chrome-keeps-the-PLACEMENT
-  ;; Every screen was going to repeat the same three-way case:
-  ;;
-  ;;   (case (load-status s :main) :ready … :failed … [:p "loading…"])
-  ;;
-  ;; which is the keyword-agreeing-in-three-places problem again, one level in.
-  ;;
-  ;; **The asymmetry that decides who renders it is STRUCTURAL, not aesthetic.**
-  ;; My first answer was "slopp owns what is true, the app owns what is seen" —
-  ;; and slopp-ui pointed out that it does not survive `not-found`, which is
-  ;; equally presentation and which slopp already defaults. The line did not
-  ;; separate the cases it was invoked for.
-  ;;
-  ;; Theirs does: `not-found` replaces the WHOLE page, so the framework can
-  ;; render it — there is nothing else on screen to be wrong about. `loading`
-  ;; and `failed` replace one PANE while the rest of the app stays up: their app
-  ;; renders the nav rail while main says loading, because a reader who
-  ;; navigated with the module list should still see it. So a framework
-  ;; rendering those has to know WHERE they go, and placement is layout, which
-  ;; is the one thing this capability does not take.
-  ;;
-  ;; Hence: the framework supplies the CONTENT as `inner`, chrome decides WHERE.
-  (let [state   (atom {})
-        pending (atom nil)
-        ;; a screen with a REQUEST, because a load state is only reachable for
-        ;; a screen that asked for something — one that names no request is
-        ;; never loading and never failed
-        things  {:render  (fn [_s] [:p "THE SCREEN"])
-                 :request (fn [_p] {:webapp/path "/api/things"})}
-        app     (webapp/wiring
-                 {:webapp/state  state
-                  :webapp/routes [["/things" things]]
-                  :webapp/chrome (fn [_s inner] [:main [:nav "RAIL"] inner])
-                  :webapp/call   (fn [_request ok _err] (reset! pending ok))})
-        text    (fn [] (pr-str ((:webapp/view app) @state)))]
-
-    (webapp/navigate! app "/things" false)
-
-    (testing "while loading, the framework renders the state and chrome places it"
-      (is (re-find #"(?i)loading" (text)) (text))
-      (is (re-find #"RAIL" (text))
-          "the rest of the app stays up — that is the whole reason chrome places it")
-      (is (not (re-find #"THE SCREEN" (text)))
-          "a screen must not render against data that has not arrived"))
-
-    (testing "inner is NEVER nil, which is the nil-pun this would otherwise be"
-      ;; slopp-ui's constraint, and it is the rule `load-value` already states:
-      ;; a nil chrome has to test is the same pun in the one value every app
-      ;; handles. Chrome asks `load-status` if it wants the distinction
-      (let [seen (atom ::none)
-            a2   (webapp/wiring
-                  {:webapp/state  (atom {})
-                   :webapp/routes [["/things" things]]
-                   :webapp/chrome (fn [_s inner] (reset! seen inner) [:main inner])
-                   :webapp/call   (fn [_rq _ok _e] nil)})]
-        ((:webapp/view a2) {})
-        (is (some? @seen) "chrome received nil and would have to test it")))
-
-    (testing "when it arrives the screen renders"
-      (@pending [:anvil])
-      (is (re-find #"THE SCREEN" (text)) (text)))
-
-    (testing "a FAILED load renders the failure, not the screen"
-      (webapp/navigate! app "/things" false)
-      (is (re-find #"(?i)loading" (text)) (text)))
-
-    (testing "and an app that wants different COPY declares it"
-      ;; the middle tier: same placement, its own words. Same shape as
-      ;; :webapp/not-found, which is what makes this one story rather than two
-      (let [s2 (atom {})
-            a2 (webapp/wiring
-                {:webapp/state   s2
-                 :webapp/routes  [["/things" things]]
-                 :webapp/loading (fn [_s] [:p "Fetching your things"])
-                 :webapp/call    (fn [_rq _ok _e] nil)})]
-        (webapp/navigate! a2 "/things" false)
-        (is (re-find #"Fetching your things" (pr-str ((:webapp/view a2) @s2)))
-            (pr-str ((:webapp/view a2) @s2)))))))
-
-(deftest a-screen-is-a-VALUE-and-it-names-its-own-REQUEST
-  ;; The last thing forcing a real browser app into ClojureScript: `js/fetch`.
-  ;; `:webapp/fetch` was app-supplied and took the SCREEN, so every app wrote a
-  ;; performer, and every performer had to case on which screen was asking —
-  ;; the same three-place agreement the route table removed, moved one seam
-  ;; along.
-  ;;
-  ;; A screen names its own request instead. `:request` is `(fn [params] ->
-  ;; request | nil)`, pure, in `:cljc`, so WHICH call a screen makes is a fact
-  ;; a JVM test reads. What is left for a browser is `fetch`.
-  (let [state (atom {})
-        calls (atom [])
-        thing {:render  (fn [s] [:p (str "Thing " (:name (webapp/load-value s :main)))])
-               ;; the url arrives RESOLVED — an app builds one with
-               ;; `slopp.rest.endpoint/request` from a descriptor; written by
-               ;; hand here because the subject is the SCREEN naming its own
-               ;; request, not how the request was assembled
-               :request (fn [params] {:http/method :get
-                                      :http/url (str "/api/things/" (:id params))})}
-        plain (fn [_s] [:p "Plain, and it asks for nothing"])
-        app   (webapp/wiring
-               {:webapp/state  state
-                :webapp/routes [["/things"     plain]
-                                ["/things/:id" thing]]
-                :webapp/call   (fn [request ok _err]
-                                 (swap! calls conj request)
-                                 (ok {:name "Anvil"}))})
-        s     (cljnx/open! (webapp/driver app))]
-
-    (testing "the screen's own :request decides the call, and it is a finished URL"
-      (cljnx/visit! s "/things/42")
-      (is (= 1 (count @calls)) "the screen asked for its data exactly once")
-      (is (= "/api/things/42" (:http/url (first @calls)))
-          "the params the route captured are the ones the request substitutes")
-      (is (re-find #"Thing Anvil" (cljnx/text s)) (cljnx/text s)))
-
-    (testing "a screen that declares NO request never waits for one"
-      ;; not the same as a request that answers nil: there is nothing in
-      ;; flight, so a load state would be a lie and a spinner would never end
-      (reset! calls [])
-      (cljnx/visit! s "/things")
-      (is (= [] @calls) "a screen with no request made one anyway")
-      (is (re-find #"asks for nothing" (cljnx/text s)) (cljnx/text s)))
-
-    (testing "a bare fn is still a screen — the shorthand for exactly that case"
-      (is (fn? plain)))
-
-    (testing "the screen's :derive shapes its own answer"
-      ;; what `:webapp/derive` was for, and it could only ever be written as a
-      ;; case on screen identity — an app-wide function asked \"which screen is
-      ;; this?\" to answer a question the screen already knows
-      (let [st  (atom {})
-            app (webapp/wiring
-                 {:webapp/state  st
-                  :webapp/routes [["/thing" {:render (fn [s] [:p (webapp/load-value s :main)])
-                                             :request (fn [_] {:http/url "/api/thing"})
-                                             :derive  (fn [v] (str "derived:" (:name v)))}]]
-                  :webapp/call   (fn [_rq ok _err] (ok {:name "Anvil"}))})
-            s2  (cljnx/open! (webapp/driver app))]
-        (cljnx/visit! s2 "/thing")
-        (is (re-find #"derived:Anvil" (cljnx/text s2)) (cljnx/text s2))))
-
-    (testing "a screen map with no :render is REFUSED"
-      ;; the shape that made maps refusable in the first place: a map is
-      ;; `ifn?`, so a row pointing at one used to match and render nil
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"(?i):render"
-           (webapp/wiring {:webapp/state  (atom {})
-                           :webapp/routes [["/things" {:request (fn [_] nil)}]]}))))
-
-    (testing "a TYPO inside a screen map is refused, not silently ignored"
-      ;; `:reqeust` would never be read, so the screen would render with no
-      ;; data forever and nothing would say why — the failure this whole
-      ;; capability keeps closing
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"(?i)reqeust"
-           (webapp/wiring {:webapp/state  (atom {})
-                           :webapp/routes [["/things" {:render  (fn [_] [:p])
-                                                       :reqeust (fn [_] nil)}]]}))))
-
-    (testing ":webapp/fetch and :webapp/derive are RETIRED, and the refusal migrates"
-      ;; no back-compat: both existed to be handed a screen and case on it,
-      ;; which is what the screen value removes
-      (doseq [k [:webapp/fetch :webapp/derive]]
-        (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo #"(?i)screen"
-             (webapp/wiring {:webapp/state  (atom {})
-                             :webapp/routes []
-                             k              (fn [& _] nil)}))
-            (str k " is still accepted"))))))
-
 (deftest what-FETCH-needs-is-decided-here-and-merely-PERFORMED-in-the-browser
   ;; The shim may not branch, which is the property standing in for the tests a
   ;; `:cljs` namespace cannot have. So every judgement `js/fetch` needs is made
@@ -1275,13 +1005,13 @@
   (testing "a GET names NO encoder, so the shim sends no body at all"
     ;; `fetch` throws on a GET carrying a body, so this is not tidiness — a
     ;; request that quietly acquires an empty body stops working entirely
-    (let [init (webapp/request-init {:http/url "/api/things"})]
+    (let [init (endpoint/request-init {:http/url "/api/things"})]
       (is (= "GET" (:method init)) (pr-str init))
       (is (= :none (:encode init)) (pr-str init))
       (is (nil? (:body init)) (pr-str init))))
 
   (testing "a request WITH a body names the json encoder and says so in a header"
-    (let [init (webapp/request-init {:http/method :put
+    (let [init (endpoint/request-init {:http/method :put
                                      :http/url    "/api/things/1"
                                      :http/body   {:name "Anvil"}})]
       (is (= "PUT" (:method init)) (pr-str init))
@@ -1293,10 +1023,10 @@
     ;; a token is STATE, not schema — it cannot be derived from an endpoint
     ;; declaration, so the shape has to carry headers or an authenticated app
     ;; falls straight back to writing its own fetch
-    (let [init (webapp/request-init {:http/url     "/api/me"
+    (let [init (endpoint/request-init {:http/url     "/api/me"
                                      :http/headers {"Authorization" "Bearer t"}})]
       (is (= "Bearer t" (get (:headers init) "Authorization")) (pr-str init)))
-    (let [init (webapp/request-init {:http/method  :post
+    (let [init (endpoint/request-init {:http/method  :post
                                      :http/url     "/api/upload"
                                      :http/body    "raw"
                                      :http/headers {"Content-Type" "text/plain"}})]
@@ -1307,30 +1037,30 @@
   (testing "a body of FALSE or nil are different requests"
     ;; the nil-pun this framework keeps removing, in the one place it would
     ;; silently drop a value: `false` is a body somebody meant to send
-    (is (= :json (:encode (webapp/request-init {:http/url "/x" :http/body false}))))
-    (is (= :none (:encode (webapp/request-init {:http/url "/x" :http/body nil})))))
+    (is (= :json (:encode (endpoint/request-init {:http/url "/x" :http/body false}))))
+    (is (= :none (:encode (endpoint/request-init {:http/url "/x" :http/body nil})))))
 
   (testing "the ENCODER follows the declared content type"
     ;; json is the default and was briefly the only thing sendable, which is
     ;; the asymmetry the consuming app named: slopp's own API publishes
     ;; `application/edn`, so a framework that can only send json cannot POST to
     ;; the endpoints slopp itself serves
-    (is (= :edn (:encode (webapp/request-init
+    (is (= :edn (:encode (endpoint/request-init
                           {:http/url     "/x"
                            :http/body    {:a 1}
                            :http/headers {"Content-Type" "application/edn"}}))))
-    (is (= :json (:encode (webapp/request-init
+    (is (= :json (:encode (endpoint/request-init
                            {:http/url     "/x"
                             :http/body    {:a 1}
                             :http/headers {"Content-Type" "application/json; charset=utf-8"}})))
         "the parameters come off before the lookup, the same as on the way back")
-    (is (= :text (:encode (webapp/request-init
+    (is (= :text (:encode (endpoint/request-init
                            {:http/url     "/x"
                             :http/body    "raw"
                             :http/headers {"Content-Type" "text/plain"}})))
         (str "a type slopp does not encode for sends the body AS GIVEN — which"
              " is honest, where guessing json would corrupt it"))
-    (is (= :none (:encode (webapp/request-init
+    (is (= :none (:encode (endpoint/request-init
                            {:http/url     "/x"
                             :http/headers {"Content-Type" "application/edn"}})))
         "a declared type on a request with NO body still sends no body"))
@@ -1339,12 +1069,12 @@
     ;; the browser answers `application/json; charset=utf-8`, and an exact
     ;; lookup on that misses — so the normalisation is here rather than being a
     ;; string-split in the namespace nothing can test
-    (is (= "application/json" (webapp/media-type "application/json; charset=utf-8")))
-    (is (= "application/json" (webapp/media-type "APPLICATION/JSON")))
-    (is (= "text/csv" (webapp/media-type "  text/csv  ")))
-    (is (nil? (webapp/media-type nil))
+    (is (= "application/json" (endpoint/media-type "application/json; charset=utf-8")))
+    (is (= "application/json" (endpoint/media-type "APPLICATION/JSON")))
+    (is (= "text/csv" (endpoint/media-type "  text/csv  ")))
+    (is (nil? (endpoint/media-type nil))
         "an answer with no content-type has no media type — not an empty one")
-    (is (nil? (webapp/media-type "")))))
+    (is (nil? (endpoint/media-type "")))))
 
 (deftest a-RESPONSE-becomes-an-answer-or-a-failure-here-not-in-the-browser
   ;; The bug this closes is the one every hand-written `fetch` has on its first
@@ -1379,90 +1109,6 @@
     (let [[_ message] (webapp/response-outcome 503 "Service Unavailable")]
       (is (re-find #"Service Unavailable" message) message))))
 
-(deftest a-screen-can-REJECT-what-it-was-SENT-and-both-drivers-agree
-  ;; Reported by the app that lost its response validation to 4d, and measured
-  ;; rather than argued: their generated `fetch` wrappers THREW on a contract
-  ;; violation, the four-state model turned that into the failed screen, and
-  ;; when the framework took over performing, the wrappers stopped being called.
-  ;;
-  ;; The obvious repair — validate inside `:derive` — is not available, and the
-  ;; reason is worth stating because it is structural rather than an oversight:
-  ;;
-  ;;   headless  `ok` is called SYNCHRONOUSLY by the fake, so a throw inside
-  ;;             `write!` propagates out of `load!` and takes the driver with it
-  ;;   browser   `ok` is called from inside a `.then`, so the same throw lands
-  ;;             in `call!`'s `.catch` and becomes a rendered failure screen
-  ;;
-  ;; Same `:derive`, two behaviours — which is the ONE difference this
-  ;; capability exists to prevent, arriving through the seam it added. And it
-  ;; cannot be closed by catching, because a `:cljc` form cannot catch on both
-  ;; platforms without the reader conditional D3 denies.
-  ;;
-  ;; So a rejection is a VALUE. `:check` answers nil for an acceptable response
-  ;; and a MESSAGE for one it refuses, and nothing throws anywhere.
-  (let [state (atom {})
-        screen {:render  (fn [s] [:p (str "got " (webapp/load-value s :main))])
-                :request (fn [_p] {:webapp/path "/api/thing"})
-                :check   (fn [v] (when-not (:ok v) "contract violation: :ok is missing"))
-                :derive  :name}
-        answer (atom {:ok true :name "Anvil"})
-        app    (webapp/wiring
-                {:webapp/state  state
-                 :webapp/routes [["/thing" screen]]
-                 :webapp/call   (fn [_rq ok _err] (ok @answer))})
-        s      (cljnx/open! (webapp/driver app))]
-
-    (testing "an answer the screen accepts is derived and rendered"
-      (cljnx/visit! s "/thing")
-      (is (= :ready (webapp/load-status @state :main)) (pr-str @state))
-      (is (re-find #"got Anvil" (cljnx/text s)) (cljnx/text s)))
-
-    (testing "an answer it REJECTS becomes :failed, carrying the check's message"
-      (reset! answer {:name "Anvil"})
-      (cljnx/visit! s "/thing")
-      (is (= :failed (webapp/load-status @state :main)) (pr-str @state))
-      (is (= "contract violation: :ok is missing"
-             (get-in @state [:loads :main :error]))
-          (pr-str @state))
-      (is (re-find #"contract violation" (cljnx/text s)) (cljnx/text s)))
-
-    (testing "and :derive never runs on an answer that was rejected"
-      ;; deriving from a value the screen just refused is work on data nobody
-      ;; trusts, and its own failure would arrive as the second error for one
-      ;; fault — the louder and less true of the two
-      (let [derived (atom 0)
-            st      (atom {})
-            a2      (webapp/wiring
-                     {:webapp/state  st
-                      :webapp/routes [["/thing" {:render  (fn [_s] [:p "x"])
-                                                 :request (fn [_p] {:webapp/path "/api/thing"})
-                                                 :check   (fn [_v] "no")
-                                                 :derive  (fn [v] (swap! derived inc) v)}]]
-                      :webapp/call   (fn [_rq ok _err] (ok {:whatever true}))})]
-        (webapp/navigate! a2 "/thing" false)
-        (is (= 0 @derived) "the derive ran on a value the check had refused")))
-
-    (testing "a SUPERSEDED answer is never checked either"
-      ;; the check is inside the freshness guard for `:derive`'s own reason: an
-      ;; answer nobody is waiting on must not be paid for. The app this came
-      ;; from had exactly the opposite — generated wrappers that validated
-      ;; BEFORE the guard, so an abandoned load paid for its own validation
-      (let [checked (atom 0)
-            st      (atom {})
-            pending (atom [])
-            a3      (webapp/wiring
-                     {:webapp/state  st
-                      :webapp/routes [["/a" {:render  (fn [_s] [:p "a"])
-                                             :request (fn [_p] {:webapp/path "/api/a"})
-                                             :check   (fn [_v] (swap! checked inc) nil)}]
-                                      ["/b" (fn [_s] [:p "b"])]]
-                      :webapp/call   (fn [_rq ok _err] (swap! pending conj ok))})]
-        (webapp/navigate! a3 "/a" false)
-        (webapp/navigate! a3 "/b" false)
-        ((first @pending) {:anything true})
-        (is (= 0 @checked)
-            "a superseded answer was validated — the abandoned load paid for it")))))
-
 (deftest a-REQUEST-carries-the-mount-point-like-every-other-address-does
   ;; The break 4d shipped, found by the app it broke: `:webapp/base` was applied
   ;; in exactly three places — `push-url!`, `strip-base` on an arriving url, and
@@ -1483,13 +1129,14 @@
   ;; reason its `:href` does.
   ;;
   ;; The request carries `:http/url` — RESOLVED, by
-  ;; `slopp.rest.endpoint/request` — so the mount is applied to a finished
+  ;; `slopp.http.endpoint/request` — so the mount is applied to a finished
   ;; address. `:webapp/base` keeps the browser prefix because a mount is the
   ;; one genuinely browser-shaped fact in the request.
   (let [called (atom [])
         state  (atom {})
-        screen {:render  (fn [_s] [:p "x"])
-                :request (fn [_p] {:http/url "/api/things"})}
+        screen (fn [page]
+                 (webapp/ask! page {:http/method :get :http/path "/api/things"} {})
+                 [:p "x"])
         app    (webapp/wiring
                 {:webapp/state       state
                  :webapp/base        "/p/demo"
@@ -1523,10 +1170,14 @@
             a2 (webapp/wiring
                 {:webapp/state  st
                  :webapp/base   "/p/demo"
-                 :webapp/routes [["/rates" {:render  (fn [_s] [:p "r"])
-                                            :request (fn [_p] {:http/url "https://api.example.com/v1/rates"})}]
-                                 ["/proto" {:render  (fn [_s] [:p "p"])
-                                            :request (fn [_p] {:http/url "//cdn.example.com/x.json"})}]]
+                 :webapp/routes [["/rates" (fn [page]
+                                             (webapp/ask! page {:http/method :get
+                                                                :http/path "https://api.example.com/v1/rates"} {})
+                                             [:p "r"])]
+                                 ["/proto" (fn [page]
+                                             (webapp/ask! page {:http/method :get
+                                                                :http/path "//cdn.example.com/x.json"} {})
+                                             [:p "p"])]]
                  :webapp/call   (fn [rq ok _err]
                                   (swap! called conj (:http/url rq))
                                   (ok nil))})]
@@ -1551,11 +1202,19 @@
             a4 (webapp/wiring
                 {:webapp/state  st
                  :webapp/base   "/p/demo"
-                 :webapp/routes [["/mine"   {:render  (fn [_s] [:p "m"])
-                                             :request (fn [_p] {:http/url "/api/modules"})}]
-                                 ["/theirs" {:render  (fn [_s] [:p "t"])
-                                             :request (fn [_p] {:http/url "/api/projects"
-                                                                :webapp/base ""})}]]
+                 :webapp/routes [["/mine"   (fn [page]
+                                              (webapp/ask! page {:http/method :get
+                                                                 :http/path "/api/modules"} {})
+                                              [:p "m"])]
+                                 ["/theirs" (fn [page]
+                                              ;; a request may name the base it is
+                                              ;; measured from, which is why ask!
+                                              ;; takes the built request's own keys
+                                              ;; through untouched
+                                              (webapp/ask! page {:http/method :get
+                                                                 :http/path "/api/projects"
+                                                                 :webapp/base ""} {})
+                                              [:p "t"])]]
                  :webapp/call   (fn [rq ok _err]
                                   (swap! called conj (:http/url rq))
                                   (ok nil))})]
@@ -1577,214 +1236,6 @@
                                   (ok nil))})]
         (webapp/navigate! a3 "/things" false)
         (is (= ["/api/things"] @called) (pr-str @called))))))
-
-(deftest a-SESSION-load-is-DECLARED-and-STARTS-at-page-load
-  ;; The gap between what `:webapp/boot` says and what its shape can do.
-  ;;
-  ;;   "`:webapp/boot` is where an app begins the loads that belong to the
-  ;;    session rather than to a route"
-  ;;
-  ;; It is `(fn [state] state)`. No `app`, so no `:webapp/call` and no
-  ;; `:webapp/render`, so it cannot reach [[load!]] and cannot begin anything.
-  ;; An app that wants a nav pane fetched once has to write ClojureScript after
-  ;; `mount!` — which is the remaining `:cljs` in the only real consumer, and
-  ;; the goal of this whole capability stated as a number that is not zero.
-  ;;
-  ;; A docstring promising what the signature cannot deliver is worse than a
-  ;; missing feature: it sends the reader to write the wrong thing and then to
-  ;; wonder why the framework's own `session-loads` did not cover it.
-  ;;
-  ;; So a session load is DATA, like a route row and like a screen's request —
-  ;; and `:webapp/session-loads` is one declaration rather than two, because
-  ;; declaring what a load IS and declaring that it outlives a screen were
-  ;; always the same statement about the same load.
-  (let [state  (atom {})
-        called (atom [])
-        app    (webapp/wiring
-                {:webapp/state         state
-                 :webapp/base          "/p/demo"
-                 :webapp/routes        [["/code" (fn [s] [:p (str "code "
-                                                                  (webapp/load-value s :modules))])]]
-                 :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [s _p] {:http/url     "/api/modules"
-                                                                      :http/headers {"Authorization" (:token s)}})
-                                                  :derive  :names}
-                                        ;; declared session-scoped, started by
-                                        ;; the app itself — no :request
-                                        :user    {}}
-                 :webapp/call          (fn [rq ok _err]
-                                         (swap! called conj rq)
-                                         (ok {:names ["a" "b"]}))})]
-
-    (testing "page load starts every session load that names a request"
-      (webapp/start! app "/p/demo/code" "")
-      (is (= ["/p/demo/api/modules"] (mapv :http/url @called))
-          (str "a declared session load did not start, or started at the wrong"
-               " address: " (pr-str @called)))
-      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
-      (is (= ["a" "b"] (webapp/load-value @state :modules))
-          "the :derive did not run on a session load"))
-
-    (testing "a session request reaches the ROUTE CAPTURES of the address"
-      ;; The case this was built for, measured in production first: a hub
-      ;; serving one shell at the root, whose nav pane is a session load and
-      ;; whose upstream is chosen by the slug in the url. The load has no
-      ;; address OF ITS OWN and is not independent of THE address, and the two
-      ;; had been treated as the same thing — so it asked `/api/modules` at the
-      ;; origin, which that hub does not serve, and the pane was empty for the
-      ;; life of every session.
-      (let [st   (atom {})
-            seen (atom [])
-            a3   (webapp/wiring
-                  {:webapp/state         st
-                   :webapp/routes        [["/p/:slug/store" (fn [_s] [:p "s"])]]
-                   :webapp/session-loads {:nav {:request (fn [_s p]
-                                                           {:http/url "/api/modules"
-                                                            :webapp/base (str "/p/" (:slug p))})}}
-                   :webapp/call          (fn [rq ok _err]
-                                           ;; `fetch!` addresses before performing, so this is the url a
-                                           ;; browser would fetch. Addressing again would re-apply the
-                                           ;; base the request still carries.
-                                           (swap! seen conj (:http/url rq))
-                                           (ok nil))})]
-        (webapp/start! a3 "/p/demo/store" "")
-        (is (= ["/p/demo/api/modules"] @seen)
-            (str "a session load could not see which tenant the url named, so"
-                 " it asked the origin: " (pr-str @seen)))))
-
-    (testing "and NO address means empty captures, never nil"
-      ;; so a request never has to tell "no captures" from "not asked"
-      (let [st   (atom {})
-            seen (atom nil)
-            a4   (webapp/wiring
-                  {:webapp/state         st
-                   :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
-                   :webapp/session-loads {:nav {:request (fn [_s p]
-                                                           (reset! seen p)
-                                                           {:http/url "/api/x"})}}
-                   :webapp/call          (fn [_rq ok _err] (ok nil))})]
-        (webapp/start! a4 "/nowhere" "")
-        (is (= {} @seen) (pr-str @seen))))
-
-    (testing "and BOOT ran first, so its state is what the request reads"
-      ;; the order start! already documents, now with something that depends on
-      ;; it: a token established by boot is what an authenticated session load
-      ;; must carry, and routing first would send the request without one
-      (is (= "abc" (get-in (first @called) [:http/headers "Authorization"]))
-          (pr-str (first @called))))
-
-    (testing "a load declared with NO request is scoped but not started"
-      ;; the two questions are still two: this one outlives a screen AND is the
-      ;; app's to begin — after a sign-in, say, which is not page load
-      (is (= :absent (webapp/load-status @state :user)) (pr-str @state))
-      (is (= 1 (count @called)) (pr-str @called)))
-
-    (testing "and both still SURVIVE navigation, which is what scoped means"
-      (webapp/navigate! app "/code" false)
-      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state))
-      (is (= ["a" "b"] (webapp/load-value @state :modules)) (pr-str @state)))
-
-    (testing "a nil request DECLINES, the same channel everywhere else"
-      ;; the shape an app needs before sign-in: the load is declared, and it
-      ;; starts when there is something to ask with
-      (let [st (atom {})
-            hit (atom 0)
-            a2 (webapp/wiring
-                {:webapp/state         st
-                 :webapp/routes        [["/x" (fn [_s] [:p "x"])]]
-                 :webapp/session-loads {:me {:request (fn [s _p] (when (:token s)
-                                                                   {:http/url "/api/me"}))}}
-                 :webapp/call          (fn [_rq ok _err] (swap! hit inc) (ok nil))})]
-        (webapp/start! a2 "/x" "")
-        (is (= 0 @hit) "an unarmed session load fetched anyway")
-        (is (= :absent (webapp/load-status @st :me)) (pr-str @st))))
-
-    (testing "a SET is refused, and the message carries the migration"
-      ;; no back-compat: the set said only which loads survive, and the map says
-      ;; that AND what they are — one declaration where there were two
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"(?i)session-loads"
-           (webapp/wiring {:webapp/state         (atom {})
-                           :webapp/routes        []
-                           :webapp/session-loads #{:modules}}))))))
-
-(deftest a-SESSION-load-runs-in-the-HEADLESS-drive-as-well-as-the-page
-  ;; The divergence this capability exists to prevent, shipped by the change
-  ;; that closed the last one. `start!` — the BROWSER entry — performs every
-  ;; declared session load. `driver` hands `screen/open!` the app's raw
-  ;; `:webapp/boot`, and `open!` refuses any key it does not know, so nothing
-  ;; headless ever started one.
-  ;;
-  ;; A declaration that works in a page and not in a test is worse than no
-  ;; declaration: the app that took it found sixteen driven screens rendering an
-  ;; empty nav, reverted, and kept the `:cljs` fetch — with the three defects
-  ;; `load!`'s docstring cites that app for still attached to it.
-  ;;
-  ;; Third finding in this shape in a fortnight — a throwing `:derive`, an
-  ;; unprefixed `:action`, and this — so the rule is worth stating where it can
-  ;; be checked rather than remembered: **anything a page load does before
-  ;; routing, a headless drive does too, out of one producer.**
-  (let [state  (atom {})
-        called (atom [])
-        app    (webapp/wiring
-                {:webapp/state         state
-                 :webapp/base          "/p/demo"
-                 :webapp/routes        [["/code" (fn [s] [:main "rail: "
-                                                          (str (webapp/load-value s :modules))])]]
-                 :webapp/boot          (fn [s] (assoc s :token "abc"))
-                 :webapp/session-loads {:modules {:request (fn [_s _p] {:http/url "/api/modules"})
-                                                  :derive  :names}}
-                 :webapp/call          (fn [rq ok _err]
-                                         (swap! called conj (:http/url rq))
-                                         (ok {:names "web ops"}))})
-        s      (cljnx/open! (webapp/driver app))]
-
-    (testing "opening the driver starts the session load, as a page load does"
-      (is (= ["/p/demo/api/modules"] @called)
-          (str "a declared session load ran in the browser and in no headless"
-               " drive, which is the one difference this capability exists to"
-               " prevent: " (pr-str @called)))
-      (is (= :ready (webapp/load-status @state :modules)) (pr-str @state)))
-
-    (testing "and boot still ran, so a driven app is not half-started"
-      (is (= "abc" (:token @state)) (pr-str @state)))
-(testing "and a drive OPENED at an address sees the same captures a page does"
-      ;; the new half of the same rule. `open!` hands the url to `:boot`, so a
-      ;; session load that chooses its upstream from the address answers
-      ;; identically in both producers. Without this the drive would show an
-      ;; empty pane against a declaration that works in a browser — which is
-      ;; the exact shape this test was written for, one field along.
-      (let [drive (atom [])
-            page  (atom [])
-            wire  (fn [sink]
-                    (webapp/wiring
-                     {:webapp/state         (atom {})
-                      :webapp/routes        [["/p/:slug/store" (fn [_s] [:main "s"])]]
-                      :webapp/session-loads {:nav {:request (fn [_s p]
-                                                              {:http/url "/api/modules"
-                                                               :webapp/base (str "/p/" (:slug p))})}}
-                      :webapp/call          (fn [rq ok _err]
-                                              (swap! sink conj (:http/url rq))
-                                              (ok nil))}))]
-        (cljnx/open! (webapp/driver (wire drive)) "/p/demo/store")
-        (webapp/start! (wire page) "/p/demo/store" "")
-        (is (= ["/p/demo/api/modules"] @drive) (pr-str @drive))
-        (is (= @page @drive)
-            (str "a drive and a page disagreed about the address a session load"
-                 " is measured from: " (pr-str @page) " vs " (pr-str @drive)))))
-
-    (testing "so a screen READING it draws the same thing a browser draws"
-      ;; the assertion the consuming app could not make: sixteen of their
-      ;; screens render a nav rail out of a session load, and every one of them
-      ;; was empty under the driver
-      (cljnx/visit! s "/p/demo/code")
-      (is (re-find #"web ops" (cljnx/text s)) (cljnx/text s)))
-
-    (testing "and it is started ONCE, not again on every navigation"
-      ;; the load survives `arrive` by being declared, so re-fetching it per
-      ;; navigation would be the silent retry loop this model removed
-      (cljnx/visit! s "/p/demo/code")
-      (is (= 1 (count @called)) (pr-str @called)))))
 
 (deftest ONE-declaration-reaches-both-entries-and-neither-is-hand-written
   ;; This test used to be `a-PAGE-cannot-be-both-the-inspection-entry-and-the-
@@ -1879,3 +1330,124 @@
            (:http/url (webapp/addressed "/p/demo"
                                         {:http/url "https://other.example/api/x"
                                          :webapp/base "/p/other"}))))))
+
+(deftest a-page-ASKS-for-what-it-needs-and-asking-twice-is-one-load
+  ;; The shape that replaces the route-row spec map. A page names ONE
+  ;; `:request` today and the framework performs it, which is why one screen
+  ;; can load one thing. A page that ASKS can load several, conditionally, and
+  ;; in whatever order its own logic wants — and it is still a pure function a
+  ;; JVM test calls, because `:webapp/call` is the seam.
+  ;;
+  ;; **Start-if-absent is the whole contract.** A page is re-run each time a
+  ;; load resolves, so an `ask` that started a fetch every time it was called
+  ;; would fetch forever. The load's identity is the REQUEST it builds —
+  ;; method plus url — so asking for the same thing twice in one render, or
+  ;; again on the next, is one load.
+  (let [calls (atom [])
+        state (atom {})
+        app   {:webapp/state  state
+               :webapp/render (fn [_] nil)
+               :webapp/call   (fn [rq ok _err]
+                                (swap! calls conj (:http/url rq))
+                                (ok {:name "Anvil"}))}
+        page  (assoc app :state @state :params {:id "42"})
+        thing {:http/method :get :http/path "/api/things/:id" :http/params #{:id}}]
+
+    (testing "the first ask STARTS the load and answers with its state"
+      (let [a (webapp/ask! page thing {:id "42"})]
+        (is (= :ready (:status a)) (pr-str a))
+        (is (= {:name "Anvil"} (:value a)) (pr-str a))
+        (is (= ["/api/things/42"] @calls))))
+
+    (testing "asking again for the SAME request does not fetch again"
+      ;; the re-entrancy contract: a page re-runs on every resolution, so this
+      ;; is not an optimisation — without it a page with one load spins
+      (webapp/ask! page thing {:id "42"})
+      (webapp/ask! page thing {:id "42"})
+      (is (= 1 (count @calls)) (pr-str @calls)))
+
+    (testing "a DIFFERENT request is a different load"
+      (webapp/ask! page thing {:id "43"})
+      (is (= ["/api/things/42" "/api/things/43"] @calls) (pr-str @calls)))
+
+    (testing "stale! makes the next ask fetch again — explicitly, not by rule"
+      ;; what a mutation needs. Automatic invalidation has several defensible
+      ;; answers and no measurement behind any of them yet, so this is the
+      ;; dull one that can BECOME automatic without a migration: an automatic
+      ;; rule that guesses wrong costs a rewrite.
+      (reset! calls [])
+      (webapp/stale! page thing {:id "42"})
+      (webapp/ask! page thing {:id "42"})
+      (is (= ["/api/things/42"] @calls) (pr-str @calls)))
+
+    (testing "and stale! on something never asked for is not an error"
+      ;; an app clearing what a mutation MIGHT have staled should not have to
+      ;; know whether this page happened to load it
+      (is (nil? (webapp/stale! page thing {:id "999"}))))))
+
+(deftest a-route-names-a-PAGE-FUNCTION-that-receives-ONE-map
+  ;; The row spec map goes. A route named `{:render … :request … :check …
+  ;; :derive …}` and the framework performed exactly one request for it — so
+  ;; one screen could load one thing, and anything else went outside the load
+  ;; machinery, which is where the only real webapp's nav pane acquired three
+  ;; of the defects this namespace exists to prevent.
+  ;;
+  ;; A route names a FUNCTION now, and it receives ONE map — the same shape a
+  ;; server handler takes one `req`. That is what lets a later key arrive
+  ;; without changing every page's arity.
+  (let [calls (atom [])
+        state (atom {})
+        thing {:http/method :get :http/path "/api/things/:id" :http/params #{:id}}
+        tags  {:http/method :get :http/path "/api/things/:id/tags" :http/params #{:id}}
+        page  (fn [{:keys [params] :as p}]
+                ;; TWO loads, and the second only when the first arrived — the
+                ;; whole point of asking rather than declaring
+                (let [t (webapp/ask! p thing {:id (:id params)})]
+                  (if (= :ready (:status t))
+                    [:main (:name (:value t))
+                     (:count (:value (webapp/ask! p tags {:id (:id params)})))]
+                    [:main "Loading…"])))
+        app   (webapp/wiring
+               {:webapp/state  state
+                :webapp/routes [["/things/:id" page]]
+                :webapp/call   (fn [rq ok _err]
+                                 (swap! calls conj (:http/url rq))
+                                 (ok (if (re-find #"/tags$" (:http/url rq))
+                                       {:count 3}
+                                       {:name "Anvil"})))})]
+
+    (testing "the page receives its route captures as :params"
+      (webapp/navigate! app "/things/42" false)
+      (is (= "/api/things/42" (first @calls)) (pr-str @calls)))
+
+    (testing "and it can ask for a SECOND thing, conditionally"
+      ;; a row's single `:request` could not express this at all
+      (is (= ["/api/things/42" "/api/things/42/tags"] @calls) (pr-str @calls)))
+
+    (testing "the page also receives the app STATE, so it renders against a snapshot"
+      ;; passed rather than deref'd: a page is re-run each time a load
+      ;; resolves, and two resolving close together would otherwise render
+      ;; inconsistent halves
+      (let [seen (atom nil)
+            st   (atom {})
+            a2   (webapp/wiring
+                  {:webapp/state  st
+                   :webapp/routes [["/x" (fn [p] (reset! seen p) [:main])]]
+                   :webapp/call   (fn [_ ok _] (ok nil))})]
+        (webapp/navigate! a2 "/x" false)
+        (is (contains? @seen :state) (pr-str (keys @seen)))
+        (is (contains? @seen :params) (pr-str (keys @seen)))
+        (is (contains? @seen :webapp/state)
+            (str "the page must be able to ask, which needs the app's own"
+                 " keys: " (pr-str (keys @seen))))))
+
+    (testing "a route pointing at something that is not a function is REFUSED"
+      ;; a keyword, a set and a vector are all `ifn?`, so they call cleanly and
+      ;; answer nil — a blank pane on a route that MATCHED, which
+      ;; `:webapp/not-found` cannot cover because nothing went wrong
+      (doseq [bad [:a-keyword #{:a :set} [:a :vector] {:render (fn [_] [:p])}]]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"(?i)page"
+             (webapp/wiring {:webapp/state  (atom {})
+                             :webapp/routes [["/x" bad]]}))
+            (str bad " was accepted as a page"))))))

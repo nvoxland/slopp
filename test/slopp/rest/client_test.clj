@@ -21,7 +21,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.rest.client :as rest.client]
             [slopp.rest.contract :as contract]
-            [slopp.http.client :as http.client] [slopp.rest.endpoint :as endpoint]))
+            [slopp.http.client :as http.client] [slopp.http.endpoint :as endpoint]))
 
 (deftest a-server-calls-an-upstream-through-the-same-builder-a-browser-uses
   ;; The gap a consuming store measured: slopp generates a typed client for the

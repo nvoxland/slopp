@@ -73,6 +73,33 @@
     (testing "an unmarked form is not a page"
       (is (not-any? #(= 'shop.ui/helper (:page %)) (:paths doc))))
 
+    (testing "a page that calls an endpoint says WHICH, and calls nothing says nothing"
+      ;; the column a reader of a browser app actually wants: not the name of
+      ;; the function that computes a url, but the endpoint this screen talks
+      ;; to. Graph-derived, so it cannot disagree with the code — and absent
+      ;; rather than empty, because an empty vector is a claim
+      
+      (let [d2 (api.reads/webapp-pages-document
+                (-> (store/empty-store)
+                    (store/ingest 'shop.api
+                                  (str "(ns shop.api)\n\n"
+                                       "(def thing \"One.\"\n"
+                                       "  {:http/method :get :http/path \"/api/thing/:id\"})\n"))
+                    (store/ingest 'shop.pages
+                                  (str "(ns shop.pages (:require [shop.api :as api]))\n\n"
+                                       "(defn ^{:webapp/path \"/quiet\"} quiet \"Calls nothing.\"\n"
+                                       "  [_page] [:main \"quiet\"])\n\n"
+                                       "(defn ^{:webapp/path \"/things/:id\"} thing \"A thing.\"\n"
+                                       "  [_page] [:main (:http/path api/thing)])\n"))))
+            by2 (into {} (map (juxt :path identity)) (:paths d2))]
+        ;; both halves in ONE store, so a derivation answering the same thing
+        ;; for every page fails here — rather than passing the absent half in a
+        ;; fixture that has no endpoints to attribute in the first place
+        (is (= [{:endpoint 'shop.api/thing :method :get :path "/api/thing/:id"}]
+               (:calls (by2 "/things/:id")))
+            (pr-str d2))
+        (is (nil? (:calls (by2 "/quiet"))) (pr-str (by2 "/quiet")))))
+
     (testing "the EMPTY document is the common case a consumer renders most"
       ;; most projects have no browser app at all
       (is (= {:paths []} (api.reads/webapp-pages-document (store/empty-store)))))

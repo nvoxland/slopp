@@ -1324,7 +1324,7 @@
         things (fn [_s] [:main
                          [:h1 "Things"]
                          [:a {:href "/things/42"} "Anvil"]])
-        thing  (fn [s] [:p (str "Thing " (:id (:params s)))])
+        thing  (fn [page] [:p (str "Thing " (:id (:params page)))])
         app    (webapp/wiring
                 {:webapp/state  state
                  :webapp/base   "/p/x"
@@ -1349,13 +1349,13 @@
       ;; assertion that says so
       (cljnx/click! s "Anvil")
       (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s))
-      (is (= thing (:render (:screen @state)))))
+      (is (= thing (:screen @state))))
 
     (testing "a url outside the mount point routes nowhere"
       ;; `/things` is not a url under `/p/x`, and treating it as one would mean
       ;; guessing that a foreign path was meant to be ours
       (cljnx/visit! s "/things")
-      (is (= thing (:render (:screen @state)))
+      (is (= thing (:screen @state))
           "the app must not have moved for a url that was never its own"))))
 
 (deftest a-REALISTIC-browser-app-is-DRIVEN-with-nothing-reaching-for-the-platform
@@ -1391,18 +1391,29 @@
         left    (atom [])
         nav     (fn [s] [:nav [:a {:href "/things"} "Things"]
                          [:span (str "at " (:path s))]])
-        things  {:render  (fn [s] [:ul (for [t (webapp/load-value s :main)]
-                                         [:li [:a {:href (str "/things/" (:id t))} (:name t)]])])
-                 :request (fn [_params] {:http/method :get :http/url "/api/things"})}
-        thing   {:render  (fn [s] [:article
-                                   [:h1 (str "Thing " (:id (:params s)))]
-                                   [:input {:placeholder "note"
-                                            :value (:draft s)
-                                            :on {:input [:thing/typed]}}]
-                                   [:button {:on {:click [:thing/save]}} "Save"]
-                                   [:button {:on {:click [:project/switch "other"]}} "Switch"]])
-                 :request (fn [params] {:http/method :get
-                                        :http/url (str "/api/things/" (:id params))})}
+        ;; the page cases on its OWN load's status — the framework used to render
+        ;; loading and failed for the one request a screen declared, which was
+        ;; right while a screen had exactly one. A page asks for as many as it
+        ;; needs, so only the page knows which of them it is waiting on
+        things  (fn [page]
+                  (let [ts (webapp/ask! page {:http/method :get
+                                              :http/path "/api/things"} {})]
+                    (if (= :ready (:status ts))
+                      [:ul (for [t (:value ts)]
+                             [:li [:a {:href (str "/things/" (:id t))} (:name t)]])]
+                      [:p "Loading…"])))
+        thing   (fn [{:keys [state params] :as page}]
+                  (webapp/ask! page {:http/method :get
+                                     :http/path "/api/things/:id"
+                                     :http/params #{:id}}
+                               {:id (:id params)})
+                  [:article
+                   [:h1 (str "Thing " (:id params))]
+                   [:input {:placeholder "note"
+                            :value (:draft state)
+                            :on {:input [:thing/typed]}}]
+                   [:button {:on {:click [:thing/save]}} "Save"]
+                   [:button {:on {:click [:project/switch "other"]}} "Switch"]])
         app     (webapp/wiring
                  {:webapp/state       state
                   :webapp/base        "/p/demo"
@@ -1441,11 +1452,8 @@
 
     (testing "a link carries the mount point, and clicking it routes"
       (cljnx/click! s "Anvil")
-      ;; the new screen is :loading until ITS request answers — navigating runs
-      ;; the :main load again, and the framework will not call a screen against
-      ;; data that has not arrived. Answering it here is what a server does
-      (is (re-find #"(?i)loading" (cljnx/text s))
-          "a screen must not render against the PREVIOUS screen's data")
+      ;; the new page asks for its OWN thing as it renders, and shows what it
+      ;; has meanwhile. Answering it here is what a server does
       (@pending nil)
       (is (re-find #"Thing 42" (cljnx/text s)) (cljnx/text s)))
 
@@ -1570,7 +1578,7 @@
       ;; the constructor's own discipline: a page that cannot open says so
       ;; where the mistake was made, rather than a screen later
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"(?i)webapp/routes|web/routes"
+           clojure.lang.ExceptionInfo #"(?i)webapp/state"
            (cljnx/driver-for {:nonsense true}))))))
 
 (deftest an-app-OPENS-at-a-url-and-its-STATUS-is-a-field
@@ -1820,3 +1828,35 @@
         (is (= [:p "one"] (:body driven)) "what the reader reads")
         (is (= (:http/hiccup served) (:body driven))
             "one source, so no second derivation exists to drift")))))
+
+(defn ^{:webapp/path "/cljnx-fixture/things"} fixture-things-page
+  "A page fixture that declares its own address."
+  [_page]
+  [:main [:h1 "fixture things"]])
+
+(deftest a-page-DECLARES-its-address-and-the-entry-declares-no-table
+  ;; The last duplicate address in this framework. A page carried
+  ;; `^{:webapp/path "/things"}` — which is what a build, a document and a gate
+  ;; read — and the entry ALSO listed `[["/things" things]]`, which is what the
+  ;; running app read. Two coordinate systems for one fact, and the marker was
+  ;; the decorative one: nothing broke when they disagreed.
+  ;;
+  ;; So the entry stops declaring a table. **The marker is the declaration, and
+  ;; both entries derive from it** — the browser's from the store at build time
+  ;; (`slopp.build/webapp-launcher-source`), the headless one from the loaded
+  ;; vars here, which is the image being the oracle for the code that is
+  ;; actually loaded.
+  ;;
+  ;; It happens in `driver-for` rather than in the `screen` tool, and for the
+  ;; reason that put `driver-for` here at all: a consumer's own tests drive the
+  ;; same entry. Deriving in the tool would route the tool's app and leave the
+  ;; consumer's test rendering not-found, which is one app wired two ways with
+  ;; nothing comparing them.
+  ;;
+  ;; An explicit `:webapp/routes` still WINS, so a test can pin one table
+  ;; without the image's opinion of it.
+  (let [state (atom {})
+        d     (cljnx/driver-for {:webapp/state state})
+        s     (cljnx/open! d "/cljnx-fixture/things")]
+    (is (re-find #"fixture things" (cljnx/text s nil {:detail :prose}))
+        "the page marked with this address rendered, and no table named it")))

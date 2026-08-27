@@ -263,6 +263,13 @@
 
   `{:paths [{:path \"/store/form/:id\" :page my.ui/form-page :doc \"…\"}]}`
 
+  **`:calls` is the ENDPOINTS a page reaches, and it is graph-derived.** A row
+  used to carry `:request` — the name of a builder var — and `:loads`, a url
+  taken from whatever single path that builder named. A page makes as many
+  calls as it likes now, by naming descriptors, so the honest answer is what
+  the page's form REFERENCES. It cannot disagree with the code, and it is
+  absent rather than empty when a page calls nothing.
+
   **The client-side half of the content surface.** `/api/http/paths` answers
   what the server hands a browser; it cannot answer what the browser then does
   with it, because a client-routed app is ONE server route and a dozen
@@ -283,10 +290,12 @@
 
   `[]` unless the project has a browser app, which most do not."
   [store]
-  {:paths (mapv (fn [{:keys [path page doc]}]
-                  (cond-> {:path path :page page}
-                    doc (assoc :doc (http.paths/undent doc))))
-                (rules.webapp/page-routes store))})
+  (let [calls (rules.webapp/page-calls store)]
+    {:paths (mapv (fn [{:keys [path page doc]}]
+                    (cond-> {:path path :page page}
+                      doc              (assoc :doc (http.paths/undent doc))
+                      (get calls page) (assoc :calls (get calls page))))
+                  (rules.webapp/page-routes store))}))
 
 (defn ^{:http/read :ui/webapp-paths} webapp-paths-read
   "The pages the project's BROWSER routes to — one row per `:webapp/path`

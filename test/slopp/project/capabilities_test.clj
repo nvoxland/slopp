@@ -438,8 +438,15 @@
     ;; `slopp.webapp` any more than a cli app names `slopp.cli` or a rest app
     ;; names `slopp.rest`.
     (is (= "slopp.webapp" (:ns-prefix (capabilities/capability "webapp"))))
-    (is (= [:webapp/client-routes] (:entry-markers (capabilities/capability "webapp")))
+    (is (= [:webapp/path :webapp/shell :webapp/client-routes]
+           (:entry-markers (capabilities/capability "webapp")))
         "declaring that the browser owns some paths IS using the browser framework")
+    ;; `:webapp/path` and `:webapp/shell` joined when a page stopped being a row
+    ;; in a table inside the entry function and became a FUNCTION declaring its
+    ;; own address. `:webapp/client-routes` still declares a served prefix, so
+    ;; it stays — but an app can now be entirely browser-owned without one, and
+    ;; a marker set that misses that vendors nothing into a store that needs
+    ;; everything.
     ;; and NOT `:app/entry`, which the first version used. That marker declares
     ;; an entry a READER can open, and a server-rendered HTML app marks one to
     ;; be looked at while having no browser code at all — so it triggered both

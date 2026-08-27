@@ -794,4 +794,12 @@
      [:map
       [:path {:doc "the address the BROWSER routes to, e.g. \"/store/form/:id\" — written as the browser sees it, the same coordinate system :http/path uses"} :string]
       [:page {:doc "the fully-qualified symbol of the function that renders this page"} :symbol]
-      [:doc {:optional true :doc "that function's docstring, de-indented and whole — MARKDOWN. Absent when it has none"} :string]]]]])
+      [:doc {:optional true :doc "that function's docstring, de-indented and whole — MARKDOWN. Absent when it has none"} :string]
+      [:calls
+       {:optional true
+        :doc "the endpoints this page reaches, derived from the reference graph rather than declared beside it — so it cannot disagree with the code. ABSENT, not empty, when a page calls none"}
+       [:sequential
+        [:map
+         [:endpoint {:doc "the fully-qualified symbol of the endpoint DESCRIPTOR the page names"} :symbol]
+         [:method {:doc "the verb that descriptor declares, defaulting to :get"} :keyword]
+         [:path {:doc "the address it names, in the same grammar :http/path uses"} :string]]]]]]]])

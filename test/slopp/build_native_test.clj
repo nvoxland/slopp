@@ -306,3 +306,41 @@
         (is (= 'ns (ffirst forms)))
         (is (some #(and (seq? %) (= 'defonce (first %))) forms)
             "a bundle whose entry is not a top-level form never runs")))))
+
+(deftest a-generated-browser-entry-carries-the-table-its-PAGES-declared
+  ;; The other half of the marker becoming the declaration. A page carries
+  ;; `^{:webapp/path "/things"}`; the entry fn used to carry `[["/things"
+  ;; things]]` as well, and the two could disagree with nothing to notice.
+  ;;
+  ;; So the build reads the markers and writes the table into the generated
+  ;; browser entry. `slopp.cljnx/marked-pages` does the same job for the
+  ;; headless drive by scanning loaded vars — two readers of ONE marker, which
+  ;; is a different thing from two declarations.
+  (let [routes '[["/things" shop.ui/things] ["/things/:id" shop.views/thing]]
+        src    (build/webapp-launcher-source 'shop.ui/app
+                                             '[shop.ui shop.views]
+                                             routes)]
+
+    (testing "every declared address is in the table, with the page that renders it"
+      (is (re-find #"\"/things\" shop\.ui/things" src) src)
+      (is (re-find #"\"/things/:id\" shop\.views/thing" src) src))
+
+    (testing "and the app's OWN table still wins when it declares one"
+      ;; generated as the default rather than as an override: an app with a
+      ;; reason to build its table at runtime keeps it, and does not have to
+      ;; also stop slopp generating one
+      (is (re-find #"or t" src)
+          (str "an assoc here would silently replace a table the author wrote: "
+               src)))
+
+    (testing "a store with no marked pages gets the entry it always got"
+      ;; the table is absent rather than empty — an empty literal would route
+      ;; nothing while looking like a declaration
+      (let [bare (build/webapp-launcher-source 'shop.ui/app '[shop.ui] nil)]
+        (is (re-find #"\(dom/mount! \(shop\.ui/app\)\)" bare) bare)
+        (is (not (re-find #":webapp/routes" bare)) bare)))
+
+    (testing "it still reads as Clojure"
+      (let [forms (edn/read-string (str "[" src "]"))]
+        (is (= 'ns (ffirst forms)))
+        (is (some #(and (seq? %) (= 'defonce (first %))) forms))))))

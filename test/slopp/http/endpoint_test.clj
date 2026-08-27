@@ -1,4 +1,4 @@
-(ns slopp.rest.endpoint-test
+(ns slopp.http.endpoint-test
   "Cover for turning an endpoint descriptor into a request.
 
   Two properties are worth the suite and neither is about the happy path. The
@@ -9,7 +9,7 @@
   guard from a descriptor that enumerates nothing, because a guard built from a
   gap refuses what the boundary would accept."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.rest.endpoint :as endpoint]))
+            [slopp.http.endpoint :as endpoint]))
 
 (deftest a-DESCRIPTOR-and-params-become-a-finished-request
   ;; What replaces the generated `-request` builder. The builder was an address

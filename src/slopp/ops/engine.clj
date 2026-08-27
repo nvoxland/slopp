@@ -33,24 +33,48 @@
   A family counts as used when the store does NOT define it and either requires
   something in it or carries one of its declared entry markers. Both halves come
   from `capabilities/shipping-families` and the catalog, so a capability is
-  covered by existing rather than by an edit here."
+  covered by existing rather than by an edit here.
+
+  **A used family arrives with the families it REQUIRES**, and that closure is
+  the same failure one level in: a vendored family has requires of ITS own. A
+  browser app names `slopp.webapp` and nothing else, so it was handed the
+  webapp family alone — while `slopp.webapp` requires `slopp.http.endpoint`, a
+  capability over. The framework landed intact and failed inside itself, as
+  `No such namespace` from the ClojureScript compiler, which reads like the
+  app's own mistake.
+
+  Read off `capabilities/prerequisites` rather than a list of permitted
+  cross-family requires, because the catalog already states this edge for a
+  reason that covers it: `webapp :requires [\"http\"]` because a browser app has
+  to be SERVED. A family a shipped namespace may legitimately reach is a family
+  the store is given.
+
+  DEFINES is applied AFTER the closure, not before. slopp's own store defines
+  `slopp.http.*`, and vendoring there would shadow the code being edited with
+  the last-shipped copy — that has to hold for a family pulled in by a
+  prerequisite exactly as it holds for one named directly."
   [store]
   (let [nses (keys (:namespaces store))
         in?  (fn [prefix n] (let [s (str n)]
-                              (or (= s prefix) (str/starts-with? s (str prefix ".")))))]
+                              (or (= s prefix) (str/starts-with? s (str prefix ".")))))
+        fams (capabilities/shipping-families)
+        defines? (fn [cap] (some #(in? (get fams cap) %) nses))
+        named (into #{}
+                    (for [[cap prefix] fams
+                          :let  [ms (set (:entry-markers (capabilities/capability cap)))]
+                          :when (and (not (defines? cap))
+                                     (or (some (fn [n]
+                                                 (some #(in? prefix %) (store/ns-require-libs store n)))
+                                               nses)
+                                         (some (fn [n]
+                                                 (some (fn [f]
+                                                         (some ms (keys (store/form-name-meta f))))
+                                                       (store/forms store n)))
+                                               nses)))]
+                      cap))]
     (into #{}
-          (for [[cap prefix] (capabilities/shipping-families)
-                :let  [ms (set (:entry-markers (capabilities/capability cap)))]
-                :when (and (not-any? #(in? prefix %) nses)
-                           (or (some (fn [n]
-                                       (some #(in? prefix %) (store/ns-require-libs store n)))
-                                     nses)
-                               (some (fn [n]
-                                       (some (fn [f]
-                                               (some ms (keys (store/form-name-meta f))))
-                                             (store/forms store n)))
-                                     nses)))]
-            cap))))
+          (remove defines?)
+          (into named (mapcat capabilities/prerequisites) named))))
 
 (defn ^:export framework-injection
   "The framework FILES slopp vendors into `store` — `{\"slopp/cli.clj\" src …}` —

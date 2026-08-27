@@ -147,6 +147,26 @@
                  covered. And the client table must be LITERAL: a computed
                  pattern is skipped rather than guessed at, which makes the join
                  partial in the safe direction"}
+{:kind       :webapp/page-address
+    :leaves     "a PAGE function, carrying the address the browser routes to it"
+    :to         "the browser's route table — GENERATED into the entry the build
+                 writes, and scanned off the loaded vars for a headless drive"
+    :markers    #{:webapp/path}
+    :checked-by "webapp-page-address refuses at the write: a pattern no shell
+                 could match, a private page the router could never call, and a
+                 second page claiming one address. pages-unserved joins each
+                 page to the shells this store serves, through the SAME
+                 router/match the server uses — one coordinate system on both
+                 sides, which is what the prefix comparison above never had"
+    :blind      "the table reaches the browser by CODE GENERATION and the
+                 headless one by scanning `all-ns`, so the two agree by both
+                 reading this marker and not by being the same value. A page in
+                 a namespace the build does not require is named and not
+                 reachable — the launcher adds every page's namespace for that
+                 reason, and a store that hand-writes its own mount is on its
+                 own. And nothing joins a page's address to the LINKS that
+                 point at it: an :href to an address no page claims is a
+                 not-found the reader finds, not the store"}
 {:kind       :webapp/shell
     :leaves     "a stored hiccup document declared as the app's SPA shell"
     :to         "a browser, which loads the compiled bundle it names and mounts
@@ -170,11 +190,12 @@
                  second needs no new tooling and is the cheaper of the two. If
                  either lands, delete this paragraph rather than annotating it.
 
-                 And the BUNDLE url is taken on trust. The marker's value is a
-                 path this store may or may not serve; a typo is a script tag
-                 pointing at a 404, which is the same blank page from a
-                 different cause. Joining it to the route table is possible and
-                 is not done."}
+                 The BUNDLE url used to be taken on trust — the marker held it,
+                 so a typo was a script tag pointing at a 404, the same blank
+                 page from a different cause. That is closed: the marker is a
+                 BOOLEAN and the url is derived from the compile output joined
+                 to the static mount that serves it, so a shell with no
+                 reachable bundle refuses at assembly like the other two."}
 
    {:kind       :app/headless-entry
     :leaves     "the whole application as data — state, a route TABLE, the

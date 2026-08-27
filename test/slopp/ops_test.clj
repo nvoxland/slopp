@@ -1625,6 +1625,52 @@
           (is (str/includes? (:err r) "launcher, not the application") (pr-str r))
           (is (str/includes? (:err r) "TWICE") (pr-str r)))))))
 
+(deftest a-family-arrives-with-the-families-it-REQUIRES
+  ;; `used-families` reads what a store REACHES FOR, and that is the whole
+  ;; signal it had: a browser app requires `slopp.webapp` and nothing else, so
+  ;; it was handed the webapp family alone. But a vendored family has requires
+  ;; of its own, and `slopp.webapp` requires `slopp.http.endpoint` — one
+  ;; capability over, in a family the store never named.
+  ;;
+  ;; The failure is the one `framework-injection` already describes and could
+  ;; not previously reach: **the framework lands intact and fails inside
+  ;; itself**. It surfaced as `No such namespace: slopp.http.endpoint` from the
+  ;; ClojureScript compiler, which reads exactly like the app's own mistake.
+  ;;
+  ;; The answer is not a hand-kept list of cross-family requires. The catalog
+  ;; already states this: `webapp :requires ["http"]` because a browser app has
+  ;; to be SERVED. What that edge MEANT — the config write turns http on with
+  ;; it — now also decides what is vendored, so a family that may legitimately
+  ;; reach another is a family that arrives with it.
+  (let [files {"_"      {"slopp/lang.cljc" "(ns slopp.lang)"}
+               "http"   {"slopp/http.clj" "(ns slopp.http)"
+                         "slopp/http/endpoint.cljc" "(ns slopp.http.endpoint)"}
+               "webapp" {"slopp/webapp.cljc" "(ns slopp.webapp)"}
+               "cli"    {"slopp/cli.clj" "(ns slopp.cli)"}}
+        browser (-> (store/empty-store)
+                    (store/ingest 'shop.ui
+                                  (str "(ns shop.ui (:require [slopp.webapp :as webapp]))\n"
+                                       "(defn ^{:webapp/path \"/things\"} things \"T.\" [_] [:ul])\n")))
+        cli-app (-> (store/empty-store)
+                    (store/ingest 'app.cmds
+                                  (str "(ns app.cmds)\n"
+                                       "(defn ^{:cli/command \"add\" :cli/args [:catn]} add \"A.\" [ctx args] args)\n")))]
+    (testing "a browser app is handed http as well, because webapp requires it"
+      (let [got (engine/framework-injection browser files)]
+        (is (contains? got "slopp/webapp.cljc") (pr-str (keys got)))
+        (is (contains? got "slopp/http/endpoint.cljc")
+            (str "slopp.webapp requires it, so an app vendored webapp alone"
+                 " compiles against a namespace nobody gave it: "
+                 (pr-str (keys got))))
+        (is (contains? got "slopp/lang.cljc") "the dialect still rides")))
+    (testing "and a capability that requires nothing still carries nothing"
+      ;; the prerequisite walk must not become \"vendor everything\" — cli
+      ;; declares `:requires []` and a command-line app has no server in it
+      (let [got (engine/framework-injection cli-app files)]
+        (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
+        (is (not (contains? got "slopp/http.clj"))
+            (str "a prerequisite nobody declared: " (pr-str (keys got))))))))
+
 (deftest a-store-whose-BROWSER-owns-routing-uses-the-webapp-family
   ;; Wave 4: `webapp` ships a family, and the entry MARKER is the only usage
   ;; signal — `used-families` reads requires and markers, and slopp mounts the
@@ -1660,6 +1706,17 @@
       (let [st (store/ingest (store/empty-store) 'shop.ui browser-app)]
         (is (contains? (engine/used-families st) "webapp")
             (pr-str (engine/used-families st)))))
+(testing "and so is a PAGE declaring its own address"
+      ;; the signal the page-function dialect actually leaves. A browser app's
+      ;; own namespaces are pages; the served shell may live in a namespace
+      ;; this store does not hold at all (a hub serves it), in which case
+      ;; `:webapp/client-routes` appears nowhere and the family would be
+      ;; withheld from the one store that needs all of it
+      (let [st (store/ingest (store/empty-store) 'shop.pages
+                             (str "(ns shop.pages)\n\n"
+                                  "(defn ^{:webapp/path \"/things\"} things \"T.\" [_] [:ul])\n"))]
+        (is (contains? (engine/used-families st) "webapp")
+            (pr-str (engine/used-families st)))))
 
     (testing "but marking a page for the READER is not"
       ;; the case that made this wrong: a server-rendered app declares a page so
@@ -1681,7 +1738,7 @@
       (let [row (first (filter #(= "webapp" (:capability %))
                                capabilities/capability-catalog))]
         (is (= "slopp.webapp" (:ns-prefix row)) (pr-str row))
-        (is (= [:webapp/client-routes] (:entry-markers row))
+        (is (= [:webapp/path :webapp/shell :webapp/client-routes] (:entry-markers row))
             (str "and :app/entry is NOT among them, deliberately: " (pr-str row)))))))
 
 (deftest the-vendored-tree-tracks-the-STORE-not-the-process-start
@@ -1761,15 +1818,24 @@
                                           " renamed file fails here loudly rather"
                                           " than compiling to nothing")
                                      {:path rel}))))
-        family (into {} (for [rel ["slopp/lang.cljc" "slopp/webapp.cljc"
-                                   "slopp/webapp/dom.cljs"]]
-                          [rel (slurp (find! rel))]))
+        vend   (fn [rels] (into {} (for [rel rels] [rel (slurp (find! rel))])))
+        family (vend ["slopp/lang.cljc" "slopp/webapp.cljc"
+                      "slopp/webapp/dom.cljs"])
+        ;; webapp REQUIRES http, so a browser app is vendored that family too —
+        ;; and it has to be, because `slopp.webapp` requires
+        ;; `slopp.http.endpoint`. Keyed here as the real manifest keys it
+        ;; rather than folded into the webapp map: a stub that hands a file
+        ;; under the wrong family is green while production is not
+        served (vend ["slopp/http/endpoint.cljc"])
         app    (str "(ns shop.ui\n"
                     "  (:require [slopp.webapp :as webapp]))\n\n"
-                    "(defn things \"The list.\" [s]\n"
-                    "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
-                    "(defn things-request \"What it asks for.\" [_params]\n"
-                    "  {:webapp/method :get :webapp/path \"/api/things\"})\n\n"
+                    ;; a PAGE is one function of one map that declares its own
+                    ;; address. The table used to hold spec maps — `{:render …
+                    ;; :request …}` — in a value only the running app could
+                    ;; read; a marker is a fact a build can see
+                    "(defn ^{:webapp/path \"/things\"} things \"The list.\"\n"
+                    "  [{:keys [state]}]\n"
+                    "  [:ul (for [t (webapp/load-value state :main)] [:li (:name t)])])\n\n"
                     "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
                     "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                     "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
@@ -1779,22 +1845,24 @@
                     ;; pre-wired map is refused, because it already carries the
                     ;; derived :webapp/view
                     "(defn ^:app/entry app \"The application.\" []\n"
-                    "  {:webapp/state  (atom {})\n"
-                    "   :webapp/routes [[\"/things\" {:render  things\n"
-                    "                               :request things-request}]]})\n")]
+                    "  {:webapp/state (atom {})})\n")]
     (testing "the fixture really vendors what it claims to"
       ;; without this the compile below could be green having compiled nothing
       ;; of the framework at all
       (is (= 3 (count family)) (pr-str (keys family)))
-      (is (every? #(re-find #"\(ns slopp\." %) (vals family))
+      (is (every? #(re-find #"\(ns slopp\." %) (concat (vals family) (vals served)))
           "a rendered namespace that is not source would make this vacuous")
+      (is (= #{"slopp/http/endpoint.cljc"} (set (keys served)))
+          (str "the http half is what `slopp.webapp` requires — vendored under"
+               " the wrong family key it is absent, and the compile fails as"
+               " the app's own mistake: " (pr-str (keys served))))
       (is (= #{"slopp/lang.cljc" "slopp/webapp.cljc" "slopp/webapp/dom.cljs"}
              (set (keys family)))
           (str "vendored under the wrong EXTENSION the compiler simply does not"
                " see them, and the error reads as the family being absent: "
                (pr-str (keys family)))))
 
-    (with-redefs [boot/framework-files (constantly {"webapp" family})
+    (with-redefs [boot/framework-files (constantly {"webapp" family "http" served})
                   boot/framework-deps
                   (constantly '{"webapp" {no.cjohansen/replicant {:mvn/version "2026.07.1"}}})]
       (let [sess (external/open!)]
@@ -1852,14 +1920,16 @@
   ;; except for the two forms every app hand-wrote.
   (let [app (str "(ns shop.ui\n"
                  "  (:require [slopp.webapp :as webapp]))\n\n"
-                 "(defn things \"The list.\" [s]\n"
-                 "  [:ul (for [t (webapp/load-value s :main)] [:li (:name t)])])\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things \"The list.\"\n"
+                 "  [{:keys [state]}]\n"
+                 "  [:ul (for [t (webapp/load-value state :main)] [:li (:name t)])])\n\n"
                  "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
                  "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
                  "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                 ;; no `:webapp/routes` — the pages carry their own addresses,
+                 ;; and the build is what joins them into a table
                  "(defn ^:app/entry app \"The application.\" []\n"
-                 "  {:webapp/state  (atom {})\n"
-                 "   :webapp/routes [[\"/things\" things]]})\n")
+                 "  {:webapp/state (atom {})})\n")
         dir (str (System/getProperty "java.io.tmpdir")
                  "/slopp-browser-entry-" (System/nanoTime))
         sess (external/open!)]
@@ -1896,7 +1966,15 @@
                   ;; naming a page without requiring its closure is a call to a
                   ;; var that does not exist, which reaches a reader as a blank
                   ;; page and reads like a rendering bug rather than a wiring one
-                  (is (str/includes? src "[shop.ui]") src))))))
+                  (is (str/includes? src "[shop.ui]") src))
+                (testing "and carries the table the PAGES declared"
+                  ;; the entry fn declares no `:webapp/routes` at all — the
+                  ;; address lives on the page, and the build is the reader
+                  ;; that joins them. Without this the app mounts and every
+                  ;; url renders not-found, which looks like a routing bug in
+                  ;; an app whose routing was never wired
+                  (is (str/includes? src "\"/things\" shop.ui/things") src)
+                  (is (str/includes? src ":webapp/routes") src))))))
 
         (testing "and the result SAYS it emitted one"
           (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))

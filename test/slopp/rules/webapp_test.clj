@@ -114,11 +114,13 @@
   ;; Three questions, which is what a browser app is: what screens are there,
   ;; what can a reader DO, and how much of this is outside the fast loop.
   (let [src (str "(ns shop.ui)\n\n"
-                 "(defn things \"T.\" [_s] [:p \"things\"])\n"
-                 "(defn thing \"T.\" [_s] [:p \"thing\"])\n\n"
+                 "(def thing-api \"E.\" {:http/method :get :http/path \"/api/thing/:id\"})\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things \"Every thing.\" [_p] [:p \"things\"])\n"
+                 "(defn ^{:webapp/path \"/things/:id\"} thing \"One thing.\" [_p]\n"
+                 "  [:p (:http/path thing-api)])\n\n"
                  "(defn ^{:http/method :get :http/path \"/p/:slug\"} doc \"D.\" [_] {})\n\n"
                  "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes  [[\"/things\" things] [\"/things/:id\" thing]]\n"
+                 "  {:webapp/state (atom {})\n"
                  "   :webapp/actions {:thing/rename {}\n"
                  "                    :thing/delete {:effectful? true}\n"
                  "                    :project/switch {:leaves? true}}})\n")
@@ -131,48 +133,30 @@
       (is (empty? (:screens (rules.webapp/webapp-report
                              (store/ingest (store/empty-store) 'shop.ui src))))))
 
-    (testing "every declared route is a screen row, naming what renders it"
+    (testing "every page's own MARKER is a screen row, naming what renders it"
+      ;; the addresses used to be read out of a `:webapp/routes` table inside
+      ;; the entry fn — a value, so a table built in pieces read as fewer
+      ;; screens than the app had. Metadata on a name cannot be half-declared
       (let [rows (:screens (rules.webapp/webapp-report on))]
-        (is (= ["/things" "/things/:id"] (mapv :path rows)))
+        (is (= ["/things" "/things/:id"] (mapv :path rows)) (pr-str rows))
         (is (= '[shop.ui/things shop.ui/thing] (mapv :screen rows)))
+        (is (= ["Every thing." "One thing."] (mapv :doc rows))
+            "what a page IS, which the path alone never says")
         (is (every? #(= :screen (:kind %)) rows)
             "rows are self-describing, so a renderer that knows nothing about
              this capability can still draw one")))
 
-    (testing "a row written as a screen VALUE reports its render AND what it loads"
-      ;; the shape a screen takes once it names its own request. The report is
-      ;; the human's picture of the app, and \"which url does this screen ask
-      ;; for\" is half of what they came for — reporting the whole map verbatim
-      ;; would answer neither question
-      (let [src2 (str "(ns shop.two)\n\n"
-                      "(defn thing \"T.\" [_s] [:p \"thing\"])\n"
-                      "(def thing-request {:http/method :get :http/path \"/api/thing\"})\n\n"
-                      "(defn ^:app/entry app \"A.\" []\n"
-                      "  {:webapp/routes [[\"/things/:id\" {:render thing :request thing-request}]]})\n")
-            rows (:screens (rules.webapp/webapp-report
-                            (assoc-in (store/ingest (store/empty-store) 'shop.two src2)
-                                      [:config "capabilities" :values "webapp.enabled"] "true")))]
-        (is (= ["/things/:id"] (mapv :path rows)) (pr-str rows))
-        (is (= '[shop.two/thing] (mapv :screen rows)) (pr-str rows))
-        (is (= '[shop.two/thing-request] (mapv :request rows)) (pr-str rows))
-        (is (= ["/api/thing"] (mapv :loads rows))
-            (str "a var name answers WHICH function, and the reader's question"
-                 " is which endpoint — the report is the picture somebody who"
-                 " does not read the code is looking at: " (pr-str rows)))))
-
-    (testing "a row is READABLE or it is skipped — never a thrown report"
-      ;; `rules.rest/contracts-report`'s own scar: one member that threw made
-      ;; nine endpoints unreadable on the day a store turned the capability on
-      (let [src3 (str "(ns shop.three)\n\n"
-                      "(defn ^:app/entry app \"A.\" []\n"
-                      "  {:webapp/routes [[\"/ok\" {:render identity}]\n"
-                      "                   [\"/broken\" {:request identity}]]})\n")
-            rows (:screens (rules.webapp/webapp-report
-                            (assoc-in (store/ingest (store/empty-store) 'shop.three src3)
-                                      [:config "capabilities" :values "webapp.enabled"] "true")))]
-        (is (= ["/broken" "/ok"] (mapv :path rows))
-            "a screen with no :render is still an ADDRESS this app declares")
-        (is (nil? (:screen (first rows))) (pr-str rows))))
+    (testing "a row names the ENDPOINTS its page calls, and says nothing when it calls none"
+      ;; graph-derived, so it cannot disagree with the code. The row used to
+      ;; carry `:request` — the name of a builder var — and `:loads`, a url
+      ;; taken from whatever single path that builder named; a page makes as
+      ;; many calls as it likes and names descriptors to make them
+      (let [by (into {} (map (juxt :path identity))
+                     (:screens (rules.webapp/webapp-report on)))]
+        (is (= [{:endpoint 'shop.ui/thing-api :method :get :path "/api/thing/:id"}]
+               (:calls (by "/things/:id")))
+            (pr-str (by "/things/:id")))
+        (is (nil? (:calls (by "/things"))) (pr-str (by "/things")))))
 
     (testing "actions say what a reader can DO, and which kind each is"
       ;; the three kinds are the app's own declaration, and a human asking what
@@ -185,25 +169,14 @@
         (is (true? (:leaves? (by :project/switch))))
         (is (not (:effectful? (by :thing/rename))))))
 
-    (testing "declared SESSION loads are reported, because they belong to no screen"
-      ;; the fetch a reader never navigates to and every screen may read — a
-      ;; nav rail, a signed-in user. Absent from the screen rows by definition,
-      ;; so a report drawing only screens shows an app fetching less than it does
-      (let [src4 (str "(ns shop.four)\n\n"
-                      "(def modules-request {:http/method :get :http/path \"/api/modules\"})\n\n"
-                      "(defn ^:app/entry app \"A.\" []\n"
-                      "  {:webapp/routes        []\n"
-                      "   :webapp/session-loads {:modules {:request modules-request}\n"
-                      "                          :user    {}}})\n")
-            rows (:session-loads (rules.webapp/webapp-report
-                                  (assoc-in (store/ingest (store/empty-store) 'shop.four src4)
-                                            [:config "capabilities" :values "webapp.enabled"] "true")))]
-        (is (= [:modules :user] (mapv :load rows)) (pr-str rows))
-        (is (= '[shop.four/modules-request nil] (mapv :request rows)) (pr-str rows))
-        (is (= ["/api/modules" nil] (mapv :loads rows))
-            (str "the url a session load fetches is the same question a screen's"
-                 " is: " (pr-str rows)))
-        (is (every? #(= :session-load (:kind %)) rows) (pr-str rows))))
+    (testing "there is no :session-loads key, because there is no such declaration"
+      ;; it answered what an app fetched that belonged to no screen. A page
+      ;; ASKS for what it needs now and `ask!` is start-if-absent, so a load
+      ;; belonging to everyone is asked for by every page that shows it and
+      ;; found already there after the first
+      (is (= #{:screens :actions :unreadable :cljs}
+             (set (keys (rules.webapp/webapp-report on))))
+          (pr-str (rules.webapp/webapp-report on))))
 
     (testing "and the :cljs count, which is the goal stated as a number"
       ;; "an app that opts into webapp writes NO ClojureScript" is an aspiration
@@ -379,44 +352,52 @@
   ;; Reported by the store that could no longer read the number `D-webapp` names
   ;; as this capability's target — so the throw hid the metric the wave is
   ;; scored by, in the tool that reports it.
+  ;;
+  ;; **Two of the three declarations have since been deleted rather than
+  ;; fixed**, which is the better answer to a value that cannot be read: the
+  ;; addresses are metadata on the pages themselves, and session loads stopped
+  ;; being declared at all. `:webapp/actions` is what is left, and it is still
+  ;; a map literal an app may name a var for.
   (let [src (str "(ns shop.six)\n\n"
-                 "(def routes \"R.\" [])\n"
-                 "(def actions \"A.\" {})\n"
-                 "(def session-loads \"S.\" {:modules {}})\n\n"
-                 "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                 "(def actions \"A.\" {})\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things \"T.\" [_p] [:p \"t\"])\n\n"
                  "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes        routes\n"
-                 "   :webapp/actions       actions\n"
-                 "   :webapp/session-loads session-loads})\n\n"
-                 ;; a second, READABLE app in the same store — without it a
-                 ;; report that returned empty would look like it had coped
-                 "(defn ^:app/entry other \"O.\" []\n"
-                 "  {:webapp/routes  [[\"/things\" things]]\n"
-                 "   :webapp/actions {:thing/save {:effectful? true}}})\n")
+                 "  {:webapp/state   (atom {})\n"
+                 "   :webapp/actions actions})\n\n"
+                 ;; a second, READABLE declaration in the same store — without
+                 ;; it a report that returned empty would look like it coped
+                 "(def other-actions \"O.\" nil)\n\n"
+                 "(defn readable \"R.\" []\n"
+                 "  {:webapp/actions {:thing/save {:effectful? true}}})\n")
         on  (assoc-in (store/ingest (store/empty-store) 'shop.six src)
                       [:config "capabilities" :values "webapp.enabled"] "true")]
 
     (testing "a declaration naming a VAR does not throw"
       (is (map? (rules.webapp/webapp-report on))
-          "a store that names its route table by var made the whole surface unreadable"))
+          "a store that names its actions by var made the whole surface unreadable"))
 
     (testing "and what IS readable is still reported"
       ;; the half that makes skipping honest rather than a shrug: an
       ;; unreadable declaration costs its own rows and nothing else
       (let [r (rules.webapp/webapp-report on)]
         (is (= ["/things"] (mapv :path (:screens r))) (pr-str r))
-        (is (= [:thing/save] (mapv :action (:actions r))) (pr-str r))))
+        (is (= [:thing/save] (mapv :action (:actions r))) (pr-str r))
+        (is (some #(re-find #"actions" %) (:unreadable r)) (pr-str r))))
 
-    (testing "every extractor, not just the one that was reported"
-      ;; routes, actions and session-loads all seq'd their value, so fixing the
-      ;; reported one would leave two loaded guns in the same function
-      (doseq [k [:webapp/routes :webapp/actions :webapp/session-loads]]
-        (let [one (str "(ns shop.one)\n\n(def v \"V.\" nil)\n\n"
-                       "(defn ^:app/entry app \"A.\" [] {" k " v})\n")
-              st  (assoc-in (store/ingest (store/empty-store) 'shop.one one)
-                            [:config "capabilities" :values "webapp.enabled"] "true")]
-          (is (map? (rules.webapp/webapp-report st))
-              (str k " taken by var still takes the report down")))))))
+    (testing "and the ADDRESSES cannot be named by a var at all any more"
+      ;; the class of failure removed rather than guarded. A page's address is
+      ;; metadata on its name, so there is no value for an app to compute and
+      ;; nothing for this reader to fail to read
+      (let [one (str "(ns shop.one)\n\n(def v \"V.\" nil)\n\n"
+                     "(defn ^:app/entry app \"A.\" [] {:webapp/state v})\n")
+            st  (assoc-in (store/ingest (store/empty-store) 'shop.one one)
+                          [:config "capabilities" :values "webapp.enabled"] "true")
+            r   (rules.webapp/webapp-report st)]
+        (is (map? r) "an entry naming its state by var still takes the report down")
+        (is (= [] (:screens r)) (pr-str r))
+        (is (= [] (:unreadable r))
+            (str "there is no address declaration left to be unreadable: "
+                 (pr-str r)))))))
 
 (deftest what-the-report-CANNOT-read-is-named-at-every-grain
   ;; The hole in the fix for the throw. Turning a crash into a SKIP was right;
@@ -434,27 +415,30 @@
   ;; agree with what I declared?", which is the question the tool is for. It
   ;; said yes about routes and quietly no about the other two.
   ;;
-  ;; Not asking it to RESOLVE a `cond->` — skipping what it cannot read is
-  ;; right, and their declaration is a `cond->` for a real reason: `:check` is
-  ;; only there when a contract was generated.
+  ;; **Two of the three grains have since stopped existing**, and that is the
+  ;; better ending than a guard: the addresses are metadata on the pages, so
+  ;; there is no value for an app to compute, and session loads are not
+  ;; declared at all. What a computed ROUTE TABLE cost this reader — one
+  ;; finding for the table, never one per element of the call form it walked —
+  ;; is recorded in `page-routes`' own docstring, where the declaration went.
   (let [src (str "(ns shop.seven)\n\n"
                  "(def actions \"A.\" {:thing/save {:effectful? true}})\n"
-                 "(defn things \"T.\" [_s] [:p \"t\"])\n"
-                 "(defn modules-request \"R.\" [_s] {:webapp/path \"/api/modules\"})\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things \"T.\" [_p] [:p \"t\"])\n\n"
                  "(defn ^:app/entry app \"A.\" []\n"
-                 "  {:webapp/routes        [[\"/things\" things]]\n"
+                 "  {:webapp/state (atom {})\n"
                  ;; a whole declaration naming a VAR
-                 "   :webapp/actions       actions\n"
-                 ;; a readable declaration with ONE unreadable entry
-                 "   :webapp/session-loads {:modules  (cond-> {:request modules-request})\n"
-                 "                          :projects {:request modules-request}}})\n")
+                 "   :webapp/actions actions})\n\n"
+                 ;; a readable one elsewhere, with ONE unreadable entry in it
+                 "(defn other \"O.\" []\n"
+                 "  {:webapp/actions {\"thing/save\" {:effectful? true}\n"
+                 "                    :thing/rename {}}})\n")
         on  (assoc-in (store/ingest (store/empty-store) 'shop.seven src)
                       [:config "capabilities" :values "webapp.enabled"] "true")
         r   (rules.webapp/webapp-report on)]
 
     (testing "the readable half is still reported, which is what makes skipping honest"
       (is (= ["/things"] (mapv :path (:screens r))) (pr-str r))
-      (is (= [:projects] (mapv :load (:session-loads r))) (pr-str r)))
+      (is (= [:thing/rename] (mapv :action (:actions r))) (pr-str r)))
 
     (testing "a whole DECLARATION it cannot read is named"
       (is (some #(re-find #"webapp/actions" %) (:unreadable r))
@@ -463,55 +447,21 @@
                " actions: " (pr-str (:unreadable r)))))
 
     (testing "and a single unreadable ENTRY inside a readable one is named too"
-      (is (some #(re-find #":modules" %) (:unreadable r))
-          (str "one session load vanished from an otherwise-complete list: "
+      (is (some #(re-find #"thing/save" %) (:unreadable r))
+          (str "one action vanished from an otherwise-complete list: "
                (pr-str (:unreadable r)))))
 
     (testing "the note SHOWS what it found, so the reader can see why"
       ;; "not a literal" is a rule; the value is the evidence, and it is what
       ;; tells an author whether they meant it
-      (is (some #(re-find #"actions" %) (:unreadable r)) (pr-str (:unreadable r)))
-      (is (some #(re-find #"cond->" %) (:unreadable r))
-          (str "the reader has to go and look otherwise: " (pr-str (:unreadable r)))))
-
-    (testing "a COMPUTED table is ONE finding, not one per element of the call"
-      ;; The false-positive half, and it is worse than an ordinary one because
-      ;; it lives in the mechanism built to stop false confidence — running the
-      ;; other way. The answer was COMPLETE and claimed three things were
-      ;; missing from it, so a reader who trusts the list hunts for routes that
-      ;; are there, and a reader who checks once learns to skim it.
-      ;;
-      ;; `(mapv (fn [[p s]] …) (:webapp/routes views/client-routes))` is a LIST,
-      ;; and a list is `sequential?` — so the reader walked the CALL as if it
-      ;; were the vector of rows and reported its three elements: the symbol
-      ;; `mapv`, the `fn`, and the argument. A threaded arg would have made it
-      ;; four. `:unreadable` only works if it is exactly as trustworthy as the
-      ;; answer beside it.
-      (let [src2 (str "(ns shop.nine)\n\n"
-                      "(defn things \"T.\" [_s] [:p \"t\"])\n"
-                      "(def client-routes \"CR.\" {:webapp/routes [[\"/things\" things]]})\n\n"
-                      "(defn ^:app/entry app \"A.\" []\n"
-                      "  {:webapp/routes (mapv (fn [[p s]] [p s])\n"
-                      "                        (:webapp/routes client-routes))})\n")
-            st   (assoc-in (store/ingest (store/empty-store) 'shop.nine src2)
-                           [:config "capabilities" :values "webapp.enabled"] "true")
-            r2   (rules.webapp/webapp-report st)]
-        (is (= ["/things"] (mapv :path (:screens r2)))
-            (str "the literal table elsewhere still reads: " (pr-str r2)))
-        (is (= 1 (count (:unreadable r2)))
-            (str "a call form's ELEMENTS were each reported as a route row: "
-                 (pr-str (:unreadable r2))))
-        (is (re-find #"mapv" (first (:unreadable r2))) (pr-str (:unreadable r2)))
-        (is (not (re-find #"a route row" (first (:unreadable r2))))
-            (str "the finding is about the TABLE, not about a row inside it: "
-                 (pr-str (:unreadable r2))))))
+      (is (some #(re-find #"actions" %) (:unreadable r)) (pr-str (:unreadable r))))
 
     (testing "a store it can read entirely says NOTHING — silence is the good case"
       (let [clean (assoc-in (store/ingest (store/empty-store) 'shop.eight
                                           (str "(ns shop.eight)\n\n"
-                                               "(defn things \"T.\" [_s] [:p \"t\"])\n\n"
+                                               "(defn ^{:webapp/path \"/things\"} things \"T.\" [_p] [:p \"t\"])\n\n"
                                                "(defn ^:app/entry app \"A.\" []\n"
-                                               "  {:webapp/routes [[\"/things\" things]]})\n"))
+                                               "  {:webapp/state (atom {})})\n"))
                             [:config "capabilities" :values "webapp.enabled"] "true")]
         (is (empty? (:unreadable (rules.webapp/webapp-report clean)))
             (pr-str (:unreadable (rules.webapp/webapp-report clean))))))))
@@ -724,3 +674,44 @@
       ;; deleted by the grammar rather than enforced better
       (is (= [] (mapv :path (rules.webapp/pages-unserved
                              (on "/store/**" ["/store"]))))))))
+
+(deftest a-page-row-names-the-ENDPOINTS-it-calls
+  ;; What a reader of a browser app actually wants from a page row: not which
+  ;; function computes a url, but which endpoint this screen talks to. The old
+  ;; answer was `:request` — a var name — plus `:loads`, a url derived from
+  ;; whatever single path that var happened to name.
+  ;;
+  ;; Both were wrong in the same direction. A page makes as many calls as it
+  ;; likes now, and it makes them by naming DESCRIPTORS, which are vars. So the
+  ;; answer is the reference graph: what this form references that is an
+  ;; endpoint. It cannot drift from what the page really calls, because it IS
+  ;; what the page really calls.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'shop.api
+                             (str "(ns shop.api)\n\n"
+                                  "(def thing \"One thing.\"\n"
+                                  "  {:http/method :get :http/path \"/api/thing/:id\"})\n\n"
+                                  "(def things \"All of them.\"\n"
+                                  "  {:http/method :get :http/path \"/api/things\"})\n"))
+               (store/ingest 'shop.ui
+                             (str "(ns shop.ui (:require [shop.api :as api]\n"
+                                  "                      [slopp.webapp :as webapp]))\n\n"
+                                  "(defn ^{:webapp/path \"/things/:id\"} thing-page \"A thing.\"\n"
+                                  "  [{:keys [params] :as page}]\n"
+                                  "  [:main (webapp/ask! page api/thing {:id (:id params)})\n"
+                                  "         (webapp/ask! page api/things {})])\n\n"
+                                  "(defn ^{:webapp/path \"/quiet\"} quiet-page \"Calls nothing.\"\n"
+                                  "  [_page]\n"
+                                  "  [:main \"nothing to load\"])\n")))
+        calls (rules.webapp/page-calls st)]
+
+    (testing "every endpoint the page references is named, with its address"
+      (is (= [{:endpoint 'shop.api/thing  :method :get :path "/api/thing/:id"}
+              {:endpoint 'shop.api/things :method :get :path "/api/things"}]
+             (get calls 'shop.ui/thing-page))
+          (pr-str calls)))
+
+    (testing "and a page that calls nothing has no entry rather than a wrong one"
+      ;; absent, not `[]` — an empty vector is an affirmative claim, and the
+      ;; two are the same only when the derivation is complete
+      (is (nil? (get calls 'shop.ui/quiet-page)) (pr-str calls)))))

@@ -152,13 +152,45 @@
   ([hiccup] (of hiccup nil))
   ([hiccup opts] (str/join "\n" (lines hiccup opts))))
 
+(defn ^:export marked-pages
+  "The loaded pages that declare their own address, as a `[[pattern page]]`
+  route table sorted by pattern.
+
+  A page carries `^{:webapp/path \"/things\"}`, and that marker is the ONE
+  declaration of where it answers: a build reads it to generate the browser's
+  table, `/api/webapp/paths` publishes it, and a write gate refuses two pages
+  claiming one address. Before this, the entry ALSO listed `[[\"/things\" things]]`
+  — a second coordinate system for the same fact, and the decorative one was
+  the marker, because nothing broke when the two disagreed.
+
+  Scanned from the IMAGE rather than from a store, because this is the half a
+  JVM drive reaches: the vars that are loaded are the code that will run. The
+  store-side half of the same fact is `slopp.rules.webapp/page-routes`, which is
+  what generates the browser's table at build time; they are two readers of one
+  marker rather than two declarations.
+
+  `clojure.*` and `cljs.*` are skipped — nothing there is an app's page — and
+  everything else is scanned, so a namespace that marks a page it did not mean
+  to serve serves it. Sorted so the table is stable to read and to diff; the
+  matcher decides precedence for itself and does not care about order."
+  []
+  (vec (sort-by first
+                (for [n (all-ns)
+                      :let [s (str (ns-name n))]
+                      :when (not (or (= s "clojure") (.startsWith s "clojure.")
+                                     (= s "cljs") (.startsWith s "cljs.")))
+                      [_ v] (ns-publics n)
+                      :let [p (:webapp/path (meta v))]
+                      :when (string? p)]
+                  [p @v]))))
+
 ^{:unsafe "resolves slopp.webapp/slopp.http by NAME, and a static require is
   impossible here rather than merely inconvenient: this namespace ships to
   EVERY store through capabilities/shipping-common, while the two it derives
   from are vendored per FAMILY. A store using http is handed no slopp.webapp
   source at all, so requiring it would make the fake browser fail to load for
   the majority app type. The obligation is owned by construction — a store
-  whose entry returns :webapp/routes IS a webapp store, so that family is
+  whose entry returns :webapp/state IS a webapp store, so that family is
   present whenever the branch that resolves it runs. store/late-ref is the
   dialect's carrier for this and is unavailable for the same reason: slopp.store
   is not vendored either."}
@@ -169,7 +201,7 @@
 
   | the entry returned | derived by |
   |---|---|
-  | a webapp DECLARATION (`:webapp/routes`) | `slopp.webapp/driver` over its wiring |
+  | a webapp DECLARATION (`:webapp/state`) | `slopp.webapp/driver` over its wiring |
   | a served CTX (`:http/routes`) | `slopp.http/driver` |
   | the contract already | itself |
 
@@ -181,9 +213,13 @@
   reintroduced one level up. And it would PASS, because each half would be
   asserting against its own reconstruction.
 
-  **This is the only place that knows app types, and [[open!]] still does not.**
-  That split is what let the fake browser leave http's namespace family: the
-  driving contract is neutral, and each capability derives it from what it owns.
+  **A browser app's ROUTE TABLE is derived from the pages, not declared** —
+  [[marked-pages]] says how and why. A declared `:webapp/routes` still wins, so
+  a test can pin one table without the image's opinion of it.
+
+  **The discriminator is `:webapp/state`, and it used to be `:webapp/routes`.**
+  It had to move when the table stopped being written: a browser app is a state
+  atom plus pages, and the atom is the one key `wiring` cannot default.
 
   **The capabilities resolve LATE, inside the branch that matched**, which is
   load-bearing rather than stylistic — see the `^:unsafe` note above.
@@ -195,12 +231,13 @@
   (cond
     (not (map? entry))
     (throw (ex-info (str "an app entry returns a MAP — a webapp declaration"
-                         " (:webapp/routes), a served ctx (:http/routes), or a"
+                         " (:webapp/state), a served ctx (:http/routes), or a"
                          " page ({:state :view}) — got " (pr-str entry))
                     {:got entry}))
 
-    (:webapp/routes entry)
-    (let [wire ((requiring-resolve 'slopp.webapp/wiring) entry)]
+    (:webapp/state entry)
+    (let [wire ((requiring-resolve 'slopp.webapp/wiring)
+                (update entry :webapp/routes #(or % (marked-pages))))]
       ((requiring-resolve 'slopp.webapp/driver) wire))
 
     (:http/routes entry)
@@ -213,7 +250,7 @@
 
     :else
     (throw (ex-info (str "this entry is none of the three shapes an app can"
-                         " return: no :webapp/routes (a browser app), no"
+                         " return: no :webapp/state (a browser app), no"
                          " :http/routes (a served app), and no :view or"
                          " :document (a page wired by hand). Keys: "
                          (pr-str (vec (sort (map str (keys entry))))))

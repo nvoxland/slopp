@@ -29,10 +29,9 @@
   encodes a body, what a `Content-Type` means) is made once over there. A
   second copy here would agree until the first change."
   (:require [slopp.http.client :as http.client]
-            [slopp.webapp :as webapp]
             [clojure.string :as str]
             [clojure.edn :as edn]
-            [cheshire.core :as json]))
+            [cheshire.core :as json] [slopp.http.endpoint :as endpoint]))
 
 (defn- checked-path
   "`path` when it is a path under the base, or a refusal naming what it would
@@ -46,7 +45,7 @@
   This is the one part of an outbound call that an UPSTREAM's own data can
   reach — a slug, an id, a name carried over from a previous response — so if
   it can become a different host then the base was never a boundary. Segment
-  VALUES cannot do it (`slopp.rest.endpoint/request` percent-encodes each one,
+  VALUES cannot do it (`slopp.http.endpoint/request` percent-encodes each one,
   so a `/` inside a value is data); this guards the url it built, whose static
   half comes from the descriptor verbatim."
   [path]
@@ -78,7 +77,7 @@
   "The body as a STRING, encoded by what `request-init` decided — or nil when
   there is no body.
 
-  The choice is not made here. `slopp.webapp/request-init` reads the declared
+  The choice is not made here. `slopp.http.endpoint/request-init` reads the declared
   `Content-Type` and NAMES the encoder, for the browser shim's sake; the server
   performs the same named choice, so the two ends cannot drift about what a
   declared content type means."
@@ -104,7 +103,7 @@
   JSON at something declared `text/csv` would hand the caller a parse error
   about a document that is fine."
   [content-type body]
-  (case (webapp/media-type content-type)
+  (case (endpoint/media-type content-type)
     "application/json" (json/parse-string (str body) true)
     "application/edn"  (edn/read-string (str body))
     body))
@@ -143,8 +142,11 @@
   **One request shape, two performers**, the same split `slopp.cljnx` made for
   drivers. A browser performs it with `fetch`; a server performs it here; and
   the decisions between — which segment is a parameter, what encodes the body,
-  what a `Content-Type` means — are made once in `slopp.webapp` and merely
-  carried out on both sides.
+  what a `Content-Type` means — are made once in `slopp.http.endpoint` and
+  merely carried out on both sides. They used to be made in `slopp.webapp`,
+  which meant a SERVER-side client required the browser's namespace to encode
+  a body — and vendoring is per capability, so that require resolved in a
+  store that had opted into `webapp` and nowhere else.
 
   ## What is handled, since \"safe\" was half the ask
 
@@ -183,7 +185,7 @@
   is no branch to take that is not \"this is broken\". Returning it would let
   the wrong shape travel one more layer before anyone noticed."
   [{:rest/keys [base-url headers timeout-ms]} request & {:keys [check requester]}]
-  (let [init (webapp/request-init request)
+  (let [init (endpoint/request-init request)
         ;; the url arrives RESOLVED and encoded — `slopp.rest.endpoint/request`
         ;; built it — so this guards a finished address rather than a template
         path (checked-path (:http/url request))

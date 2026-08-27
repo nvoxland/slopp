@@ -22,7 +22,7 @@
   routes, links and static mounts rather than pages."
   (:require [rewrite-clj.parser :as p]
             [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit] [slopp.http.router :as router]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit] [slopp.http.router :as router] [slopp.index.refs :as refs]))
 
 (defn webapp-client-routes-consequences-check
   "Done-advisory: an endpoint gained `:webapp/client-routes` this episode — state what that
@@ -178,7 +178,7 @@
   something.
 
   **It reads a DESCRIPTOR, which is a map literal, not a request.** A request
-  carries a finished `:http/url` — `slopp.rest.endpoint/request` resolved it —
+  carries a finished `:http/url` — `slopp.http.endpoint/request` resolved it —
   so it holds no pattern to join and is not scanned. The pattern lives on the
   descriptor, which is a `def` and therefore always readable, so this no longer
   depends on where an app happens to assemble its map.
@@ -215,8 +215,57 @@
                        :when (map? node)
                        :let [p (get node :http/path)]
                        :when (string? p)]
-                   {:path p
-                    :form (symbol (str nsx) (str (:name e)))})))))
+                   {:path   p
+                    ;; the verb travels with the address because half an
+                    ;; address is not one: two endpoints share a path and
+                    ;; differ only here, and a reader shown the path alone
+                    ;; cannot tell which of them a page calls
+                    :method (get node :http/method :get)
+                    :form   (symbol (str nsx) (str (:name e)))})))))
+
+(defn ^:export page-calls
+  "Every ENDPOINT each page reaches, as `{page-symbol [{:endpoint :method
+  :path} …]}` — a page that calls none is ABSENT rather than empty.
+
+  **What a reader of a browser app actually wants from a page row.** Not which
+  function computes a url: which endpoint this screen talks to. The row used to
+  answer `:request` — the name of a builder var — plus `:loads`, a url derived
+  from whatever single path that builder happened to name.
+
+  Both were wrong in the same direction, and the direction is the shape of the
+  framework rather than an oversight. A page makes as many calls as it likes,
+  whenever it likes, and it makes them by naming DESCRIPTORS, which are vars.
+  A declaration beside the route row could only ever describe one of them, and
+  only while somebody kept it in agreement with the code.
+
+  So this is the REFERENCE GRAPH: what the page's form references that is an
+  endpoint. It cannot drift from what the page calls, because it is what the
+  page calls — the same argument that put the address on the page rather than
+  in a table.
+
+  Absent rather than `[]` for a page that calls nothing, because the two are
+  only the same claim when the derivation is complete, and this one is bounded
+  by what a descriptor is: a map literal with an `:http/path`. A page reaching
+  an endpoint some other way is invisible here, and an empty vector would state
+  otherwise."
+  [st]
+  (let [endpoints (into {} (for [{:keys [path method form]} (request-paths st)]
+                             [form {:endpoint form :method method :path path}]))
+        pages     (into {} (for [nsx  (keys (:namespaces st))
+                                 e    (store/forms st nsx)
+                                 :when (and (:name e)
+                                            (string? (:webapp/path (store/form-name-meta e))))]
+                             [(:id e) (symbol (str nsx) (str (:name e)))]))]
+    (into {}
+          (for [[fid rs] (group-by first
+                                   (for [r    (refs/refs st)
+                                         :let [t (symbol (str (:to-ns r)) (str (:to-name r)))]
+                                         :when (and (contains? pages (:from-form r))
+                                                    (contains? endpoints t))]
+                                     [(:from-form r) (get endpoints t)]))
+                :let [called (vec (sort-by :path (distinct (map second rs))))]
+                :when (seq called)]
+            [(get pages fid) called]))))
 
 (defn ^:export webapp-report
   "The `webapp` section of `query_surface`: what this browser application IS.
@@ -226,26 +275,37 @@
   names: the agent, a consuming tool, and the HUMAN, who does not read the code
   and needs a rendered picture of the application.
 
-  Four questions, which between them are what a browser app is:
+  Three questions, which between them are what a browser app is:
 
-  - `:screens` — every declared ADDRESS, the function that renders it, and what
-    it LOADS. This is the map somebody draws, so the load is the url rather than
-    the name of the function that computes one: a var answers WHICH function,
-    and the reader of this report does not read the code.
+  - `:screens` — every declared ADDRESS, the function that renders it, and the
+    endpoints it CALLS. This is the map somebody draws, so a call is the
+    endpoint's own address rather than the name of a function that computes
+    one: a var answers WHICH function, and the reader of this report does not
+    read the code.
 
     Addresses rather than screens, and the distinction is load-bearing here
     because this is what a count would be taken from: a row's screen is not
     unique and a screen's row is not unique, so an app with a lens bar or a
     print view has more rows than screens and neither number is wrong.
-  - `:session-loads` — what this app fetches that belongs to NO screen: a nav
-    rail, a signed-in user, anything started at page load and readable
-    everywhere. Absent from `:screens` by definition, so a report drawing only
-    screens shows an app fetching less than it does.
   - `:actions` — what a reader can DO, and which kind each is. The `:effectful?`
     ones reach a server and the `:leaves?` ones hand the page back to the
     browser, so a human asking what a control does needs the kind visible rather
     than inferred from the name.
   - `:cljs` — how many namespaces are outside the fast loop.
+
+  **`:screens` reads the page MARKERS, and it used to read a table.** The
+  addresses lived in a `:webapp/routes` vector inside the entry fn — a VALUE,
+  so a table built in pieces was unreadable and this report carried an
+  `:unreadable` line to say which. A page carries its own address as metadata
+  now, which cannot be half-declared, so that whole class of skip is gone from
+  the rows. `:unreadable` survives for `:webapp/actions`, which is still a map
+  literal an app may name a var for.
+
+  **`:session-loads` is GONE, with the key that declared it.** It answered what
+  an app fetched that belonged to no screen — and a page ASKS for what it needs
+  now, `ask!` being start-if-absent, so a load belonging to everyone is asked
+  for by every page that shows it and found already there after the first.
+  There is no separate declaration left to report.
 
   **`:cljs` is the goal stated as a NUMBER.** \"An app that opts into `webapp`
   writes no ClojureScript\" is an aspiration until a store can answer how much it
@@ -264,28 +324,18 @@
   `[:or …]` threw while reading its children as map entries, and made nine
   endpoints unreadable on the day a store enabled the capability. Here every
   extraction is total — a malformed action map contributes a row with the kinds
-  it could read, and a route row that is not a `[pattern screen]` pair is
-  skipped rather than throwing over the rest."
+  it could read."
   [store]
   (if-not (capabilities/enabled? store "webapp")
-    {:screens [] :actions [] :session-loads [] :cljs 0}
+    {:screens [] :actions [] :cljs 0}
     (let [rows     (for [nsx  (keys (:namespaces store))
                          e    (store/forms store nsx)
                          :let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
                          node (tree-seq coll? seq sx)
                          :when (map? node)]
                      [nsx node])
-          ;; an unqualified screen name is resolvable only against the namespace
-          ;; that DECLARED the table, and a row nobody can look up answers half
-          ;; the question. A symbol written with an alias is left as written:
-          ;; resolving one means reading the ns form, and `views/thing` is
-          ;; already findable by a reader
-          qualify  (fn [nsx s]
-                     (if (and (symbol? s) (nil? (namespace s)))
-                       (symbol (str nsx) (str s))
-                       s))
           ;; **An app may name a VAR where a literal would go** —
-          ;; `{:webapp/routes routes}` — and every extractor below seq's what it
+          ;; `{:webapp/actions actions}` — and the extractor below seq's what it
           ;; finds, so a symbol threw `Don't know how to create ISeq from` and
           ;; took the whole of `query_surface` with it, including `:cli`,
           ;; `:http` and `:rest`, which have nothing to do with any of this.
@@ -295,10 +345,6 @@
           ;; no longer read the number `D-webapp` names as the target — so the
           ;; throw hid the metric the wave is scored by, in the tool that
           ;; reports it.
-          ;;
-          ;; Skipped rather than guessed at, like a computed route pattern: an
-          ;; unreadable declaration costs its own rows and the readable ones in
-          ;; the same store still land
           declared (fn [node k pred]
                      (let [v (get node k)]
                        (when (pred v) v)))
@@ -316,117 +362,43 @@
           ;; absence — nothing in it distinguishes a store with seven actions
           ;; declared by var from one with none.
           ;;
-          ;; Reported by the store that would have asked this tool "does the
-          ;; surface agree with what I declared?", which is the question it is
-          ;; for. It said yes about routes and quietly no about the rest.
+          ;; The ADDRESSES used to need this too, and no longer can: they are
+          ;; metadata on a name, which is readable by construction.
           unreadable
           (vec (concat
-                ;; a whole declaration written as something other than a literal
                 (for [[nsx node] rows
-                      ;; `vector?` and not `sequential?`, which is the whole of a false
-                      ;; positive worth remembering: a CALL FORM is a list, so
-                      ;; `(mapv f (:webapp/routes views/client-routes))` passed
-                      ;; `sequential?` and the reader walked the call as if it
-                      ;; were the table — reporting its three elements (`mapv`,
-                      ;; the fn, the argument) as three unreadable ROWS, on a
-                      ;; store whose fourteen routes were all present. A
-                      ;; threaded argument would have made it four. A literal
-                      ;; table is a vector; anything else is a computation
-                      [k pred] [[:webapp/routes vector?]
-                                [:webapp/actions map?]
-                                [:webapp/session-loads map?]]
-                      :when (and (contains? node k) (not (pred (get node k))))]
+                      :when (and (contains? node :webapp/actions)
+                                 (not (map? (get node :webapp/actions))))]
                   ;; NOT "so none of it is in this answer", which this cannot know:
-                  ;; these readers scan every map literal in the store, so the
+                  ;; this reader scans every map literal in the store, so the
                   ;; same rows may be declared literally somewhere else and
-                  ;; reported from there. The app that found the row bug has
-                  ;; exactly that shape — a computed table here, the literal one
-                  ;; it maps over in the views — so the over-claim would have
-                  ;; been a second false statement beside the first
-                  (str nsx " declares " k " as " (shown (get node k))
+                  ;; reported from there
+                  (str nsx " declares :webapp/actions as "
+                       (shown (get node :webapp/actions))
                        " — only a literal is read here, so nothing was taken"
                        " from THIS declaration"))
-                ;; one entry inside a declaration that IS readable
-                (for [[nsx node] rows
-                      [k spec] (declared node :webapp/session-loads map?)
-                      :when (not (and (keyword? k) (map? spec)))]
-                  (str nsx " declares the session load " (pr-str k) " as "
-                       (shown spec) " — only a literal map can be read"))
-                (for [[nsx node] rows
-                      row (declared node :webapp/routes vector?)
-                      :when (not (and (vector? row) (= 2 (count row))
-                                      (string? (first row))))]
-                  (str nsx " declares a route row as " (shown row)
-                       " — a readable row is [\"/pattern\" screen]"))
                 (for [[nsx node] rows
                       [a _decl] (declared node :webapp/actions map?)
                       :when (not (keyword? a))]
                   (str nsx " declares the action " (shown a)
                        " — an action is named by a keyword"))))
-          ;; request VAR → the path it names, so a row can say what it loads as
-          ;; a url rather than as the name of the function that computes one.
-          ;; `first` because a request that names two paths is answering a
-          ;; question this report does not ask; the finding grain for that is
-          ;; `request-paths-unserved`, which lists every one
-          loads    (into {} (for [[form rows] (group-by :form (request-paths store))]
-                              [form (:path (first rows))]))
-          screens  (vec (sort-by :path
-                                 (for [[nsx node] rows
-                                       row  (declared node :webapp/routes vector?)
-                                       :when (and (vector? row) (= 2 (count row))
-                                                  (string? (first row)))
-                                       ;; a row's target is a bare render fn or a
-                                       ;; screen VALUE naming its own request.
-                                       ;; Reporting the map verbatim would answer
-                                       ;; neither question a reader has — what
-                                       ;; draws this, and what does it load
-                                       :let [target  (second row)
-                                             screen  (if (map? target) (:render target) target)
-                                             request (when (map? target) (:request target))]]
-                                   (let [rq (when request (qualify nsx request))]
-                                     (cond-> {:kind :screen :path (first row)}
-                                       ;; absent when the map has no :render, which
-                                       ;; `wiring` refuses — but dropping the row
-                                       ;; would hide an ADDRESS this app declares,
-                                       ;; and the address is the half a server route
-                                       ;; has to answer for
-                                       screen (assoc :screen (qualify nsx screen))
-                                       rq     (assoc :request rq)
-                                       ;; and what it LOADS, as the url rather than
-                                       ;; as the var that computes it. A var name
-                                       ;; answers WHICH function; the reader of this
-                                       ;; report does not read the code, and their
-                                       ;; question is which endpoint. Absent when a
-                                       ;; request builds its path rather than naming
-                                       ;; one — the same limit [[request-paths]]
-                                       ;; states, in the same safe direction
-                                       (get loads rq) (assoc :loads (get loads rq)))))))
+          calls    (page-calls store)
+          screens  (vec (for [{:keys [path page doc]} (page-routes store)]
+                          (cond-> {:kind :screen :path path :screen page}
+                            doc             (assoc :doc doc)
+                            (get calls page) (assoc :calls (get calls page)))))
           actions  (vec (sort-by :action
                                  (for [[_nsx node] rows
                                        [a decl] (declared node :webapp/actions map?)
                                        :when (keyword? a)]
                                    (cond-> {:kind :action :action a}
                                      (:effectful? decl) (assoc :effectful? true)
-                                     (:leaves? decl)    (assoc :leaves? true)))))
-          ;; the fetches that belong to NO screen — a nav rail, a signed-in
-          ;; user — started at page load and readable from every screen. A
-          ;; report drawing only screens would show an app fetching less than
-          ;; it does, and these are the requests a reader never navigates to
-          sessions (vec (sort-by :load
-                                 (for [[nsx node] rows
-                                       [k spec] (declared node :webapp/session-loads map?)
-                                       :when (and (keyword? k) (map? spec))
-                                       :let [rq (when-let [r (:request spec)]
-                                                  (qualify nsx r))]]
-                                   (cond-> {:kind :session-load :load k}
-                                     rq             (assoc :request rq)
-                                     (get loads rq) (assoc :loads (get loads rq))))))]
-      {:screens       screens
-       :actions       actions
-       :session-loads sessions
-       :unreadable    unreadable
-       :cljs          (count (filter #(= :cljs (store/platform-for store %))
-                                     (keys (:namespaces store))))})))
+                                     (:leaves? decl)    (assoc :leaves? true)))))]
+      {:screens    screens
+       :actions    actions
+       :unreadable unreadable
+       :cljs       (count (filter #(= :cljs (store/platform-for store %))
+                                  (keys (:namespaces store))))})))
 
 (defn ^:export request-paths-unserved
   "The [[request-paths]] no endpoint in this store declares, sorted — `[]` when

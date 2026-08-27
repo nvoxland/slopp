@@ -32,7 +32,7 @@
   the table."
   (:require [goog.object :as gobj]
             [replicant.dom :as replicant]
-            [slopp.webapp :as webapp] [cljs.reader :as reader]))
+            [slopp.webapp :as webapp] [cljs.reader :as reader] [slopp.http.endpoint :as endpoint]))
 
 (defn- click-data
   "A DOM click event read into the map `slopp.webapp/click-target` decides on.
@@ -82,7 +82,7 @@
 
 (def encoders
   "How a request body becomes what `fetch` sends, keyed by the encoder
-  `slopp.webapp/request-init` NAMED.
+  `slopp.http.endpoint/request-init` NAMED.
 
   A map rather than a `cond`, and the difference is the whole discipline: the
   choice between these was made in `:cljc`, by a function an in-image test
@@ -101,7 +101,7 @@
 
 (def decoders
   "How a response body becomes a Clojure value, keyed by MEDIA TYPE —
-  `slopp.webapp/media-type` produces the key, so `application/json;
+  `slopp.http.endpoint/media-type` produces the key, so `application/json;
   charset=utf-8` finds the JSON entry rather than falling through.
 
   **`application/edn` is here because slopp's own API publishes it.** `:http/raw`
@@ -146,7 +146,7 @@
   "The `:webapp/call` a real page runs: `js/fetch`, and nothing else.
 
   Every judgement it needs was made in `slopp.webapp`, which is `:cljc` and
-  driven by ordinary tests — the URL by `slopp.rest.endpoint/request`, which
+  driven by ordinary tests — the URL by `slopp.http.endpoint/request`, which
   resolves it before the request is ever performed, the method, headers and
   encoder by `request-init`, the decoder key by `media-type`, and whether the
   answer is data or a failure by `response-outcome`. What is left here is one
@@ -163,7 +163,7 @@
   A rejected promise — DNS, offline, CORS — is the other channel and reaches
   `err` with the browser's own message."
   [request ok err]
-  (let [init    (webapp/request-init request)
+  (let [init    (endpoint/request-init request)
         respond (fn [status]
                   (fn [value]
                     (let [[kind v] (webapp/response-outcome status value)]
@@ -174,7 +174,7 @@
                        :body    ((get encoders (:encode init)) (:body init))})
         (.then (fn [response]
                  (-> ((get decoders
-                           (webapp/media-type (.get (.-headers response) "content-type"))
+                           (endpoint/media-type (.get (.-headers response) "content-type"))
                            (::text decoders))
                       response)
                      (.then (respond (.-status response))))))

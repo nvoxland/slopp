@@ -21,7 +21,7 @@
   modernises it, which is why the reason is written here rather than assumed.
 
   **Renderer-agnostic, deliberately.** This never learns what a screen looks
-  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str] [slopp.lang :as lang] [clojure.walk :as walk]))
+  like. The moment it does, it is presentation and belongs to the app." (:require [clojure.string :as str] [slopp.lang :as lang] [clojure.walk :as walk] [slopp.http.endpoint :as endpoint]))
 
 (defn- arrive
   "The state transition a navigation IS: `path` and its route in, everything
@@ -31,50 +31,38 @@
   separate from its performance — what a navigation MEANS is assertable without
   an atom, a plug-in or a clock.
 
-  **The question for any key is: is it part of the ADDRESS, or part of the
-  session?** Address-scoped state dies with the route. Session-scoped state — a
-  nav pane, a signed-in user, a compose box — deliberately survives, and a loop
-  that cleared it would be making a membership decision about an application's
-  own state from inside the framework.
+  **LOADS survive, and that is not a policy this makes.** They used to be
+  cleared except for the ones `:webapp/session-loads` declared — a membership
+  rule an app had to write, which existed because a screen's data was started
+  BY the navigation and so obviously belonged to it. A page asks for what it
+  needs while rendering, so a load's lifetime is answered by whether anything
+  still asks: what the next page wants it re-asks for and finds already there,
+  and what nobody wants sits until [[stale!]] drops it or the tab closes.
 
-  So the membership is DECLARED, twice, because there are two kinds of it:
-  `:webapp/address-keys` (default `#{:call}`) names plain state keys that die
-  with the route, and `:webapp/session-loads` (default `#{}`) names LOADS whose
-  entries outlive it.
+  That deletes the declaration AND the escape it existed for. A load pushed out
+  of the framework to survive a navigation used to lose the four states, the
+  token and the guard with it — see [[load!]] for the three defects that
+  produced in a real app.
 
-  The reason for the `:call` default is sharper than staleness, and it is
-  slopp-ui's: a call form's inputs are not merely stale under the new route,
-  they are TYPED to the old one. `:m` is a parameter of `/api/module/:m` and
-  means nothing to `/api/search`, so carrying it across shows a form claiming
-  the new endpoint takes arguments it does not have.
+  **There is no eviction yet, deliberately.** Sweeping what a render did not ask
+  for is the obvious rule and it is an automatic rule of exactly the family
+  [[stale!]] declines to guess at. It can be added without a migration; a wrong
+  automatic rule cannot be removed without one.
 
-  **An earlier version cleared every load regardless**, on the argument that the
-  loop writes them so clearing them is housekeeping. That reasons from
-  AUTHORSHIP, and slopp-ui showed what it costs: authorship decides who owns the
-  MACHINERY, and scope is a separate question never derivable from who does the
-  writing. A load pushed out of the framework to survive a navigation loses the
-  four states, the token and the guard with it — see [[load!]] for the three
-  defects that produced in a real app.
-
-  **A load entry that stays is EMPTIED, not bumped, when it goes.** Emptying
-  makes it `:absent` — nothing has been requested for this screen yet, which is
-  the true statement — and [[begin-load]] then moves it to `:loading`. A token
-  bumped in place never passes through `:absent`, so the four-state model
-  quietly becomes three and a view can no longer tell an unasked load from one
-  that answered nil."
-  [state path route address-keys session-loads]
+  **Plain state keys still die with the route**, declared by
+  `:webapp/address-keys` (default `#{:call}`). The reason for that default is
+  sharper than staleness, and it is slopp-ui's: a call form's inputs are not
+  merely stale under the new route, they are TYPED to the old one. `:m` is a
+  parameter of `/api/module/:m` and means nothing to `/api/search`, so carrying
+  it across shows a form claiming the new endpoint takes arguments it does not
+  have."
+  [state path route address-keys]
   (as-> state s
     (apply dissoc s address-keys)
     (assoc s
            :path   path
            :screen (:screen route)
-           :params (:params route)
-           :loads  ;; `(keys …)` because `session-loads` is a MAP of declared loads now:
-                   ;; it says what each one IS as well as that it outlives a
-                   ;; screen, which were always the same statement. Seq'd
-                   ;; directly it hands `select-keys` MapEntries and keeps
-                   ;; nothing
-                   (select-keys (:loads s) (keys session-loads)))))
+           :params (:params route))))
 
 (defn- begin-load
   "Mark `key` as in flight, minting the token that decides whether its answer is
@@ -150,24 +138,20 @@
   **Public because scope is the app's question and the machinery is not.** The
   loop runs `:main` through here on every navigation; an app runs its own loads
   through here too — a nav pane, a signed-in user, anything fetched once and
-  used on several screens. Declaring the key in `:webapp/session-loads` keeps
-  its entry across [[arrive]]; everything else about it is identical.
+  used on several screens.
 
-  **The MACHINERY travels and the SCOPE does not**, which matters to anyone
-  adopting this incrementally. This function reads two keys — `:webapp/state`
-  and `:webapp/render` — so it works against a hand-built map from an app that
-  has never called [[wiring]]. `:webapp/session-loads` does not travel with it:
-  the guarantee is honoured by [[arrive]], so **an app that navigates with its
-  own code gets no scope guarantee from declaring it**, and a load survives or
-  dies by whatever that code does to `:loads`.
+  **SCOPE is no longer declared anywhere**, and the declaration that used to
+  carry it is worth remembering for what it cost. `:webapp/session-loads` named
+  which loads survived a navigation — a membership rule an app had to write,
+  honoured by [[arrive]] and by nothing else. So the machinery travelled to an
+  app that built its own map and the guarantee did not, and a store read that
+  sentence three times without noticing it named a function they never called.
+  A guarantee stated where it is IMPLEMENTED reads as unconditional at the
+  point it is CONSUMED.
 
-  Reported by the app it was written for, which read the sentence above three
-  times without noticing it named a function they do not call. The sentence was
-  exact; what it lacked was its own precondition, and a guarantee stated where
-  it is IMPLEMENTED reads as unconditional at the point it is CONSUMED. Adopting
-  `load!` alone is safe and useful; adopting `session-loads` alone is a fix that
-  appears to work and then quietly does not, which is worse than the bug it
-  replaces.
+  [[arrive]] clears nothing now, so every load survives every navigation and a
+  page finds what it needs already there — which removes the declaration and
+  the precondition together.
 
   **This exists because the alternative was measured, in the only real webapp
   built on slopp.** Their module nav is fetched once and read on every Code
@@ -552,146 +536,82 @@
    hiccup))
 
 (defn- derived-view
-  "The `:webapp/view` slopp builds from an app's own parts: render the matched
-  SCREEN, hand the result to the app's chrome, and prefix every in-app link.
+  "The `:webapp/view` slopp builds from an app's own parts: call the matched
+  PAGE with one map, hand the result to the app's chrome, and prefix every
+  in-app link.
 
   **This is what makes a route row point at a function rather than a keyword.**
   `:screen` used to be a bare keyword agreeing in three separate places — the
   routes fn returned it, the view cased on it, the fetch received it — with
   nothing checking any of the three. Rename one and the app renders a blank pane
-  at a url that looks right. A row naming the screen's var collapses all three
+  at a url that looks right. A row naming the page's var collapses all three
   into one reference the graph can see, and there is no keyword left to mistype.
 
-  **A screen is only called when its data is READY**, and the other three states
-  are rendered by the framework: `:webapp/not-found` when no row matched,
-  `:webapp/loading` while the `:main` load is out, `:webapp/failed` when it
-  failed. That removes from every screen the same three-way `case` on
-  `load-status` — the keyword-agreeing-in-three-places problem one level in.
+  **The page receives ONE map**, the same shape a server handler takes one
+  `req`: `:state` (the snapshot this render is for), `:params` (the route
+  captures) and the app's own keys, so it can [[ask!]]. State is PASSED rather
+  than deref'd because a page is re-run each time a load resolves, and two
+  resolving close together would otherwise render inconsistent halves.
 
-  **Who renders a state, and who PLACES it, are different questions**, and the
-  line between them is structural rather than aesthetic. The first answer here
-  was \"slopp owns what is true, the app owns what is seen\", which slopp-ui
-  showed does not survive its own precedent: what `not-found` looks like is
-  presentation too, and slopp defaults that.
-
-  The asymmetry that does hold: **`not-found` replaces the WHOLE page**, so the
-  framework can render it outright — there is nothing else on screen to be wrong
-  about. **`loading` and `failed` replace one PANE while the rest of the app
-  stays up** — a reader who navigated with a module list should still see it
-  while the main pane loads. So rendering those requires knowing WHERE they go,
-  placement is layout, and layout is the one thing this capability does not
-  take. Hence: the framework supplies the CONTENT as `inner`, and chrome decides
-  where it sits.
-
-  **`inner` is never nil.** A nil chrome has to test is the nil-pun again, in
-  the one value every app handles; chrome asks `load-status` if it wants the
-  distinction, which is the rule [[load-value]] already states.
-
-  **Chrome takes the state as well as the inner hiccup**, so a nav bar can know
-  which screen is current and what the session loaded without reaching for the
-  atom it was handed.
+  **The framework no longer renders `loading` and `failed`.** It used to, for
+  the ONE `:main` load a screen declared — and that was right while a screen
+  had exactly one. A page asks for as many as it needs, so only the page knows
+  which of them it is waiting on and what to show meanwhile. `:webapp/loading`
+  and `:webapp/failed` remain as an app's own defaults for a page to call;
+  what the framework still owns is `not-found`, which replaces the WHOLE page
+  and so has nothing else on screen to be wrong about.
 
   **[[prefix-links]] runs LAST, over the finished tree**, so a view writes client
   route keys and never the mount point. One producer: what this adds is exactly
   what [[click-target]] strips, which is why the two are tested against each
   other rather than separately."
-  [{:webapp/keys [chrome not-found loading failed base routes]}]
+  [{:webapp/keys [chrome not-found base routes] :as app}]
   (fn [state]
-    (let [screen (:screen state)
-          inner  (if screen
-                   (case (load-status state :main)
-                     ;; :absent is the SCREEN, not a spinner: nothing was ever
-                     ;; asked for, which is a screen that declared no :request
-                     ;; or one whose :request declined. A spinner there would
-                     ;; never end
-                     (:absent :ready) ((:render screen) state)
-                     :failed          (failed state)
-                     (loading state))
-                   (not-found state))]
+    (let [page  (:screen state)
+          inner (if page
+                  (page (assoc app :state state :params (:params state)))
+                  (not-found state))]
       (prefix-links base routes (chrome state inner)))))
 
-(defn as-screen
-  "The screen VALUE a route row names — a map with `:render`, whatever the row
-  was written as.
+(defn as-page
+  "The PAGE FUNCTION a route row names, or a refusal.
 
-  Two ways to write a screen, and the short one is not the lesser one:
+  A page is `(fn [page] hiccup)` — one map, the same shape a server handler
+  takes one `req`, carrying `:state`, `:params` and the app's own keys so the
+  page can [[ask!]] for whatever it needs.
 
-  - `(fn [state] hiccup)` — the whole declaration for a screen whose data the
-    app already has.
-  - `{:render (fn [state] hiccup)
-      :request (fn [params] -> request | nil)
-      :check   (fn [response] -> nil | message)
-      :derive  (fn [response] -> value)}` — a screen that asks for something.
+  **The spec map is gone.** A row used to name
+  `{:render … :request … :check … :derive …}`, and the framework performed
+  exactly ONE request for it — so a screen could load one thing, and anything
+  else went outside the load machinery, which is where the only real webapp's
+  nav pane acquired three of the defects this namespace exists to prevent. A
+  page that asks can load several, conditionally, in the order its own logic
+  wants. `:check` went with the descriptor's `:rest/response`; `:derive` is
+  ordinary code in a function.
 
-  `:request` is the seam this exists for. It is PURE and it is `:cljc`, so
-  which call a screen makes is a fact an in-image test reads rather than a
-  `js/fetch` in a namespace whose only verification is that it compiled. Its
-  answer goes to [[request-url]] and then to `:webapp/call`, which the browser
-  entry supplies — so an app that opts into this writes no ClojureScript to
-  fetch its own data. A nil request DECLINES, the same channel [[perform!]]
-  uses: a screen that has nothing to ask for right now waits for nothing.
-
-  `:check` is how a screen REFUSES what it was sent — nil accepts, a message
-  rejects and the load becomes `:failed` carrying it, with `:derive` never run.
-  It exists because validating inside `:derive` and throwing produces two
-  different behaviours from one function: headless the performer calls `ok`
-  synchronously so the throw escapes [[load!]] and takes the driver with it,
-  while in a page `ok` is called from inside a `.then` and the same throw
-  becomes a rendered failure screen. A rejection is a VALUE for that reason, and
-  it cannot be fixed by catching — a `:cljc` form cannot catch on both platforms
-  without the reader conditional D3 denies.
-
-  `:derive` shapes that screen's own answer. It replaced an app-wide
-  `:webapp/derive` that received the screen and cased on it — a function asking
-  \"which screen is this?\" to answer something the screen already knew.
-
-  **Normalised HERE, once.** A view, a navigation and a surface report would
-  otherwise each write the same `(if (map? target) …)`, and the one that forgot
-  would pass every fixture written as a bare fn.
-
-  Two refusals, and the second is the one that would not otherwise fail. A map
-  with no `:render` is a route that matches and renders nil, because a map is
-  `ifn?`. A map with a key this framework does not read — `:reqeust` — is a
-  screen that renders with no data forever, at a url that looks right, with
-  nothing anywhere saying why."
+  **Refused rather than accepted with a warning**, because a keyword, a set and
+  a vector are all `ifn?`: they call cleanly and answer nil, which is a blank
+  pane on a route that MATCHED — something `:webapp/not-found` cannot cover,
+  since nothing went wrong. `fn?` alone would be too narrow: a VAR is the
+  readable way to write a row and is not `fn?`."
   [pattern target]
-  (let [known #{:render :request :check :derive}]
-    (cond
-      (map? target)
-      (let [unknown (remove known (keys target))]
-        (when-not (ifn? (:render target))
-          (throw (ex-info (str "the route " (pr-str pattern) " names a screen with"
-                               " no :render — a screen map is {:render (fn [state]"
-                               " hiccup)}, plus :request and :derive if it asks for"
-                               " anything. Without :render this route matches and"
-                               " draws nothing.")
-                          {:webapp/not-a-screen pattern})))
-        (when (seq unknown)
-          (throw (ex-info (str "the screen at " (pr-str pattern) " declares "
-                               (apply str (interpose ", " (map pr-str (sort-by str unknown))))
-                               " — a screen reads :render, :request, :check and :derive."
-                               " An unread key is not a crash: it is a screen that"
-                               " renders with no data forever, at a url that"
-                               " matched.")
-                          {:webapp/unknown-key (vec unknown) :webapp/pattern pattern})))
-        target)
-
-      ;; a keyword, symbol, set and vector are all `ifn?`, so they call cleanly
-      ;; and answer nil — a blank pane on a route that MATCHED, which
-      ;; `:webapp/not-found` cannot cover because nothing went wrong. `fn?`
-      ;; alone would be too narrow: a VAR is the readable way to write a row
-      ;; and is not `fn?`
-      (or (not (ifn? target))
-          (keyword? target) (symbol? target) (set? target) (vector? target))
-      (throw (ex-info (str "the route " (pr-str pattern) " points at "
-                           (pr-str target) ", which is not a SCREEN — a row names"
-                           " (fn [state] hiccup), or {:render … :request …} for a"
-                           " screen that asks for its own data. A keyword is"
-                           " callable and answers nil, so this route would match"
-                           " and then render a blank page.")
-                      {:webapp/not-a-screen pattern}))
-
-      :else {:render target})))
+  (if (or (not (ifn? target))
+          (map? target) (keyword? target) (symbol? target)
+          (set? target) (vector? target))
+    (throw (ex-info (str "the route " (pr-str pattern) " points at "
+                         (pr-str target) ", which is not a PAGE — a row names"
+                         " (fn [page] hiccup), where `page` carries :state,"
+                         " :params and the app's keys. A map, keyword or vector"
+                         " is callable and answers nil, so this route would"
+                         " match and then render a blank page."
+                         (when (map? target)
+                           (str " The {:render … :request …} screen map is"
+                                " retired: a page ASKS for what it needs with"
+                                " slopp.webapp/ask!, as many times as it needs,"
+                                " so one declared request per screen is no"
+                                " longer the limit.")))
+                    {:webapp/not-a-page pattern}))
+    target))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws [:webapp/unknown-key :webapp/missing-key]}
@@ -715,6 +635,15 @@
     paths the server answers for. [[match-route]] does the matching, on the same
     grammar as the server's router. A path no row matches is a real answer, and
     it is nil.
+
+  **An app does not WRITE this table — its pages do.** A page carries a
+  `:webapp/path` marker naming its own address, and both entries derive the
+  table from those markers: the browser's is generated by
+  `slopp.build/webapp-launcher-source` from the store, the headless one by
+  `slopp.cljnx/marked-pages` from the loaded vars. It stays a required key here
+  because by the time an app reaches this constructor the table has been
+  supplied — and an app with a reason to build its own still may, since a
+  declared table wins over both derivations.
 
   **The table is ADDRESSES, not screens.** A row's screen is not unique and a
   screen's row is not unique — one screen answers at several urls the moment an
@@ -783,23 +712,30 @@
                   :webapp/not-found :webapp/loading :webapp/failed
                   :webapp/render :webapp/push-url! :webapp/call
                   :webapp/request-for :webapp/act :webapp/actions
-                  :webapp/address-keys :webapp/session-loads :webapp/boot
+                  :webapp/address-keys :webapp/boot
                   :webapp/url-for :webapp/leave!}
         ;; RETIRED, each carrying its own migration rather than being reported
         ;; as a typo. Both received the SCREEN and cased on it
-        retired {:webapp/fetch  (str "a screen names its own :request now —"
-                                     " [\"/things/:id\" {:render thing :request (fn"
-                                     " [params] {:webapp/path \"/api/things/:id\""
-                                     " :webapp/path-params {:id (:id params)}})}]."
-                                     " That request is pure and :cljc, so WHICH call"
-                                     " a screen makes is a fact a test reads;"
-                                     " :webapp/call performs it, and the browser"
-                                     " entry supplies that.")
-                 :webapp/derive (str "a screen shapes its own answer now — {:render"
-                                     " … :request … :derive (fn [response] value)}."
-                                     " An app-wide derive could only ever be a case"
-                                     " on which screen was asking, to answer"
-                                     " something the screen already knew.")}
+        retired {:webapp/fetch  (str "a PAGE asks for what it needs now —"
+                                     " [\"/things/:id\" thing-page], where the page"
+                                     " calls (slopp.webapp/ask! page api/thing {:id"
+                                     " (:id params)}). ask! is start-if-absent, so a"
+                                     " page re-run when a load resolves does not"
+                                     " re-fetch; :webapp/call performs, and the"
+                                     " browser entry supplies that.")
+                 :webapp/derive (str "a page shapes its own answer now — it is an"
+                                     " ordinary function, so what used to be"
+                                     " :derive is a `let`. An app-wide derive could"
+                                     " only ever be a case on which screen was"
+                                     " asking, to answer something the screen"
+                                     " already knew.")
+                 :webapp/session-loads
+                 (str "a page ASKS for what it needs, and ask! is"
+                      " start-if-absent — so a load belonging to no screen is"
+                      " asked for by every page that shows it and found already"
+                      " there after the first. This declared which loads"
+                      " survived a navigation, which stopped being a question"
+                      " when navigation stopped clearing them.")}
         ;; `:webapp/view` is neither known nor unknown — it is DERIVED, and has
         ;; its own refusal below naming what replaced it. Reported here it would
         ;; read as a typo, which is the least useful thing to tell someone who
@@ -836,23 +772,6 @@
       (when (contains? app k)
         (throw (ex-info (str k " is retired — " why)
                         {:webapp/retired-key k}))))
-    ;; a SET said only WHICH loads survive a navigation, so starting one still
-    ;; needed code the app wrote in its own entry point — which for a browser
-    ;; app means ClojureScript, which is the thing this capability exists to
-    ;; remove. The map says what the load IS as well, and those were always one
-    ;; statement about one load
-    (when (and (contains? app :webapp/session-loads)
-               (not (map? (:webapp/session-loads app))))
-      (throw (ex-info (str ":webapp/session-loads is a declared MAP now —"
-                           " {:modules {:request (fn [state] {:webapp/path"
-                           " \"/api/modules\"}) :derive :names}}. A set named"
-                           " which loads survive a navigation and nothing else,"
-                           " so STARTING one was still code in your entry point;"
-                           " declared, slopp starts it at page load and"
-                           " query_surface can draw it. A load with no :request"
-                           " is scoped without being started, which is the set's"
-                           " old meaning: {:user {}}.")
-                      {:webapp/retired-shape :session-loads-set})))
     ;; A TABLE, never a function, and the refusal carries the migration because
     ;; there is no shim behind it. A function answers only when called, with a
     ;; path, at runtime — so nothing can list an app's screens, join a link to
@@ -926,21 +845,7 @@
                 ;; with its own address-scoped keys can name them
                 :webapp/address-keys #{:call}
                 ;; nothing outlives the screen unless the app says so. The
-                ;; conservative default, because a load that wrongly survives
-                ;; shows the previous screen's answer under a new url — while
-                ;; one that wrongly dies is only re-fetched
-                ;; nothing outlives the screen unless the app says so. The
-                ;; conservative default, because a load that wrongly survives
-                ;; shows the previous screen's answer under a new url — while
-                ;; one that wrongly dies is only re-fetched.
-                ;;
-                ;; A MAP of declared loads: `{:modules {:request … :check …
-                ;; :derive …}}`. It says what each load IS as well as that it
-                ;; outlives a screen, which were always the same statement about
-                ;; the same load — and a load declared with no `:request` is
-                ;; scoped without being started, for the one an app begins
-                ;; itself after a sign-in
-                :webapp/session-loads {}}
+                }
                app)
         ;; a DECLARED nil is not the same as an absent key, and `merge` keeps
         ;; it. The mount point arrives from a DOM attribute the browser answers
@@ -955,97 +860,23 @@
         ;; written as a bare fn
         (update :webapp/routes
                 (fn [rows] (mapv (fn [[pattern target]]
-                                   [pattern (as-screen pattern target)])
+                                   [pattern (as-page pattern target)])
                                  rows)))
         ;; the VIEW is derived last, from the parts above, and put where the
         ;; driver and the browser entry both already look for it. One producer:
         ;; a headless drive and a real page render the same function
-        (as-> a (assoc a :webapp/view (derived-view a))))))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string]] [:maybe :string]]}
-  media-type
-  "The MEDIA TYPE inside a `Content-Type` header — `nil` for a header that is
-  absent or empty.
-
-  A browser answers `application/json; charset=utf-8`, so a decoder map keyed
-  by `\"application/json\"` misses on the string the response actually carries.
-  Taking the parameters off is a decision, small enough to look like none, and
-  it belongs on this side of the seam for the reason every other one does: in
-  the shim it would be a string-split nothing can run, and its failure mode is
-  every response falling through to the default decoder — which for JSON means
-  a screen rendering a string of JSON rather than the data in it.
-
-  `nil` rather than `\"\"` when there is no header, so a caller's `get` reaches
-  its default instead of matching an entry somebody keyed by the empty string."
-  [content-type]
-  (let [t (str/trim (str/lower-case (str content-type)))
-        t (str/trim (first (str/split t #";")))]
-    (when (seq t) t)))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map
-                          [:http/method {:optional true} [:maybe :keyword]]
-                          [:http/headers {:optional true} [:maybe [:map-of :string :string]]]
-                          [:http/body {:optional true} :any]]]
-                   [:map [:method :string] [:headers [:map-of :string :string]]
-                    [:encode :keyword]]]}
-  request-init
-  "Everything `fetch` needs about a request except its URL — as DATA, with the
-  encoder NAMED rather than run.
-
-  The browser shim may not branch, because a namespace whose only verification
-  is that it compiled must not be where a decision lives. So every judgement
-  moves here: the method and its spelling, the headers, and WHICH encoder the
-  body wants. What the shim does with `:encode` is one `get` into a map of
-  encoders — the choice was already made, in a function this test suite drives.
-
-  **The encoder follows the DECLARED content type**, and JSON is the default
-  rather than the only option. That asymmetry was real and the consuming app
-  named it: slopp's own API publishes `application/edn`, so a framework that
-  could only send JSON could not POST to the endpoints slopp itself serves.
-
-  | declared `Content-Type` | `:encode` |
-  |---|---|
-  | absent, or `application/json` | `:json` |
-  | `application/edn` | `:edn` |
-  | anything else | `:text` — the body AS GIVEN |
-
-  `:text` is the honest answer rather than a gap: slopp does not know how to
-  encode for `image/png`, and guessing JSON would corrupt what the caller
-  handed over.
-
-  `:encode` is `:none` when there is no body, whatever the declared type says.
-  `fetch` throws on a GET carrying one, so a request that quietly acquired an
-  empty body would stop working rather than send something harmless.
-
-  **`false` is a body and `nil` is not**, which is the nil-pun this framework
-  keeps removing, in the one place it would silently drop a value somebody
-  meant to send.
-
-  **Headers are in the shape from the start**, rather than after the first app
-  needs them. A token is STATE and not schema — nothing about an endpoint
-  declaration can produce it — so an app without this key would fall straight
-  back to writing its own `fetch`, which is the whole thing being avoided. A
-  declared header WINS over the default content type, which is also what makes
-  the table above reachable at all."
-  [{:http/keys [method headers body]}]
-  (let [has-body? (some? body)
-        declared  (media-type (get headers "Content-Type"))]
-    {:method  (str/upper-case (name (or method :get)))
-     ;; starts from {} so a request with no body and no declared headers
-     ;; still answers a MAP — `clj->js` on nil is null, and a caller reading
-     ;; (get (:headers init) …) would be asking a nil the same question
-     :headers (merge {} (when has-body? {"Content-Type" "application/json"})
-                     headers)
-     :encode  (if has-body?
-                (case declared
-                  "application/edn" :edn
-                  ("application/json" nil) :json
-                  :text)
-                :none)
-     :body    body}))
+        (as-> a (let [view (derived-view a)]
+                  (cond-> (assoc a :webapp/view view)
+                    ;; the DEFAULT render runs the view, and that is not a
+                    ;; convenience: a page ASKS for its data while rendering, so
+                    ;; a no-op render is an app that never fetches anything. In
+                    ;; a page the browser entry overrides this with one that
+                    ;; mounts the result; headless it runs the same view, which
+                    ;; is the rule this capability keeps re-learning — anything
+                    ;; a page load does, a headless drive does too, out of one
+                    ;; producer.
+                    (not (contains? app :webapp/render))
+                    (assoc :webapp/render (fn [state] (view state) nil))))))))
 
 (defn ^:export
   ^{:malli/schema [:=> {:throws []} [:cat :int :any] [:tuple :keyword :any]]}
@@ -1305,23 +1136,17 @@
   the slow-response race, which in a real browser is a heisenbug you reproduce
   by throttling the network.
 
-  **The SCREEN says what to fetch.** A route row's screen carries `:request`, a
-  pure `(fn [params] -> request | nil)`, so which call a url makes is decided in
-  `:cljc` where a test can read it, and `:webapp/call` is left with nothing but
-  performing. What that replaced was an app-wide `:webapp/fetch` receiving the
-  screen and casing on it — the three-place keyword agreement the route table
-  removed, one seam along.
+  **The PAGE says what to fetch, while it renders.** It used to be declared: a
+  route row carried one `:request`, and this ran it before rendering. That made
+  a screen able to load exactly one thing, and anything else had to leave the
+  load machinery — which is where the only real webapp's nav pane acquired
+  three of the defects this namespace exists to prevent. A page calls
+  [[ask!]] instead, as many times as it needs and conditionally, so navigating
+  is just arriving and rendering.
 
-  **A nil request DECLINES**, the same channel [[perform!]] uses: a screen with
-  nothing to ask for starts no load at all, so `:main` stays `:absent` and
-  [[derived-view]] renders the screen rather than a spinner that never ends. The
-  render happens HERE in that case and inside [[load!]] otherwise, so exactly
-  one render shows the new address and it is never the empty pre-load flash.
-
-  **The screen's data is the `:main` load**, run through [[load!]] like any
-  other, so the machinery is one implementation rather than one for the loop and
-  one for everybody else. That was not true of the first version, and what it
-  cost is written up in `load!`.
+  **[[ask!]] is start-if-absent**, which is what makes that safe: the page is
+  re-run on every resolution, and a load already in flight or already answered
+  is not asked for again.
 
   **`:webapp/call` takes CALLBACKS rather than returning a promise, and the
   reason travels with the decision because it reads as arbitrary style
@@ -1329,22 +1154,12 @@
   only run in a browser would put the whole headless exercise back where it
   started, which is the one outcome this capability exists to prevent. An app
   whose HTTP layer is promise-shaped adapts at this seam — that is what the seam
-  is for.
-
-  **The screen's `:derive` is applied inside the freshness guard, not inside the
-  call.** The two read as equivalent and are not: the call runs before anything
-  knows whether the answer is still wanted, so deriving there pays for every
-  abandoned load."
-  [{:webapp/keys [state base routes render push-url!
-                  address-keys session-loads] :as app}
+  is for."
+  [{:webapp/keys [state base routes render push-url! address-keys] :as _app}
    path push?]
   (when push? (push-url! (prefixed base path)))
-  (swap! state arrive path (match-route routes path) address-keys session-loads)
-  (let [{:keys [screen params]} @state
-        request (when-let [f (:request screen)] (f params))]
-    (if request
-      (fetch! app :main screen request)
-      (render @state))))
+  (swap! state arrive path (match-route routes path) address-keys)
+  (render @state))
 
 (defn- navigate-for!
   "The driver's `:navigate`, partial'd over `app`.
@@ -1441,54 +1256,34 @@
     path))
 
 (defn- begin!
-  "Boot the app and start every declared session load, returning the state that
-  leaves. `path` is the app-relative address this session is starting at, or
-  nil when there is none.
+  "Boot the app, returning the state that leaves.
 
   Answers the question a page load and a headless drive must answer
   identically, so it is one function and not two.
 
   **Two callers and they must not differ.** [[start!]] is what the browser entry
-  runs; `(:boot (driver app))` is what `slopp.cljnx/open!` runs. When only
-  the first started session loads, a declaration that worked in a page was
-  invisible to every headless drive — which is the ONE difference this
-  capability exists to prevent, arriving in the change that closed the previous
-  one. The app that took it found sixteen driven screens rendering an empty nav
-  rail and reverted the declaration rather than paper over it.
+  runs; `(:boot (driver app))` is what `slopp.cljnx/open!` runs. When only the
+  first did something, a declaration that worked in a page was invisible to
+  every headless drive — which is the ONE difference this capability exists to
+  prevent. The app that met it found sixteen driven screens rendering an empty
+  nav rail and reverted the declaration rather than paper over it.
 
   Third instance of the shape in a fortnight, after a throwing `:derive` and an
   unprefixed `:action`, so the rule is worth having explicitly: **anything a
   page load does before routing, a headless drive does too, out of one
-  producer.**
+  producer.** That rule is why this stays a function rather than being inlined
+  into `start!` now that boot is all it does.
 
-  Boot FIRST, because a session `:request` reads the state boot established —
-  an authenticated load carries a token boot put there, and reversing these two
-  sends the request without one.
-
-  **A session `:request` takes STATE and the route CAPTURES.** It used to take
-  state alone, on the reasoning that a session load has no address so there are
-  no captures to hand it. That reasoning conflated two things: a session load
-  has no address OF ITS OWN, which is not the same as being independent of THE
-  address. A real hub is where they come apart — which project a request
-  belongs to is in the url, and the load that fills the nav pane needs it. It
-  asked `/api/modules` at the origin, which that hub does not serve, and the
-  pane was empty for the life of every session.
-
-  **Matching is not rendering**, which is what makes this cost nothing: the
-  address is turned into captures here, before routing, and step 3 still shows
-  the screen. Both of [[start!]]'s ordering reasons survive untouched.
-
-  Captures are `{}` rather than nil when there is no address, so a request never
-  has to tell \"no captures\" from \"not asked\".
+  **It used to start every declared `:webapp/session-loads` entry as well**, and
+  that half is gone with the declaration: a page ASKS for what it needs while
+  rendering, and [[ask!]] is start-if-absent, so a load belonging to no screen
+  is asked for by every page that shows it and found already there after the
+  first.
 
   Read-call-write, never inside `swap!`: boot is the app's own code, `swap!`
-  demands a pure function and may retry, and an entry point that starts a fetch
-  is neither."
-  [{:webapp/keys [state boot session-loads routes] :as app} path]
+  demands a pure function and may retry, and an entry point is neither."
+  [{:webapp/keys [state boot]} _path]
   (reset! state (boot @state))
-  (let [params (or (:params (match-route routes path)) {})]
-    (doseq [[key spec] session-loads]
-      (fetch! app key spec (when-let [f (:request spec)] (f @state params)))))
   @state)
 
 (defn ^:export
@@ -1551,43 +1346,28 @@
                     [:maybe :string] [:maybe :string]]
                    :any]}
   start!
-  "Everything a browser entry does when the bundle runs: let the app start what
-  belongs to no particular screen, then show the url the reader arrived at.
+  "Everything a browser entry does when the bundle runs: let the app put what
+  it needs in place, then show the url the reader arrived at.
 
-  Three steps now, and the ORDER is the decision.
+  Two steps, and the ORDER is the decision.
 
   1. **`:webapp/boot`** — a pure `(fn [state] state)` for whatever the app wants
      in place before anything else. A token read from the document, a
      preference, a default filter.
-  2. **Every declared `:webapp/session-loads` entry that names a `:request`** is
-     started, through the same [[fetch!]] a screen's `:main` load goes through.
-  3. **The url the reader arrived at.**
+  2. **The url the reader arrived at.**
 
-  Routing last, because the first screen may read a session load and rendering
-  before they are in flight shows `:absent` as a flash of empty chrome on every
-  page load. Boot FIRST, because a session request is a `(fn [state])` and the
-  state it reads is the one boot established — an authenticated load carries a
-  token boot put there, and reversing these two sends the request without one.
+  Boot FIRST, because the first page rendered may read what boot established —
+  an authenticated request carries a token boot put there, and reversing these
+  two sends it without one.
 
-  **This is what `:webapp/boot` used to CLAIM and could not do.** Its docstring
-  said it was where an app begins the loads that belong to the session rather
-  than to a route; it is `(fn [state] state)`, with no `app`, so it can reach
-  neither `:webapp/call` nor [[load!]] and can begin nothing. An app that wanted
-  a nav pane fetched once had to write ClojureScript after `mount!` — which is
-  this capability's own goal, stated as a number, not being zero. A docstring
-  promising what the signature cannot deliver is worse than a missing feature:
-  it sends a reader to write the wrong thing and then to wonder why the
-  framework's own `session-loads` did not cover it.
-
-  So a session load is DATA, like a route row and like a screen's request. That
-  also makes it visible to everything that reads declarations — `query_surface`
-  draws it, and `webapp-request-paths-are-served` joins its path against the
-  endpoints this store serves, neither of which is possible for a fetch an app
-  performs in its own entry point.
-
-  **A session `:request` takes STATE where a screen's takes PARAMS**, and the
-  asymmetry is the honest one: a session load has no address, so there are no
-  captures to hand it, and what it does need is whatever boot established.
+  **There is no third step any more, and its absence is the point.** It used to
+  start every declared `:webapp/session-loads` entry, which existed because a
+  screen's data was started BY the navigation: anything belonging to no screen
+  needed somewhere else to begin. A page ASKS for what it needs while it
+  renders, so a nav pane is asked for by every page that shows one — found
+  already loaded after the first, because [[ask!]] is start-if-absent. The
+  declaration, the scope rule in [[arrive]], and the escape an app reached for
+  when the scope rule pushed a load out of the building all go together.
 
   **Read-call-write, never inside `swap!`**, matching `slopp.cljnx/open!`
   exactly. Boot is the app's own code; `swap!` demands a pure function and may
@@ -1598,9 +1378,88 @@
   moment an app has no reader to notice it went wrong, so it is the last place
   a decision should live somewhere nothing can check."
   [app pathname search]
-  
-  ;; the address is KNOWN here and SHOWN in step 3 — nothing requires those to
-  ;; be the same moment. Deriving it first is what lets a session load reach the
-  ;; route captures without either ordering reason above being given up.
   (begin! app (app-path (:webapp/base app) pathname search))
   (navigate-url! app pathname search false))
+
+(defn ^:export load-key
+  "The key a request loads under — `[method url]`.
+
+  **A request IS its own identity.** Two asks for the same address are the
+  same load, and that is what makes calling `ask` during a render safe: a page
+  is re-run each time a load resolves, so a key derived from anything else
+  would either start a second fetch or collapse two genuinely different ones.
+
+  Not the DESCRIPTOR, which is a generated map: two regenerations produce
+  equal maps, so it would work, but it is the url that actually distinguishes
+  one fetch from another — a descriptor plus different params is a different
+  request and must be a different load."
+  [request]
+  [(:http/method request :get) (:http/url request)])
+
+(defn ^:export ask!
+  "The load for `descriptor` with `params` — STARTED if nothing has asked for
+  it yet — as `{:status :value}` / `{:status :error}`.
+
+  ```clojure
+  (defn ^{:webapp/path \"/things/:id\"} thing-page
+    \"One thing.\"
+    [{:keys [params] :as page}]
+    (let [thing (webapp/ask page api/thing {:id (:id params)})]
+      (case (:status thing)
+        :loading [:main \"Loading…\"]
+        :failed  [:main (:error thing)]
+        :ready   [:main (:name (:value thing))]
+        [:main])))
+  ```
+
+  **This is what a page uses instead of declaring one `:request`.** A route row
+  named exactly one, and the framework performed it — so one screen could load
+  one thing, and anything else went outside the load machinery, which is where
+  the only real webapp's nav pane acquired three of the defects this namespace
+  exists to prevent. A page that ASKS can load several, conditionally, in
+  whatever order its own logic wants, and is still an ordinary function a JVM
+  test calls.
+
+  **START-IF-ABSENT is the contract, and it is not an optimisation.** A page is
+  re-run every time a load resolves, so an `ask` that fetched on every call
+  would fetch forever. The load's identity is the REQUEST — see [[load-key]] —
+  so asking twice in one render, or again on the next, is one load.
+
+  **Nothing here invalidates.** A `:ready` load stays ready until [[stale!]]
+  says otherwise. Automatic invalidation — by url prefix after an effectful
+  call, by a page declaring what a mutation stales, by versioning the whole
+  store — has several defensible answers and no measurement behind any of them,
+  so the dull explicit one is what ships: it can BECOME automatic later without
+  a migration, where an automatic rule that guesses wrong costs a rewrite."
+  [page descriptor params]
+  (let [request (endpoint/request descriptor params)
+        key     (load-key request)
+        entry   (get-in @(:webapp/state page) [:loads key])]
+    (when-not entry
+      (fetch! page key {} request))
+    (or (get-in @(:webapp/state page) [:loads key]) {:status :absent})))
+
+(defn ^:export stale!
+  "Drop the load for `descriptor` with `params`, so the next [[ask]] fetches
+  again. Returns nil.
+
+  **What a mutation needs, said explicitly.** `ask` answers from a `:ready`
+  load forever, so after a POST a list would keep showing what it showed
+  before, with nothing saying so. The old model got this by accident: `arrive`
+  emptied every load on navigation, so an app that saved and navigated
+  refetched — and an app that saved and stayed did not.
+
+  **Explicit rather than automatic, deliberately.** Invalidating by url prefix
+  after an effectful call, letting a page declare what a mutation stales, and
+  versioning the whole store on any mutation are all defensible, and there is
+  no measurement behind any of them yet. This one is duller and can BECOME
+  automatic without a migration; an automatic rule that guesses wrong costs a
+  rewrite.
+
+  Staling something nothing has asked for is not an error: an app clearing
+  what a mutation MIGHT have touched should not have to know which page
+  happened to load it."
+  [page descriptor params]
+  (swap! (:webapp/state page) update :loads dissoc
+         (load-key (endpoint/request descriptor params)))
+  nil)

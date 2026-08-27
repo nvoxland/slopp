@@ -1,4 +1,4 @@
-(ns slopp.rest.endpoint
+(ns slopp.http.endpoint
   "An endpoint as a DESCRIPTOR — one var carrying its address, method, declared
   params and contracts — and the one function that turns one into a request.
 
@@ -15,6 +15,14 @@
   a server with `slopp.rest.client/call!`, and both receive a finished
   `:http/url` — every decision about the address is made here, once. That is
   the same split `slopp.cljnx` makes for drivers.
+
+  **Both halves of a request live here, and one of them arrived late.** The
+  address is what [[request]] resolves; the method spelling, the headers and
+  WHICH encoder a body wants are what [[request-init]] decides. Those used to
+  sit in `slopp.webapp`, so the server-side performer required the BROWSER's
+  namespace to encode a body. That is not merely untidy: the framework is
+  vendored per capability, so the require resolved in a store that had opted
+  into `webapp` and in no other.
 
   `:cljc` and `:pure` deliberately: a page names a descriptor from a view, and
   a JVM test reads the request a page will make without a browser anywhere."
@@ -122,5 +130,95 @@
        (cond-> {:http/method (or method :get)
                 :http/url    (str url (when (seq query) (str "?" query)))}
          (and body? (seq rest'))     (assoc :http/body rest')
+         ;; an endpoint may name the BASE it is measured from — a hub endpoint at
+         ;; the origin, reached by an app mounted under a prefix. Carried
+         ;; through rather than interpreted: `slopp.webapp/addressed` is the
+         ;; only thing that reads it, and a mount is a browser fact
+         (:webapp/base descriptor)   (assoc :webapp/base (:webapp/base descriptor))
          (:rest/request descriptor)  (assoc :rest/request (:rest/request descriptor))
          (:rest/response descriptor) (assoc :rest/response (:rest/response descriptor)))))))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []} [:cat [:maybe :string]] [:maybe :string]]}
+  media-type
+  "The MEDIA TYPE inside a `Content-Type` header — `nil` for a header that is
+  absent or empty.
+
+  A browser answers `application/json; charset=utf-8`, so a decoder map keyed
+  by `\"application/json\"` misses on the string the response actually carries.
+  Taking the parameters off is a decision, small enough to look like none, and
+  it belongs on this side of the seam for the reason every other one does: in
+  the shim it would be a string-split nothing can run, and its failure mode is
+  every response falling through to the default decoder — which for JSON means
+  a screen rendering a string of JSON rather than the data in it.
+
+  `nil` rather than `\"\"` when there is no header, so a caller's `get` reaches
+  its default instead of matching an entry somebody keyed by the empty string."
+  [content-type]
+  (let [t (str/trim (str/lower-case (str content-type)))
+        t (str/trim (first (str/split t #";")))]
+    (when (seq t) t)))
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map
+                          [:http/method {:optional true} [:maybe :keyword]]
+                          [:http/headers {:optional true} [:maybe [:map-of :string :string]]]
+                          [:http/body {:optional true} :any]]]
+                   [:map [:method :string] [:headers [:map-of :string :string]]
+                    [:encode :keyword]]]}
+  request-init
+  "Everything `fetch` needs about a request except its URL — as DATA, with the
+  encoder NAMED rather than run.
+
+  The browser shim may not branch, because a namespace whose only verification
+  is that it compiled must not be where a decision lives. So every judgement
+  moves here: the method and its spelling, the headers, and WHICH encoder the
+  body wants. What the shim does with `:encode` is one `get` into a map of
+  encoders — the choice was already made, in a function this test suite drives.
+
+  **The encoder follows the DECLARED content type**, and JSON is the default
+  rather than the only option. That asymmetry was real and the consuming app
+  named it: slopp's own API publishes `application/edn`, so a framework that
+  could only send JSON could not POST to the endpoints slopp itself serves.
+
+  | declared `Content-Type` | `:encode` |
+  |---|---|
+  | absent, or `application/json` | `:json` |
+  | `application/edn` | `:edn` |
+  | anything else | `:text` — the body AS GIVEN |
+
+  `:text` is the honest answer rather than a gap: slopp does not know how to
+  encode for `image/png`, and guessing JSON would corrupt what the caller
+  handed over.
+
+  `:encode` is `:none` when there is no body, whatever the declared type says.
+  `fetch` throws on a GET carrying one, so a request that quietly acquired an
+  empty body would stop working rather than send something harmless.
+
+  **`false` is a body and `nil` is not**, which is the nil-pun this framework
+  keeps removing, in the one place it would silently drop a value somebody
+  meant to send.
+
+  **Headers are in the shape from the start**, rather than after the first app
+  needs them. A token is STATE and not schema — nothing about an endpoint
+  declaration can produce it — so an app without this key would fall straight
+  back to writing its own `fetch`, which is the whole thing being avoided. A
+  declared header WINS over the default content type, which is also what makes
+  the table above reachable at all."
+  [{:http/keys [method headers body]}]
+  (let [has-body? (some? body)
+        declared  (media-type (get headers "Content-Type"))]
+    {:method  (str/upper-case (name (or method :get)))
+     ;; starts from {} so a request with no body and no declared headers
+     ;; still answers a MAP — `clj->js` on nil is null, and a caller reading
+     ;; (get (:headers init) …) would be asking a nil the same question
+     :headers (merge {} (when has-body? {"Content-Type" "application/json"})
+                     headers)
+     :encode  (if has-body?
+                (case declared
+                  "application/edn" :edn
+                  ("application/json" nil) :json
+                  :text)
+                :none)
+     :body    body}))

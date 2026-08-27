@@ -1053,8 +1053,22 @@
         ;; carries them:
         ;; the-slim-framework-jar-carries-the-syntax-it-lets-the-framework-use
         ;; and no-rule-names-a-namespace-that-does-not-ship.
-        ships?    (fn [n] (or (in-fam? n)
-                              (contains? capabilities/shipping-common n)))
+        ;; **Its OWN family, or one its capability REQUIRES** — not any family at
+        ;; all, which is what this said and is how `slopp.webapp` came to
+        ;; require `slopp.http.endpoint` unnoticed. Vendoring is per family, so
+        ;; a store handed webapp alone resolved the require nowhere and the
+        ;; ClojureScript compiler reported it as the APP's missing namespace.
+        ;; `used-families` now walks the same `:requires` edge, so what this
+        ;; permits is exactly what arrives.
+        cap-of    (fn [n] (first (for [[c p] (capabilities/shipping-families)
+                                       :let [s (str n)]
+                                       :when (or (= s p) (str/starts-with? s (str p ".")))]
+                                   c)))
+        reach     (fn [c] (conj (capabilities/prerequisites c) c))
+        ships?    (fn [from n]
+                    (or (contains? capabilities/shipping-common n)
+                        (boolean (when-let [c (cap-of n)]
+                                   (contains? (reach (cap-of from)) c)))))
         framework (->> (all-ns)
                        (map ns-name)
                        (filter in-fam?)
@@ -1064,7 +1078,7 @@
         leaks     (for [n     framework
                         [_ dep] (ns-aliases (find-ns n))
                         :let  [d (ns-name dep)]
-                        :when (and (re-find #"^slopp\." (str d)) (not (ships? d)))]
+                        :when (and (re-find #"^slopp\." (str d)) (not (ships? n d)))]
                     [n d])]
     (is (seq families) "no shipping family derived — this guard would be vacuous")
     (is (some #{'slopp.http.html} framework)
