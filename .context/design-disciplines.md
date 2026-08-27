@@ -3611,3 +3611,41 @@ required the BROWSER namespace to encode a request body — a server-side client
 reaching into `webapp` — and nothing had ever complained, because the guard's
 predicate permitted it and no rest-only store had been built to break on it.
 
+## A milestone and a consumer's artifact are different events (2026-08-27)
+
+I told a consuming store a wave was "ready", meaning: milestone green,
+`full_check` green, bundle recompiled. All true. None of them the jar, which
+had not been rebuilt in fourteen hours — so the namespace at the centre of the
+wave was in the store and in no artifact anybody could load.
+
+They held the restart and checked `META-INF/slopp/head.edn` instead of acting on
+the message. Had they not, they would have loaded the old head, found the new
+namespace missing, and started debugging their own store for a wave that had
+never arrived — which is the exact misreading the vendoring fix in that same
+wave exists to prevent: *it reads like your own mistake.*
+
+**The gap has been seen from both ends in one week.** A jar arrived unannounced
+and they asked rather than inferred; then a wave was announced and had not
+arrived. One gap: my milestone and their artifact are separate events, and each
+side can only see its own.
+
+**The rule: a coordination message carries `jar: <head>` unconditionally,
+including when it is unchanged.** A number that is always present cannot be read
+two ways; a number that appears only when something happened makes its absence
+mean "nothing changed" and "I did not think about it" at once, and those are the
+two cases that matter. Their suggestion, taken as written — they offered to make
+checking a habit of theirs instead, and a habit that exists to cover a missing
+line is the wrong half to build.
+
+**Read the FILE, not `session_brief`.** Its `:jar {:head :behind}` reports the
+jar the running process LOADED, so it still said `d34547` immediately after a
+rebuild wrote `d37783` to disk. That is correct for what it answers — *am I
+serving stale code* — and wrong for what a consumer asks, which is *what will
+I load next boot*. `unzip -p target/slopp.jar META-INF/slopp/head.edn` is the
+one that settles it.
+
+**And the build refuses staleness itself, which is worth knowing before you
+reach for it**: `clojure -T:build uber` will not jar a materialization older
+than the store, and names the two-step fix (`build {dir …}` then `uber`). That
+refusal is why this was a missing message rather than a wrong artifact.
+
