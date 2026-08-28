@@ -75,14 +75,25 @@ def advise(msg):
         "additionalContext": msg}}, sys.stdout)
 
 
-def cooled_down(key):
-    """True when this smell fired recently — stay quiet."""
+def cooled_down(key, sid):
+    """True when this smell fired recently IN THIS SESSION — stay quiet.
+
+    Keyed by session because the file is per-STORE and two agents share the
+    directory: an unkeyed cooldown lets one session's hint silence a hint the
+    other has never seen. Same shape as the pending-intent mailbox that was
+    letting sessions steal each other's identity, and cheaper to fix.
+
+    One file rather than one per session, so nothing accumulates. Two
+    simultaneous writers can still lose a cooldown to a read-modify-write
+    race; the cost of that is one extra hint, which is the failure this is
+    allowed to have."""
     path = ".slopp/bash-hint-cooldowns.json"
     now = time.time()
     try:
         cools = json.load(open(path))
     except Exception:
         cools = {}
+    key = "%s\t%s" % (sid or "-", key)
     if now - cools.get(key, 0) < COOLDOWN_S:
         return True
     cools[key] = now
@@ -112,7 +123,7 @@ def main():
         if not hit:
             return
         key, msg = hit
-        if not cooled_down(key):
+        if not cooled_down(key, d.get("session_id", "")):
             advise(msg)
     except Exception:
         pass

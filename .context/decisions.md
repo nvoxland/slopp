@@ -3802,15 +3802,65 @@ unreachable while a branch was a separate file, and the equivalent case for two
 servers on ONE line had always been covered by the CAS serializing them — which
 is precisely the serialization per-line CAS removes on purpose. **The
 protection was a side effect of the thing the feature deliberately removed.**
-Answered by `db/next-id-floor` plus two raisers (`line-view` on adoption,
-`refresh-cache!` unconditionally) and `duplicate-delta-id?`, which makes the
-residual race a `false` from `append!` rather than a throw — kept as narrow as
-`writer-collision?`, naming one constraint on one column.
+Answered first by a floor and two raisers, then by per-session id blocks, and
+finally by removing the counter altogether: ids are random names, so two lines
+cannot count from the same place because neither counts. `duplicate-delta-id?`
+survives, making the residual collision a `false` from `append!` rather than a
+throw — kept as narrow as `writer-collision?`, naming one constraint on one
+column. See `D-id-allocation`.
 
 **No legacy handling ships** (user: *"Keep it clean, we don't want 'legacy
 management' code"*). The `(ns,pos)` → `(line,ns,pos)` migration is idempotent
 DDL inside `db/open!` and runs at most once per store; there is no second read
 path. The two real stores were handled by hand.
+
+### D-lease (2026-08-27) — a thread's owner is RECORDED and never acted on; the divert was reverted the day it shipped
+
+Amends `D-threads`. Shipped and reverted inside one day, kept here because the
+reverting is the decision and the reasoning is reusable.
+
+**What was built.** `lines` gained `owner_pid` / `owner_started` — which live
+process last adopted a thread — and `adopt-thread!` diverted a SECOND live
+process to a fresh line. The motivation: `D-threads`'s key is deliberately
+stable across a process's death, so two processes resuming one conversation key
+to one row, and `D-threads` had explicitly accepted the resulting contention.
+
+**Why it was wrong, in the order the evidence arrived.**
+
+*It broke a case that happens constantly.* The plugin's Stop hook runs `done`
+through a ONE-SHOT process carrying the session's own agent id, on every
+session pause, for up to its timeout. That is a legitimate holder which is not
+the server. Diverting there minted a fresh line and left ten changes stranded
+on the old one — silently, because every write had already reported success and
+the `done` came back `:test-status :none` with no `:rebased`, which reads
+exactly like a done with nothing to land.
+
+*It defended a case that is not happening.* Measured afterwards, which is the
+wrong order: every live server on the store carried a DISTINCT conversation id.
+The duplicate pids that prompted the whole design were a reconnect where the
+previous server had not yet exited — one conversation, not two agents.
+
+*And the trade pointed the wrong way even when the case is real.* Sharing a
+line costs CONTENTION, which per-line CAS already arbitrates and which this
+store survived for its entire life. Abandoning one costs WORK, discovered at a
+done that lands nothing. Those are not comparable harms.
+
+**What stays.** The columns and `thread_list`'s `:held`. They cost nothing,
+nothing branches on them, and `:held` is the only reason the stranding was
+diagnosable — the orphaned line was found by reading owner pids and noticing
+two of them were one-shot CLI processes. Pinned by
+`db-test/a-threads-lease-is-recorded-and-never-acted-on`.
+
+**The general lesson, which is why this is a decision and not just a revert.**
+A mechanism that can ABANDON work must be held to a higher bar than one that
+merely slows it down, and the bar is evidence that the case it prevents is
+real. This one was designed from a hypothetical, found confirming evidence in a
+reconnect it misread, and was never measured before landing — against this
+repo's own standing rule that a cost complaint with no number is a preference.
+If two live processes under one conversation ever show up with a measurement
+behind them, the columns are already there and only the branch has to come back.
+
+---
 
 ### D-threads (2026-08-15, user decision) — every agent works in an anonymous line, and `done` is what lands it
 
@@ -5627,82 +5677,85 @@ changes by RENAMING a key, never by redefining one in place.** A missing
 the paths within the app; `/api/http/paths` marks which of its documents is the
 shell. `slopp.webapp.paths` and its prefix document are deleted.
 
-### D-id-allocation — the FILE allocates id ranges, and nothing infers a counter (2026-08-27)
+### D-id-allocation — ids are RANDOM NAMES; the counter and everything that coordinated it are gone (2026-08-27)
 
-Every id in a store — `d…` deltas and `f…` forms — comes off one counter.
-`deltas.id` is UNIQUE across the whole journal, so the counter is a property of
-the FILE. It lived in each session's store VALUE and was persisted
-last-writer-wins by whoever wrote next.
+Every id in a store — `d…` deltas and `f…` forms — came off one counter.
+`deltas.id` is UNIQUE across the whole journal, so the counter was a property
+of the FILE, while the value carrying it belonged to ONE LINE. Every mechanism
+below tried to reconcile those two facts. Each was correct. Each was
+incomplete, and the last one made the question go away instead.
 
-**That deadlocked two live sessions.** A session whose line had seen fewer
-deltas wrote a floor BELOW ids the file already held (`meta.next-id` 37863
-against `MAX(deltas.id)` d37868). Every session after it minted a taken id, hit
-the UNIQUE constraint, was caught by `duplicate-delta-id?`, refreshed — and
-minted the SAME id again, twelve times, then threw `commit contention on
-append`. Deterministic, and the error names a race that is not happening, which
-cost each of us about an hour separately. Neither agent could land the fix,
-because the fix lives in the store. Nathan raised the floor by hand to break it.
+**What the counter cost, in one day.** A session whose line had seen fewer
+deltas persisted a floor BELOW ids the file already held (`meta.next-id` 37863
+against `MAX(deltas.id)` d37868). Sessions after it minted a taken id, hit the
+UNIQUE constraint, refreshed — and minted the SAME id again, twelve times, then
+threw `commit contention on append`. **Deterministic, and the error names a
+race that is not happening**, which cost two agents about an hour each,
+separately. Neither could land the fix, because the fix lives in the store.
+Nathan raised the floor by hand to break it. It then happened a second time to
+a session that predated the allocator and so had reserved no block.
 
-**Three changes, in order, each landing green on its own.**
+**Three coordination fixes, all landed green, all now deleted.**
 
-1. **The floor became monotonic** (`write-snapshot!`): `MAX(excluded.v,
-   meta.v)` on the `next-id` upsert ONLY. The `meta-fields` loop beside it
-   stays last-writer-wins deliberately — those are per-store values where the
-   last writer is right. Same upsert shape, opposite obligation, which is why
-   the two are not one loop.
-2. **The file became the allocator** (`db/reserve-id-block!`): one transaction
-   advances `meta.next-id` by `id-block-size` and hands back `{:start :limit}`.
-   A session mints inside a range nobody else holds, so two sessions cannot
-   choose the same id — a property of the design rather than a guard that has
-   to fire. `open!` reserves after adopting the thread and before loading the
-   store; the block rides the SESSION (`:id-block`), not the store value,
-   because a full reload replaces the store and must not replace this.
-3. **Inference was deleted** (`store/bump-next-id`, and `store/id-num` behind
-   it). `replay-delta` raised a store's counter past every id it OBSERVED, so
-   a session replaying a foreign delta would have dragged itself into the block
-   that delta came from — manufacturing the exact collision block allocation
-   abolishes, under concurrency only. Found by agent-0e63 reading the draft;
-   it would have shipped.
+1. **A monotonic floor** (`write-snapshot!`): `MAX(excluded.v, meta.v)` on the
+   `next-id` upsert only, so a short line could not drag the file backwards.
+2. **The file as allocator** (`db/reserve-id-block!`): one transaction handed a
+   session a disjoint `{:start :limit}`, so two sessions could not choose one
+   id — a property of the design rather than a guard that fires.
+3. **Inference deleted** (`store/bump-next-id`): `replay-delta` had raised a
+   store's counter past every id it OBSERVED, which under block allocation
+   would have walked a session into another's range — manufacturing the exact
+   collision the allocator abolishes, under concurrency only.
 
-**Inference existed BECAUSE the counter was inferred from content.** Once the
-file owns the allocator it is not redundant, it is a second source of truth for
-a value that now has one. It was also a workaround for a floor nobody could
-trust, so step 1 had already retired it.
+**The measurement that ended the whole line of work.**
 
-**The MAX upsert STAYS, as the floor of last resort.** `external/open!` passes
-`{:create? false}`, so a session in a directory with no store yet is dirless
-and reserves nothing; the store is materialized by its first write. That
-session's snapshots carry its counter into `meta` monotonically, so a later
-session reserves above it. Two mechanisms, both monotonic, neither able to
-lower the floor.
+```
+query_search  "SUBSTR\(id|CAST\(.*id|sort-by :id|compare.*:id"   → []
+```
+
+**Nothing in the store compares an id by MAGNITUDE.** All fourteen journal
+windowing sites walk by IDENTITY (`drop-while #(not= since (:id %))`);
+ordering lives in `parent`, because the journal is a DAG. The counter, the
+floor, the blocks and the reservation existed to maintain a total order **no
+reader consumes**.
+
+**So ids became random names** (`store/gen-id`): a prefix plus 48 bits, minted
+per call, store returned unchanged. Disjointness stops being arranged and
+becomes structural — two writers cannot choose one name because neither draws
+from anything the other holds.
+
+**The deepest consequence is that RETRY becomes correct.** A shared counter is
+what made "try again" meaningless: every attempt re-derived the same id, so
+twelve retries were twelve identical failures. With random names a losing
+attempt genuinely differs from the one before it, and `deltas.id UNIQUE` turns
+the rare collision into one honest retry rather than a wedge.
+
+**Deleted with it:** `reserve-id-block!`, `id-block-size`, `next-id-floor`,
+`ensure-id-block!`, the MAX upsert, `:next-id` on the store value and in
+`meta`, the floor raisers in `refresh-cache!` and `line-view`, and the
+reservation in `open!`. `load-store`'s "nil if empty" gate had been riding on
+the `next-id` row doing double duty; it now says what it means.
+
+**No migration, which is the point.** Ids are opaque, so old sequential ids
+stay valid beside new random ones. Every id bug this store hit came from
+per-session state established at `open!` while code hot-reloads into running
+processes in seconds — and this change needs no per-session state at all.
 
 **Costs, both accepted.**
 
-- **Gaps.** A session exiting mid-block burns the rest. Ids are ADDRESSES, not
-  a resource: nothing counts them, nothing infers a total from one, and the
-  journal already skips (`d37783` → `d37823`).
-- **Ids stop being globally ordered across concurrent sessions.** A holding
-  `[40000,41000)` can write later than B holding `[41000,42000)` and carry the
-  lower id. Verified safe before committing to it: all fourteen journal
-  windowing sites walk by IDENTITY (`drop-while #(not= since (:id %))`), never
-  by magnitude — `report {since}`, `query_changes {from}`, `verify-after`,
-  `episode-span`, `undo!`, `timeline`, `rule-telemetry`, `merge-logs` and the
-  rest. **Anything added later that SORTS by id is reading a total order that
-  no longer exists.**
+- **Ids stopped being comparable BY EYE, deliberately.** `d42353` came after
+  `d37783` and you could see it; you cannot see it now. No code relied on this
+  — that is the grep — but people did, several times in the day this changed.
+  Ask the journal, not the number.
+- **A 48-bit collision is possible**: about one chance in 55,000 across a
+  hundred thousand ids. It is caught by the UNIQUE index and retried, which is
+  the mechanism that now works rather than the one that wedged.
 
-**Rejected: UUIDv7/ULID.** Mechanically perfect — no allocator, collision-free.
-But `commit_point {target}`, `head.edn` and every milestone line are short ids
-a human reads and types. The product's texture is worth more than the
-elegance.
-
-**Rejected: per-line id prefixes** (`d37868.cb68`). Removes the file-global
-obligation by denying the journal is one sequence, which it is.
-
-**The rule underneath, which bit twice in one day**: a value with a file-global
-obligation must have exactly one writer, and it must be the file. The session
-id has the same shape one layer up — provenance wants it shared across a
-resume, ownership wants it unique per process — which is what the
-conversation-id/worker-id split addresses.
+**What SURVIVED the deletion, and why it is not dead code.** The recreated-fork
+guard in `merge-logs` still refuses a delivered id carrying content it never
+had. Random ids make that case unconstructible in the wild rather than merely
+rare, so its test now forces the collision by hand — insurance nothing
+exercises is indistinguishable from insurance that does not work.
 
 ### D-page-function — a page is a FUNCTION that asks for what it needs (2026-08-27)
 

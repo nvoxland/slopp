@@ -1498,3 +1498,207 @@ since the value was a route capture on every address the app answers — which
 removed their last `:cljs` namespace entirely. The capability's stated goal
 arrived by way of its worst failure.
 
+
+## 2026-08-27 — a schema migration and its readers ship by different mechanisms
+
+The thread-lease change (`d44442`) added two columns to `lines` and code that
+reads them, in ONE `done`. Within minutes the other agent working this store
+reported `no such column: owner_pid` taking their tools down.
+
+**Landing them together was not the fix, and could not have been.** The
+`ALTER TABLE` lives in `store.db/open!`, and nothing makes an already-open
+session re-run `open!`. Meanwhile the `--live` host hot-reloads store code into
+every running process within seconds. So the reader arrives everywhere at once
+and the migration arrives nowhere — the gap is not about landing order, it is
+about two deploy mechanisms with different reach.
+
+It cleared only because a one-shot `slopp --call` was run in response to the
+alarm: that opens a fresh session, which runs `open!`, which ran the ALTER.
+The other agent concluded from a stale `query_search` that the code had been
+"transient and superseded" — it had not; it was landed, and left alone the
+outage would have persisted. **A resolution nobody performed is worth
+distrusting: something fixed it, and knowing what is the difference between a
+closed hole and a recurring one.**
+
+The rule, which generalises past this incident:
+
+> On a self-hosting store, a schema migration and its readers are not deployed
+> by the same mechanism. Code hot-reloads into every live process; DDL runs
+> only at `open!`. A reader must TOLERATE its column being absent — it cannot
+> assume the migration shipped alongside it has run.
+
+Fixed at `d46470` by making it structural rather than procedural:
+`adopt-thread!` selects `*` and reads the lease off the normalized row instead
+of naming the columns in SQL, so a store whose `open!` has not run reads nil —
+unheld — which is exactly how adoption behaved before the lease existed. The
+owner stamp is wrapped for the same reason: failing to record a lease must not
+fail the adoption.
+
+**The wider pattern this is the third instance of today.** Shared per-store
+mailbox, file-global id counter with per-line writers, and now a migration
+whose reach differs from its readers'. Each is one obligation with more than
+one mechanism behind it, and each was invisible until a second agent existed.
+
+## 2026-08-27 — why a session kept getting wedged: five whys to one root cause
+
+Two agents on one store wedged four times in a day. Each looked different and
+all four had one cause.
+
+1. **Why did the write fail?** `commit-appended!` exhausted twelve retries.
+2. **Why did every retry fail?** The id it minted was already in `deltas.id`.
+3. **Why was it minting taken ids?** It drew from the shared `meta.next-id`
+   floor. `refresh-cache!` lifted it to the floor, minted, collided, refreshed
+   to the SAME floor, minted the SAME id. Livelock, not contention — retrying
+   could not make progress because nothing distinguished the two writers.
+4. **Why was it on the shared floor rather than a reserved block?**
+   `reserve-id-block!` runs at `open!`. That server opened at 02:17; the
+   allocator landed at 11:12. **It never reserved one.** Same for the other
+   agent's server, running since 22 August. The allocator was landed and
+   almost nobody was using it.
+5. **Why does a session run new code against old initialization?**
+
+> **Code is PUSH** — hot-reloaded into every live process within seconds.
+> **Session state is PULL-AT-OPEN** — established once, and nothing re-runs it.
+
+**Root cause: every change that adds per-session state creates a population of
+live sessions running the new code against the old state, and nothing detects
+or repairs it.** Three of the day's four incidents are that sentence:
+
+| symptom | new code arrived | state that never did |
+|---|---|---|
+| wedged on append | block allocator | no reserved block |
+| `no such column: owner_pid` | lease reader | the `ALTER` never ran |
+| work stranded on a thread | lease divert | `:pinned-agent?` semantics |
+
+**The fourth was different and worth separating**: the thread lease abandoned
+a line holding un-landed work, because it read "not my pid" as "not mine" and
+the Stop hook legitimately runs `done` from a one-shot process under the
+session's own agent id. That one was a wrong model, not a deploy gap.
+
+**What was done about it.** Not more initialization. `ensure-id-block!`
+acquired the block lazily at the point of USE — immune to the root cause,
+because a session that never reserved and one that ran out are the same case —
+and then the counter was deleted outright (`D-id-allocation`), which removes
+the state rather than migrating it.
+
+**The rule worth keeping, which generalises past ids:**
+
+> A value or step with a FILE-GLOBAL obligation must have exactly one owner,
+> and that owner must be the file — never a session, and never the moment a
+> session happened to start.
+
+**And one about error messages.** "commit contention on append" named a race
+you can win. The failure was deterministic. That single word sent two agents
+chasing head-mismatches for about an hour each, on separate occasions, in
+opposite directions. An error that names the wrong mechanism costs more than a
+slow one, and the fix was to distinguish *the head moved* from *the id was
+taken* from *this session predates a change it needs*.
+
+**Why none of this was reachable before.** Every mechanism DESIGNED for
+concurrency held — lock-free CAS, WAL, per-line rebase, threads keyed by
+`(agent, branch)`, async startup. What broke was a mailbox, a counter, an
+initialization step: things that assumed a single sequential session and had
+never met a second one.
+
+## 2026-08-27 — a gate measured on the wrong population, and why it inverted
+
+`ideas/observation/verdict-cache.md` was filed with a stated bar: build the
+content-keyed verdict cache when reuse exceeds **40% at done-grain**. On
+2026-08-27 `slopp.lab.verdicts/reuse-rate` read **46.3%** and the gate looked
+met. It was not: the number was computed over 217 closure-carrying
+observations that were almost entirely WHOLE-TIER `full_check` runs, because
+`ops.external/external-test-run!` recorded an empty `:scope` on the narrowed
+`:only` path — so done's own runs, the population the gate names, contributed
+nothing to the fraction that was supposed to authorize the build.
+
+Fixed at `d6f6686853cb6` (a narrowed run now records the scope it covered,
+pinned by `slopp.verification-test/a-NARROWED-run-records-the-scope-it-
+actually-covered`). Split properly, the two populations disagree completely:
+
+```
+whole-tier   19,945 ns-runs   45.8% already-green
+done-grain        91 ns-runs    1.1% already-green
+```
+
+**The done-grain number is ~0 by construction, not by sample size.** The cache
+key and the impact selector are computed from the same require-closure —
+`closure-hashes` says so in its own docstring, as a soundness property. A
+namespace is selected by `done` because the change is in its closure; its hash
+digests that closure; so a selected namespace is a changed-hash namespace. The
+two can only come apart when content returns to a prior hash, which is what the
+one hit in 91 is.
+
+**The general lesson, which is a repeat.** A gate is a claim about a
+POPULATION, and a fraction cannot report that its denominator is the wrong
+one — it reports a number either way, and a plausible number reads as an
+answer. This is the same shape as the earlier entry about "commit contention
+on append": the measurement was honest and the thing it was measuring was not
+what anyone believed. Both times the tell was available and unread — here, the
+451-of-668 `:without-closure` count that the instrument deliberately reports
+rather than hides, which was carried forward as a caveat instead of being
+treated as the finding.
+
+Two corollaries worth keeping:
+
+- **A gate should name its denominator, not just its threshold.** ">40%" was
+  unfalsifiable in practice because nothing checked that the runs being counted
+  were the runs being gated.
+- **The reuse is real, but it lives where the design forbade looking.** 9,143
+  of 19,945 namespace-runs inside `full_check` re-verified already-green
+  content. Whether the oracle may use that is an ORACLE decision, recorded as
+  the open question on the idea file — not an optimization to slip in.
+
+## 2026-08-27 — the refusal meter counted green test runs, and it named the wrong remedy
+
+`query_cost` reported 1,465 refusals over 14,654 calls (9%), with **`test_run`
+the most-refused tool by a wide margin at 461**. That number reached a
+performance plan as *"`test_run` being #1 is a guidance bug, not an agent bug —
+agents reach for a manual test ritual `AGENTS.md` says isn't needed; the refusal
+message should name the tool to use instead."*
+
+There is no such habit. The meter was reading its own prefix.
+
+`slopp.mcp/refusal-text` is the single derivation of both refusal facts, and it
+tested `(str/starts-with? t "{:error")`. Every external test-run result opens
+its map with `:errors`:
+
+```
+{:errors 0, :exit 0, :external true, :status :green, :ran 2}
+ ^^^^^^^ starts with "{:error"
+```
+
+So **every external test run was recorded as a refused call — green ones
+included.** Re-classifying the 1,121 recorded samples: 327 false positives,
+29% of all sampled refusals, every one `test_run`.
+
+Corrected picture: the real refusal rate is about **7%**, not 9%, and the
+ranking changes completely. `test_run` drops out (its genuine refusals are a
+handful of mistyped arguments). The actual top is `edit_subform` (299),
+`edit_add_form` (263), `query_eval` (112) — **edit-tool match failures**, which
+`:source-now` already exists to answer and which want match precision, not a
+message naming a different tool. The planned remedy would have been work on a
+problem nobody had.
+
+Fixed at `daeb8dd105c73`: the predicate matches `"{:error "` **with the space**
+`pr-str` always emits after the key. Pinned by two cases in
+`mcp-test/refusal-text-is-the-one-derivation-of-both-refusal-facts` — a green
+run and a red run, neither of which is a refusal. Note the fix is
+forward-only: turns already recorded carry the wrong counts, so a window
+spanning today still reads high.
+
+**The pattern, and it is the third instance today.** Each time a measurement
+was correct about its NUMBER and wrong about the THING, and each time the error
+pointed work at something that was not broken:
+
+- the verdict cache's 46.3% gate — measured on whole-tier runs, while the
+  population it gated (done-grain) was structurally incapable of hitting;
+- the shard spread's "already at its floor" — the right conclusion for the
+  wrong reason, which made the reason falsifiable and the conclusion look
+  falsified;
+- this one — a prefix test matching a longer key.
+
+The common shape: **a plausible number reads as an answer, and nothing in a
+metric announces its own denominator or its own predicate.** The defence that
+worked all three times was the same — look at the raw rows the number was
+computed from before acting on it. That cost minutes each time and would have
+cost days of misdirected work.

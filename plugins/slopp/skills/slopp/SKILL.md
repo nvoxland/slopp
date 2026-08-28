@@ -55,6 +55,20 @@ complete, before starting the next. Each extra
 call re-reads your entire context; the patterns below are where sessions
 measurably bleed tokens.
 
+**That re-read is per TURN, not per call — so independent calls go in ONE
+turn.** Two calls issued together cost one context pass and one model
+round-trip; the same two in sequence cost two of each. This is the largest
+measured lever on the whole loop and it is left on the table by habit rather
+than by any rule here: across two stores, **98–100% of turns issued exactly
+one tool**. Send together anything whose inputs you already have — reads of
+two different forms, a `query_depends` beside a `query_search`, and **writes
+to DIFFERENT forms**, which do not contend because slopp rebases per form.
+Keep sequential only what is genuinely dependent, and three things are:
+a read whose ANSWER picks your next write; two edits to ONE form (that is one
+edit, not a batch — see "Choosing the write tool"); and a failing test with
+its implementation, because red-first means you have to SEE the red. `done`
+ends a turn's batch by definition — its verdict is what decides the next move.
+
 1. **Orient with ONE small call: `session_brief`.** Form names, recent
    milestones with their asks, git alignment, the loop — everything a
    fresh session needs to start working. Skip `query_project` unless you
@@ -235,6 +249,22 @@ measurably bleed tokens.
    change was broad, when you DELETED A CALLER (dead surface appears in
    namespaces you never touched — the one thing episode scope structurally
    cannot see), or before a commit you want to stand behind.
+   **A verdict that still STANDS is handed back, not re-earned.** When nothing
+   since the last whole-store check could have changed what it says, you get
+   that verdict with `:standing true` in about a millisecond and no check runs
+   — the same courtesy `commit_point` has always shown an unchanged milestone.
+   Any write of any kind retires it; `{force true}` re-runs regardless. So
+   asking again is cheap and honest rather than something to ration: the
+   reason this exists is that over one store's journal, 117 of 325 runs were
+   repeats INSIDE A SINGLE ASK, at about four minutes each.
+   **It takes minutes, so your harness may move it to the BACKGROUND and hand
+   you a task id. When it does, keep working and let the result arrive — do
+   NOT poll for it.** Backgrounding is the good outcome: the call is no longer
+   blocking you. Polling gives that back and adds round trips on top, and it
+   is the single most expensive habit measured on this store — 227 polls at
+   ~112s each, 7.1 hours spent waiting for results that were already coming.
+   Read something, draft the next edit, write a note; the notification will
+   interrupt you when it lands.
    **`{affected true}` is the MIDDLE GEAR, and what it saves depends entirely
    on WHERE you changed things.** Lint, dead surface, layering and the in-image
    suite still cover every namespace; only the `^:external` tier narrows, to
@@ -360,6 +390,20 @@ because each part surprises somebody:
   is a delta on your thread and not something anyone would call pending, so
   they do not count. It is the same set `query_changes` reports on, which is
   what lets the two be compared.
+- **A fresh PROCESS is not a current VIEW, and this is the one that fools
+  people.** An external test run spawns a real JVM against a materialization of
+  YOUR thread — genuinely isolated, genuinely fresh, and still answering about
+  whatever your line holds. If your thread was forked before someone else
+  landed, that run is a correct answer about an old store. So when a form you
+  know landed reads as missing, "the work is gone" is the LAST explanation to
+  reach for. Four cheaper ones present identically: your session's store value
+  is behind, your verification image is behind, your THREAD was forked from an
+  older branch head, or you are looking in the wrong namespace. `session_brief`
+  shows your thread and whether the branch has moved; a one-shot read from
+  outside any session (`slopp --call query_store …`) answers about the BRANCH
+  and is the tie-breaker. **If your thread holds nothing you need
+  (`:unlanded 0`), `thread_drop` and re-fork from the current head** — that has
+  beaten fighting the merge every time it has been tried here.
 
 **Gone down a wrong path and want to start over?** `thread_drop` with no
 argument abandons your own thread and puts you back where the branch is, with

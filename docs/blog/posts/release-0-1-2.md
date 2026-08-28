@@ -41,12 +41,18 @@ rather than a surprising one.
 
 ```sh
 slopp --call query_project
-SLOPP_AGENT=ci slopp --call commit_point '{"description":"release 1.2"}'
+slopp --call commit_point '{"agent":"ci","description":"release 1.2"}'
 ```
 
 One tool call against the store in the current directory, args as JSON, EDN or
 `@file`. It opens a durable turn-enforced session for that single dispatch, so
 scripts and CI steps get the same provenance as an interactive session.
+
+A one-shot names its agent IN THE CALL, and that name is the session's
+identity rather than just the delta's — turns are durable across processes, and
+so is the line one was opened on. (0.1.2 shipped this as a `SLOPP_AGENT`
+environment variable; that was retired when identity moved to the harness's own
+session id, and the argument is what carries it now.)
 
 ## Mixed ownership: slopp owns exactly one branch
 

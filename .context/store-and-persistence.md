@@ -60,7 +60,9 @@
   rebuilds from the journal on `open!`, so `->R` would stop being addressable
   after a reopen.
 - **`deftest` is a named form on purpose** (tests are addressable/editable).
-- Ids: `"f<n>"` forms, `"d<n>"` deltas, single monotonic counter (`:next-id`).
+- Ids: `"f…"` forms, `"d…"` deltas — a prefix plus 48 random bits, minted per
+  call by `store/gen-id`. NO counter: a store value carries no allocation
+  state, so disjointness across sessions is structural rather than arranged.
   The DB has a UNIQUE constraint on delta ids as a collision backstop.
 - Deltas: `{:id :parent :op :ns :prompt ...}` — ops today: `:ingest`,
   `:replace`, `:add`, `:delete`, `:rename` (multi-form, `:form-ids`),
@@ -105,7 +107,9 @@
     status)` — a line is a POINTER to a head delta. A named line is a
     BRANCH; an anonymous one is an agent's THREAD. One row shape, because
     they are one thing.
-  - `meta(k,v)` — `next-id`, git pins, saved remotes.
+  - `meta(k,v)` — git pins, saved remotes, the fold-field registry. No id
+    counter: any row here also marks the store as persisted, which is what
+    `load-store`'s "nil if empty" reads.
 - `persist!` = ONE transaction: delta row + full element rows of the touched
   namespace(s) (multi-ns arity for cross-ns ops like rename) + counter.
   Namespaces are small; full-ns row rewrite keeps write-through trivially
@@ -251,18 +255,52 @@ whose work was just replayed onto somebody else's is the one who most needs to
 know which happened. It is also what lets the test tell the two paths apart:
 without it, a land that never merged passes every assertion about the lander.
 
-**The id counter belongs to the FILE, not the line**, and this is the sharp
-edge. Ids are minted from a store VALUE (`store/gen-id` counts `:next-id`)
-while `deltas.id` is UNIQUE across the whole journal, so two lines counting
-from the same place mint the same id. Unreachable while a branch was a
-separate file; per-line CAS then removed the serialization that had covered
+**Ids are RANDOM NAMES, and this used to be the sharp edge.** `deltas.id` is
+UNIQUE across the whole journal, so an id counter was a property of the FILE —
+while the value carrying it belonged to ONE LINE, which meant two lines
+counting from the same place minted the same id. Unreachable while a branch was
+a separate file; per-line CAS then removed the serialization that had covered
 the equivalent case for two servers on one line. **The protection was a side
-effect of the thing the feature deliberately removed.** Three answers, all
-present: `db/next-id-floor` reads the file's counter, `line-view` and
-`refresh-cache!` raise a value's counter to it, and `duplicate-delta-id?`
-makes the residual race a `false` from `append!` (refresh, rebase) rather
-than a throw — as narrow as `writer-collision?`, naming one constraint on
-one column.
+effect of the thing the feature deliberately removed.**
+
+Three answers were built and all are gone: a monotonic floor, per-session
+reserved blocks, and the deletion of counter inference from replay. What ended
+them was a measurement rather than a better mechanism — nothing in the store
+compares an id by magnitude, so the whole apparatus maintained a total order no
+reader consumes. `store/gen-id` now mints a prefix plus 48 random bits per
+call and returns the store unchanged, so there is no counter to persist,
+reload, fork, park or fall behind with, and `deltas.id UNIQUE` turns the rare
+collision into one honest retry. Full reasoning and costs: `D-id-allocation`
+in `decisions.md`.
+
+**Why it exists is the same argument as the fold-field registry, learned
+twice.** A name in code is a reference and the CST rewrite reaches it; a name
+in a register is a DECLARATION, which no rewrite walks, so a re-addressing verb
+has to move it and missing one is silent — the declaration ends up naming a
+namespace that no longer exists while the code that moved goes ungated. This
+store accumulated fifteen orphans in one wave of deletions before
+`ns-grained-registers` existed.
+
+That fix did not generalise, and the gap is worth recording because it stood
+through every rename slopp ever ran: the two MODULE-grained registers were
+re-keyed by a hand-written arm inside `ns-rename!` that named `:modules` and
+never `:module-test-edges`. Which failure a rename produced depended on nothing
+a reader could see — whether the edge happened to be test-only. Now:
+
+- `ns-grained-registers` is DERIVED from this map (`:grain :namespace` + a
+  `:record` fn), so the two cannot disagree; they already had, over
+  `:module-roles`.
+- `store/rekey-module-registers` handles the module grain from the same list,
+  with each row's `:edge-opts` carrying `:test-only` — the test relation is an
+  option rather than a branch somebody has to remember to write.
+- `refs/occurrences-of` scans the `:kind :declaration` rows, keys AND values,
+  so a register that did NOT follow a rename is REPORTED rather than silent.
+- `rename-test/a-rename-leaves-no-name-keyed-register-naming-the-old-name`
+  derives its population from the store value (every string-keyed map is a
+  name-keyed register; `:namespaces` is keyed by symbols), so a sixth register
+  is graded by existing rather than by being added to the test.
+
+ADDING A REGISTER = one row here. Nothing else.
 - **The two halves cost two orders of magnitude apart, and it decides designs.**
   Measured 2026-08-15 on slopp's own store (2678 elements / 4.3 MB, 23,464
   deltas): `db/load-elements` — the elements→`:namespaces` read, split out so
@@ -303,6 +341,8 @@ one column.
   the store at the first real write; it is the ONLY implicit adoption in the
   system. When you add a caller of `db/open!`, decide which one it is: a
   question takes `{:create? false}`, a write takes the default.
+
+
 
 ## Rendering (`slopp.store.render`)
 
@@ -433,7 +473,7 @@ ADDING A REGISTER = one row here. Nothing else.
   `(:deps store)`, read by `load-store` into `:deps`) so launch/git/native
   read it O(1) without replaying — `db/deps [conn]` is the session-free read.
   Branch propagation is free (snapshot goes through persist!). `:deps` is on
-  the store VALUE (like `:next-id`/`:line-id`).
+  the store VALUE (like `:line-id`).
 - `.slopp/` is gitignored; what users commit to VCS is an open Phase-4
   question (the delta DAG is meant to BE the history).
 

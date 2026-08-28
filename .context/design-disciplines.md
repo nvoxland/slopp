@@ -3789,3 +3789,175 @@ reporting "there is no such form" from one read of it is the same error as
 reporting "the store is down" from one failing tool — a conclusion from the
 readers you happened to ask rather than from the ones that would disconfirm it.
 
+## Advice about someone else's code should name what you read (2026-08-27)
+
+I told a consuming store *"you can drop `answered` when you next touch it"* —
+their local helper for load states — having just landed a better default for
+`:webapp/failed`. Wrong twice, and they measured both.
+
+**Wrong once on the artifact.** The fix was not in the jar they run, so the
+advice was actionable only in a future they could not reach. I drew that exact
+distinction — announcement versus artifact — for a different document *in the
+same message*.
+
+**Wrong once on the code, and this is the one that would have cost them.**
+`answered` dispatches THREE load states; I read it as the failed branch because
+that was the branch I had just changed. Dropping it would have taken the
+LOADING branch too — and since every page in that store renders nil as its own
+empty state, a page in flight would have said *this project has nothing*
+instead of *waiting*. A worse bug than the one I fixed, introduced by advice
+offered in passing.
+
+Their correction is the right shape: delegate `answered`'s `:failed` branch to
+the framework default and keep the function. One branch, not the function —
+which is precisely the distinction I collapsed.
+
+**The rule: advice about code you have not read is a guess wearing the grammar
+of a recommendation.** I read their REPORT of a bug and answered about their
+FUNCTION. Either read the code, or say what you actually know — *the framework
+default now covers the failed case, if that is all `answered` does for you*
+costs one clause and cannot take a loading state with it.
+
+The tell is the imperative. "You can drop X" asserts a fact about X; "if X only
+does Y, the default now covers it" asserts a fact about the default, which is
+the thing I actually knew.
+
+
+## Two covered halves and an uncovered joint (2026-08-27)
+
+`/api/config` documents `?prefix=http.auth` and shipped with the filter INERT.
+It answered all twenty settings for every prefix, including one nothing
+matched — the exact failure its own docstring names one paragraph earlier as
+*the one failure that turns a typo into a page nobody questions*.
+
+Both halves were tested. `config-document` has nine assertions on its
+filtering, including the empty-prefix case. The endpoint has a contract test
+that fetches `/api/config` and asserts 200. Neither could see the bug, because
+the read between them took `[:params :prefix]` where this surface puts
+`:query-params`, and nothing called the read.
+
+**A filter tested only through its own function is a filter tested with the
+request removed** — and the request is the half a consumer supplies. The
+derivation test passes the prefix as an argument, which is precisely the step
+the consumer cannot perform. It proves the filter can filter, never that
+anything asks it to.
+
+The endpoint test was worse than useless here: it asked for the path with no
+query string, so it exercised the one request shape under which a broken
+filter and a working one are indistinguishable. A 200 says the endpoint
+answers. It says nothing about whether the request reached the read.
+
+**The rule: a documented parameter is tested by showing it CHANGES the
+answer, through the pipeline a consumer enters.** Not `every?` over a
+narrowed result — that is true of a filter answering nothing and true of one
+answering everything when every key happens to match. The assertion that
+catches an inert filter is a comparison against the unfiltered call:
+
+```clj
+(is (< (count (rows "/api/config?prefix=http")) (count (rows "/api/config")))
+    "?prefix did not narrow — the filter is documented and inert")
+```
+
+It read `(not (< 14 14))` when red, which names the failure without being
+read for it.
+
+Generalises past filters: any parameter that only ever appears in a test as a
+function ARGUMENT has an untested joint between the wire and the function.
+Pagination, sort order, `?view=`, `?depth=` — each is one keyword away from
+the same silence, and each fails by answering plausibly.
+
+## Every check asked whether the DECLARED things shipped (2026-08-27)
+
+`/api/config` shipped `:bundle` on the wire and declared it in no contract.
+`check-response`, `check-arrived` and the `rest-*-contract` rules all reported
+clean, and they were all correct: a malli map is OPEN, so
+
+```clj
+(m/validate [:map [:a :string]] {:a "x" :bundle "/y"})  ; => true
+```
+
+**Every mechanism on this surface asks whether what was declared is honoured.
+Nothing asked whether what ships is declared.** A contract can under-declare
+forever and the whole apparatus stays green, because under-declaring is not a
+violation of anything — it is a promise nobody made.
+
+The cost lands precisely on the field's reason for existing. `:bundle` was
+added so a missing browser bundle is findable from a page instead of costing a
+day of white-page hunting. On the wire but not in the contract means findable
+by curl and not by the generated client — which is the half a consumer builds
+against. The consumer rendered it from the raw value and wrote a docstring
+calling it a knowing exception.
+
+**Who can run the check is the structural point.** The consumer sees what we
+SEND and never what we meant to DECLARE; the gap is only visible from the side
+holding both. So it cannot be delegated to the party who noticed it, and a
+report from them is the only signal until we build it. They asked for the
+mechanism rather than for the field, which is the right ask.
+
+**The remedy is `mu/closed-schema` over a real answer**, which reports the
+exact path: `{:in [:bundle] :type :malli.core/extra-key}`. It closes
+recursively, so a nested row's undeclared key is caught too.
+
+**The fixture is the load-bearing half, and this is the part that is easy to
+get wrong.** slopp's own store legitimately omits `:bundle` — no mount reaches
+its bundle — so closing the contract over the obvious fixture is GREEN and
+proves nothing. That is exactly why the gap was invisible from here and
+obvious from a store that had one. A closed schema over a document that never
+grew its optional keys is green for the wrong reason, so each document asserts
+which optional key its fixture actually exercised:
+
+```clj
+(is (contains? doc exercised)
+    (str "the fixture did not produce " exercised
+         ", so closing this contract proves nothing about it"))
+```
+
+Generalises: **an optional key is checked by a test only if the fixture
+produces it.** Optionality is where coverage silently stops, and no coverage
+tool reports it, because the assertion ran.
+
+### The generalisation: a DECLARED form and an ACTUAL form that nobody compares
+
+Stated after the fact by the consumer, and it is stronger than the entry above
+because it has an existence proof in it. *No mechanism asks* invites a design
+project; *one mechanism asks, for one artifact kind, and it caught something the
+day it shipped* invites a much better question — **what else has a declared form
+and an actual form that nothing compares?**
+
+Three found immediately, without looking hard:
+
+- **A response document.** Declared: the `:rest/response` schema. Actual: the
+  map the handler returns. Nothing compared them until
+  `a-document-ships-NOTHING-its-contract-does-not-DECLARE`, and it found
+  `:bundle` on its first run.
+- **A route table.** Declared: the store-side traversal the write gates walk.
+  Actual: `http.routes/from-namespaces` over loaded vars. These are two walks
+  over two inputs, and `from-namespaces`' own docstring says a marker landing in
+  one and not the other is "a route that passes every write gate, appears in
+  `query_surface`, and 404s — with nothing able to say why."
+- **A flag's contract.** Declared: what `--live` is documented to do. Actual:
+  what it does. On 2026-08-27 that gap was a UI listener announced, bound, and
+  then torn down by the stdio loop's `finally` on stdin EOF — announced,
+  withdrawn, still alive, saying nothing. Tonight's bug is this rule's own
+  shape, and nothing on either side was in a position to notice.
+
+### The fixture guard is the part that generalises furthest
+
+A closed-schema check over a store that legitimately omits the optional key is
+GREEN and vacuous. The guard that refuses to run rather than passing over an
+empty set is what makes it a check that fires on PLAUSIBLE:
+
+```clj
+(is (seq served) "no EDN documents found — this check would be vacuous")
+```
+
+It went red immediately, on a discriminator that read the media type off the
+route row where the key does not live. Without it the check would have examined
+nothing and reported clean.
+
+**This is the shape to copy, and it is not about schemas.** The assertion is
+about the check's own COVERAGE rather than about the artifact — and coverage is
+the thing that fails silently, because the assertion still ran. Six wrong reads
+were made across two agents and a consumer on 2026-08-27, every one returning a
+plausible number, and **not one was caught by a tool**: plausible is precisely
+what no check fires on unless something asserts about its own reach.
