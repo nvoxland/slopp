@@ -28,13 +28,31 @@ session's brief, so nothing quietly evaporates when a session ends.
 
 ## `done` is also what makes your work visible
 
-Every session writes to a private line of its own — a **thread** — and a green
-`done` *lands* that thread onto the branch. So a branch only ever contains work
-that some verdict stood behind, and until you say done, nobody else sees yours:
-not another agent on the same branch, not `commit_point`, not a running server.
+Every session writes to a private line of its own — a **thread** — and `done`
+*lands* that thread onto the branch. So a branch only ever contains work that
+some verdict stood behind, and until you say done, nobody else sees yours: not
+another agent on the same branch, not `commit_point`, not a running server.
 
-A red `done` lands nothing. Your thread survives, still holding the work that
-is not finished yet, and you fix it and call done again.
+A `done` that is red **on your own work** lands nothing. Your thread survives,
+still holding the work that is not finished yet, and you fix it and call done
+again.
+
+A red that belongs to somebody else is a different thing, and it used to be
+treated the same. `done` answers two questions now. `:test-status` grades the
+**store** — `commit_point` and `session_brief` read it, and a red store cannot
+milestone. `:episode-status` grades **your work**, and the land turns on that
+one. When the branch is red for reasons that exercise nothing you touched, done
+names the failing tests under `:red-attribution`:
+
+```clj
+{:test-status :red :episode-status :green
+ :red-attribution {:foreign [app.core-test/f-t]}}
+```
+
+and your thread lands anyway. Innocence has to be proven rather than assumed:
+a failing test the run produced no trace for arrives as `:untraced`, and one it
+counted but did not show detail for as `:unseen`. Either keeps the red yours,
+and your thread stays where it is.
 
 If somebody else landed while you were working, your thread is rebased onto
 theirs — once, at your own done, so every conflict arrives together at a moment
@@ -45,7 +63,8 @@ says which happened:
 {:land {:landed "main" :head "d1042" :rebased {:merged 3}}}
 ```
 
-A conflicting or red rebase lands nothing and leaves your thread open.
+A conflicting rebase, or one that goes red on your work, lands nothing and
+leaves your thread open.
 
 `session_brief` reports what is outstanding as `:thread {:on "main" :unlanded
 7}`. Nothing here is a mode to turn on: it is where your writes already go.

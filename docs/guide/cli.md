@@ -58,7 +58,15 @@ slopp . --snapshot   # freeze the loaded version at startup
 
 `--live` matters when you are working on slopp itself, or on any store whose
 program the server is running. It watches the journal's `data_version` and
-reloads changed namespaces into the running process.
+reloads the namespaces whose source changed **plus everything that requires
+them**, dependencies first.
+
+The dependents are not thoroughness for its own sake. Clojure evaluates a lot
+ONCE, at `def` time, and keeps the result — a response schema referenced from a
+handler's metadata is a value captured when that `defn` ran. Reload only what
+changed and the handler goes on publishing the old schema forever, because its
+own source never moved. Dependencies reload first, so a dependent never
+re-captures the value that is about to change.
 
 The one layer `--live` cannot reload is the boot kernel itself
 (`src/slopp/kernel/boot.clj`, `src/slopp/kernel/rt.clj`), because that is the code doing the

@@ -15,7 +15,9 @@
   from `store.db` into the JVM (in dependency order) and invokes the entry
   point — no exported project source needed. `--snapshot` freezes a version
   at startup; `--live` tracks the store's `data_version` and hot-reloads
-  changed namespaces into the running process. General: any store runs from
+  changed namespaces AND their dependents (`boot/with-dependents`, dependencies
+  first) into the running process — a value captured at `def` time, such as a
+  schema in handler metadata, does not move when only its own namespace does. General: any store runs from
   its db; slopp running itself is the self-host instance. See
   `.context/operation-api.md`.
 - **The SQLite journal is the record of truth** (m5a inversion). Durable
@@ -110,6 +112,37 @@
   version-locked variant that WOULD earn its keep is parked in
   `ideas/version-locked-references.md`. Convert at the boundary, one
   place.
+
+**A derived value carries what it was derived FROM** (2026-08-28,
+`slopp.currency`). The store tracks CONTENT rigorously — the delta log, form
+ids, closure hashes — and tracked DERIVATION not at all once a value left the
+process that made it. A served route table, a jar, a git projection, a verdict,
+a session's line pointer and a cached source render are each derived from the
+store and each carried no record of its origin, so no reader could ask and
+every reader answered confidently. Two agents on one store for one night
+produced ten separate frictions that are all that single gap.
+
+`currency/of` takes a LINE's identity — its head plus that line's `elements`
+digest, the pair `engine/refresh-cache!` already gates the session cache on —
+and `currency/report` compares a stamp against it. Two properties are
+load-bearing:
+
+- **The stamp is DATA, so it crosses processes.** Both sides read the store;
+  the store is the shared ground. That is what distinguishes this from
+  `slopp.image.currency`, which answers a narrower question (which forms one
+  IMAGE loaded, in what order) and is deliberately in-process and storeless so
+  the write paths can stamp without a dependency.
+- **`:current?` is `true`/`false`/`nil`.** nil means nothing could be
+  measured. Collapsing it into false invents a claim; collapsing it into true
+  is the failure the whole mechanism exists to end.
+
+The rule that makes it worth having, and the reason it is not a doctor tool:
+**every read that returns a derived answer reports its own currency in the
+same breath.** A diagnostic somebody must remember to run only helps a reader
+who already suspects — it is the tax, not the fix. `session_brief`'s
+`:ui-stale` beside `:app-behind` is the pattern: silent unless there is
+genuinely something to doubt, because a line that says everything is fine
+every time is one a reader learns to skip.
 
 ## Components (2026-07-24)
 

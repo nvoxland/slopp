@@ -75,6 +75,30 @@ refuses rather than shipping a tag pointing at a 404.
   [:html [:head [:title "Orders"]] [:body [:div {:id "app"}]]])
 ```
 
+A shell whose path is a wildcard covers every address beneath it, which is what
+makes a refreshed deep link work. Hand the context the route table your pages
+already declare and the **status** is derived from it while the **body** is
+not:
+
+```clj
+(slopp.http/context {:http/namespaces [...]
+                     :webapp/bundle "/js/main.js"
+                     :webapp/routes [["/orders" 'app.ui/orders]
+                                     ["/orders/:id" 'app.ui/order]]})
+;; /orders/42        → 200 + shell
+;; /orders/42/typo   → 404 + shell   (same bytes)
+```
+
+Same document either way: the app boots, finds an address its own table does
+not match, and renders whatever not-found it wants. Rendering stays the app's
+job and telling the truth becomes the server's — a crawler, a link checker and
+`curl -f` all read the status and never see the page.
+
+Without `:webapp/routes` a wildcard shell answers 200 for everything under it,
+so a typo and a real page are indistinguishable at the server. That is the
+compatibility answer for shells written before this existed, not the one to
+choose.
+
 A top-level `defonce` starts the bundle, so the page needs no inline script:
 
 ```clj

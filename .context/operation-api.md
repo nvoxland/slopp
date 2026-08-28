@@ -546,8 +546,13 @@ its store-backed static reader moved to `api.web/store-reader`.
   rewrites argv — `call-main!` resolves from the loaded store).
 - `--snapshot` (default) freezes a version at startup. `--live` runs
   `watch-live!`: poll `db data_version`, and on a foreign commit `load-string`
-  the changed namespaces into the running host (the host tracks its own
-  store). Safe because the core is plain-fn/immutable-map and the store's
+  the changed namespaces AND their transitive dependents, dependencies first
+  (`with-dependents`), into the running host (the host tracks its own store).
+  Dependents because a schema referenced from handler metadata is evaluated at
+  `def` time — reloading only what changed left a running host publishing a
+  stale contract, measured 2026-08-27. A failed reload is carried in the poll
+  loop's `stuck` set, since reverting the source baseline cannot make a
+  dependent look changed. Safe because the core is plain-fn/immutable-map and the store's
   green-gate admits only compiling code; caveat — long-lived instances
   (reaper, git `HttpHandler`) keep old code until re-created. See D-series R.
 - `build!` MATERIALIZES the store to files (for tooling/native-image);

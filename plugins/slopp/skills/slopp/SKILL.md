@@ -120,8 +120,13 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    VISIBLE: you write in a private thread of your own, and a green `done`
    LANDS that thread onto the branch. Until then nobody else sees it — not
    another agent on the same branch, not `commit_point`, not the running
-   server. A red `done` lands nothing and your thread survives, holding the
-   work that is not finished yet. Finished a unit of work and about to
+   server. A `done` that is red ON YOUR OWN WORK lands nothing and your
+   thread survives, holding the work that is not finished yet — but a red
+   that provably exercises nothing you touched does not hold you: done
+   reports it under `:red-attribution` as `:foreign` and lands anyway. Two
+   verdicts, and they answer different questions: `:test-status` grades the
+   STORE (a red one still cannot milestone), `:episode-status` grades YOUR
+   work and is what the land turns on. Finished a unit of work and about to
    start the next? That's a done point. Call it, read the findings, and
    find out whether you were actually done before you move on. Multiple
    `done`s per session is the normal shape, not an exception: each one is
@@ -230,7 +235,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    read is actually expensive, and the part worth knowing: whether a response
    you were handed in trimmed form got re-fetched with `query_detail` anyway.
    `:withheld` counts the answers that arrived incomplete (a trim, or an
-   `:unchanged` stub); `:refetched` counts the ones you went back for, charged
+   `:already-sent` stub); `:refetched` counts the ones you went back for, charged
    to the tool that withheld rather than to `query_detail`. A re-fetch costs
    MORE than the whole answer would have, so a high `:refetch-rate` means the
    trimming is losing you tokens, not saving them — narrow the read (name the
@@ -344,8 +349,9 @@ ends a turn's batch by definition — its verdict is what decides the next move.
 ### You write in a thread; `done` lands it
 
 Every session works in its own private line — a THREAD — and a branch only
-ever contains work that reached a green `done`. Nothing about this is a mode
-you turn on or a tool you call; it is where your writes already go.
+ever contains work that reached a `done` with nothing red attributable to it.
+Nothing about this is a mode you turn on or a tool you call; it is where your
+writes already go.
 
 `session_brief` names it: `:thread {:on "main" :unlanded 7}` means seven
 writes are yours alone. Writes carry a `:hint` saying the same thing — once
@@ -361,8 +367,15 @@ because each part surprises somebody:
   own `done` — so every conflict arrives together at a moment you chose,
   instead of arriving one at a time while you are trying to finish. The
   result says so (`:land {:landed "main" :rebased {:merged n}}`). If the
-  rebase conflicts or goes red, NOTHING lands and your thread is still
-  there: fix it and call `done` again.
+  rebase conflicts or goes red on your work, NOTHING lands and your thread
+  is still there: fix it and call `done` again.
+- **Another agent's red does not hold your thread.** If the branch is red
+  for reasons that exercise nothing you touched, `done` still says
+  `:test-status :red` — the store IS red and no milestone can be taken —
+  but it names the failing tests as `:foreign` under `:red-attribution`,
+  sets `:episode-status :green`, and lands. Innocence has to be proven, so
+  a failing test with no trace (`:untraced`), or one the run counted but
+  did not show (`:unseen`), keeps the red yours and your thread stays put.
 - **A running server serves the branch**, so if slopp is hosting your app or
   reloading its own code, that process keeps running the last landed state
   until your `done` moves it. Your verification image is a different thing
@@ -1886,6 +1899,38 @@ from its own url. Your side of the contract is a `[:head …]` and a mount point
 REFUSES when the app is assembled, because the symptom is a blank page and a
 blank page implicates everything.
 
+**Pass `:webapp/routes` when you assemble the context, or your wildcard shell
+lies.** A `**` shell covers every address beneath it — that is what makes a
+refreshed deep link work — so without a client route table the whole subtree
+answers **200**, and a typo, a stale asset url and a real page become
+indistinguishable at the server. An app that can never 404 has no way to say
+*no such thing*.
+
+Hand the context the table your pages already declare, and the STATUS is
+derived while the BODY is not:
+
+```clojure
+(slopp.http/context {:http/namespaces [...]
+                     :webapp/bundle "/js/main.js"
+                     :webapp/routes [["/things" 'app.ui/things]
+                                     ["/things/:id" 'app.ui/thing]]})
+;; /things/42  → 200 + shell
+;; /things/oops/typo → 404 + shell   (same bytes)
+```
+
+Same document either way: the SPA boots, finds an address its own table does
+not match, and renders whatever not-found it wants. **Rendering stays your
+job; telling the truth becomes the server's** — a crawler, a link checker, a
+`curl -f` and a monitor all read status and never see your page.
+
+The alternative people reach for is a hand-maintained list of route prefixes,
+one marker per section, so the statuses stay honest. That list goes stale, and
+it is a second copy of something your `^{:webapp/path …}` markers already say.
+
+Omitting `:webapp/routes` is still legal and still answers 200 everywhere —
+the compatibility answer, for a shell written before this existed. It is not
+the one to choose on purpose.
+
 The rules that matter:
 
 - **Attrs are position 2, always a map or absent.** Compute conditional
@@ -2268,7 +2313,15 @@ declare the app; slopp owns the loop.
   transition, `:effectful?` (a request through `:webapp/call`), and `:leaves?`
   (a full page load, for a destination that is not a client route). Declaring
   the kind is what stops a browser dispatcher and a headless one drifting
-  apart.
+  apart. **All three see the VALUE** — `:webapp/act` and `:webapp/url-for` are
+  both `[state action value]` — because a `<select>` has ONE handler for N
+  options, so its choice cannot ride in the action vector the way a button's
+  argument can, nor in an `:href` the way a link's can. That is what lets a
+  dropdown whose choice IS the destination navigate on change:
+  `(fn [_state _action slug] (when (seq slug) (str "/p/" slug)))`, with nil
+  declining for the empty option. Without it the selection has to reach state
+  first — and a `:leaves?` action does not run the reducer — so the app needs a
+  second "go" button that exists only to read the state back.
 - **Drive it headlessly**: `(cljnx/open! (webapp/driver app))`, then `visit!`
   the url a reader would type — mount point included — and `click!` a link.
   No browser, no compile, and the same functions the real page runs. **`visit!`
@@ -2730,7 +2783,7 @@ supplies one, is this read — never a grep.** `:unknown-shape` names the
 callers passing a non-literal: trust `:mismatch` only as far as that list
 is empty · `query_brief` (the edit dossier) ·
 `query_macroexpand`. Re-reads are FREE: a view you already received THIS ASK
-returns a tiny `:unchanged` stub — re-fetch instead of carrying source in
+returns a tiny `:already-sent` stub — re-fetch instead of carrying source in
 context. The stub is scoped to the ask, so after a context clear or a
 compaction the next ask gets payloads again; when one does appear and you have
 not in fact seen it (a subagent shares the session), its `:detail` id is a

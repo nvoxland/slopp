@@ -56,8 +56,11 @@ changes each failing test implicates.
 On a giant form, `query_slice {ns name match window}` returns the neighbourhood
 instead of the whole thing.
 
-Re-reading is cheap on purpose: an unchanged view comes back as a small
-`:unchanged` stub, so re-fetching beats carrying source around.
+Re-reading is cheap on purpose: a view you have already been sent in this ask
+comes back as a small `:already-sent` stub, so re-fetching beats carrying
+source around. The key names a fact about **you**, not about the store — an
+outline does not move when a form's body changes, so a stub is never evidence
+that a write failed to land.
 
 ## Getting real files out
 

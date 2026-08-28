@@ -74,8 +74,9 @@ clojure -M -m slopp.kernel.boot . --live
 ```
 
 `--live` watches the store's `data_version` and hot-reloads changed namespaces
-into the running process, so an edit you just committed is live in the server
-that made it. `--snapshot` freezes at startup instead.
+and everything that requires them (dependencies first), so an edit you just
+committed is live in the server that made it — including in handlers that
+captured a value from what you changed at `def` time. `--snapshot` freezes at startup instead.
 
 **Startup is async (concurrent sessions).** The MCP server completes its
 `initialize` handshake as soon as the store VALUE loads and boots the image

@@ -164,3 +164,71 @@ CI for a slopp repo is usually: checkout → `import` (or checkout the `slopp`
 branch directly) → `test`. GitHub only runs push-triggered workflows from the
 pushed ref's tree, so workflows living on `main` reach the `slopp` branch via
 `workflow_dispatch`/`schedule` with `checkout ref: slopp`.
+
+## Several writers on one box
+
+Each agent runs its own MCP server, and each server owns JVMs: the image that
+verifies your writes, plus — by default — a pre-warmed spare and one parked
+image per branch line you visit. That is the right trade for one agent, where
+the cost is memory you weren't using and the benefit is never waiting ~830 ms
+for a JVM to boot. Run eight agents on one box and it inverts: the idle images
+multiply by eight while the boots they avoid do not get any more painful.
+
+Three host settings turn it down. All are environment variables read by the
+server at startup, and **all default to the single-writer behaviour**, so a
+normal setup needs none of them.
+
+| Variable | Effect |
+|---|---|
+| `SLOPP_WARM_SPARE=0` | Stop holding a pre-warmed spare image per server. The biggest single saving: one whole idle JVM per agent. |
+| `SLOPP_BRANCH_IMAGE_TTL_MS` | How long an idle per-branch image is held before it is reaped (default `600000` — ten minutes). Shorten it when agents move between branches. Must read as a positive number; anything else keeps the default rather than being obeyed as zero. |
+| `SLOPP_IMAGE_JVM_OPTS` | JVM options for every image, space-separated. **No default.** See below — one setting measured a 25% cut and is offered rather than shipped. |
+| `SLOPP_NO_RECYCLE` | Switch off image reuse entirely. Costs speed; set it only when you suspect a reused image of carrying something between tenants. |
+
+A reasonable swarm profile is `SLOPP_WARM_SPARE=0` plus a shorter lease:
+
+```sh
+SLOPP_WARM_SPARE=0 SLOPP_BRANCH_IMAGE_TTL_MS=120000 slopp <dir> --live
+```
+
+**What you are buying, and with what.** You buy memory with image-boot
+latency, and only on the paths that would have found a warm image waiting —
+`restart`, `deps_add`, a branch switch. Nothing about verification changes: an
+image booted on demand grades your code exactly as a pre-warmed one does.
+
+**What this does not do is give the agents separate REPLs by itself** — they
+already have them. Two agents on one store are two servers, two images and two
+private threads, and that is the model whether or not you tune any of this.
+What multiplies is the *idle* JVMs, which is what these settings are for.
+
+### Trading image memory for collector throughput
+
+One JVM setting measured a large, repeatable cut on a loaded image and is
+offered here rather than shipped, because only half its gate is settled:
+
+```sh
+SLOPP_IMAGE_JVM_OPTS="-XX:+UseSerialGC -Xms32m" slopp <dir> --live
+```
+
+Against a 279-namespace store, committed memory per image went **722 MB ->
+538 MB (-25.6%)**, reproducible to 0.07% across alternated rounds with a full
+GC forced before each sample. The saving is not the heap alone: the serial
+collector drops GC bookkeeping from 62 MB to 0.6 MB and takes ~35 MB of
+collector worker stacks with it, and it sizes the heap *smaller* (278 -> 192 MB)
+rather than larger.
+
+**The two flags are a pair and neither belongs without the other.** `-Xms32m`
+alone measured 2.3% WORSE — an image that loads a real store allocates past 32m
+before it is ready, so the heap is demand-sized either way. `-XX:+UseSerialGC`
+alone is far worse still: it commits its ergonomic initial heap at startup and,
+unlike G1, never gives it back.
+
+**What is not established is the throughput cost.** The serial collector is
+single-threaded. Every test still passes and passes identically, so no verdict
+changes — but a memory win that costs suite wall clock is not a win, and the
+measurement that would settle it was too noisy at the sample size taken to
+separate a real regression from a busy machine. Run your own before adopting
+it, and treat an unexplained slowdown after setting it as this, not a mystery.
+
+Nothing here reaches the external test tier, whose shard JVMs are launched
+separately; these options apply to the images that verify writes.

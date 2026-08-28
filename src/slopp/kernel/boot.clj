@@ -825,11 +825,65 @@
       (describe t)
       (str (describe t) " — caused by: " (describe root)))))
 
+(defn ^:export with-dependents
+  "`changed` plus every namespace that (transitively) requires one of them, in
+  dependency order — the set a live reload has to re-evaluate.
+
+  **Reloading only what changed is not enough, and the reason is `def` time.**
+  Clojure evaluates a great deal ONCE, when a form is defined, and keeps the
+  result as a value. Var metadata is the sharpest case here, because a route's
+  contract rides in it —
+
+      (defn ^{:rest/response contracts/config-document} config [req] …)
+
+  — so the schema is a VALUE captured when that `defn` ran. Change
+  `contracts` and `config`'s metadata does not move: its own source is
+  byte-identical, so a source-diff reload correctly leaves it alone and the
+  running host publishes the old contract indefinitely. Default arguments,
+  `def`d registries built from another namespace's data, and anything closing
+  over a loaded value all fail the same way.
+
+  Dependency order, dependencies first, is load-bearing rather than tidy: a
+  dependent re-evaluated BEFORE its dependency would re-capture the value that
+  is about to change, reproducing the bug one poll later and looking like a
+  flake.
+
+  This over-reloads by design. A namespace nothing requires costs nothing, and
+  the alternative — asking which dependents actually captured something — is
+  not decidable from source. Re-evaluating a namespace whose definitions are
+  unchanged is cheap and idempotent; serving a stale contract is neither."
+  [sources changed]
+  (let [all   (set (keys sources))
+        deps  (into {} (map (fn [[n s]] [n (internal-requires s all)])) sources)
+        ;; who requires ME — the edges the poll loop needs and the graph does
+        ;; not already carry, since `dependency-order` only ever walks downward
+        rdeps (reduce-kv (fn [m n ds]
+                           (reduce #(update %1 %2 (fnil conj #{}) n) m ds))
+                         {} deps)
+        reach (loop [seen #{} frontier (set changed)]
+                (if (empty? frontier)
+                  seen
+                  (let [seen' (into seen frontier)]
+                    (recur seen'
+                           (into #{} (comp (mapcat rdeps) (remove seen')) frontier)))))]
+    (filterv reach (dependency-order sources))))
+
 ^:unsafe (defn watch-live!
   "Poll the store's data_version; when another writer commits, reload the
-  namespaces whose source changed into THIS jvm (dependency order). The store's
-  green-gate means only compilable code ever loads. Caveat: long-lived instances
-  (servers, background threads) keep their old closure code until re-created.
+  namespaces whose source changed AND everything that requires them, in
+  dependency order. The store's green-gate means only compilable code ever
+  loads. Caveat: long-lived instances (servers, background threads) keep their
+  old closure code until re-created.
+
+  **The reload set is `with-dependents`, not the source diff, and that is not
+  an optimisation in reverse.** A great deal is evaluated ONCE at def time and
+  kept as a value — var metadata most sharply, since a route's contract rides
+  there. Change the namespace holding a schema and the dependent that captured
+  it does NOT change: its own text is byte-identical, so a source-diff reload
+  correctly skips it and the running host publishes the old contract
+  indefinitely. That shipped: `:bundle` was added to a response contract,
+  landed green, and the live host went on serving the previous schema to every
+  consumer generating a client from it.
 
   **A reload also DROPS what the new source stopped defining.** `load-string`
   re-defines the forms it is given and is silent about the rest, so without
@@ -840,9 +894,11 @@
   Resilient by construction: the ENTIRE poll body is guarded, so a transient
   store error (contention, a swapped db file) logs and RETRIES instead of
   killing the daemon and serving stale code forever. The version baseline
-  advances only when every changed namespace reloaded — a failed one keeps its
-  OLD source in the baseline AND holds the version back, so the next poll
-  retries it rather than treating it as already seen.
+  advances only when every namespace in the set reloaded — a failed one keeps
+  its OLD source in the baseline AND holds the version back, so the next poll
+  retries it rather than treating it as already seen. A failed DEPENDENT is
+  carried explicitly instead, because reverting the baseline cannot make one
+  look changed: its source never differed.
 
   **A failure that keeps failing says so, and says why.** The retry note used
   to read the same hopeful sentence forever while a reload had been stuck for
@@ -860,18 +916,29 @@
              ;; materializes one — WAIT for it rather than dying at boot
              (or (open-conn dir)
                  (do (Thread/sleep (long interval-ms)) (recur))))]
-    (loop [dv (data-version conn), prev (store-sources conn)]
-      (let [[dv' prev']
+    ;; `stuck` is the namespaces whose last reload FAILED. Reverting `prev`
+    ;; retries an EDITED namespace — it goes on looking changed — but that
+    ;; trick cannot reach a DEPENDENT, whose own source never differed from
+    ;; the baseline. Without carrying them, a dependent that failed to reload
+    ;; would be dropped silently and keep serving its old definitions, which
+    ;; is the exact failure the widened reload set exists to prevent.
+    (loop [dv (data-version conn), prev (store-sources conn), stuck #{}]
+      (let [[dv' prev' stuck']
             (try
               (Thread/sleep (long interval-ms))
               (let [dv2 (data-version conn)]
                 (if (= dv dv2)
-                  [dv prev]
+                  [dv prev stuck]
                   (let [now       (store-sources conn)
                         platforms (store-platforms conn)
-                        changed (filter #(and (boot-loads? platforms %)
-                                              (not= (get prev %) (get now %)))
-                                        (dependency-order now))
+                        ;; what MOVED, and then what CAPTURED something from
+                        ;; it. The source diff finds the first; `with-dependents`
+                        ;; adds the second, which is the half that was missing.
+                        edited  (filter #(not= (get prev %) (get now %))
+                                        (keys now))
+                        changed (filterv #(boot-loads? platforms %)
+                                         (with-dependents
+                                           now (into (set edited) stuck)))
                         failed  (reduce (fn [failed ns-sym]
                                           (try (reload-ns! ns-sym (get now ns-sym))
                                                (stamp-loaded! ns-sym)
@@ -909,11 +976,12 @@
                     ;; a failed ns keeps its OLD source so it still looks changed,
                     ;; and holding dv back keeps the version-change branch firing
                     [(if (seq failed) dv dv2)
-                     (reduce #(assoc %1 %2 (get prev %2)) now (keys failed))])))
+                     (reduce #(assoc %1 %2 (get prev %2)) now (keys failed))
+                     (set (keys failed))])))
               (catch Throwable t
                 (log! "live-reload poll error (continuing): " (failure-message t))
-                [dv prev]))]
-        (recur dv' prev')))))
+                [dv prev stuck]))]
+        (recur dv' prev' stuck')))))
 
 ;; --- entry ---
 (defn parse-args

@@ -3870,9 +3870,10 @@ managed for the agent between 'done' calls so that only done things show in the
 actual branches."*
 
 A THREAD is a line with no name and an `agent`. Every session adopts one — no
-option, no tool — and its writes go there until a green `done` lands them onto
-the branch. A branch therefore only ever contains work some verdict stood
-behind.
+option, no tool — and its writes go there until a `done` lands them onto the
+branch. A branch therefore only ever contains work some verdict stood behind.
+(The bar was a GREEN done until the 2026-08-28 amendment below; it is now a
+done with nothing red attributable to the episode.)
 
 **Adopt-or-create, keyed by `(agent, branch)`.** Nothing is remembered between
 sessions: a returning agent asks the same question and gets the same row, which
@@ -3884,7 +3885,8 @@ stands and stays there; when the branch has moved by the time it lands, the
 branch is merged INTO the thread first, through the same pipeline
 `branch_merge` uses. The view and the verdict are stable while work is in
 progress, and every conflict arrives together, at a moment the agent chose. A
-conflicting or red rebase lands NOTHING and leaves the thread open.
+conflicting rebase, or one that goes red on the episode's own work, lands
+NOTHING and leaves the thread open.
 
 **The order inside the landing was forced, and it is the part worth
 remembering.** `kernel.boot/store-sources` reads the trunk, so once a session
@@ -3895,6 +3897,38 @@ for the wedge unreachable from inside it. So the land shipped first, complete
 and inert (a session's line was still a branch, so it no-opped), and the
 adoption flip was the last write. Same shape as the phase-2 migration hazard,
 one layer up.
+
+**Amended 2026-08-28: the land turns on the EPISODE's verdict, not the
+store's.** The original bar was a green `done`, and a night of two agents on
+one store measured what that costs: the moment the trunk goes red for anyone's
+reason, NOBODY can land — including the thread carrying the fix. Twenty changes
+sat behind one red test whose repair was inside the twenty, and neither agent
+could clear it alone.
+
+So `done` reports two verdicts. `:test-status` grades the STORE and is
+unchanged — `commit_point` and `session_brief` read it, and a red store still
+cannot milestone. `:episode-status` grades this episode's own work, and the
+land reads that one. They differ only when the failing tests provably exercise
+nothing the episode touched.
+
+The proof comes from machinery that already existed and was thrown away at the
+moment it was useful: `implicate` intersects each failing test's trace with the
+episode's edits, and used to report only the hits — so "your change broke this"
+and "nothing here is yours" and "there is no trace at all" arrived as the same
+missing key, and the only safe reading was to assume the red was yours. It now
+says which: `:mine`, `:foreign`, `:untraced`. Only `:foreign` is innocence.
+`:untraced`, and `:unseen` (the summary counts more failures than it carries
+detail for, because detail is capped for response size), are the two ways of
+having no evidence, and both keep the red the episode's. A test the episode
+WROTE is `:mine` whatever its trace says — the trace maps a test to the source
+it exercises and can never name the test itself, so red-first TDD would
+otherwise read as somebody else's red. That case was caught by
+`done-is-what-lands-and-a-red-one-lands-nothing`, which is the guard that
+already existed for exactly this decision.
+
+The invariant is not weakened, it is stated correctly: a branch only ever
+contains work that reached a done with nothing red attributable to it. The
+weaker version charged every agent for every other agent's red.
 
 **What is NOT an agent gets no thread of its own to hide in.** A clone lands
 what it ingested, because a project whose `main` is empty is not a clone of
