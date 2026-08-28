@@ -200,6 +200,37 @@ key.
 Prefer this over `file_put` for anything key-shaped: you get per-key history
 and a merge that resolves at key grain instead of line grain.
 
+## The dev file — what to run, and it stays here
+
+`dev` declares what this project wants RUN while somebody is working on it.
+
+```clj
+config_file {path "dev" key "run.app.main"    value "shop.core/-main"}
+config_file {path "dev" key "run.app.args"    value "--port,8080"}
+config_file {path "dev" key "run.app.url"     value "http://127.0.0.1:8080"}
+config_file {path "dev" key "run.worker.main" value "shop.jobs/-main"}
+config_file {path "dev" key "run.worker.enabled" value "false"}
+```
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `run.*.main` | qualified symbol | — | the entry fn; the NAME is the key's middle segment |
+| `run.*.args` | ordered CSV | — | arguments, in order (`--port,8080`) |
+| `run.*.url` | string | — | where a human should open it; DECLARED, not observed |
+| `run.*.enabled` | boolean | `true` | `false` silences an entry without deleting it |
+
+Validated at the write, like `capabilities` and `rules` — an unregistered key
+refuses rather than recording a setting that governs nothing.
+
+**It never leaves the database.** `dev` is the one path in
+`slopp.store/local-config-paths`: `build!` does not write it into a built tree
+and `slopp.git/commit-paths` does not put it in a projected one. What to run
+on a laptop, on which port, is a fact about a development session and not
+about the program — shipping it would put one developer's choices in a jar,
+and a second developer's pull would carry them back.
+
+Every other config path ships and always has.
+
 ## The dependency manifest
 
 `deps_add`, `deps_remove`, `deps_list`. It is a tracked delta stream, reaches
@@ -225,6 +256,7 @@ git branch, because GitHub reads it and slopp does not.
 | `CLAUDE_PLUGIN_DATA` | Where the plugin caches the downloaded jar. Falls back to `$XDG_CACHE_HOME/slopp` or `~/.cache/slopp`. |
 | `SLOPP_WARM_SPARE` | `0` or `false` stops the server holding a pre-warmed spare image. One whole idle JVM per agent — the biggest saving when several agents share a box. |
 | `SLOPP_BRANCH_IMAGE_TTL_MS` | How long an idle per-branch image is held before it is reaped. Default `600000` (ten minutes). Must read as a positive number; anything else keeps the default rather than being obeyed as zero. |
+| `SLOPP_SERVER_JVM_OPTS` | JVM options for the server process, space-separated. Empty by default. `-XX:+UseSerialGC -Xms32m` measured 2.62 GB -> 2.17 GB committed (~17%) but cost ~31% on boot-to-ready, so it is offered for hosts running several writers rather than shipped on. |
 | `SLOPP_IMAGE_JVM_OPTS` | JVM options for every owned image, space-separated. Defaults to `-XX:+UseSerialGC -Xms32m`, which cuts committed memory per image 25.6% (722 -> 538 MB) at no measurable throughput cost. The two flags are a pair — either alone is worse than neither. Set it empty to restore the previous collector. |
 | `SLOPP_NO_RECYCLE` | Switch off image reuse entirely. Costs speed; set it only when a reused image is suspected of carrying state between tenants. |
 

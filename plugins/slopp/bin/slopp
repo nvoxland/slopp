@@ -74,12 +74,26 @@ if [ "${1:-}" = "--warm" ]; then
   shift
 fi
 
+# The server JVM's memory budget, empty by default. Space-separated, and an
+# explicitly empty value means none — so `SLOPP_SERVER_JVM_OPTS=` is the
+# off-arm if you are measuring your own.
+#
+# `-XX:+UseSerialGC -Xms32m` measured 2.62 GB -> 2.17 GB committed on this
+# repo's own store (~17%, two independent runs), and cost ~15s on a ~50s
+# boot-to-ready (+31%, four paired rounds). That is a REAL trade rather than a
+# free win, which is why it is not the default: one agent pays the 15s on
+# every session start and never notices the memory, while a box running eight
+# writers is the other way round. The images have their own budget
+# (SLOPP_IMAGE_JVM_OPTS), measured separately and shipped on, because their
+# throughput gate came back clean and this one did not.
+SLOPP_SERVER_JVM_OPTS="${SLOPP_SERVER_JVM_OPTS-}"
+
 # Dev override: run a locally built jar (clojure -T:build uber) instead of
 # the pinned release — no fetch, no checksum. For testing kernel/jar changes
 # exactly as the plugin would run them.
 if [ -n "${SLOPP_JAR:-}" ]; then
   [ "$WARM" = "1" ] && exit 0
-  exec java -jar "$SLOPP_JAR" "$@"
+  exec java $SLOPP_SERVER_JVM_OPTS -jar "$SLOPP_JAR" "$@"
 fi
 
 # Single-flight download: the SessionStart warm hook and the MCP server
@@ -148,4 +162,4 @@ fi
 
 [ "$WARM" = "1" ] && exit 0
 
-exec java -jar "$JAR" "$@"
+exec java $SLOPP_SERVER_JVM_OPTS -jar "$JAR" "$@"

@@ -182,6 +182,7 @@ normal setup needs none of them.
 |---|---|
 | `SLOPP_WARM_SPARE=0` | Stop holding a pre-warmed spare image per server. The biggest single saving: one whole idle JVM per agent. |
 | `SLOPP_BRANCH_IMAGE_TTL_MS` | How long an idle per-branch image is held before it is reaped (default `600000` — ten minutes). Shorten it when agents move between branches. Must read as a positive number; anything else keeps the default rather than being obeyed as zero. |
+| `SLOPP_SERVER_JVM_OPTS` | JVM options for the SERVER process, space-separated. **Empty by default**, and the one knob here that is a real trade rather than a free win — see below. |
 | `SLOPP_IMAGE_JVM_OPTS` | JVM options for every image, space-separated. Defaults to `-XX:+UseSerialGC -Xms32m` (see below). An explicitly empty value means none — set it if your project turns out to prefer the throughput collector. |
 | `SLOPP_NO_RECYCLE` | Switch off image reuse entirely. Costs speed; set it only when you suspect a reused image of carrying something between tenants. |
 
@@ -237,3 +238,38 @@ SLOPP_IMAGE_JVM_OPTS="" slopp <dir> --live      # the previous collector
 
 Nothing here reaches the external test tier, whose shard JVMs are launched
 separately; these options apply to the images that verify writes.
+
+### The server process is the bigger JVM, and its budget is opt-in
+
+Measured on this repo's own store, the server is **~2.6 GB committed** — close
+to four times an image, and the largest single thing a writer costs. It is also
+the piece that is identical in every writer, since every server runs the same
+tool code.
+
+`-XX:+UseSerialGC -Xms32m` on the server measured **2.62 GB -> 2.17 GB (~17%,
+two independent runs)**. Unlike the image, it is **not** on by default, because
+its throughput gate did not come back clean: boot-to-ready went from ~50s to
+~65s across four paired rounds (+31%, point estimate — the spread is wide
+enough that the interval still touches zero, so treat it as "a real cost of
+uncertain size" rather than a precise 15 seconds).
+
+That is a genuine trade and which way it falls depends on you:
+
+- **One agent** pays the slower start on every session and never notices the
+  memory. Leave it off.
+- **A box running several writers** is the other way round — half a gigabyte
+  each, against a wait nobody is watching.
+
+```sh
+SLOPP_SERVER_JVM_OPTS="-XX:+UseSerialGC -Xms32m" slopp <dir>
+```
+
+Combined with `SLOPP_WARM_SPARE=0`, that is the swarm profile: it takes roughly
+half a gigabyte off the server and a whole idle JVM off the images, per writer.
+
+**Why the images ship this on and the server does not** is worth stating,
+because the asymmetry looks arbitrary: they were measured separately and the
+answers differed. The image's throughput gate bounded the cost at about 5% with
+the point estimate slightly in its favour. The server's did not. Same flags,
+same method, different workload — the server loads and indexes the whole store,
+which is far more allocation-heavy than running a suite in an image.
