@@ -100,17 +100,23 @@
       (or (= "*" (first ps)) (= (first ps) (first ks))) (recur (rest ps) (rest ks))
       :else false)))
 
-(defn find-entry
+(defn ^{:export "slopp.project"} find-entry
   "The registry entry governing concrete key `k` — exact match first, then
   wildcard patterns. nil = no such capability (the unknown-key refusal
-  signal; a typo'd key must never silently do nothing)."
-  [k]
-  (let [k (str k)]
-    (or (some #(when (= (:key %) k) %) registry)
-        (some #(when (and (str/includes? (:key %) "*")
-                          (match-pattern? (:key %) k))
-                 %)
-              registry))))
+  signal; a typo'd key must never silently do nothing).
+
+  Takes the REGISTRY in the 2-arity, because `dev` is governed by its own
+  (`slopp.project.dev/registry`) and the lookup — exact, then pattern — is
+  the same question whichever set of rows is asked. The 1-arity is the
+  capability registry, which is what every existing caller means."
+  ([k] (find-entry registry k))
+  ([rows k]
+   (let [k (str k)]
+     (or (some #(when (= (:key %) k) %) rows)
+         (some #(when (and (str/includes? (:key %) "*")
+                           (match-pattern? (:key %) k))
+                  %)
+               rows)))))
 
 (defn check-value
   "Validate config string `v` against `entry`'s declared `:type`. nil when
@@ -143,37 +149,12 @@
                               " — " (pr-str alien) " is not one"))))
         :qualified-symbol (when-not (re-matches #"[^\s/]+/[^\s/]+" v)
                             (bad "a qualified symbol (app.core/-main)"))
-        :csv (when (str/blank? v) (bad "a comma-separated list"))))))
-
-(defn ^:export effective
-  "The effective value of capability `k` for this store: the stored
-  `capabilities` config value parsed per its registry type, else the
-  entry's `:default` — so a registered key with a default never nil-puns.
-  Unknown key → nil. A stored value failing its check (reachable only via
-  a foreign merge; the write gate refuses it) falls back to the default
-  rather than throwing at serve time.
-
-  Exported: it is THE reader for a capability value, and a consumer
-  outside this module reaching into `[:config \"capabilities\" :values]`
-  would skip both the type parsing and the default."
-  [store k]
-  (let [k (str k)
-        entry (find-entry k)
-        v (get-in store [:config "capabilities" :values k])
-        parse (fn [entry v]
-                (case (first (:type entry))
-                  :string v
-                  :boolean (= "true" v)
-                  :int (Long/parseLong v)
-                  :enum (keyword v)
-                  :set-of (into #{} (map (comp keyword str/trim))
-                                (str/split v #","))
-                  :qualified-symbol (symbol v)
-                  :csv (into #{} (map str/trim) (str/split v #","))))]
-    (cond
-      (nil? entry) nil
-      (and v (nil? (check-value entry v))) (parse entry v)
-      :else (:default entry))))
+        :csv (when (str/blank? v) (bad "a comma-separated list"))
+        ;; ORDERED, where :csv is a set. Membership is the right shape for a
+        ;; group's members; it is the wrong one for anything positional —
+        ;; `--port,8080` and `8080,--port` are not the same arguments, and a
+        ;; set cannot tell them apart.
+        :csv-list (when (str/blank? v) (bad "a comma-separated list"))))))
 
 (defn ^:export config-refusal
   "The `capabilities` config write gate: a teaching error for an unknown
@@ -327,79 +308,6 @@
   rather than fourteen unrelated settings it could set."
   (into {} (map (juxt :capability :doc)) capability-catalog))
 
-(defn ^:export report
-  "The `query_capabilities` payload: `{:settings [...] :patterns [...]
-  :owners {...}}`, plus `:orphaned` when the store has stored keys this build
-  does not recognise. `:settings` = one row per CONCRETE registry key
-  `{:key :owner :effective :default :doc}` (+ `:set true :value <raw>` when
-  the store sets it), plus a row for every stored key a wildcard pattern
-  governs. `:patterns` = the wildcard entries themselves (key + owner + doc)
-  — they name families, they are not settable rows. A pure function of the
-  store value, so it is correct on any branch and at any revision.
-
-  **`:owner` is DERIVED from the key's first segment**, never stored beside
-  it, so the label and the name cannot disagree; `:owners` is the vocabulary
-  those labels come from. It exists because every project is shown every
-  key, and fourteen of nineteen belong to one app type — a store that will
-  never serve HTTP still reads `http.auth.oidc.*` as something it could set.
-  Filtering them out would be the wrong fix: `http.enabled` is itself a web
-  key, so hiding web keys until web is on hides the switch that turns it on.
-  Attribution is what makes fourteen settings read as one feature.
-
-  **`:orphaned` is the rename path, and it used to be invisible.** This is a
-  JOIN of the registry against the stored config, and a stored key with no
-  registry row simply fell off it. So a store carrying three settings under
-  retired names reported ZERO `:set true` and said nothing at all — the tool
-  whose job is *what is configured here* describing an unconfigured store,
-  while the reason its app server would not start sat in the config it
-  declined to mention. UNSET and SET-UNDER-A-NAME-I-NO-LONGER-KNOW shared one
-  representation at the exact moment the difference IS the diagnosis.
-
-  The rows carry the VALUE, not just the key, because that makes the answer a
-  migration instruction rather than a prompt to go and look. Absent when there
-  are none, the way the module manifest's `:debt` is — this always computes,
-  so absence unambiguously means none.
-
-  Found by the first store to cross a capability rename. With
-  `no-backwards-compatibility` standing policy that path is common rather than
-  rare, so the report has to survive it."
-  [store]
-  (let [values (get-in store [:config "capabilities" :values] {})
-        concrete? #(not (str/includes? (:key %) "*"))
-        owner-of (fn [k] (first (str/split (str k) #"\.")))
-        setting (fn [k entry]
-                  (let [v (get values k)]
-                    (cond-> {:key k
-                             :owner (owner-of k)
-                             :effective (effective store k)
-                             :default (:default entry)
-                             :doc (:doc entry)}
-                      (some? v) (assoc :set true :value v))))
-        rows (mapv #(setting (:key %) %) (filter concrete? registry))
-        exact? (fn [k] (some #(when (= (:key %) k) %) registry))
-        ;; every stored key the concrete rows above did not already cover:
-        ;; some are governed by a wildcard pattern, and the rest are governed
-        ;; by nothing, which is the case this used to drop on the floor.
-        loose (remove exact? (sort (keys values)))
-        {governed true orphans false} (group-by #(some? (find-entry %)) loose)
-        wild (mapv #(setting % (find-entry %)) governed)
-        orphaned (mapv (fn [k] {:key k :value (get values k)}) orphans)]
-    (cond-> {:settings (into rows wild)
-             :patterns (mapv #(assoc (select-keys % [:key :doc]) :owner (owner-of (:key %)))
-                             (remove concrete? registry))
-             ;; the vocabulary rides along rather than being looked up: an
-             ;; owner label on a row is only useful beside what the label
-             ;; MEANS, and a reader of this payload has no other way to it.
-             :owners owners}
-      (seq orphaned)
-      (assoc :orphaned orphaned
-             :orphaned-note
-             (str "stored under names this slopp does not know — nothing reads"
-                  " them. They are usually a capability RENAME you have not"
-                  " migrated: set the current key (query_capabilities lists"
-                  " them all) and then config_file {path \"capabilities\" key"
-                  " <old> unset true}")))))
-
 (defn ^:export capability
   "The catalog row for `c`, or nil when nothing declares it.
 
@@ -448,83 +356,6 @@
     (into #{} (comp (map :capability)
                     (filter #(contains? (prerequisites %) c)))
           capability-catalog)))
-
-(defn ^:export enabled?
-  "Whether `store` has opted into capability `c`.
-
-  THE predicate. It existed six times as a hand-rolled
-  `(= \"true\" (get-in candidate [:config \"capabilities\" :values \"web.enabled\"]))`
-  — in the write gates, in the done-grain checks, in the dev server and in the
-  client build — which is a second reader of a path this namespace is supposed
-  to be the only owner of, copied five more times. A rename then reaches five
-  of the six, and the sixth keeps working against a key nothing writes.
-
-  Reads through [[effective]] rather than the raw config, so it inherits the
-  type parse and the registry default: an unregistered or misspelled capability
-  is `false` rather than a truthy string, and there is no spelling of `true`
-  that works here and not in `query_capabilities`."
-  [store c]
-  (true? (effective store (str c ".enabled"))))
-
-(defn ^:export implied-puts
-  "The `<c>.enabled` keys a write of `k`=`v` must ALSO set, in dependency
-  order — empty when there is nothing to imply.
-
-  Enabling a capability turns on what it requires, transitively, because the
-  alternative is the puzzle every project would otherwise meet once: opting
-  into `webapp` appears to work and then nothing serves, since `http` was
-  never set. Only prerequisites already OFF are returned, so the reported
-  `:implied` names the changes a reader could not have predicted rather than
-  restating the graph back at them.
-
-  Only ever ADDS. A write of `false` implies nothing — turning `webapp` off is
-  not a reason to tear down the server, which may be serving other things —
-  and that asymmetry is deliberate: the enable direction has one safe answer
-  and the disable direction is a question only the author can settle, which is
-  what [[disable-refusal]] asks."
-  [store k v]
-  (let [k (str k)]
-    (if-not (and (str/ends-with? k ".enabled") (= "true" (str v)))
-      []
-      (let [c (subs k 0 (- (count k) (count ".enabled")))]
-        (into []
-              (comp (remove #(enabled? store %))
-                    (map #(str % ".enabled")))
-              (sort (prerequisites c)))))))
-
-(defn ^:export disable-refusal
-  "A teaching refusal when turning `k` off would leave a dependent capability
-  standing on nothing — nil when the write may land.
-
-  The mirror of [[implied-puts]], and the half that is easy to leave out. An
-  enable that implies its prerequisites but a disable that does not check its
-  dependents lets the config reach a state the catalog says is impossible:
-  `webapp` on with `http` off. Nothing would refuse it, and the consequence
-  would surface as a browser app that never loads — a diagnosis several layers
-  from the config that caused it.
-
-  It REFUSES rather than cascading, and the asymmetry with the enable
-  direction is the point: turning something on has one safe answer, since a
-  prerequisite is exactly what the capability cannot work without. Turning
-  something off does not — silently disabling `webapp` because you disabled
-  `http` would be slopp deciding to remove a feature the author never
-  mentioned. So the enable direction acts, and this one asks."
-  [store k v]
-  (let [k (str k)]
-    (when (and (str/ends-with? k ".enabled") (= "false" (str v)))
-      (let [c    (subs k 0 (- (count k) (count ".enabled")))
-            held (sort (filter #(enabled? store %) (dependents c)))]
-        (when (seq held)
-          (str k " cannot be turned off while "
-               (str/join ", " held)
-               (if (= 1 (count held)) " is enabled" " are enabled")
-               " — " (str/join " and " held)
-               (if (= 1 (count held)) " requires " " require ")
-               c ", so this would leave "
-               (if (= 1 (count held)) "it" "them")
-               " standing on nothing. Turn "
-               (str/join ", " (map #(str % ".enabled") held))
-               " off first, or leave " k " as it is."))))))
 
 (defn ^:export shipping-families
   "`{capability ns-prefix}` for every capability that SHIPS a namespace family
@@ -640,3 +471,198 @@
   SET all still publish — *this is configured and I am not showing you* is a
   useful answer, and *nothing here* would be a false one."
   ["http.auth.static." "http.auth.bearer." "http.auth.oidc."])
+
+(defn ^{:export "slopp.project"} parse-value
+  "A stored config STRING as its registry `entry`'s declared type.
+
+  Extracted from [[effective]] so a second registry can read its own values
+  without copying the `case` — `slopp.project.dev` governs the `dev` path
+  with the same type vocabulary, and a second copy of this would drift the
+  day a type is added. What is shared is the VOCABULARY, not the keys: each
+  registry still declares its own.
+
+  Assumes `v` already passed [[check-value]]. A value that has not is the
+  caller's problem, and [[effective]] handles it by falling back to the
+  entry's default rather than throwing at serve time."
+  [entry v]
+  (case (first (:type entry))
+    :string v
+    :boolean (= "true" v)
+    :int (Long/parseLong v)
+    :enum (keyword v)
+    :set-of (into #{} (map (comp keyword str/trim)) (str/split v #","))
+    :qualified-symbol (symbol v)
+    :csv (into #{} (map str/trim) (str/split v #","))
+    ;; a VECTOR, order kept — see check-value for why the two comma types
+    ;; are not one type
+    :csv-list (into [] (map str/trim) (str/split v #","))))
+
+(defn ^:export effective
+  "The effective value of capability `k` for this store: the stored
+  `capabilities` config value parsed per its registry type, else the
+  entry's `:default` — so a registered key with a default never nil-puns.
+  Unknown key → nil. A stored value failing its check (reachable only via
+  a foreign merge; the write gate refuses it) falls back to the default
+  rather than throwing at serve time.
+
+  Exported: it is THE reader for a capability value, and a consumer
+  outside this module reaching into `[:config \"capabilities\" :values]`
+  would skip both the type parsing and the default."
+  [store k]
+  (let [k (str k)
+        entry (find-entry k)
+        v (get-in store [:config "capabilities" :values k])]
+    (cond
+      (nil? entry) nil
+      (and v (nil? (check-value entry v))) (parse-value entry v)
+      :else (:default entry))))
+
+(defn ^:export report
+  "The `query_capabilities` payload: `{:settings [...] :patterns [...]
+  :owners {...}}`, plus `:orphaned` when the store has stored keys this build
+  does not recognise. `:settings` = one row per CONCRETE registry key
+  `{:key :owner :effective :default :doc}` (+ `:set true :value <raw>` when
+  the store sets it), plus a row for every stored key a wildcard pattern
+  governs. `:patterns` = the wildcard entries themselves (key + owner + doc)
+  — they name families, they are not settable rows. A pure function of the
+  store value, so it is correct on any branch and at any revision.
+
+  **`:owner` is DERIVED from the key's first segment**, never stored beside
+  it, so the label and the name cannot disagree; `:owners` is the vocabulary
+  those labels come from. It exists because every project is shown every
+  key, and fourteen of nineteen belong to one app type — a store that will
+  never serve HTTP still reads `http.auth.oidc.*` as something it could set.
+  Filtering them out would be the wrong fix: `http.enabled` is itself a web
+  key, so hiding web keys until web is on hides the switch that turns it on.
+  Attribution is what makes fourteen settings read as one feature.
+
+  **`:orphaned` is the rename path, and it used to be invisible.** This is a
+  JOIN of the registry against the stored config, and a stored key with no
+  registry row simply fell off it. So a store carrying three settings under
+  retired names reported ZERO `:set true` and said nothing at all — the tool
+  whose job is *what is configured here* describing an unconfigured store,
+  while the reason its app server would not start sat in the config it
+  declined to mention. UNSET and SET-UNDER-A-NAME-I-NO-LONGER-KNOW shared one
+  representation at the exact moment the difference IS the diagnosis.
+
+  The rows carry the VALUE, not just the key, because that makes the answer a
+  migration instruction rather than a prompt to go and look. Absent when there
+  are none, the way the module manifest's `:debt` is — this always computes,
+  so absence unambiguously means none.
+
+  Found by the first store to cross a capability rename. With
+  `no-backwards-compatibility` standing policy that path is common rather than
+  rare, so the report has to survive it."
+  [store]
+  (let [values (get-in store [:config "capabilities" :values] {})
+        concrete? #(not (str/includes? (:key %) "*"))
+        owner-of (fn [k] (first (str/split (str k) #"\.")))
+        setting (fn [k entry]
+                  (let [v (get values k)]
+                    (cond-> {:key k
+                             :owner (owner-of k)
+                             :effective (effective store k)
+                             :default (:default entry)
+                             :doc (:doc entry)}
+                      (some? v) (assoc :set true :value v))))
+        rows (mapv #(setting (:key %) %) (filter concrete? registry))
+        exact? (fn [k] (some #(when (= (:key %) k) %) registry))
+        ;; every stored key the concrete rows above did not already cover:
+        ;; some are governed by a wildcard pattern, and the rest are governed
+        ;; by nothing, which is the case this used to drop on the floor.
+        loose (remove exact? (sort (keys values)))
+        {governed true orphans false} (group-by #(some? (find-entry %)) loose)
+        wild (mapv #(setting % (find-entry %)) governed)
+        orphaned (mapv (fn [k] {:key k :value (get values k)}) orphans)]
+    (cond-> {:settings (into rows wild)
+             :patterns (mapv #(assoc (select-keys % [:key :doc]) :owner (owner-of (:key %)))
+                             (remove concrete? registry))
+             ;; the vocabulary rides along rather than being looked up: an
+             ;; owner label on a row is only useful beside what the label
+             ;; MEANS, and a reader of this payload has no other way to it.
+             :owners owners}
+      (seq orphaned)
+      (assoc :orphaned orphaned
+             :orphaned-note
+             (str "stored under names this slopp does not know — nothing reads"
+                  " them. They are usually a capability RENAME you have not"
+                  " migrated: set the current key (query_capabilities lists"
+                  " them all) and then config_file {path \"capabilities\" key"
+                  " <old> unset true}")))))
+
+(defn ^:export enabled?
+  "Whether `store` has opted into capability `c`.
+
+  THE predicate. It existed six times as a hand-rolled
+  `(= \"true\" (get-in candidate [:config \"capabilities\" :values \"web.enabled\"]))`
+  — in the write gates, in the done-grain checks, in the dev server and in the
+  client build — which is a second reader of a path this namespace is supposed
+  to be the only owner of, copied five more times. A rename then reaches five
+  of the six, and the sixth keeps working against a key nothing writes.
+
+  Reads through [[effective]] rather than the raw config, so it inherits the
+  type parse and the registry default: an unregistered or misspelled capability
+  is `false` rather than a truthy string, and there is no spelling of `true`
+  that works here and not in `query_capabilities`."
+  [store c]
+  (true? (effective store (str c ".enabled"))))
+
+(defn ^:export implied-puts
+  "The `<c>.enabled` keys a write of `k`=`v` must ALSO set, in dependency
+  order — empty when there is nothing to imply.
+
+  Enabling a capability turns on what it requires, transitively, because the
+  alternative is the puzzle every project would otherwise meet once: opting
+  into `webapp` appears to work and then nothing serves, since `http` was
+  never set. Only prerequisites already OFF are returned, so the reported
+  `:implied` names the changes a reader could not have predicted rather than
+  restating the graph back at them.
+
+  Only ever ADDS. A write of `false` implies nothing — turning `webapp` off is
+  not a reason to tear down the server, which may be serving other things —
+  and that asymmetry is deliberate: the enable direction has one safe answer
+  and the disable direction is a question only the author can settle, which is
+  what [[disable-refusal]] asks."
+  [store k v]
+  (let [k (str k)]
+    (if-not (and (str/ends-with? k ".enabled") (= "true" (str v)))
+      []
+      (let [c (subs k 0 (- (count k) (count ".enabled")))]
+        (into []
+              (comp (remove #(enabled? store %))
+                    (map #(str % ".enabled")))
+              (sort (prerequisites c)))))))
+
+(defn ^:export disable-refusal
+  "A teaching refusal when turning `k` off would leave a dependent capability
+  standing on nothing — nil when the write may land.
+
+  The mirror of [[implied-puts]], and the half that is easy to leave out. An
+  enable that implies its prerequisites but a disable that does not check its
+  dependents lets the config reach a state the catalog says is impossible:
+  `webapp` on with `http` off. Nothing would refuse it, and the consequence
+  would surface as a browser app that never loads — a diagnosis several layers
+  from the config that caused it.
+
+  It REFUSES rather than cascading, and the asymmetry with the enable
+  direction is the point: turning something on has one safe answer, since a
+  prerequisite is exactly what the capability cannot work without. Turning
+  something off does not — silently disabling `webapp` because you disabled
+  `http` would be slopp deciding to remove a feature the author never
+  mentioned. So the enable direction acts, and this one asks."
+  [store k v]
+  (let [k (str k)]
+    (when (and (str/ends-with? k ".enabled") (= "false" (str v)))
+      (let [c    (subs k 0 (- (count k) (count ".enabled")))
+            held (sort (filter #(enabled? store %) (dependents c)))]
+        (when (seq held)
+          (str k " cannot be turned off while "
+               (str/join ", " held)
+               (if (= 1 (count held)) " is enabled" " are enabled")
+               " — " (str/join " and " held)
+               (if (= 1 (count held)) " requires " " require ")
+               c ", so this would leave "
+               (if (= 1 (count held)) "it" "them")
+               " standing on nothing. Turn "
+               (str/join ", " (map #(str % ".enabled") held))
+               " off first, or leave " k " as it is."))))))

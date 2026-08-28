@@ -406,16 +406,27 @@
              :source (apply str "(ns tk.core)\n"
                             (for [i (range 1 6)]
                               (str "(defn f" i " [x] (+ x " i "))\n")))})
-      (testing "an identical re-read returns an :unchanged stub, not the payload (told-tracking)"
+      (testing "an identical re-read returns an :already-sent stub, not the payload"
         (let [a (call! sess "query_source" {:ns "tk.core"})
               b (call! sess "query_source" {:ns "tk.core"})]
           (is (re-find #":outline" a) a)
-          (is (re-find #":unchanged true" b) b)
+          (is (re-find #":already-sent true" b) b)
           (is (< (count b) (count a)))))
-      (testing "a body edit leaves the OUTLINE honestly unchanged"
+      (testing "a body edit leaves the OUTLINE honestly identical — and the stub says so"
+        ;; THE measured trap, and the reason the key is not called
+        ;; `:unchanged`. An outline names forms, not their source, so a body
+        ;; edit cannot move it. An agent read `:unchanged` as "your edit did
+        ;; not apply", re-applied it on top of itself, stacked a duplicate
+        ;; malli key and 500'd a live endpoint. The payload hash was right
+        ;; about the view the whole time; the KEY made a claim about the store
+        ;; that only the reader could have made about themselves.
         (call! sess "edit_replace_form" {:ns "tk.core" :name "f1"
                                         :source "(defn f1 [x] (* x 9))"})
-        (is (re-find #":unchanged true" (call! sess "query_source" {:ns "tk.core"}))))
+        (let [b (call! sess "query_source" {:ns "tk.core"})]
+          (is (re-find #":already-sent true" b) b)
+          (is (re-find #"NOT whether the store changed" b)
+              (str "the stub has to say whose fact this is, or it reads as"
+                   " \"your write did not land\": " b))))
       (testing "a change the view can SEE invalidates it"
         (call! sess "edit_add_form" {:ns "tk.core" :source "(defn g [x] x)"})
         (is (re-find #":outline" (call! sess "query_source" {:ns "tk.core"}))))
@@ -1786,7 +1797,7 @@
     ;; because it happened to be quiet is not the same thing
     (is (some? (#'mcp/refusal-text {:isError true})))))
 
-(deftest an-unchanged-stub-must-not-outlive-the-reader-it-is-about
+(deftest an-already-sent-stub-must-not-outlive-the-reader-it-is-about
   ;; `told!`'s guarantee — "identical to what this session already received" —
   ;; is true of the SERVER session and false of the reader. The server session
   ;; lives for the process; the reader resets on /clear, on automatic
@@ -1804,19 +1815,21 @@
   ;; write-tool gate, so a read-only planning ask never rotates one — and a
   ;; read-only planning ask is exactly where this was first hit.
   (let [sess    (atom {})
-        payload {:routes (vec (range 60))}]
+        ;; big enough that withholding it is a real saving — see the sibling
+        ;; test: the stub is only used when it is smaller than the payload
+        payload {:routes (vec (range 200))}]
     (testing "a re-read inside ONE ask still stubs — that saving is the point"
       ;; reads are 52% of all output and stable whole-store views are the fat;
       ;; the fix must narrow the withholding, not delete it
       (is (= payload (#'mcp/told! sess "query_surface" {} payload)))
-      (is (:unchanged (#'mcp/told! sess "query_surface" {} payload))))
+      (is (:already-sent (#'mcp/told! sess "query_surface" {} payload))))
     (testing "a NEW ASK re-tells it, because the reader may be new"
       (swap! sess update :slopp.mcp/ask (fnil inc 0))
       (is (= payload (#'mcp/told! sess "query_surface" {} payload))))
     (testing "and it stubs again within that new ask"
-      (is (:unchanged (#'mcp/told! sess "query_surface" {} payload))))))
+      (is (:already-sent (#'mcp/told! sess "query_surface" {} payload))))))
 
-(deftest an-unchanged-stub-carries-a-way-back-to-the-payload
+(deftest an-already-sent-stub-carries-a-way-back-to-the-payload
   ;; Expiring at the ask boundary covers /clear and compaction, but not a
   ;; SUBAGENT: it shares the server session, runs inside the parent's ask, and
   ;; has seen nothing. So there must still be an in-band way out — and today
@@ -1825,10 +1838,13 @@
   ;; write-capable one (`config_file`), which prompts for permission in plan
   ;; mode: the detour that made this cost a whole planning turn.
   (let [sess    (atom {})
-        payload {:routes (vec (range 60))}]
+        ;; big enough that withholding it is a real saving — the stub is only
+        ;; used when it is SMALLER than what it withholds, so a toy payload
+        ;; now (correctly) comes back in full
+        payload {:routes (vec (range 200))}]
     (#'mcp/told! sess "query_surface" {} payload)
     (let [stub (#'mcp/told! sess "query_surface" {} payload)]
-      (is (:unchanged stub))
+      (is (:already-sent stub))
       (is (string? (:detail stub)) "the stub names its own escape")
       (is (= (pr-str payload)
              (get-in @sess [:slopp.mcp/spool :entries (:detail stub)]))
@@ -1855,18 +1871,18 @@
       (io/make-parents (io/file dir ".slopp" "pending-intent"))
       (ask! "first ask: what rules are on")
       (let [one (call! sess "query_rules" {})]
-        (is (not (str/includes? one "unchanged")) "the first read is the payload")
+        (is (not (str/includes? one "already-sent")) "the first read is the payload")
         (testing "a re-read inside the SAME ask is the stub — the saving stands"
-          (is (str/includes? (call! sess "query_rules" {}) "unchanged"))))
+          (is (str/includes? (call! sess "query_rules" {}) "already-sent"))))
       (testing "after a NEW ask the same read is the payload again"
         (ask! "second ask, fresh context: what rules are on")
         (let [again (call! sess "query_rules" {})]
-          (is (not (str/includes? again "unchanged"))
+          (is (not (str/includes? again "already-sent"))
               "a cleared or compacted reader has seen none of this")
           (is (str/includes? again "rules") (subs again 0 (min 200 (count again))))))
       (testing "and the stub, when it does appear, names the door out"
         (let [stub (call! sess "query_rules" {})]
-          (is (str/includes? stub "unchanged"))
+          (is (str/includes? stub "already-sent"))
           (is (str/includes? stub ":detail")
               "a read-only tool's withheld payload must not need a write-capable one")))
       (finally (ops/close! sess)))))
@@ -2757,3 +2773,60 @@
       (finally
         (.destroyForcibly proc)
         (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external ui-serve-keeps-the-address-session-brief-reports-TRUE
+  ;; `session_brief` reads `:ui-url` off the session, and only `start-ui!` ever
+  ;; wrote it — so re-serving moved the listener and left the brief announcing
+  ;; the port it came up on at boot. Measured live: the brief said 49283 while
+  ;; the listener held 53610 and 49283 was bound by nobody.
+  ;;
+  ;; It is the same defect as a host announcing a url it never binds, one layer
+  ;; up, and it lands on whoever is trying to find the port — which is exactly
+  ;; what the brief is for.
+  (let [sess (external/open!)]
+    (try
+      (let [r   (call! sess "ui_serve" {})
+            url (second (re-find #"(http://127\.0\.0\.1:\d+/)" (str r)))]
+        (testing "the tool reports an address"
+          (is (some? url) (str r)))
+        (testing "and the SESSION carries the one just served"
+          (is (= url (:ui-url @sess))
+              (str "session_brief would announce " (pr-str (:ui-url @sess))
+                   " while the listener is on " (pr-str url))))
+        (call! sess "ui_serve" {:stop true})
+        (testing "stopping CLEARS it rather than leaving an address nothing binds"
+          (is (nil? (:ui-url @sess)) (pr-str (:ui-url @sess)))))
+      (finally (ops/close! sess)))))
+
+(deftest a-host-can-turn-down-the-idle-images-a-server-holds
+  ;; A writer does not cost one JVM. It costs the active image, a warm spare
+  ;; that `-main` switches on for every server, and one parked image per branch
+  ;; line held for the reap TTL. Scaling writers multiplies the IDLE ones, and
+  ;; idle is where the waste is: the spare exists only to keep a JVM boot off
+  ;; the critical path, which is a latency trade nobody asked for when the
+  ;; binding constraint is memory.
+  ;;
+  ;; Both knobs are already `open!` options; only `-main` hardcoded them. The
+  ;; DEFAULTS do not move — they are what was measured — so a single-writer
+  ;; host sees no change and a swarm operator gets a dial.
+  (let [opts #'slopp.mcp/host-image-options]
+    (testing "unset: exactly today's behaviour"
+      (is (= {:slopp.ops/warm-spare? true :slopp.ops/branch-image-ttl-ms 600000}
+             (opts (constantly nil)))))
+
+    (testing "a host running many writers drops the spare and shortens the lease"
+      (is (= {:slopp.ops/warm-spare? false :slopp.ops/branch-image-ttl-ms 60000}
+             (opts {"SLOPP_WARM_SPARE" "0"
+                    "SLOPP_BRANCH_IMAGE_TTL_MS" "60000"}))))
+
+    (testing "off is spelled the two ways people spell it, and nothing else is off"
+      (is (false? (:slopp.ops/warm-spare? (opts {"SLOPP_WARM_SPARE" "false"}))))
+      (is (true? (:slopp.ops/warm-spare? (opts {"SLOPP_WARM_SPARE" "1"})))))
+
+    (testing "a TTL that is not a number keeps the default instead of becoming zero"
+      ;; The failure this refuses: a typo'd lease parsed as 0 reaps every branch
+      ;; image the instant it is parked, which reads as "branch switching got
+      ;; slow" and never as "the variable was misspelt". An unreadable setting
+      ;; must not be obeyed as its most destructive reading.
+      (is (= 600000 (:slopp.ops/branch-image-ttl-ms
+                     (opts {"SLOPP_BRANCH_IMAGE_TTL_MS" "soon"})))))))

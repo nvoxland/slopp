@@ -35,18 +35,31 @@
   ;; malli + nrepl ship WITH slopp (inherent), merged into every image's -Sdeps
   ;; — NOT via the project manifest (deps_add), so they are unremovable and
   ;; centrally versioned. Image-tier only (the server runs on kernel deps).
-  (let [sdeps (nth (#'slopp.image.repl/default-cmd nil) 2)]
-    (is (re-find #"metosin/malli" sdeps))
-    (is (re-find #"nrepl/nrepl" sdeps)))
-  (testing "inherent deps win a colliding manifest entry (slopp controls versions)"
-    ;; The expected version is READ from `inherent-deps`, not restated here.
-    ;; Pinning the literal made this test the thing you had to remember on an
-    ;; upgrade — it failed on the malli bump for no reason anyone cared about,
-    ;; while the rule it exists to protect had not changed at all.
-    (let [ours  (get-in repl/inherent-deps '[metosin/malli :mvn/version])
-          sdeps (nth (#'slopp.image.repl/default-cmd '{metosin/malli {:mvn/version "0.0.0"}}) 2)]
-      (is (clojure.string/includes? sdeps ours) sdeps)
-      (is (not (re-find #"0\.0\.0" sdeps))))))
+  ;;
+  ;; The value is found by SEARCHING for the flag, never by index. A command
+  ;; vector read positionally breaks on any new LEADING option — a JVM memory
+  ;; budget prepends `-J` opts — and it breaks looking like a missing
+  ;; dependency rather than a moved one, so the red points at the wrong thing
+  ;; entirely. The subject here is "inherent deps ride every image", which is
+  ;; true wherever in the command line they ride.
+  (letfn [(sdeps-of [cmd]
+            (let [c (vec cmd)
+                  i (.indexOf c "-Sdeps")]
+              (is (nat-int? i) (str "the launch command must carry -Sdeps: " c))
+              (nth c (inc i))))]
+    (let [sdeps (sdeps-of (#'slopp.image.repl/default-cmd nil))]
+      (is (re-find #"metosin/malli" sdeps))
+      (is (re-find #"nrepl/nrepl" sdeps)))
+    (testing "inherent deps win a colliding manifest entry (slopp controls versions)"
+      ;; The expected version is READ from `inherent-deps`, not restated here.
+      ;; Pinning the literal made this test the thing you had to remember on an
+      ;; upgrade — it failed on the malli bump for no reason anyone cared about,
+      ;; while the rule it exists to protect had not changed at all.
+      (let [ours  (get-in repl/inherent-deps '[metosin/malli :mvn/version])
+            sdeps (sdeps-of (#'slopp.image.repl/default-cmd
+                             '{metosin/malli {:mvn/version "0.0.0"}}))]
+        (is (clojure.string/includes? sdeps ours) sdeps)
+        (is (not (re-find #"0\.0\.0" sdeps)))))))
 
 (deftest ^:external image-dies-with-its-parent
   ;; The leak fix, proven behaviorally. A shard JVM that dies abnormally
@@ -377,3 +390,77 @@
             "the nREPL status is the only evidence of WHY, so it travels")
         (is (clojure.string/includes? r "restart")
             "and the remedy — a reader with a dead image reaches for the one verb that rebuilds it")))))
+
+(deftest an-image-launches-under-a-jvm-budget
+  ;; The subject is the PLACEMENT rule, not the budget's contents. `-J` is a
+  ;; clj-opt: the launcher collects it only from the part of the command line
+  ;; before `-M`, and the same strings after `-M` are passed to the program as
+  ;; arguments and never reach the JVM. That failure is silent and MEASURES as
+  ;; the flag having no effect, which is the worst way for it to break — you
+  ;; conclude the setting does nothing and delete it.
+  ;;
+  ;; The budget is injected rather than read, because the shipped default is
+  ;; empty (a controlled A/B took `-Xms32m` back out), and a rule that can only
+  ;; be exercised when someone has configured a budget is one that breaks on
+  ;; the day someone does.
+  (let [cmd (vec (#'slopp.image.repl/default-cmd nil ["-Xms8m" "-Xss1m"]))
+        m   (.indexOf cmd "-M")
+        js  (filterv #(clojure.string/starts-with? % "-J") cmd)]
+    (is (= ["-J-Xms8m" "-J-Xss1m"] js)
+        (str "each budget opt rides -J-prefixed, in order: " cmd))
+    (is (nat-int? m) (str "the launch command must carry -M: " cmd))
+    (is (every? #(< (.indexOf cmd %) m) js)
+        (str "budget opts must precede -M to be read as clj-opts: " cmd))
+    (is (< (.indexOf cmd "-J-Xms8m") (.indexOf cmd "-Sdeps"))
+        "the budget leads the command line"))
+
+  (testing "an empty budget adds nothing at all — the shipped default"
+    (is (empty? (filterv #(clojure.string/starts-with? % "-J")
+                         (#'slopp.image.repl/default-cmd nil [])))))
+
+  (testing "and the default arity still resolves the budget from the host"
+    ;; the 2-arity is the seam; the 1-arity is what start! actually calls, and
+    ;; it must keep reading the environment rather than shipping a fixed list.
+    (is (= (vec (#'slopp.image.repl/default-cmd nil))
+           (vec (#'slopp.image.repl/default-cmd
+                 nil (repl/image-jvm-opts #(System/getenv %))))))))
+
+(deftest the-image-budget-is-overridable-and-empty-means-none
+  ;; Unset and empty must DIFFER. Unset is the shipped budget; empty is
+  ;; as-shipped-before-the-budget, which is the off-arm a controlled A/B runs
+  ;; against. An off-arm you can only reach by editing code is one nobody runs,
+  ;; and this repo's own record is a memory result published at 3.4x that was
+  ;; 35% once someone compared it against an off-arm on the same box.
+  (is (= repl/default-image-jvm-opts (repl/image-jvm-opts (constantly nil)))
+      "unset: the shipped budget")
+  (is (= ["-Xms8m" "-Xss1m"]
+         (repl/image-jvm-opts {"SLOPP_IMAGE_JVM_OPTS" "  -Xms8m   -Xss1m "}))
+      "set: exactly what the host asked for, whitespace-separated")
+  (is (= [] (repl/image-jvm-opts {"SLOPP_IMAGE_JVM_OPTS" ""}))
+      "empty: no budget at all — the off-arm"))
+
+(deftest the-shipped-budget-never-carries-a-flag-without-its-pair
+  ;; Two settings in this budget are only safe PAIRED, and both fail in the
+  ;; direction that looks like success — which is why they are tests and not
+  ;; docstring warnings. The docstring carries the numbers; this carries the
+  ;; refusal.
+  (let [budget    repl/default-image-jvm-opts
+        has?      (fn [needle] (some #(clojure.string/includes? % needle) budget))
+        starts?   (fn [prefix] (some #(clojure.string/starts-with? % prefix) budget))]
+    ;; SerialGC alone commits its ergonomic initial heap (576 MB measured) at
+    ;; startup and never uncommits, nearly DOUBLING the footprint against G1 —
+    ;; 681 MB vs 348. It shrinks a small idle child only when told what heap to
+    ;; start with.
+    (is (or (not (has? "UseSerialGC")) (starts? "-Xms"))
+        (str "UseSerialGC without -Xms nearly doubles image memory: " budget))
+    ;; A max-heap cap manufactures OutOfMemoryError, and an OOM raised inside a
+    ;; test run is a red suite that means nothing. Paired with ExitOnOOM the
+    ;; image DIES instead, which the eval path already reports as the run not
+    ;; having happened — a missing verdict, never a false one.
+    (is (or (not (starts? "-Xmx")) (has? "ExitOnOutOfMemoryError"))
+        (str "-Xmx without ExitOnOutOfMemoryError turns an OOM into a false red: "
+             budget))
+    ;; -Xshare:on refuses to START the VM on a stale archive. A dead image is a
+    ;; false verdict where a slow one is not; :auto degrades silently instead.
+    (is (not (has? "-Xshare:on"))
+        (str "-Xshare:on makes a stale archive a dead image: " budget))))

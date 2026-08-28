@@ -2011,32 +2011,35 @@
             {:id did :parent parent :op :read-cost :ns '*session*
              :at (now-ms) :reads reads})))
 
-(defn record-otel
-  "Append an `:otel` delta carrying a batch of normalized harness telemetry —
-  *this is what the model side of these asks cost*.
+(def ^:export local-config-paths
+  "Config paths that stay in the DB — they reach neither a built tree nor a
+  projected one.
 
-  One delta per RECEIVED BATCH rather than per request, the same grain
-  `:read-cost` uses and for the same reason: the exporter already batches on
-  its own interval, and a delta per model round trip would put thousands of
-  bookkeeping entries in a journal whose unit is a change to the code.
+  Every other config path ships: `ops.external/build!` writes each `:config`
+  entry as a file at its own path, and `git/commit-paths` puts each one in
+  every projected tree. That is right for `capabilities`, `rules` and `gates`,
+  which configure the PRODUCT and must travel with it.
 
-  `requests` are already normalized by [[slopp.otel/api-requests]] — session,
-  prompt, model, token counts, derived context size, cost and duration. They
-  are normalized BEFORE they get here, which is deliberate: the raw records
-  carry the operator's email address and account ids on every row, and the
-  honest place to drop those is at the boundary that parses them, not in a
-  filter someone has to remember.
+  `dev` does not. It says what to RUN while somebody is working on this
+  project — an entry point, arguments, a port — which is a fact about a
+  development session rather than about the program. Shipping it would put a
+  developer's port number in a jar and a git tree, and a second developer's
+  pull would then carry the first one's choices.
 
-  A MARKER op (registered in [[slopp.store.fields/markers]]): it changes no
-  code, so a host that has not loaded one is not behind, and it does not travel
-  across merges — telemetry describes a session on one line, and replaying it
-  onto another would attribute one agent's cost to a different one.
+  DECLARED rather than derived, for the same reason
+  [[projected-config-paths]] is: the store that needs the answer is often the
+  one missing the entry, and a fresh clone holds no config at all.
 
-  `:ns` is the `*session*` sentinel that every op which is not about ONE
-  namespace already uses."
-  [store requests]
-  (let [parent (:id (last (:deltas store)))
-        [did store] (gen-id store "d")]
-    (update store :deltas conj
-            {:id did :parent parent :op :otel :ns '*session*
-             :at (now-ms) :requests (vec requests)})))
+  **This set WINS over the has-config fallback.** That docstring tells callers
+  to treat a path as projected if it is in the projected set OR the store
+  already holds `:config` for it — which is true of every dev entry somebody
+  has set. Read naively, the fallback projects precisely the thing that must
+  never be projected, so the local check comes first:
+
+      (and (not (local-config-paths path))
+           (or (projected-config-paths path) (get-in st [:config path])))
+
+  The two sets are disjoint, and a test asserts it — a path declared both ways
+  has no sensible reading and would fail silently in whichever direction the
+  caller happened to ask."
+  #{"dev"})

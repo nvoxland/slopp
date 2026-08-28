@@ -153,7 +153,18 @@
                                             conflicts))]
                           (assoc conflicts ix c)
                           (conj conflicts c)))
-        touched    (store/suffix-touched (remove :merged-from ours-sfx))]
+        touched    (store/suffix-touched (remove :merged-from ours-sfx))
+        ;; What OUR suffix DELETED, by name. `touched` cannot answer this: it
+        ;; is form-id keyed, and a replayed copy arrives under a new id, so the
+        ;; id we deleted and the id they are re-adding are different values for
+        ;; one piece of code. The NAME is the only thing that survives replay,
+        ;; which is why the `:add` arm resolves by it — this is the same
+        ;; question asked of our own suffix.
+        deleted-here (into #{}
+                           (comp (remove :merged-from)
+                                 (filter #(= :delete (:op %)))
+                                 (map (fn [d] [(:ns d) (str (:name d))])))
+                           ours-sfx)]
     (if imposter
       {:error (str "merge identity mismatch: delta " (:id imposter)
                    " looks like a recreated fork/branch at the same"
@@ -264,6 +275,29 @@
                                              :ours (n/string (:node cur))
                                              :theirs src
                                              :reason "both sides added this name"})
+                            notes changed new-nses applied)
+
+                      ;; WE DELETED THIS NAME and they still have it. Their
+                      ;; delta is an `:add` only because landing REPLAYS forms
+                      ;; under new ids, so one piece of code has several
+                      ;; identities and the copy arriving here is not the one
+                      ;; we removed. Appending it would UNDO a deletion in
+                      ;; silence — the only merge outcome that produces a wrong
+                      ;; store with no signal, and the reason a resurrected
+                      ;; `ensure-id-block!` was found by its caller failing to
+                      ;; compile rather than by anything here.
+                      ;;
+                      ;; The twin of `:replace`'s "we deleted it; they edited
+                      ;; it", which has always conflicted. Ours is KEPT — the
+                      ;; deletion stands — and the disagreement is reported
+                      ;; rather than resolved by whoever wrote last.
+                      (deleted-here [ns-sym (str nm)])
+                      (done st idmap merged
+                            (conj conflicts {:form (symbol (str ns-sym) (str nm))
+                                             :ns ns-sym :delta (:id d)
+                                             :ours nil :theirs src
+                                             :reason (str "we deleted it; their line still has it"
+                                                          " (a replayed copy under a new id)")})
                             notes changed new-nses applied)
 
                       :else

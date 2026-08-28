@@ -399,3 +399,37 @@
                 "and nothing that is still in the thread"))
           (finally (git/close-ctx! ctx))))
       (finally (ops/close! sess)))))
+
+(deftest a-LOCAL-config-path-never-reaches-a-projected-tree
+  ;; `commit-paths` renders EVERY config entry into every projected tree, and
+  ;; its own docstring says why that is right: "they all ride EVERY projected
+  ;; tree, so a slopp push never deletes them." True of `capabilities`,
+  ;; `rules` and `gates`, which configure the product.
+  ;;
+  ;; Not true of `dev`, which says what to RUN while somebody works on this
+  ;; project. Projecting it pushes one developer's port and entry point at
+  ;; everyone who pulls, and the next developer's pull carries the first
+  ;; one's choices back.
+  (let [configs {"capabilities" {:format :manifest :values {"http.port" "8080"}}
+                 "dev"          {:format :manifest
+                                 :values {"run.app.main" "app.core/-main"
+                                          "run.app.args" "--port,9999"}}}
+        tree    (#'git/commit-paths {} {} {} configs (constantly nil))]
+
+    (testing "the product's config still rides, as it always did"
+      (is (contains? tree "capabilities"))
+      (is (str/includes? (get tree "capabilities") "http.port")))
+
+    (testing "and the dev section does NOT"
+      (is (not (contains? tree "dev"))
+          (str "a dev entry reached the projected tree: "
+               (pr-str (get tree "dev")))))
+
+    (testing "nor does its content arrive under some other path"
+      ;; the failure that would survive a key check: rendered into a tree
+      ;; entry somebody else owns
+      (is (not-any? #(str/includes? (str %) "run.app.main") (vals tree))
+          (str "dev content is in the tree under another path: "
+               (pr-str (into {} (filter (fn [[_ v]]
+                                          (str/includes? (str v) "run.app.main"))
+                                        tree))))))))

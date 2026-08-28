@@ -860,6 +860,36 @@
          (try (jdbc/execute! conn ["ALTER TABLE deltas ADD COLUMN parent TEXT"])
               (catch java.sql.SQLException _ nil))
          (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_parent ON deltas(parent)"])
+         ;; MEASUREMENTS are about the journal, not in it. A delta is a link in
+         ;; the chain every writer CASes against, so appending one MOVES THE
+         ;; HEAD — and a number describing what something cost has no business
+         ;; making a verdict lose that race. Learned the expensive way: harness
+         ;; telemetry arriving on an exporter's interval appended a delta every
+         ;; few seconds from an HTTP receiver that is not an agent and never
+         ;; stops, and the store became unwritable — `full_check` computed a
+         ;; whole-store answer for three to four minutes and then lost the
+         ;; commit to a telemetry row, four times, and ordinary writes began
+         ;; failing behind it. The interval was never the bug; ANY interval
+         ;; makes the head non-quiescent.
+         ;;
+         ;; Two more costs the same rows were quietly paying: every such op has
+         ;; to be registered as a merge MARKER purely so `merge-logs` will skip
+         ;; it, and they sit on the load path, where the measured gap between
+         ;; `load-elements` (~410ms) and `load-store` (~4s) is EDN-parsing delta
+         ;; payloads.
+         ;;
+         ;; `delta` is a nullable FK: a measurement ABOUT a specific delta (a
+         ;; turn's timing, a run's cost) names it; one that is about a span of
+         ;; wall-clock time rather than an entry does not, and must not invent
+         ;; an anchor to look tidy.
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS measurements (
+                              seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+                              at      INTEGER NOT NULL,
+                              kind    TEXT NOT NULL,
+                              delta   TEXT REFERENCES deltas(id),
+                              payload TEXT NOT NULL)"])
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS measurements_kind
+                              ON measurements(kind, seq)"])
          ;; A LINE is a pointer to a head delta. A named line is a branch; an
          ;; anonymous one (name NULL) is an agent's thread. They are the same row
          ;; because they are the same thing — a thread is a branch nobody named.
@@ -1164,3 +1194,84 @@
                   (or (nil? si)
                       (= (long started)
                          (.toEpochMilli ^java.time.Instant si))))))))))
+
+(defn ^:export record-measurement!
+  "Record one MEASUREMENT — a number about what something cost — beside the
+  journal. Returns nil.
+
+  Deliberately not a delta. Appending to `deltas` moves the head that every
+  writer compare-and-swaps against, and a statistic must never be the reason a
+  verdict loses that race. This is a plain INSERT into its own table: no
+  parent, no chain, no CAS, and nothing for `merge-logs` to be taught to skip.
+
+  `kind` names the reader ('otel', 'read-cost', …) so one fold cannot see
+  another's rows. `delta` is an optional FK to the entry this is ABOUT — a
+  turn's timing names its `:turn-end`, an external run names its `:observe` —
+  and is nil for a measurement about a span of wall-clock time rather than an
+  entry. Inventing an anchor to make the column look full would make the FK
+  mean two different things.
+
+  `payload` is stored as EDN, the same way a delta's is, so the two are read
+  back by the same reader and a measurement that outgrows a flat map does not
+  need a migration."
+  [conn kind delta payload]
+  (jdbc/execute! conn
+                 ["INSERT INTO measurements (at, kind, delta, payload)
+                   VALUES (?, ?, ?, ?)"
+                  (System/currentTimeMillis) (str kind)
+                  (some-> delta str) (pr-str payload)])
+  nil)
+
+(defn ^:export measurements
+  "The measurements of `kind`, oldest first, as
+  `[{:seq :at :kind :delta :payload}]`. `since` (a `:seq`) windows to rows
+  AFTER it; nil reads them all.
+
+  The window is by `seq` rather than by time because that is what makes a
+  reader idempotent: wall-clock ties are possible and a fold that re-read a
+  row would double-count what it cost. `seq` is the table's own primary key,
+  monotonic, and never reused.
+
+  Kept OUT of the store value on purpose. `load-store` already spends most of
+  its four seconds EDN-parsing delta payloads, and folding every measurement
+  ever taken into every session's store would put the cost of the telemetry on
+  the price of opening the project. A reader that wants numbers asks for them."
+  [conn kind since]
+  (mapv (fn [r] {:seq     (:measurements/seq r)
+                 :at      (:measurements/at r)
+                 :kind    (:measurements/kind r)
+                 :delta   (:measurements/delta r)
+                 :payload (edn/read-string (:measurements/payload r))})
+        (jdbc/execute! conn
+                       (if since
+                         ["SELECT * FROM measurements WHERE kind = ? AND seq > ?
+                           ORDER BY seq" (str kind) since]
+                         ["SELECT * FROM measurements WHERE kind = ?
+                           ORDER BY seq" (str kind)]))))
+
+(defn ^:export line-status
+  "`line-id`'s status — `\"open\"`, `\"landed\"`, `\"abandoned\"` — or **nil** when
+  the registry has no such line.
+
+  A cached line id has to keep asking this, because a DIFFERENT PROCESS can
+  settle the line underneath the one holding the id. The plugin's Stop hook is
+  the routine case: on every session pause it runs `done` through a one-shot
+  process carrying the session's own agent id, which adopts this agent's line,
+  lands it, and settles it — while the long-lived server goes on holding the
+  id it cached at first use.
+
+  **nil and \"landed\" are different answers and must not be collapsed.** A
+  settled line is one the system finished with on purpose, and moving off it
+  is self-healing. A line the registry does not have AT ALL is a broken
+  invariant, and healing that quietly is how work goes missing with nobody
+  told — `slopp.ops.branch/land-thread!` reports that case deliberately, and a
+  boolean here would take away its ability to. Learned by writing the boolean
+  first: it turned a reported failure into a silent one, and
+  `branch-test/a-session-that-cannot-FIND-its-thread-says-so-instead-of-landing-quietly`
+  said so immediately.
+
+  A primary-key lookup, so asking on every resolution costs a fraction of what
+  the write it precedes costs."
+  [conn line-id]
+  (one-col (jdbc/execute-one!
+            conn ["SELECT status FROM lines WHERE id = ?" line-id])))

@@ -630,3 +630,39 @@
             sess (atom {:store st2 :test-map {'g.core-test/traced #{'g.core/g}}})]
         (is (= '[g.core-test/traced]
                (vec (sort (engine/affected-tests sess 'g.core 'g)))))))))
+
+(deftest a-red-says-whether-it-is-mine-or-merely-present
+  ;; The measured deadlock: `implicate` computes the correlation and then
+  ;; collapses two different answers into one absence. A failing test whose
+  ;; trace is KNOWN and disjoint from my edits is SOMEONE ELSE'S red; a
+  ;; failing test with NO trace is a red nobody can attribute at all. Both
+  ;; arrived as "the :implicated key is missing", so the only safe reading
+  ;; was "assume it is mine" — which is what freezes one agent's thread
+  ;; behind another agent's red.
+  (let [summary {:fail 3
+                 :failures [{:test 'p.core-test/mine-t}
+                            {:test 'p.core-test/theirs-t}
+                            {:test 'p.core-test/nobody-knows-t}]}
+        tmap    {'p.core-test/mine-t   ['p.core/f]
+                 'p.core-test/theirs-t ['p.core/g]}
+        by-test (into {} (map (juxt :test identity))
+                      (:failures (engine/implicate summary tmap #{'p.core/f})))]
+    (testing "a failure that exercises an edited form is mine, and names it"
+      (is (= ['p.core/f] (:implicated (by-test 'p.core-test/mine-t))))
+      (is (= :mine (:attribution (by-test 'p.core-test/mine-t)))))
+    (testing "a TRACED failure disjoint from my edits is someone else's"
+      (is (= :foreign (:attribution (by-test 'p.core-test/theirs-t))))
+      (is (nil? (:implicated (by-test 'p.core-test/theirs-t)))))
+        (testing "an UNTRACED failure is evidence of neither — and must not read as foreign"
+      (is (= :untraced (:attribution (by-test 'p.core-test/nobody-knows-t)))))
+    (testing "a failing test the episode WROTE is its own red, trace or no trace"
+      ;; the trace maps a test to the SOURCE it exercises, so it can never
+      ;; name the test itself. Red-first — write the failing test, then make
+      ;; it pass — edits only the test, and reading the trace alone called
+      ;; that somebody else's red.
+      (let [f (first (:failures (engine/implicate
+                                 {:fail 1 :failures [{:test 'p.core-test/theirs-t}]}
+                                 tmap
+                                 #{'p.core-test/theirs-t})))]
+        (is (= :mine (:attribution f)))
+        (is (= ['p.core-test/theirs-t] (:implicated f)))))))

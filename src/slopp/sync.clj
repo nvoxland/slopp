@@ -236,9 +236,16 @@
   merge it was gaining nothing from."
   [session treeM treeT changed conflict! note! agent]
   (let [st         (:store @session)
+        ;; LOCAL first, and it is not a stylistic ordering. The fallback below
+        ;; treats a path as projected when the store merely HOLDS `:config`
+        ;; for it — which is true of every `dev` entry anybody has set, so
+        ;; read the other way round the fallback claims precisely the paths
+        ;; that must never be projected. A local path is not in a remote tree
+        ;; to begin with, so there is nothing here to refuse absorbing.
         projected? (fn [path]
-                     (or (contains? store/projected-config-paths path)
-                         (some? (get-in st [:config path]))))
+                     (and (not (contains? store/local-config-paths path))
+                          (or (contains? store/projected-config-paths path)
+                              (some? (get-in st [:config path])))))
         ;; a NUL byte, spelled without putting one in this source: a stored
         ;; control byte makes the form read as BINARY to grep and it goes
         ;; invisible to every text sweep
@@ -390,84 +397,6 @@
       (boolean (or (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/heads/slopp/"))
                    (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/remotes/origin/slopp/"))))
       (finally (.close repo)))))
-
-^:reads (defn alignment
-  "Q12: PROOF that the published slopp branch is the store's latest
-  milestone — {:branch :branch-head :latest-milestone :milestone-sha
-  :head-milestone :aligned :note} — or nil when there is no resolvable LOCAL
-  remote, branch, or milestone. One call answers the cross-check agents
-  otherwise perform by hand (throwaway worktrees, raw sqlite, duplicate
-  test runs). `commits` = query-commits rows, newest first.
-
-  It asks the branch HEAD which milestone it is — `git/stamped-milestone`
-  reads the `Slopp-Commit:` trailer every projected commit carries — rather
-  than comparing against the sha the store recorded. Those are different
-  facts, and the difference is not hypothetical: a sha is pinned when a commit
-  is MINTED, which says nothing about what was published. On 2026-08-14 a
-  refused push left a pin naming a commit nobody had; the pin is
-  first-writer-wins, so no later projection could correct it, and this read
-  went permanently false against a mirror that WAS the latest milestone's
-  projection — while advising a `git_push` that could not fix it. A stamp
-  rides the artifact and cannot disagree with the artifact.
-
-  A head with NO stamp was not minted here: it is an ADOPTED remote commit
-  from a pull, and for those the milestone's `:sha` is the remote's own commit
-  id — an observation rather than a mint record — so sha equality is the
-  right question there, and only there."
-  [dir remote branch commits]
-  (try
-    (when-let [target (and remote (resolve-remote dir remote))]
-      (let [f    (io/file (str target))
-            gitd (if (.exists (io/file f ".git")) (io/file f ".git") f)]
-        (when (.exists (io/file gitd "HEAD"))
-          (let [repo (-> (org.eclipse.jgit.storage.file.FileRepositoryBuilder.)
-                         (.setGitDir gitd)
-                         (.build))
-                b    (or branch "slopp")]
-            (try
-              (when-let [head (.resolve repo (str "refs/heads/" b))]
-                ;; the LATEST milestone, not the latest one that happens to
-                ;; carry a sha: a milestone the projection never minted is
-                ;; genuinely unaligned, and skipping to an older row reported
-                ;; alignment against a milestone nobody asked about.
-                (when-let [latest (first commits)]
-                  (let [head-sha (.name head)
-                        stamp    (git/stamped-milestone (git/message-of repo head-sha))
-                        aligned  (if stamp
-                                   (= stamp (:commit latest))
-                                   (= head-sha (:sha latest)))]
-                    {:branch b :branch-head head-sha
-                     :latest-milestone (:commit latest)
-                     :milestone-sha (:sha latest)
-                     ;; what the verdict was actually based on — a reader who
-                     ;; cannot see WHICH milestone the head claims to be has to
-                     ;; go and do the cross-check this exists to replace
-                     :head-milestone stamp
-                     :aligned aligned
-                     :note (cond
-                             (and aligned stamp)
-                             (str "the " b " branch head STAMPS milestone "
-                                  (:commit latest) " — read off the commit"
-                                  " itself, not a recorded sha; no"
-                                  " worktree/sqlite cross-check needed")
-
-                             aligned
-                             (str "the " b " branch head IS milestone "
-                                  (:commit latest) "'s adopted commit; no"
-                                  " worktree/sqlite cross-check needed")
-
-                             stamp
-                             (str "the " b " branch head is milestone " stamp
-                                  "'s projection, not the latest ("
-                                  (:commit latest) ") — git_push publishes it")
-
-                             :else
-                             (str "the " b " branch head carries no milestone"
-                                  " stamp and is not milestone "
-                                  (:commit latest) "'s adopted commit —"
-                                  " git_push publishes it"))}))) 
-              (finally (.close repo)))))))
-    (catch Exception _ nil)))
 
 (defn publish-local!
   "Mirror the store's milestone history into THIS checkout's local git as
@@ -1013,3 +942,127 @@
     (println (pr-str r))
     (shutdown-agents)
     (when (or (:error r) (false? (:ok r)) (= :red (:status r))) (System/exit 1))))
+
+(defn alignment-note
+  "The sentence [[alignment]] reports, from facts already measured:
+  `{:stamp :latest :aligned :projected?}`.
+
+  Pure and separate because the interesting part is a DECISION, not the git
+  plumbing that gathers it — and because the decision was wrong in a way no
+  amount of testing the plumbing would have found.
+
+  `:projected?` is the fact that was missing. `git_push` publishes a
+  projection that EXISTS; it does not build one. On this store the note said
+  *git_push publishes it*, the push ran with a real token, reported OK over
+  133 commits, and alignment came back byte-identical — because the milestone
+  it names had no projection anywhere, and the sha it compares against was in
+  no object database on the machine. \"Behind, and a push will catch it up\"
+  and \"behind, and the commits it would need were never created\" are
+  different facts that shared one sentence, and the sentence is
+  instruction-shaped, so the reader acts on it.
+
+  Three values, not two: `nil` means nothing could look, and is reported as
+  neither built nor missing. Answering false would invent a claim; answering
+  true is the confident report this whole class of bug is made of."
+  [branch {:keys [stamp latest aligned projected?]}]
+  (cond
+    (and aligned stamp)
+    (str "the " branch " branch head STAMPS milestone " latest
+         " — read off the commit itself, not a recorded sha; no"
+         " worktree/sqlite cross-check needed")
+
+    aligned
+    (str "the " branch " branch head IS milestone " latest
+         "'s adopted commit; no worktree/sqlite cross-check needed")
+
+    (false? projected?)
+    (str "the " branch " branch head is milestone " (or stamp "an earlier state")
+         "'s projection, and milestone " latest "'s commit is in NO reachable"
+         " object database — so there is nothing for git_push to publish. A"
+         " sha is pinned when a commit is MINTED, which says nothing about"
+         " whether one was ever built here. git_push from a CHECKOUT mirrors"
+         " the slopp/* branches that exist; it does not create a projection.")
+
+    stamp
+    (str "the " branch " branch head is milestone " stamp
+         "'s projection, not the latest (" latest ") — git_push publishes it")
+
+    :else
+    (str "the " branch " branch head carries no milestone stamp and is not"
+         " milestone " latest "'s adopted commit — git_push publishes it")))
+
+^:reads (defn alignment
+  "Q12: PROOF that the published slopp branch is the store's latest
+  milestone — {:branch :branch-head :latest-milestone :milestone-sha
+  :head-milestone :aligned :note} — or nil when there is no resolvable LOCAL
+  remote, branch, or milestone. One call answers the cross-check agents
+  otherwise perform by hand (throwaway worktrees, raw sqlite, duplicate
+  test runs). `commits` = query-commits rows, newest first.
+
+  It asks the branch HEAD which milestone it is — `git/stamped-milestone`
+  reads the `Slopp-Commit:` trailer every projected commit carries — rather
+  than comparing against the sha the store recorded. Those are different
+  facts, and the difference is not hypothetical: a sha is pinned when a commit
+  is MINTED, which says nothing about what was published. On 2026-08-14 a
+  refused push left a pin naming a commit nobody had; the pin is
+  first-writer-wins, so no later projection could correct it, and this read
+  went permanently false against a mirror that WAS the latest milestone's
+  projection — while advising a `git_push` that could not fix it. A stamp
+  rides the artifact and cannot disagree with the artifact.
+
+  A head with NO stamp was not minted here: it is an ADOPTED remote commit
+  from a pull, and for those the milestone's `:sha` is the remote's own commit
+  id — an observation rather than a mint record — so sha equality is the
+  right question there, and only there."
+  [dir remote branch commits]
+  (try
+    (when-let [target (and remote (resolve-remote dir remote))]
+      (let [f    (io/file (str target))
+            gitd (if (.exists (io/file f ".git")) (io/file f ".git") f)]
+        (when (.exists (io/file gitd "HEAD"))
+          (let [repo (-> (org.eclipse.jgit.storage.file.FileRepositoryBuilder.)
+                         (.setGitDir gitd)
+                         (.build))
+                b    (or branch "slopp")]
+            (try
+              (when-let [head (.resolve repo (str "refs/heads/" b))]
+                ;; the LATEST milestone, not the latest one that happens to
+                ;; carry a sha: a milestone the projection never minted is
+                ;; genuinely unaligned, and skipping to an older row reported
+                ;; alignment against a milestone nobody asked about.
+                (when-let [latest (first commits)]
+                  (let [head-sha (.name head)
+                        stamp    (git/stamped-milestone (git/message-of repo head-sha))
+                        aligned  (if stamp
+                                   (= stamp (:commit latest))
+                                   (= head-sha (:sha latest)))
+                        ;; Does the commit this is comparing against EXIST?
+                        ;; `git_push` publishes a projection; it does not build
+                        ;; one, so a milestone nobody projected has nothing to
+                        ;; publish and advising a push means a real push to a
+                        ;; public repository that changes nothing. nil when
+                        ;; there is no sha to ask about — "not measured" is not
+                        ;; the same answer as "not there".
+                        projected?
+                        (when-let [sha (:sha latest)]
+                          (try (.has (.getObjectDatabase repo)
+                                     (org.eclipse.jgit.lib.ObjectId/fromString sha))
+                               (catch Exception _ nil)))]
+                    {:branch b :branch-head head-sha
+                     :latest-milestone (:commit latest)
+                     :milestone-sha (:sha latest)
+                     ;; what the verdict was actually based on — a reader who
+                     ;; cannot see WHICH milestone the head claims to be has to
+                     ;; go and do the cross-check this exists to replace
+                     :head-milestone stamp
+                     ;; and whether the thing the remedy would publish is even
+                     ;; there. Carried as data beside the sentence, so a reader
+                     ;; who wants the fact does not have to parse prose for it.
+                     :latest-projected projected?
+                     :aligned aligned
+                     :note (alignment-note b {:stamp stamp
+                                              :latest (:commit latest)
+                                              :aligned aligned
+                                              :projected? projected?})}))) 
+              (finally (.close repo)))))))
+    (catch Exception _ nil)))

@@ -155,23 +155,6 @@
        " (catch Throwable _)) (System/exit 0)) \"slopp-parent-watchdog\")"
        " (.setDaemon true) (.start))) nil)"))
 
-(defn- default-cmd
-  "The target image launch command: Clojure + nREPL, plus the store's external
-  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
-  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
-  malli) are merged LAST so slopp-the-tool's own image deps are always present
-  at slopp's versions — regardless of the project manifest.
-
-  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
-  before `-m` starts nREPL): the child can never exist without its reaper,
-  closing the boot-window orphan class — a parent killed between spawn and
-  nREPL connect used to leave a JVM nothing would ever reap."
-  ([] (default-cmd nil))
-  ([deps]
-   [clojure-bin "-Sdeps"
-    (pr-str {:deps (merge deps inherent-deps)})
-    "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))
-
 (defn- benign-load-noise?
   "True when a `load-file` stderr chunk carries ONLY compiler noise — var-shadow
   `WARNING:`s (e.g. garden.color's `abs` re-refer) or reflection warnings — and
@@ -380,66 +363,6 @@
     (eval! handle "(in-ns 'user)")
     handle))
 
-(defn ^:export ^{:live-handle true
-        :malli/schema
-        [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
-              [:cat [:? [:map
-                        [:slopp.image.repl/cmd {:optional true} [:maybe [:sequential :string]]]
-                        [:slopp.image.repl/dir {:optional true} [:maybe :some]]
-                        [:slopp.image.repl/timeout-ms {:optional true} :int]
-                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]]]]
-         :map]}
-  start!
-  "Launch a fresh owned image (with slopp.kernel.rt support loaded); returns a handle
-  for eval!/restart!/stop!.
-
-  The OPTION map is a caller-built contract, so its keys are qualified —
-  unlike the handle this returns, whose keys are internal and read in the
-  body by `eval!`/`stop!` rather than destructured at any boundary.
-
-  `:currency` is the image's own record of what it has loaded, minted HERE so
-  every handle carries one from birth. It used to be a process-global atom,
-  which meant the question \"does the image hold this form's current source\"
-  had an implied subject and a second image had to be kept out by every
-  caller choosing a non-stamping loader.
-
-  Any throw after the spawn (port timeout, connect failure, rt load) DESTROYS
-  the child before rethrowing — with a custom :cmd the watchdog may not be
-  aboard yet, and an abandoned nrepl JVM outlives even parent death. The
-  ex-info carries the child :pid so the cleanup is verifiable.
-
-  The `:=>` schema is DOCUMENTATION here, not a verified claim: this fn
-  spawns a JVM, so `analyzer-pure?` excludes it from the generative
-  oracle-check. Nothing will catch it drifting from the impl — keep it
-  honest by hand."
-  ([] (start! {}))
-  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps] :or {timeout-ms 60000}}]
-   (let [cmd (or cmd (default-cmd deps))
-         dir (or dir (temp-dir))
-         pb  (doto (ProcessBuilder. ^java.util.List cmd)
-               (.redirectErrorStream true)
-               (.directory (io/file dir)))
-         proc (.start pb)]
-     (try
-       (let [rdr  (io/reader (.getInputStream proc))
-             port (read-port rdr timeout-ms)
-             conn (nrepl/connect :port port)
-             client (nrepl/client conn 30000)
-             session (nrepl/new-session client)]
-         (inject-rt! {:process proc :port port :conn conn :client client
-                      :session session :reader rdr :dir dir
-                      :currency (image.currency/new-registry)}))
-       (catch Throwable t
-         (.destroyForcibly proc)
-         (throw (ex-info (str "image boot failed: " (ex-message t))
-                         {:pid (.pid proc)} t)))))))
-
-(defn restart!
-  "Stop the image and start a fresh one (the D5 correctness backstop). Returns a
-  new handle; the old one is dead."
-  ([handle] (restart! handle {}))
-  ([handle opts] (stop! handle) (start! opts)))
-
 ^:unsafe (defn ^:export reset-to-baseline!
   "Return `image` to the state it recorded at boot, so the next tenant gets it
   as if freshly launched — or NIL, meaning it could not be proven clean and
@@ -640,3 +563,162 @@
              handle
              (add-libs-code deps-map))]
       (when (:err r) r))))
+
+(def ^:export default-image-jvm-opts
+  "The JVM budget every owned image launches under. **Empty, and that is a
+  measured result rather than a placeholder.** Host property, never store
+  config: a store is shared by every writer and by CI, and how much memory this
+  BOX will spend on child JVMs is not a property of the code being written.
+
+  `-Xms32m` shipped here first, on an isolated probe that showed a bare
+  clojure+nREPL child dropping 348 -> 262 MB committed. A controlled A/B against
+  a REAL loaded image — same store, three rounds, arms alternated, a full GC
+  forced before each sample — reversed it:
+
+  | arm | total committed |
+  |---|---|
+  | no budget | 722,259 / 722,088 / 722,105 KB |
+  | `-Xms32m` | 721,534 / 746,875 / 747,741 KB |
+
+  It never won, and cost ~16 MB (+2.3%) on average. `-Xms` sets the INITIAL
+  heap, and an image that loads a real store allocates past 32m before it is
+  ready — so the heap is sized on demand either way, and starting smaller only
+  overshoots on the way up. The probe's number was never wrong about a BARE
+  JVM; it was wrong that a bare JVM stands in for a loaded one.
+
+  Both numbers deserve their weight stated: the in-situ A/B alternated arms and
+  normalised the collection cycle, while the probe took ONE unsynchronised
+  sample per arm — and a single sample here measures GC phase, not the flag.
+  The first in-situ run made exactly that mistake and reported the on-arm 33 MB
+  WORSE, which was also noise. Only the controlled comparison counts.
+
+  What survives is this seam and its guards, which is what a real budget will
+  need. Two pairings must hold for anything added later, both encoded as tests
+  because a comment cannot fail:
+
+  - **`-XX:+UseSerialGC` must never ship without an `-Xms`.** Alone it nearly
+    DOUBLES the footprint — 681 MB against 348 — because Serial commits its
+    ergonomic initial heap at startup and, unlike G1, never uncommits.
+  - **An `-Xmx` cap must never ship without `-XX:+ExitOnOutOfMemoryError`.** A
+    cap manufactures OutOfMemoryError, and an OOM inside a test run is a RED
+    SUITE that means nothing — the exact false verdict the oracle exists to
+    prevent. Paired, the image DIES instead, which the eval path already
+    reports as the run not having happened rather than as a failure.
+
+  And where the memory actually is, measured on a loaded image: heap 278 MB
+  committed, **metaspace 195 MB**, thread stacks 74 MB, GC 63 MB, code cache
+  26 MB. Metaspace is 27% here — most of it the store's own namespaces, defined
+  through a DynamicClassLoader — so neither a shared class archive nor an
+  isolated-classloader runtime can give it back. The remaining levers are the
+  per-process ones."
+  [])
+
+(defn ^:export image-jvm-opts
+  "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set
+  one (whitespace-separated), else `default-image-jvm-opts`.
+
+  **An explicitly EMPTY value means no budget at all**, and that is the point
+  rather than an edge case: it is the off-arm. A memory change is only worth
+  what a controlled A/B on a quiet box says it is worth, and an off-arm you
+  reach by editing code is one nobody runs. Unset and empty must therefore
+  differ — unset is the shipped budget, empty is as-shipped-before-the-budget.
+
+  `getenv` is a parameter rather than a read, because the process environment
+  is state a test cannot set, and a precedence rule nobody can exercise is one
+  that drifts."
+  [getenv]
+  (if-let [override (getenv "SLOPP_IMAGE_JVM_OPTS")]
+    (vec (re-seq #"\S+" override))
+    default-image-jvm-opts))
+
+(defn- default-cmd
+  "The target image launch command: Clojure + nREPL, plus the store's external
+  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
+  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
+  malli) are merged LAST so slopp-the-tool's own image deps are always present
+  at slopp's versions — regardless of the project manifest.
+
+  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
+  before `-m` starts nREPL): the child can never exist without its reaper,
+  closing the boot-window orphan class — a parent killed between spawn and
+  nREPL connect used to leave a JVM nothing would ever reap.
+
+  The memory budget rides `-J` opts, and their PLACEMENT is load-bearing:
+  `-J` is a clj-opt, collected by the launcher only from the part of the
+  command line before `-M`. The same strings after `-M` are handed to the
+  program as arguments and never reach the JVM — a budget that silently does
+  nothing, which is worse than none because it MEASURES as no effect. They go
+  first, ahead of everything.
+
+  `opts` is an argument in the third arity because the shipped budget is empty
+  (see [[default-image-jvm-opts]]): the placement rule above still has to be
+  provable, and a rule that can only be exercised when someone happens to have
+  configured a budget is one that breaks the day someone does."
+  ([] (default-cmd nil))
+  ([deps] (default-cmd deps (image-jvm-opts #(System/getenv %))))
+  ([deps opts]
+   (-> [clojure-bin]
+       (into (map #(str "-J" %)) opts)
+       (into ["-Sdeps"
+              (pr-str {:deps (merge deps inherent-deps)})
+              "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
+
+(defn ^:export ^{:live-handle true
+        :malli/schema
+        [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
+              [:cat [:? [:map
+                        [:slopp.image.repl/cmd {:optional true} [:maybe [:sequential :string]]]
+                        [:slopp.image.repl/dir {:optional true} [:maybe :some]]
+                        [:slopp.image.repl/timeout-ms {:optional true} :int]
+                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]]]]
+         :map]}
+  start!
+  "Launch a fresh owned image (with slopp.kernel.rt support loaded); returns a handle
+  for eval!/restart!/stop!.
+
+  The OPTION map is a caller-built contract, so its keys are qualified —
+  unlike the handle this returns, whose keys are internal and read in the
+  body by `eval!`/`stop!` rather than destructured at any boundary.
+
+  `:currency` is the image's own record of what it has loaded, minted HERE so
+  every handle carries one from birth. It used to be a process-global atom,
+  which meant the question \"does the image hold this form's current source\"
+  had an implied subject and a second image had to be kept out by every
+  caller choosing a non-stamping loader.
+
+  Any throw after the spawn (port timeout, connect failure, rt load) DESTROYS
+  the child before rethrowing — with a custom :cmd the watchdog may not be
+  aboard yet, and an abandoned nrepl JVM outlives even parent death. The
+  ex-info carries the child :pid so the cleanup is verifiable.
+
+  The `:=>` schema is DOCUMENTATION here, not a verified claim: this fn
+  spawns a JVM, so `analyzer-pure?` excludes it from the generative
+  oracle-check. Nothing will catch it drifting from the impl — keep it
+  honest by hand."
+  ([] (start! {}))
+  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps] :or {timeout-ms 60000}}]
+   (let [cmd (or cmd (default-cmd deps))
+         dir (or dir (temp-dir))
+         pb  (doto (ProcessBuilder. ^java.util.List cmd)
+               (.redirectErrorStream true)
+               (.directory (io/file dir)))
+         proc (.start pb)]
+     (try
+       (let [rdr  (io/reader (.getInputStream proc))
+             port (read-port rdr timeout-ms)
+             conn (nrepl/connect :port port)
+             client (nrepl/client conn 30000)
+             session (nrepl/new-session client)]
+         (inject-rt! {:process proc :port port :conn conn :client client
+                      :session session :reader rdr :dir dir
+                      :currency (image.currency/new-registry)}))
+       (catch Throwable t
+         (.destroyForcibly proc)
+         (throw (ex-info (str "image boot failed: " (ex-message t))
+                         {:pid (.pid proc)} t)))))))
+
+(defn restart!
+  "Stop the image and start a fresh one (the D5 correctness backstop). Returns a
+  new handle; the old one is dead."
+  ([handle] (restart! handle {}))
+  ([handle opts] (stop! handle) (start! opts)))

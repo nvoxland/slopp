@@ -907,29 +907,27 @@
       (is (= base (second (store/alloc-id base "d")))
           "the store comes back unchanged"))))
 
-(deftest harness-telemetry-lands-as-a-REGISTERED-marker-op
-  ;; The harness knows what slopp cannot — tokens, cost, and how full the
-  ;; conversation is. Those arrive as OpenTelemetry and land here as their own
-  ;; citizen, for the reason `:read-cost` did: they record what a SPAN cost and
-  ;; there is no other op that can carry them.
-  (let [st (store/record-otel (store/empty-store)
-                              [{:session "s1" :prompt "p1" :context 17548
-                                :input 2 :output 4 :cost-usd 0.08}])
-        d  (last (:deltas st))]
-    (testing "one delta per received batch, carrying the requests"
-      (is (= :otel (:op d)) (pr-str d))
-      (is (= 1 (count (:requests d))) (pr-str d))
-      (is (= 17548 (:context (first (:requests d))))))
+(deftest the-retired-otel-op-stays-REGISTERED-for-the-deltas-already-written
+  ;; Telemetry used to be a delta. It is a row in the `measurements` table now,
+  ;; because appending one moved the head every few seconds and took the store
+  ;; out — see `slopp.ops/record-otel!`.
+  ;;
+  ;; But `:otel` deltas were written during the hour before the move, and they
+  ;; are in this store's journal forever. `merge-logs` turns an UNREGISTERED op
+  ;; into an error that fails the ENTIRE merge, so retiring the writer while
+  ;; un-registering the op would mean any merge that met one of those rows
+  ;; refused — a store-wide failure caused by history.
+  ;;
+  ;; So the registration outlives the writer, deliberately. This test is what
+  ;; stops a later cleanup from noticing nothing writes `:otel` and removing it.
+  (let [otel-delta {:id "d1" :parent nil :op :otel :ns '*session*
+                    :at 0 :requests [{:session "s" :context 17548}]}
+        st (update (store/empty-store) :deltas conj otel-delta)]
 
-    (testing "it is a MARKER — no code changed, so a host that lacks one is not behind"
+    (testing "the op is registered as a marker"
       (is (contains? fields/markers :otel)
-          "an unregistered op makes merge-logs REFUSE the whole merge, which is
-           a store-wide failure caused by telemetry"))
+          "an unregistered op makes merge-logs REFUSE the whole merge"))
 
-    (testing "and a merge meets a KNOWN op rather than refusing"
-      ;; the failure this guards is specific and severe: merge-logs turns any
-      ;; unregistered op into an error that fails the entire merge, so an
-      ;; unregistered telemetry delta would block landing for everyone on the
-      ;; branch — work stopped by a measurement.
+    (testing "so a merge that meets a historical row does not refuse"
       (let [r (merge/merge-logs (store/empty-store) st)]
         (is (nil? (:error r)) (pr-str (:error r)))))))

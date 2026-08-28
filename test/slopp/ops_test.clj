@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -2158,4 +2158,105 @@
         (ops/ingest! sess 'sc.more "(ns sc.more)\n\n(defn ^:unused-ok g \"G.\" [x] x)\n")
         (let [r (external/full-check! sess)]
           (is (nil? (:standing r)) (pr-str (dissoc r :lint :warnings)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-brief-says-when-the-served-ui-is-behind-the-store
+  ;; The `:app-behind` precedent, one listener over. A brief that hands a
+  ;; reader a url is the place they find out anything about it at all — a
+  ;; consumer read this brief through a twenty-minute window in which their
+  ;; app served old code and it said nothing, which is why `:app-behind` is
+  ;; here. The reviewer listener had the same hole and no counter: its route
+  ;; table is assembled once at serve time, so a route added afterwards 404s
+  ;; and the brief keeps announcing the url as though nothing were owed.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-uistale-" (System/nanoTime))
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (store/ingest (store/empty-store) 'brief.one "(ns brief.one)\n\n(def a 1)\n")
+            _     (db/append! conn st (store/deltas st) ['brief.one] trunk nil)
+            stamp (slopp.currency/of conn trunk)
+            sess  (atom {:store st :db conn :line trunk
+                         :ui-url "http://127.0.0.1:1234/" :ui-stamp stamp})]
+
+        (testing "a listener serving the current store earns no remark"
+          (let [b (ops/session-brief sess)]
+            (is (= "http://127.0.0.1:1234/" (:ui b)) (pr-str b))
+            (is (nil? (:ui-stale b))
+                (str "silence is for nothing-to-doubt, or the line becomes noise: " (pr-str b)))))
+
+        (testing "and once the line moves under it, the brief says so beside the url"
+          (let [st2 (store/ingest st 'brief.two "(ns brief.two)\n\n(def b 2)\n")
+                new (vec (drop (count (store/deltas st)) (store/deltas st2)))]
+            (is (true? (db/append! conn st2 new ['brief.two] trunk (:head stamp)))
+                "fixture: the line really did move")
+            (let [b (ops/session-brief sess)]
+              (is (= "http://127.0.0.1:1234/" (:ui b)) "the url is still handed over")
+              (is (some? (:ui-stale b)) (pr-str b))))))
+      (finally (.close conn)))))
+
+(deftest ^:external the-model-side-is-read-beside-the-writer-not-in-the-query-door
+  ;; `record-otel!` writes the measurements TABLE rather than the journal — a
+  ;; statistic must not move the head every writer compare-and-swaps against.
+  ;; Its read twin belongs in the same place, and that is not a tidiness
+  ;; preference: `slopp.read.query` is declared `:pure`, so a query front door
+  ;; that opens the journal makes its own tier a claim it does not earn.
+  ;; full_check grades exactly that, and it went red on this the first time
+  ;; anything asked.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-otelread-" (System/nanoTime))
+        conn (db/open! dir)
+        sess (atom {:store (store/empty-store) :db conn})]
+    (try
+      (is (= 1 (ops/record-otel! sess [{:model "claude-opus-5" :input 2 :output 4}]))
+          "fixture: one request recorded")
+      (testing "the read twin hands back what the writer put there"
+        (let [ms (ops/otel-measurements sess)]
+          (is (= 1 (count ms)) (pr-str ms))
+          (is (= 1 (count (:requests (first ms)))) (pr-str ms))
+          (is (= "claude-opus-5" (:model (first (:requests (first ms))))) (pr-str ms))))
+      (testing "and the query front door folds what it is HANDED"
+        (is (map? (query/query-turn-cost sess :otel (ops/otel-measurements sess)))))
+      (testing "a session with no journal simply has none"
+        (is (empty? (ops/otel-measurements (atom {:store (store/empty-store)})))))
+      (finally (.close conn)))))
+
+(deftest ^:external dev-config-validates-at-write
+  ;; `dev` has a registry, so it gets the same bar `capabilities` and `rules`
+  ;; get. Without this the registry would be documentation: `config_file`
+  ;; only refuses on paths it is told to check, so an unregistered path
+  ;; records whatever it is handed and a typo'd key governs nothing, silently
+  ;; — the exact hole the `rules` registry was wired in to close.
+  (let [sess (external/open!)]
+    (try
+      (testing "an unknown dev key is refused, and the refusal names it"
+        (let [r (ops/config-file! sess "dev" :key "run.app.prot" :value "8080"
+                                  :prompt "typo'd field")]
+          (is (re-find #"run\.app\.prot" (str (:error r))) (pr-str r))
+          (is (nil? (get-in (:store @sess) [:config "dev" :values "run.app.prot"]))
+              "the refused key landed anyway")))
+
+      (testing "a value that fails its type is refused with the teaching"
+        (let [r (ops/config-file! sess "dev" :key "run.app.main" :value "unqualified"
+                                  :prompt "not an entry point")]
+          (is (re-find #"qualified symbol" (str (:error r))) (pr-str r))))
+
+      (testing "a good declaration lands and reads back as a runnable"
+        (is (nil? (:error (ops/config-file! sess "dev" :key "run.app.main"
+                                            :value "shop.core/-main"
+                                            :prompt "the app"))))
+        (is (nil? (:error (ops/config-file! sess "dev" :key "run.app.args"
+                                            :value "--port,8080"
+                                            :prompt "on this port"))))
+        (let [runs (dev/runnables (:store @sess))]
+          (is (= 'shop.core/-main (get-in runs ["app" :main])) (pr-str runs))
+          (is (= ["--port" "8080"] (get-in runs ["app" :args])) (pr-str runs))))
+
+      (testing "and the write reports that a registry stood behind it"
+        ;; D-surface-honesty: an unchecked write records what it is handed, so
+        ;; a caller cannot tell the two apart unless the result says which
+        ;; happened. `dev` must not report itself as unverified now that it
+        ;; has a registry.
+        (let [r (ops/config-file! sess "dev" :key "run.worker.main"
+                                  :value "shop.jobs/-main" :prompt "a worker")]
+          (is (not-any? #{:schema} (:unverified r)) (pr-str r))))
+
       (finally (ops/close! sess)))))

@@ -19,7 +19,7 @@
             [slopp.ops.engine :as engine]
             [slopp.ops.external :as external]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render]))
+            [slopp.store.render :as store.render] [next.jdbc :as jdbc]))
 
 (def ^:private seed "(ns th.core)\n\n(defn f [x] (inc x))\n")
 
@@ -316,4 +316,110 @@
                 "the rebase DID happen — A is looking at B's change, which is what
                  makes the red actionable rather than mysterious"))
           (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-session-re-adopts-when-something-else-SETTLED-its-line
+  ;; THE orphaning root cause, in one test.
+  ;;
+  ;; `engine/session-line` caches the line id on the session and never
+  ;; re-checks it — "the row is touched once per session rather than once per
+  ;; call". `adopt-thread!` is careful never to hand back a settled line, but
+  ;; nothing re-asks once the answer is cached.
+  ;;
+  ;; And another process settles it routinely. `adopt-thread!`'s own docstring
+  ;; names it: the plugin's Stop hook runs `done` through a ONE-SHOT process
+  ;; carrying this session's own agent id, so on every session pause a second
+  ;; process adopts this line, lands it, and settles it. The long-lived server
+  ;; then keeps writing to a line the registry has finished with.
+  ;;
+  ;; Observed live: `session_brief` reporting 20 un-landed while `thread_list`
+  ;; reported 0 for the line it named and `thread_drop` refused both with
+  ;; "already landed" — work that could go neither forward nor back.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-settled" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'th.settled "(ns th.settled)\n(defn a \"A.\" [] 1)\n")
+      (let [conn (:db @sess)
+            line (engine/session-line sess)
+            status-of (fn [id] (:lines/status
+                                (first (jdbc/execute!
+                                        conn ["SELECT status FROM lines WHERE id = ?" id]))))]
+
+        (testing "fixture: the session has adopted an open line"
+          (is (some? line))
+          (is (= "open" (status-of line))))
+
+        ;; what the Stop hook's one-shot does, minus the JVM
+        (jdbc/execute! conn ["UPDATE lines SET status = 'landed' WHERE id = ?" line])
+
+        (testing "the session does NOT keep writing to the settled line"
+          (let [now (engine/session-line sess)]
+            (is (not= line now)
+                (str "still on the settled line " line
+                     " — every write from here lands nowhere and cannot be dropped"))
+            (is (= "open" (status-of now)) "re-adopted a line that is not open")))
+
+        (testing "and the session's cache now names the line it actually writes to"
+          ;; the three-readers symptom: session value, registry and drop path
+          ;; each resolving `my thread` differently is what made this invisible
+          (is (= (:line @sess) (engine/session-line sess)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external another-agents-red-does-not-hold-my-thread
+  ;; The deadlock this closes, measured over one night of two agents on one
+  ;; store: the trunk goes red for agent A's reasons, and from that moment
+  ;; NOBODY can land — including the agent carrying the fix. Twenty changes
+  ;; sat on one thread, held by one red test, with the fix for that red
+  ;; inside the twenty.
+  ;;
+  ;; The bargain is unchanged where it is load-bearing: the store is red,
+  ;; done SAYS red, and no milestone can be taken. What changes is the
+  ;; attribution — a failing test whose trace is disjoint from everything
+  ;; this episode touched is evidence about somebody else's work, and it
+  ;; is not a verdict on mine.
+  ;;
+  ;; `g` is ^:unused-ok because the fixture needs exactly ONE red: the
+  ;; unused-public gate would otherwise fail B's done on B's own form, and
+  ;; the test would pass or fail for a reason that has nothing to do with
+  ;; whose red it is.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-foreign-red-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'fr.core
+                       (str "(ns fr.core (:require [clojure.test :refer [deftest is]]))\n"
+                            "(defn f \"F.\" [x] (inc x))\n"
+                            "(deftest f-t (is (= 2 (f 1))))\n")
+                       :agent "setup")
+          (ops/ingest! setup 'fr.other
+                       "(ns fr.other)\n\n(defn ^:unused-ok g \"G.\" [] :ok)\n"
+                       :agent "setup")
+          (ops/edit-replace! setup 'fr.core 'f "(defn f \"F.\" [x] (+ x 2))"
+                             :prompt "break f — this red is setup's" :agent "setup")
+          ;; landed directly rather than through a done, because a red done
+          ;; landing nothing is precisely the thing under test
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the red really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (ops/edit-replace! b 'fr.other 'g "(defn ^:unused-ok g \"G.\" [] :still-ok)"
+                             :prompt "work that touches nothing f-t reaches" :agent "agent-b")
+          (let [r    (external/done! b :label "b finishes" :agent "agent-b")
+                fnd  (:findings r)
+                attr (:red-attribution fnd)]
+            (testing "the red is still reported as a red — this launders nothing"
+              (is (= :red (:test-status fnd)) (pr-str fnd)))
+            (testing "and done says whose it is"
+              (is (= ['fr.core/f-t] (:foreign attr)) (pr-str attr))
+              (is (empty? (:mine attr)) (pr-str attr))
+              (is (empty? (:untraced attr)) (pr-str attr)))
+            (testing "so B's work lands instead of waiting for someone else's fix"
+              (is (= "main" (:landed (:land r))) (pr-str r))
+              (let [main-store (db/load-store (:db @b) (db/trunk-line-id! (:db @b)))]
+                (is (re-find #":still-ok" (store.render/render-ns main-store 'fr.other))
+                    "B's work is on the branch"))))
+          (finally (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

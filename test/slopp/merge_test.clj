@@ -478,3 +478,44 @@
             the remote ADDED has no base to merge against"
     (let [r (merge/merge-text nil "" "new\n")]
       (is (= "new\n" (:merged r)) (pr-str r)))))
+
+(deftest a-delete-is-not-UNDONE-by-their-REPLAYED-copy
+  ;; The only merge shape that produces a WRONG STORE WITH NO SIGNAL.
+  ;;
+  ;; A land replays forms onto the branch under NEW ids, so one piece of code
+  ;; accumulates several identities. Delete it on a thread and the merge meets
+  ;; the branch's re-minted copy as an ADD of a name we no longer have — and
+  ;; the `:add` arm reads "we do not have this name" as "we never had it" and
+  ;; appends. The author's deletion is undone in silence.
+  ;;
+  ;; Measured by agent-cb68: they deleted `ensure-id-block!` and
+  ;; `reserve-id-block!`, the merge brought main's re-minted copies back, and
+  ;; it only failed LOUDLY because the resurrected form still had a caller and
+  ;; would not compile. A deletion of something nothing calls comes back
+  ;; quietly, and the store carries code its author removed.
+  ;;
+  ;; `:replace` already has this guard — `(nil? cur)` is "we deleted it; they
+  ;; edited it" and conflicts. `:add` is its missing twin.
+  (let [b      (base)
+        ;; ours: the author deletes it
+        ours   (first (store/remove-form b 'm.core 'c :prompt "drop c"))
+        ;; theirs: the SAME code, re-minted under a new identity, which is
+        ;; exactly what landing does
+        theirs (-> b
+                   (store/remove-form 'm.core 'c :prompt "lift c") first
+                   (store/append-form 'm.core (p/parse-string "(defn c [x] x)")
+                                      :prompt "replayed onto the branch") first)
+        r      (merge/merge-logs ours theirs)
+        src    (store.render/render-ns (:store r) 'm.core)]
+
+    (testing "the deletion STANDS — their replayed copy does not undo it"
+      (is (not (re-find #"defn c\b" src))
+          (str "a form the author deleted was resurrected by the merge: " src)))
+
+    (testing "and if it cannot stand, it is REPORTED rather than silent"
+      ;; either outcome is defensible; silence is not. This is the assertion
+      ;; that matters — the incident was expensive because nothing said so.
+      (is (or (not (re-find #"defn c\b" src))
+              (seq (:conflicts r))
+              (seq (:notes r)))
+          "the form came back AND nothing in the merge result mentions it"))))

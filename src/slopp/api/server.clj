@@ -18,7 +18,7 @@
   belongs to the HUB, which is its own project (`slopp-ui`) and proxies here.
   `ui_serve {port}` is still an explicit override for one run."
   (:require [slopp.http :as slopp.http]
-            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel]))
+            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel] [slopp.currency :as slopp.currency] [slopp.store.db :as db]))
 
 (defonce ^:private current
   ;; defonce, not def: under --live this namespace reloads on every edit,
@@ -131,8 +131,14 @@
    ;; served list above is documented to stay short for exactly that reason.
    ;; An explicit row also keeps OTLP's own path, so the standard
    ;; OTEL_EXPORTER_OTLP_ENDPOINT variable works with no per-signal override.
+   ;; the VAR, not the function: a bare `otel/logs` captures the value at
+   ;; serve! time, so a `--live` reload of the receiver would never reach the
+   ;; running listener. This is the blessed carrier for an in-process
+   ;; reference held in DATA, and it is what makes editing the handler take
+   ;; effect without re-serving. Adding or removing a route still needs a
+   ;; re-serve — the route TABLE is built here and the running server holds it.
    :http/routes [{:method :post :path "/v1/logs" :auth :public
-                  :handler otel/logs}]
+                  :handler #'otel/logs}]
    ;; the reviewer API publishes typed contracts; anything serving them
    ;; unvalidated answers 200s nobody checked
    :http/wrap-context slopp.rest/validating
@@ -170,9 +176,22 @@
                                     :http/host "127.0.0.1"
                                     :http/port port))
           p   (:port srv)
-          url (str "http://127.0.0.1:" p "/")]
-      (reset! current {:server srv :port p :url url})
-      {:url url :port p})
+          url (str "http://127.0.0.1:" p "/")
+          ;; the route table and both performer vocabularies were just derived
+          ;; from the store, and the running listener will hold them until it
+          ;; is re-served. Stamp WHAT they came from, so [[serving]] can answer
+          ;; the question the listener would otherwise answer as a bare 404.
+          stamp (slopp.currency/of (:db @session) (:line @session))]
+      (reset! current {:server srv :port p :url url :stamp stamp
+                       ;; WHICH PROCESS answers this url. A listener runs in
+                       ;; the MCP host while `query_eval` runs in a child
+                       ;; image JVM that loads the whole store fresh — same
+                       ;; store, same code, two loading strategies, and the
+                       ;; only reason that was ever found is that an eval
+                       ;; happened to print its own pid.
+                       :process (db/this-process)})
+      (merge {:url url :port p :process (db/this-process)}
+             (slopp.currency/report (:db @session) stamp)))
     (catch Exception e
       ;; the recognition AND the sentence come from slopp.http — this used to
       ;; walk its own cause chain and phrase its own answer, one of three
@@ -206,3 +225,36 @@
   is one place to keep right."
   [session]
   (slopp.http/context (serving-opts session)))
+
+(defn ^:export serving
+  "The running listener and the currency of what it SERVES — or nil when
+  nothing is up.
+
+  `{:url :port :process :derived-from :current? :why}`. `:process` is the
+  `{:pid :started}` that ANSWERS that url, because a listener runs in the MCP
+  host while `query_eval` runs in a child image JVM loading the whole store
+  fresh — same store, same code, two loading strategies, and nothing said so.
+  An evening was lost to that once, and it broke only because an eval happened
+  to print its own pid.
+
+  The route table, both
+  performer vocabularies and the shell's serve-time state (`:webapp/base`,
+  `:webapp/bundle`, `:webapp/routes`) are all assembled once by
+  `serving-opts` and then held by the listener, so a route added afterwards
+  answers 404 — correctly, for the table this process has, and
+  indistinguishably from a path that genuinely does not exist.
+
+  Re-deriving per request is not the answer: assembly walks every served
+  namespace's var metadata, and a listener that rebuilt itself on every
+  request would pay that on every request. What was missing is cheaper and
+  more honest — the listener knows what it was built from, so it can SAY it
+  is behind. `:current? nil` means the session carried no journal to compare
+  against, which is neither current nor stale and must not be reported as
+  either."
+  [session]
+  (when-let [c @current]
+    (let [r (slopp.currency/report (:db @session) (:stamp c))]
+      (cond-> (merge (select-keys c [:url :port :process]) r)
+        (false? (:current? r))
+        (assoc :remedy (str "ui_serve again — the route table is rebuilt at"
+                            " serve time, and only then"))))))

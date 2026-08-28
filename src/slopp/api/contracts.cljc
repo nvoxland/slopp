@@ -848,7 +848,7 @@
     [:map-of :string :string]]
    [:bundle
     {:optional true
-     :doc "the URL this project's compiled browser bundle is SERVED at, joined from the compile output and the static mount that reaches it. Not a setting — nothing sets it, which is why it rides beside the config rather than in it. ABSENT when no mount reaches the bundle, and that is a real answer rather than a gap: a store may serve its bundle from an endpoint instead, which is what slopp's own reviewer UI does"}
+     :doc "the URL this project's compiled browser bundle is SERVED at, joined from the compile output and the static mount that reaches it. Not a setting — nothing sets it, which is why it rides beside the config rather than in it. ABSENT when no mount reaches the bundle, and that is a real answer rather than a gap: a store may serve its bundle from an endpoint instead, which is what slopp's own reviewer UI does. A PATH on the project's own host, never absolute — resolve it against the address this document came from, which is the one thing a remote consumer holding it cannot otherwise know"}
     :string]
    [:patterns
     {:optional true

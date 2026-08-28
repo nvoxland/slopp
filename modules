@@ -1,5 +1,5 @@
 slopp.addelete: slopp.read slopp.store slopp.ops (test)
-slopp.api: slopp.edit slopp.http slopp.index slopp.ops slopp.otel slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.webapp slopp.ops (test) slopp.rest (test) slopp.webdev (test)
+slopp.api: slopp.currency slopp.edit slopp.http slopp.index slopp.ops slopp.otel slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.webapp slopp.ops (test) slopp.rest (test) slopp.webdev (test)
 slopp.branch: slopp.read slopp.store slopp.ops (test)
 slopp.build-native: slopp.build slopp.ops (test)
 slopp.chsig: slopp.edit slopp.store slopp.ops (test)
@@ -8,6 +8,7 @@ slopp.coldload: slopp.index
 slopp.coldload-gate: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.commit: slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.concurrency: slopp.read slopp.store slopp.ops (test)
+slopp.currency: slopp.store
 slopp.edit: slopp.image slopp.index slopp.project slopp.store slopp.ops (test)
 slopp.edit-group: slopp.read slopp.store slopp.ops (test)
 slopp.effect-boundary: slopp.edit slopp.read slopp.ops (test)
@@ -35,7 +36,7 @@ slopp.merge: slopp.store
 slopp.modules: slopp.edit slopp.read slopp.store slopp.index (test) slopp.ops (test) slopp.project (test) slopp.rules (test)
 slopp.multiproc: slopp.read slopp.store slopp.ops (test)
 slopp.observe: slopp.ops (test)
-slopp.ops: slopp.build slopp.edit slopp.image slopp.index slopp.kernel slopp.project slopp.read slopp.rules slopp.store slopp.store (test) slopp.webdev (test)
+slopp.ops: slopp.build slopp.currency slopp.edit slopp.image slopp.index slopp.kernel slopp.project slopp.read slopp.rules slopp.store slopp.store (test) slopp.webdev (test)
 slopp.orientation: slopp.edit slopp.read slopp.ops (test)
 slopp.phase4: slopp.read slopp.store slopp.ops (test)
 slopp.project: slopp.index slopp.store

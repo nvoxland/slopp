@@ -1427,7 +1427,7 @@
                   :webapp/request-for (fn [s _a] {:http/method :put
                                                   :http/url    (str "/api/things/" (:id (:params s)))
                                                   :http/body   (:draft s)})
-                  :webapp/url-for     (fn [_s a] (str "/p/" (second a)))
+                  :webapp/url-for     (fn [_s a _v] (str "/p/" (second a)))
                   ;; ONE performer, and it sees BOTH kinds of traffic: the load a
                   ;; screen names and the request a control derives. That is the
                   ;; seam `js/fetch` sits behind in a page, which is why there is

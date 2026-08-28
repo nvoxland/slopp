@@ -710,8 +710,9 @@
   nothing became invisible.
 
   `done` and `commit_point` stay quiet by name, and that exclusion is about
-  noise rather than detection: a red `done` genuinely does leave everything
-  private, and it says so itself, in the verdict the agent is already reading.
+  noise rather than detection: a `done` that is red on the episode's own work
+  genuinely does leave everything private, and it says so itself, in the
+  verdict the agent is already reading.
 
   Keyed to the LINE as well as the count, so a land resets both halves — the
   fresh thread starts at zero and the next reminder is a real one rather than
@@ -734,7 +735,7 @@
                  " on your thread and nobody else can see "
                  (if (= 1 n) "it" "them")
                  " — not another agent on this branch, not the git projection,"
-                 " not the running server. A green done lands them.")))))))
+                 " not the running server. `done` lands them.")))))))
 
 (defn- foreign-unlanded-note
   "The line a ONE-SHOT process owes its caller when another thread holds
@@ -865,10 +866,27 @@
    (fn [session _a _sym]
      (text! (doctor/diagnose (:store @session))))
    "ui_serve"
+   ;; `:ui-url` is what session_brief announces, and until this only
+   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
+   ;; brief naming the port it came up on at BOOT. Observed live: the brief
+   ;; said 49283 while the listener held 53610 and nobody held 49283. The
+   ;; address a reader is handed has to be the one that was bound, and
+   ;; stopping has to clear it rather than leave an address nothing answers.
    (fn [session a _sym]
      (text! (if (:stop a)
-              {:stopped (boolean (server/stop!))}
-              (server/serve! session (server/preferred-port (:dir @session) (:port a))))))
+              (let [stopped (boolean (server/stop!))]
+                (swap! session dissoc :ui-url :ui-stamp)
+                {:stopped stopped})
+              (let [r (server/serve! session
+                                     (server/preferred-port (:dir @session) (:port a)))]
+                ;; the stamp rides the SESSION beside the url, because the
+                ;; brief is where a reader finds out anything about this
+                ;; listener and slopp.ops cannot ask slopp.api — that edge
+                ;; runs the other way.
+                (when (:url r)
+                  (swap! session assoc :ui-url (:url r)
+                         :ui-stamp (:derived-from r)))
+                r))))
 "screen"
    (fn [session a _sym]
      (text! (webdev.screen/screen! session
@@ -1120,19 +1138,33 @@
   (let [k [tool (select-keys a [:ns :name :targets :since :detail :depth
                                 :limit :contains :full :at :collapse :format
                                 :on :direction])]
-        h [(get @session ::ask 0) (hash payload)]]
+        h     [(get @session ::ask 0) (hash payload)]
+        p-str (pr-str payload)
+        stub  {:already-sent true
+               :view (str tool (when (:ns a) (str " " (:ns a)))
+                          (when (:name a) (str "/" (:name a))))
+               :note (str "already sent in this ask — about what YOU received,"
+                          " NOT whether the store changed (an outline does not"
+                          " move when a body does). query_detail {:detail}"
+                          " re-opens it.")}]
     (if (and (= h (get-in @session [::told k]))
-             (< 130 (count (pr-str payload))))
-      (let [id (spool! session (pr-str payload))]
+             ;; a stub bigger than what it withholds is not a saving, it is a
+             ;; round trip for nothing. This was a constant (130 chars) chosen
+             ;; when the stub was one short sentence; the note then grew and
+             ;; the floor did not, so small views started costing MORE to
+             ;; withhold than to send. Measuring the actual stub cannot drift
+             ;; out of step with the stub the way a number written down
+             ;; elsewhere can. The id is a representative one — they are all
+             ;; the same length — because it cannot be minted before the
+             ;; decision to spool.
+             (< (count (pr-str (assoc stub :detail "s00000000000")))
+                (count p-str)))
+      (let [id (spool! session p-str)]
         ;; a stub is a withholding, not a saving, until nobody opens it —
         ;; recorded through the same channel as a trim so one fold can ask
         ;; both paths the question
         (note-response! {:stub? true :spooled id})
-        {:unchanged true
-         :view (str tool (when (:ns a) (str " " (:ns a)))
-                    (when (:name a) (str "/" (:name a))))
-         :detail id
-         :note "identical to what this session already received — query_detail {id} if you have not"})
+        (assoc stub :detail id))
       (do (swap! session assoc-in [::told k] h)
           payload))))
 
@@ -1406,7 +1438,9 @@
       "query_capabilities" (text! (told! session name a (query/query-capabilities session)))
       "query_surface" (text! (told! session name a (query/query-surface session)))
       "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry session :since (:since a))))
-      "query_cost" (text! (told! session name a (query/query-turn-cost session :since (:since a))))
+      "query_cost" (text! (told! session name a (query/query-turn-cost
+                                               session :since (:since a)
+                                               :otel (ops/otel-measurements session))))
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))
@@ -1764,104 +1798,6 @@
       (.flush out-writer)))
   nil)
 
-^:unsafe
-(defn -main
-  "Start the stdio MCP server. An optional `dir` argument makes the session
-  durable (store at <dir>/.slopp/store.db); without it the session is
-  ephemeral. Serving a git checkout that carries a slopp BRANCH with an
-  absent/empty store AUTO-IMPORTS it first (zero-ceremony onboarding).
-
-  Serving a dir that is NOT slopp-managed writes NOTHING there: the server
-  is launched in whatever directory the editor has open, so adoption has to
-  be something you do, not something that happens to you. The store is
-  created by the first real write (`slopp.ops.engine/ensure-db!`).
-
-  Git is push/pull to a remote slopp does not own: `git_push` publishes the
-  projection, `git_clone` rebuilds a fileless store from one (slopp.sync).
-  Serving the store to a git client AS a remote was removed — it forced
-  exact-project handling for less than it cost."
-  [& [dir]]
-  (when dir
-    (when-let [r (sync/maybe-auto-import! dir)]
-      (binding [*out* *err*]
-        (println (str "slopp: auto-imported " (:namespaces r)
-                      " namespaces from the repo's slopp branch")))))
-  (let [session (external/open! (cond-> {:slopp.ops/warm-spare? true
-                                      ;; boot the image on a background thread
-                                      ;; so the MCP handshake completes as soon
-                                      ;; as the store loads — a slow/contended
-                                      ;; boot no longer races the connect timeout
-                                      :slopp.ops/async-image? true
-                                      ;; WHO is driving this server. Read here
-                                      ;; and nowhere deeper: a child JVM
-                                      ;; inherits the variable, so a session
-                                      ;; opened inside an image or a test
-                                      ;; runner would otherwise claim this
-                                      ;; conversation's thread. This process is
-                                      ;; the only one a harness actually
-                                      ;; spawned. nil when no known harness set
-                                      ;; one, and open! generates an id as before.
-                                      :slopp.ops/agent-id
-                                      (harness/conversation-id
-                                       #(System/getenv %))}
-                             dir (assoc :slopp.ops/dir dir)))]
-    (swap! session assoc :require-turns? true)   ; real servers enforce turns
-    ;; the reviewer UI comes up with the server, always. It serves the LIVE
-    ;; session and therefore dies with it — that is the trade that keeps its
-    ;; warranty numbers honest — so nothing ever brought it back, and a human
-    ;; who wanted it had to know to ask again after every restart.
-    ;; start-ui! never throws: MCP must serve even when the UI cannot.
-    (start-ui! session)
-    ;; the app server comes up beside the UI, for a store that asked for it.
-    ;; BACKGROUNDED: it boots a whole second JVM and loads the app's web
-    ;; surface into it, and nothing about that should sit between the editor
-    ;; and a completed MCP handshake — the same reason the oracle's own boot
-    ;; is async here.
-    (future (start-app! session))
-    (try
-      (serve! session (io/reader System/in) (io/writer System/out))
-      (finally
-        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
-        ;; belongs to the MCP session and must not outlive it — but boot
-        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
-        ;; working. Saying nothing is what made this expensive: a manual launch
-        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
-        ;; immediately, so the last thing a launcher reads is a url that is
-        ;; already dead, with a live process behind it. Three agents spent an
-        ;; evening diagnosing that, twice concluding the code was broken and
-        ;; once that a jar had not shipped.
-        ;;
-        ;; stderr, because stdout is the JSON-RPC channel.
-        (.println System/err
-                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
-                               " UI listener and exiting. The UI belongs to the"
-                               " MCP session and does not outlive it, so a url"
-                               " printed above has stopped working. To keep one"
-                               " alive, run slopp from an editor (which holds"
-                               " stdin open) rather than launching it manually."))
-        ;; deregister BEFORE the listener goes: the hub should learn we are
-        ;; leaving from us, not by ageing us out thirty seconds later.
-        (hub/stop! (:hub-heartbeat @session))
-        (server/stop!)
-        ;; the app image is a CHILD JVM. Its watchdog would reap it when we
-        ;; die anyway, but leaving that to a watchdog means the port stays
-        ;; bound for as long as the reap takes — and the next server to start
-        ;; here wants exactly that port.
-        (live/stop! (:app-server @session))
-        (ops/close! session)
-        ;; and GO. `(future (start-app! session))` above runs on Clojure's
-        ;; send-off pool, whose workers are NON-DAEMON with a 60-second
-        ;; keepalive — so `main` returns, `DestroyJavaVM` starts, and an IDLE
-        ;; pool thread holds the JVM open for a further minute with every
-        ;; listener already torn down. Caught by thread dump: DestroyJavaVM
-        ;; RUNNABLE, held by `clojure-agent-send-off-pool-0` parked in
-        ;; SynchronousQueue.poll — same stack and same cpu time twelve seconds
-        ;; apart, waiting for a task that was never coming.
-        ;;
-        ;; A minute of a process that has announced a url, withdrawn it, and
-        ;; still answers `ps` is exactly the state nobody could interpret.
-        (shutdown-agents)))))
-
 (defn call!
   "One-shot tool invocation against the store at `dir` — the --call CLI's
   engine and the fallback when no MCP connection exists. Opens a durable
@@ -1923,3 +1859,141 @@
     (println (clojure.string/join "\n" (map :text (:content r))))
     (flush)
     (System/exit (if (:isError r) 1 0))))
+
+(defn- host-image-options
+  "The idle-image budget this SERVER opens with, from the host environment.
+
+  A writer costs several JVMs, not one: the active image, a warm spare, and one
+  parked image per branch line held for the reap lease. Only the first is doing
+  anything. The other two are latency trades — they exist to keep a JVM boot
+  off the critical path — and a host running many concurrent writers is trading
+  the wrong way, because its binding constraint is memory rather than the ~830
+  ms a boot costs.
+
+  Both were already `open!` options; only this server hardcoded them, so there
+  was no way to say so without editing code. **The defaults do not move** —
+  they are what was measured for a session alone on a box — so a single-writer
+  host is unaffected and a swarm operator gets a dial.
+
+  `SLOPP_WARM_SPARE` is off for `0` or `false` and on for anything else,
+  including unset. `SLOPP_BRANCH_IMAGE_TTL_MS` must read as a POSITIVE number
+  to be honoured: a typo parsed as zero would reap every branch image the
+  instant it was parked, which presents as branch switching having got slow and
+  never as a misspelt variable. An unreadable setting must not be obeyed as its
+  most destructive reading.
+
+  `getenv` is a parameter rather than a read, because the process environment
+  is state a test cannot set."
+  [getenv]
+  (let [off?  #{"0" "false"}
+        spare (some-> (getenv "SLOPP_WARM_SPARE") str/trim str/lower-case)
+        ttl   (some-> (getenv "SLOPP_BRANCH_IMAGE_TTL_MS") str/trim parse-long)]
+    {:slopp.ops/warm-spare?         (not (off? spare))
+     :slopp.ops/branch-image-ttl-ms (if (and ttl (pos? ttl))
+                                      ttl
+                                      external/default-branch-image-ttl-ms)}))
+
+^:unsafe
+(defn -main
+  "Start the stdio MCP server. An optional `dir` argument makes the session
+  durable (store at <dir>/.slopp/store.db); without it the session is
+  ephemeral. Serving a git checkout that carries a slopp BRANCH with an
+  absent/empty store AUTO-IMPORTS it first (zero-ceremony onboarding).
+
+  Serving a dir that is NOT slopp-managed writes NOTHING there: the server
+  is launched in whatever directory the editor has open, so adoption has to
+  be something you do, not something that happens to you. The store is
+  created by the first real write (`slopp.ops.engine/ensure-db!`).
+
+  Git is push/pull to a remote slopp does not own: `git_push` publishes the
+  projection, `git_clone` rebuilds a fileless store from one (slopp.sync).
+  Serving the store to a git client AS a remote was removed — it forced
+  exact-project handling for less than it cost."
+  [& [dir]]
+  (when dir
+    (when-let [r (sync/maybe-auto-import! dir)]
+      (binding [*out* *err*]
+        (println (str "slopp: auto-imported " (:namespaces r)
+                      " namespaces from the repo's slopp branch")))))
+  (let [session (external/open! (cond-> (merge {;; boot the image on a background thread
+                                      ;; so the MCP handshake completes as soon
+                                      ;; as the store loads — a slow/contended
+                                      ;; boot no longer races the connect timeout
+                                      :slopp.ops/async-image? true
+                                      ;; WHO is driving this server. Read here
+                                      ;; and nowhere deeper: a child JVM
+                                      ;; inherits the variable, so a session
+                                      ;; opened inside an image or a test
+                                      ;; runner would otherwise claim this
+                                      ;; conversation's thread. This process is
+                                      ;; the only one a harness actually
+                                      ;; spawned. nil when no known harness set
+                                      ;; one, and open! generates an id as before.
+                                      :slopp.ops/agent-id
+                                      (harness/conversation-id
+                                       #(System/getenv %))}
+                                     ;; how many IDLE image JVMs this server
+                                     ;; holds. The warm spare was hardcoded on
+                                     ;; here: the right default for a session
+                                     ;; alone on a box, the wrong one for eight
+                                     ;; of them, because it buys latency with a
+                                     ;; whole idle JVM per server. LAST, so the
+                                     ;; host's answer wins over the defaults.
+                                     (host-image-options #(System/getenv %)))
+                             dir (assoc :slopp.ops/dir dir)))]
+    (swap! session assoc :require-turns? true)   ; real servers enforce turns
+    ;; the reviewer UI comes up with the server, always. It serves the LIVE
+    ;; session and therefore dies with it — that is the trade that keeps its
+    ;; warranty numbers honest — so nothing ever brought it back, and a human
+    ;; who wanted it had to know to ask again after every restart.
+    ;; start-ui! never throws: MCP must serve even when the UI cannot.
+    (start-ui! session)
+    ;; the app server comes up beside the UI, for a store that asked for it.
+    ;; BACKGROUNDED: it boots a whole second JVM and loads the app's web
+    ;; surface into it, and nothing about that should sit between the editor
+    ;; and a completed MCP handshake — the same reason the oracle's own boot
+    ;; is async here.
+    (future (start-app! session))
+    (try
+      (serve! session (io/reader System/in) (io/writer System/out))
+      (finally
+        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
+        ;; belongs to the MCP session and must not outlive it — but boot
+        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
+        ;; working. Saying nothing is what made this expensive: a manual launch
+        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
+        ;; immediately, so the last thing a launcher reads is a url that is
+        ;; already dead, with a live process behind it. Three agents spent an
+        ;; evening diagnosing that, twice concluding the code was broken and
+        ;; once that a jar had not shipped.
+        ;;
+        ;; stderr, because stdout is the JSON-RPC channel.
+        (.println System/err
+                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
+                               " UI listener and exiting. The UI belongs to the"
+                               " MCP session and does not outlive it, so a url"
+                               " printed above has stopped working. To keep one"
+                               " alive, run slopp from an editor (which holds"
+                               " stdin open) rather than launching it manually."))
+        ;; deregister BEFORE the listener goes: the hub should learn we are
+        ;; leaving from us, not by ageing us out thirty seconds later.
+        (hub/stop! (:hub-heartbeat @session))
+        (server/stop!)
+        ;; the app image is a CHILD JVM. Its watchdog would reap it when we
+        ;; die anyway, but leaving that to a watchdog means the port stays
+        ;; bound for as long as the reap takes — and the next server to start
+        ;; here wants exactly that port.
+        (live/stop! (:app-server @session))
+        (ops/close! session)
+        ;; and GO. `(future (start-app! session))` above runs on Clojure's
+        ;; send-off pool, whose workers are NON-DAEMON with a 60-second
+        ;; keepalive — so `main` returns, `DestroyJavaVM` starts, and an IDLE
+        ;; pool thread holds the JVM open for a further minute with every
+        ;; listener already torn down. Caught by thread dump: DestroyJavaVM
+        ;; RUNNABLE, held by `clojure-agent-send-off-pool-0` parked in
+        ;; SynchronousQueue.poll — same stack and same cpu time twelve seconds
+        ;; apart, waiting for a task that was never coming.
+        ;;
+        ;; A minute of a process that has announced a url, withdrawn it, and
+        ;; still answers `ps` is exactly the state nobody could interpret.
+        (shutdown-agents)))))

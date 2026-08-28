@@ -172,7 +172,14 @@
                               (or (blob-of (:sha entry)) (pr-str entry))
                               entry)])
                        files)
-                  (map (fn [[p entry]] [p (store/render-config entry)]) configs)))))
+                  ;; every config entry EXCEPT the locally-declared ones. The
+                  ;; rest ride every projected tree so a push never deletes
+                  ;; them; `dev` must not ride any, because it says what to RUN
+                  ;; while somebody works on this project — projecting it
+                  ;; pushes one developer's port and entry point at everyone
+                  ;; who pulls.
+                  (map (fn [[p entry]] [p (store/render-config entry)])
+                       (remove (comp store/local-config-paths key) configs))))))
 
 ;; ---------------------------------------------------------------------------
 ;; commits + refs

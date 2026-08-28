@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
 
 (defn close! "Release everything the session owns and return nil: its image, a warm spare
   still booting, the SQLite connection, every per-branch line's image and
@@ -1875,10 +1875,13 @@ recompiled (engine/after-write! session ns-sym)]
             {:path (str path) :unset (str key)}))
 
       (and key (some? value))
-      ;; TWO registries now. The `rules` one closed a real hole: with nothing
+      ;; THREE registries now. The `rules` one closed a real hole: with nothing
       ;; to disagree with, a renamed dial and a MISTYPED dial were the same
       ;; event — both accepted, both governing nothing, neither reported. The
       ;; catalog always knew every rule; this path simply was not asking.
+      ;; `dev` arrives with its registry already written, so it is asked from
+      ;; the start rather than after somebody loses an afternoon to a field
+      ;; named `prot`.
       (if-let [refusal (case (str path)
                          "capabilities"
                          (or (capabilities/config-refusal (str key) (str value))
@@ -1886,6 +1889,8 @@ recompiled (engine/after-write! session ns-sym)]
                                                            (str key) (str value)))
                          "rules"
                          (catalog/config-refusal (str key) (str value))
+                         "dev"
+                         (dev/config-refusal (str key) (str value))
                          nil)]
         {:error refusal}
         (let [fmt      (or (some-> format clojure.core/keyword)
@@ -1894,7 +1899,7 @@ recompiled (engine/after-write! session ns-sym)]
               ;; whether a REGISTRY stood behind this write, which is a
               ;; different question from which path it was — and stopped being
               ;; the same question the moment `rules` gained one
-              checked? (contains? #{"capabilities" "rules"} (str path))
+              checked? (contains? #{"capabilities" "rules" "dev"} (str path))
               ;; the prerequisites this write turns on WITH it, computed
               ;; against the PRE-write store so the report names only what
               ;; actually changed rather than restating the graph
@@ -1924,8 +1929,9 @@ recompiled (engine/after-write! session ns-sym)]
             (not checked?)
             (assoc :note (str "recorded as given — no registry governs the "
                               path " config, so neither the key nor the value"
-                              " was validated. `capabilities` (query_capabilities)"
-                              " and `rules` (query_rules) are the checked paths."))
+                              " was validated. `capabilities` (query_capabilities),"
+                              " `rules` (query_rules) and `dev` are the checked"
+                              " paths."))
 
             ;; ABSENT when nothing was implied, the way the module manifest's
             ;; :debt is: an empty vector on every write would train the reader
@@ -2183,6 +2189,22 @@ recompiled (engine/after-write! session ns-sym)]
       ;; which most clients never show anyone. Hand the url over when asked
       ;; what is going on, rather than making them know to ask for it.
       (:ui-url @session) (assoc :ui (:ui-url @session))
+      ;; …and whether the table behind that url is still the store's. The
+      ;; route table and both performer vocabularies are assembled ONCE at
+      ;; serve time, so a route added afterwards answers 404 — correctly, for
+      ;; the table that listener holds, and indistinguishably from a path that
+      ;; does not exist. Same hole `:app-behind` two clauses down was added
+      ;; for, on the listener that had no counter.
+      ;;
+      ;; Nil unless there is genuinely something to doubt: a line announcing
+      ;; that everything is fine every time is one a reader learns to skip,
+      ;; and this one has to be read on the rare occasion it appears.
+      (false? (:current? (slopp.currency/report (:db @session) (:ui-stamp @session))))
+      (assoc :ui-stale
+             (str "that listener's route table was built at "
+                  (:head (:ui-stamp @session))
+                  " and this line has moved since — a route added after it came"
+                  " up answers 404 until you ui_serve again"))
       ;; the APP slopp is running for this project, when it is running one.
       ;; Its only other announcement is a line on the server's stderr, which
       ;; most clients never show anyone — so an agent asked "what is going
@@ -4673,19 +4695,50 @@ recompiled (engine/after-write! session ns-sym)]
         reads))))
 
 (defn ^:export record-otel!
-  "Append `requests` — already normalized by [[slopp.otel/api-requests]] — to
-  this session's journal as one `:otel` delta. Returns the count recorded.
+  "Record `requests` — already normalized by [[slopp.otel/api-requests]] — as
+  MEASUREMENTS beside the journal. Returns the count recorded.
 
-  Thin on purpose. The HTTP route that receives telemetry should decode and
-  hand over; deciding how a session mutates is this layer's job, and a handler
-  that reached into the store directly would be the second place that knows
-  how, which is how the two stop agreeing.
+  **Not a delta, and this is the whole lesson.** It was one, for about an hour,
+  and the store became unwritable: an exporter posts on its own interval from
+  an HTTP handler that is not an agent and never pauses, so every few seconds a
+  telemetry row moved the head that every writer compare-and-swaps against.
+  `full_check` lost first because it is slowest — three to four minutes of
+  whole-store verification computed and then discarded, four times — and
+  ordinary writes started failing behind it.
 
-  Nothing is recorded for an empty batch: an exporter posts on its own
-  interval whether or not anything happened, and a delta per empty tick would
-  fill the journal with evidence that nothing occurred."
+  The interval was never the bug. ANY interval makes the head non-quiescent;
+  a shorter one only finds out sooner. A number about what something cost is
+  not an entry in the history, and writing one must not be able to make a
+  verdict lose a race.
+
+  One row per received batch, the grain the exporter already batches at.
+  Nothing is recorded for an empty batch: an exporter posts whether or not
+  anything happened, and a row per empty tick would fill the table with
+  evidence that nothing occurred.
+
+  Silent when the session has no db — an ephemeral store keeps no measurements,
+  and telemetry is the last thing that should fail somebody's request."
   [session requests]
   (let [rs (vec requests)]
     (when (seq rs)
-      (engine/commit-appended! session #(store/record-otel % rs) []))
+      (when-let [conn (:db @session)]
+        (db/record-measurement! conn "otel" nil {:requests rs})))
     (count rs)))
+
+(defn ^:export otel-measurements
+  "Every harness-telemetry batch this store has recorded, as the payloads
+  [[record-otel!]] wrote — `[{:requests [...]}, ...]`, oldest first. Empty for
+  a session with no journal, because an ephemeral store keeps no
+  measurements.
+
+  The read TWIN of the writer, and it lives here for the same reason the
+  writer does: measurements are beside the journal rather than in it, and
+  opening the journal is IO. `slopp.read.query` is the `query_*` front door
+  and is declared `:pure`, so reading this there made its tier a claim it did
+  not earn — invisible to every done, because a tier is a whole-store
+  question and `full_check` is the only thing that asks. It asked once and
+  said so."
+  [session]
+  (if-let [conn (:db @session)]
+    (mapv :payload (db/measurements conn "otel" nil))
+    []))

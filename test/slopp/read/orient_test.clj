@@ -841,3 +841,31 @@
           r  (orient/unread-declarations st)]
       (is (= :http/path (get-in r [:markers :web/path :now])) (pr-str r))
       (is (re-find #"rename_sweep" (:note r)) (:note r)))))
+
+(deftest a-milestone-can-be-green-while-the-jar-was-never-built
+  ;; Friction #17, hit twice in one night and caught both times by a CONSUMER
+  ;; reading the artifact rather than by anything slopp said. A milestone is
+  ;; the announcement other people act on, and it was making a claim about the
+  ;; store while saying nothing about the jar that carries the store to them.
+  ;;
+  ;; Announcement → artifact → process are three states, and nothing joined
+  ;; them. `jar-currency` already computed the middle one for `session_brief`;
+  ;; this is the sentence a milestone can say.
+  (let [st {:deltas [{:id "d1" :at 100 :op :add :ns 'a.b}
+                     {:id "d2" :at 200 :op :add :ns 'a.b}
+                     {:id "d3" :at 300 :op :add :ns 'a.b}]}]
+    (testing "a jar built from the head has nothing to report"
+      (is (nil? (orient/jar-warning st "d3"))))
+    (testing "a jar behind the store names its own head and what it costs"
+      (let [w (orient/jar-warning st "d1")]
+        (is (string? w) (pr-str w))
+        (is (str/includes? w "d1") (str "it must name the head it was built from: " w))))
+    (testing "a FOREIGN jar head makes no claim about this store"
+      ;; slopp's jar serves projects that are not slopp, so a head from one
+      ;; store and a delta log from another share nothing — counting deltas
+      ;; after it here would measure how fast THIS reader has been writing and
+      ;; report it as the tool's age
+      (is (nil? (orient/jar-warning st "d-from-some-other-store"))))
+    (testing "and no jar at all is silence, not a warning"
+      ;; a checkout or a bare -M run has no artifact to be stale
+      (is (nil? (orient/jar-warning st nil))))))

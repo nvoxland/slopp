@@ -701,12 +701,17 @@
       (is (<= 4 (count read-by)) (str "config paths the code reads: " (pr-str (keys read-by)))))
     (testing "the check bites"
       (is (seq (remove store/projected-config-paths #{"a-path-nobody-declared"}))))
-    (is (empty? (remove store/projected-config-paths (keys read-by)))
-        (str "undeclared config path(s) — add them to"
-             " store/projected-config-paths or a pull will blob them: "
-             (pr-str (into {} (filter (fn [[p _]]
-                                        (not (store/projected-config-paths p)))
-                                      read-by)))))))
+    ;; DECLARED in exactly one of the two sets. A path is either a rendering
+    ;; that rides every tree (`projected-config-paths`) or one that stays in
+    ;; the db (`local-config-paths`); undeclared still blobs on pull, and
+    ;; declared BOTH ways has no sensible reading — whichever caller asks
+    ;; first wins, silently.
+    (let [declared? (some-fn store/projected-config-paths store/local-config-paths)]
+      (is (empty? (remove declared? (keys read-by)))
+          (str "undeclared config path(s) — add them to"
+               " store/projected-config-paths (ships) or store/local-config-paths"
+               " (stays in the db), or a pull will blob them: "
+               (pr-str (into {} (remove (comp declared? key) read-by))))))))
 
 (deftest ^:external a-pull-merges-a-tracked-file-instead-of-handing-it-over
   ;; Both sides edit ONE tracked file in DIFFERENT places. That used to be
@@ -864,3 +869,91 @@
         (ops/close! sess)
         (clojure.java.shell/sh "rm" "-rf" dir)
         (clojure.java.shell/sh "rm" "-rf" out)))))
+
+(deftest a-remedy-is-only-named-when-it-can-actually-work
+  ;; Friction #13, reproduced on this store: `git_push` was run, with a real
+  ;; token, and succeeded — 133 commits, status OK — and alignment came back
+  ;; BYTE-IDENTICAL. The push published what the mirror already held; the
+  ;; projection for every milestone since had never been built, and the sha
+  ;; alignment was comparing against existed in no object database on the
+  ;; machine.
+  ;;
+  ;; The note is instruction-shaped and was wrong, which is the expensive
+  ;; kind: running it costs a real push to a public repository, appears to
+  ;; succeed, and changes nothing about the thing it was run for. Anyone
+  ;; following it concludes their push failed silently, or that alignment is
+  ;; broken, and neither is true.
+  ;;
+  ;; "the branch is behind and a push will catch it up" and "the branch is
+  ;; behind and the commits it would need were never created" are different
+  ;; facts that shared one sentence.
+  (testing "aligned, with a stamp read off the commit itself"
+    (let [n (sync/alignment-note "slopp/main"
+                                 {:stamp "d900" :latest "d900" :aligned true
+                                  :projected? true})]
+      (is (str/includes? n "d900") n)
+      (is (not (str/includes? n "git_push")) (str "nothing to advise: " n))))
+
+  (testing "behind, and the projection EXISTS — a push is the real remedy"
+    (let [n (sync/alignment-note "slopp/main"
+                                 {:stamp "d100" :latest "d900" :aligned false
+                                  :projected? true})]
+      (is (str/includes? n "git_push") n)))
+
+  (testing "behind, and the projection was NEVER BUILT — a push cannot publish it"
+    (let [n (sync/alignment-note "slopp/main"
+                                 {:stamp "d100" :latest "d900" :aligned false
+                                  :projected? false})]
+      (is (not (str/includes? n "git_push publishes it"))
+          (str "this is the sentence that sent someone to push for nothing: " n))
+      (is (str/includes? n "d900") n)))
+
+  (testing "and an UNKNOWN projection state is not reported as either"
+    ;; nil is "could not look" — no repository to ask. Answering false would
+    ;; invent a claim; answering true is the confident report this whole
+    ;; cluster is about.
+    (let [n (sync/alignment-note "slopp/main"
+                                 {:stamp "d100" :latest "d900" :aligned false
+                                  :projected? nil})]
+      (is (string? n) n)
+      (is (not (str/includes? n "never")) (str "nothing measured that: " n)))))
+
+(deftest a-LOCAL-config-path-stays-in-the-db
+  ;; Every config path ships today. `build!` spits each `(:config st)` entry
+  ;; into the built tree as a file and `commit-paths` puts each one in every
+  ;; projected tree, with no filter anywhere. That is right for `capabilities`
+  ;; and `rules` — they configure the PRODUCT — and wrong for anything that
+  ;; configures a DEVELOPMENT session, which is a fact about this machine and
+  ;; this checkout rather than about the program.
+  ;;
+  ;; So a second declared set, beside `projected-config-paths` and read the
+  ;; same way: declared rather than derived, because the store that needs the
+  ;; answer is often the one missing the entry.
+  (testing "the two sets are DISJOINT"
+    ;; a path in both is a contradiction with no sensible reading, and the
+    ;; failure would be silent in whichever direction the caller asked first
+    (is (empty? (filter store/projected-config-paths store/local-config-paths))
+        (str "a config path is declared BOTH projected and local: "
+             (pr-str (filter store/projected-config-paths
+                             store/local-config-paths)))))
+
+  (testing "`dev` is local"
+    (is (contains? store/local-config-paths "dev")))
+
+  (testing "and LOCAL wins over the has-config fallback"
+    ;; the trap, and the reason this test exists. `projected-config-paths`'
+    ;; own docstring tells callers to treat a path as projected if it is in
+    ;; the set OR the store already holds `:config` for it — which is exactly
+    ;; true of a dev entry somebody has set. Read naively, the fallback
+    ;; projects the one thing that must never be projected.
+    (let [st (-> (store/empty-store)
+                 (assoc-in [:config "dev" :values "run.app.main"] "app.core/-main")
+                 (assoc-in [:config "capabilities" :values "http.port"] "8080"))
+          projected? (fn [path]
+                       (and (not (store/local-config-paths path))
+                            (or (contains? store/projected-config-paths path)
+                                (some? (get-in st [:config path])))))]
+      (is (not (projected? "dev"))
+          "a dev entry the store HOLDS was still treated as projected")
+      (is (projected? "capabilities")
+          "the fallback stopped working for an ordinary path"))))

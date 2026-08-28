@@ -1286,13 +1286,26 @@
         ;; a nil url DECLINES, the same channel a nil request is — an unarmed
         ;; switcher, a selection not yet made. Throwing would push every app's
         ;; arming pattern into the browser
-        (when-let [url (url-for @state action)]
+        ;; `[state action value]`, the SAME signature as `:webapp/act`, and for
+        ;; the same reason its docstring gives: `value` is the typed or selected
+        ;; text the view could not know, because everything else rides in the
+        ;; action itself. A `<select>` has ONE handler for N options by
+        ;; construction, so its choice cannot be spelled into the action vector
+        ;; the way a button's argument can, nor into an `:href` the way a
+        ;; link's can — it arrives here or nowhere.
+        ;;
+        ;; Without it a dropdown whose CHOICE IS THE DESTINATION cannot
+        ;; navigate on change: the selection would have to reach state first,
+        ;; and a `:leaves?` action does not run the reducer. So the app needs a
+        ;; second control — a "go" button whose only job is to read the state
+        ;; back — and a consumer shipped exactly that, marked as a workaround.
+        (when-let [url (url-for @state action value)]
           (leave! url))
         (throw (ex-info (str (pr-str (first action)) " is declared :leaves? but"
                              " this app has no :webapp/url-for — an action that"
                              " hands the page back to the browser with nowhere"
                              " to go is a control that cannot work. Declare"
-                             " (fn [state action] -> url).")
+                             " (fn [state action value] -> url).")
                         {:webapp/missing-key :webapp/url-for
                          :action action})))
 

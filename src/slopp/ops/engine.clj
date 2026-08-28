@@ -164,19 +164,47 @@
 (defn implicate
   "Rock 2: annotate each failure with the just-changed forms that failing
   test actually exercises (trace map ∩ edited) — the correlation agents
-  otherwise re-derive from raw expected/actual on every red."
+  otherwise re-derive from raw expected/actual on every red.
+
+  Each failure also carries `:attribution`, because that intersection has
+  THREE outcomes and reporting only the hits collapsed the last two:
+
+  - `:mine`     the test exercises a form this episode changed, or IS one
+                — `:implicated` names which
+  - `:foreign`  the test IS traced and its trace is disjoint from this
+                episode's edits — somebody else's red
+  - `:untraced` no trace for this test, so nothing was intersected and
+                neither answer is available
+
+  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
+  key, leaving 'assume it is mine' as the only safe reading — which is how
+  one agent's red comes to freeze every other agent's thread. Only
+  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
+  evidence and must never be read as the presence of it, which is why an
+  empty trace counts as untraced rather than as a disjoint one.
+
+  The test's OWN name is checked against `edited` before its trace is,
+  because the trace maps a test to the source forms it exercises and so can
+  never name the test itself. Writing a failing test against code you did
+  not touch is the ordinary red-first move, and reading its trace alone
+  called it somebody else's."
   [summary tmap edited]
-  (if-not (and (seq (:failures summary)) (seq edited) (seq tmap))
+  (if-not (and (seq (:failures summary)) (seq edited))
     summary
-    (update summary :failures
-            (fn [fs]
-              (mapv (fn [f]
-                      (let [hits (some->> (get tmap (:test f))
-                                          set
-                                          (set/intersection (set edited))
-                                          seq sort vec)]
-                        (cond-> f hits (assoc :implicated hits))))
-                    fs)))))
+    (let [edited (set edited)]
+      (update summary :failures
+              (fn [fs]
+                (mapv (fn [f]
+                        (let [own    (when (contains? edited (:test f)) [(:test f)])
+                              traced (seq (get tmap (:test f)))
+                              hits   (some->> traced set (set/intersection edited) seq)]
+                          (cond
+                            (or own hits)
+                            (assoc f :attribution :mine
+                                   :implicated (vec (sort (distinct (concat own hits)))))
+                            traced (assoc f :attribution :foreign)
+                            :else  (assoc f :attribution :untraced))))
+                      fs))))))
 
 (defn shape-episode-reds!
   "Mid-episode response diet (direction over repetition): full failure
@@ -710,12 +738,48 @@
   id comes in on the first prompt, so adopting before then would key the
   thread to a placeholder."
   [session]
-  (or (:line @session)
-      (when-let [conn (:db @session)]
+  (if-let [conn (:db @session)]
+    (let [cached (:line @session)
+          status (when cached (db/line-status conn cached))]
+      ;; The cache is CHECKED, not trusted, and that is the whole of this
+      ;; change. Another process can settle this line underneath us: the
+      ;; plugin's Stop hook runs `done` through a one-shot carrying this
+      ;; session's own agent id, so every session pause adopts this line,
+      ;; lands it, and settles it while this server holds the id it cached at
+      ;; first use.
+      ;;
+      ;; Writing to a settled line is silent and total. Every write reports
+      ;; success, none of them can land — settled lines are not landable — and
+      ;; the thread cannot be dropped to recover, because settled lines are
+      ;; not droppable either. Observed live: `session_brief` reporting 20
+      ;; un-landed while `thread_list` reported 0 for the line it named and
+      ;; `thread_drop` refused with "already landed". Work that could go
+      ;; neither forward nor back, and the only exit was restarting the server.
+      ;;
+      ;; The cost is a primary-key lookup per resolution, against a write that
+      ;; is about to open a transaction. The docstring's "touched once per
+      ;; session" was protecting adoption's UPDATE, which this still does once.
+      (cond
+        ;; still ours to write to
+        (= "open" status) cached
+
+        ;; ABSENT from the registry: a broken invariant, NOT a settled line,
+        ;; and re-adopting here would heal it silently. `land-thread!` reports
+        ;; this case on purpose — it names the thread, says the writes are in
+        ;; the journal but not on the branch, and tells the agent to restart
+        ;; and re-apply. Taking that away by quietly issuing a new line is how
+        ;; work goes missing with nobody told.
+        (and cached (nil? status)) cached
+
+        ;; SETTLED under us — the Stop hook case. Move to a fresh line so the
+        ;; next write goes somewhere that can land.
+        :else
         (let [id (db/adopt-thread! conn (session-branch-line session)
                                    (:agent-id @session))]
           (swap! session assoc :line id)
-          id))))
+          id)))
+    ;; ephemeral: no journal, so no registry to disagree with
+    (:line @session)))
 
 (defn try-commit!
   "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
@@ -1718,3 +1782,41 @@
   median 43 of 46 external test namespaces and deferred 84.6% of changes."
   [session store changed]
   (external-among store (impacted-tests session store changed)))
+
+(defn red-attribution
+  "Whose red is this? Splits a verification summary's failing tests by the
+  three-way `:attribution` [[implicate]] put on each one, and returns nil
+  when nothing is red.
+
+  {:mine [...] :foreign [...] :untraced [...] :unseen n} — non-empty
+  entries only. `:mine` and `:foreign` are claims; `:untraced` and
+  `:unseen` are the two ways of having no claim to make, and they are kept
+  because the whole point of the split is that a caller may act on
+  innocence and must never infer it from silence:
+
+  - `:untraced` — the run produced no trace for this failing test
+  - `:unseen`   — the summary counts MORE failures than it carries blocks
+                  for, so some red is not represented here at all. Failure
+                  detail is capped for response size, and attributing only
+                  what survived the cap would read a truncation as a clean
+                  bill of health.
+
+  A caller wanting \"none of this red is mine\" needs all three of `:mine`,
+  `:untraced` and `:unseen` to be absent."
+  [summary]
+  (let [total (+ (:fail summary 0) (:error summary 0))]
+    (when (pos? total)
+      (let [blocks (vec (:failures summary))
+            named  (into #{} (keep :test) blocks)
+            ;; a test the run NAMED as failing but carried no block for is a
+            ;; red we cannot attribute — same standing as an untraced one
+            capped (vec (sort (remove named (:failed-tests summary))))
+            by     (group-by #(or (:attribution %) :untraced) blocks)
+            bucket (fn [k] (vec (sort (distinct (keep :test (get by k))))))
+            unseen (max 0 (- total (count blocks) (count capped)))]
+        (cond-> {}
+          (seq (get by :mine))    (assoc :mine (bucket :mine))
+          (seq (get by :foreign)) (assoc :foreign (bucket :foreign))
+          (or (seq (get by :untraced)) (seq capped))
+          (assoc :untraced (vec (sort (distinct (concat (bucket :untraced) capped)))))
+          (pos? unseen)           (assoc :unseen unseen))))))

@@ -347,7 +347,7 @@
 
   A turn with no `:timing` is ABSENT rather than zero: nothing was measured,
   which is a different fact from nothing having been spent."
-  [store & {:keys [since]}]
+  [store & {:keys [since otel]}]
   (let [deltas  (:deltas store)
         window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
         ts      (keep :timing window)
@@ -361,7 +361,17 @@
         tally   (fn [rows key-fn val-fn]
                   (reduce (fn [m r] (update m (key-fn r) (fnil + 0) (val-fn r)))
                           {} rows))
-        model   (vec (mapcat :requests (filter #(= :otel (:op %)) window)))]
+        ;; Telemetry lives in the `measurements` table now — writing it as a
+        ;; delta moved the head every few seconds and made the store
+        ;; unwritable. `otel` is those rows, read by the caller because this
+        ;; fold is pure over a store VALUE and a table is not in one.
+        ;;
+        ;; The journal is still read for it, and not out of caution: real
+        ;; `:otel` deltas were written during the hour before the move, and
+        ;; dropping them would silently shorten the history of the very
+        ;; measurement this section reports.
+        model   (into (vec (mapcat :requests (filter #(= :otel (:op %)) window)))
+                      (mapcat :requests otel))]
     (cond->
      {:window  {:turns (count ts) :since (or since :all)}
       :wall    {:elapsed-ms elapsed

@@ -965,3 +965,40 @@
       (finally
         (.destroyForcibly other)
         (.close conn)))))
+
+(deftest ^:external a-measurement-does-NOT-move-the-head
+  ;; The property this table exists for. Harness telemetry arrived on an
+  ;; exporter's interval and appended a delta every few seconds, so the head
+  ;; was never quiescent: `full_check` computed a whole-store answer for three
+  ;; to four minutes and lost the CAS to a telemetry row, four times running,
+  ;; and ordinary writes began failing behind it.
+  ;;
+  ;; A number about what something cost is not an entry in the history. It must
+  ;; be writable without touching the chain everything else races against.
+  (let [dir (str (java.nio.file.Files/createTempDirectory
+                  "slopp-measure" (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (with-open [conn (db/open! dir)]
+      (db/record-measurement! conn "otel" nil {:context 17548 :cost-usd 0.08})
+      (db/record-measurement! conn "otel" nil {:context 510 :cost-usd 0.01})
+
+      (testing "the rows are there"
+        (let [ms (db/measurements conn "otel" nil)]
+          (is (= 2 (count ms)) (pr-str ms))
+          (is (= 17548 (:context (:payload (first ms)))) (pr-str ms))
+          (is (every? :at ms) "each carries when it was taken")))
+
+      (testing "and NOTHING was appended to the journal"
+        ;; the whole point: no delta, so no head movement, so no verdict loses
+        ;; a race to a statistic
+        (is (empty? (jdbc/execute! conn ["SELECT 1 FROM deltas LIMIT 1"]))
+            "a measurement wrote a delta — it is back in the chain"))
+
+      (testing "kind SEPARATES them, so one reader cannot see another's rows"
+        (db/record-measurement! conn "read-cost" nil {:chars 100})
+        (is (= 2 (count (db/measurements conn "otel" nil))))
+        (is (= 1 (count (db/measurements conn "read-cost" nil)))))
+
+      (testing "since windows by seq, which is how a fold reads only new rows"
+        (let [all   (db/measurements conn "otel" nil)
+              after (db/measurements conn "otel" (:seq (first all)))]
+          (is (= 1 (count after)) (pr-str after)))))))

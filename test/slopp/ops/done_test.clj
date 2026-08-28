@@ -58,3 +58,40 @@
       (finally
         (reset! boot/boot-info nil)
         (ops/close! sess)))))
+
+(deftest a-verdict-covers-forms-the-branch-must-actually-have
+  ;; Friction #14, ranked third by both agents and the one that makes every
+  ;; other green untrustworthy. `done` computes green against a THREAD image
+  ;; holding the whole episode, and then lands. If anything drops between
+  ;; those two moments the green is honest and wrong — measured with two
+  ;; forms, where `http.dispatch/handle!` landed and `http/context` did not,
+  ;; and every shell then served 200 while the milestone read green.
+  ;;
+  ;; A red that lies costs an investigation. A GREEN that lies ships.
+  (let [judged #{['app.core "f"] ['app.core "g"] ['app.web "handle"]}]
+    (testing "everything judged is on the branch — nothing to say"
+      (is (empty? (done/landed-gap
+                   judged
+                   {'app.core {:elements [{:name 'f} {:name 'g}]}
+                    'app.web  {:elements [{:name 'handle}]}}))))
+
+    (testing "a form the verdict covered that the branch does not have is NAMED"
+      (is (= [['app.web "handle"]]
+             (done/landed-gap
+              judged
+              {'app.core {:elements [{:name 'f} {:name 'g}]}
+               'app.web  {:elements [{:name 'other}]}}))))
+
+    (testing "a whole namespace that never arrived counts every form in it"
+      (is (= [['app.web "handle"]]
+             (done/landed-gap
+              judged
+              {'app.core {:elements [{:name 'f} {:name 'g}]}}))))
+
+    (testing "unnamed elements cannot be matched and must not mask a gap"
+      ;; an ns form and a bare comment carry no :name; counting them as
+      ;; present would let any namespace vouch for any form
+      (is (= [['app.core "g"]]
+             (done/landed-gap
+              #{['app.core "f"] ['app.core "g"]}
+              {'app.core {:elements [{:name 'f} {:name nil} {}]}}))))))

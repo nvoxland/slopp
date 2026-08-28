@@ -717,3 +717,35 @@
                 " Every input to this was here at boot — the store says what it"
                 " declares and this slopp says what it reads, and nothing"
                 " joined the two."))}))))
+
+(defn ^:export jar-warning
+  "A sentence when the jar built from `head` is behind `store`, else nil.
+
+  The reader-facing half of [[jar-currency]]: same derivation, phrased for
+  somebody deciding whether to act. Nil unless there is genuinely something to
+  doubt — a warning that fires every time is one a reader learns to skip, and
+  this one has to be read on the rare occasion it appears.
+
+  Nil covers three different silences on purpose, and none of them is a claim
+  that the artifact is current:
+
+  - no `head` at all — a checkout, a bare `-M` run, no artifact to be stale
+  - a FOREIGN head, so `jar-currency` reports no `:behind`: slopp's jar serves
+    projects that are not slopp, and counting this log's deltas after another
+    store's head would measure how fast the reader has been writing and report
+    it as the tool's age
+  - a jar built from the head, which is the ordinary good case
+
+  Announcement, artifact and process are three states and nothing joined
+  them: a milestone said the store was green while the jar carrying that store
+  to everyone else had never been rebuilt. It happened twice in one night and
+  a CONSUMER caught it both times, by reading the artifact rather than by
+  believing the announcement."
+  [store head]
+  (let [c (jar-currency store head)]
+    (when (pos? (:behind c 0))
+      (str "the jar this process is running was built from " (:head c)
+           ", which is " (:behind c) " code delta"
+           (when (not= 1 (:behind c)) "s")
+           " behind this store — anyone reading the ARTIFACT rather than the"
+           " store will not see this work until it is rebuilt"))))

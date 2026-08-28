@@ -479,7 +479,7 @@
                                        :webapp/bundle "/js/main.js"
                                        :http/wrap-context honouring})]
     (testing "context derives the route table from var metadata"
-      (is (= {"/api/w/mine/:owner" :rest, "/" :content
+      (is (= {"/api/w/mine/:owner" :rest, "/" :content, "/app/**" :content
               "/about" :content, "/robots.txt" :content}
              (into {} (map (juxt :path :kind)) (:http/routes ctx)))
           "both markers, and the row says which one carried the path"))
@@ -725,3 +725,80 @@
            (slopp.http/context {:http/namespaces ['slopp.http-test]
                                 :http/wrap-context honouring
                                 :webapp/base "/p/demo"}))))))
+
+(def ^{:http/method :get :http/path "/app/**" :http/auth :public
+       :webapp/shell true}
+  t-app-shell
+  "A WILDCARD shell — the shape whose status is the question. `/app/**` covers
+  every address under `/app`, including ones the browser routes and ones that
+  are simply typos, and the server cannot tell them apart from the path alone."
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "utf-8"}]
+    [:title "App"]]
+   [:body [:div {:id "app"}]]])
+
+(deftest a-WILDCARD-shell-tells-the-truth-about-an-address-it-does-not-ROUTE
+  ;; A `**` shell serves its document for every address underneath it, which is
+  ;; what makes a refreshed deep link work. The cost, until now, was that the
+  ;; whole subtree answered 200: a typo, a stale asset url and a real page were
+  ;; indistinguishable at the server, and an app that can never 404 has no way
+  ;; to say "no such thing".
+  ;;
+  ;; The two answers available before this were both wrong. Keep a
+  ;; hand-maintained prefix list and get honest statuses that go stale; or
+  ;; declare one wildcard and 200 on everything. This store picked the first
+  ;; and its hub carries TWO markers over one document to pay for it.
+  ;;
+  ;; The status is DERIVED instead, from the client route table the app already
+  ;; declares — `^{:webapp/path …}` markers, which Move A made the single
+  ;; declaration of an address. Same bytes either way: the SPA boots, sees an
+  ;; address its own table does not match, and renders whatever not-found it
+  ;; wants. The server tells the truth to everything that reads STATUS rather
+  ;; than body — a crawler, a link checker, a `curl -f`, a monitor.
+  ;;
+  ;; Rendering stays the app's job and truth-telling becomes the server's.
+  ;; Those are different jobs and this is the seam between them.
+  (let [routes [["/app" :home]
+                ["/app/things/:id" :thing]]
+        ctx    (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                    :http/wrap-context honouring
+                                    :webapp/bundle "/js/main.js"
+                                    :webapp/routes routes})
+        GET    (fn [uri] (slopp.http/handle! ctx {:request-method :get :uri uri}))]
+
+    (testing "an address the client table DOES route answers 200"
+      (is (= 200 (:status (GET "/app"))))
+      (is (= 200 (:status (GET "/app/things/42")))))
+
+    (testing "an address it does NOT route answers 404"
+      (is (= 404 (:status (GET "/app/nonsense"))))
+      (is (= 404 (:status (GET "/app/things/42/typo")))))
+
+    (testing "and the 404 still carries the SHELL, so the app renders its own not-found"
+      ;; the whole point: a server-rendered error page would take that decision
+      ;; away from the app. Status is the server's to tell; the page is not.
+      (let [r (GET "/app/nonsense")]
+        (is (str/includes? (str (:body r)) "id=\"app\"")
+            (str "the 404 dropped the document — the app has nothing to boot into: "
+                 (pr-str r)))
+        (is (str/includes? (str (:body r)) "src=\"/js/main.js\"")
+            "the bundle is missing from the 404, so the SPA never starts")))
+
+    (testing "a 200 and a 404 are the SAME bytes"
+      ;; if they differed, a consumer would have two documents to reason about
+      ;; and the app would need to know which one it booted into
+      (is (= (str (:body (GET "/app"))) (str (:body (GET "/app/nonsense"))))))
+
+    (testing "with NO client table declared, the shell answers 200 as it always did"
+      ;; the compatibility answer, and it is deliberate: with no table the
+      ;; server cannot know, and inventing 404s for an app that never declared
+      ;; its routes would break every existing shell. Stated in the docstring
+      ;; rather than left to be discovered, because a status that silently
+      ;; stops being derived is the same class of bug as a filter that
+      ;; silently stops filtering.
+      (let [bare (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                      :http/wrap-context honouring
+                                      :webapp/bundle "/js/main.js"})]
+        (is (= 200 (:status (slopp.http/handle!
+                             bare {:request-method :get :uri "/app/nonsense"}))))))))

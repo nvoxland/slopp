@@ -971,3 +971,40 @@
     (testing "unrelated files in the built dir are ignored"
       (spit (java.io.File. dir "deps.edn") "{:paths [\"src\"]}")
       (is (= 3 (count (testrun/read-timings dir)))))))
+
+(deftest a-completed-verdict-is-not-DISCARDED-when-its-record-cannot-be-written
+  ;; `full_check` computes a whole-store answer in three to four minutes and
+  ;; then appends one bookkeeping delta saying it happened. The append is a
+  ;; compare-and-swap against the branch head, and on a busy branch it can lose
+  ;; twelve times and throw — which propagated, so the ANSWER was thrown away
+  ;; with it. Four times in one evening, ~9 minutes of real verification
+  ;; computed and discarded, with the caller told only "call again".
+  ;;
+  ;; The caller asked whether the store is green. That answer was in hand.
+  ;; Failing to write a note about it is not a reason to withhold it.
+  (let [verdict {:status :green :ms 190000 :namespaces 125}]
+
+    (testing "the record is written and the verdict is returned unchanged"
+      (let [wrote (atom false)]
+        (is (= verdict (external/record-or-keep! verdict #(reset! wrote true))))
+        (is (true? @wrote))))
+
+    (testing "CONTENTION on the append keeps the verdict and says it is unrecorded"
+      (let [r (external/record-or-keep!
+               verdict
+               #(throw (ex-info "the branch head moved under all 12 attempts"
+                                {:retryable true})))]
+        (is (= :green (:status r)) "the verdict was discarded with its record")
+        (is (= 190000 (:ms r)))
+        (is (false? (:recorded r))
+            "nothing says the journal is missing this run, so a later reader
+             counts one fewer whole-store check than actually happened")
+        (is (string? (:record-note r)) (pr-str r))))
+
+    (testing "a NON-retryable failure still propagates"
+      ;; the narrowness is the point: contention is ordinary and a verdict
+      ;; should outlive it, while a genuine bug in the append path must not be
+      ;; swallowed and reported as a successful check
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (external/record-or-keep!
+                    verdict #(throw (ex-info "corrupt store" {:fatal true}))))))))

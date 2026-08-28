@@ -229,14 +229,47 @@
       ;; way to declare. Placing it after POLICY and not before is the whole
       ;; point — content is as unreachable un-authorized as any handler.
       (= :content (:kind row))
-      (html/content-response
-       (let [value (var-get (:handler row))]
-         (if (:webapp/shell row)
-           ;; the row DECLARES it is a shell; WHICH bundle is a deployment
-           ;; fact the app states once on the context, beside the mount point
-           (html/complete-shell value (:webapp/bundle ctx) (:webapp/base ctx))
-           value))
-       (:http/media-type row))
+      (let [resp (html/content-response
+                  (let [value (var-get (:handler row))]
+                    (if (:webapp/shell row)
+                      ;; the row DECLARES it is a shell; WHICH bundle is a deployment
+                      ;; fact the app states once on the context, beside the mount point
+                      (html/complete-shell value (:webapp/bundle ctx) (:webapp/base ctx))
+                      value))
+                  (:http/media-type row))]
+        ;; A SHELL'S STATUS IS DERIVED, and the body is not.
+        ;;
+        ;; A `**` shell covers every address beneath it — that is what makes a
+        ;; refreshed deep link work — so without this the whole subtree answers
+        ;; 200 and a typo, a stale asset url and a real page are
+        ;; indistinguishable at the server. An app that can never 404 has no
+        ;; way to say "no such thing", and the only alternative was a
+        ;; hand-maintained prefix list that goes stale.
+        ;;
+        ;; The client route table answers it, and the app already declares it:
+        ;; `^{:webapp/path …}` markers are the single declaration of a browser
+        ;; address. Matched with the SERVER's matcher rather than the client's,
+        ;; because `slopp.webapp/match-route` ships in the `webapp` family and
+        ;; this ships in `http` — a store may vendor either without the other.
+        ;; The two grammars agree, and a test runs both over one table.
+        ;;
+        ;; Same bytes either way: the SPA boots, finds an address its own table
+        ;; does not match, and renders whatever not-found it wants. Rendering
+        ;; stays the app's job; telling the truth becomes the server's.
+        ;;
+        ;; ABSENT `:webapp/routes` means the status is NOT derived and the
+        ;; shell answers 200, exactly as it always did. That is the
+        ;; compatibility answer and it is deliberate — with no table the server
+        ;; cannot know, and inventing 404s for an app that never declared its
+        ;; routes would break every shell that predates this.
+        (if-let [client (and (:webapp/shell row) (seq (:webapp/routes ctx)))]
+          (if (router/match (mapv (fn [[p target]]
+                                    {:method :get :path p :handler target})
+                                  client)
+                            :get (:uri req))
+            resp
+            (assoc resp :status 404))
+          resp))
 
       :else
       (let [;; DECODED IN PLACE: a handler reads :path-params, :query-params and

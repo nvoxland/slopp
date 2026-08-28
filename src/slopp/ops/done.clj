@@ -181,3 +181,32 @@
                                             (str (or (:name e) (:id e)))))))
            (get lines (dec (:row f 0)))
            (assoc :at (str/trim (nth lines (dec (:row f)))))))))
+
+(defn ^:export landed-gap
+  "Which `expected` forms — `#{[ns-sym \"name\"]}`, the live ones this episode's
+  verdict covered — are NOT in `by-ns`, the branch's own elements. Sorted, and
+  empty when the branch has them all.
+
+  A verdict is earned against the THREAD image, which holds the whole episode,
+  and the work then LANDS through a rebase that mints new form ids. If
+  anything drops between those two moments the green is honest and wrong:
+  measured with two forms, where one landed and the other did not, after which
+  every request served 200 while the milestone read green.
+
+  `by-ns` must be read from the BRANCH rather than from the session that did
+  the work. Checking a landing against the store that produced it is the same
+  reader answering twice, which is exactly the mistake this exists to catch.
+
+  Matched by NAME, not by source bytes, and that is deliberate on both sides.
+  The measured failure is a form that did not arrive AT ALL, which a name
+  catches; and a rebase legitimately re-mints ids and can reorder a namespace,
+  so byte or id equality would report differences that are not losses. An
+  element with no `:name` — an ns form, a bare comment — can match nothing,
+  or any namespace would vouch for any form in it."
+  [expected by-ns]
+  (let [present (into #{}
+                      (for [[ns-sym m] by-ns
+                            e          (:elements m)
+                            :when      (:name e)]
+                        [ns-sym (str (:name e))]))]
+    (vec (sort (remove present expected)))))

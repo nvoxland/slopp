@@ -89,7 +89,8 @@
   own reviewer UI hit it immediately, because the endpoints and their read
   performers live in different namespaces on purpose."
   [{:http/keys [auth-config routes namespaces perform-ctx max-body-bytes wrap-context]
-    :webapp/keys [base bundle]}]
+    :webapp/keys [base bundle]
+    client-routes :webapp/routes}]
   (let [ctx ((or wrap-context identity)
              (cond-> {:http/routes (into (routes/from-namespaces namespaces) routes)
                       :http/read-performers (routes/performers-from-namespaces namespaces :http/read)
@@ -101,7 +102,14 @@
                ;; the bundle a shell injects — carried on the CONTEXT beside
                ;; the mount point, because both are deployment facts and
                ;; neither is something a page can know about itself
-               bundle (assoc :webapp/bundle bundle)))
+               bundle (assoc :webapp/bundle bundle)
+;; the app's OWN address table, carried for the dispatcher to derive a
+               ;; status from: a `**` shell serves its document for everything
+               ;; beneath it, so without this every typo under the mount answers
+               ;; 200 and the app has no way to say "no such thing". Absent is
+               ;; the honest default (the server cannot know), which is why this
+               ;; is a cond-> clause and not a key that is always present.
+               client-routes (assoc :webapp/routes client-routes)))
         ;; A route DECLARING a contract that nothing on this context honours.
         ;; The same question `missing` asks below of a declared read, and the
         ;; answer matters more: a missing performer answers 500, while a missing

@@ -634,8 +634,11 @@
                  :webapp/chrome      (fn [_s inner] inner)
                  :webapp/actions     {:project/switch {:leaves? true}
                                       :thing/run      {:effectful? true}}
-                 :webapp/url-for     (fn [_s action] (when (second action)
-                                                       (str "/p/" (second action) "/store")))
+                 ;; this switcher spells its destination INTO the action, which
+                 ;; is still the right shape for a link or a button — the value
+                 ;; is for the control that cannot, i.e. a `<select>`
+                 :webapp/url-for     (fn [_s action _v] (when (second action)
+                                                          (str "/p/" (second action) "/store")))
                  :webapp/request-for (fn [_s _action] {:path "/run"})
                  :webapp/call        (fn [req ok _err] (swap! called conj req) (ok :done))
                  :webapp/act         (fn [s action _v] (swap! acted conj action) s)
@@ -1657,3 +1660,42 @@
       ;; the default is reached because a PAGE chose to show it, so it must not
       ;; render an empty element when the page's own reason is not in :loads
       (is (seq (pr-str (failed {:loads {}})))))))
+
+(deftest a-LEAVING-action-sees-the-VALUE-the-control-carried
+  ;; `:webapp/act` is `[state action value]`, and its docstring says why the
+  ;; third argument exists: the typed or selected text is the one thing the
+  ;; view could not know, because everything else rides in the action itself.
+  ;;
+  ;; That is exactly as true of an action that LEAVES. A `<select>` has ONE
+  ;; handler for N options by construction, so the chosen slug cannot be
+  ;; spelled into the action vector the way a button's argument can, or into an
+  ;; `:href` the way a link's can. It arrives as the value or not at all.
+  ;;
+  ;; Without it, a dropdown whose CHOICE IS THE DESTINATION cannot navigate on
+  ;; change: the selection has to reach state first, and a `:leaves?` action
+  ;; does not run the reducer — correctly, since an effect that also reduced is
+  ;; how two dispatchers drift apart. So one interaction needs two controls, and
+  ;; the second is a "go" button that exists only to read the state back. A
+  ;; consumer shipped that button and marked it a workaround for this gap.
+  ;;
+  ;; Every dropdown-as-destination has this shape — project switcher, version
+  ;; picker, branch selector, locale menu — so it belongs in the framework
+  ;; rather than in each app.
+  (let [went (atom nil)
+        app  {:webapp/state   (atom {})
+              :webapp/actions {:project/goto {:leaves? true}}
+              :webapp/leave!  #(reset! went %)
+              :webapp/url-for (fn [_state _action slug]
+                                (when (seq slug) (str "/p/" slug)))}]
+
+    (testing "the value the control carried reaches url-for"
+      (webapp/dispatch! app [:project/goto] "slopp-ui")
+      (is (= "/p/slopp-ui" @went)
+          "url-for never saw the selected value, so a dropdown cannot be its own destination"))
+
+    (testing "and nil still DECLINES, so the empty option is not a navigation"
+      ;; the unarmed-switcher channel, unchanged — an empty selection is a real
+      ;; state and must not throw or navigate
+      (reset! went nil)
+      (webapp/dispatch! app [:project/goto] "")
+      (is (nil? @went) "an empty selection navigated somewhere"))))

@@ -5,7 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.api.server :as server]
             [slopp.store :as store]
-            [slopp.http :as slopp.http] [clojure.edn :as edn] [slopp.http.client :as http.client] [clojure.set :as set] [clojure.string :as str] [slopp.api.otel :as otel]))
+            [slopp.http :as slopp.http] [clojure.edn :as edn] [slopp.http.client :as http.client] [clojure.set :as set] [clojure.string :as str] [slopp.api.otel :as otel] [slopp.store.db :as db]))
 
 (deftest ^:external ui-serve-serves-the-callers-own-session
   ;; The listener serves the CALLER's session rather than opening one. A
@@ -228,7 +228,16 @@
   ;; explicit route row in `serving-opts`, and an in-image test that builds its
   ;; own context would pass whether or not the LISTENER carries the row — the
   ;; exact failure the sibling test above this one was written for.
-  (let [sess (atom {:store (store/empty-store)})
+  ;;
+  ;; The session needs a JOURNAL because a measurement is not a delta. It was
+  ;; one for about an hour and the store became unwritable: an exporter posts
+  ;; on its own interval and moved the head every writer compare-and-swaps
+  ;; against, so `full_check` lost the race four times running. This test
+  ;; asserted the delta for as long as that was true and nothing ran it after
+  ;; it stopped being true.
+  (let [dir     (str (System/getProperty "java.io.tmpdir") "/slopp-otel-" (System/nanoTime))
+        journal (db/open! dir)
+        sess    (atom {:store (store/empty-store) :db journal})
         payload (str "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":["
                      "{\"timeUnixNano\":\"1787881784700000000\","
                      "\"body\":{\"stringValue\":\"claude_code.api_request\"},"
@@ -244,46 +253,102 @@
                      "{\"key\":\"cost_usd\",\"value\":{\"doubleValue\":0.08}},"
                      "{\"key\":\"duration_ms\",\"value\":{\"intValue\":1475}}"
                      "]}]}]}]}")]
-    (testing "the receiver answers when called directly"
-      ;; told apart from the transport on purpose: a 500 with a generic body
-      ;; looks identical whether the handler threw or the mount is missing
-      (is (= 200 (:status (otel/logs {:http/deps {:session sess} :body payload})))))
-    (testing "an unparseable export is 400 — NEVER a 500 an exporter retries forever"
-      ;; found by a fixture of mine that was missing two brackets: the handler
-      ;; threw, the server answered 500, and an exporter treats 5xx as
-      ;; retryable — so an unreadable batch would come back on every interval
-      ;; for as long as the process lived. 400 is OTLP's non-retryable answer.
-      (let [r (otel/logs {:http/deps {:session sess}
-                          :body "{\"resourceLogs\":[{\"scopeLogs\":["})]
-        (is (= 400 (:status r)) (pr-str r))
-        (is (clojure.string/includes? (str (:body r)) "could not parse") (pr-str r))))
     (try
-      (let [r    (server/serve! sess 0)
-            url  (str (:url r) "v1/logs")
-            conn (doto ^java.net.HttpURLConnection
-                       (.openConnection (java.net.URL. url))
-                   (.setRequestMethod "POST")
-                   (.setRequestProperty "Content-Type" "application/json")
-                   (.setDoOutput true))]
-        (with-open [o (.getOutputStream conn)]
-          (.write o (.getBytes payload "UTF-8")))
-        (testing "the exporter is answered with OTLP's success shape"
-          (let [code (.getResponseCode conn)]
-            (is (= 200 code)
-                (str "server said " code ": "
-                     (try (slurp (.getErrorStream conn))
-                          (catch Throwable t (str "no error stream: " t)))))))
+      (testing "the receiver answers when called directly"
+        ;; told apart from the transport on purpose: a 500 with a generic body
+        ;; looks identical whether the handler threw or the mount is missing
+        (is (= 200 (:status (otel/logs {:http/deps {:session sess} :body payload})))))
+      (testing "an unparseable export is 400 — NEVER a 500 an exporter retries forever"
+        ;; found by a fixture of mine that was missing two brackets: the handler
+        ;; threw, the server answered 500, and an exporter treats 5xx as
+        ;; retryable — so an unreadable batch would come back on every interval
+        ;; for as long as the process lived. 400 is OTLP's non-retryable answer.
+        (let [r (otel/logs {:http/deps {:session sess}
+                            :body "{\"resourceLogs\":[{\"scopeLogs\":["})]
+          (is (= 400 (:status r)) (pr-str r))
+          (is (clojure.string/includes? (str (:body r)) "could not parse") (pr-str r))))
+      (try
+        (let [before (count (db/measurements journal "otel" nil))
+              r      (server/serve! sess 0)
+              url    (str (:url r) "v1/logs")
+              http   (doto ^java.net.HttpURLConnection
+                           (.openConnection (java.net.URL. url))
+                       (.setRequestMethod "POST")
+                       (.setRequestProperty "Content-Type" "application/json")
+                       (.setDoOutput true))]
+          (with-open [o (.getOutputStream http)]
+            (.write o (.getBytes payload "UTF-8")))
+          (testing "the exporter is answered with OTLP's success shape"
+            (let [code (.getResponseCode http)]
+              (is (= 200 code)
+                  (str "server said " code ": "
+                       (try (slurp (.getErrorStream http))
+                            (catch Throwable t (str "no error stream: " t)))))))
 
-        (let [d (last (filter #(= :otel (:op %)) (:deltas (:store @sess))))]
-          (testing "and the batch is on the session's line"
-            (is (some? d) (pr-str (mapv :op (:deltas (:store @sess)))))
-            (is (= 1 (count (:requests d))) (pr-str d)))
+          (let [ms (db/measurements journal "otel" nil)
+                p  (:payload (last ms))]
+            (testing "and the batch is recorded beside the journal, not IN it"
+              (is (= (inc before) (count ms))
+                  (str "the post over the wire must have added exactly one row: " (pr-str ms)))
+              (is (empty? (filter #(= :otel (:op %)) (:deltas (:store @sess))))
+                  "a measurement must never move the head a writer CASes against")
+              (is (= 1 (count (:requests p))) (pr-str p)))
 
-          (testing "carrying the CONTEXT SIZE the CLI never sends as a field"
-            (is (= (+ 2 9987 7559) (:context (first (:requests d))))
-                (pr-str (first (:requests d)))))
+            (testing "carrying the CONTEXT SIZE the CLI never sends as a field"
+              (is (= (+ 2 9987 7559) (:context (first (:requests p))))
+                  (pr-str (first (:requests p)))))
 
-          (testing "and NOT carrying the operator's email, which rides every raw record"
-            (is (not (clojure.string/includes? (pr-str d) "someone@example.com"))
-                "an identity attribute reached the journal"))))
-      (finally (server/stop!)))))
+            (testing "and NOT carrying the operator's email, which rides every raw record"
+              (is (not (clojure.string/includes? (pr-str p) "someone@example.com"))
+                  "an identity attribute reached the measurements table"))))
+        (finally (server/stop!)))
+      (finally (.close journal)))))
+
+(deftest ^:external a-served-route-table-says-when-the-store-moved-under-it
+  ;; Friction #12, and the shape of Cause 1: the route table and both
+  ;; performer vocabularies are assembled ONCE at serve time and the running
+  ;; listener holds them. Add an endpoint after that and it answers 404 —
+  ;; correctly, for the table it has — while the store says the route exists.
+  ;; `serving-opts` already documents the re-serve requirement in a comment,
+  ;; which is a thing a reader has to have read; nothing MEASURED it.
+  ;;
+  ;; The listener cannot re-derive itself cheaply, and that is fine. What it
+  ;; must not do is answer as though there were nothing to know.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-served-" (System/nanoTime))
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (store/ingest (store/empty-store) 'demo.served
+                                "(ns demo.served)\n\n(defn f [] 1)\n")
+            _     (db/append! conn st (store/deltas st) ['demo.served] trunk nil)
+            sess  (atom {:store st :db conn :line trunk})]
+        (try
+          (let [r (server/serve! sess 0)]
+            (testing "a fresh listener says what store state its table came from"
+              (is (true? (:current? r)) (pr-str r))
+              (is (= trunk (:line (:derived-from r))) (pr-str r)))
+
+            (testing "and WHICH PROCESS answers that url"
+              ;; the costliest of the six ways two readers of one store
+              ;; disagree, and the one neither agent considered for an
+              ;; evening: `query_eval` runs in a child image JVM while a
+              ;; served listener runs in the MCP host. Same store, same code,
+              ;; two loading strategies — and the only reason it was ever
+              ;; found is that an eval happened to print its own pid.
+              (let [p (:process (server/serving sess))]
+                (is (= (:pid (db/this-process)) (:pid p)) (pr-str p))
+                (is (some? (:started p))
+                    "pids are reused, so the pair is the identity")))
+
+            (testing "and reports itself behind once the line moves under it"
+              (let [st2 (store/ingest st 'demo.later "(ns demo.later)\n\n(defn g [] 2)\n")
+                    new (vec (drop (count (store/deltas st)) (store/deltas st2)))]
+                (is (true? (db/append! conn st2 new ['demo.later] trunk
+                                       (:head (:derived-from r))))
+                    "fixture: the line really did move under the listener")
+                (let [s (server/serving sess)]
+                  (is (= (:url r) (:url s)) "the same listener is still up")
+                  (is (false? (:current? s)) (pr-str s))
+                  (is (some? (:why s)) "and it says what to do about it")))))
+          (finally (server/stop!))))
+      (finally (.close conn)))))
