@@ -5,7 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.api.server :as server]
             [slopp.store :as store]
-            [slopp.http :as slopp.http] [clojure.edn :as edn] [slopp.http.client :as http.client] [clojure.set :as set] [clojure.string :as str]))
+            [slopp.http :as slopp.http] [clojure.edn :as edn] [slopp.http.client :as http.client] [clojure.set :as set] [clojure.string :as str] [slopp.api.otel :as otel]))
 
 (deftest ^:external ui-serve-serves-the-callers-own-session
   ;; The listener serves the CALLER's session rather than opening one. A
@@ -218,3 +218,72 @@
                (set/difference derived listed)
                " / served but declares neither: "
                (set/difference listed derived))))))
+
+(deftest ^:external the-listener-RECEIVES-harness-telemetry-and-records-it
+  ;; The one thing slopp cannot observe about itself: how many tokens a request
+  ;; carried, what it cost, and how full the conversation is. It arrives as
+  ;; OTLP over the listener that already exists.
+  ;;
+  ;; ^:external and through a REAL serve! deliberately: the mount is an
+  ;; explicit route row in `serving-opts`, and an in-image test that builds its
+  ;; own context would pass whether or not the LISTENER carries the row — the
+  ;; exact failure the sibling test above this one was written for.
+  (let [sess (atom {:store (store/empty-store)})
+        payload (str "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":["
+                     "{\"timeUnixNano\":\"1787881784700000000\","
+                     "\"body\":{\"stringValue\":\"claude_code.api_request\"},"
+                     "\"attributes\":["
+                     "{\"key\":\"session.id\",\"value\":{\"stringValue\":\"s-abc\"}},"
+                     "{\"key\":\"user.email\",\"value\":{\"stringValue\":\"someone@example.com\"}},"
+                     "{\"key\":\"prompt.id\",\"value\":{\"stringValue\":\"p-1\"}},"
+                     "{\"key\":\"model\",\"value\":{\"stringValue\":\"claude-opus-5\"}},"
+                     "{\"key\":\"input_tokens\",\"value\":{\"intValue\":2}},"
+                     "{\"key\":\"output_tokens\",\"value\":{\"intValue\":4}},"
+                     "{\"key\":\"cache_read_tokens\",\"value\":{\"intValue\":9987}},"
+                     "{\"key\":\"cache_creation_tokens\",\"value\":{\"intValue\":7559}},"
+                     "{\"key\":\"cost_usd\",\"value\":{\"doubleValue\":0.08}},"
+                     "{\"key\":\"duration_ms\",\"value\":{\"intValue\":1475}}"
+                     "]}]}]}]}")]
+    (testing "the receiver answers when called directly"
+      ;; told apart from the transport on purpose: a 500 with a generic body
+      ;; looks identical whether the handler threw or the mount is missing
+      (is (= 200 (:status (otel/logs {:http/deps {:session sess} :body payload})))))
+    (testing "an unparseable export is 400 — NEVER a 500 an exporter retries forever"
+      ;; found by a fixture of mine that was missing two brackets: the handler
+      ;; threw, the server answered 500, and an exporter treats 5xx as
+      ;; retryable — so an unreadable batch would come back on every interval
+      ;; for as long as the process lived. 400 is OTLP's non-retryable answer.
+      (let [r (otel/logs {:http/deps {:session sess}
+                          :body "{\"resourceLogs\":[{\"scopeLogs\":["})]
+        (is (= 400 (:status r)) (pr-str r))
+        (is (clojure.string/includes? (str (:body r)) "could not parse") (pr-str r))))
+    (try
+      (let [r    (server/serve! sess 0)
+            url  (str (:url r) "v1/logs")
+            conn (doto ^java.net.HttpURLConnection
+                       (.openConnection (java.net.URL. url))
+                   (.setRequestMethod "POST")
+                   (.setRequestProperty "Content-Type" "application/json")
+                   (.setDoOutput true))]
+        (with-open [o (.getOutputStream conn)]
+          (.write o (.getBytes payload "UTF-8")))
+        (testing "the exporter is answered with OTLP's success shape"
+          (let [code (.getResponseCode conn)]
+            (is (= 200 code)
+                (str "server said " code ": "
+                     (try (slurp (.getErrorStream conn))
+                          (catch Throwable t (str "no error stream: " t)))))))
+
+        (let [d (last (filter #(= :otel (:op %)) (:deltas (:store @sess))))]
+          (testing "and the batch is on the session's line"
+            (is (some? d) (pr-str (mapv :op (:deltas (:store @sess)))))
+            (is (= 1 (count (:requests d))) (pr-str d)))
+
+          (testing "carrying the CONTEXT SIZE the CLI never sends as a field"
+            (is (= (+ 2 9987 7559) (:context (first (:requests d))))
+                (pr-str (first (:requests d)))))
+
+          (testing "and NOT carrying the operator's email, which rides every raw record"
+            (is (not (clojure.string/includes? (pr-str d) "someone@example.com"))
+                "an identity attribute reached the journal"))))
+      (finally (server/stop!)))))

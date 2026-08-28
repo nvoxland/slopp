@@ -50,3 +50,30 @@
       (testing "unparseable input errors cleanly"
         (is (:error (ops/query-macroexpand sess "(when x"))))
       (finally (ops/close! sess)))))
+
+(deftest an-observation-carries-per-namespace-TIME-when-the-run-measured-it
+  ;; Shard balancing weights by image BOOTS, and the tier costs its slowest
+  ;; shard, so the proxy is paid on every whole-store check. The observation is
+  ;; where the honest number has to land: it is already appended per run and
+  ;; already carries the scope those namespaces came from.
+  ;;
+  ;; A bare map stands in for the store: `observation-of` reads it only to
+  ;; qualify BARE failure names, and every run here is green.
+  (testing "ABSENT when the build wrote no timing"
+    ;; the failure this guards is a balancer reading a missing measurement as
+    ;; zero and packing an expensive namespace as if it were free. Absent and
+    ;; zero must not be the same value.
+    (is (not (contains? (external/observation-of {} {:status :green :ran 3})
+                        :ns-ms))))
+  (testing "carried when the run measured it"
+    (is (= '{a.core-test 1200 b.core-test 300}
+           (:ns-ms (external/observation-of
+                    {} {:status :green :ran 3
+                        :ns-ms '{a.core-test 1200 b.core-test 300}})))))
+  (testing "and it rides beside the evidence rather than replacing any of it"
+    (let [o (external/observation-of {} {:status :green :ran 3
+                                         :ns-ms '{a.core-test 1200}})]
+      (is (= :external (:tier o)))
+      (is (= :green (:status o)))
+      (is (= 3 (:ran o)))
+      (is (= [] (:failures o))))))

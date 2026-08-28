@@ -45,6 +45,29 @@
   (spit (io/file (str trace-file-prefix (java.util.UUID/randomUUID) ".edn"))
         (pr-str trace)))
 
+(def ^:export timing-file-prefix
+  "Marks this run's per-namespace TIMING files in the built dir.
+
+  Separate from [[trace-file-prefix]] rather than a second key inside the same
+  file, and the reason is mechanical: `read-traces` globs its prefix and merges
+  the results with `into`, so a timing map arriving under that prefix would be
+  poured into a set-valued map and throw on the first number. Two prefixes, two
+  readers, neither able to see the other's files."
+  "slopp-nstiming-")
+
+(defn- write-timing!
+  "Emit this shard's per-namespace wall time as EDN beside the build.
+
+  A FILE for the same reason as [[write-trace!]]: the output parsers regex the
+  whole joined stdout+stderr of every shard, so anything printed there is a
+  false-match surface. Written even when EMPTY, because an absent file means
+  *this build has no timing runner* and an empty one means *it ran and there
+  was nothing to time* — [[slopp.ops.testrun/read-timings]] answers nil only
+  for the first, and a balancer must be able to tell them apart."
+  [timing]
+  (spit (io/file (str timing-file-prefix (java.util.UUID/randomUUID) ".edn"))
+        (pr-str timing)))
+
 ^:unsafe ^:entry-point (defn -main
   "Run the built project's tests through cognitect, tracing which src forms
   each test touches; write the trace, then exit on cognitect's own verdict.
@@ -58,6 +81,14 @@
         touched   (atom #{})
         current   (atom nil)
         trace     (atom {})
+        ;; per-NAMESPACE wall time, accumulated from the same bracket the
+        ;; trace uses. Balancing the external tier has only ever had image-BOOT
+        ;; counts to weight with, and the tier costs its slowest shard, so the
+        ;; proxy is paid on every whole-store check. Namespace grain rather
+        ;; than test grain: the shard packer's unit is a namespace, and a
+        ;; finer number would be recorded and then summed away.
+        timing    (atom {})
+        started   (atom nil)
         orig      t/report
         originals (rt/instrument! (instrumentation-targets!) touched)
         ;; track the current test, then DELEGATE — clojure.test's own methods
@@ -65,15 +96,23 @@
         record    (fn [m]
                     (case (:type m)
                       :begin-test-var (do (reset! current (rt/qualified (:var m)))
-                                          (reset! touched #{}))
+                                          (reset! touched #{})
+                                          (reset! started (System/nanoTime)))
                       :end-test-var   (when @current
                                         (swap! trace update @current
-                                               (fnil into #{}) @touched))
+                                               (fnil into #{}) @touched)
+                                        (when-let [t0 @started]
+                                          (swap! timing update
+                                                 (symbol (namespace @current))
+                                                 (fnil + 0)
+                                                 (quot (- (System/nanoTime) t0)
+                                                       1000000))))
                       nil)
                     (orig m))]
     (try
       (let [{:keys [fail error]} (binding [t/report record] (ctr-test opts))]
         (write-trace! @trace)
+        (write-timing! @timing)
         (System/exit (if (zero? (+ fail error)) 0 1)))
       (finally
         (rt/restore! originals)))))

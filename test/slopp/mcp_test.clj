@@ -1762,6 +1762,22 @@
   (testing "a thrown exception, which the dispatcher already marked"
     (is (= "error: boom"
            (#'mcp/refusal-text {:isError true :content [{:text "error: boom"}]}))))
+  (testing "a result whose first key merely STARTS with :error is not a refusal"
+    ;; `{:errors 0` starts with `{:error`. Every external test run opens its
+    ;; map with `:errors`, so a prefix test on `{:error` counted all of them —
+    ;; GREEN ones included. Measured on this store before the fix: 461 of 1465
+    ;; recorded refusals were `test_run`, making it the most-refused tool by a
+    ;; wide margin and putting "agents reach for a redundant test ritual" into
+    ;; a performance plan. There was no such habit; the meter was reading its
+    ;; own prefix. A waste metric that invents waste sends someone to fix a
+    ;; thing that is not broken, which is worse than under-counting.
+    (is (nil? (#'mcp/refusal-text
+               {:content [{:text (str "{:errors 0, :exit 0, :external true,"
+                                      " :status :green, :ran 2}")}]}))
+        "a GREEN external run was being recorded as a refused call")
+    (is (nil? (#'mcp/refusal-text
+               {:content [{:text "{:errors 1, :exit 1, :failures 3}"}]}))
+        "a RED run is a test failure, not a refused call — nothing bounced"))
   (testing "a clean result is nil, so the predicate is the extraction"
     (is (nil? (#'mcp/refusal-text {:content [{:text "{:ok true, :delta \"d1\"}"}]})))
     (is (nil? (#'mcp/refusal-text {}))))
@@ -2678,3 +2694,66 @@
         (is (true? (.exists pi)))
         (is (re-find #"B's own ask" (slurp pi))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-server-whose-CLIENT-IS-GONE-says-so-and-EXITS
+  ;; EOF on stdin is the ordinary end of an MCP server's life: the editor
+  ;; closed the pipe, or nobody was on the other end at all. `-main` handles it
+  ;; correctly — the `finally` deregisters from the hub and stops the UI
+  ;; listener, which is right, because the UI serves the LIVE session and dies
+  ;; with it by design.
+  ;;
+  ;; Two things were wrong with it and both cost a full evening across three
+  ;; agents on 2026-08-27:
+  ;;
+  ;; 1. **It said nothing.** A manual or scripted launch prints
+  ;;    `slopp UI: http://127.0.0.1:PORT/` during boot, then withdraws that
+  ;;    listener on EOF without a word. Everyone who curled the announced url
+  ;;    got nothing and concluded the code was broken — a consumer twice, and
+  ;;    this store's own agents three times between them.
+  ;; 2. **It lingered ~60s.** `(future (start-app! session))` runs on Clojure's
+  ;;    send-off pool, whose worker threads are NON-DAEMON with a 60s keepalive,
+  ;;    and nothing called `shutdown-agents`. A thread dump caught it exactly:
+  ;;    `DestroyJavaVM` RUNNABLE — main had already returned — held open by
+  ;;    `clojure-agent-send-off-pool-0` parked in `SynchronousQueue.poll`, the
+  ;;    same stack and the same `cpu=365.70ms` twelve seconds apart. An idle
+  ;;    pool worker waiting for a task that was never coming.
+  ;;
+  ;; So: alive, announced, serving nothing, silent. This test is the one
+  ;; nobody had.
+  ;;
+  ;; An EMPTY dir on purpose — the boot path is identical and there is no store
+  ;; to load, so this costs a JVM rather than a JVM plus 279 namespaces.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-eof-" (System/nanoTime))
+        cp   (System/getProperty "java.class.path")
+        pb   (ProcessBuilder. ["java" "-cp" cp "clojure.main" "-e"
+                               (str "(require 'slopp.mcp) (slopp.mcp/-main \"" dir "\")")])
+        _    (.mkdirs (io/file dir))
+        proc (.start pb)]
+    (try
+      ;; close stdin immediately: this IS the condition under test
+      (.close (.getOutputStream proc))
+
+      (testing "it exits rather than lingering on an idle pool thread"
+        ;; 40s: comfortably past a correct exit and comfortably short of the
+        ;; 60s keepalive that used to hold it, so this discriminates rather
+        ;; than merely waiting long enough for anything to finish.
+        (let [done? (.waitFor proc 40 java.util.concurrent.TimeUnit/SECONDS)]
+          (when-not done? (.destroyForcibly proc))
+          (is done?
+              (str "the server was still alive 40s after its client went away."
+                   " A process that has torn down its listener and returned from"
+                   " -main is holding the JVM open on a non-daemon pool thread"))))
+
+      (testing "and it SAYS why, so a launcher is not left guessing"
+        ;; the announced url is on stderr from boot; the withdrawal has to be
+        ;; there too, or the last word anyone reads is a url that stopped
+        ;; working without comment
+        (let [err (slurp (.getErrorStream proc))]
+          (is (re-find #"(?i)stdin|client" err)
+              (str "nothing on stderr names the client going away — the last"
+                   " thing a launcher reads is the url that just stopped"
+                   " working. stderr was: " (pr-str err)))))
+
+      (finally
+        (.destroyForcibly proc)
+        (sh/sh "rm" "-rf" dir)))))

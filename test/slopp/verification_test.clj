@@ -936,3 +936,38 @@
             (str "the standing verdict reported currency as of when it was"
                  " EARNED rather than as of now: " (pr-str (:app r)))))
       (finally (ops/close! sess)))))
+
+(deftest external-timings-merge-across-shards-by-summing
+  ;; Shard balancing is currently weighted by IMAGE BOOTS, a proxy that
+  ;; predicts cost only if every boot costs the same — measured, they differ
+  ;; ~5x, and the tier costs its SLOWEST shard. Balancing on OBSERVED
+  ;; per-namespace time needs that time to exist, and until this it did not:
+  ;; the `:observe` delta carried {:ran :failures :status :tier} and the shard
+  ;; report carried per-SHARD ms only.
+  ;;
+  ;; Sibling of the trace merge below and deliberately a SEPARATE prefix:
+  ;; `read-traces` globs and `merge-with into`, so a timing file under the
+  ;; trace prefix would be merged into a set-valued map and throw on a number.
+  (let [dir (str (java.nio.file.Files/createTempDirectory
+                  "slopp-timing-merge"
+                  (make-array java.nio.file.attribute.FileAttribute 0)))
+        put (fn [suffix m]
+              (spit (java.io.File. dir (str testmain/timing-file-prefix suffix ".edn"))
+                    (pr-str m)))]
+    (testing "no timing files — nil, so 'did not measure' stays distinct from 'measured zero'"
+      (is (nil? (testrun/read-timings dir))))
+    (put "a" '{a.core-test 1200 b.core-test 300})
+    (put "b" '{c.core-test 50})
+    (testing "every shard's namespaces are present"
+      (is (= '{a.core-test 1200 b.core-test 300 c.core-test 50}
+             (testrun/read-timings dir))))
+    (testing "a namespace split across two shards SUMS — the cost is the work, not the shard"
+      ;; round-robin shards by namespace today, but a namespace appearing twice
+      ;; must not silently keep one number and discard the other: that is the
+      ;; failure mode that makes an expensive namespace look cheap and keeps
+      ;; it packed beside the other expensive ones.
+      (put "c" '{a.core-test 800})
+      (is (= 2000 (get (testrun/read-timings dir) 'a.core-test))))
+    (testing "unrelated files in the built dir are ignored"
+      (spit (java.io.File. dir "deps.edn") "{:paths [\"src\"]}")
+      (is (= 3 (count (testrun/read-timings dir)))))))

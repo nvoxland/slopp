@@ -160,27 +160,31 @@
 
   The weights come from THE reference graph, not a source scan, so they track
   the code and cannot drift. The order is total (weight, then name), so the
-  split is deterministic — a shard assignment that varied between runs would
-  make a flake unreproducible.
+  split is DETERMINISTIC — a shard assignment that varied between runs would
+  make a flake unreproducible, and that property is load-bearing.
 
-  **Balanced boots are not balanced time, and a better-looking proxy made it
-  WORSE.** This split produces `[132 133 133 133]` boots — textbook — while the
-  shards hold `[78 15 14 13]` namespaces and run `[43.3s 108.1s 134.0s
-  217.1s]`. A namespace that boots nothing weighs ZERO and packs for free,
-  which looks like the bug.
+  **Three re-weightings have now measured WORSE, and the third one explains the
+  other two.** A base-plus-heavy cost proxy: `264s` and `275s` against this
+  weight's `217s`. Then, once per-namespace TIME was finally recorded
+  (`observation-of` carries `:ns-ms`), longest-processing-time on measured
+  seconds: `266.1s` against this weight's `237.8s`.
 
-  It is not. Pricing a BASE per namespace plus a heavy term for tests that
-  shell a whole project was built and measured TWICE: `264s` and `275s` against
-  this weight's `217s`. Those 78 light namespaces really are nearly free —
-  43.3s across all of them, ~0.55s each — so pricing them at a boot apiece
-  spread them into the shards already carrying the expensive tests.
+  The third attempt is the informative one, because it failed for a reason none
+  of the reasoning had allowed for: **there is no stable per-namespace cost to
+  weight with.** Across two full runs of the same suite, the same namespace
+  measured `0.8s` and `27.1s` (orientation-test, 34x), `17.8s` and `114.5s`
+  (mcp-test), `44.6s` and `3.7s` (sync-test, 0.08x) — median ratio 1.00, so it
+  is variance rather than drift. These tests boot JVMs and shell subprocesses,
+  so what a namespace costs depends on what happens to be running beside it.
+  Fitted weights are noise, and a schedule fitted to noise also stops being
+  reproducible.
 
-  **The spread is not a packing failure.** It is a few namespaces costing
-  enormously more than the rest, and no split of four shards goes below the
-  single most expensive one. Fixing it needs per-namespace MEASUREMENT, which
-  the store does not record today (`:observe` deltas carry status, not time) —
-  not a cleverer proxy. Read `:cost` on an external result for what the current
-  split achieves."
+  So the earlier conclusion — *the tier is near its floor* — was right, and the
+  reason recorded for it was wrong. It is not that the work cannot divide below
+  one namespace (the largest is about half an even shard). It is that the
+  quantity a packer would divide is not a property of the thing being packed.
+  Read `:cost` on an external result for what this split achieves; `:ns-ms`
+  records the times, which are worth having as evidence and not as weights."
   [store nses n]
   (let [w    (frequencies (map :from-ns
                                (concat (refs/refs-to store 'slopp.ops.external/open!)
@@ -352,8 +356,11 @@
        :narrowing-ceiling-ms ceiling
        :unbalanced? uneven?
        :note (str "this tier costs its SLOWEST shard (" (secs slowest) "), not the sum."
-                  " The FASTEST (" (secs floor) ") is one JVM boot plus dependency"
-                  " resolution, which EVERY run pays — narrowed or not. So narrowing"
+                  " The FASTEST (" (secs floor) ") is the least-loaded shard, and it"
+                  " is NOT the fixed cost: per-namespace timing puts a shard's own"
+                  " JVM boot plus dependency resolution near 8s, so the rest of that"
+                  " number is tests it still ran. Read this ceiling as CONSERVATIVE"
+                  " — a run narrow enough can go below it. So narrowing"
                   (if (zero? ceiling)
                     " cannot return anything here: one shard is one boot."
                     (str " can return at most " (secs ceiling) " of it, and only when"
@@ -365,11 +372,45 @@
                     (str " The shards are UNBALANCED (" (secs floor) "…"
                          (secs slowest) "): this tier costs its slowest, so part"
                          " of that is the SPREAD rather than the work, and running"
-                         " fewer tests does not address it. A PERFECTLY divisible"
-                         " split would land near " (secs (long mean)) " — but the"
-                         " work is not divisible below one namespace, so if a"
-                         " single test namespace costs more than that, this is"
-                         " already near its floor and re-balancing cannot help."
-                         " Re-weighting the split was tried against this spread"
-                         " and measured WORSE, twice."))
+                         " fewer tests does not address it. An even split would land"
+                         " near " (secs (long mean)) " and the largest single"
+                         " namespace is about HALF that, so the work does divide —"
+                         " and re-balancing has still measured WORSE three times,"
+                         " most recently on per-namespace times measured directly"
+                         " (266.1s against the boot proxy's 237.8s). The reason is"
+                         " that there is no stable per-namespace cost to pack with:"
+                         " across two runs of one suite the same namespace measured"
+                         " 0.8s and 27.1s, 17.8s and 114.5s, 44.6s and 3.7s. These"
+                         " tests boot JVMs and shell subprocesses, so a namespace"
+                         " costs what its NEIGHBOURS leave it. Treat :ns-ms as"
+                         " evidence about a run, never as a weight for the next"
+                         " one."))
                   " Materializing the project cost " (secs build-ms) " on top.")})))
+
+(defn ^{:export "slopp.verification"} read-timings
+  "Merge the per-namespace TIMINGS this run's shards wrote into the built
+  `dir`: `{test-ns-sym total-ms}`, or **nil** when none were written.
+
+  The evidence shard balancing has never had. `balance-shards` weights by
+  IMAGE BOOTS — a proxy that predicts cost only if every boot costs the same,
+  and measured on this store they differ about fivefold. The tier costs its
+  SLOWEST shard, so a bad weight is paid on every `full_check`.
+
+  nil rather than {}, for the reason [[read-traces]] gives: *did not measure*
+  and *measured nothing* are different claims, and only a build with no timing
+  runner makes the second one true. An empty map would absorb as evidence and
+  a balancer would happily weight everything at zero.
+
+  `merge-with +` because the run is SHARDED: two shards can each report time
+  for one namespace, and keeping either number alone understates it. Summing
+  is right even though today's round-robin splits by namespace — a namespace
+  that looks cheap because half its cost went to another shard is exactly the
+  input that keeps expensive tests packed together."
+  [dir]
+  (let [fs (->> (.listFiles (io/file dir))
+                (filter #(str/starts-with? (.getName ^java.io.File %)
+                                           testmain/timing-file-prefix)))]
+    (when (seq fs)
+      (->> fs
+           (map #(edn/read-string (slurp %)))
+           (apply merge-with +)))))

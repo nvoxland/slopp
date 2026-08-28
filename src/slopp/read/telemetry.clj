@@ -272,13 +272,42 @@
   compared. Rows of two hundred calls are the same unit everywhere."
   200)
 
+(defn- model-summary
+  "The model side of a window: what its requests carried and what they cost.
+
+  `:context` is a DISTRIBUTION rather than a total, and that is the only
+  interesting choice here. Context does not accumulate — every request ships
+  the whole conversation, so summing it counts the same tokens once per round
+  trip and produces a number with no meaning. What matters is how CLOSE the
+  largest got to the limit, because that is what forces a compaction, and a
+  mean hides exactly that: one enormous request against a hundred small ones
+  leaves the average comfortable.
+
+  `:tokens` IS a sum, and legitimately: input, output and cache traffic are
+  each paid per request."
+  [rs]
+  (let [sum (fn [k] (reduce + 0 (keep k rs)))
+        ctx (vec (sort (keep :context rs)))]
+    {:requests       (count rs)
+     :input          (sum :input)
+     :output         (sum :output)
+     :cache-read     (sum :cache-read)
+     :cache-creation (sum :cache-creation)
+     :tokens         (+ (sum :input) (sum :output)
+                        (sum :cache-read) (sum :cache-creation))
+     :cost-usd       (sum :cost-usd)
+     :context        (when (seq ctx)
+                       {:p50 (nth ctx (quot (count ctx) 2))
+                        :max (peek ctx)})}))
+
 (defn ^:export turn-cost
   "Where this store's wall clock went, folded READ-ONLY over the delta log —
   no new instrumentation: `call-timing` has been writing `:timing` onto every
   `:turn-end` since it shipped. Optional `:since` (a delta id) windows to
   turns AFTER it.
 
-  Returns `{:window :wall :calls :refused :tools :repeats}`.
+  Returns `{:window :wall :calls :refused :tools :repeats}`, plus `:model`
+  when the harness's telemetry has been received.
 
   **The three-way split is the point, and it is exhaustive.** `:slopp-ms` is
   time inside a tool, `:idle-ms` is the session nobody was in, and
@@ -287,6 +316,14 @@
   `:slopp-share` is taken against ACTIVE time (elapsed minus idle), because a
   share against elapsed makes a human going to bed look like time slopp
   failed to use.
+
+  **`:model` is the half slopp cannot measure about itself** — tokens, cost,
+  and how full the conversation was — and it is here rather than in a separate
+  call because the two are only useful together: a session slow from context
+  size and one slow from whole-store checks look identical in wall time alone.
+  It is ABSENT when no `:otel` delta is in the window. Telemetry is opt-in, so
+  a zeroed section would say *this window cost nothing* where the truth is
+  *nobody was measuring*.
 
   `:repeats` names a tool run more than once inside ONE ask, which is the
   question a per-tool total cannot answer: a hundred cheap calls and two
@@ -323,46 +360,49 @@
         refused (sum (comp :count :refused))
         tally   (fn [rows key-fn val-fn]
                   (reduce (fn [m r] (update m (key-fn r) (fnil + 0) (val-fn r)))
-                          {} rows))]
-    {:window  {:turns (count ts) :since (or since :all)}
-     :wall    {:elapsed-ms elapsed
-               :idle-ms    idle
-               :active-ms  active
-               :slopp-ms   in
-               :outside-ms (sum :outside-ms)
-               :slopp-share (str (int (* 100 (/ in (double (max 1 active))))) "%")}
-     :calls   {:total calls}
-     :refused {:count   refused
-               :pct     (int (* 100 (/ refused (double (max 1 calls)))))
-               :by-tool (->> (mapcat (comp :by-tool :refused) ts)
-                             (#(tally % :tool :n))
-                             (map (fn [[t n]] {:tool t :n n}))
-                             (sort-by (juxt (comp - :n) :tool))
-                             vec)}
-     :tools   (let [rows (mapcat :top ts)
-                    ms   (tally rows :tool :ms)
-                    n    (tally rows :tool :n)]
-                (->> (keys ms)
-                     (map (fn [t]
-                            {:tool t :calls (n t) :ms (ms t)
-                             :avg-ms (long (/ (ms t) (max 1 (n t))))}))
-                     (sort-by (juxt (comp - :ms) :tool))
-                     vec))
-     :repeats (let [rows (mapcat #(filter (fn [x] (> (:n x) 1)) (:top %)) ts)]
-                (->> (group-by :tool rows)
-                     (map (fn [[t xs]]
-                            {:tool     t
-                             :turns    (count xs)
-                             :extra    (reduce + 0 (map #(dec (:n %)) xs))
-                             ;; what the repeats COST, which is the whole
-                             ;; question: two reads in one ask is ordinary, two
-                             ;; whole-store checks is four minutes of asking
-                             ;; the same thing twice. Ranked rather than
-                             ;; filtered — a threshold here would be a number
-                             ;; nobody measured.
-                             :extra-ms (long (reduce + 0 (map #(* (:ms %)
-                                                                  (/ (dec (:n %))
-                                                                     (double (:n %))))
-                                                              xs)))}))
-                     (sort-by (juxt (comp - :extra-ms) :tool))
-                     vec))}))
+                          {} rows))
+        model   (vec (mapcat :requests (filter #(= :otel (:op %)) window)))]
+    (cond->
+     {:window  {:turns (count ts) :since (or since :all)}
+      :wall    {:elapsed-ms elapsed
+                :idle-ms    idle
+                :active-ms  active
+                :slopp-ms   in
+                :outside-ms (sum :outside-ms)
+                :slopp-share (str (int (* 100 (/ in (double (max 1 active))))) "%")}
+      :calls   {:total calls}
+      :refused {:count   refused
+                :pct     (int (* 100 (/ refused (double (max 1 calls)))))
+                :by-tool (->> (mapcat (comp :by-tool :refused) ts)
+                              (#(tally % :tool :n))
+                              (map (fn [[t n]] {:tool t :n n}))
+                              (sort-by (juxt (comp - :n) :tool))
+                              vec)}
+      :tools   (let [rows (mapcat :top ts)
+                     ms   (tally rows :tool :ms)
+                     n    (tally rows :tool :n)]
+                 (->> (keys ms)
+                      (map (fn [t]
+                             {:tool t :calls (n t) :ms (ms t)
+                              :avg-ms (long (/ (ms t) (max 1 (n t))))}))
+                      (sort-by (juxt (comp - :ms) :tool))
+                      vec))
+      :repeats (let [rows (mapcat #(filter (fn [x] (> (:n x) 1)) (:top %)) ts)]
+                 (->> (group-by :tool rows)
+                      (map (fn [[t xs]]
+                             {:tool     t
+                              :turns    (count xs)
+                              :extra    (reduce + 0 (map #(dec (:n %)) xs))
+                              ;; what the repeats COST, which is the whole
+                              ;; question: two reads in one ask is ordinary, two
+                              ;; whole-store checks is four minutes of asking
+                              ;; the same thing twice. Ranked rather than
+                              ;; filtered — a threshold here would be a number
+                              ;; nobody measured.
+                              :extra-ms (long (reduce + 0 (map #(* (:ms %)
+                                                                   (/ (dec (:n %))
+                                                                      (double (:n %))))
+                                                               xs)))}))
+                      (sort-by (juxt (comp - :extra-ms) :tool))
+                      vec))}
+      (seq model) (assoc :model (model-summary model)))))

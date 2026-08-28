@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.api.endpoints]
             [slopp.api.contracts :as contracts]
-            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.rest :as slopp.rest] [slopp.api.reads :as api.reads] [slopp.rest.paths :as rest.paths]))
+            [slopp.http :as slopp.http] [slopp.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp.api.model :as model] [slopp.read.orient :as orient] [slopp.rest :as slopp.rest] [slopp.api.reads :as api.reads] [slopp.rest.paths :as rest.paths] [malli.util :as mu]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -1218,3 +1218,84 @@
                (edn/read-string
                 (:body (slopp.http/handle! none {:request-method :get
                                                  :uri "/api/webapp/paths"})))))))))
+
+(deftest a-document-ships-NOTHING-its-contract-does-not-DECLARE
+  ;; Every check on this surface asks whether the DECLARED things are honoured
+  ;; — `check-response`, `check-arrived`, the `rest-*-contract` rules. None
+  ;; asks the other direction, because a malli map is OPEN:
+  ;;
+  ;;     (m/validate [:map [:a :string]] {:a "x" :bundle "/y"})  ; => true
+  ;;
+  ;; So a contract can UNDER-declare forever and every mechanism reports
+  ;; clean. `/api/config` shipped `:bundle` on the wire and declared it
+  ;; nowhere; a consumer generating a client from the contract could not see
+  ;; the field, which lands the cost exactly on the reason `:bundle` exists —
+  ;; a missing bundle is meant to be findable from a page rather than by curl.
+  ;;
+  ;; **The consumer structurally cannot run this check.** They see what we
+  ;; send, never what we meant to declare. It is ours, so it is here.
+  ;;
+  ;; The fixture is the load-bearing half. Closing a schema over a THIN store
+  ;; proves nothing: slopp's own store legitimately omits `:bundle` (no mount
+  ;; reaches its bundle), which is exactly why this was invisible from here
+  ;; and obvious from a store that has one. So the store below is built to
+  ;; make the OPTIONAL keys appear, and each document asserts which optional
+  ;; key its fixture actually exercised — an unexercised key is an unchecked
+  ;; one, and silence about that is how this shipped.
+  (let [src  (str "(ns shop.ui)\n\n"
+                  "(defn ^{:webapp/path \"/things\"} things\n"
+                  "  \"Every thing, listed.\"\n"
+                  "  [_a _p] [:main \"things\"])\n")
+        st   (-> (store/empty-store)
+                 (store/ingest 'shop.ui src)
+                 ;; the mount that makes :bundle resolve — without it the
+                 ;; field is legitimately absent and the check is vacuous
+                 (assoc-in [:config "capabilities" :values "http.static./js"]
+                           "public/cljs")
+                 (assoc-in [:config "capabilities" :values "http.enabled"] "true"))
+        ctx  (server/context (atom {:store st}))
+        GET  (fn [path]
+               (edn/read-string
+                (:body (slopp.http/handle! ctx {:request-method :get :uri path}))))]
+
+    (testing "and the LIST below covers every EDN document this API serves"
+      ;; The sibling test in this file shipped `/api/config` 500ing by keeping
+      ;; an exhaustive list by hand and saying so in prose. Same file, same
+      ;; failure available here, so the same remedy: the routes carry their
+      ;; own `:rest/response`, which makes the set derivable rather than
+      ;; declared. A fifth EDN document fails HERE, by name.
+      (let [served (set (for [row (:http/routes ctx)
+                              :let [p (str (:path row))]
+                              :when (and (= "application/edn"
+                                            (:rest/media-type (meta (:handler row))))
+                                         (not (str/includes? p ":")))]
+                          p))
+            listed #{"/api/config" "/api/webapp/paths" "/api/http/paths"
+                     "/api/rest/paths"}]
+        (is (seq served) "no EDN documents found — this check would be vacuous")
+        (is (empty? (remove listed served))
+            (str "these documents are served as EDN and nothing below closes"
+                 " their contract, so each may ship undeclared keys: "
+                 (pr-str (vec (remove listed served)))))))
+
+    (doseq [[path schema exercised]
+            [["/api/config"        contracts/config-document       :bundle]
+             ["/api/webapp/paths"  contracts/webapp-paths-document :paths]
+             ["/api/http/paths"    contracts/http-paths-document   :paths]
+             ["/api/rest/paths"    contracts/rest-paths-document   :paths]]]
+      (let [doc (GET path)]
+
+        (testing (str path " — the fixture reaches the keys being checked")
+          ;; guard the guard: a closed schema over a document that never grew
+          ;; its optional keys is green for the wrong reason
+          (is (contains? doc exercised)
+              (str "the fixture did not produce " exercised
+                   ", so closing this contract proves nothing about it: "
+                   (pr-str (sort (keys doc))))))
+
+        (testing (str path " — every key it ships is declared")
+          (let [errs (:errors (m/explain (mu/closed-schema schema) doc))]
+            (is (empty? errs)
+                (str path " ships key(s) its :rest/response never declares, so a"
+                     " generated client cannot see them: "
+                     (pr-str (mapv :in errs))))))))))

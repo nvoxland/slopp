@@ -1167,3 +1167,36 @@
           (is (= '[bd.core-test/loud-t bd.core-test/quiet-t] (:went-green t))
               (pr-str t))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-SUPERSEDED-turn-is-closed-with-the-timing-it-accumulated
+  ;; Measured on this store: 393 turn-begin deltas against 346 turn-end — 47
+  ;; turns (11%) never closed, because the Stop hook calls `done` and nothing
+  ;; calls `turn_end`. Every cost fold is therefore computed over 88% of turns
+  ;; with the rest silently absent, which is the denominator failure this
+  ;; project keeps paying for.
+  ;;
+  ;; It cannot be fixed from the hook. `turn-end!` folds the ring the SERVER
+  ;; accumulates in memory, and a one-shot `--call turn_end` has an empty one —
+  ;; it would record a boundary with no `:timing`, which is the hole wearing a
+  ;; hat. The only moment that has both the knowledge (the previous ask is
+  ;; over) and the data (the ring) is the next `turn-begin!`, in the server.
+  (let [sess (external/open!)]
+    (try
+      (ops/turn-begin! sess :agent "alice" :intent "first ask" :user "nathan")
+      ;; stand in for the wire's accounting: one call, one second of it
+      (swap! sess assoc :slopp.read.telemetry/calls
+             [{:tool "query_slice" :start 1000 :end 2000}])
+      (ops/turn-begin! sess :agent "alice" :intent "second ask" :user "nathan")
+      (let [ends (filter #(= :turn-end (:op %)) (:deltas (:store @sess)))]
+        (testing "the superseded turn is CLOSED rather than dropped"
+          (is (= 1 (count ends))
+              (str "a turn that is never closed leaves no record of what the"
+                   " ask cost: " (pr-str (mapv :op (:deltas (:store @sess)))))))
+        (testing "and it carries the wall clock it actually accumulated"
+          ;; the whole point — a boundary with no timing would balance the
+          ;; counts and still measure nothing
+          (is (some? (:timing (first ends))) (pr-str (first ends)))
+          (is (= 1 (:calls (:timing (first ends)))) (pr-str (:timing (first ends))))))
+      (testing "the new turn starts from a CLEAR ring — one ask never pays for another"
+        (is (empty? (:slopp.read.telemetry/calls @sess))))
+      (finally (ops/close! sess)))))

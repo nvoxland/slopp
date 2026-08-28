@@ -190,27 +190,6 @@
       (catch Exception e
         {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
 
-(defn turn-begin!
-  "Open `agent`'s turn, recording the VERBATIM user ask as the root intent of
-  everything until turn-end. A new begin supersedes an unclosed one. The
-  intent also stays on the session (:last-intent) — orientation mines it so
-  the brief arrives task-shaped.
-
-  Also resets the wall-clock ring (`:slopp.read.telemetry/calls`) so this ask
-  measures only itself. The wire records a call AFTER it returns — otherwise
-  `turn_end` would read a half-finished entry for itself — which leaves the
-  previous turn's closing bracket in the ring. Clearing here is what keeps one
-  ask's cost from bleeding into the next."
-  [session & {:keys [agent intent user]}]
-  (when intent (swap! session assoc :last-intent intent))
-  (swap! session dissoc :slopp.read.telemetry/calls)
-  (engine/commit-appended! session
-                    #(first (store/record-turn % :turn-begin
-                                               :agent agent :intent intent
-                                               :user user))
-                    [])
-  {:turn :open :agent agent :intent intent})
-
 (defn turn-end!
   "Close `agent`'s turn (stable or not — a red turn is still history), and
   record where the turn's WALL CLOCK went.
@@ -253,6 +232,37 @@
                   (map #(clojure.string/join "/" (take (inc %) parts))
                        (range (count parts)))))]
     (boolean (some open? (or roots [agent-label])))))
+
+(defn turn-begin!
+  "Open `agent`'s turn, recording the VERBATIM user ask as the root intent of
+  everything until turn-end. A new begin supersedes an unclosed one. The
+  intent also stays on the session (:last-intent) — orientation mines it so
+  the brief arrives task-shaped.
+
+  Also resets the wall-clock ring (`:slopp.read.telemetry/calls`) so this ask
+  measures only itself. The wire records a call AFTER it returns — otherwise
+  `turn_end` would read a half-finished entry for itself — which leaves the
+  previous turn's closing bracket in the ring. Clearing here is what keeps one
+  ask's cost from bleeding into the next."
+  [session & {:keys [agent intent user]}]
+  ;; A previous ask that never called turn_end is CLOSED here, before its ring
+  ;; is cleared. This is the only moment that has both halves: the knowledge
+  ;; that the ask is over (a new one is starting) and the wall-clock ring,
+  ;; which lives in THIS process's memory. The Stop hook cannot do it — a
+  ;; one-shot `--call turn_end` finds an empty ring and would write a boundary
+  ;; with no :timing, balancing the counts while still measuring nothing.
+  ;; Measured before this existed: 393 turn-begins against 346 turn-ends, so
+  ;; 11% of asks contributed to no cost fold and nothing said so.
+  (when (turn-open? session agent)
+    (turn-end! session :agent agent :note "superseded by a new ask"))
+  (when intent (swap! session assoc :last-intent intent))
+  (swap! session dissoc :slopp.read.telemetry/calls)
+  (engine/commit-appended! session
+                    #(first (store/record-turn % :turn-begin
+                                               :agent agent :intent intent
+                                               :user user))
+                    [])
+  {:turn :open :agent agent :intent intent})
 
 ^:reads (defn query-eval
   "Observe-only eval against the live image (the oracle): call anything —
@@ -4661,3 +4671,21 @@ recompiled (engine/after-write! session ns-sym)]
         (engine/commit-appended! session #(store/record-read-cost % reads) [])
         (swap! session dissoc :slopp.read.telemetry/reads)
         reads))))
+
+(defn ^:export record-otel!
+  "Append `requests` — already normalized by [[slopp.otel/api-requests]] — to
+  this session's journal as one `:otel` delta. Returns the count recorded.
+
+  Thin on purpose. The HTTP route that receives telemetry should decode and
+  hand over; deciding how a session mutates is this layer's job, and a handler
+  that reached into the store directly would be the second place that knows
+  how, which is how the two stop agreeing.
+
+  Nothing is recorded for an empty batch: an exporter posts on its own
+  interval whether or not anything happened, and a delta per empty tick would
+  fill the journal with evidence that nothing occurred."
+  [session requests]
+  (let [rs (vec requests)]
+    (when (seq rs)
+      (engine/commit-appended! session #(store/record-otel % rs) []))
+    (count rs)))

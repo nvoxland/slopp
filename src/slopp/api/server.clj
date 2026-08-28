@@ -18,7 +18,7 @@
   belongs to the HUB, which is its own project (`slopp-ui`) and proxies here.
   `ui_serve {port}` is still an explicit override for one run."
   (:require [slopp.http :as slopp.http]
-            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest]))
+            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel]))
 
 (defonce ^:private current
   ;; defonce, not def: under --live this namespace reloads on every edit,
@@ -125,6 +125,14 @@
   one that stopped was the one no browser was pointed at."
   [session]
   {:http/namespaces served-namespaces
+   ;; The harness's telemetry receiver, mounted as an explicit row rather than
+   ;; declared like an endpoint. It is not part of what this project PUBLISHES
+   ;; — no contract, no generated client, a schema slopp does not own — and the
+   ;; served list above is documented to stay short for exactly that reason.
+   ;; An explicit row also keeps OTLP's own path, so the standard
+   ;; OTEL_EXPORTER_OTLP_ENDPOINT variable works with no per-signal override.
+   :http/routes [{:method :post :path "/v1/logs" :auth :public
+                  :handler otel/logs}]
    ;; the reviewer API publishes typed contracts; anything serving them
    ;; unvalidated answers 200s nobody checked
    :http/wrap-context slopp.rest/validating

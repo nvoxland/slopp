@@ -14,7 +14,7 @@
   SURVIVES a round trip through the log alone. `replay-delta` is the honest
   oracle for that, and a new op earns its place by replaying."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [rewrite-clj.node :as n] [slopp.store.fields :as fields]))
+            [slopp.store :as store] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [rewrite-clj.node :as n] [slopp.store.fields :as fields] [slopp.store.merge :as merge]))
 
 (def src "(ns foo)\n\n(defn add [x y]\n  (+ x y))\n\n;; a comment\n(def z 1)\n")
 
@@ -906,3 +906,30 @@
       ;; so nothing can persist it, ratchet it, or fall behind the file
       (is (= base (second (store/alloc-id base "d")))
           "the store comes back unchanged"))))
+
+(deftest harness-telemetry-lands-as-a-REGISTERED-marker-op
+  ;; The harness knows what slopp cannot — tokens, cost, and how full the
+  ;; conversation is. Those arrive as OpenTelemetry and land here as their own
+  ;; citizen, for the reason `:read-cost` did: they record what a SPAN cost and
+  ;; there is no other op that can carry them.
+  (let [st (store/record-otel (store/empty-store)
+                              [{:session "s1" :prompt "p1" :context 17548
+                                :input 2 :output 4 :cost-usd 0.08}])
+        d  (last (:deltas st))]
+    (testing "one delta per received batch, carrying the requests"
+      (is (= :otel (:op d)) (pr-str d))
+      (is (= 1 (count (:requests d))) (pr-str d))
+      (is (= 17548 (:context (first (:requests d))))))
+
+    (testing "it is a MARKER — no code changed, so a host that lacks one is not behind"
+      (is (contains? fields/markers :otel)
+          "an unregistered op makes merge-logs REFUSE the whole merge, which is
+           a store-wide failure caused by telemetry"))
+
+    (testing "and a merge meets a KNOWN op rather than refusing"
+      ;; the failure this guards is specific and severe: merge-logs turns any
+      ;; unregistered op into an error that fails the entire merge, so an
+      ;; unregistered telemetry delta would block landing for everyone on the
+      ;; branch — work stopped by a measurement.
+      (let [r (merge/merge-logs (store/empty-store) st)]
+        (is (nil? (:error r)) (pr-str (:error r)))))))

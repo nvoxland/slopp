@@ -333,3 +333,51 @@
             c2  (telemetry/turn-cost s3 :since (first ids))]
         (is (= 1 (get-in c2 [:window :turns]))
             "only the last timed turn survives the window")))))
+
+(deftest turn-cost-reports-the-MODEL-side-beside-the-wall-clock
+  ;; The question this whole fold exists for is "where did the time go", and
+  ;; until now it could only answer for slopp's own half. The other half —
+  ;; tokens, cost, and how full the conversation was — is the harness's, and it
+  ;; arrives as :otel deltas. Reporting them in the SAME call is the point: a
+  ;; session that is slow because of context size and one that is slow because
+  ;; of whole-store checks look identical in wall time alone.
+  (let [turn  {:op :turn-end :id "d1"
+               :timing {:elapsed-ms 1000 :idle-ms 0 :slopp-ms 400
+                        :outside-ms 600 :calls 2}}
+        otel  {:op :otel :id "d2"
+               :requests [{:session "s" :input 2 :output 4 :cache-read 9987
+                           :cache-creation 7559 :context 17548 :cost-usd 0.08}
+                          {:session "s" :input 10 :output 20 :cache-read 500
+                           :cache-creation 0 :context 510 :cost-usd 0.01}]}]
+
+    (testing "ABSENT when no telemetry was ever received"
+      ;; opt-in: the exporter has to be configured. Absent must not read as
+      ;; "this session cost nothing", which a zeroed section would.
+      (is (not (contains? (telemetry/turn-cost {:deltas [turn]}) :model))))
+
+    (testing "totals across every received batch"
+      (let [m (:model (telemetry/turn-cost {:deltas [turn otel]}))]
+        (is (= 2 (:requests m)) (pr-str m))
+        (is (= 12 (:input m)))
+        (is (= 24 (:output m)))
+        (is (= 10487 (:cache-read m)))
+        (is (= 7559 (:cache-creation m)))
+        (is (= (+ 12 24 10487 7559) (:tokens m)) "every token the window paid for")
+        ;; compared in CENTS: 0.08 + 0.01 is not exactly 0.09 in a double, and
+        ;; a test that asserts otherwise fails on arithmetic rather than on
+        ;; behaviour
+        (is (= 9 (Math/round (* 100.0 (:cost-usd m)))) (pr-str (:cost-usd m)))))
+
+    (testing "CONTEXT is reported as a distribution, because its max is the cap"
+      ;; a mean hides the thing that matters — approaching the context limit is
+      ;; what forces a compaction, and one enormous request does that while an
+      ;; average stays comfortable
+      (let [m (:model (telemetry/turn-cost {:deltas [turn otel]}))]
+        (is (= 17548 (:max (:context m))) (pr-str m))
+        (is (some? (:p50 (:context m))) (pr-str m))))
+
+    (testing "and it is WINDOWED like everything else in this fold"
+      (let [m (:model (telemetry/turn-cost {:deltas [turn otel]} :since "d1"))]
+        (is (= 2 (:requests m)) "batches after the since-point count"))
+      (let [m (:model (telemetry/turn-cost {:deltas [turn otel]} :since "d2"))]
+        (is (nil? m) "nothing after the last delta, so no model section at all")))))

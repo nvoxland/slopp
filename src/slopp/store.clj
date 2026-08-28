@@ -2010,3 +2010,33 @@
     (update store :deltas conj
             {:id did :parent parent :op :read-cost :ns '*session*
              :at (now-ms) :reads reads})))
+
+(defn record-otel
+  "Append an `:otel` delta carrying a batch of normalized harness telemetry —
+  *this is what the model side of these asks cost*.
+
+  One delta per RECEIVED BATCH rather than per request, the same grain
+  `:read-cost` uses and for the same reason: the exporter already batches on
+  its own interval, and a delta per model round trip would put thousands of
+  bookkeeping entries in a journal whose unit is a change to the code.
+
+  `requests` are already normalized by [[slopp.otel/api-requests]] — session,
+  prompt, model, token counts, derived context size, cost and duration. They
+  are normalized BEFORE they get here, which is deliberate: the raw records
+  carry the operator's email address and account ids on every row, and the
+  honest place to drop those is at the boundary that parses them, not in a
+  filter someone has to remember.
+
+  A MARKER op (registered in [[slopp.store.fields/markers]]): it changes no
+  code, so a host that has not loaded one is not behind, and it does not travel
+  across merges — telemetry describes a session on one line, and replaying it
+  onto another would attribute one agent's cost to a different one.
+
+  `:ns` is the `*session*` sentinel that every op which is not about ONE
+  namespace already uses."
+  [store requests]
+  (let [parent (:id (last (:deltas store)))
+        [did store] (gen-id store "d")]
+    (update store :deltas conj
+            {:id did :parent parent :op :otel :ns '*session*
+             :at (now-ms) :requests (vec requests)})))

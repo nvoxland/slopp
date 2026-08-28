@@ -35,9 +35,18 @@
   field on another op that could not carry it. It records what a SPAN of
   answers cost to send, and it is its own citizen because riding `:turn-end`
   gave it the turn's rotation gate, which is blind to exactly the spans where
-  reads dominate."
+  reads dominate.
+
+  `:otel` is the third of that family and the first whose content slopp did not
+  produce: what the HARNESS reports about a session — tokens, cost, and the
+  context size slopp structurally cannot observe from inside an MCP server. A
+  marker for the same reason as its neighbours (it changes no code, so a host
+  that has not loaded one is not behind), and registered HERE rather than
+  anywhere else because an unregistered op makes `merge-logs` refuse the whole
+  merge — telemetry able to stop everyone on a branch from landing would be a
+  measurement doing harm."
   #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert
-    :read-cost})
+    :read-cost :otel})
 
 (def silent-markers
   "The marker subset merge-logs skips without a note — verification and

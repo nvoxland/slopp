@@ -295,7 +295,10 @@
 
   A refusal arrives in two shapes: a thrown exception, which `handle!` has
   already marked `:isError`, or slopp's own refusal-as-data, which `text!`
-  pr-strs so the payload opens with `{:error`. This is the whole predicate as
+  pr-strs so the payload opens with `{:error ` — **including the space**, which
+  is what keeps `{:errors 0` (how every external test-run result opens) from
+  matching. This docstring said `{:error` for a year and the code agreed with
+  it, which is how the meter came to count green test runs as refusals. This is the whole predicate as
   well as the message — `:refused?` is `(some? (refusal-text r))` — because
   asking the same question at two call sites is how they drift, and the
   failure log has four instances of that shape already.
@@ -308,7 +311,14 @@
   [r]
   (let [t (:text (first (:content r)))]
     (cond
-      (and t (str/starts-with? t "{:error")) t
+      ;; the SPACE is load-bearing. `pr-str` of the refusal shape `{:error
+      ;; "..."}` always puts one after the key, and `{:errors 0` — the opening
+      ;; of every external test-run result — does not have it. Without the
+      ;; space this matched all of them: 461 of 1465 recorded refusals on this
+      ;; store were `test_run`, GREEN runs included, which made it the
+      ;; most-refused tool by a wide margin and put a nonexistent "agents reach
+      ;; for a redundant test ritual" habit into a performance plan.
+      (and t (str/starts-with? t "{:error ")) t
       (:isError r) (or t "error")
       :else nil)))
 
@@ -1811,6 +1821,24 @@
     (try
       (serve! session (io/reader System/in) (io/writer System/out))
       (finally
+        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
+        ;; belongs to the MCP session and must not outlive it — but boot
+        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
+        ;; working. Saying nothing is what made this expensive: a manual launch
+        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
+        ;; immediately, so the last thing a launcher reads is a url that is
+        ;; already dead, with a live process behind it. Three agents spent an
+        ;; evening diagnosing that, twice concluding the code was broken and
+        ;; once that a jar had not shipped.
+        ;;
+        ;; stderr, because stdout is the JSON-RPC channel.
+        (.println System/err
+                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
+                               " UI listener and exiting. The UI belongs to the"
+                               " MCP session and does not outlive it, so a url"
+                               " printed above has stopped working. To keep one"
+                               " alive, run slopp from an editor (which holds"
+                               " stdin open) rather than launching it manually."))
         ;; deregister BEFORE the listener goes: the hub should learn we are
         ;; leaving from us, not by ageing us out thirty seconds later.
         (hub/stop! (:hub-heartbeat @session))
@@ -1820,7 +1848,19 @@
         ;; bound for as long as the reap takes — and the next server to start
         ;; here wants exactly that port.
         (live/stop! (:app-server @session))
-        (ops/close! session)))))
+        (ops/close! session)
+        ;; and GO. `(future (start-app! session))` above runs on Clojure's
+        ;; send-off pool, whose workers are NON-DAEMON with a 60-second
+        ;; keepalive — so `main` returns, `DestroyJavaVM` starts, and an IDLE
+        ;; pool thread holds the JVM open for a further minute with every
+        ;; listener already torn down. Caught by thread dump: DestroyJavaVM
+        ;; RUNNABLE, held by `clojure-agent-send-off-pool-0` parked in
+        ;; SynchronousQueue.poll — same stack and same cpu time twelve seconds
+        ;; apart, waiting for a task that was never coming.
+        ;;
+        ;; A minute of a process that has announced a url, withdrawn it, and
+        ;; still answers `ps` is exactly the state nobody could interpret.
+        (shutdown-agents)))))
 
 (defn call!
   "One-shot tool invocation against the store at `dir` — the --call CLI's

@@ -572,14 +572,23 @@
                                         :when (= s (str (:name f)))]
                                     (symbol (str n) s)))]
                         (if (= 1 (count hits)) (first hits) (symbol s))))))]
-    {:tier     :external
-     :status   (:status result)
-     :ran      (:ran result)
-     ;; DISTINCT: clojure.test emits a FAIL block per failing ASSERTION, so one
-     ;; red test arrives three times. The observation records which tests went
-     ;; red, not how many of their assertions did — measured on a real red run
-     :failures (vec (distinct (for [f (:failing result) :when (:test f)]
-                                {:test (qualify (:test f))})))}))
+    (cond->
+     {:tier     :external
+      :status   (:status result)
+      :ran      (:ran result)
+      ;; DISTINCT: clojure.test emits a FAIL block per failing ASSERTION, so one
+      ;; red test arrives three times. The observation records which tests went
+      ;; red, not how many of their assertions did — measured on a real red run
+      :failures (vec (distinct (for [f (:failing result) :when (:test f)]
+                                 {:test (qualify (:test f))})))}
+      ;; per-NAMESPACE wall time, when the build's runner measured it.
+      ;; CONDITIONAL, and that is the whole care here: a run from a build with
+      ;; no timing runner must leave the key ABSENT, because the reader this
+      ;; exists for is a shard balancer, and a balancer that reads "unmeasured"
+      ;; as zero packs an expensive namespace as though it were free — the
+      ;; exact mistake that made the last re-weighting measure WORSE than the
+      ;; boot-count proxy it replaced.
+      (:ns-ms result) (assoc :ns-ms (:ns-ms result)))))
 
 (defn- record-run-observation!
   "Append the run's result as an `:observe` delta — *these tests ran, in this
@@ -1194,26 +1203,34 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; trace one line up: this is the only tier that ever runs an
                 ;; ^:external test, so a red missed here is missed forever, and
                 ;; `:assertions-never-red` had nothing to read for one
-                (record-run-observation!
-                 session
-                 (or (seq full-set)
-                     (when ns [(symbol (str ns))])
-                     ;; A NARROWED `:only` run names test VARS; the scope it
-                     ;; covered is their NAMESPACES. Without this the branch
-                     ;; fell through to `[]`, `closure-hashes` was handed
-                     ;; nothing, and the observation carried no content key —
-                     ;; on exactly the runs a verdict cache would read, since
-                     ;; `done` narrows its impacted slice with `:only`. So the
-                     ;; whole-tier runs nobody would cache recorded a key and
-                     ;; the narrowed ones it exists for did not: 16 of the last
-                     ;; 60 observations on this store had one.
-                     (seq (vec (sort (distinct
-                                      (keep #(some-> (symbol (str %))
-                                                     namespace symbol)
-                                            only)))))
-                     [])
-                 result)
-                (stamp result))))
+                (stamp
+                 (record-run-observation!
+                  session
+                  (or (seq full-set)
+                      (when ns [(symbol (str ns))])
+                      ;; A NARROWED `:only` run names test VARS; the scope it
+                      ;; covered is their NAMESPACES. Without this the branch
+                      ;; fell through to `[]`, `closure-hashes` was handed
+                      ;; nothing, and the observation carried no content key —
+                      ;; on exactly the runs a verdict cache would read, since
+                      ;; `done` narrows its impacted slice with `:only`. So the
+                      ;; whole-tier runs nobody would cache recorded a key and
+                      ;; the narrowed ones it exists for did not: 16 of the last
+                      ;; 60 observations on this store had one.
+                      (seq (vec (sort (distinct
+                                       (keep #(some-> (symbol (str %))
+                                                      namespace symbol)
+                                             only)))))
+                      [])
+                  ;; The shards' per-namespace wall time, when the build carried
+                  ;; a runner that measured it. Read ONCE, HERE, because `dir`
+                  ;; is deleted in the finally below and this is the last moment
+                  ;; the measurement exists — and folded into the RESULT rather
+                  ;; than passed beside it so the journal and the caller cannot
+                  ;; disagree about what the run cost.
+                  (if-let [t (testrun/read-timings dir)]
+                    (assoc result :ns-ms t)
+                    result))))))
           (finally
             ;; a full materialized project per run; nothing else ever deletes it
             (delete-dir! (io/file dir))))))))

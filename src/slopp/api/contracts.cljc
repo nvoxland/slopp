@@ -846,6 +846,10 @@
    [:owners
     {:doc "what each owner label MEANS, keyed by the label — the vocabulary the :owner column comes from, riding along because a reader of this document has no other route to it"}
     [:map-of :string :string]]
+   [:bundle
+    {:optional true
+     :doc "the URL this project's compiled browser bundle is SERVED at, joined from the compile output and the static mount that reaches it. Not a setting — nothing sets it, which is why it rides beside the config rather than in it. ABSENT when no mount reaches the bundle, and that is a real answer rather than a gap: a store may serve its bundle from an endpoint instead, which is what slopp's own reviewer UI does"}
+    :string]
    [:patterns
     {:optional true
      :doc "the wildcard FAMILIES themselves — they name settable spaces (http.static.*) rather than settings, so they are not rows. Absent when the prefix matches none"}
