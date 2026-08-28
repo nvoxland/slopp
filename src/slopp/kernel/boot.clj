@@ -735,139 +735,6 @@
         (with-meta sources {:load-failures @failed})))
     {}))
 
-^:unsafe (defn watch-live!
-  "Poll the store's data_version; when another writer commits, reload the
-  namespaces whose source changed into THIS jvm (dependency order). The store's
-  green-gate means only compilable code ever loads. Caveat: long-lived instances
-  (servers, background threads) keep their old closure code until re-created.
-
-  **A reload also DROPS what the new source stopped defining.** `load-string`
-  re-defines the forms it is given and is silent about the rest, so without
-  this a deleted form keeps answering in the running host — the store correct,
-  the suite green, and the server serving a definition that no longer exists.
-  See `departed-vars` for why the error directions are not symmetric.
-
-  Resilient by construction: the ENTIRE poll body is guarded, so a transient
-  store error (contention, a swapped db file) logs and RETRIES instead of
-  killing the daemon and serving stale code forever. The version baseline
-  advances only when every changed namespace reloaded — a failed one keeps its
-  OLD source in the baseline AND holds the version back, so the next poll
-  retries it rather than treating it as already seen.
-
-  **A failure that keeps failing says so, and says why.** The retry note used
-  to read the same hopeful sentence forever while a reload had been stuck for
-  many minutes, and the REASON existed only in the server log — a file no
-  slopp surface exposes, on a system whose whole claim is that the store
-  answers everything. `boot-info` now carries the message and the consecutive
-  attempt count, so a verdict marked suspect can say what to do about it.
-
-  ^:unsafe: the store loader IS load-string (it evaluates rendered store
-  source), which the dialect denylist bans for ordinary code — here it is the
-  whole point."
-  [dir & {:keys [interval-ms] :or {interval-ms 500}}]
-  (let [conn (loop []
-             ;; an unadopted dir has no store until its first write
-             ;; materializes one — WAIT for it rather than dying at boot
-             (or (open-conn dir)
-                 (do (Thread/sleep (long interval-ms)) (recur))))]
-    (loop [dv (data-version conn), prev (store-sources conn)]
-      (let [[dv' prev']
-            (try
-              (Thread/sleep (long interval-ms))
-              (let [dv2 (data-version conn)]
-                (if (= dv dv2)
-                  [dv prev]
-                  (let [now       (store-sources conn)
-                        platforms (store-platforms conn)
-                        changed (filter #(and (boot-loads? platforms %)
-                                              (not= (get prev %) (get now %)))
-                                        (dependency-order now))
-                        failed  (reduce (fn [failed ns-sym]
-                                          (try (reload-ns! ns-sym (get now ns-sym))
-                                               (stamp-loaded! ns-sym)
-                                               (record-loaded! ns-sym (get now ns-sym))
-                                               failed
-                                               (catch Throwable t
-                                                 (let [why (failure-message t)]
-                                                   (log! "live-reload failed for " ns-sym ": " why)
-                                                   (assoc failed ns-sym why)))))
-                                        {} changed)
-                        loaded  (remove failed changed)]
-                    (when (seq loaded)
-                      (log! "live-reloaded: " (str/join " " loaded)))
-                    (measure-host!
-                     (into {} (filter #(boot-loads? platforms (key %))) now))
-                    ;; keep the currency record honest: a failed ns stays
-                    ;; listed until a later poll reloads it (it also holds
-                    ;; the version baseline back, below)
-                    (swap! boot-info
-                           #(when %
-                              (-> %
-                                  (assoc :last-reload-at (System/currentTimeMillis)
-                                         :failed (vec (sort (keys failed)))
-                                         ;; the REASON, and how long it has been
-                                         ;; true — "the next poll retries" is not
-                                         ;; news the twentieth time
-                                         :failed-why
-                                         (not-empty
-                                          (into {}
-                                                (for [[ns-sym why] failed]
-                                                  [ns-sym
-                                                   {:why why
-                                                    :attempts (inc (get-in % [:failed-why ns-sym :attempts] 0))}]))))
-                                  (update :reloads (fnil + 0) (count loaded)))))
-                    ;; a failed ns keeps its OLD source so it still looks changed,
-                    ;; and holding dv back keeps the version-change branch firing
-                    [(if (seq failed) dv dv2)
-                     (reduce #(assoc %1 %2 (get prev %2)) now (keys failed))])))
-              (catch Throwable t
-                (log! "live-reload poll error (continuing): " (failure-message t))
-                [dv prev]))]
-        (recur dv' prev')))))
-
-^:unsafe (defn -main
-  "clojure -M -m slopp.kernel.boot <dir> [--snapshot | --live] [--main ns/fn arg...]
-
-  Load the store's program into THIS jvm and run its entry point (default
-  slopp.mcp/-main <dir>). --live tracks the store and hot-reloads changed
-  namespaces (the watcher is a DAEMON thread — it never keeps the JVM alive
-  after the program exits). --main trampolines any store CLI — in a fileless
-  tree this is THE entry point: e.g.
-    clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>"
-  [& args]
-  (let [{:keys [dir live? main args]} (parse-args args)]
-    (reset! boot-info {:dir dir
-                       :mode (if live? :live :snapshot)
-                       :booted-at (System/currentTimeMillis)})
-    (log! "slopp.kernel.boot: loading store at " dir " (" (if live? "live" "snapshot") ")")
-    (let [sources (load-store! dir)]
-      ;; a typo'd dir CREATES an empty .slopp/store.db and loads zero
-      ;; namespaces; without this the real error surfaced downstream as
-      ;; requiring-resolve's "Could not locate …__init.class" — say it here
-      (when (empty? sources)
-        ;; two different situations, and only one is a mistake: an EMPTY
-        ;; store means someone pointed at the wrong dir, while NO store is
-        ;; the ordinary case for a dir that never adopted slopp — the
-        ;; server is expected to serve those and leave them alone
-        (if (.exists (io/file dir ".slopp" "store.db"))
-          (log! "slopp.kernel.boot: the store at " dir " has no namespaces yet —"
-                " a freshly adopted store, or the wrong directory (a"
-                " populated one lives at " dir "/.slopp/store.db).")
-          (log! "slopp.kernel.boot: no slopp store at " dir " — serving an"
-                " unadopted directory and leaving it untouched. Your first"
-                " write creates " dir "/.slopp/store.db.")))
-      ;; a namespace that did not load is now SURVIVABLE (load-store! is
-      ;; best-effort), which makes saying so the whole job: an agent whose
-      ;; store came up half-loaded must learn it from orientation rather than
-      ;; from the first confusing failure downstream.
-      (when-let [f (seq (:load-failures (meta sources)))]
-        (swap! boot-info assoc :load-failures (vec f))))
-    (when live?
-      (doto (Thread. ^Runnable (fn [] (watch-live! dir)))
-        (.setDaemon true)
-        (.start)))
-    (apply (requiring-resolve main) args)))
-
 (defn ^:export by-capability
   "`m` when it is a manifest keyed BY CAPABILITY, else throw naming `what` and
   the remedy. nil and empty pass through — those mean \"no manifest\", which is
@@ -980,3 +847,204 @@
   []
   (when-let [r (io/resource "META-INF/slopp/framework-deps.edn")]
     (not-empty (by-capability (edn/read-string (slurp r)) "framework-deps.edn"))))
+
+(defn ^:export with-dependents
+  "`changed` plus every namespace that (transitively) requires one of them, in
+  dependency order — the set a live reload has to re-evaluate.
+
+  **Reloading only what changed is not enough, and the reason is `def` time.**
+  Clojure evaluates a great deal ONCE, when a form is defined, and keeps the
+  result as a value. Var metadata is the sharpest case here, because a route's
+  contract rides in it —
+
+      (defn ^{:rest/response contracts/config-document} config [req] …)
+
+  — so the schema is a VALUE captured when that `defn` ran. Change
+  `contracts` and `config`'s metadata does not move: its own source is
+  byte-identical, so a source-diff reload correctly leaves it alone and the
+  running host publishes the old contract indefinitely. Default arguments,
+  `def`d registries built from another namespace's data, and anything closing
+  over a loaded value all fail the same way.
+
+  Dependency order, dependencies first, is load-bearing rather than tidy: a
+  dependent re-evaluated BEFORE its dependency would re-capture the value that
+  is about to change, reproducing the bug one poll later and looking like a
+  flake.
+
+  This over-reloads by design. A namespace nothing requires costs nothing, and
+  the alternative — asking which dependents actually captured something — is
+  not decidable from source. Re-evaluating a namespace whose definitions are
+  unchanged is cheap and idempotent; serving a stale contract is neither."
+  [sources changed]
+  (let [all   (set (keys sources))
+        deps  (into {} (map (fn [[n s]] [n (internal-requires s all)])) sources)
+        ;; who requires ME — the edges the poll loop needs and the graph does
+        ;; not already carry, since `dependency-order` only ever walks downward
+        rdeps (reduce-kv (fn [m n ds]
+                           (reduce #(update %1 %2 (fnil conj #{}) n) m ds))
+                         {} deps)
+        reach (loop [seen #{} frontier (set changed)]
+                (if (empty? frontier)
+                  seen
+                  (let [seen' (into seen frontier)]
+                    (recur seen'
+                           (into #{} (comp (mapcat rdeps) (remove seen')) frontier)))))]
+    (filterv reach (dependency-order sources))))
+
+^:unsafe (defn watch-live!
+  "Poll the store's data_version; when another writer commits, reload the
+  namespaces whose source changed AND everything that requires them, in
+  dependency order. The store's green-gate means only compilable code ever
+  loads. Caveat: long-lived instances (servers, background threads) keep their
+  old closure code until re-created.
+
+  **The reload set is `with-dependents`, not the source diff, and that is not
+  an optimisation in reverse.** A great deal is evaluated ONCE at def time and
+  kept as a value — var metadata most sharply, since a route's contract rides
+  there. Change the namespace holding a schema and the dependent that captured
+  it does NOT change: its own text is byte-identical, so a source-diff reload
+  correctly skips it and the running host publishes the old contract
+  indefinitely. That shipped: `:bundle` was added to a response contract,
+  landed green, and the live host went on serving the previous schema to every
+  consumer generating a client from it.
+
+  **A reload also DROPS what the new source stopped defining.** `load-string`
+  re-defines the forms it is given and is silent about the rest, so without
+  this a deleted form keeps answering in the running host — the store correct,
+  the suite green, and the server serving a definition that no longer exists.
+  See `departed-vars` for why the error directions are not symmetric.
+
+  Resilient by construction: the ENTIRE poll body is guarded, so a transient
+  store error (contention, a swapped db file) logs and RETRIES instead of
+  killing the daemon and serving stale code forever. The version baseline
+  advances only when every namespace in the set reloaded — a failed one keeps
+  its OLD source in the baseline AND holds the version back, so the next poll
+  retries it rather than treating it as already seen. A failed DEPENDENT is
+  carried explicitly instead, because reverting the baseline cannot make one
+  look changed: its source never differed.
+
+  **A failure that keeps failing says so, and says why.** The retry note used
+  to read the same hopeful sentence forever while a reload had been stuck for
+  many minutes, and the REASON existed only in the server log — a file no
+  slopp surface exposes, on a system whose whole claim is that the store
+  answers everything. `boot-info` now carries the message and the consecutive
+  attempt count, so a verdict marked suspect can say what to do about it.
+
+  ^:unsafe: the store loader IS load-string (it evaluates rendered store
+  source), which the dialect denylist bans for ordinary code — here it is the
+  whole point."
+  [dir & {:keys [interval-ms] :or {interval-ms 500}}]
+  (let [conn (loop []
+             ;; an unadopted dir has no store until its first write
+             ;; materializes one — WAIT for it rather than dying at boot
+             (or (open-conn dir)
+                 (do (Thread/sleep (long interval-ms)) (recur))))]
+    ;; `stuck` is the namespaces whose last reload FAILED. Reverting `prev`
+    ;; retries an EDITED namespace — it goes on looking changed — but that
+    ;; trick cannot reach a DEPENDENT, whose own source never differed from
+    ;; the baseline. Without carrying them, a dependent that failed to reload
+    ;; would be dropped silently and keep serving its old definitions, which
+    ;; is the exact failure the widened reload set exists to prevent.
+    (loop [dv (data-version conn), prev (store-sources conn), stuck #{}]
+      (let [[dv' prev' stuck']
+            (try
+              (Thread/sleep (long interval-ms))
+              (let [dv2 (data-version conn)]
+                (if (= dv dv2)
+                  [dv prev stuck]
+                  (let [now       (store-sources conn)
+                        platforms (store-platforms conn)
+                        ;; what MOVED, and then what CAPTURED something from
+                        ;; it. The source diff finds the first; `with-dependents`
+                        ;; adds the second, which is the half that was missing.
+                        edited  (filter #(not= (get prev %) (get now %))
+                                        (keys now))
+                        changed (filterv #(boot-loads? platforms %)
+                                         (with-dependents
+                                           now (into (set edited) stuck)))
+                        failed  (reduce (fn [failed ns-sym]
+                                          (try (reload-ns! ns-sym (get now ns-sym))
+                                               (stamp-loaded! ns-sym)
+                                               (record-loaded! ns-sym (get now ns-sym))
+                                               failed
+                                               (catch Throwable t
+                                                 (let [why (failure-message t)]
+                                                   (log! "live-reload failed for " ns-sym ": " why)
+                                                   (assoc failed ns-sym why)))))
+                                        {} changed)
+                        loaded  (remove failed changed)]
+                    (when (seq loaded)
+                      (log! "live-reloaded: " (str/join " " loaded)))
+                    (measure-host!
+                     (into {} (filter #(boot-loads? platforms (key %))) now))
+                    ;; keep the currency record honest: a failed ns stays
+                    ;; listed until a later poll reloads it (it also holds
+                    ;; the version baseline back, below)
+                    (swap! boot-info
+                           #(when %
+                              (-> %
+                                  (assoc :last-reload-at (System/currentTimeMillis)
+                                         :failed (vec (sort (keys failed)))
+                                         ;; the REASON, and how long it has been
+                                         ;; true — "the next poll retries" is not
+                                         ;; news the twentieth time
+                                         :failed-why
+                                         (not-empty
+                                          (into {}
+                                                (for [[ns-sym why] failed]
+                                                  [ns-sym
+                                                   {:why why
+                                                    :attempts (inc (get-in % [:failed-why ns-sym :attempts] 0))}]))))
+                                  (update :reloads (fnil + 0) (count loaded)))))
+                    ;; a failed ns keeps its OLD source so it still looks changed,
+                    ;; and holding dv back keeps the version-change branch firing
+                    [(if (seq failed) dv dv2)
+                     (reduce #(assoc %1 %2 (get prev %2)) now (keys failed))
+                     (set (keys failed))])))
+              (catch Throwable t
+                (log! "live-reload poll error (continuing): " (failure-message t))
+                [dv prev stuck]))]
+        (recur dv' prev' stuck')))))
+
+^:unsafe (defn -main
+  "clojure -M -m slopp.kernel.boot <dir> [--snapshot | --live] [--main ns/fn arg...]
+
+  Load the store's program into THIS jvm and run its entry point (default
+  slopp.mcp/-main <dir>). --live tracks the store and hot-reloads changed
+  namespaces (the watcher is a DAEMON thread — it never keeps the JVM alive
+  after the program exits). --main trampolines any store CLI — in a fileless
+  tree this is THE entry point: e.g.
+    clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>"
+  [& args]
+  (let [{:keys [dir live? main args]} (parse-args args)]
+    (reset! boot-info {:dir dir
+                       :mode (if live? :live :snapshot)
+                       :booted-at (System/currentTimeMillis)})
+    (log! "slopp.kernel.boot: loading store at " dir " (" (if live? "live" "snapshot") ")")
+    (let [sources (load-store! dir)]
+      ;; a typo'd dir CREATES an empty .slopp/store.db and loads zero
+      ;; namespaces; without this the real error surfaced downstream as
+      ;; requiring-resolve's "Could not locate …__init.class" — say it here
+      (when (empty? sources)
+        ;; two different situations, and only one is a mistake: an EMPTY
+        ;; store means someone pointed at the wrong dir, while NO store is
+        ;; the ordinary case for a dir that never adopted slopp — the
+        ;; server is expected to serve those and leave them alone
+        (if (.exists (io/file dir ".slopp" "store.db"))
+          (log! "slopp.kernel.boot: the store at " dir " has no namespaces yet —"
+                " a freshly adopted store, or the wrong directory (a"
+                " populated one lives at " dir "/.slopp/store.db).")
+          (log! "slopp.kernel.boot: no slopp store at " dir " — serving an"
+                " unadopted directory and leaving it untouched. Your first"
+                " write creates " dir "/.slopp/store.db.")))
+      ;; a namespace that did not load is now SURVIVABLE (load-store! is
+      ;; best-effort), which makes saying so the whole job: an agent whose
+      ;; store came up half-loaded must learn it from orientation rather than
+      ;; from the first confusing failure downstream.
+      (when-let [f (seq (:load-failures (meta sources)))]
+        (swap! boot-info assoc :load-failures (vec f))))
+    (when live?
+      (doto (Thread. ^Runnable (fn [] (watch-live! dir)))
+        (.setDaemon true)
+        (.start)))
+    (apply (requiring-resolve main) args)))

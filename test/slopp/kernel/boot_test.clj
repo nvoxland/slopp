@@ -617,3 +617,55 @@
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (instance? clojure.lang.ExceptionInfo e))
       (is (str/includes? (ex-message e) "framework-deps.edn") (ex-message e)))))
+
+(deftest a-reload-reaches-the-DEPENDENTS-of-what-changed
+  ;; `watch-live!` reloads namespaces whose own SOURCE TEXT changed. That is
+  ;; correct and it is not sufficient, because Clojure evaluates plenty of
+  ;; things ONCE at def time and keeps the result as a value:
+  ;;
+  ;;     (defn ^{:rest/response contracts/config-document} config [req] …)
+  ;;
+  ;; The schema is baked into `config`'s var metadata when that `defn` is
+  ;; evaluated. Change `contracts` and the value in `config`'s metadata does
+  ;; not move, because `config`'s own source is byte-identical and nothing
+  ;; reloads it.
+  ;;
+  ;; Measured on this store on 2026-08-27: `:bundle` was added to
+  ;; `api.contracts/config-document`, landed green, and the live host went on
+  ;; publishing the OLD schema on `/api/rest/paths` — the contract a consumer
+  ;; generates their client from. Three agents spent an evening on it and
+  ;; blamed, in order, a hidden cache, a stale jar, and four innocent
+  ;; processes. The host was doing exactly what it was told.
+  ;;
+  ;; `watch-live!`'s docstring already names a cousin — "long-lived instances
+  ;; keep their old closure code until re-created" — but that reads as being
+  ;; about servers and threads. This is var METADATA holding another
+  ;; namespace's value, which is worse, because it is the published API
+  ;; contract rather than an internal.
+  (let [sources {'app.contracts "(ns app.contracts)"
+                 'app.endpoints "(ns app.endpoints (:require [app.contracts :as c]))"
+                 'app.server    "(ns app.server (:require [app.endpoints :as e]))"
+                 'app.unrelated "(ns app.unrelated)"}]
+
+    (testing "a changed namespace drags everything that requires it, transitively"
+      (is (= '[app.contracts app.endpoints app.server]
+             (boot/with-dependents sources #{'app.contracts}))
+          "only the changed namespace reloaded — a dependent that captured a
+           value at def time keeps serving the old one"))
+
+    (testing "and they come back in DEPENDENCY ORDER, dependencies first"
+      ;; reloading a dependent before its dependency would re-capture the value
+      ;; that is about to change — the same bug, one poll later
+      (let [r (boot/with-dependents sources #{'app.contracts})]
+        (is (< (.indexOf r 'app.contracts) (.indexOf r 'app.endpoints)))
+        (is (< (.indexOf r 'app.endpoints) (.indexOf r 'app.server)))))
+
+    (testing "a namespace nothing connects to is left alone"
+      ;; the cost of this fix is reloading more, so it must not reload everything
+      (is (not (some #{'app.unrelated} (boot/with-dependents sources #{'app.contracts})))))
+
+    (testing "changing a LEAF reloads only itself"
+      (is (= '[app.server] (boot/with-dependents sources #{'app.server}))))
+
+    (testing "nothing changed, nothing reloads"
+      (is (= [] (boot/with-dependents sources #{}))))))
