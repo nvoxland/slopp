@@ -225,7 +225,7 @@ git branch, because GitHub reads it and slopp does not.
 | `CLAUDE_PLUGIN_DATA` | Where the plugin caches the downloaded jar. Falls back to `$XDG_CACHE_HOME/slopp` or `~/.cache/slopp`. |
 | `SLOPP_WARM_SPARE` | `0` or `false` stops the server holding a pre-warmed spare image. One whole idle JVM per agent — the biggest saving when several agents share a box. |
 | `SLOPP_BRANCH_IMAGE_TTL_MS` | How long an idle per-branch image is held before it is reaped. Default `600000` (ten minutes). Must read as a positive number; anything else keeps the default rather than being obeyed as zero. |
-| `SLOPP_IMAGE_JVM_OPTS` | JVM options for every owned image, space-separated. No default. `-XX:+UseSerialGC -Xms32m` measured a 25.6% cut in committed memory per image (722 -> 538 MB) and is offered rather than shipped: the two flags are a pair (either alone is worse than neither), and the collector's throughput cost is not yet established. |
+| `SLOPP_IMAGE_JVM_OPTS` | JVM options for every owned image, space-separated. Defaults to `-XX:+UseSerialGC -Xms32m`, which cuts committed memory per image 25.6% (722 -> 538 MB) at no measurable throughput cost. The two flags are a pair — either alone is worse than neither. Set it empty to restore the previous collector. |
 | `SLOPP_NO_RECYCLE` | Switch off image reuse entirely. Costs speed; set it only when a reused image is suspected of carrying state between tenants. |
 
 The last four matter when **several agents write on one box**. Each agent runs

@@ -182,7 +182,7 @@ normal setup needs none of them.
 |---|---|
 | `SLOPP_WARM_SPARE=0` | Stop holding a pre-warmed spare image per server. The biggest single saving: one whole idle JVM per agent. |
 | `SLOPP_BRANCH_IMAGE_TTL_MS` | How long an idle per-branch image is held before it is reaped (default `600000` — ten minutes). Shorten it when agents move between branches. Must read as a positive number; anything else keeps the default rather than being obeyed as zero. |
-| `SLOPP_IMAGE_JVM_OPTS` | JVM options for every image, space-separated. **No default.** See below — one setting measured a 25% cut and is offered rather than shipped. |
+| `SLOPP_IMAGE_JVM_OPTS` | JVM options for every image, space-separated. Defaults to `-XX:+UseSerialGC -Xms32m` (see below). An explicitly empty value means none — set it if your project turns out to prefer the throughput collector. |
 | `SLOPP_NO_RECYCLE` | Switch off image reuse entirely. Costs speed; set it only when you suspect a reused image of carrying something between tenants. |
 
 A reasonable swarm profile is `SLOPP_WARM_SPARE=0` plus a shorter lease:
@@ -201,34 +201,39 @@ already have them. Two agents on one store are two servers, two images and two
 private threads, and that is the model whether or not you tune any of this.
 What multiplies is the *idle* JVMs, which is what these settings are for.
 
-### Trading image memory for collector throughput
+### The image collector
 
-One JVM setting measured a large, repeatable cut on a loaded image and is
-offered here rather than shipped, because only half its gate is settled:
+Images ship with `-XX:+UseSerialGC -Xms32m`, which is worth knowing about
+because it is unusual and because you may want to turn it off.
 
-```sh
-SLOPP_IMAGE_JVM_OPTS="-XX:+UseSerialGC -Xms32m" slopp <dir> --live
-```
+Measured against a 279-namespace store, it cuts committed memory per image
+**722 MB -> 538 MB (-25.6%)**, reproducible to 0.07%. The saving is not the heap
+alone: the serial collector drops GC bookkeeping from 62 MB to 0.6 MB, takes
+~35 MB of collector worker stacks with it, and sizes the heap *smaller*
+(278 -> 192 MB) rather than larger.
 
-Against a 279-namespace store, committed memory per image went **722 MB ->
-538 MB (-25.6%)**, reproducible to 0.07% across alternated rounds with a full
-GC forced before each sample. The saving is not the heap alone: the serial
-collector drops GC bookkeeping from 62 MB to 0.6 MB and takes ~35 MB of
-collector worker stacks with it, and it sizes the heap *smaller* (278 -> 192 MB)
-rather than larger.
+**Throughput does not pay for it, which is the surprising half.** Twelve runs
+of a whole in-image suite per arm, inside one settled image: median 2738 ms on
+the default collector, 2639 ms on this one. The difference is not significant,
+so the honest claim is a bound rather than a win — a regression of at most
+about 5%, with the point estimate slightly in this configuration's favour, and
+half the run-to-run spread. Every assertion passes identically; no verdict
+changes.
 
 **The two flags are a pair and neither belongs without the other.** `-Xms32m`
-alone measured 2.3% WORSE — an image that loads a real store allocates past 32m
+alone measured 2.3% WORSE — an image loading a real store allocates past 32m
 before it is ready, so the heap is demand-sized either way. `-XX:+UseSerialGC`
 alone is far worse still: it commits its ergonomic initial heap at startup and,
-unlike G1, never gives it back.
+unlike G1, never gives it back. Told what heap to start with, it holds far less.
 
-**What is not established is the throughput cost.** The serial collector is
-single-threaded. Every test still passes and passes identically, so no verdict
-changes — but a memory win that costs suite wall clock is not a win, and the
-measurement that would settle it was too noisy at the sample size taken to
-separate a real regression from a busy machine. Run your own before adopting
-it, and treat an unexplained slowdown after setting it as this, not a mystery.
+**When to turn it off.** This is one project's workload. A far more
+allocation-heavy one could find single-threaded collection costs it real time,
+and the symptom is slower tests rather than wrong ones — so if your suite slows
+down noticeably after an upgrade, this is the first thing to try:
+
+```sh
+SLOPP_IMAGE_JVM_OPTS="" slopp <dir> --live      # the previous collector
+```
 
 Nothing here reaches the external test tier, whose shard JVMs are launched
 separately; these options apply to the images that verify writes.
