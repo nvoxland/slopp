@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp.store.render :as store.render]
             [slopp.store.db :as db]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [clojure.java.io :as io] [next.jdbc :as jdbc] [rewrite-clj.node :as n] [slopp.read.history :as history])
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [clojure.java.io :as io] [next.jdbc :as jdbc] [rewrite-clj.node :as n] [slopp.read.history :as history] [slopp.index.refs :as refs] [rewrite-clj.parser :as p])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1525,4 +1525,93 @@
             "and it is the whole delta, not a projection")
         (is (empty? (db/line-deltas conn trunk :ops [:commit]))
             "a kind the line never wrote is an empty answer, not an error"))
+      (finally (.close conn)))))
+
+(deftest ^:external the-reference-index-persists-beside-the-elements
+  ;; A fresh process paid 9.3 s of kondo over 244 namespaces before it could
+  ;; answer "who calls this" (measured on slopp's own store). The index the
+  ;; value carries (`:refs`, one entry per namespace keyed on its source) is
+  ;; written with the elements of the namespaces a write touched and read
+  ;; back at open — as rows, one per edge, so a reader outside the value can
+  ;; ask the same question in SQL.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (-> (store/empty-store)
+                      (store/ingest 'ri.core "(ns ri.core)\n(defn f [x] x)\n")
+                      (store/ingest 'ri.two
+                                    "(ns ri.two (:require [ri.core :as c]))\n(defn g [x] (c/f x))\n"))
+            st    (refs/refresh st ['ri.core 'ri.two])]
+        (is (true? (db/append! conn st (store/deltas st) ['ri.core 'ri.two] trunk nil)))
+        (let [loaded (db/load-store conn trunk)]
+          (is (= (:refs st) (:refs loaded)) "the index reloads exactly as it was written")
+          (is (= (refs/refs st) (refs/refs loaded)) "and the graph over it is the same graph"))
+        (testing "a namespace persisted WITHOUT an entry has none on disk either"
+          ;; the index is written from the value, never invented by the db
+          (let [st2 (store/ingest st 'ri.three "(ns ri.three)\n(def a 1)\n")]
+            (is (true? (db/append! conn st2
+                                   (vec (drop (count (store/deltas st)) (store/deltas st2)))
+                                   ['ri.three] trunk (:head st))))
+            (let [loaded (db/load-store conn trunk)]
+              (is (nil? (get-in loaded [:refs 'ri.three])))
+              (is (= (get-in st [:refs 'ri.two]) (get-in loaded [:refs 'ri.two]))
+                  "an untouched namespace's entry is untouched"))))
+        (testing "rewriting a namespace replaces its rows rather than adding to them"
+          (let [st2 (db/load-store conn trunk)
+                st3 (refs/refresh
+                     (first (store/replace-node st2 'ri.two 'g
+                                                (p/parse-string "(defn g [x] x)")
+                                                :prompt "t"))
+                     ['ri.two])]
+            (is (true? (db/append! conn st3 (:pending st3) ['ri.two] trunk (:head st2))))
+            (is (empty? (get-in st3 [:refs 'ri.two :rows])) "fixture: g no longer calls anything")
+            (is (= (get-in st3 [:refs 'ri.two])
+                   (get-in (db/load-store conn trunk) [:refs 'ri.two]))))))
+      (finally (.close conn)))))
+
+(deftest ^:external the-reference-index-follows-a-lines-view
+  ;; `elements` is materialized per line and copied at a fork, replaced at a
+  ;; land, dropped at an abandon. The index derived from those rows has to
+  ;; travel with them, or a fresh thread starts with no index (the cold
+  ;; rebuild it exists to avoid) and a landed branch keeps an index computed
+  ;; from source it no longer holds.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)
+        rows (fn [line] (mapv :form_refs/to_name
+                              (jdbc/execute! conn ["SELECT to_name FROM form_refs WHERE line = ? ORDER BY seq" line])))
+        keyed (fn [line] (mapv :refs_keys/ns
+                               (jdbc/execute! conn ["SELECT ns FROM refs_keys WHERE line = ? ORDER BY ns" line])))]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (-> (store/empty-store)
+                      (store/ingest 'lv.core "(ns lv.core)\n(defn f [x] x)\n")
+                      (store/ingest 'lv.core.two
+                                    "(ns lv.core.two (:require [lv.core :as c]))\n(defn g [x] (c/f x))\n"))
+            st    (refs/refresh st ['lv.core 'lv.core.two])]
+        (is (true? (db/append! conn st (store/deltas st) ['lv.core 'lv.core.two] trunk nil)))
+        (is (= ["f"] (rows trunk)) "fixture: the trunk carries one edge")
+        (let [head   (db/line-head conn trunk)
+              thread (db/create-line! conn {:kind "thread" :base head :parent trunk :agent "a"})]
+          (testing "a fork inherits the index with the elements"
+            (is (= ["f"] (rows thread)))
+            (is (= ["lv.core" "lv.core.two"] (keyed thread))))
+          (testing "a land moves the thread's index onto the branch and releases the thread's"
+            (let [st2 (refs/refresh
+                       (first (store/replace-node (store/committed st) 'lv.core.two 'g
+                                                  (p/parse-string "(defn g [x] x)")
+                                                  :prompt "t"))
+                       ['lv.core.two])]
+              (is (true? (db/append! conn st2 (:pending st2) ['lv.core.two] thread head)))
+              (is (= [] (rows thread)) "fixture: g calls nothing now")
+              (is (true? (db/land-thread! conn thread trunk head)))
+              (is (= [] (rows trunk)) "the branch's index is the thread's")
+              (is (= ["lv.core" "lv.core.two"] (keyed trunk)))
+              (is (empty? (keyed thread)) "and the settled thread holds none")))
+          (testing "an abandoned thread releases its index too"
+            (let [t2 (db/create-line! conn {:kind "thread" :base (db/line-head conn trunk)
+                                            :parent trunk :agent "b"})]
+              (is (seq (keyed t2)) "fixture: the fork copied it")
+              (is (true? (db/abandon-thread! conn t2)))
+              (is (empty? (keyed t2)))))))
       (finally (.close conn)))))

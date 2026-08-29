@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev] [slopp.index.refs :as refs])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -2451,4 +2451,70 @@
           (ops/create-ns! sess 'cur.more :source "(ns cur.more)\n\n(defn ^:unused-ok g \"G.\" [x] x)\n")
           (is (pos? (:behind (ops/jar-currency sess head)))
               "a write after the jar's head is what it is behind by")))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-write-keeps-the-reference-index-current-and-a-reopen-finds-it
+  ;; The graph used to be rebuilt whole after every write — 1.8 s on slopp's
+  ;; own store, and 9.3 s cold at every open. The write path now refreshes
+  ;; exactly the namespaces it rewrote (`refs/refresh` in `try-commit!`), the
+  ;; entries land beside the elements, and the next process reads them.
+  ;; Both namespaces live in ONE module (`ri.core`), so the module gate has
+  ;; no say here.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-refidx" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "refidx"})
+        edge (fn [rows] (some #(and (= 'ri.core.two (:from-ns %)) (= 'f (:to-name %))) rows))]
+    (try
+      (is (nil? (:error (ops/ingest! sess 'ri.core "(ns ri.core)\n\n(defn f [x] x)\n"))))
+      (is (nil? (:error (ops/ingest! sess 'ri.core.two
+                                     "(ns ri.core.two (:require [ri.core :as c]))\n\n(defn g [x] (c/f x))\n"))))
+      (is (nil? (:error (ops/edit-replace! sess 'ri.core.two 'g "(defn g [x] (c/f (c/f x)))"
+                                           :prompt "twice"))))
+      (let [st (:store @sess)]
+        (testing "every namespace the session wrote has a current entry"
+          (doseq [nsx ['ri.core 'ri.core.two]]
+            (is (= (slopp.index.refs/ns-key st nsx) (get-in st [:refs nsx :key]))
+                (str nsx " — the write path did not refresh its entry; index holds "
+                     (pr-str (update-vals (:refs st) #(select-keys % [:key])))
+                     " over namespaces " (pr-str (keys (:namespaces st)))))))
+        (is (edge (get-in st [:refs 'ri.core.two :rows])) "and the rows are the edges"))
+      (finally (ops/close! sess)))
+    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "refidx"})]
+      (try
+        (let [st (:store @sess2)]
+          (is (= (slopp.index.refs/ns-key st 'ri.core.two)
+                 (get-in st [:refs 'ri.core.two :key]))
+              "a fresh process reads the index it was left")
+          (is (edge (slopp.index.refs/refs st))))
+        (finally (ops/close! sess2))))))
+
+(deftest ^:external the-done-point-brings-stale-index-entries-current
+  ;; The write path refreshes what it rewrote; a journal replay of another
+  ;; agent's deltas, a merge, or a store written before the index existed
+  ;; leave entries missing or keyed on an older source. `ns-refs` recomputes
+  ;; those on read, correctly and every time — `refresh-index!` is what makes
+  ;; that stop happening: it recomputes exactly the entries that do not match,
+  ;; persists them, and leaves the current ones alone.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-refidx2" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "refidx2"})]
+    (try
+      (is (nil? (:error (ops/ingest! sess 'rx.core "(ns rx.core)\n\n(defn f [x] x)\n"))))
+      (is (nil? (:error (ops/ingest! sess 'rx.core.two
+                                     "(ns rx.core.two (:require [rx.core :as c]))\n\n(defn g [x] (c/f x))\n"))))
+      ;; the shape a replay leaves: one entry gone, one keyed on an older source
+      (swap! sess update :store
+             #(-> % (update :refs dissoc 'rx.core)
+                    (assoc-in [:refs 'rx.core.two :key] "an-older-source")))
+      (let [r  (ops/refresh-index! sess)
+            st (:store @sess)]
+        (is (= #{'rx.core 'rx.core.two} (set (:refreshed r))) (pr-str r))
+        (doseq [nsx ['rx.core 'rx.core.two]]
+          (is (= (slopp.index.refs/ns-key st nsx) (get-in st [:refs nsx :key])) (str nsx)))
+        (testing "and it is on disk — a reopen reads exactly these entries"
+          (let [conn   (:db @sess)
+                loaded (db/load-store conn (:line @sess))]
+            (is (= (:refs st) (:refs loaded)))))
+        (testing "a second pass finds nothing to do"
+          (is (empty? (:refreshed (ops/refresh-index! sess))))))
       (finally (ops/close! sess)))))

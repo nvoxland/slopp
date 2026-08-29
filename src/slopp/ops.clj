@@ -4915,3 +4915,29 @@ recompiled (engine/after-write! session ns-sym)]
   `slopp.read.history`, and the write path never needs this."
   [session]
   (store/deltas (:store @(with-history session))))
+
+(defn ^:export refresh-index!
+  "Bring the session's reference index current: recompute the `:refs` entry
+  of every namespace whose entry is missing or keyed on an older source,
+  persist those rows beside the elements (`db/persist-index!`), and leave the
+  live value carrying them. Returns `{:refreshed [ns …]}`.
+
+  The write path keeps the namespaces IT rewrote current; what this catches
+  is everything else that changes a value — a journal replay of another
+  agent's deltas, a merge, a store written before the index existed.
+  `ns-refs` already recomputes a stale entry on every read, correctly; this
+  is what makes it stop paying for that. Called at the done-point, which is
+  the cadence a stale entry can accumulate at. Not a journal write: nothing
+  here moves the head, so the value is swapped in place the way
+  `refresh-cache!` swaps a re-read materialization."
+  [session]
+  (let [st    (:store @session)
+        stale (vec (for [nsx (sort (keys (:namespaces st)))
+                         :when (not= (get-in st [:refs nsx :key]) (refs/ns-key st nsx))]
+                     nsx))]
+    (when (seq stale)
+      (let [fresh (refs/refresh st stale)]
+        (when-let [conn (:db @session)]
+          (db/persist-index! conn fresh stale (engine/session-line session)))
+        (swap! session update :store assoc :refs (:refs fresh))))
+    {:refreshed stale}))

@@ -4,7 +4,7 @@
   consume. Producers normalize here; consumers never re-integrate."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.index.refs :as refs]
-            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str] [slopp.read.modules :as read.modules]))
+            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str] [slopp.read.modules :as read.modules] [rewrite-clj.parser :as p]))
 
 (deftest the-graph-sees-every-reference-kind
   (let [st (-> (store/empty-store)
@@ -505,3 +505,40 @@
         (is (some #{'app.cmds/plain} unused)
             (str "and the exemption must be the MARKER rather than the namespace: "
                  (pr-str unused)))))))
+
+(deftest refs-are-a-per-namespace-index-the-value-carries
+  ;; `refs` re-integrated all 244 namespaces after EVERY write (1.8 s, measured
+  ;; on slopp's own store; 9.3 s cold). A namespace's outgoing references are
+  ;; a function of that namespace's source alone, so they are indexed per
+  ;; namespace under `:refs` in the value, each entry keyed on the source it
+  ;; was computed from. `refs` uses an entry whose key still matches and
+  ;; recomputes one that does not — the key is what makes a stale entry
+  ;; impossible to serve, whichever path wrote the value.
+  (let [st    (-> (store/empty-store)
+                  (store/ingest 'pn.core "(ns pn.core)\n(defn f [x] x)\n")
+                  (store/ingest 'pn.two
+                                "(ns pn.two (:require [pn.core :as c]))\n(defn g [x] (c/f x))\n"))
+        fresh (refs/refresh st ['pn.core 'pn.two])
+        edge? (fn [rs] (some #(and (= 'pn.two (:from-ns %)) (= 'f (:to-name %))) rs))]
+    (testing "refresh writes one entry per namespace, keyed on that namespace's source"
+      (is (= #{'pn.core 'pn.two} (set (keys (:refs fresh)))))
+      (is (= (refs/ns-key st 'pn.two) (get-in fresh [:refs 'pn.two :key]))))
+    (testing "the graph over a refreshed value is the graph over the bare one"
+      (is (= (refs/refs st) (refs/refs fresh)))
+      (is (edge? (refs/refs fresh)) "fixture: pn.two/g calls pn.core/f"))
+    (testing "an entry whose key matches is USED — its rows are the answer"
+      (let [planted (assoc-in fresh [:refs 'pn.two :rows] [])]
+        (is (not (edge? (refs/refs planted))))))
+    (testing "an entry whose key does not match is recomputed, never served"
+      (let [stale (-> fresh
+                      (assoc-in [:refs 'pn.two :rows] [])
+                      (assoc-in [:refs 'pn.two :key] "not-this-source"))]
+        (is (edge? (refs/refs stale)))))
+    (testing "the resolved end of an edge is looked up at read time, so the source namespace's entry survives the target's edits"
+      (let [st2 (first (store/replace-node fresh 'pn.core 'f
+                                           (p/parse-string "(defn f [x] (inc x))")
+                                           :prompt "t"))]
+        (is (= (refs/ns-key st 'pn.two) (refs/ns-key st2 'pn.two)))
+        (is (not= (refs/ns-key st 'pn.core) (refs/ns-key st2 'pn.core)))
+        (is (= (:id (store/form-named st2 'pn.core 'f))
+               (:to-form (first (filter #(= 'pn.two (:from-ns %)) (refs/refs st2))))))))))

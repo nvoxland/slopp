@@ -317,165 +317,6 @@
       :via       :declared
       :marker    :covers})))
 
-^:reads (defn ^:export refs
-  "EVERY reference in the store as canonical records — THE single source
-  of truth for 'who references what'. Producers normalize here (kondo
-  statics including un-required qualified calls, carrier positions,
-  marker declarations); consumers — gates, unused, review, moves — query
-  this and never re-integrate sources. Self-references excluded.
-  Record: {:from-form fid|nil :from-ns sym|:external :from-var sym|nil
-           :to-ns sym :to-name sym :to-form fid|nil
-           :via :static|:carrier|:declared [:arity n] [:marker kw]}
-  Derived (never stored — refs are an index of source), memoized on the
-  immutable store value so repeated whole-graph queries within an
-  operation are free."
-  [st]
-  (cache/cached-last
-   ::refs st
-   (fn []
-     (let [known (set (keys (:namespaces st)))]
-       (vec (drop-self
-             (concat (static-refs st known (sort known))
-                     (carrier-refs st known (sort known))
-                     (declared-refs st known (sort known)))))))))
-
-(defn ^:export ns-refs
-  "The graph SLICE for one namespace's outbound references — the same
-  canonical records `refs` yields, produced for `nsx` alone (the write
-  gates run per write; a whole-store sweep there would be waste). Same
-  producers, same record shape; scoping is an access path, not a dialect."
-  [st nsx]
-  (let [known (set (keys (:namespaces st)))]
-    (vec (drop-self
-          (concat (static-refs st known [nsx])
-                  (carrier-refs st known [nsx])
-                  (declared-refs st known [nsx]))))))
-
-(defn ^:export cold-load-order
-  "The namespace's forms reordered so every intra-ns definition precedes its
-  callers — the arrangement a fresh load resolves top-to-bottom WITHOUT a
-  declare. Kahn topological sort over THE reference graph's intra-ns edges
-  (same pattern as store/ns-dependency-order, at form grain; ties break by
-  original position, so an already-ordered ns is unchanged). Returns
-  {:order [form-id ...] :cycle [qsym ...]|nil}: :order is the resolving
-  sequence (the ns declaration always first); :cycle names the
-  mutual-recursion group when no full order exists — those genuinely need a
-  declare, which the reorder alone can't remove."
-  [store nsx]
-  (let [forms   (vec (store/forms store nsx))
-        pos     (into {} (map-indexed (fn [i f] [(:name f) i])) forms)
-        names   (set (keep :name forms))
-        ;; intra-ns dependency: caller NEEDS callee before it
-        needs   (reduce (fn [m r]
-                          (if (and (= nsx (:to-ns r)) (:from-var r)
-                                   (contains? names (:to-name r))
-                                   (not= :declared (:via r)))
-                            (update m (:from-var r) (fnil conj #{}) (:to-name r))
-                            m))
-                        {} (ns-refs store nsx))
-        nm->id  (into {} (keep (fn [f] (when (:name f) [(:name f) (:id f)])) forms))
-        ns-decl (some (fn [f] (when (= nsx (:name f)) (:id f))) forms)]
-    ;; Kahn: repeatedly take the earliest-positioned form whose deps are done
-    (loop [order (if ns-decl [ns-decl] [])
-           remaining (vec (sort-by pos (remove #{nsx} (keep :name forms))))
-           done #{}]
-      (if (empty? remaining)
-        {:order order :cycle nil}
-        (if-let [ready (first (filter #(every? done (get needs % #{})) remaining))]
-          (recur (conj order (nm->id ready))
-                 (vec (remove #{ready} remaining))
-                 (conj done ready))
-          ;; nothing ready → the remainder is a dependency cycle
-          {:order (into order (map nm->id) remaining)
-           :cycle (vec (sort (map #(symbol (str nsx) (str %)) remaining)))})))))
-
-(defn ^:export covered-by
-  "Every test that covers form `qsym`, each tagged with HOW we know — the
-   canonical coverage edge set, the reference-graph epic's shape applied to
-   'which test reaches this form'. Three producers, one answer:
-   - :observed — the trace map saw the test exercise the form (strongest).
-   - :static   — a deftest references the form within `depth` static hops
-                 (default 2), so it works for tests that never trace (the
-                 external tier) and needs no run; `:hops` is the distance.
-   - :declared — a `^{:covers}` marker on the deftest names the form, for the
-                 dispatch / data / spawned-child-image path neither static
-                 reach nor the trace can see. No hops — it is a claim, direct.
-   Returns `[{:test qsym :via #{…} :hops n?}]`, sorted. Neither :static nor
-   :declared means verified — they say 'a test REACHES/CLAIMS this', not 'this
-   was checked' — so `:via` stays visible and a consumer must weight :observed
-   over the others rather than conflate them (do NOT let them claim green)."
-  [st tmap qsym & {:keys [depth] :or {depth 2}}]
-  (let [to-ns    (symbol (namespace qsym))
-        to-nm    (symbol (name qsym))
-        test-ns? (fn [ns] (str/ends-with? (str ns) "-test"))
-        observed (into #{} (for [r (observed-refs tmap)
-                                 :when (and (= to-ns (:to-ns r)) (= to-nm (:to-name r)))]
-                             (symbol (str (:from-ns r)) (str (:from-var r)))))
-        declared (into #{} (for [r (refs st)
-                                 :when (and (= :declared (:via r))
-                                            (= :covers (:marker r))
-                                            (= to-ns (:to-ns r)) (= to-nm (:to-name r)))]
-                             (symbol (str (:from-ns r)) (str (:from-var r)))))
-        radj     (reduce (fn [m r]
-                           (if (= :static (:via r))
-                             (update m [(:to-ns r) (:to-name r)] (fnil conj #{})
-                                     [(:from-ns r) (:from-var r)])
-                             m))
-                         {} (refs st))
-        static   (loop [frontier #{[to-ns to-nm]} seen #{} hop 1 acc {}]
-                   (if (or (empty? frontier) (> hop depth))
-                     acc
-                     (let [callers (into #{} (mapcat #(get radj %)) frontier)
-                           fresh   (into #{} (remove seen) callers)
-                           acc'    (reduce (fn [a [fns fv]]
-                                             (if (test-ns? fns)
-                                               (update a (symbol (str fns) (str fv))
-                                                       (fnil min hop) hop)
-                                               a))
-                                           acc fresh)]
-                       (recur fresh (into seen frontier) (inc hop) acc'))))
-        tests    (into (sorted-set) (concat observed (keys static) declared))]
-    (vec (for [t tests]
-           (cond-> {:test t
-                    :via  (cond-> #{}
-                            (observed t) (conj :observed)
-                            (static t)   (conj :static)
-                            (declared t) (conj :declared))}
-             (static t) (assoc :hops (static t)))))))
-
-^:reads (defn ^:export refs-by-target
-  "THE reverse index over `refs`: `{to-qsym [ref ...]}`, every reference
-  grouped by the qualified symbol it points AT.
-
-  `refs-to` filtered the whole record stream on every call, which is fine for
-  one question and quadratic for a page that asks it per form (slopp's own
-  store carries 7,578 edges). Grouping once turns every blast-radius and
-  liveness question into a map lookup.
-
-  Memoized on the immutable store value with the same `cached-last` strategy
-  `refs` uses, and for the same reason: the store is too large to hash and a
-  new value appears only on a write, so identity is a sound key. It is an
-  INDEX, not a second producer — `refs` remains the single source of truth and
-  this holds exactly its records, in its order."
-  [st]
-  (cache/cached-last
-   ::refs-by-target st
-   (fn []
-     (reduce (fn [m r]
-               (update m (symbol (str (:to-ns r)) (str (:to-name r)))
-                       (fnil conj []) r))
-             {}
-             (refs st)))))
-
-^:reads (defn ^:export refs-to
-  "Every reference TO `qsym` (an ns/name symbol) — the blast-radius/liveness
-  question, answered from THE graph.
-
-  A lookup into `refs-by-target`, so asking this once per form costs one
-  grouping pass over the store rather than one full scan per call."
-  [st qsym]
-  (get (refs-by-target st) qsym []))
-
 (defn ^:export occurrences-of
   "Every place `target` (a namespace name) APPEARS, whatever form the
   appearance takes — the occurrence set a rename must answer to.
@@ -742,3 +583,235 @@
             Narrow on purpose: the declaration is the half that has actually
             shipped broken, twice, and a looser test promotes every docstring
             containing a parenthesis"}])
+
+(defn ^:export ns-key
+  "What a namespace's reference rows are a function of, as one digest: the
+  namespace's rendered source. An index entry carrying this key was computed
+  from exactly this text; one carrying any other key was not, and `ns-refs`
+  recomputes it rather than serve it. Portable — SHA-256 of the text, not
+  `hash` — because the entry is persisted and read back by another process.
+
+  Deliberately NOT keyed on which other namespaces exist, although a row is
+  kept only when its target namespace does: that would stale every entry in
+  the store on every `ns_create`, on disk as well as in memory, and a fresh
+  process would be back to the cold rebuild. Instead the target check is
+  applied when a row is READ (`ns-refs`), so a namespace deleted after the
+  index was written drops out of the graph at once. The one shape this does
+  not cover — a reference written BEFORE its target namespace existed — is
+  refused by the write gate for a `:require`, and for a bare qualified
+  symbol it heals on the referrer's next write."
+  [st nsx]
+  (store/sha256-of (.getBytes ^String (store.render/render-ns st nsx) "UTF-8")))
+
+(defn- ns-rows
+  "The INDEX rows for `nsx`: every reference leaving it — kondo statics,
+  carrier positions, marker declarations, self-references dropped — with
+  `:to-form` REMOVED from the cross-namespace ones. The target form is
+  looked up when a row is read (`with-target`), so these rows are a function
+  of `nsx`'s source alone and the target namespace can be edited without
+  touching them. A same-namespace declaration keeps its `:to-form` (it IS
+  this namespace's form), and a `:covers` row keeps its nil — it never
+  resolved, and a row that carries the key is read as it is."
+  [st nsx]
+  (let [known (set (keys (:namespaces st)))]
+    (vec (map (fn [r]
+                (cond
+                  (= :external (:from-ns r))  r
+                  (= :covers (:marker r))     (assoc r :to-form nil)
+                  :else                       (dissoc r :to-form)))
+              (drop-self
+               (concat (static-refs st known [nsx])
+                       (carrier-refs st known [nsx])
+                       (declared-refs st known [nsx])))))))
+
+(defn ^:export ns-refs
+  "The graph SLICE for one namespace's outbound references — the same
+  canonical records `refs` yields, produced for `nsx` alone (the write
+  gates run per write; a whole-store sweep there would be waste). Same
+  producers, same record shape; scoping is an access path, not a dialect.
+
+  Read from the `:refs` index the value carries when the entry's `:key`
+  still equals `ns-key` for this namespace; recomputed (`ns-rows`) when it
+  does not or there is none. Either way the rows are finished HERE, against
+  the store as it is now: a row whose target namespace no longer exists is
+  dropped, and a cross-namespace row gets its `:to-form` resolved."
+  [st nsx]
+  (let [e     (get-in st [:refs nsx])
+        rows  (if (and e (= (:key e) (ns-key st nsx)))
+                (:rows e)
+                (ns-rows st nsx))
+        known (:namespaces st)
+        with-target (fn [r]
+                      (if (contains? r :to-form)
+                        r
+                        (assoc r :to-form
+                               (:id (store/form-named st (:to-ns r) (:to-name r))))))]
+    (into [] (comp (filter #(contains? known (:to-ns %)))
+                   (map with-target))
+          rows)))
+
+^:reads (defn ^:export refs
+  "EVERY reference in the store as canonical records — THE single source
+  of truth for 'who references what'. Producers normalize here (kondo
+  statics including un-required qualified calls, carrier positions,
+  marker declarations); consumers — gates, unused, review, moves — query
+  this and never re-integrate sources. Self-references excluded.
+  Record: {:from-form fid|nil :from-ns sym|:external :from-var sym|nil
+           :to-ns sym :to-name sym :to-form fid|nil
+           :via :static|:carrier|:declared [:arity n] [:marker kw]}
+
+  Assembled PER NAMESPACE (`ns-refs`) from the `:refs` index the value
+  carries: an entry whose `:key` still equals `ns-key` for its namespace is
+  used as it is, and one that does not — or is absent — is recomputed for
+  that namespace only. Memoized on the immutable store value so repeated
+  whole-graph queries within an operation are free; a write that touched
+  one namespace costs one namespace, where it used to cost the store (1.8 s
+  per write on slopp's own store, 9.3 s cold)."
+  [st]
+  (cache/cached-last
+   ::refs st
+   (fn []
+     (vec (mapcat #(ns-refs st %) (sort (keys (:namespaces st))))))))
+
+(defn ^:export cold-load-order
+  "The namespace's forms reordered so every intra-ns definition precedes its
+  callers — the arrangement a fresh load resolves top-to-bottom WITHOUT a
+  declare. Kahn topological sort over THE reference graph's intra-ns edges
+  (same pattern as store/ns-dependency-order, at form grain; ties break by
+  original position, so an already-ordered ns is unchanged). Returns
+  {:order [form-id ...] :cycle [qsym ...]|nil}: :order is the resolving
+  sequence (the ns declaration always first); :cycle names the
+  mutual-recursion group when no full order exists — those genuinely need a
+  declare, which the reorder alone can't remove."
+  [store nsx]
+  (let [forms   (vec (store/forms store nsx))
+        pos     (into {} (map-indexed (fn [i f] [(:name f) i])) forms)
+        names   (set (keep :name forms))
+        ;; intra-ns dependency: caller NEEDS callee before it
+        needs   (reduce (fn [m r]
+                          (if (and (= nsx (:to-ns r)) (:from-var r)
+                                   (contains? names (:to-name r))
+                                   (not= :declared (:via r)))
+                            (update m (:from-var r) (fnil conj #{}) (:to-name r))
+                            m))
+                        {} (ns-refs store nsx))
+        nm->id  (into {} (keep (fn [f] (when (:name f) [(:name f) (:id f)])) forms))
+        ns-decl (some (fn [f] (when (= nsx (:name f)) (:id f))) forms)]
+    ;; Kahn: repeatedly take the earliest-positioned form whose deps are done
+    (loop [order (if ns-decl [ns-decl] [])
+           remaining (vec (sort-by pos (remove #{nsx} (keep :name forms))))
+           done #{}]
+      (if (empty? remaining)
+        {:order order :cycle nil}
+        (if-let [ready (first (filter #(every? done (get needs % #{})) remaining))]
+          (recur (conj order (nm->id ready))
+                 (vec (remove #{ready} remaining))
+                 (conj done ready))
+          ;; nothing ready → the remainder is a dependency cycle
+          {:order (into order (map nm->id) remaining)
+           :cycle (vec (sort (map #(symbol (str nsx) (str %)) remaining)))})))))
+
+(defn ^:export covered-by
+  "Every test that covers form `qsym`, each tagged with HOW we know — the
+   canonical coverage edge set, the reference-graph epic's shape applied to
+   'which test reaches this form'. Three producers, one answer:
+   - :observed — the trace map saw the test exercise the form (strongest).
+   - :static   — a deftest references the form within `depth` static hops
+                 (default 2), so it works for tests that never trace (the
+                 external tier) and needs no run; `:hops` is the distance.
+   - :declared — a `^{:covers}` marker on the deftest names the form, for the
+                 dispatch / data / spawned-child-image path neither static
+                 reach nor the trace can see. No hops — it is a claim, direct.
+   Returns `[{:test qsym :via #{…} :hops n?}]`, sorted. Neither :static nor
+   :declared means verified — they say 'a test REACHES/CLAIMS this', not 'this
+   was checked' — so `:via` stays visible and a consumer must weight :observed
+   over the others rather than conflate them (do NOT let them claim green)."
+  [st tmap qsym & {:keys [depth] :or {depth 2}}]
+  (let [to-ns    (symbol (namespace qsym))
+        to-nm    (symbol (name qsym))
+        test-ns? (fn [ns] (str/ends-with? (str ns) "-test"))
+        observed (into #{} (for [r (observed-refs tmap)
+                                 :when (and (= to-ns (:to-ns r)) (= to-nm (:to-name r)))]
+                             (symbol (str (:from-ns r)) (str (:from-var r)))))
+        declared (into #{} (for [r (refs st)
+                                 :when (and (= :declared (:via r))
+                                            (= :covers (:marker r))
+                                            (= to-ns (:to-ns r)) (= to-nm (:to-name r)))]
+                             (symbol (str (:from-ns r)) (str (:from-var r)))))
+        radj     (reduce (fn [m r]
+                           (if (= :static (:via r))
+                             (update m [(:to-ns r) (:to-name r)] (fnil conj #{})
+                                     [(:from-ns r) (:from-var r)])
+                             m))
+                         {} (refs st))
+        static   (loop [frontier #{[to-ns to-nm]} seen #{} hop 1 acc {}]
+                   (if (or (empty? frontier) (> hop depth))
+                     acc
+                     (let [callers (into #{} (mapcat #(get radj %)) frontier)
+                           fresh   (into #{} (remove seen) callers)
+                           acc'    (reduce (fn [a [fns fv]]
+                                             (if (test-ns? fns)
+                                               (update a (symbol (str fns) (str fv))
+                                                       (fnil min hop) hop)
+                                               a))
+                                           acc fresh)]
+                       (recur fresh (into seen frontier) (inc hop) acc'))))
+        tests    (into (sorted-set) (concat observed (keys static) declared))]
+    (vec (for [t tests]
+           (cond-> {:test t
+                    :via  (cond-> #{}
+                            (observed t) (conj :observed)
+                            (static t)   (conj :static)
+                            (declared t) (conj :declared))}
+             (static t) (assoc :hops (static t)))))))
+
+^:reads (defn ^:export refs-by-target
+  "THE reverse index over `refs`: `{to-qsym [ref ...]}`, every reference
+  grouped by the qualified symbol it points AT.
+
+  `refs-to` filtered the whole record stream on every call, which is fine for
+  one question and quadratic for a page that asks it per form (slopp's own
+  store carries 7,578 edges). Grouping once turns every blast-radius and
+  liveness question into a map lookup.
+
+  Memoized on the immutable store value with the same `cached-last` strategy
+  `refs` uses, and for the same reason: the store is too large to hash and a
+  new value appears only on a write, so identity is a sound key. It is an
+  INDEX, not a second producer — `refs` remains the single source of truth and
+  this holds exactly its records, in its order."
+  [st]
+  (cache/cached-last
+   ::refs-by-target st
+   (fn []
+     (reduce (fn [m r]
+               (update m (symbol (str (:to-ns r)) (str (:to-name r)))
+                       (fnil conj []) r))
+             {}
+             (refs st)))))
+
+^:reads (defn ^:export refs-to
+  "Every reference TO `qsym` (an ns/name symbol) — the blast-radius/liveness
+  question, answered from THE graph.
+
+  A lookup into `refs-by-target`, so asking this once per form costs one
+  grouping pass over the store rather than one full scan per call."
+  [st qsym]
+  (get (refs-by-target st) qsym []))
+
+(defn ^:export refresh
+  "`st` with its `:refs` index current for `nses`: one entry
+  `{:key (ns-key …) :rows (ns-rows …)}` per namespace that exists, and no
+  entry for one that does not (a deleted namespace leaves the index as it
+  left the store). The write path calls this for exactly the namespaces a
+  write rewrote, so the graph after a write costs one namespace's analysis
+  rather than the store's; anything that skips it — a journal replay, a
+  merge — leaves entries whose keys no longer match, and `ns-refs`
+  recomputes those on read. Persisted beside the elements (`form_refs`) and
+  reloaded at open, so a fresh process never pays the cold rebuild either."
+  [st nses]
+  (reduce (fn [s nsx]
+            (if (contains? (:namespaces s) nsx)
+              (assoc-in s [:refs nsx] {:key (ns-key s nsx) :rows (ns-rows s nsx)})
+              (update s :refs dissoc nsx)))
+          st
+          nses))

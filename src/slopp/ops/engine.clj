@@ -786,12 +786,20 @@
   delta lists — the base's count dropped off the candidate's — which is the
   reason the lists had to be in RAM at all.
 
+  The REFERENCE INDEX is refreshed here for `nses` — the namespaces whose
+  elements this commit rewrites — before anything lands, so the committed
+  value's `:refs` entries for them are current and `write-snapshot!` persists
+  them beside the elements. This is the one chokepoint every write passes,
+  which is why the refresh lives here and not in each operation: the graph
+  after a write costs one namespace's analysis rather than the store's.
+
   What lands in the session carries NO delta list: `store/committed` clears
   the suffix and the list is dropped here. A candidate that carries one — a
   merge folds a hydrated value — is committed like any other, and the live
   value stays the journal's facts, not the journal."
   [session base st' nses]
-  (let [landed (dissoc (store/committed st') :deltas)]
+  (let [st'    (refs/refresh st' nses)
+        landed (dissoc (store/committed st') :deltas)]
     (if-let [conn (ensure-db! session)]
       (if (db/append! conn st' (:pending st') (vec nses)
                       (session-line session) (:head base))

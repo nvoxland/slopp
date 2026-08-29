@@ -1491,6 +1491,10 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; untraced failing test, or a failure the run counted and did not
         ;; show, keeps the red this episode's and the thread stays put.
         land (when-not (= :red (:episode-status findings))
+               ;; entries a replay or a merge left stale are brought current
+               ;; and persisted here, before the view lands — the one cadence
+               ;; a stale entry can accumulate at
+               (ops/refresh-index! session)
                (branch/land-thread! session))
         ;; #14: the verdict above was earned against the THREAD image, which
         ;; held the whole episode. The land rebases and re-mints ids, so
