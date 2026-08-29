@@ -64,8 +64,9 @@
   - same-form divergence = MV conflict: ours kept, theirs surfaced
   - add/add id collisions are remapped to fresh ids
   - whole namespaces created on their side arrive intact (provenance kept)
-  - :move deltas REPLAY (order is load-bearing since D7 — the merge gate
-    refuses a store that won't cold-load; a missing form/target skips with a note)
+  - a historical :move delta is marked applied and changes nothing: order
+    is DERIVED from the forms, and the committer (merge-into-session!)
+    arranges every namespace the merge touched before the cold-load gate
   Iterated merges stay exact via causal delivery: replayed deltas carry
   :merged-from (their id), the :merge delta records :applied, and neither
   replays again nor counts as OUR work in conflict detection. ROUND TRIPS

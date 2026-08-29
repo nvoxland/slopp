@@ -1672,6 +1672,63 @@
                                   (some #(str/includes? src (str %)) marks))]
                    (symbol (str nsx) (str (:name t)))))))))
 
+(defn red-attribution
+  "Whose red is this? Splits a verification summary's failing tests by the
+  three-way `:attribution` [[implicate]] put on each one, and returns nil
+  when nothing is red.
+
+  {:mine [...] :foreign [...] :untraced [...] :unseen n} — non-empty
+  entries only. `:mine` and `:foreign` are claims; `:untraced` and
+  `:unseen` are the two ways of having no claim to make, and they are kept
+  because the whole point of the split is that a caller may act on
+  innocence and must never infer it from silence:
+
+  - `:untraced` — the run produced no trace for this failing test
+  - `:unseen`   — the summary counts MORE failures than it carries blocks
+                  for, so some red is not represented here at all. Failure
+                  detail is capped for response size, and attributing only
+                  what survived the cap would read a truncation as a clean
+                  bill of health.
+
+  A caller wanting \"none of this red is mine\" needs all three of `:mine`,
+  `:untraced` and `:unseen` to be absent."
+  [summary]
+  (let [total (+ (:fail summary 0) (:error summary 0))]
+    (when (pos? total)
+      (let [blocks (vec (:failures summary))
+            named  (into #{} (keep :test) blocks)
+            ;; a test the run NAMED as failing but carried no block for is a
+            ;; red we cannot attribute — same standing as an untraced one
+            capped (vec (sort (remove named (:failed-tests summary))))
+            by     (group-by #(or (:attribution %) :untraced) blocks)
+            bucket (fn [k] (vec (sort (distinct (keep :test (get by k))))))
+            unseen (max 0 (- total (count blocks) (count capped)))]
+        (cond-> {}
+          (seq (get by :mine))    (assoc :mine (bucket :mine))
+          (seq (get by :foreign)) (assoc :foreign (bucket :foreign))
+          (or (seq (get by :untraced)) (seq capped))
+          (assoc :untraced (vec (sort (distinct (concat (bucket :untraced) capped)))))
+          (pos? unseen)           (assoc :unseen unseen))))))
+
+(defn red-history
+  "The tests that went red in episodes where `ns-sym/nm` changed, from the
+  red-after index (`db/reds-for`) — nil without a durable store or without
+  evidence. A FLOOR for selection, never a selector: measured on slopp's own
+  journal it recalls 38% of failing tests alone (48% with namespace grain)
+  against a 95% bar, so it cannot replace the closure fallback; what it adds
+  is what a trace cannot see — a test that reads a marker or reaches the
+  form through a dispatch or a route, and went red beside it anyway.
+
+  Only tests that still EXIST: the index remembers a name as it was, and a
+  renamed or deleted test handed to the runner would make the run report
+  `:scope-ran-nothing` for a scope that was mostly right."
+  [session ns-sym nm]
+  (when-let [conn (:db @session)]
+    (let [st (:store @session)]
+      (when-let [fid (:id (store/form-named st ns-sym nm))]
+        (seq (filter (fn [t] (store/form-named st (symbol (namespace t)) (symbol (name t))))
+                     (map :test (db/reds-for conn [fid]))))))))
+
 (defn affected-tests
   "Which tests must re-run after editing `ns-sym/nm`: the tests observed (via
   tracing) to exercise that form — or the form itself if it IS a test. nil =
@@ -1719,7 +1776,15 @@
 
   So [[marker-readers]] is UNIONED in, on the same terms as `:covers`: a floor,
   never a ceiling, and it can only ever ADD tests — which is what makes it
-  incapable of causing the failure it fixes."
+  incapable of causing the failure it fixes.
+
+  HISTORY-aware (2026-08-29): [[red-history]] — the tests that went red in
+  past episodes where this form changed — is unioned in on exactly those
+  terms. Measured on slopp's own journal, history alone recalls 38% of
+  failing tests (48% with namespace grain) against a 95% bar, so it never
+  SELECTS: an untraced form still falls back to the closure. What it adds is
+  the same blind spot the two floors above cover, learned rather than
+  declared."
   [session ns-sym nm]
   (let [qform (symbol (str ns-sym) (str nm))
         tmap  (:test-map @session)
@@ -1728,9 +1793,10 @@
                       (filter #(contains? (:via %) :declared))
                       (map :test))
         readers  (marker-readers store ns-sym nm)
+        history  (red-history session ns-sym nm)
         with-declared (fn [res]
                         (when res
-                          (vec (sort (distinct (concat res declared readers))))))
+                          (vec (sort (distinct (concat res declared readers history))))))
         via-routes (fn []
                      (when-let [hits (get (rules.http/endpoint-test-refs store)
                                           qform)]
@@ -1822,41 +1888,3 @@
   median 43 of 46 external test namespaces and deferred 84.6% of changes."
   [session store changed]
   (external-among store (impacted-tests session store changed)))
-
-(defn red-attribution
-  "Whose red is this? Splits a verification summary's failing tests by the
-  three-way `:attribution` [[implicate]] put on each one, and returns nil
-  when nothing is red.
-
-  {:mine [...] :foreign [...] :untraced [...] :unseen n} — non-empty
-  entries only. `:mine` and `:foreign` are claims; `:untraced` and
-  `:unseen` are the two ways of having no claim to make, and they are kept
-  because the whole point of the split is that a caller may act on
-  innocence and must never infer it from silence:
-
-  - `:untraced` — the run produced no trace for this failing test
-  - `:unseen`   — the summary counts MORE failures than it carries blocks
-                  for, so some red is not represented here at all. Failure
-                  detail is capped for response size, and attributing only
-                  what survived the cap would read a truncation as a clean
-                  bill of health.
-
-  A caller wanting \"none of this red is mine\" needs all three of `:mine`,
-  `:untraced` and `:unseen` to be absent."
-  [summary]
-  (let [total (+ (:fail summary 0) (:error summary 0))]
-    (when (pos? total)
-      (let [blocks (vec (:failures summary))
-            named  (into #{} (keep :test) blocks)
-            ;; a test the run NAMED as failing but carried no block for is a
-            ;; red we cannot attribute — same standing as an untraced one
-            capped (vec (sort (remove named (:failed-tests summary))))
-            by     (group-by #(or (:attribution %) :untraced) blocks)
-            bucket (fn [k] (vec (sort (distinct (keep :test (get by k))))))
-            unseen (max 0 (- total (count blocks) (count capped)))]
-        (cond-> {}
-          (seq (get by :mine))    (assoc :mine (bucket :mine))
-          (seq (get by :foreign)) (assoc :foreign (bucket :foreign))
-          (or (seq (get by :untraced)) (seq capped))
-          (assoc :untraced (vec (sort (distinct (concat (bucket :untraced) capped)))))
-          (pos? unseen)           (assoc :unseen unseen))))))

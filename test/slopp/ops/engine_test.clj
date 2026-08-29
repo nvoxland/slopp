@@ -17,7 +17,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.edit :as edit]
-            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n]))
+            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc]))
 
 (deftest ^:external heal-path-replays-candidate-namespaces
   ;; the extract_ns live failure: hot-load-all!'s heal boots a FRESH image
@@ -693,3 +693,33 @@
       (testing "the episode's net ns change includes a :refer → NOT inert, tests selected"
         (is (= '[ep.b-test/h-t] (engine/impacted-tests sess st3 [fid]))))
       (finally (.close ^java.sql.Connection (:db @sess))))))
+
+(deftest history-is-a-floor-under-trace-evidence
+  ;; Measured on this store's own journal (2026-08-29): history-only
+  ;; selection — the tests that went red beside a changed form before —
+  ;; recalls 38% of failing tests at form grain, 48% with the namespace
+  ;; grain, against a 95% bar. So history does not SELECT; it is a FLOOR,
+  ;; unioned in on the same terms as a `^:covers` declaration: it can only
+  ;; ever add tests, and what it adds is exactly what a trace cannot see —
+  ;; a test that reads a marker, reaches the form through a dispatch or an
+  ;; HTTP route, and went red beside it anyway.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'hf.core "(ns hf.core)\n(defn f [] 1)\n")
+                 (store/ingest 'hf.core-test
+                               (str "(ns hf.core-test (:require [clojure.test :refer [deftest is]]))\n"
+                                    "(deftest traced (is true))\n"
+                                    "(deftest reader (is true))\n")))
+        sess (journaled! st {'hf.core-test/traced #{'hf.core/f}})
+        fid  (:id (store/form-named st 'hf.core 'f))]
+    (try
+      (testing "with no history, trace evidence alone selects"
+        (is (= '[hf.core-test/traced] (engine/affected-tests sess 'hf.core 'f))))
+      (jdbc/execute! (:db @sess) ["INSERT INTO form_reds (form_id, test, n, last_delta)
+                                   VALUES (?,?,1,'d-red')" fid "hf.core-test/reader"])
+      (testing "a test that went red beside the form is unioned in, once"
+        (is (= '[hf.core-test/reader hf.core-test/traced]
+               (engine/affected-tests sess 'hf.core 'f))))
+      (testing "a form with NO trace evidence still falls back to the closure — history never narrows"
+        (is (nil? (engine/affected-tests sess 'hf.core-test 'reader))
+            "no evidence about the test form itself: nil, so the caller runs the namespace"))
+      (finally (.close (:db @sess))))))

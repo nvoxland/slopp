@@ -1694,3 +1694,29 @@
             (is (= '[[rr.core 0] [b 1] [a 2]]
                    (mapv (juxt :name :rank) (store/forms (db/load-store c2 trunk) 'rr.core)))))))
       (finally (.close conn)))))
+
+(deftest ^:external a-connection-older-than-the-schema-heals-on-its-first-failed-write
+  ;; Three schema changes in one wave (form_refs, form_reds, elements.rank)
+  ;; each broke the running host the same way: it hot-reloaded code that
+  ;; writes the new column against a connection opened before the column
+  ;; existed, and every write failed until someone ran `open!` by hand.
+  ;; `open!` is the only thing that runs the DDL, and a live connection
+  ;; never re-runs it. So the writer heals itself: a schema-shaped SQL
+  ;; failure ("no such table", "no column named") runs `ensure-schema!` on
+  ;; the connection and retries once — the same idempotent DDL `open!` ran.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (store/ingest (store/empty-store) 'hs.core "(ns hs.core)\n(defn f [] 1)\n")]
+        (is (true? (db/append! conn st (store/deltas st) ['hs.core] trunk nil)))
+        ;; the connection's schema falls behind the code: the column the
+        ;; writer inserts is gone (what an older store looks like to newer code)
+        (jdbc/execute! conn ["ALTER TABLE elements DROP COLUMN rank"])
+        (let [st2 (first (store/append-form (store/committed st) 'hs.core
+                                            (p/parse-string "(defn g [] 2)")))]
+          (is (true? (db/append! conn st2 (:pending st2) ['hs.core] trunk (:head st)))
+              "the write heals the schema and lands, instead of failing on a column the code knows about")
+          (is (= [0 1 2] (mapv :rank (store/forms (db/load-store conn trunk) 'hs.core)))
+              "and the healed column carries what the write put there")))
+      (finally (.close conn)))))
