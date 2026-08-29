@@ -965,9 +965,11 @@
   ;; The control below is what caught that.
   (let [src0 "(ns demo-t (:require [clojure.test :refer [deftest is]]))\n\n(deftest ^:external t (is (= 1 1)))"
         base (store/ingest (store/empty-store) 'demo-t src0)
-        done (update base :deltas conj
-                     {:id "d-done" :parent (:id (last (:deltas base)))
-                      :op :done :at 0})
+        ;; through the one door, so the done lands in the recent window the
+        ;; check reads — a conj onto :deltas bypasses everything the value
+        ;; derives from an append
+        done (store/record-delta base {:id "d-done" :parent (:head base)
+                                       :op :done :at 0})
         grew (first (store/replace-node
                      done 'demo-t 't
                      (p/parse-string "(deftest ^:external t (is (= 1 1)) (is (= 2 2)))")))

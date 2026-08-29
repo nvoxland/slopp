@@ -39,7 +39,7 @@
   nothing this map contains."
   []
   (merge {:namespaces {} :deltas []
-          :head nil :head-at nil :line-pos 0 :pending [] :prompts {} :last-write {}}
+          :head nil :head-at nil :line-pos 0 :pending [] :recent [] :prompts {} :last-write {}}
          (fields/field-defaults)))
 
 (defn now-ms
@@ -1020,7 +1020,22 @@
                 ;; journal last held everything. `try-commit!` sends exactly
                 ;; this and `committed` clears it — no more recovering two new
                 ;; entries by dropping one whole list's count off another's
-                (update :pending (fnil conj []) d))
+                (update :pending (fnil conj []) d)
+                ;; the RECENT window: everything since the last milestone plus
+                ;; the done that earned it. The readers of the recent past —
+                ;; was the last done green, is a turn open, what changed since
+                ;; the done — look back no further, so they get hundreds of
+                ;; entries instead of the whole log
+                (update :recent
+                        (fn [r]
+                          (let [r (conj (or r []) d)]
+                            (if (= :commit (:op d))
+                              (let [i (or (last (keep-indexed
+                                                 (fn [i x] (when (= :done (:op x)) i))
+                                                 r))
+                                          (dec (count r)))]
+                                (subvec r i))
+                              r)))))
       ask?
       (update :prompts (fn [m] (reduce #(assoc %1 %2 p) (or m {}) fids)))
 

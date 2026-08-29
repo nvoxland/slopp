@@ -1753,7 +1753,7 @@
   global fallback selected for them, while traced forms keep their narrow
   sets."
   [session store changed]
-  (let [baseline (->> (:deltas store) (filter #(= :done (:op %))) last :id)
+  (let [baseline (->> (:recent store) (filter #(= :done (:op %))) last :id)
         base-src (when baseline (store/sources-at store baseline))
         reach (memoize
                (fn [ns-sym]

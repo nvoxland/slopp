@@ -706,7 +706,11 @@
   done) before its first activity, so pre-existing history is never
   mistaken for contested work. nil = log start."
   [store agent-label]
-  (let [ds  (store/deltas store)
+  (let [;; the recent window: since the last milestone plus the done that
+        ;; earned it. An agent whose own last done is older than that has no
+        ;; un-judged work newer than the milestone's done, so that done is
+        ;; the right boundary for it too
+        ds  (:recent store)
         own (last (filter #(and (= :done (:op %))
                                 (= agent-label (:agent %)))
                           ds))]

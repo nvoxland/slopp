@@ -399,7 +399,7 @@
   itself but lands BEFORE the boundary marker, so a done that rewrote something
   is correctly not seen as unchanged."
   [st]
-  (let [back  (reverse (store/deltas st))
+  (let [back  (reverse (:recent st))
         tail  (take-while #(not= :done (:op %)) back)
         prior (first (drop-while #(not= :done (:op %)) back))]
     (when (and prior

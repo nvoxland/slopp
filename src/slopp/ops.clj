@@ -240,7 +240,10 @@
   "Does `agent-label` (or any of its path ancestors — sub-agents ride the
   root agent's turn) have an open :turn-begin?"
   [session agent-label]
-  (let [ds (store/deltas (:store @session))
+  (let [;; the recent window: a turn open across a milestone reads as closed,
+        ;; and the next write opens a fresh one — one extra marker, never
+        ;; a refused write
+        ds (:recent (:store @session))
         open? (fn [lbl]
                 (let [marks (filter #(and (contains? #{:turn-begin :turn-end}
                                                      (:op %))
@@ -1062,11 +1065,17 @@ recompiled (engine/after-write! session ns-sym)]
         {:error (str "cannot move " nm)}))))
 
 (defn forms-changed-since
-  "Ids of forms touched by deltas after `since-id` (nil = since the beginning)
-  that still exist in the store."
+  "Ids of forms touched by deltas after `since-id` (nil = since the beginning
+  of the recent window) that still exist in the store.
+
+  Read from `:recent` — everything since the last milestone plus the done
+  that earned it. A `since-id` older than the window (a done from before the
+  last milestone) means everything in the window changed since it, which is
+  what the window's cut guarantees: nothing between that done and the
+  milestone is un-judged."
   [store since-id]
-  (let [ds   (store/deltas store)
-        tail (if since-id
+  (let [ds   (:recent store)
+        tail (if (and since-id (some #(= since-id (:id %)) ds))
                (rest (drop-while #(not= since-id (:id %)) ds))
                ds)]
     (->> tail
@@ -3149,7 +3158,9 @@ recompiled (engine/after-write! session ns-sym)]
   non-zero, so an informational count would make a refusal say `namespaces`
   as though that were the thing that fired."
   [store]
-  (->> (store/deltas store)
+  (->> ;; the RECENT window: since the last milestone, plus the done that
+       ;; earned it — which is as far back as a standing verdict can be
+       (:recent store)
        (keep (fn [d]
                (cond
                  (and (= :done (:op d))

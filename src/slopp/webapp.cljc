@@ -1507,8 +1507,7 @@
   (begin! app (app-path (:webapp/base app) pathname search))
   (navigate-url! app pathname search false))
 
-(defn ^:export ^{:breaking-ok "the 1-arity took a request and keyed on its own :http/url, which IS the defect: :webapp/base says which upstream that url means, so two projects' /api/modules were one load and the second rendered the first's data under its name. Keeping it would keep the bug reachable under a name that reads correct — there is no arity here that is right without the base."}
-  load-key
+(defn ^:export load-key
   "The key a request loads under — `[method url]`, where the url is the one a
   browser will actually FETCH.
 
@@ -1522,7 +1521,9 @@
   taken before the base is applied says two projects' `/api/modules` are one
   load. Measured on the only app that fronts more than one upstream —
   navigating to the second project asked for nothing and rendered the first
-  one's data under its name.
+  one's data under its name. (There used to be a 1-arity that keyed on the
+  request's own url; it was removed rather than kept, because there is no
+  arity here that is right without the base.)
 
   **A cache hit is silent by construction**, which is why this belongs to the
   load model rather than to an app. No screen can show one, and no assertion

@@ -1309,14 +1309,15 @@
       (finally (.close conn)))))
 
 (deftest a-loaded-store-carries-its-head-position-prompts-and-last-writes
-  ;; `record-delta` keeps four derived facts current on every append. A store
-  ;; LOADED from the journal has to arrive with the same four, or the first
+  ;; `record-delta` keeps its derived facts current on every append. A store
+  ;; LOADED from the journal has to arrive with the same ones, or the first
   ;; read after an open answers from an empty map while a write would have
   ;; answered correctly — the two paths must agree. They are read by index
   ;; (the line's head, its ancestry count, `prompt-for-forms` over the forms
-  ;; the materialization holds, the newest delta per namespace), never by
-  ;; folding the payloads, because folding them is the cost this whole item
-  ;; exists to remove.
+  ;; the materialization holds, the newest delta per namespace, the window
+  ;; from the done before the last milestone), never by folding the
+  ;; payloads, because folding them is the cost this whole item exists to
+  ;; remove.
   (let [dir   (temp-dir)
         conn  (db/open! dir)
         st    (-> (store/empty-store)
@@ -1326,25 +1327,31 @@
         trunk (db/trunk-line-id! conn)
         _     (db/append! conn st (store/deltas st) ['ld.core 'ld.other] trunk nil)
         h0    (db/line-head conn trunk)
-        st2   (-> st
+        st2   (-> (store/committed st)
                   (store/record-delta {:id "x1" :parent h0 :op :replace :ns 'ld.core :form-id (fid 'ld.core) :prompt "the ask"})
                   (store/record-delta {:id "x2" :parent "x1" :op :move :ns 'ld.core :form-id (fid 'ld.core) :prompt "pipeline" :system true})
-                  (store/record-delta {:id "x3" :parent "x2" :op :done :ns '*session* :label "l"}))
-        _     (db/append! conn st2 (drop (count (store/deltas st)) (store/deltas st2)) ['ld.core] trunk h0)]
+                  (store/record-delta {:id "x3" :parent "x2" :op :done :ns '*session* :label "l"})
+                  (store/record-delta {:id "x4" :parent "x3" :op :commit :ns '*session* :description "m"})
+                  (store/record-delta {:id "x5" :parent "x4" :op :turn-begin :ns '*session* :agent "a"}))
+        _     (db/append! conn st2 (:pending st2) ['ld.core] trunk h0)]
     (try
       (let [loaded (db/load-store conn trunk)]
         (testing "head and position"
-          (is (= "x3" (:head loaded)))
-          (is (= (count (store/deltas st2)) (:line-pos loaded))))
+          (is (= "x5" (:head loaded)))
+          (is (= (:line-pos st2) (:line-pos loaded))))
         (testing "the prompt per form, the author's — the :system move did not overwrite it"
           (is (= "the ask" (get (:prompts loaded) (fid 'ld.core))) (pr-str (:prompts loaded))))
         (testing "the last write per namespace, session markers excluded"
           (is (= "x2" (get-in loaded [:last-write 'ld.core :id])) (pr-str (:last-write loaded)))
           (is (some? (get-in loaded [:last-write 'ld.other :id])))
           (is (nil? (get-in loaded [:last-write '*session*]))))
+        (testing "the recent window, cut at the milestone to the done that earned it"
+          (is (= ["x3" "x4" "x5"] (map :id (:recent loaded))) (pr-str (map :id (:recent loaded)))))
         (testing "and the two paths agree: a load answers what the writes built"
           (is (= (:prompts st2) (:prompts loaded)))
-          (is (= (:last-write st2) (:last-write loaded)))))
+          (is (= (:last-write st2) (:last-write loaded)))
+          (is (= (map :id (:recent st2)) (map :id (:recent loaded))))
+          (is (= [] (:pending loaded)))))
       (finally (.close conn)))))
 
 (deftest a-line-can-name-its-head-delta-and-say-whether-an-id-is-on-it

@@ -979,3 +979,31 @@
       (is (= 2 (:line-pos c)))
       (is (= ["p3"] (map :id (:pending (store/record-delta c {:id "p3" :op :done :ns '*session*}))))
           "and the next append starts a new suffix"))))
+
+(deftest record-delta-keeps-a-bounded-recent-window-cut-at-each-milestone
+  ;; The readers of the RECENT past — was the last done green, is a turn
+  ;; open, what changed since the done, is anything un-judged — walked the
+  ;; whole list. They only ever look back as far as the last milestone, and
+  ;; the done that earned it. So the value keeps exactly that: `:recent` grows
+  ;; with every append and is cut at each `:commit` to the done immediately
+  ;; before it (with whatever sat between) plus the commit itself. A pure
+  ;; reader gets a window that is hundreds long, never tens of thousands.
+  (let [ds [{:id "a1" :op :add :ns 'rw.core :form-id "f1"}
+            {:id "a2" :op :done :ns '*session* :findings {:test-status :green}}
+            {:id "a3" :op :turn-end :ns '*session*}
+            {:id "a4" :op :commit :ns '*session* :description "m1"}
+            {:id "a5" :op :replace :ns 'rw.core :form-id "f1"}
+            {:id "a6" :op :done :ns '*session* :findings {:test-status :red}}
+            {:id "a7" :op :commit :ns '*session* :description "m2"}
+            {:id "a8" :op :turn-begin :ns '*session* :agent "x"}]
+        at  (fn [n] (reduce store/record-delta (store/empty-store) (take n ds)))]
+    (is (= [] (:recent (store/empty-store))))
+    (is (= ["a1" "a2" "a3"] (map :id (:recent (at 3)))) "grows with every append")
+    (is (= ["a2" "a3" "a4"] (map :id (:recent (at 4))))
+        "a milestone cuts the window to the done that earned it, and itself")
+    (is (= ["a2" "a3" "a4" "a5" "a6"] (map :id (:recent (at 6)))))
+    (is (= ["a6" "a7"] (map :id (:recent (at 7)))))
+    (is (= ["a6" "a7" "a8"] (map :id (:recent (at 8)))))
+    (testing "a milestone with no done before it keeps just itself"
+      (is (= ["c1"] (map :id (:recent (store/record-delta (store/empty-store)
+                                                           {:id "c1" :op :commit :ns '*session*}))))))))

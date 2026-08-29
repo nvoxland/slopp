@@ -453,7 +453,7 @@
    the journal at all. Narrow — the ordinary way to break something is to write
    it — and it is why this asks rather than refuses."
   [_session st* changed]
-  (let [ds       (store/deltas st*)
+  (let [ds       (:recent st*)
         baseline (->> ds (filter #(= :done (:op %))) last :id)]
     (if-not baseline
       []
