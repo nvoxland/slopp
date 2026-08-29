@@ -1216,9 +1216,12 @@
           ;; :parent stays in the payload too — the column is a denormalization
           ;; for traversal, so row->delta and every reader below it are
           ;; untouched.
-          (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, parent, payload)
-                              VALUES (?,?,?,?,?)"
-                             (:id d) (name (:op d)) (str (:ns d)) (:parent d)
+          ;; `at` is a COLUMN as well as a payload field: the currency counts
+          ;; ask "how much code landed after this clock time", and a compare
+          ;; inside EDN text is a parse of every row
+          (jdbc/execute! tx ["INSERT INTO deltas (id, op, ns, parent, at, payload)
+                              VALUES (?,?,?,?,?,?)"
+                             (:id d) (name (:op d)) (str (:ns d)) (:parent d) (:at d)
                              (pr-str (dissoc d :id :op :ns))])
           ;; and the form index, in the same transaction: one row per form
           ;; the delta names, so history by form is a read and not a parse
@@ -1282,183 +1285,6 @@
          (jdbc/execute! tx ["SELECT id, payload FROM deltas
                              WHERE payload LIKE '%:form-id%' OR payload LIKE '%:sources%'
                              ORDER BY seq"]))))))
-
-(defn ^:export open!
-  "Open (creating if needed) the store db under `dir`; returns the connection.
-
-  `{:create? false}` returns NIL instead of creating one when `dir` has no
-  store yet — for callers that merely ASK whether a dir is slopp-managed.
-  The MCP server is launched in whatever directory the editor has open, so
-  an unconditional create colonises every project a user opens: an empty
-  `.slopp/store.db` appears, and from then on the session-pause hook has
-  something to write checkpoints into. Serving is a question, not an
-  adoption; the store is materialized by the first real write."
-  (^java.sql.Connection [dir] (open! dir nil))
-  (^java.sql.Connection [dir {:keys [create?] :or {create? true}}]
-   (let [f (io/file dir ".slopp" "store.db")]
-     (when (or create? (.exists f))
-       (io/make-parents f)
-(ensure-gitignore! dir)
-       (let [conn (jdbc/get-connection
-                   (jdbc/get-datasource {:dbtype "sqlite" :dbname (str f)}))]
-         (jdbc/execute! conn ["PRAGMA journal_mode=WAL"])
-         (jdbc/execute! conn ["PRAGMA busy_timeout=5000"])
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS meta (
-                              k TEXT PRIMARY KEY, v TEXT NOT NULL)"])
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS deltas (
-                              seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-                              id      TEXT UNIQUE NOT NULL,
-                              op      TEXT NOT NULL,
-                              ns      TEXT NOT NULL,
-                              payload TEXT NOT NULL)"])
-         ;; a `tree` column used to hold each milestone's byte-exact snapshot of
-         ;; every namespace — 94% of a 344MB journal at its worst, still 82MB
-         ;; (39%) when it was removed. An older store has the column and its
-         ;; rows; nothing reads or writes them, and DROP COLUMN rewrites the
-         ;; whole table, so it is left where it is rather than paid for at every
-         ;; open. `git/project-journal!` derives the tree by folding the log.
-         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_ns ON deltas(ns)"])
-;; :parent has been on every delta since the beginning — the writer's head at
-         ;; write time — but it lived inside the pr-str'd payload, where no query
-         ;; could reach it. So the log was walkable only by loading all of it, and
-         ;; a second line had to be a whole separate db FILE with its own copy of
-         ;; the journal. As a column it is an index away from being a real DAG.
-         ;; ALTER rather than an inline column so a fresh store and an existing one
-         ;; take exactly one path; SQLite has no ADD COLUMN IF NOT EXISTS, so the
-         ;; throw IS the no-op (same idiom as elements.comment above).
-         (try (jdbc/execute! conn ["ALTER TABLE deltas ADD COLUMN parent TEXT"])
-              (catch java.sql.SQLException _ nil))
-         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_parent ON deltas(parent)"])
-         ;; MEASUREMENTS are about the journal, not in it. A delta is a link in
-         ;; the chain every writer CASes against, so appending one MOVES THE
-         ;; HEAD — and a number describing what something cost has no business
-         ;; making a verdict lose that race. Learned the expensive way: harness
-         ;; telemetry arriving on an exporter's interval appended a delta every
-         ;; few seconds from an HTTP receiver that is not an agent and never
-         ;; stops, and the store became unwritable — `full_check` computed a
-         ;; whole-store answer for three to four minutes and then lost the
-         ;; commit to a telemetry row, four times, and ordinary writes began
-         ;; failing behind it. The interval was never the bug; ANY interval
-         ;; makes the head non-quiescent.
-         ;;
-         ;; Two more costs the same rows were quietly paying: every such op has
-         ;; to be registered as a merge MARKER purely so `merge-logs` will skip
-         ;; it, and they sit on the load path, where the measured gap between
-         ;; `load-elements` (~410ms) and `load-store` (~4s) is EDN-parsing delta
-         ;; payloads.
-         ;;
-         ;; `delta` is a nullable FK: a measurement ABOUT a specific delta (a
-         ;; turn's timing, a run's cost) names it; one that is about a span of
-         ;; wall-clock time rather than an entry does not, and must not invent
-         ;; an anchor to look tidy.
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS measurements (
-                              seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-                              at      INTEGER NOT NULL,
-                              kind    TEXT NOT NULL,
-                              delta   TEXT REFERENCES deltas(id),
-                              payload TEXT NOT NULL)"])
-         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS measurements_kind
-                              ON measurements(kind, seq)"])
-         ;; HISTORY BY FORM. The journal is indexed by namespace and by
-         ;; parent; the form a delta touched lived only inside its EDN
-         ;; payload, so "which deltas touched this form" meant parsing every
-         ;; payload — which is the reason the whole log has been kept in RAM.
-         ;; One row per (delta, form), written at append from every key a
-         ;; delta names a form by (`delta-form-ids`), and the first graph edge
-         ;; the store persists rather than recomputes.
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS delta_forms (
-                              delta_id TEXT NOT NULL,
-                              form_id  TEXT NOT NULL,
-                              PRIMARY KEY (delta_id, form_id)) WITHOUT ROWID"])
-         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS delta_forms_form
-                              ON delta_forms(form_id)"])
-         ;; a journal older than the index is indexed HERE, once — a backfill
-         ;; that waits for an operator runs on exactly one store
-         (index-journal-forms! conn)
-         ;; A LINE is a pointer to a head delta. A named line is a branch; an
-         ;; anonymous one (name NULL) is an agent's thread. They are the same row
-         ;; because they are the same thing — a thread is a branch nobody named.
-         ;; `base` is the delta the line split from, which is what makes a split
-         ;; findable from either side.
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS lines (
-                              id         TEXT PRIMARY KEY,
-                              name       TEXT UNIQUE,
-                              kind       TEXT NOT NULL,
-                              head       TEXT,
-                              base       TEXT,
-                              parent     TEXT,
-                              agent      TEXT,
-                              created_at INTEGER NOT NULL,
-                              used_at    INTEGER NOT NULL,
-                              status     TEXT NOT NULL)"])
-         ;; The LEASE: which live PROCESS is writing this thread right now.
-         ;; A thread is keyed by (agent, branch) so that one conversation
-         ;; resumed later finds its own un-landed work — which is right, and
-         ;; which also means two processes resuming the SAME conversation key
-         ;; to one row and write it at once, the contention threads exist to
-         ;; abolish. Identity answers "whose work is this"; it cannot answer
-         ;; "who may write it now", and one value could never do both.
-         ;;
-         ;; pid PLUS start time, because pids are reused: the pair identifies
-         ;; a process rather than a slot. Same ADD COLUMN idiom as `parent`
-         ;; and `comment` above — SQLite has no IF NOT EXISTS here, so the
-         ;; throw IS the no-op, and an older store simply has nil owners,
-         ;; which reads as unheld and behaves exactly as it did before.
-         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_pid INTEGER"])
-              (catch java.sql.SQLException _ nil))
-         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_started INTEGER"])
-              (catch java.sql.SQLException _ nil))
-         (jdbc/execute! conn [elements-ddl])
-         ;; a form OWNS the comment rendered above it (whitespace-is-rendering).
-         ;; Same story as `tree` above: SQLite has no ADD COLUMN IF NOT EXISTS,
-         ;; so adding it to an existing store throws and that is the no-op.
-         (try (jdbc/execute! conn ["ALTER TABLE elements ADD COLUMN comment TEXT"])
-     (catch java.sql.SQLException _ nil))
-;; …and `line` is the one column that idiom cannot add: it belongs to the
-         ;; PRIMARY KEY, and SQLite can neither add nor drop a key in place. So an
-         ;; existing table is COPIED into the new shape with every row backfilled
-         ;; to the trunk — the only line those rows could ever have belonged to.
-         ;; It runs at most once per store, and afterwards a reader with no line
-         ;; predicate still sees exactly what it saw before, which is what lets
-         ;; the readers move one at a time instead of in lockstep with the schema.
-         ;;
-         ;; In a transaction because the half-done state is indistinguishable
-         ;; from the finished one: a crash between the rename and the copy leaves
-         ;; an empty `elements` that already HAS a line column, so the probe
-         ;; below would skip it forever and the rows would be gone.
-         (when (try (jdbc/execute! conn ["SELECT line FROM elements LIMIT 0"]) false
-                    (catch java.sql.SQLException _ true))
-           (jdbc/with-transaction [tx conn]
-             (let [trunk (trunk-line-id! tx)]
-               (jdbc/execute! tx ["ALTER TABLE elements RENAME TO elements_unlined"])
-               (jdbc/execute! tx [elements-ddl])
-               (jdbc/execute! tx ["INSERT INTO elements
-                                     (line,ns,pos,kind,form_id,name,source,comment)
-                                   SELECT ?, ns, pos, kind, form_id, name, source, comment
-                                   FROM elements_unlined" trunk])
-               (jdbc/execute! tx ["DROP TABLE elements_unlined"]))))
-         ;; content-addressed dependency analysis (P4-deps M4/M6), keyed by
-         ;; "lib@version" — a surface/native verdict is a pure fn of the coord
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS dep_surface (
-                              id      TEXT PRIMARY KEY,
-                              surface TEXT,
-                              native  TEXT)"])
-         ;; git-pull conflicts, held OFF the journal (G-series): the raw remote
-         ;; file + provenance, kept until the agent resolves — the journal only
-         ;; ever holds slopp-valid forms
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS quarantine (
-                              path    TEXT PRIMARY KEY,
-                              ns      TEXT,
-                              source  TEXT,
-                              sha     TEXT NOT NULL,
-                              reason  TEXT NOT NULL,
-                              at      INTEGER NOT NULL)"])
-         ;; content-addressed binary assets (D-web wave 4): bytes live HERE,
-         ;; the journal carries only shas — a large asset costs the log ~60B
-         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS blobs (
-                              sha   TEXT PRIMARY KEY,
-                              bytes BLOB NOT NULL)"])
-         conn)))))
 
 ^:reads (defn ^:export deltas-touching
           "ONE LINE's deltas that touched any of `fids`, oldest first, as full delta
@@ -1735,3 +1561,372 @@
                     v   (if (and (nil? raw) (not absent-nil?)) init raw)]
                 [field (if (and normalize (some? v)) (normalize v) v)])))
        (fields/meta-fields)))))
+
+^:reads (defn ^:export code-deltas-after
+          "How many CODE deltas `line-id` gained after a point — `{:id delta-id}`
+  (by position along the line) or `{:at epoch-ms}` (by clock, strictly
+  after) — the ONE spelling of a currency count: the host's, the jar's and
+  the bundle's `:behind` all read it. Markers (`store.fields/markers`:
+  verify, done, commit, the turn pair…) never count — a host that has not
+  \"loaded\" a done is not behind on anything. Both shapes are one indexed
+  query over the line's ancestry; neither parses a payload."
+          [conn line-id {:keys [id at]}]
+          (let [marks (apply str (interpose "," (repeat (count fields/markers) "?")))
+                ops   (map name fields/markers)
+                base  (str ancestry-cte
+                           " SELECT COUNT(*) AS n FROM deltas
+                             WHERE id IN (SELECT id FROM anc)
+                               AND op NOT IN (" marks ")")]
+            (or (:n (jdbc/execute-one!
+                     conn (cond
+                            id (into [(str base " AND seq > (SELECT seq FROM deltas WHERE id = ?)")
+                                      (line-head conn line-id)]
+                                     (concat ops [id]))
+                            :else (into [(str base " AND at > ?") (line-head conn line-id)]
+                                        (concat ops [(long (or at 0))])))))
+                0)))
+
+(defn backfill-at!
+  "Fill the `at` column for every delta still missing it — a journal written
+  before `at` was a column. Parses each such payload once for its `:at`;
+  returns the number of rows filled, 0 on every later open at the cost of
+  one indexed existence query. A delta whose payload carries no `:at` (the
+  earliest ones) is left NULL: a count by clock cannot place it, and it
+  should not be placed by guessing."
+  [conn]
+  (if (nil? (jdbc/execute-one! conn ["SELECT 1 FROM deltas WHERE at IS NULL LIMIT 1"]))
+    0
+    (jdbc/with-transaction [tx conn]
+      (reduce (fn [n row]
+                (let [id (or (:id row) (:deltas/id row))
+                      at (:at (edn/read-string (or (:payload row) (:deltas/payload row))))]
+                  (if (number? at)
+                    (do (jdbc/execute! tx ["UPDATE deltas SET at = ? WHERE id = ?" (long at) id])
+                        (inc n))
+                    n)))
+              0
+              (jdbc/execute! tx ["SELECT id, payload FROM deltas
+                                  WHERE at IS NULL AND payload LIKE '%:at %'"])))))
+
+(defn ^:export open!
+  "Open (creating if needed) the store db under `dir`; returns the connection.
+
+  `{:create? false}` returns NIL instead of creating one when `dir` has no
+  store yet — for callers that merely ASK whether a dir is slopp-managed.
+  The MCP server is launched in whatever directory the editor has open, so
+  an unconditional create colonises every project a user opens: an empty
+  `.slopp/store.db` appears, and from then on the session-pause hook has
+  something to write checkpoints into. Serving is a question, not an
+  adoption; the store is materialized by the first real write."
+  (^java.sql.Connection [dir] (open! dir nil))
+  (^java.sql.Connection [dir {:keys [create?] :or {create? true}}]
+   (let [f (io/file dir ".slopp" "store.db")]
+     (when (or create? (.exists f))
+       (io/make-parents f)
+(ensure-gitignore! dir)
+       (let [conn (jdbc/get-connection
+                   (jdbc/get-datasource {:dbtype "sqlite" :dbname (str f)}))]
+         (jdbc/execute! conn ["PRAGMA journal_mode=WAL"])
+         (jdbc/execute! conn ["PRAGMA busy_timeout=5000"])
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS meta (
+                              k TEXT PRIMARY KEY, v TEXT NOT NULL)"])
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS deltas (
+                              seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+                              id      TEXT UNIQUE NOT NULL,
+                              op      TEXT NOT NULL,
+                              ns      TEXT NOT NULL,
+                              payload TEXT NOT NULL)"])
+         ;; a `tree` column used to hold each milestone's byte-exact snapshot of
+         ;; every namespace — 94% of a 344MB journal at its worst, still 82MB
+         ;; (39%) when it was removed. An older store has the column and its
+         ;; rows; nothing reads or writes them, and DROP COLUMN rewrites the
+         ;; whole table, so it is left where it is rather than paid for at every
+         ;; open. `git/project-journal!` derives the tree by folding the log.
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_ns ON deltas(ns)"])
+;; :parent has been on every delta since the beginning — the writer's head at
+         ;; write time — but it lived inside the pr-str'd payload, where no query
+         ;; could reach it. So the log was walkable only by loading all of it, and
+         ;; a second line had to be a whole separate db FILE with its own copy of
+         ;; the journal. As a column it is an index away from being a real DAG.
+         ;; ALTER rather than an inline column so a fresh store and an existing one
+         ;; take exactly one path; SQLite has no ADD COLUMN IF NOT EXISTS, so the
+         ;; throw IS the no-op (same idiom as elements.comment above).
+         (try (jdbc/execute! conn ["ALTER TABLE deltas ADD COLUMN parent TEXT"])
+              (catch java.sql.SQLException _ nil))
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_parent ON deltas(parent)"])
+         ;; MEASUREMENTS are about the journal, not in it. A delta is a link in
+         ;; the chain every writer CASes against, so appending one MOVES THE
+         ;; HEAD — and a number describing what something cost has no business
+         ;; making a verdict lose that race. Learned the expensive way: harness
+         ;; telemetry arriving on an exporter's interval appended a delta every
+         ;; few seconds from an HTTP receiver that is not an agent and never
+         ;; stops, and the store became unwritable — `full_check` computed a
+         ;; whole-store answer for three to four minutes and then lost the
+         ;; commit to a telemetry row, four times, and ordinary writes began
+         ;; failing behind it. The interval was never the bug; ANY interval
+         ;; makes the head non-quiescent.
+         ;;
+         ;; Two more costs the same rows were quietly paying: every such op has
+         ;; to be registered as a merge MARKER purely so `merge-logs` will skip
+         ;; it, and they sit on the load path, where the measured gap between
+         ;; `load-elements` (~410ms) and `load-store` (~4s) is EDN-parsing delta
+         ;; payloads.
+         ;;
+         ;; `delta` is a nullable FK: a measurement ABOUT a specific delta (a
+         ;; turn's timing, a run's cost) names it; one that is about a span of
+         ;; wall-clock time rather than an entry does not, and must not invent
+         ;; an anchor to look tidy.
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS measurements (
+                              seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+                              at      INTEGER NOT NULL,
+                              kind    TEXT NOT NULL,
+                              delta   TEXT REFERENCES deltas(id),
+                              payload TEXT NOT NULL)"])
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS measurements_kind
+                              ON measurements(kind, seq)"])
+         ;; HISTORY BY FORM. The journal is indexed by namespace and by
+         ;; parent; the form a delta touched lived only inside its EDN
+         ;; payload, so "which deltas touched this form" meant parsing every
+         ;; payload — which is the reason the whole log has been kept in RAM.
+         ;; One row per (delta, form), written at append from every key a
+         ;; delta names a form by (`delta-form-ids`), and the first graph edge
+         ;; the store persists rather than recomputes.
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS delta_forms (
+                              delta_id TEXT NOT NULL,
+                              form_id  TEXT NOT NULL,
+                              PRIMARY KEY (delta_id, form_id)) WITHOUT ROWID"])
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS delta_forms_form
+                              ON delta_forms(form_id)"])
+         ;; a journal older than the index is indexed HERE, once — a backfill
+         ;; that waits for an operator runs on exactly one store
+         (index-journal-forms! conn)
+         ;; `at` as a COLUMN: the currency counts ask how much code landed
+         ;; after a clock time, and inside the EDN payload that was a parse
+         ;; of every row. Same ADD COLUMN idiom as `parent` — the throw is
+         ;; the no-op — and a journal older than the column is filled once.
+         (try (jdbc/execute! conn ["ALTER TABLE deltas ADD COLUMN at INTEGER"])
+              (catch java.sql.SQLException _ nil))
+         (jdbc/execute! conn ["CREATE INDEX IF NOT EXISTS deltas_at ON deltas(at)"])
+         (backfill-at! conn)
+         ;; A LINE is a pointer to a head delta. A named line is a branch; an
+         ;; anonymous one (name NULL) is an agent's thread. They are the same row
+         ;; because they are the same thing — a thread is a branch nobody named.
+         ;; `base` is the delta the line split from, which is what makes a split
+         ;; findable from either side.
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS lines (
+                              id         TEXT PRIMARY KEY,
+                              name       TEXT UNIQUE,
+                              kind       TEXT NOT NULL,
+                              head       TEXT,
+                              base       TEXT,
+                              parent     TEXT,
+                              agent      TEXT,
+                              created_at INTEGER NOT NULL,
+                              used_at    INTEGER NOT NULL,
+                              status     TEXT NOT NULL)"])
+         ;; The LEASE: which live PROCESS is writing this thread right now.
+         ;; A thread is keyed by (agent, branch) so that one conversation
+         ;; resumed later finds its own un-landed work — which is right, and
+         ;; which also means two processes resuming the SAME conversation key
+         ;; to one row and write it at once, the contention threads exist to
+         ;; abolish. Identity answers "whose work is this"; it cannot answer
+         ;; "who may write it now", and one value could never do both.
+         ;;
+         ;; pid PLUS start time, because pids are reused: the pair identifies
+         ;; a process rather than a slot. Same ADD COLUMN idiom as `parent`
+         ;; and `comment` above — SQLite has no IF NOT EXISTS here, so the
+         ;; throw IS the no-op, and an older store simply has nil owners,
+         ;; which reads as unheld and behaves exactly as it did before.
+         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_pid INTEGER"])
+              (catch java.sql.SQLException _ nil))
+         (try (jdbc/execute! conn ["ALTER TABLE lines ADD COLUMN owner_started INTEGER"])
+              (catch java.sql.SQLException _ nil))
+         (jdbc/execute! conn [elements-ddl])
+         ;; a form OWNS the comment rendered above it (whitespace-is-rendering).
+         ;; Same story as `tree` above: SQLite has no ADD COLUMN IF NOT EXISTS,
+         ;; so adding it to an existing store throws and that is the no-op.
+         (try (jdbc/execute! conn ["ALTER TABLE elements ADD COLUMN comment TEXT"])
+     (catch java.sql.SQLException _ nil))
+;; …and `line` is the one column that idiom cannot add: it belongs to the
+         ;; PRIMARY KEY, and SQLite can neither add nor drop a key in place. So an
+         ;; existing table is COPIED into the new shape with every row backfilled
+         ;; to the trunk — the only line those rows could ever have belonged to.
+         ;; It runs at most once per store, and afterwards a reader with no line
+         ;; predicate still sees exactly what it saw before, which is what lets
+         ;; the readers move one at a time instead of in lockstep with the schema.
+         ;;
+         ;; In a transaction because the half-done state is indistinguishable
+         ;; from the finished one: a crash between the rename and the copy leaves
+         ;; an empty `elements` that already HAS a line column, so the probe
+         ;; below would skip it forever and the rows would be gone.
+         (when (try (jdbc/execute! conn ["SELECT line FROM elements LIMIT 0"]) false
+                    (catch java.sql.SQLException _ true))
+           (jdbc/with-transaction [tx conn]
+             (let [trunk (trunk-line-id! tx)]
+               (jdbc/execute! tx ["ALTER TABLE elements RENAME TO elements_unlined"])
+               (jdbc/execute! tx [elements-ddl])
+               (jdbc/execute! tx ["INSERT INTO elements
+                                     (line,ns,pos,kind,form_id,name,source,comment)
+                                   SELECT ?, ns, pos, kind, form_id, name, source, comment
+                                   FROM elements_unlined" trunk])
+               (jdbc/execute! tx ["DROP TABLE elements_unlined"]))))
+         ;; content-addressed dependency analysis (P4-deps M4/M6), keyed by
+         ;; "lib@version" — a surface/native verdict is a pure fn of the coord
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS dep_surface (
+                              id      TEXT PRIMARY KEY,
+                              surface TEXT,
+                              native  TEXT)"])
+         ;; git-pull conflicts, held OFF the journal (G-series): the raw remote
+         ;; file + provenance, kept until the agent resolves — the journal only
+         ;; ever holds slopp-valid forms
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS quarantine (
+                              path    TEXT PRIMARY KEY,
+                              ns      TEXT,
+                              source  TEXT,
+                              sha     TEXT NOT NULL,
+                              reason  TEXT NOT NULL,
+                              at      INTEGER NOT NULL)"])
+         ;; content-addressed binary assets (D-web wave 4): bytes live HERE,
+         ;; the journal carries only shas — a large asset costs the log ~60B
+         (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS blobs (
+                              sha   TEXT PRIMARY KEY,
+                              bytes BLOB NOT NULL)"])
+         conn)))))
+
+^:reads (defn ^:export last-artifact-put
+          "The newest `:artifact-put` delta for `path` on `line-id` that is not a
+  removal, as a delta map — or nil when nothing has recorded one. The
+  browser's currency is measured from it. Prefiltered in SQL on op and on the
+  path's text in the payload; the parse confirms both."
+          [conn line-id path]
+          (->> (jdbc/execute!
+                conn [(str ancestry-cte
+                           " SELECT * FROM deltas
+                             WHERE id IN (SELECT id FROM anc) AND op = 'artifact-put'
+                               AND payload LIKE ?
+                             ORDER BY seq DESC")
+                      (line-head conn line-id)
+                      (str "%:path " (pr-str (str path)) "%")])
+               (map row->delta)
+               (filter #(and (= (str path) (str (:path %)))
+                             (not= :remove (:action %))))
+               first))
+
+^:reads (defn ^:export ops-after
+          "`[{:id :op :ns} …]` for every delta on `line-id` after delta `id`,
+  oldest first — the three indexed columns and no payload, for a reader that
+  only needs to know what KIND of thing happened and to which namespace.
+  The bundle's currency counts client writes this way; fetching payloads to
+  answer it would parse megabytes to read three symbols."
+          [conn line-id id]
+          (mapv (fn [r] {:id (:deltas/id r)
+                         :op (keyword (:deltas/op r))
+                         :ns (symbol (:deltas/ns r))})
+                (jdbc/execute!
+                 conn [(str ancestry-cte
+                            " SELECT id, op, ns FROM deltas
+                              WHERE id IN (SELECT id FROM anc)
+                                AND seq > (SELECT seq FROM deltas WHERE id = ?)
+                              ORDER BY seq")
+                       (line-head conn line-id) id])))
+
+^:reads (defn ^:export delta-by-id
+          "The delta with `id`, as a delta map, or nil. One row by primary key —
+  for the reader that holds an id (a milestone's `:target`, a `:since`
+  argument) and needs the entry behind it, without scanning a list for it."
+          [conn id]
+          (some-> (jdbc/execute-one! conn ["SELECT * FROM deltas WHERE id = ?" id])
+                  row->delta))
+
+^:reads (defn ^:export line-deltas
+          "ONE LINE's whole journal as delta maps, oldest first — or only the part
+  after delta `since` when given. This is the read the history VIEWS
+  (`query_history`, `query_changes`, a milestone's tree, an episode diff)
+  hydrate with, at the moment they are asked: a session no longer carries its
+  line's history in the value, because the value read it for two scalars and
+  a bounded window, and the views that genuinely need all of it are asked a
+  few times a day. Milestone `:files` manifests are thinned exactly as
+  `load-store` thins them."
+          [conn line-id & {:keys [since]}]
+          (thin-commit-manifests
+           (mapv row->delta
+                 (jdbc/execute!
+                  conn (cond-> [(str ancestry-cte
+                                     " SELECT id, op, ns, payload FROM deltas
+                                       WHERE id IN (SELECT id FROM anc)"
+                                     (when since
+                                       " AND seq > (SELECT seq FROM deltas WHERE id = ?)")
+                                     " ORDER BY seq")
+                                (line-head conn line-id)]
+                         since (conj since))))))
+
+^:reads (defn ^:export sources-at
+          "`{form-id source}` for each of `fids` as of delta `at-id` (inclusive) on
+  `line-id` — the content view a baseline comparison needs. A form deleted by
+  then is absent; `at-id` nil (before any delta) is `{}`.
+
+  Folds only the deltas that TOUCHED those forms (`delta_forms`), up to the
+  point asked for. `store/sources-at` folded the whole log from the root for
+  every form, on every done, for every rule that compares against the last
+  done — and the callers ever ask about the handful of forms an episode
+  changed."
+          [conn line-id at-id fids]
+          (if (or (nil? at-id) (empty? fids))
+            {}
+            (let [wanted (set (map str fids))
+                  ;; next.jdbc qualifies a plain column's alias by its table (:deltas/s) and
+                  ;; leaves an aggregate's bare — read both rather than betting
+                  upto   (let [r (jdbc/execute-one! conn ["SELECT seq AS s FROM deltas WHERE id = ?" at-id])]
+                           (or (:s r) (:deltas/s r)))
+                  marks  (apply str (interpose "," (repeat (count wanted) "?")))]
+              (if (nil? upto)
+                {}
+                (reduce (fn [acc row]
+                          (let [d   (row->delta row)
+                                acc (into acc (filter (comp wanted key)) (:sources d))]
+                            (if (and (= :delete (:op d)) (wanted (str (:form-id d))))
+                              (dissoc acc (str (:form-id d)))
+                              acc)))
+                        {}
+                        (jdbc/execute!
+                         conn (into [(str ancestry-cte
+                                          " SELECT * FROM deltas
+                                            WHERE id IN (SELECT id FROM anc)
+                                              AND seq <= ?
+                                              AND id IN (SELECT delta_id FROM delta_forms
+                                                         WHERE form_id IN (" marks "))
+                                            ORDER BY seq")
+                                     (line-head conn line-id) upto]
+                                    wanted)))))))
+
+^:reads (defn ^:export last-full-check
+          "The newest `:verify` delta on `line-id` whose result is scoped
+  `:full-check` — the whole-store verdict — as a delta map, or nil. An
+  episode-scoped verify (the kind every write appends) is not one, and the
+  scope lives in the payload, so verify rows are read newest first behind a
+  text prefilter and the first whose parsed result says `:full-check` wins."
+          [conn line-id]
+          (->> (jdbc/execute!
+                conn [(str ancestry-cte
+                           " SELECT * FROM deltas
+                             WHERE id IN (SELECT id FROM anc) AND op = 'verify'
+                               AND payload LIKE '%:full-check%'
+                             ORDER BY seq DESC")
+                      (line-head conn line-id)])
+               (map row->delta)
+               (filter #(= :full-check (get-in % [:result :scope])))
+               first))
+
+^:reads (defn ^:export recent-markers
+          "The newest `n` deltas of `op` on `line-id`, newest first, as delta
+  maps. `breaking-changes` looks back through the last dozen dones for the
+  baseline a late `^:breaking-ok` may be discharging; that look-back is
+  bounded here rather than by walking the whole list."
+          [conn line-id op n]
+          (mapv row->delta
+                (jdbc/execute!
+                 conn [(str ancestry-cte
+                            " SELECT * FROM deltas
+                              WHERE id IN (SELECT id FROM anc) AND op = ?
+                              ORDER BY seq DESC LIMIT ?")
+                       (line-head conn line-id) (name op) (long n)])))

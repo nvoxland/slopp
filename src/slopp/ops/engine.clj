@@ -1754,7 +1754,10 @@
   sets."
   [session store changed]
   (let [baseline (->> (:recent store) (filter #(= :done (:op %))) last :id)
-        base-src (when baseline (store/sources-at store baseline))
+        ;; the baseline sources of the CHANGED forms only — a fold over the
+        ;; deltas that touched them, not the whole log from the root
+        base-src (when baseline
+                   (db/sources-at (:db @session) (session-line session) baseline changed))
         reach (memoize
                (fn [ns-sym]
                  (vec (for [tns (test-nses-reaching store [ns-sym])

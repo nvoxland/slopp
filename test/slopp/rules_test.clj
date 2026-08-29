@@ -970,9 +970,15 @@
         ;; derives from an append
         done (store/record-delta base {:id "d-done" :parent (:head base)
                                        :op :done :at 0})
-        grew (first (store/replace-node
-                     done 'demo-t 't
-                     (p/parse-string "(deftest ^:external t (is (= 1 1)) (is (= 2 2)))")))
+        ;; the check is pure over the value and reads the baseline sources
+        ;; `run-done-advisories!` hands in — here they are handed in by hand,
+        ;; exactly as the runner would read them from the journal
+        grew (let [g   (first (store/replace-node
+                               done 'demo-t 't
+                               (p/parse-string "(deftest ^:external t (is (= 1 1)) (is (= 2 2)))")))
+                   fid (:id (first (filter #(= 't (:name %)) (store/forms g 'demo-t))))]
+               (assoc g :baselines [{:done "d-done"
+                                     :sources {fid "(deftest ^:external t (is (= 1 1)))"}}]))
         fid  (:id (first (filter #(= 't (:name %)) (store/forms grew 'demo-t))))]
     (testing "the control: an added assertion with no red observed FIRES"
       (is (seq (rules/assertions-never-red-check nil grew [fid]))

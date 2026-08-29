@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -179,9 +179,14 @@
    The one rule in the registry that is a QUESTION rather than a verdict, and
    legitimately advisory: the system cannot know whether the effect belonged
    there. It fires only for the episode that made the declaration, so it
-   prompts once and cannot decay into a standing warning to scroll past."
+   prompts once and cannot decay into a standing warning to scroll past.
+
+   Read off the value's recent window: the episode is everything after its
+   last done, and the declaration BEFORE it is looked for in the window's
+   earlier part. One older than the window reads as a first declaration —
+   which still asks the question, with less to compare against."
   [_session store _changed]
-  (let [ds      (store/deltas store)
+  (let [ds      (:recent store)
         since   (->> ds (keep-indexed #(when (= :done (:op %2)) %1)) last)
         recent  (if since (drop (inc since) ds) ds)
         prior   (fn [m] (->> (take (or since (count ds)) ds)
@@ -357,11 +362,12 @@
   a different one. Error-grade — a tier its code does not satisfy is a
   declaration that lies, and every reader downstream is relying on it: the
   tests you decide not to isolate, the reviewer trusting the core/shell
-  split."
+  split.
+
+  The episode is read off the value's recent window — everything after its
+  last done."
   [_session store _changed]
-  (let [ds     (store/deltas store)
-        since  (->> ds (keep-indexed #(when (= :done (:op %2)) %1)) last)
-        recent (if since (drop (inc since) ds) ds)
+  (let [recent (->> (:recent store) reverse (take-while #(not= :done (:op %))) reverse)
         moved  (into #{}
                      (mapcat (fn [d]
                                (case (:op d)
@@ -457,7 +463,10 @@
         baseline (->> ds (filter #(= :done (:op %))) last :id)]
     (if-not baseline
       []
-      (let [old-srcs (store/sources-at st* baseline)
+      (let [;; the changed forms' sources at the baseline, read from the journal
+            ;; by the done pipeline (bounded to the deltas that touched them)
+            ;; and handed in on the value
+            old-srcs (:sources (first (:baselines st*)))
             after    (->> ds (drop-while #(not= baseline (:id %))) rest)
             ever-red (into #{} (for [d after
                                      f (get-in d [:result :failures])
@@ -691,11 +700,12 @@
 
   Error-grade, and not a judgement call: every finding here is one a write
   gate would have REFUSED outright. Anything softer would make the
-  whole-episode check the more permissive of the two, which is backwards."
+  whole-episode check the more permissive of the two, which is backwards.
+
+  The episode is read off the value's recent window — everything after its
+  last done."
   [_session store _changed]
-  (let [ds     (store/deltas store)
-        since  (->> ds (keep-indexed #(when (= :done (:op %2)) %1)) last)
-        recent (if since (drop (inc since) ds) ds)
+  (let [recent (->> (:recent store) reverse (take-while #(not= :done (:op %))) reverse)
         moved  (into #{}
                      (mapcat (fn [d]
                                (case (:op d)
@@ -1327,9 +1337,25 @@
    naming flagged three test helpers, and each was fixed ad hoc. The write
    gates already declared it (`^{:rule/applies-to :production}`); the
    done-advisories now do too, and the runner is what makes the declaration
-   mean something rather than document an intention."
+   mean something rather than document an intention.
+
+   **The checks are pure over the value, and what they need from HISTORY is
+   read here and handed in**: `:baselines` — `[{:done id :sources {fid src}}
+   …]`, newest first — the changed forms' sources at the last done and the
+   dozen before it (`breaking-changes` looks that far back for a late
+   `^:breaking-ok`). Each is a bounded journal read over the deltas that
+   touched those forms, never a fold of the whole log; a session with no
+   journal gets none, and the checks that need a baseline report nothing."
   [session st* changed]
-  (run-checks session st* changed (filter #(enabled? st* %) done-advisories)))
+  (let [conn  (:db @session)
+        line  (when conn (or (:line @session) (db/trunk-line-id! conn)))
+        st*   (if conn
+                (assoc st* :baselines
+                       (mapv (fn [d] {:done (:id d)
+                                      :sources (db/sources-at conn line (:id d) changed)})
+                             (db/recent-markers conn line :done 13)))
+                st*)]
+    (run-checks session st* changed (filter #(enabled? st* %) done-advisories))))
 
 (defn status-affecting-fired?
   "True when an advisory whose EFFECTIVE severity is `:error` produced a

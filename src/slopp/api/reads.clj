@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -40,7 +40,7 @@
   "Read performer: the reviewer landing model — milestones plus the
   working set."
   [{:keys [session]} _]
-  (model/timeline session))
+  (model/timeline (ops/with-history session)))
 
 (defn ^{:http/read :ui/change} change-read
   "Read performer: the review of one `from..to` range, or nil when the
@@ -49,7 +49,7 @@
   [{:keys [session]} range-str]
   (let [[from to] (str/split (str range-str) #"\.\." 2)]
     (when (and (seq from) (seq to))
-      (model/change-view session from to))))
+      (model/change-view (ops/with-history session) from to))))
 
 (defn ^{:http/read :ui/form} form-view-read
   "Read performer: one form's page model by ID, at the requested rendering

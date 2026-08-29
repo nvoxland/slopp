@@ -1382,3 +1382,122 @@
           (is (false? (db/on-line? conn trunk "t1")) "the trunk does not see the thread's write")
           (is (false? (db/on-line? conn trunk "nope")))))
       (finally (.close conn)))))
+
+(deftest the-journal-counts-code-deltas-after-a-point-by-index
+  ;; Three currency numbers — the host's, the jar's, the bundle's `:behind` —
+  ;; counted the whole in-RAM list. The count is a query when `at` is a
+  ;; COLUMN: written at append, backfilled once on open for a journal older
+  ;; than the column, indexed. Markers never count; only code moves an
+  ;; artifact behind.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'cd.core "(ns cd.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "c1" :op :ingest :ns 'cd.core :parent nil :at 1000 :sources {"f1" "(ns cd.core)"}}
+                              {:id "c2" :op :done :ns '*session* :parent "c1" :at 2000}
+                              {:id "c3" :op :replace :ns 'cd.core :parent "c2" :at 3000 :form-id "f1" :source "x"}
+                              {:id "c4" :op :verify :ns 'cd.core :parent "c3" :at 4000 :result {}}
+                              {:id "c5" :op :add :ns 'cd.core :parent "c4" :at 5000 :form-id "f2" :sources {"f2" "(def b 1)"}}]
+                             ['cd.core] trunk nil)))
+      (testing "after a delta id — markers excluded"
+        (is (= 2 (db/code-deltas-after conn trunk {:id "c1"})) "c3 and c5")
+        (is (= 1 (db/code-deltas-after conn trunk {:id "c3"})))
+        (is (= 0 (db/code-deltas-after conn trunk {:id "c5"}))))
+      (testing "after a time — the host's boot has no position in the log, only a clock"
+        (is (= 2 (db/code-deltas-after conn trunk {:at 1500})))
+        (is (= 1 (db/code-deltas-after conn trunk {:at 3000})) "strictly after")
+        (is (= 3 (db/code-deltas-after conn trunk {:at 0}))))
+      (testing "a journal older than the column is backfilled on open"
+        (jdbc/execute! conn ["UPDATE deltas SET at = NULL"])
+        (is (= 0 (db/code-deltas-after conn trunk {:at 0})) "fixture: the column is empty")
+        (.close conn)
+        (let [conn2 (db/open! dir)]
+          (try
+            (is (= 3 (db/code-deltas-after conn2 trunk {:at 0})) "the open filled it from the payloads")
+            (finally (.close conn2)))))
+      (finally (try (.close conn) (catch Exception _))))))
+
+(deftest a-line-names-its-newest-artifact-and-the-ops-after-a-delta
+  ;; `bundle-currency` walked the whole list twice: once to find the newest
+  ;; `:artifact-put` for a path, once to count the client writes after it.
+  ;; The first is one indexed row; the second needs only (id, op, ns) per
+  ;; delta after a position — no payload — because the platform filter is
+  ;; the store value's to apply.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'ap.core "(ns ap.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "a1" :op :ingest :ns 'ap.core :parent nil :at 1 :sources {"f1" "(ns ap.core)"}}
+                              {:id "a2" :op :artifact-put :ns '*session* :parent "a1" :at 2 :path "public/x.js" :entry {:sha "old"}}
+                              {:id "a3" :op :artifact-put :ns '*session* :parent "a2" :at 3 :path "public/x.js" :entry {:sha "new"}}
+                              {:id "a4" :op :replace :ns 'ap.core :parent "a3" :at 4 :form-id "f1" :source "x"}
+                              {:id "a5" :op :verify :ns 'ap.core :parent "a4" :at 5 :result {}}
+                              {:id "a6" :op :artifact-put :ns '*session* :parent "a5" :at 6 :path "public/x.js" :action :remove}]
+                             ['ap.core] trunk nil)))
+      (testing "the newest artifact-put for a path that is not a removal"
+        (is (= "a3" (:id (db/last-artifact-put conn trunk "public/x.js"))))
+        (is (= "new" (get-in (db/last-artifact-put conn trunk "public/x.js") [:entry :sha])))
+        (is (nil? (db/last-artifact-put conn trunk "public/none.js"))))
+      (testing "the op rows after a delta — id, op, ns; no payload"
+        (is (= [{:id "a4" :op :replace :ns 'ap.core}
+                {:id "a5" :op :verify :ns 'ap.core}
+                {:id "a6" :op :artifact-put :ns '*session*}]
+               (db/ops-after conn trunk "a3")))
+        (is (= [] (db/ops-after conn trunk "a6"))))
+      (finally (.close conn)))))
+
+(deftest sources-at-a-point-folds-only-the-deltas-that-touched-the-forms-asked-for
+  ;; `store/sources-at` folded the WHOLE log from the root to answer what a
+  ;; form looked like at the last done — on every done, for every rule that
+  ;; compares against a baseline. The callers ever ask about a handful of
+  ;; forms; `delta_forms` makes those a dozen deltas out of tens of thousands.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'sa.core "(ns sa.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "s1" :op :ingest :ns 'sa.core :parent nil :at 1 :form-ids ["f1" "f2"]
+                               :sources {"f1" "(ns sa.core)" "f2" "(def a 1)"}}
+                              {:id "s2" :op :replace :ns 'sa.core :parent "s1" :at 2 :form-id "f2" :sources {"f2" "(def a 2)"}}
+                              {:id "s3" :op :done :ns '*session* :parent "s2" :at 3}
+                              {:id "s4" :op :replace :ns 'sa.core :parent "s3" :at 4 :form-id "f2" :sources {"f2" "(def a 3)"}}
+                              {:id "s5" :op :add :ns 'sa.core :parent "s4" :at 5 :form-id "f3" :sources {"f3" "(def b 1)"}}
+                              {:id "s6" :op :delete :ns 'sa.core :parent "s5" :at 6 :form-id "f1"}]
+                             ['sa.core] trunk nil)))
+      (testing "as of the done: f2 is its second version, f3 does not exist yet"
+        (is (= {"f2" "(def a 2)"} (db/sources-at conn trunk "s3" ["f2" "f3"]))))
+      (testing "as of the head: f2 is current, f3 exists, f1 is deleted"
+        (is (= {"f2" "(def a 3)" "f3" "(def b 1)"} (db/sources-at conn trunk "s6" ["f1" "f2" "f3"]))))
+      (testing "before the delete, f1 is still there"
+        (is (= {"f1" "(ns sa.core)"} (db/sources-at conn trunk "s5" ["f1"]))))
+      (testing "nothing asked, nothing answered; a nil point is before any delta"
+        (is (= {} (db/sources-at conn trunk "s6" [])))
+        (is (= {} (db/sources-at conn trunk nil ["f2"]))))
+      (finally (.close conn)))))
+
+(deftest a-line-names-its-newest-whole-store-verdict
+  ;; `standing-full-check` walked the whole list for the newest `:verify`
+  ;; scoped `:full-check`. The scope lives in the payload, so the read is a
+  ;; text prefilter on verify rows newest-first, confirmed on the parse.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'fc.core "(ns fc.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "v1" :op :ingest :ns 'fc.core :parent nil :at 1 :sources {"f1" "(ns fc.core)"}}
+                              {:id "v2" :op :verify :ns 'fc.core :parent "v1" :at 2 :result {:status :green}}
+                              {:id "v3" :op :verify :ns '*session* :parent "v2" :at 3 :result {:scope :full-check :status :red :ms 1}}
+                              {:id "v4" :op :verify :ns '*session* :parent "v3" :at 4 :result {:scope :full-check :status :green :ms 2}}
+                              {:id "v5" :op :verify :ns 'fc.core :parent "v4" :at 5 :result {:status :green}}]
+                             ['fc.core] trunk nil)))
+      (is (= "v4" (:id (db/last-full-check conn trunk))) "the newest whole-store one, not the newest verify")
+      (is (= :green (get-in (db/last-full-check conn trunk) [:result :status])))
+      (let [thread (db/adopt-thread! conn trunk "agent-f")]
+        (is (= "v4" (:id (db/last-full-check conn thread))) "a thread inherits the branch's verdicts"))
+      (finally (.close conn)))))

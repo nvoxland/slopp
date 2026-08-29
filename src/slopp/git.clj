@@ -578,10 +578,12 @@
             (set-branch-ref! repo nm sha))
           {:refs refs})))))
 
-^:reads (defn ^:export milestone-tree
-  "{path content} for the tree the store's LAST milestone projects — folded
-  from the journal and rendered, **with no git repo anywhere**. nil when the
-  store has no milestones yet.
+(defn ^:export milestone-tree
+  "{path content} for the tree the LAST milestone in `deltas` projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when there
+  is no milestone yet. `deltas` is the line's journal, oldest first
+  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
+  is asked for rarely enough to read it then.
 
   This is the merge BASE for an import that did not come through git. Export
   is one-way; import is the narrow case where an external tool changed an
@@ -597,14 +599,13 @@
 
   A marker normally targets the delta immediately before it; a retroactive
   `commit_point {:target …}` names an earlier one, and the fold stops there."
-  [store blob-of]
-  (let [ds     (store/deltas store)
-        marker (last (filter #(= :commit (:op %)) ds))]
+  [deltas blob-of]
+  (let [marker (last (filter #(= :commit (:op %)) deltas))]
     (when marker
       (let [upto (or (:target marker) (:id marker))
             st   (reduce (fn [st d]
                            (let [st' (or (store/replay-delta st d) st)]
                              (if (= (:id d) upto) (reduced st') st')))
-                         (store/empty-store) ds)]
+                         (store/empty-store) deltas)]
         (commit-paths (source-tree st) (:deps marker) (:files marker)
                       (:config marker) blob-of)))))

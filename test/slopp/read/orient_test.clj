@@ -165,37 +165,6 @@
   (testing "a snapshot host with nothing since boot is current — silent"
     (is (nil? (orient/host-warning {:mode :snapshot :booted-at 100} 0 nil)))))
 
-(deftest code-deltas-since-is-the-one-counter-for-host-currency
-  ;; Markers (:verify :done :commit :turn-begin …) are bookkeeping — a host
-  ;; that has not "loaded" a :done delta is not stale. The set lives in
-  ;; store.fields/markers and this is the only place that reads it for this
-  ;; question, so the count cannot drift between session_brief and a verdict.
-  ;;
-  ;; That sentence was ASPIRATIONAL for a while and read as enforced.
-  ;; session_brief carried its own byte-identical copy of the expression below
-  ;; — the two agreed, so nothing was wrong and nothing could notice, which is
-  ;; the whole shape of a producer pair. Collapsed 2026-08-05; the claim is now
-  ;; true by construction rather than by comment.
-  ;;
-  ;; Note what would NOT have caught it: a check for a comment that names
-  ;; another form. This comment named none — it asserted UNIQUENESS, which is a
-  ;; claim about a form that does not exist yet, and no per-form check can see
-  ;; the absence of a second one.
-  (let [st {:deltas [{:id "d1" :op :add     :at 50}
-                     {:id "d2" :op :replace :at 150}
-                     {:id "d3" :op :verify  :at 160}
-                     {:id "d4" :op :done    :at 170}
-                     {:id "d5" :op :commit  :at 180}
-                     {:id "d6" :op :replace :at 190}]}]
-    (testing "counts only CODE deltas after the mark"
-      (is (= 2 (orient/code-deltas-since st 100))))
-    (testing "everything after 0 is counted except the markers"
-      (is (= 3 (orient/code-deltas-since st 0))))
-    (testing "nothing after the newest"
-      (is (zero? (orient/code-deltas-since st 999))))
-    (testing "a nil mark reads as 0, never as 'skip the check'"
-      (is (= 3 (orient/code-deltas-since st nil))))))
-
 (deftest doc-summaries-end-at-a-sentence-not-mid-word
   ;; The card is the right vehicle at the right moment — every query_slice
   ;; returns one for each callee — and a 90-char cut destroyed what it was
@@ -522,32 +491,6 @@
         (str "name the verb that builds a fresh verification image: "
              (pr-str line)))))
 
-(deftest jar-currency-compares-only-when-the-two-heads-share-a-store
-  ;; Three claims, not two — the same discipline current-boot-info holds for
-  ;; :host-drift. "I did not look" must not render as "I looked and it was
-  ;; fine", and here there is a third state the others do not have: a jar can
-  ;; be perfectly current and belong to a DIFFERENT store. slopp's own jar
-  ;; serves other projects, so counting deltas since its head against THEIR
-  ;; log would measure their writing speed and call it the tool's age.
-  (let [st (-> (store/empty-store)
-               (store/ingest 'jc.a "(ns jc.a)\n\n(defn a \"A.\" [] 1)\n")
-               (store/ingest 'jc.b "(ns jc.b)\n\n(defn b \"B.\" [] 2)\n"))
-        ds (store/deltas st)
-        h1 (:id (first ds))]
-    (testing "no stamp — nothing to report, and no invented zero"
-      (is (nil? (orient/jar-currency st nil))))
-    (testing "a head this store has never seen is reported WITHOUT a count"
-      (let [r (orient/jar-currency st "d-from-another-store")]
-        (is (= "d-from-another-store" (:head r))
-            "the identity still travels — it is what a human compares by hand")
-        (is (not (contains? r :behind))
-            "and the count is absent, not zero: this store cannot place that head")))
-    (testing "a head this store HAS is placed, and counted the one way"
-      (let [r (orient/jar-currency st h1)]
-        (is (= h1 (:head r)))
-        (is (= (orient/code-deltas-since st (:at (first ds))) (:behind r))
-            "the same counter the host and the served app report, not a fourth spelling")))))
-
 (deftest the-currency-record-says-which-artifact-is-answering
   ;; :host said which MODE this process runs in and never which CODE. "Am I
   ;; running the slopp that has the fix" was therefore unanswerable from the
@@ -618,47 +561,44 @@
   ;; thing it measures.
   ;;
   ;; So the browser is a third artifact that can be stale, beside the host and
-  ;; the jar, and it was the only one with no report.
-  (let [entry  {:sha "abc" :bytes 10 :content-type "application/javascript"}
-        out    "public/cljs/main.js"
-        client (fn [st nsx src platform]
-                 (-> st
-                     (store/ingest nsx src)
-                     (as-> s (first (store/record-module-platform
-                                     s (str nsx) platform)))))
-        built  (fn [st] (first (store/record-artifact st out entry)))]
+  ;; the jar, and it was the only one with no report. The two journal reads
+  ;; (`slopp.store.db/last-artifact-put`, `ops-after`) are handed in; what is
+  ;; under test here is the discrimination over them.
+  (let [artifact {:id "c1" :op :artifact-put :entry {:sha "abc"}}
+        st       (-> (store/empty-store)
+                     (store/ingest 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n")
+                     (as-> s (first (store/record-module-platform s "app.view" :cljc)))
+                     (store/ingest 'app.other "(ns app.other)\n\n(defn w \"W.\" [s] s)\n")
+                     (as-> s (first (store/record-module-platform s "app.other" :cljs)))
+                     (store/ingest 'app.server "(ns app.server)\n\n(defn h \"H.\" [r] r)\n"))]
 
     (testing "no bundle recorded is NIL, not zero"
       ;; zero would claim a bundle exists and is current, which is the stronger
       ;; form of the mistake this whole record exists to avoid
-      (is (nil? (orient/bundle-currency (store/empty-store) out))))
+      (is (nil? (orient/bundle-currency st nil []))))
 
     (testing "a fresh compile is behind nothing"
-      (let [st (-> (store/empty-store)
-                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
-                   built)]
-        (is (= 0 (:behind (orient/bundle-currency st out))))
-        (is (= "abc" (:sha (orient/bundle-currency st out))))))
+      (is (= {:sha "abc" :behind 0} (orient/bundle-currency st artifact []))))
 
     (testing "a CLIENT write after the compile counts"
-      (let [st (-> (store/empty-store)
-                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
-                   built
-                   (client 'app.other "(ns app.other)\n\n(defn w \"W.\" [s] s)\n" :cljs))]
-        (is (= 1 (:behind (orient/bundle-currency st out)))
-            "a :cljs namespace written after the compile is IN the browser's
-             blind spot — the bundle predates it")))
+      (is (= 1 (:behind (orient/bundle-currency
+                         st artifact [{:id "x" :op :ingest :ns 'app.other}])))
+          "a :cljs namespace written after the compile is IN the browser's
+           blind spot — the bundle predates it")
+      (is (= 2 (:behind (orient/bundle-currency
+                         st artifact [{:id "x" :op :ingest :ns 'app.other}
+                                      {:id "y" :op :replace :ns 'app.view}])))
+          "and :cljc counts the same way"))
 
-    (testing "and a JVM-only write does NOT"
+    (testing "and a JVM-only write does NOT, nor does a marker"
       ;; the discrimination that makes this worth having rather than noisy: a
       ;; server-side edit cannot stale a browser bundle, and reporting it would
       ;; train the reader to ignore the number
-      (let [st (-> (store/empty-store)
-                   (client 'app.view "(ns app.view)\n\n(defn v \"V.\" [s] s)\n" :cljc)
-                   built
-                   (store/ingest 'app.server "(ns app.server)\n\n(defn h \"H.\" [r] r)\n"))]
-        (is (= 0 (:behind (orient/bundle-currency st out)))
-            "a :jvm write is not something the browser can be behind on")))))
+      (is (= 0 (:behind (orient/bundle-currency
+                         st artifact [{:id "x" :op :replace :ns 'app.server}
+                                      {:id "y" :op :verify :ns 'app.view}
+                                      {:id "z" :op :done :ns '*session*}])))
+          "a :jvm write is not something the browser can be behind on"))))
 
 (deftest a-store-DECLARING-what-nothing-reads-says-so-as-one-fact
   ;; Reported by a consuming store, and the cost was a WRONG DIAGNOSIS rather
@@ -760,40 +700,6 @@
       (is (= 3 (get-in r [:markers :web/path :count])) (pr-str r))
       (is (= 2 (get-in r [:markers :web/path :generated])) (pr-str r)))))
 
-(deftest a-counter-that-reads-ZERO-both-ways-is-not-a-counter
-  ;; slopp-ui, 2026-08-23. A `done` went green and the served stylesheet stayed
-  ;; byte-identical for about twenty minutes — the app image was running old
-  ;; code while every surface said fine. They went to `session_brief`, which is
-  ;; where you look, and it showed `:app <url>` and `:app-boot-ms` and NOTHING
-  ;; about currency. `:app {:behind n}` exists and they had seen it fire twice
-  ;; that day — in `full_check`, a different call.
-  ;;
-  ;; Their words, and the reason this is a defect rather than a preference: a
-  ;; counter that reads 0 both when you are current and when nobody updated the
-  ;; counter is a signal whose output cannot vary. The accounting that exists to
-  ;; catch exactly this was silent in the one case it was for.
-  ;;
-  ;; Two docstrings were meanwhile telling readers this lived in the brief. It
-  ;; did not. Now it does — as `:app-behind`, beside `:app-boot-ms`.
-  (let [st (store/ingest (store/empty-store) 'app.a
-                         "(ns app.a)\n\n(defn ^:unused-ok f \"F.\" [x] x)\n")]
-
-    (testing "0 for an image served after the last code delta, and 0 is an ANSWER"
-      (is (= 0 (orient/behind st {:serving? true
-                                  :served-at (+ 1000 (System/currentTimeMillis))}))))
-
-    (testing "and it COUNTS the code deltas an image was served before"
-      (is (pos? (orient/behind st {:serving? true :served-at 0}))
-          "an image from before every delta is behind by all of them"))
-
-    (testing "nothing serving is a different answer from a current image"
-      ;; nil, not 0. A store slopp runs no app for must not be told its app is
-      ;; up to date — that is the same conflation one level up, and it is why
-      ;; the brief omits the key entirely rather than reporting a reassuring
-      ;; zero
-      (is (nil? (orient/behind st nil)))
-      (is (nil? (orient/behind st {:serving? false :served-at 0}))))))
-
 (deftest a-marker-slopp-DELETED-is-reported-like-one-it-renamed
   ;; Reported by slopp-ui, 2026-08-23, at the boot after the `:rest/client`
   ;; retirement — and it is a hole this very session opened.
@@ -849,23 +755,20 @@
   ;; store while saying nothing about the jar that carries the store to them.
   ;;
   ;; Announcement → artifact → process are three states, and nothing joined
-  ;; them. `jar-currency` already computed the middle one for `session_brief`;
-  ;; this is the sentence a milestone can say.
-  (let [st {:deltas [{:id "d1" :at 100 :op :add :ns 'a.b}
-                     {:id "d2" :at 200 :op :add :ns 'a.b}
-                     {:id "d3" :at 300 :op :add :ns 'a.b}]}]
-    (testing "a jar built from the head has nothing to report"
-      (is (nil? (orient/jar-warning st "d3"))))
-    (testing "a jar behind the store names its own head and what it costs"
-      (let [w (orient/jar-warning st "d1")]
-        (is (string? w) (pr-str w))
-        (is (str/includes? w "d1") (str "it must name the head it was built from: " w))))
-    (testing "a FOREIGN jar head makes no claim about this store"
-      ;; slopp's jar serves projects that are not slopp, so a head from one
-      ;; store and a delta log from another share nothing — counting deltas
-      ;; after it here would measure how fast THIS reader has been writing and
-      ;; report it as the tool's age
-      (is (nil? (orient/jar-warning st "d-from-some-other-store"))))
-    (testing "and no jar at all is silence, not a warning"
-      ;; a checkout or a bare -M run has no artifact to be stale
-      (is (nil? (orient/jar-warning st nil))))))
+  ;; them. `slopp.ops/jar-currency` derives the middle one from the journal;
+  ;; this is the sentence a milestone can say about it.
+  (testing "a jar built from the head has nothing to report"
+    (is (nil? (orient/jar-warning {:head "d3" :behind 0}))))
+  (testing "a jar behind the store names its own head and what it costs"
+    (let [w (orient/jar-warning {:head "d1" :behind 2})]
+      (is (string? w) (pr-str w))
+      (is (str/includes? w "d1") (str "it must name the head it was built from: " w))
+      (is (str/includes? w "2 code deltas") w)))
+  (testing "a FOREIGN jar head makes no claim about this store"
+    ;; slopp's jar serves projects that are not slopp, so a head from one
+    ;; store and a delta log from another share nothing — the currency map
+    ;; carries no :behind, and the warning stays silent
+    (is (nil? (orient/jar-warning {:head "d-from-some-other-store"}))))
+  (testing "and no jar at all is silence, not a warning"
+    ;; a checkout or a bare -M run has no artifact to be stale
+    (is (nil? (orient/jar-warning nil)))))

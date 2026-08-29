@@ -216,8 +216,9 @@
 (defn file-history
   "Every tracked version of manifest file `path`, oldest first:
   [{:delta :op :at :agent :prompt :bytes}] (bytes absent on remove) — the
-  file counterpart of query_history {ns name}, read straight off the delta log."
-  [store path]
+  file counterpart of query_history {ns name}. `deltas` is the line's journal,
+  oldest first (`slopp.store.db/line-deltas`); the value does not carry it."
+  [deltas path]
   (into []
         (keep (fn [d]
                 (case (:op d)
@@ -229,16 +230,18 @@
                                  {:delta (:id d) :op :file-remove :at (:at d)
                                   :agent (:agent d) :prompt (:prompt d)})
                   nil)))
-        (:deltas store)))
+        deltas))
 
 (defn file-at
   "Manifest file `path`'s content as of delta `at-id` (inclusive), or nil
-  (absent / removed / unknown delta) — the file counterpart of query_history {ns name at}."
-  [store path at-id]
+  (absent / removed / unknown delta) — the file counterpart of query_history
+  {ns name at}. `deltas` is the line's journal, oldest first
+  (`slopp.store.db/line-deltas`); the value does not carry it."
+  [deltas path at-id]
   (let [upto (reduce (fn [acc d]
                        (let [acc (conj acc d)]
                          (if (= at-id (:id d)) (reduced acc) acc)))
-                     [] (:deltas store))]
+                     [] deltas)]
     (when (= at-id (:id (peek upto)))
       (reduce (fn [cur d]
                 (cond

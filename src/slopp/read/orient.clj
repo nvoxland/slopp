@@ -58,21 +58,6 @@
                   (assoc :note (str "rolled up by namespace, showing 20 of "
                                     (count rolled) " — {contains} narrows"))))))))))
 
-(defn ^:export code-deltas-since
-  "How many CODE deltas landed after `at` (epoch ms) — the host-currency
-  count, and the ONLY spelling of it.
-
-  Markers (`store.fields/markers`: :verify :done :commit :merge :revert, the
-  turn pair) are bookkeeping, not code: a host that has not \"loaded\" a :done
-  delta is not behind on anything. A nil `at` counts everything rather than
-  skipping the question, because a missing boot timestamp must never read as
-  a clean bill of health."
-  [store at]
-  (let [at (or at 0)]
-    (count (filter #(and (> (:at % 0) at)
-                         (not (contains? fields/markers (:op %))))
-                   (store/deltas store)))))
-
 (def ^:private doc-summary-cap
   "The character budget for a doc summary. Composites carry MANY of these, so
   one verbose docstring must not eat the result."
@@ -184,70 +169,6 @@
   genuine transient (a half-written db page, a contended read) without leaving
   room for false hope."
   3)
-
-(defn ^:export behind
-  "How many CODE changes the SERVED app image is behind the store — `0` when
-  it is current, `nil` when there is no answer.
-
-  This is the HOST-CURRENCY question one image over, so it is deliberately
-  the same count: [[slopp.read.orient/code-deltas-since]], whose docstring
-  calls itself \"the ONLY spelling of it\". Delegating rather than filtering
-  here is the whole point — this store already carries four near-copies of
-  the no-content op set, and a fifth that drifted by one op would report a
-  different number for the same staleness.
-
-  The filtering is not a nicety. Markers are 8383 of this store's ~17400
-  deltas and `:verify` alone is 6441, because every write appends one. A raw
-  delta count would report roughly twice the changes anyone actually made,
-  and a number that overstates is a number people stop reading.
-
-  **`0` is an answer and must be reported.** The question this exists for is
-  \"is the page I am about to look at built from what I just wrote?\", and
-  staying silent when the answer is yes puts the reader back where they
-  started — hand-checking something the system knows. Silence is reserved for
-  \"nothing is serving\", which is most stores.
-
-  **A running map with no `:served-at` answers nil, and that is the opposite
-  default from `code-deltas-since`.** There, a missing boot stamp counts
-  everything, because a host that cannot say when it booted must not read as
-  current. Here the caller has already established something IS serving, so
-  an absent stamp is a slopp bug rather than a stale app — and reporting a
-  freshly-served app as maximally behind would send someone to re-serve a
-  thing that is already right.
-
-  Reported by slopp-ui, twice, and the second bite is the expensive one: a
-  restyled page passed `full_check`, `compile_client` and a bundle copy, and
-  the served stylesheet was still the old one. Markup that has moved on from
-  its stylesheet does not render as an old page — it renders as a broken one."
-  [store running]
-  (when (:serving? running)
-    (when-let [at (:served-at running)]
-      (code-deltas-since store at))))
-
-(defn ^:export jar-currency
-  "What the running ARTIFACT is, placed against `store` — `{:head id}` always,
-  plus `:behind n` when this store is the one it came from. Nil `head` → nil.
-
-  `head` is [[slopp.kernel.boot/jar-head]]'s answer: the store head the jar was
-  built from, or nil in a process that is not running one.
-
-  **`:behind` is ABSENT rather than 0 when the head is foreign**, and this is
-  the case the obvious version gets wrong. slopp's jar serves projects that are
-  not slopp, so a head from one store and a delta log from another share
-  nothing; counting deltas after that head's timestamp in THIS log would
-  measure how fast the reader has been writing and report it as the tool's age.
-  The identity still travels, because it is exactly what a human compares by
-  hand across two stores — which is how the six incidents behind this were
-  eventually solved, expensively.
-
-  The count is [[code-deltas-since]] and nothing else. Three artifacts now
-  report staleness — the host, the served app, this — and a fourth spelling
-  that drifted by one op would answer the same question three different ways."
-  [store head]
-  (when head
-    (let [d (first (filter #(= head (:id %)) (store/deltas store)))]
-      (cond-> {:head head}
-        d (assoc :behind (code-deltas-since store (:at d)))))))
 
 (defn- one-cause
   "The single edit every drifted row agrees on, as a clause — nil when they
@@ -536,20 +457,22 @@
                       " `restart` tool does not settle it; the next poll retries"
                       " and the MCP server coming up again is the certain fix")))))))
 
-(defn ^:export bundle-currency
-  "What the compiled BUNDLE at `path` is, placed against `store` — `{:sha …
-  :behind n}` — or nil when nothing has compiled one.
+(defn ^:export
+  ^{:breaking-ok "the 2-arity walked the store's whole delta list twice to find the newest compile and count the client writes after it; the value no longer carries the list, so the two reads are handed in from slopp.store.db and this keeps the discrimination. Its one caller moved in the same write."}
+  bundle-currency
+  "What the compiled BUNDLE is, placed against `store` — `{:sha … :behind n}`
+  — or nil when nothing has compiled one. `artifact` is the newest
+  `:artifact-put` delta for the bundle's path (`slopp.store.db/last-artifact-put`,
+  nil when there is none) and `after` the `{:id :op :ns}` rows the line gained
+  after it (`slopp.store.db/ops-after`); both are the caller's to read,
+  because this is the pure half and the journal is not in the value.
 
   **The third artifact that can be stale, and until now the only one with no
-  report.** The host has `:app {:behind n}`, the jar has [[jar-currency]], and
+  report.** The host has `:app {:behind n}`, the jar has its currency, and
   the browser had nothing — so a store could take a green `done`, a green
   `commit_point`, a green `full_check` AND `:app {:behind 0}` while the browser
   was being served a bundle from before the work started. Reported by the app it
   happened to, after rewriting ten screens and finding the page unchanged.
-
-  Nothing was wrong in any of those checks. `:app {:behind n}` measures the
-  IMAGE, and its zero was honest about the image. The bundle is a different
-  artifact answering a different question, and the answer was simply missing.
 
   **Only CLIENT deltas count**, and that discrimination is what keeps the number
   worth reading. A `:jvm` namespace cannot stale a browser bundle; counting
@@ -569,25 +492,16 @@
   **Counted by POSITION in the delta log, not by timestamp.** The first cut
   compared `:at` and was green alone and red in the suite: a compile and the
   write after it can land in the same millisecond, so the comparison dropped the
-  write and the answer was a confident zero. The log is already ordered and the
-  artifact IS a delta in it, so `after` is a subvector rather than a comparison
-  and ties cannot exist. [[code-deltas-since]] keeps its timestamp because it
-  compares against a BOOT, which has no position in this log."
-  [store path]
-  (let [ds  (vec (store/deltas store))
-        idx (last (keep-indexed
-                   (fn [i d] (when (and (= :artifact-put (:op d))
-                                        (= (str path) (str (:path d)))
-                                        (not= :remove (:action d)))
-                               i))
-                   ds))]
-    (when idx
-      (let [client (fn [nsx] (contains? #{:cljc :cljs}
-                                        (store/platform-for store nsx)))]
-        {:sha    (:sha (:entry (nth ds idx)))
-         :behind (count (filter #(and (not (contains? fields/markers (:op %)))
-                                      (client (:ns %)))
-                                (subvec ds (inc idx))))}))))
+  write and the answer was a confident zero. The artifact IS a delta in the log,
+  so `after` is what follows it and ties cannot exist."
+  [store artifact after]
+  (when artifact
+    (let [client (fn [nsx] (contains? #{:cljc :cljs}
+                                      (store/platform-for store nsx)))]
+      {:sha    (:sha (:entry artifact))
+       :behind (count (filter #(and (not (contains? fields/markers (:op %)))
+                                    (client (:ns %)))
+                              after))})))
 
 (defn ^:export unread-declarations
   "Markers this store DECLARES that this slopp no longer READS — or nil, which
@@ -718,19 +632,23 @@
                 " declares and this slopp says what it reads, and nothing"
                 " joined the two."))}))))
 
-(defn ^:export jar-warning
-  "A sentence when the jar built from `head` is behind `store`, else nil.
+(defn ^:export
+  ^{:breaking-ok "the 2-arity took a store and read its whole delta list to place the jar's head; the value no longer carries the list, so the derivation moved to slopp.ops/jar-currency (a journal read) and this keeps only the phrasing. Both callers moved in the same write."}
+  jar-warning
+  "A sentence when the jar is behind the store, else nil — given `currency`,
+  the `{:head :behind}` map `slopp.ops/jar-currency` derives from the
+  journal.
 
-  The reader-facing half of [[jar-currency]]: same derivation, phrased for
-  somebody deciding whether to act. Nil unless there is genuinely something to
-  doubt — a warning that fires every time is one a reader learns to skip, and
-  this one has to be read on the rare occasion it appears.
+  The reader-facing half of that derivation, phrased for somebody deciding
+  whether to act. Nil unless there is genuinely something to doubt — a
+  warning that fires every time is one a reader learns to skip, and this one
+  has to be read on the rare occasion it appears.
 
   Nil covers three different silences on purpose, and none of them is a claim
   that the artifact is current:
 
-  - no `head` at all — a checkout, a bare `-M` run, no artifact to be stale
-  - a FOREIGN head, so `jar-currency` reports no `:behind`: slopp's jar serves
+  - no currency at all — a checkout, a bare `-M` run, no artifact to be stale
+  - a FOREIGN head, so the map carries no `:behind`: slopp's jar serves
     projects that are not slopp, and counting this log's deltas after another
     store's head would measure how fast the reader has been writing and report
     it as the tool's age
@@ -741,11 +659,10 @@
   to everyone else had never been rebuilt. It happened twice in one night and
   a CONSUMER caught it both times, by reading the artifact rather than by
   believing the announcement."
-  [store head]
-  (let [c (jar-currency store head)]
-    (when (pos? (:behind c 0))
-      (str "the jar this process is running was built from " (:head c)
-           ", which is " (:behind c) " code delta"
-           (when (not= 1 (:behind c)) "s")
-           " behind this store — anyone reading the ARTIFACT rather than the"
-           " store will not see this work until it is rebuilt"))))
+  [currency]
+  (when (pos? (:behind currency 0))
+    (str "the jar this process is running was built from " (:head currency)
+         ", which is " (:behind currency) " code delta"
+         (when (not= 1 (:behind currency)) "s")
+         " behind this store — anyone reading the ARTIFACT rather than the"
+         " store will not see this work until it is rebuilt")))

@@ -7,7 +7,7 @@
   the blue/green swap need a real image and are `^:external`."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.read.orient :as orient] [clojure.java.io :as io]))
+            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [clojure.java.io :as io]))
 
 (deftest a-serve-plan-is-derived-from-the-store
   (let [src (str "(ns shop.api)\n\n"
@@ -524,20 +524,19 @@
       (testing "the running map carries how long the image took to come up"
         (is (integer? (:boot-ms r)) r)
         (is (pos? (:boot-ms r)) "a JVM launch plus a namespace load is never free"))
-      (testing "and it is the BOOT, not the whole refresh — the number that a\n                hot-load would remove, without the bind it would not"
+      (testing "and it is the BOOT, not the whole refresh — the number that a
+                hot-load would remove, without the bind it would not"
         ;; if this ever measured the bind too, a slow port would read as a
         ;; slow image and the comparison hot-load exists to inform is wrong
         (is (< (:boot-ms r) 120000) r))
       (testing "the running map records WHICH store version it is serving"
         ;; without this nothing downstream can answer "is what I am looking
-        ;; at current?" — the whole of slopp-ui's friction #5
+        ;; at current?" — the whole of slopp-ui's friction #5. How far behind
+        ;; it is (`slopp.ops/app-behind`) is a journal read, covered where a
+        ;; journal exists: ops-test and the full_check test beside this one.
         (is (integer? (:served-at r)) r)
-        (is (= 0 (orient/behind s r))
-            "freshly served from this very store — behind by nothing"))
-      (testing "and a change after the boot makes it say so"
-        (let [s' (store/ingest s 'demo.later "(ns demo.later)\n(defn l \"L.\" [] 1)\n")]
-          (is (= 1 (orient/behind s' r))
-              "one code delta landed since the image was built")))
+        (is (= (:head-at s) (:served-at r))
+            "served at the head's time — the stamp is the store's, not the clock's"))
       (finally (live/stop! r)))))
 
 (deftest ^:external a-managed-server-carries-the-apps-assets-all-the-way-into-the-child
@@ -668,54 +667,6 @@
     (let [m (#'live/bind-failure 7999 "Permission denied")]
       (is (str/includes? m "Permission denied") m)
       (is (str/includes? m "7999") m))))
-
-(deftest how-far-behind-the-served-app-is-is-a-number-the-system-already-has
-  ;; slopp-ui, twice. They restyled a served page: `full_check` GREEN,
-  ;; `compile_client` clean, bundle copied to disk. Every signal said done.
-  ;; Then they curled `/css/style.css` on a hunch and got the OLD sheet — the
-  ;; app image is rebuilt at DONE grain, so a browser would have loaded a page
-  ;; whose markup had changed and whose stylesheet had not. That does not
-  ;; render as an old page, it renders as a broken one.
-  ;;
-  ;; Nothing anywhere hinted at it, and `done` then fixed it silently, which
-  ;; is correct behaviour and is also why they would never have known there
-  ;; had been anything to fix. Their own framing: "me hand-checking something
-  ;; the system knows and does not say." The gap is REPORTING, so the fix is a
-  ;; number where they were already looking, not a verb to remember to run.
-  ;;
-  ;; This is the HOST-currency question one image over, so it is the same
-  ;; count: `read.orient/code-deltas-since`, whose docstring calls itself "the
-  ;; ONLY spelling of it". Measured before deciding that — markers are 8383 of
-  ;; this store's ~17400 deltas, and `:verify` alone is 6441 because every
-  ;; write appends one. A count of raw deltas would have reported roughly
-  ;; twice the work anyone did, which is how a number stops being read.
-  (let [s    (-> (store/empty-store)
-                 (store/ingest 'bh.core "(ns bh.core)\n(defn a \"A.\" [] 1)\n")
-                 (store/ingest 'bh.more "(ns bh.more)\n(defn b \"B.\" [] 2)\n"))
-        head (:at (last (store/deltas s)))]
-    (testing "served at the head — zero, and ZERO IS THE ANSWER, not silence"
-      ;; the question is "is what I am looking at current?", so the current
-      ;; case has to be reported. Omitting it puts the reader back to not
-      ;; knowing whether it was checked.
-      (is (= 0 (orient/behind s {:serving? true :served-at head}))))
-    (testing "served before any of it — every code delta counts"
-      (is (= 2 (orient/behind s {:serving? true :served-at 0}))))
-    (testing "bookkeeping is not code — a verify is not something to re-serve for"
-      (let [s' (store/record-verification s ['bh.core] {:test 1 :pass 1})]
-        (is (= 2 (orient/behind s' {:serving? true :served-at 0}))
-            "the marker filter is inherited, not re-derived")))
-    (testing "nothing is serving — nothing to say"
-      (is (nil? (orient/behind s {:serving? false :served-at 0})))
-      (is (nil? (orient/behind s nil))))
-    (testing "a running map that never recorded WHEN it served cannot answer"
-      ;; nil means no evidence. Note this is the OPPOSITE default from
-      ;; `code-deltas-since`, which counts everything for a nil `at` so a
-      ;; missing boot stamp cannot read as a clean bill of health. Here the
-      ;; caller has already established something IS serving, so an absent
-      ;; stamp is a slopp bug rather than a stale app, and reporting a
-      ;; freshly-served app as maximally behind would send the reader to
-      ;; re-serve a thing that is current.
-      (is (nil? (orient/behind s {:serving? true}))))))
 
 (deftest ^:external full-check-says-how-far-behind-the-served-app-is
   ;; The REPORTING half of slopp-ui's friction #5. `behind` answers the

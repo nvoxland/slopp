@@ -267,34 +267,6 @@
         ;; must defeat inertness regardless
         (is (not (engine/inert-ns-require-change? st' fid)))))))
 
-(deftest impacted-tests-diffs-against-the-last-done-not-the-newest-delta
-  ;; review V-F3: an episode with TWO ns edits — the first adds a :refer
-  ;; (behaviour-changing), the second an alias-only require. Judged against
-  ;; the NEWEST delta's prior, the alias edit looks inert and the :refer is
-  ;; masked → done skips the tests. It must diff against the LAST-DONE
-  ;; baseline, where the whole episode's net change (incl. the :refer) shows.
-  (let [st0 (-> (store/empty-store)
-                (store/ingest 'ep.a "(ns ep.a)\n\n(defn f \"F.\" [x] x)\n")
-                (store/ingest 'ep.q "(ns ep.q)\n\n(defn q \"Q.\" [x] x)\n")
-                (store/ingest 'ep.b "(ns ep.b)\n\n(defn h \"H.\" [x] x)\n")
-                (store/ingest 'ep.b-test
-                              (str "(ns ep.b-test (:require [ep.b :as b]\n"
-                                   "                        [clojure.test :refer [deftest is]]))\n\n"
-                                   "(deftest h-t (is (= 1 (b/h 1))))\n")))
-        st1 (first (store/record-done st0 "baseline"))
-        ;; edit 1: a :refer (non-inert)
-        st2 (first (store/replace-node st1 'ep.b 'ep.b
-                                       (p/parse-string "(ns ep.b (:require [ep.a :refer [f]]))")
-                                       :prompt "add refer"))
-        ;; edit 2: alias-only, quiet
-        st3 (first (store/replace-node st2 'ep.b 'ep.b
-                                       (p/parse-string "(ns ep.b (:require [ep.a :refer [f]] [ep.q :as q]))")
-                                       :prompt "add alias"))
-        sess (atom {:store st3 :test-map {'ep.b-test/h-t #{'ep.b/h}}})
-        fid  (:id (store/form-named st3 'ep.b 'ep.b))]
-    (testing "the episode's net ns change includes a :refer → NOT inert, tests selected"
-      (is (= '[ep.b-test/h-t] (engine/impacted-tests sess st3 [fid]))))))
-
 (deftest an-endpoint-selects-the-tests-that-drive-its-route
   (let [s (store/ingest (store/empty-store) 'shop.api
                         (str "(ns shop.api)\n\n"
@@ -715,3 +687,49 @@
           (is (= "dr3" (:id (last wf))) "and it is the newest one")
           (is (every? :description cs) "the rest keep everything that is actually read")))
       (finally (.close conn)))))
+
+(defn- journaled!
+  "A session over `st` WITH a journal: `st`'s whole delta log appended to a
+  fresh store on disk, the trunk as the session's line, `test-map` as its
+  trace evidence. The engine reads baselines (`db/sources-at`) from the
+  journal rather than the value, so a fixture that judges an episode against
+  a done has to put that done on disk. The caller closes the connection."
+  [st test-map]
+  (let [dir   (str (java.nio.file.Files/createTempDirectory
+                    "slopp-engine" (make-array java.nio.file.attribute.FileAttribute 0)))
+        conn  (slopp.store.db/open! dir)
+        trunk (slopp.store.db/trunk-line-id! conn)]
+    (slopp.store.db/append! conn st (store/deltas st) (vec (keys (:namespaces st))) trunk nil)
+    (atom {:store (store/committed st) :db conn :line trunk :test-map test-map})))
+
+(deftest impacted-tests-diffs-against-the-last-done-not-the-newest-delta
+  ;; review V-F3: an episode with TWO ns edits — the first adds a :refer
+  ;; (behaviour-changing), the second an alias-only require. Judged against
+  ;; the NEWEST delta's prior, the alias edit looks inert and the :refer is
+  ;; masked → done skips the tests. It must diff against the LAST-DONE
+  ;; baseline, where the whole episode's net change (incl. the :refer) shows.
+  (let [st0 (-> (store/empty-store)
+                (store/ingest 'ep.a "(ns ep.a)\n\n(defn f \"F.\" [x] x)\n")
+                (store/ingest 'ep.q "(ns ep.q)\n\n(defn q \"Q.\" [x] x)\n")
+                (store/ingest 'ep.b "(ns ep.b)\n\n(defn h \"H.\" [x] x)\n")
+                (store/ingest 'ep.b-test
+                              (str "(ns ep.b-test (:require [ep.b :as b]\n"
+                                   "                        [clojure.test :refer [deftest is]]))\n\n"
+                                   "(deftest h-t (is (= 1 (b/h 1))))\n")))
+        st1 (first (store/record-done st0 "baseline"))
+        ;; edit 1: a :refer (non-inert)
+        st2 (first (store/replace-node st1 'ep.b 'ep.b
+                                       (p/parse-string "(ns ep.b (:require [ep.a :refer [f]]))")
+                                       :prompt "add refer"))
+        ;; edit 2: alias-only, quiet
+        st3 (first (store/replace-node st2 'ep.b 'ep.b
+                                       (p/parse-string "(ns ep.b (:require [ep.a :refer [f]] [ep.q :as q]))")
+                                       :prompt "add alias"))
+        ;; the baseline is read from the JOURNAL now, so the done has to be
+        ;; on disk — a journaled session, not a bare atom
+        sess (journaled! st3 {'ep.b-test/h-t #{'ep.b/h}})
+        fid  (:id (store/form-named st3 'ep.b 'ep.b))]
+    (try
+      (testing "the episode's net ns change includes a :refer → NOT inert, tests selected"
+        (is (= '[ep.b-test/h-t] (engine/impacted-tests sess st3 [fid]))))
+      (finally (.close ^java.sql.Connection (:db @sess))))))

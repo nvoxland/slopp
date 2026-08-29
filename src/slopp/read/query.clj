@@ -272,11 +272,16 @@
   arities, flags); `:detail true` adds doc lines. Pass `:since <delta id>`
   on a re-check: when nothing STRUCTURAL changed after that delta the
   response is a one-liner instead of the full outline (verify/turn/
-  milestone markers don't count as change)."
+  milestone markers don't count as change).
+
+  `:since` is judged against the value's RECENT window — everything since
+  the last milestone plus the done that earned it. A `since` older than the
+  window is not in it, and cannot be unchanged: a milestone landed after it,
+  and a milestone follows work."
   [session & {:keys [since detail]}]
   (let [st   (:store @session)
-        ds   (store/deltas st)
-        head (:id (last ds))
+        ds   (:recent st)
+        head (:head st)
         quiet-ops #{:verify :done :commit :turn-begin :turn-end}
         unchanged? (and since
                        (some #(= since (:id %)) ds)

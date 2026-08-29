@@ -382,7 +382,7 @@
   (with-open [conn (db/open! dir)]
     (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
       (and (empty? (:namespaces st))
-           (empty? (:deltas st))
+           (zero? (:line-pos st 0))
            (empty? (:files st))))))
 
 ^:reads (defn- slopp-branch?
@@ -872,7 +872,10 @@
     (if-not (.isDirectory root)
       {:error (str dir " is not a directory")}
       (let [base (git/milestone-tree
-                  (:store @session)
+                  ;; the line's journal, read when asked — the value no longer
+                  ;; carries it, and an import is asked for rarely
+                  (db/line-deltas (:db @session)
+                                  (or (:line @session) (db/trunk-line-id! (:db @session))))
                   #(db/get-blob (:db @session) %))]
         (if (nil? base)
           {:error (str "nothing to import ONTO — this store has no milestones,"

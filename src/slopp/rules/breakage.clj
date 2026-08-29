@@ -95,15 +95,15 @@
   marker as stale (frictions #15; a merge-delivered narrowing made that the
   common case, and the escape was unusable exactly when it was needed).
   True when the form narrowed relative to ANY unmarked prior-done baseline
-  (bounded by the caller). Not the FIRST unmarked sighting — an unrelated
-  done landing after the narrowing sits narrow-unmarked and would answer
-  'narrowed nothing since', re-opening the friction; the earlier WIDE
-  baseline still discharges it (review V-F4). Marked baselines are skipped
-  (the marker cannot vouch for itself)."
-  [store fid ns-sym new-form prior-done-ids]
+  (`priors` — `[{:done :sources} …]`, bounded by the caller). Not the FIRST
+  unmarked sighting — an unrelated done landing after the narrowing sits
+  narrow-unmarked and would answer 'narrowed nothing since', re-opening the
+  friction; the earlier WIDE baseline still discharges it (review V-F4).
+  Marked baselines are skipped (the marker cannot vouch for itself)."
+  [fid ns-sym new-form priors]
   (boolean
-   (some (fn [did]
-           (when-let [old-src (get (store/sources-at store did) fid)]
+   (some (fn [{:keys [sources]}]
+           (when-let [old-src (get sources fid)]
              (when-let [old (try (n/sexpr (p/parse-string old-src))
                                  (catch Exception _ nil))]
                (and (not (and (symbol? (second old))
@@ -112,7 +112,7 @@
                     (boolean (or (seq (removed-arities old new-form))
                                  (seq (removed-schema-keys old new-form))
                                  (not (node-boundary? ns-sym new-form))))))))
-         prior-done-ids)))
+         priors)))
 
 (defn breaking-changes
   "The episode's likely CONTRACT BREAKAGES: a CHANGED `defn` that WAS
@@ -137,14 +137,19 @@
    lands, the new baseline is already private, so a guard on the old form's
    boundary status would never see the stale marker again.
 
+   Reads `(:baselines store)` — `[{:done id :sources {fid src}} …]`, newest
+   first, the changed forms' sources at the last done and the dozen before
+   it, which `run-done-advisories!` reads from the journal (bounded, only the
+   deltas that touched those forms) and hands in. The rule is pure over the
+   value and never walks the log.
+
    Returns `[{:form …} …]`."
   [store changed-fids]
-  (let [baseline (->> (store/deltas store)
-                      (filter #(= :done (:op %)))
-                      last :id)]
+  (let [baselines (:baselines store)
+        baseline  (first baselines)]
     (if-not baseline
       []
-      (let [old-srcs (store/sources-at store baseline)]
+      (let [old-srcs (:sources baseline)]
         (vec (keep
               (fn [fid]
                 (let [e       (store/form-by-id store fid)
@@ -178,15 +183,10 @@
                             ;; bounded look past the baseline
                             (let [marked-old? (and (symbol? (second old-form))
                                                    (:breaking-ok (meta (second old-form))))
-                                  prior (->> (store/deltas store)
-                                             (filter #(= :done (:op %)))
-                                             (map :id)
-                                             butlast
-                                             reverse
-                                             (take 12))]
+                                  prior (take 12 (rest baselines))]
                               (when-not (and (not marked-old?)
-                                       (discharged-by-history? store fid ns-sym
-                                                               new-form prior)) {:form qsym :stale-marker true
+                                             (discharged-by-history? fid ns-sym new-form prior))
+                                {:form qsym :stale-marker true
                                  :note (str qsym " carries ^:breaking-ok but"
                                             " narrowed nothing — remove the flag")}))
                             narrowed? finding)))))))

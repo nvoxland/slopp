@@ -2409,3 +2409,46 @@
     (is (nil? (:image @sess)) "the image was handed on — the session no longer holds it")
     (is (nil? (:db @sess)) "the connection was closed — the session no longer holds it")
     (is (nil? (ops/close! sess)) "a second close is a no-op, not a second park")))
+
+(deftest ^:external the-app-and-the-jar-are-placed-against-the-journal
+  ;; Two of the three artifact currencies. `app-behind` is slopp-ui's
+  ;; friction #5 — a served page whose stylesheet was still the old one while
+  ;; every surface said fine — and the rule it fixed: a counter that reads 0
+  ;; both when you are current and when nobody updated it is not a counter.
+  ;; `jar-currency` is friction #17 — a green milestone whose jar had never
+  ;; been rebuilt, caught twice by a consumer reading the artifact. Both used
+  ;; to fold the whole delta list the value carried; both are one indexed
+  ;; read now, so the value need not carry it.
+  (let [sess (external/open!)]
+    (try
+      (ops/create-ns! sess 'cur.core :source "(ns cur.core)\n\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+      (testing "app-behind: 0 for an image served after the last code delta, and 0 is an ANSWER"
+        (is (= 0 (ops/app-behind sess {:serving? true
+                                       :served-at (+ 1000 (System/currentTimeMillis))}))))
+      (testing "and it COUNTS the code deltas an image was served before"
+        (is (pos? (ops/app-behind sess {:serving? true :served-at 0}))
+            "an image from before every delta is behind by all of them"))
+      (testing "nothing serving is a different answer from a current image"
+        ;; nil, not 0: a store slopp runs no app for must not be told its app
+        ;; is up to date — the brief omits the key rather than reassuring
+        (is (nil? (ops/app-behind sess nil)))
+        (is (nil? (ops/app-behind sess {:serving? false :served-at 0})))
+        (is (nil? (ops/app-behind sess {:serving? true}))
+            "a running map that never recorded WHEN it served cannot answer"))
+      (testing "jar-currency: no stamp — nothing to report, and no invented zero"
+        (is (nil? (ops/jar-currency sess nil))))
+      (testing "a head this store has never seen is reported WITHOUT a count"
+        (let [r (ops/jar-currency sess "d-from-another-store")]
+          (is (= "d-from-another-store" (:head r))
+              "the identity still travels — it is what a human compares by hand")
+          (is (not (contains? r :behind))
+              "and the count is absent, not zero: this store cannot place that head")))
+      (testing "a head this store HAS is placed, and counted the one way"
+        (let [head (:head (:store @sess))
+              r    (ops/jar-currency sess head)]
+          (is (= head (:head r)))
+          (is (= 0 (:behind r)) "built from the head — behind by nothing")
+          (ops/create-ns! sess 'cur.more :source "(ns cur.more)\n\n(defn ^:unused-ok g \"G.\" [x] x)\n")
+          (is (pos? (:behind (ops/jar-currency sess head)))
+              "a write after the jar's head is what it is behind by")))
+      (finally (ops/close! sess)))))

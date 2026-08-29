@@ -26,18 +26,19 @@
   (let [base (store/ingest (store/empty-store) 'fm.core "(ns fm.core)\n")
         [s1 d1] (store/record-file-put base wf "v1\n" :agent "a" :prompt "first")
         [s2 d2] (store/record-file-put s1 wf "v2\n" :agent "b" :prompt "second")
-        [s3 d3] (store/record-file-remove s2 wf :agent "c")]
+        [s3 d3] (store/record-file-remove s2 wf :agent "c")
+        ds      (store/deltas s3)]
     (testing "history: every version, oldest first, with provenance"
-      (let [h (store/file-history s3 wf)]
+      (let [h (store/file-history ds wf)]
         (is (= [:file-put :file-put :file-remove] (mapv :op h)))
         (is (= [(:id d1) (:id d2) (:id d3)] (mapv :delta h)))
         (is (= ["a" "b" "c"] (mapv :agent h)))
         (is (= [3 3 nil] (mapv :bytes h)))))
     (testing "content at a point in time (the query_form_at analog)"
-      (is (= "v1\n" (store/file-at s3 wf (:id d1))))
-      (is (= "v2\n" (store/file-at s3 wf (:id d2))))
-      (is (nil? (store/file-at s3 wf (:id d3))))
-      (is (nil? (store/file-at s3 wf "d0"))))))
+      (is (= "v1\n" (store/file-at ds wf (:id d1))))
+      (is (= "v2\n" (store/file-at ds wf (:id d2))))
+      (is (nil? (store/file-at ds wf (:id d3))))
+      (is (nil? (store/file-at ds wf "d0"))))))
 
 (deftest structured-config-is-semantic-with-per-key-history
   (let [base (store/ingest (store/empty-store) 'cf.core "(ns cf.core)\n")

@@ -906,12 +906,15 @@
   being unclassified; the cost of being wrong here is a stale green."
   #{:verify :done :commit :turn-begin :turn-end :observe :read-cost})
 
-(defn ^:export standing-full-check
+(defn ^:export
+  ^{:breaking-ok "the 1-arity walked the store's whole delta list for the newest whole-store check; the value no longer carries the list, so the two reads are handed in from slopp.store.db and this keeps only the judgement. Its one caller moved in the same write."}
+  standing-full-check
   "The whole-store verdict that STILL STANDS — the most recent `full_check`
   result when nothing since it could have changed what it says — or nil.
-
-  A pure fold over the delta log; no instrumentation, because `full_check`
-  already records its verdict as a `:verify` delta scoped `:full-check`.
+  `check` is that newest `:verify` delta scoped `:full-check`
+  (`slopp.store.db/last-full-check`, nil when there is none) and `after` the
+  `{:id :op :ns}` rows the line gained after it (`slopp.store.db/ops-after`);
+  both are the caller's to read, because this is the pure half.
 
   **Why this exists.** `full_check` is the most expensive operation slopp
   performs, ~236s on this store, almost all of it fresh JVM boots in the
@@ -928,14 +931,7 @@
   Conservative by construction: see `verdict-inert-ops`. Anything not
   provably bookkeeping means re-run, so the failure mode is a check you did
   not need rather than a green you did not earn."
-  [store]
-  (let [ds  (vec (:deltas store))
-        at  (->> (map-indexed vector ds)
-                 (keep (fn [[i d]]
-                         (when (and (= :verify (:op d))
-                                    (= :full-check (get-in d [:result :scope])))
-                           i)))
-                 last)]
-    (when at
-      (when (every? #(verdict-inert-ops (:op %)) (subvec ds (inc at)))
-        (:result (nth ds at))))))
+  [check after]
+  (when (and check (= :full-check (get-in check [:result :scope])))
+    (when (every? #(verdict-inert-ops (:op %)) after)
+      (:result check))))

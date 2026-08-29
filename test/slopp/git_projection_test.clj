@@ -352,7 +352,8 @@
                 sha  (get-in tip [:refs "main"])
                 from-git (git/tree-at (:slopp.git/repo ctx) sha)
                 from-store (git/milestone-tree
-                            (:store @sess)
+                            (db/line-deltas (:db @sess)
+                                            (or (:line @sess) (db/trunk-line-id! (:db @sess))))
                             #(db/get-blob (:slopp.git/map-conn ctx) %))]
             (is (some? sha))
             (is (seq from-git) "positive control: the projection produced a tree")

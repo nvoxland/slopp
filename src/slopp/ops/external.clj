@@ -158,7 +158,9 @@
       (when (and conn (seq (:namespaces store))
                  (or (nil? (:modules store))
                      (and (empty? (:modules store))
-                          (not-any? #(= :module-edge (:op %)) (:deltas store)))))
+                          ;; "has any module edge ever been declared" is one indexed read
+                          (nil? (db/last-marker conn (or (:line @session) (db/trunk-line-id! conn))
+                                                :module-edge)))))
         (ops/adopt-modules! session :agent (or agent-id "slopp")))
       (when-let [p (:image-ready @session)] (deliver p :ok))
       session)
@@ -225,16 +227,18 @@
   useless in a plain test JVM; gating on the boot record means drift is only
   ever computed where an empty record would be news.
 
-  `image` is the one whose record is being read. It used to be implied,
-  because the record was a process-global atom and \"the image\" meant the
-  oracle by convention — the assumption that broke the day a second image
-  started running on purpose."
-  [image st]
+  Takes the SESSION: the count of code deltas since boot is a journal read
+  (`db/code-deltas-after`, by clock), and the image whose record is read is
+  the session's oracle. It used to be implied, because the record was a
+  process-global atom and \"the image\" meant the oracle by convention — the
+  assumption that broke the day a second image started running on purpose."
+  [session st]
   (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
                        (catch Throwable _ nil))]
     (orient/host-warning info
-                         (orient/code-deltas-since st (:booted-at info 0))
-                         (rules.currency/drift image st))))
+                         (db/code-deltas-after (:db @session) (engine/session-line session)
+                                               {:at (:booted-at info 0)})
+                         (rules.currency/drift (:image @session) st))))
 
 (def ^:export external-slice-cap
   "How many impacted `^:external` tests `done` will run before deferring to
@@ -1444,7 +1448,7 @@ client-deps (merge (:client-deps st) (:client provided))
     ;; about it, and the investigation that followed eliminated four correct
     ;; mechanisms in rt first. Nil unless there is genuinely something to
     ;; doubt, so it never becomes noise the reader learns to skip.
-    (host-warning-now (:image @session) st*) (assoc :host-stale (host-warning-now (:image @session) st*))
+    (host-warning-now session st*) (assoc :host-stale (host-warning-now session st*))
     ;; what the done-point COST, persisted on the boundary delta. done is the
     ;; most frequently called verdict, so its cost dominates by repetition
     ;; rather than by any single call being slow — a product the log could
@@ -1648,8 +1652,7 @@ client-deps (merge (:client-deps st) (:client provided))
                         ;; foreign one, or one built from this head all report
                         ;; nothing.
                         jar-stale (orient/jar-warning
-                                   (:store @session)
-                                   (:jar-head (boot/current-boot-info)))]
+                                   (ops/jar-currency session (:jar-head (boot/current-boot-info))))]
                     (cond-> (merge {:commit (:id @v) :target target
                                     :status (if refused? :unlanded status)
                                     :description description}
@@ -1662,7 +1665,7 @@ client-deps (merge (:client-deps st) (:client provided))
 
       target
       (if (db/on-line? (:db @session) (engine/session-line session) target)
-        (mark! target (history/status-at (:store @session) target) {} extra)
+        (mark! target (history/status-at (:store (ops/with-history session)) target) {} extra)
         {:error (str "no delta " target " in this branch's history")})
 
       :else
@@ -1696,7 +1699,8 @@ client-deps (merge (:client-deps st) (:client provided))
                 verdict (if (#{:red :green} (get-in cp [:findings :test-status]))
                           (:findings cp)
                           (ops/last-judged-done st))
-                status  (or (:test-status verdict) (history/status-at st head))
+                status  (or (:test-status verdict)
+                            (history/status-at (:store (ops/with-history session)) head))
                 status (if (= :unknown status) :green status) ; nothing ever ran red
                 ;; NO tree is captured. A milestone used to carry a byte-exact
                 ;; snapshot of every namespace, because comments lived
@@ -1809,11 +1813,18 @@ client-deps (merge (:client-deps st) (:client provided))
   that has moved on. It shipped without doing so, and the report went nil the
   first time an app server appeared between two checks — the guard was right
   and the payload was stale. Computing currency in two places is how the two
-  answers drift, which is what this exists to make impossible."
+  answers drift, which is what this exists to make impossible.
+
+  Every count here is a journal read by index (`db/code-deltas-after`,
+  `db/last-artifact-put`, `db/ops-after`) — the value no longer carries the
+  history a count over the whole line would need."
   [session st]
-  (let [app    (orient/behind st (:app-server @session))
-        bundle (orient/bundle-currency st "public/cljs/main.js")
-        host   (host-warning-now (:image @session) st)]
+  (let [conn   (:db @session)
+        line   (engine/session-line session)
+        app    (ops/app-behind session (:app-server @session))
+        art    (db/last-artifact-put conn line "public/cljs/main.js")
+        bundle (orient/bundle-currency st art (when art (db/ops-after conn line (:id art))))
+        host   (host-warning-now session st)]
     (cond-> {}
       host (assoc :host-stale host)
       ;; The BROWSER's artifact, third after the host and the jar and the only
@@ -2396,7 +2407,11 @@ client-deps (merge (:client-deps st) (:client provided))
   rather than a green nobody earned."
   [session & {:keys [affected force]}]
   (if-let [standing (and (not force)
-                         (history/standing-full-check (:store @session)))]
+                         (let [conn (:db @session)
+                               line (engine/session-line session)
+                               chk  (db/last-full-check conn line)]
+                           (history/standing-full-check
+                            chk (when chk (db/ops-after conn line (:id chk))))))]
     (assoc (merge (dissoc standing :app :bundle :host-stale)
                   (currency-now session (:store @session)))
            :standing true

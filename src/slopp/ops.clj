@@ -1106,7 +1106,7 @@ recompiled (engine/after-write! session ns-sym)]
                                    (symbol (name (symbol s)))
                                    %))
                               only))
-        last-verify (:id (last (filter #(= :verify (:op %)) (store/deltas st))))
+        last-verify (:id (db/last-marker (:db @session) (engine/session-line session) :verify))
         edited      (into #{}
                           (keep (fn [id]
                                   (when-let [e (store/form-by-id st id)]
@@ -1853,11 +1853,12 @@ recompiled (engine/after-write! session ns-sym)]
                                       (:sha entry) " is not in this store")}))
                      {:path (str path) :content entry}))]
     (if at
-      (let [at-id (or (some (fn [d] (when (and (= :commit (:op d)) (= at (:id d)))
-                                      (:target d)))
-                            (store/deltas st))
-                      at)
-            c     (store/file-at st (str path) at-id)]
+      (let [conn  (:db @session)
+            line  (engine/session-line session)
+            ;; a milestone id resolves through its :target — one row by id
+            at-d  (db/delta-by-id conn at)
+            at-id (if (= :commit (:op at-d)) (:target at-d) at)
+            c     (store/file-at (db/line-deltas conn line) (str path) at-id)]
         (if (some? c)
           (assoc (resolved c) :at at)
           {:error (str path " has no content at " at)}))
@@ -1867,9 +1868,11 @@ recompiled (engine/after-write! session ns-sym)]
 
 ^:reads (defn file-history!
   "Every tracked version of a manifest file, oldest first, with provenance —
-  the file counterpart of query_history {ns name}."
+  the file counterpart of query_history {ns name}. The line's journal is read
+  here, when asked; the value does not carry it."
   [session path]
-  (let [h (store/file-history (:store @session) (str path))]
+  (let [h (store/file-history (db/line-deltas (:db @session) (engine/session-line session))
+                              (str path))]
     (if (seq h)
       {:path (str path) :versions h}
       {:error (str path " has never been tracked")})))
@@ -2052,274 +2055,20 @@ recompiled (engine/after-write! session ns-sym)]
                        " real calls and get value-true assertions instead of holes")})))
     (edit/missing-form-error (:store @session) ns-sym nm)))
 
-^:reads (defn session-brief
-  "THE one-call orientation, task-shaped (knowledge-differential stance):
-  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
-  up to one row, form names ride only for solo nses on small stores — and
-  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
-  user's verbatim words, via the prompt hook or turn_begin) is mined
-  against form names, deterministically, and the top matches ride as
-  interface CARDS under :relevant. The agent starts working instead of
-  orienting. :host is the serving process's code-currency record
-  (orient/host-brief over the kernel's boot-info, reached through the
-  late-ref carrier — absent when this process didn't boot from a store):
-  which code the host actually runs, and what a restart would change.
-  :module-cycles rides only when the manifest has one — impossible to create
-  under the gate, so it was inherited at import, and this is the only place
-  outside the web UI that says so."
-  [session]
-  (let [st       (:store @session)
-        nss      (sort (keys (:namespaces st)))
-        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
-        total    (reduce + 0 (map (comp count val) names))
-        fams     (group-by #(first (str/split (str %) #"\.")) nss)
-        project  (vec (mapcat (fn [[seg members]]
-                                (if (<= 5 (count members))
-                                  [{:family (str seg ".*") :nses (count members)
-                                    :forms (reduce + 0 (map (comp count names) members))}]
-                                  (for [n members]
-                                    (if (< 200 total)
-                                      {:ns n :forms (count (names n))}
-                                      {:ns n :forms (names n)}))))
-                              (sort-by key fams)))
-        ms       (->> (query-commits session)
-                      (take 5)
-                      (mapv #(-> (select-keys % [:commit :description :at :status])
-                                 (update :description orient/snip 110))))
-        last-done (let [d (last (filter #(= :done (:op %)) (store/deltas st)))]
-                    (when (and d (or (= :red (get-in d [:findings :test-status]))
-                                     (pos? (get-in d [:findings :lint-errors] 0))))
-                      (-> (select-keys d [:label :at :findings])
-                          (assoc :note (str "the last done-point left problems —"
-                                            " address them or tell the user why not")))))
-        ;; the kernel ns exists only in a process that booted from a store
-        ;; (the dev server, a jar launch) — reach it through the carrier and
-        ;; treat any failure as absence, never an error
-        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
-                                      (catch Throwable _ nil))]
-                   (orient/host-brief
-                    ;; :jar-head is the ARTIFACT's identity; placing it against
-                    ;; THIS store is the caller's job, because the store a jar
-                    ;; runs against is often not the one it was built from.
-                    (cond-> info
-                      (:jar-head info)
-                      (assoc :jar (orient/jar-currency st (:jar-head info))))
-                    ;; ONE spelling of the code-delta count. This was a second
-                    ;; copy of code-deltas-since — identical today, and the
-                    ;; docstring one namespace over already called itself "the
-                    ;; ONLY spelling of it" while this stood beside it. Three
-                    ;; artifacts now report staleness with it.
-                    (orient/code-deltas-since st (:booted-at info))
-                    (boolean (when-let [b (:branch @session)]
-                               (not= "main" (str b))))
-                    ;; MEASURED, not inferred: without this the
-                    ;; brief repeats whatever the reload counter
-                    ;; believes, which is how it once announced
-                    ;; five stale namespaces to a process that
-                    ;; held every one of them current.
-                    (rules.currency/drift (:image @session) st)))
-        ;; DERIVED, never remembered. A cycle is standing debt rather than an
-        ;; event, so reading the manifest each time means it survives a
-        ;; restart, covers import as well as adoption, and cannot disagree
-        ;; with the module graph — one `module-layers`, one answer.
-        cycles   (vec (:cycles (store/module-layers (:modules st))))
-        ;; one store-wide scan, not two — the cond-> below tests and reports the
-        ;; same value
-        unread   (orient/unread-declarations st)
-;; the line this session WRITES to, when it is a private one. Read from
-        ;; the session rather than resolved, deliberately: resolving ADOPTS,
-        ;; and orientation must not be the thing that creates a workspace.
-        ;; The count is measured from the thread's own base, which is the one
-        ;; delta guaranteed to be in its log however far the branch has moved.
-        thread   (when-let [conn (:db @session)]
-                   (when-let [row (and (:line @session)
-                                       (first (filter #(= (:line @session) (:id %))
-                                                      (db/lines conn))))]
-                     (when (= "thread" (:kind row))
-                       ;; ONE producer for this number, shared with thread_list and
-                       ;; the write hint. It used to be re-derived here by counting
-                       ;; the store's deltas past the base, which was a second
-                       ;; derivation of the same question AND the same defect: it
-                       ;; counted verification records, so a check with nothing
-                       ;; written left it non-zero.
-                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
-                         (cond-> {:on (:branch @session) :unlanded n}
-                           (pos? n)
-                           (assoc :note
-                                  (str n " change(s) are private to this thread. A green"
-                                       " done lands them on " (:branch @session)
-                                       "; nothing outside this session — the running"
-                                       " host included — can see them until it does.")))))))
-        intent   (:last-intent @session)
-        stop     #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
-                   "tell" "every" "should" "their" "them" "than" "then" "they"
-                   "what" "where" "which" "been" "back" "also" "only" "into"}
-        tokens   (when intent
-                   (into #{}
-                         (comp (map str/lower-case)
-                               (filter #(<= 4 (count %)))
-                               (remove stop))
-                         (re-seq #"[A-Za-z][A-Za-z0-9-]+" intent)))
-        score    (fn [nm]
-                   (let [words (str/split (str/lower-case (str nm)) #"-")]
-                     (count (filter tokens words))))
-        relevant (when (seq tokens)
-                   (->> (for [n nss, f (names n)
-                              :let [s (score f)]
-                              :when (pos? s)]
-                          [s (symbol (str n) (str f))])
-                        (sort-by (comp - first))
-                        (map second)
-                        (take 5)
-                        (keep #(orient/form-card session (symbol (namespace %))
-                                          (symbol (name %))))
-                        vec
-                        not-empty))]
-    (cond-> {:project project
-             ;; the loop is taught in full by the slopp SKILL; the brief only needs to
-             ;; NAME it. Measured: 472 chars, byte-identical in all 5 sessions of an
-             ;; eval9 lifetime — orientation should carry what CHANGED, not re-teach
-             ;; what the skill already said.
-             :loop (str "small verified writes → done {label} at each finish point"
-                        " → ONE commit_point. Results are self-describing: act on"
-                        " them, don't narrate them. (Full loop: the slopp skill.)")}
-      (seq ms)   (assoc :milestones ms)
-      last-done  (assoc :last-done last-done)
-      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
-      ;; every add, so nothing a store does under the gate can create one.
-      ;; That makes this the rarest thing in the brief and the one nobody
-      ;; else will mention: adoption reports it once at open and the report
-      ;; is discarded, leaving the web UI's module page as the only surface.
-      (seq cycles)
-      (assoc :module-cycles cycles
-             :module-cycles-note
-             (str "inherited at import — nothing loads in a circle and the code"
-                  " is not broken. A module is the first two segments, so this"
-                  " is a cross-module call in each direction. Nothing can add"
-                  " to it (an edge that closes a cycle is refused), so it is"
-                  " one-time debt: move what crosses, then module_dep"
-                  " {from … to … remove true}."))
-      host       (assoc :host host)
-      thread     (assoc :thread thread)
-      ;; what this store DECLARES that this slopp no longer reads. The brief is
-      ;; where it belongs because the moment it becomes true is a RESTART onto
-      ;; a different artifact — no write happened, so no write-time gate could
-      ;; have said it, and the store did not change.
-      ;;
-      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
-      ;; per-form half at done grain, and nobody adds ten of those up. A
-      ;; consuming store hit exactly this — every route declaring a retired
-      ;; spelling, so nothing registered and everything 404d — and diagnosed
-      ;; beat-contract drift from this brief's own `:hub-note`, because the
-      ;; fact it needed was not here to read.
-      unread     (assoc :unread-declarations unread)
-      ;; the reviewer UI, when the server brought one up. It is for a HUMAN,
-      ;; and its only other announcement is a line on the server's stderr —
-      ;; which most clients never show anyone. Hand the url over when asked
-      ;; what is going on, rather than making them know to ask for it.
-      (:ui-url @session) (assoc :ui (:ui-url @session))
-      ;; …and whether the table behind that url is still the store's. The
-      ;; route table and both performer vocabularies are assembled ONCE at
-      ;; serve time, so a route added afterwards answers 404 — correctly, for
-      ;; the table that listener holds, and indistinguishably from a path that
-      ;; does not exist. Same hole `:app-behind` two clauses down was added
-      ;; for, on the listener that had no counter.
-      ;;
-      ;; Nil unless there is genuinely something to doubt: a line announcing
-      ;; that everything is fine every time is one a reader learns to skip,
-      ;; and this one has to be read on the rare occasion it appears.
-      (false? (:current? (slopp.currency/report (:db @session) (:ui-stamp @session))))
-      (assoc :ui-stale
-             (str "that listener's route table was built at "
-                  (:head (:ui-stamp @session))
-                  " and this line has moved since — a route added after it came"
-                  " up answers 404 until you ui_serve again"))
-      ;; the APP slopp is running for this project, when it is running one.
-      ;; Its only other announcement is a line on the server's stderr, which
-      ;; most clients never show anyone — so an agent asked "what is going
-      ;; on" is where a human finds out the app has an address at all.
-      (:url (:app-server @session)) (assoc :app (:url (:app-server @session)))
-      ;; and what the image cost to come up. It rides HERE rather than only on
-      ;; the banner because the comment two lines up is the whole reason: an
-      ;; agent asked "what is going on" is where a human finds out. The first
-      ;; app to want this number had to watch for the child process and diff
-      ;; its bind against its start time — hand-measuring a figure slopp had
-      ;; already computed, because the only place it was written was stderr.
-      (:boot-ms (:app-server @session))
-      (assoc :app-boot-ms (:boot-ms (:app-server @session)))
-      ;; and whether that image is built from what you just wrote. `full_check`
-      ;; has carried this for a while and the BRIEF is where a reader looks —
-      ;; a consumer read this brief through a twenty-minute window in which
-      ;; their app served old code, and it said nothing, because the counter
-      ;; lived in a different call. Two docstrings meanwhile claimed it was
-      ;; here.
-      ;;
-      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
-      ;; to look at built from what I just wrote", and silence on yes puts the
-      ;; reader back to hand-checking something slopp knows. Silence is for
-      ;; nothing-is-serving, which `behind` answers nil for.
-      (some? (orient/behind (:store @session) (:app-server @session)))
-      (assoc :app-behind (orient/behind (:store @session) (:app-server @session)))
-      ;; and a managed app server that FAILED is not the same as one nobody
-      ;; asked for. Silence on both is how "the dev server is broken" reads
-      ;; as "this project has no dev server", which sends the reader nowhere.
-      (and (:app-server @session) (not (:serving? (:app-server @session))))
-      (assoc :app-note (str "slopp is running this project's app server and it"
-                            " is DOWN: " (:reason (:app-server @session))))
-    ;; the HUB's url when this project registered with one — that is the
-    ;; address to hand a human on a machine running several projects, and
-    ;; the per-project one above is a derived port nobody should type
-    ;; the project's own page ON the hub, and ONLY while a hub is answering:
-    ;; the slug in it is minted by the hub and returned on every beat, so
-    ;; holding one is the proof we are registered rather than a guess. This
-    ;; used to be the configured hub root, set when the beat STARTED and never
-    ;; revisited — so a machine with no hub had orientation hand a human a
-    ;; connection refused. A hub is optional; absence is an ordinary state and
-    ;; has to be sayable.
-    (:hub @session) (assoc :hub (:hub @session))
-    ;; a hub that REFUSED our beat is a third state, and it must not read as
-    ;; the second. The hub validates each check-in against its own copy of the
-    ;; beat contract — a hand-maintained twin of ours, because neither store
-    ;; can read the other — so this 400 IS the notification that the two
-    ;; copies diverged. Called "no hub is answering" it sends someone to check
-    ;; whether a hub is running, the one thing that is not wrong.
-    (and (not (:hub @session)) (:hub-refused @session))
-    (assoc :hub-note
-           (str "the hub at " (:hub-configured @session) " REFUSED this"
-                " project's check-in with "
-                (:hub/refused (:hub-refused @session))
-                " — it is running and it rejected what we sent, so this is"
-                " ours to fix, not a missing hub. Its explanation: "
-                (pr-str (:hub/explain (:hub-refused @session)))
-                ". The beat contract crosses the split by COPY"
-                " (slopp.hub/project-beat here, its twin over there),"
-                " so a refusal is where drift between them surfaces"))
-
-    ;; NOT the refused case — cond-> tests every clause in order, so without
-    ;; this guard both fire and the generic note overwrites the specific one
-    (and (not (:hub @session))
-         (not (:hub-refused @session))
-         (:hub-configured @session))
-    (assoc :hub-note
-           (str "no hub is answering at " (:hub-configured @session)
-                " — this project keeps beating, so it appears within one"
-                " interval of a hub starting. Start one (the slopp-ui"
-                " project) or set the slopp.hub.port capability to 0. Until"
-                " then :ui is all there is, and it serves JSON"))
-      relevant   (assoc :relevant relevant))))
-
 ^:reads (defn report
   "The handoff/summary composite (ratio push): milestones, net form-level
   changes with their recorded ASKS, and the last verification state — the
   history fan-out (query_history + query_history {contains} + query_changes +
   query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions."
+  delta/milestone id; `:contains` filters asks/descriptions.
+
+  A history read: the line's journal is read here, when asked (a handoff is
+  written a few times a day), rather than carried in the value."
   [session & {:keys [since contains limit] :or {limit 50}}]
   (let [st        (:store @session)
-        deltas    (store/deltas st)
-        after     (if since
-                    (->> deltas (drop-while #(not= since (:id %))) rest vec)
-                    (vec deltas))
+        conn      (:db @session)
+        line      (engine/session-line session)
+        after     (vec (db/line-deltas conn line :since since))
         after-ids (into #{} (map :id) after)
         content   #{:add :replace :delete :rename :move}
         changes   (->> after
@@ -2351,14 +2100,14 @@ recompiled (engine/after-write! session ns-sym)]
                        (take 20)
                        (mapv #(-> (select-keys % [:commit :description :at :status])
                                   (update :description orient/snip 110))))
-        verify*   (->> deltas (filter #(= :verify (:op %))) last)
+        verify*   (db/last-marker conn line :verify)
         dead      (->> after
                        (filter #(= :revert (:op %)))
                        (mapv (fn [d] (cond-> {:why (:why d)
                                               :forms (vec (:forms d))}
                                        (:at d) (assoc :at (history/human-time (:at d)))))))
         ;; the USER's verbatim asks, recorded on turn-begin. A handoff's first
-        ;; question is "what was I asked to do?", and per-form :asks answer a
+        ;; question is \"what was I asked to do?\", and per-form :asks answer a
         ;; different one (what each write intended). Without these, handoffs
         ;; read the journal by hand — eval9 shelled out to sqlite3 on
         ;; .slopp/store.db to get exactly this.
@@ -2613,7 +2362,7 @@ recompiled (engine/after-write! session ns-sym)]
   milestone gate's job."
   [session]
   (let [st      (:store @session)
-        last-c  (:id (last (filter #(= :commit (:op %)) (store/deltas st))))
+        last-c  (:id (db/last-marker (:db @session) (engine/session-line session) :commit))
         changed (into #{}
                       (keep #(store/ns-of-form-id st %))
                       (forms-changed-since st last-c))]
@@ -2746,162 +2495,6 @@ recompiled (engine/after-write! session ns-sym)]
                           (name tier) ". Layering — whether they require a LOOSER"
                           " tier — is a whole-graph property reported by"
                           " full_check, not at write grain."))}))))))
-
-(defn undo!
-  "Walk back your own recent writes — the reach-for-it-without-thinking undo.
-  Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
-  content writes, `:to \"d123\"` undoes everything of yours after that delta.
-  `:to` also takes a NAMED anchor — `:last-commit` (scrap everything since the
-  last milestone — the usual dead-end rollback) or `:last-done` (back to your
-  last done point) — as a keyword or the same string over the wire. One atomic
-  verified group, recorded as honest provenance rather than erased.
-
-  Delta addressing is the point. `revert-form!` looks a form up by name, so it
-  can never undo a DELETE — there is no name left to find. The log still holds
-  the source, so undo puts it back. Forms another agent also wrote in the span
-  are SKIPPED and reported in `:skipped-shared`, never stomped, which is what
-  makes this safe to reach for while others are working.
-
-  **`:deltas n` counts over the LOG, and REFUSES rather than reaching past.**
-  Markers are transparent, but a delta whose op undo cannot invert
-  (`:rename-ns`, `:move-forms`, `:ns-delete`, `:config-put`, a `module_*`
-  declaration, anything that changes more than form sources) stops it, named
-  in `:blocked` with nothing reverted. It used to count over the FILTERED
-  sequence, so *the last one* meant *the last one that passed the filter*: it
-  stepped over the head and reverted an older write while returning
-  `:reverted 1` and `:skipped-shared []`. Reported by a consumer whose
-  already-shipped CSS fix was rolled back underneath them and reached their
-  user as a screenshot of a bug that had been fixed. Measured afterwards: 20
-  op types and 1218 deltas in slopp's own store were steppable, so an
-  ordinary `ns_rename` was enough to arm it.
-
-  The conservative op set is not the bug and is unchanged: undo inverts form
-  SOURCES, and a `:rename-ns` also re-keys the namespace, so inverting it here
-  would restore the text under the new name. Not being able to undo something
-  is fine; reaching past it is not.
-
-  `:to` still walks forward from an anchor the caller named explicitly, which
-  is a different request: there the address is right and the coverage may be
-  partial.
-
-  Returns `{:reverted n :undid [delta-ids] :skipped-shared [...]}`, or
-  `{:reverted 0 :blocked [{:delta :op :why}] :note ...}`."
-  [session & {:keys [deltas to agent prompt]}]
-  (let [st       (:store @session)
-        ;; undo means "walk back MY writes"; with no explicit agent that is the
-        ;; session's own id — what every live write is tagged with. Left nil,
-        ;; `mine?` counted every delta as mine while `others` counted every
-        ;; real-agent delta as someone else's, so a session's own forms were
-        ;; skipped as :skipped-shared, leaving the store red. One agent, one
-        ;; ownership test.
-        agent    (or agent (:agent-id @session))
-        all      (store/deltas st)
-        ;; :last-commit / :last-done name the two anchors worth rolling back to
-        ;; without knowing a delta id — accepted as keyword or wire string.
-        commit-anchor? (contains? #{:last-commit "last-commit" ":last-commit"} to)
-        done-anchor?   (contains? #{:last-done "last-done" ":last-done"} to)
-        to       (cond
-                   commit-anchor?
-                   (:id (last (filter #(= :commit (:op %)) all)))
-                   done-anchor?
-                   (:id (last (filter #(= :done (:op %)) all)))
-                   :else to)
-        mine?    (fn [d] (and (contains? history/content-ops (:op d))
-                              (= agent (:agent d))))
-        ;; POSITIONAL addressing counts over the LOG. `(take-last n (filter
-        ;; mine? all))` counted over the SURVIVORS, so "the last one" meant
-        ;; "the last one that passed the filter" — a different delta, chosen
-        ;; silently, then reverted while reporting `:reverted 1` and
-        ;; `:skipped-shared []`. Markers are transparent, because nobody means
-        ;; "undo my :verify"; a marker that also carries content — :merge — is
-        ;; not.
-        transparent? (fn [d] (and (contains? fields/markers (:op d))
-                                  (not (contains? history/content-ops (:op d)))))
-        recent   (when-not to
-                   (take-last (max 1 (or deltas 1)) (remove transparent? all)))
-        blocked  (vec (for [d recent :when (not (mine? d))]
-                        {:delta (:id d) :op (:op d)
-                         :why (if (= agent (:agent d))
-                                (str "undo inverts form SOURCES, and " (:op d)
-                                     " changes more than sources — reverting it"
-                                     " here would half-undo it")
-                                (str "written by "
-                                     (or (:agent d) "another agent")))}))
-        target   (if to
-                   (first (filter mine? (rest (drop-while #(not= to (:id %)) all))))
-                   (first recent))]
-    (cond
-      (and (or commit-anchor? done-anchor?) (nil? to))
-      {:reverted 0
-       :note (str "no " (if commit-anchor? "commit" "done")
-                  " to roll back to")}
-
-      ;; BEFORE the not-target case: a blocked head is not "nothing to undo",
-      ;; it is "the thing you named cannot be undone". Reported as a refusal
-      ;; because the ADDRESS is what is wrong — you asked for the last n
-      ;; writes, and reaching past them to revert something OLDER is doing
-      ;; something adjacent to what was asked. `undo` is the tool an agent
-      ;; reaches for at the moment it knows it made a mistake; that is the one
-      ;; behaviour it must never have.
-      (seq blocked)
-      {:reverted 0
-       :blocked blocked
-       :note (str "refused, nothing was reverted: the last "
-                  (count recent) " delta(s) include "
-                  (count blocked) " that undo cannot invert — "
-                  (str/join ", " (map #(str (:delta %) " (" (name (:op %)) ")")
-                                      blocked))
-                  ". Reverting past them would have restored an OLDER write"
-                  " while reporting success, which is what this refusal"
-                  " exists to prevent. To reach the earlier work anyway,"
-                  " name the span explicitly with :to <delta>; to address one"
-                  " form, edit_revert it by name.")}
-
-      (not target)
-      {:reverted 0
-       :note (if to
-               (str "nothing of yours after " to)
-               "no writes of yours to undo")}
-
-      :else
-      (let [from    (:id target)
-            changes (history/query-changes session :agent agent :from from)
-            span    (drop-while #(not= from (:id %)) all)
-            others  (into #{}
-                          (mapcat history/delta-fids)
-                          (filter #(and (contains? history/content-ops (:op %))
-                                        (not (mine? %)))
-                                  span))
-            {:keys [steps shared]} (history/revert-steps changes others)]
-        (cond
-          (empty? (:forms changes))
-          {:reverted 0 :note (str "nothing of yours changed since " from)}
-
-          (empty? steps)
-          {:reverted 0 :skipped-shared shared
-           :note "every changed form is shared with other agents"}
-
-          :else
-          (let [r (edit-group! session steps
-                               :prompt (or prompt (str "undo back to " from))
-                               :agent agent)]
-            (if (or (:error r) (:conflict r))
-              r
-              (let [undid-ids (mapv :id (filter mine? span))
-                    reverted  (vec (remove (set shared) (map :form (:forms changes))))]
-                ;; mark the dead end so it stays findable: what was scrapped
-                ;; and (if given) why. A vanished exploration teaches nothing.
-                (engine/commit-appended!
-                 session
-                 (fn [base] (first (store/record-revert base :why prompt
-                                                        :forms reverted
-                                                        :undid undid-ids
-                                                        :agent agent)))
-                 [])
-                (assoc r
-                       :reverted (count steps)
-                       :undid undid-ids
-                       :skipped-shared shared)))))))))
 
 (defn cleanup!
   "Run the done-point's TIDY over one namespace, on demand: normalize every
@@ -4810,3 +4403,497 @@ recompiled (engine/after-write! session ns-sym)]
   (if-let [conn (:db @session)]
     (mapv :payload (db/measurements conn "tool-call" nil))
     []))
+
+(defn ^:export jar-currency
+  "What the running ARTIFACT is, placed against this session's store —
+  `{:head id}` always, plus `:behind n` when this store is the one it came
+  from. Nil `head` → nil.
+
+  `head` is `slopp.kernel.boot/jar-head`'s answer: the store head the jar was
+  built from, or nil in a process that is not running one.
+
+  **`:behind` is ABSENT rather than 0 when the head is foreign**, and this is
+  the case the obvious version gets wrong. slopp's jar serves projects that are
+  not slopp, so a head from one store and a delta log from another share
+  nothing; counting deltas after that head in THIS log would measure how fast
+  the reader has been writing and report it as the tool's age. The identity
+  still travels, because it is exactly what a human compares by hand across
+  two stores — which is how the six incidents behind this were eventually
+  solved, expensively.
+
+  Two indexed reads — is the head on this line, and how many code deltas
+  followed it — and the count is `slopp.store.db/code-deltas-after`, the one
+  spelling every currency number shares."
+  [session head]
+  (when head
+    (let [conn (:db @session)
+          line (engine/session-line session)]
+      (cond-> {:head head}
+        (db/on-line? conn line head)
+        (assoc :behind (db/code-deltas-after conn line {:id head}))))))
+
+(defn ^:export app-behind
+  "How many CODE changes the SERVED app image is behind the store — `0` when
+  it is current, `nil` when there is no answer. `running` is the session's
+  app-server map.
+
+  This is the HOST-CURRENCY question one image over, so it is deliberately
+  the same count — `slopp.store.db/code-deltas-after`, by the clock the image
+  was served at. Markers never count: they are 8383 of one store's ~17400
+  deltas and `:verify` alone 6441, because every write appends one; a raw
+  count would report roughly twice the changes anyone made, and a number that
+  overstates is a number people stop reading.
+
+  **`0` is an answer and must be reported.** The question is \"is the page I
+  am about to look at built from what I just wrote?\", and staying silent when
+  the answer is yes puts the reader back to hand-checking. Silence is reserved
+  for \"nothing is serving\", which is most stores.
+
+  **A running map with no `:served-at` answers nil.** The caller has already
+  established something IS serving, so an absent stamp is a slopp bug rather
+  than a stale app — and reporting a freshly-served app as maximally behind
+  would send someone to re-serve a thing that is already right. Reported by
+  slopp-ui, twice; the second bite was a restyled page whose served
+  stylesheet was still the old one."
+  [session running]
+  (when (:serving? running)
+    (when-let [at (:served-at running)]
+      (db/code-deltas-after (:db @session) (engine/session-line session) {:at at}))))
+
+^:reads (defn session-brief
+  "THE one-call orientation, task-shaped (knowledge-differential stance):
+  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
+  up to one row, form names ride only for solo nses on small stores — and
+  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
+  user's verbatim words, via the prompt hook or turn_begin) is mined
+  against form names, deterministically, and the top matches ride as
+  interface CARDS under :relevant. The agent starts working instead of
+  orienting. :host is the serving process's code-currency record
+  (orient/host-brief over the kernel's boot-info, reached through the
+  late-ref carrier — absent when this process didn't boot from a store):
+  which code the host actually runs, and what a restart would change.
+  :module-cycles rides only when the manifest has one — impossible to create
+  under the gate, so it was inherited at import, and this is the only place
+  outside the web UI that says so."
+  [session]
+  (let [st       (:store @session)
+        nss      (sort (keys (:namespaces st)))
+        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
+        total    (reduce + 0 (map (comp count val) names))
+        fams     (group-by #(first (str/split (str %) #"\.")) nss)
+        project  (vec (mapcat (fn [[seg members]]
+                                (if (<= 5 (count members))
+                                  [{:family (str seg ".*") :nses (count members)
+                                    :forms (reduce + 0 (map (comp count names) members))}]
+                                  (for [n members]
+                                    (if (< 200 total)
+                                      {:ns n :forms (count (names n))}
+                                      {:ns n :forms (names n)}))))
+                              (sort-by key fams)))
+        ms       (->> (query-commits session)
+                      (take 5)
+                      (mapv #(-> (select-keys % [:commit :description :at :status])
+                                 (update :description orient/snip 110))))
+        last-done (let [d (db/last-marker (:db @session) (engine/session-line session) :done)]
+                    (when (and d (or (= :red (get-in d [:findings :test-status]))
+                                     (pos? (get-in d [:findings :lint-errors] 0))))
+                      (-> (select-keys d [:label :at :findings])
+                          (assoc :note (str "the last done-point left problems —"
+                                            " address them or tell the user why not")))))
+        ;; the kernel ns exists only in a process that booted from a store
+        ;; (the dev server, a jar launch) — reach it through the carrier and
+        ;; treat any failure as absence, never an error
+        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+                                      (catch Throwable _ nil))]
+                   (orient/host-brief
+                    ;; :jar-head is the ARTIFACT's identity; placing it against
+                    ;; THIS store is the caller's job, because the store a jar
+                    ;; runs against is often not the one it was built from.
+                    (cond-> info
+                      (:jar-head info)
+                      (assoc :jar (jar-currency session (:jar-head info))))
+                    ;; ONE spelling of the code-delta count. This was a second
+                    ;; copy of code-deltas-since — identical today, and the
+                    ;; docstring one namespace over already called itself "the
+                    ;; ONLY spelling of it" while this stood beside it. Three
+                    ;; artifacts now report staleness with it.
+                    (db/code-deltas-after (:db @session) (engine/session-line session)
+                                          {:at (:booted-at info 0)})
+                    (boolean (when-let [b (:branch @session)]
+                               (not= "main" (str b))))
+                    ;; MEASURED, not inferred: without this the
+                    ;; brief repeats whatever the reload counter
+                    ;; believes, which is how it once announced
+                    ;; five stale namespaces to a process that
+                    ;; held every one of them current.
+                    (rules.currency/drift (:image @session) st)))
+        ;; DERIVED, never remembered. A cycle is standing debt rather than an
+        ;; event, so reading the manifest each time means it survives a
+        ;; restart, covers import as well as adoption, and cannot disagree
+        ;; with the module graph — one `module-layers`, one answer.
+        cycles   (vec (:cycles (store/module-layers (:modules st))))
+        ;; one store-wide scan, not two — the cond-> below tests and reports the
+        ;; same value
+        unread   (orient/unread-declarations st)
+;; the line this session WRITES to, when it is a private one. Read from
+        ;; the session rather than resolved, deliberately: resolving ADOPTS,
+        ;; and orientation must not be the thing that creates a workspace.
+        ;; The count is measured from the thread's own base, which is the one
+        ;; delta guaranteed to be in its log however far the branch has moved.
+        thread   (when-let [conn (:db @session)]
+                   (when-let [row (and (:line @session)
+                                       (first (filter #(= (:line @session) (:id %))
+                                                      (db/lines conn))))]
+                     (when (= "thread" (:kind row))
+                       ;; ONE producer for this number, shared with thread_list and
+                       ;; the write hint. It used to be re-derived here by counting
+                       ;; the store's deltas past the base, which was a second
+                       ;; derivation of the same question AND the same defect: it
+                       ;; counted verification records, so a check with nothing
+                       ;; written left it non-zero.
+                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
+                         (cond-> {:on (:branch @session) :unlanded n}
+                           (pos? n)
+                           (assoc :note
+                                  (str n " change(s) are private to this thread. A green"
+                                       " done lands them on " (:branch @session)
+                                       "; nothing outside this session — the running"
+                                       " host included — can see them until it does.")))))))
+        intent   (:last-intent @session)
+        stop     #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
+                   "tell" "every" "should" "their" "them" "than" "then" "they"
+                   "what" "where" "which" "been" "back" "also" "only" "into"}
+        tokens   (when intent
+                   (into #{}
+                         (comp (map str/lower-case)
+                               (filter #(<= 4 (count %)))
+                               (remove stop))
+                         (re-seq #"[A-Za-z][A-Za-z0-9-]+" intent)))
+        score    (fn [nm]
+                   (let [words (str/split (str/lower-case (str nm)) #"-")]
+                     (count (filter tokens words))))
+        relevant (when (seq tokens)
+                   (->> (for [n nss, f (names n)
+                              :let [s (score f)]
+                              :when (pos? s)]
+                          [s (symbol (str n) (str f))])
+                        (sort-by (comp - first))
+                        (map second)
+                        (take 5)
+                        (keep #(orient/form-card session (symbol (namespace %))
+                                          (symbol (name %))))
+                        vec
+                        not-empty))]
+    (cond-> {:project project
+             ;; the loop is taught in full by the slopp SKILL; the brief only needs to
+             ;; NAME it. Measured: 472 chars, byte-identical in all 5 sessions of an
+             ;; eval9 lifetime — orientation should carry what CHANGED, not re-teach
+             ;; what the skill already said.
+             :loop (str "small verified writes → done {label} at each finish point"
+                        " → ONE commit_point. Results are self-describing: act on"
+                        " them, don't narrate them. (Full loop: the slopp skill.)")}
+      (seq ms)   (assoc :milestones ms)
+      last-done  (assoc :last-done last-done)
+      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
+      ;; every add, so nothing a store does under the gate can create one.
+      ;; That makes this the rarest thing in the brief and the one nobody
+      ;; else will mention: adoption reports it once at open and the report
+      ;; is discarded, leaving the web UI's module page as the only surface.
+      (seq cycles)
+      (assoc :module-cycles cycles
+             :module-cycles-note
+             (str "inherited at import — nothing loads in a circle and the code"
+                  " is not broken. A module is the first two segments, so this"
+                  " is a cross-module call in each direction. Nothing can add"
+                  " to it (an edge that closes a cycle is refused), so it is"
+                  " one-time debt: move what crosses, then module_dep"
+                  " {from … to … remove true}."))
+      host       (assoc :host host)
+      thread     (assoc :thread thread)
+      ;; what this store DECLARES that this slopp no longer reads. The brief is
+      ;; where it belongs because the moment it becomes true is a RESTART onto
+      ;; a different artifact — no write happened, so no write-time gate could
+      ;; have said it, and the store did not change.
+      ;;
+      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
+      ;; per-form half at done grain, and nobody adds ten of those up. A
+      ;; consuming store hit exactly this — every route declaring a retired
+      ;; spelling, so nothing registered and everything 404d — and diagnosed
+      ;; beat-contract drift from this brief's own `:hub-note`, because the
+      ;; fact it needed was not here to read.
+      unread     (assoc :unread-declarations unread)
+      ;; the reviewer UI, when the server brought one up. It is for a HUMAN,
+      ;; and its only other announcement is a line on the server's stderr —
+      ;; which most clients never show anyone. Hand the url over when asked
+      ;; what is going on, rather than making them know to ask for it.
+      (:ui-url @session) (assoc :ui (:ui-url @session))
+      ;; …and whether the table behind that url is still the store's. The
+      ;; route table and both performer vocabularies are assembled ONCE at
+      ;; serve time, so a route added afterwards answers 404 — correctly, for
+      ;; the table that listener holds, and indistinguishably from a path that
+      ;; does not exist. Same hole `:app-behind` two clauses down was added
+      ;; for, on the listener that had no counter.
+      ;;
+      ;; Nil unless there is genuinely something to doubt: a line announcing
+      ;; that everything is fine every time is one a reader learns to skip,
+      ;; and this one has to be read on the rare occasion it appears.
+      (false? (:current? (slopp.currency/report (:db @session) (:ui-stamp @session))))
+      (assoc :ui-stale
+             (str "that listener's route table was built at "
+                  (:head (:ui-stamp @session))
+                  " and this line has moved since — a route added after it came"
+                  " up answers 404 until you ui_serve again"))
+      ;; the APP slopp is running for this project, when it is running one.
+      ;; Its only other announcement is a line on the server's stderr, which
+      ;; most clients never show anyone — so an agent asked "what is going
+      ;; on" is where a human finds out the app has an address at all.
+      (:url (:app-server @session)) (assoc :app (:url (:app-server @session)))
+      ;; and what the image cost to come up. It rides HERE rather than only on
+      ;; the banner because the comment two lines up is the whole reason: an
+      ;; agent asked "what is going on" is where a human finds out. The first
+      ;; app to want this number had to watch for the child process and diff
+      ;; its bind against its start time — hand-measuring a figure slopp had
+      ;; already computed, because the only place it was written was stderr.
+      (:boot-ms (:app-server @session))
+      (assoc :app-boot-ms (:boot-ms (:app-server @session)))
+      ;; and whether that image is built from what you just wrote. `full_check`
+      ;; has carried this for a while and the BRIEF is where a reader looks —
+      ;; a consumer read this brief through a twenty-minute window in which
+      ;; their app served old code, and it said nothing, because the counter
+      ;; lived in a different call. Two docstrings meanwhile claimed it was
+      ;; here.
+      ;;
+      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
+      ;; to look at built from what I just wrote", and silence on yes puts the
+      ;; reader back to hand-checking something slopp knows. Silence is for
+      ;; nothing-is-serving, which `behind` answers nil for.
+      (some? (app-behind session (:app-server @session)))
+      (assoc :app-behind (app-behind session (:app-server @session)))
+      ;; and a managed app server that FAILED is not the same as one nobody
+      ;; asked for. Silence on both is how "the dev server is broken" reads
+      ;; as "this project has no dev server", which sends the reader nowhere.
+      (and (:app-server @session) (not (:serving? (:app-server @session))))
+      (assoc :app-note (str "slopp is running this project's app server and it"
+                            " is DOWN: " (:reason (:app-server @session))))
+    ;; the HUB's url when this project registered with one — that is the
+    ;; address to hand a human on a machine running several projects, and
+    ;; the per-project one above is a derived port nobody should type
+    ;; the project's own page ON the hub, and ONLY while a hub is answering:
+    ;; the slug in it is minted by the hub and returned on every beat, so
+    ;; holding one is the proof we are registered rather than a guess. This
+    ;; used to be the configured hub root, set when the beat STARTED and never
+    ;; revisited — so a machine with no hub had orientation hand a human a
+    ;; connection refused. A hub is optional; absence is an ordinary state and
+    ;; has to be sayable.
+    (:hub @session) (assoc :hub (:hub @session))
+    ;; a hub that REFUSED our beat is a third state, and it must not read as
+    ;; the second. The hub validates each check-in against its own copy of the
+    ;; beat contract — a hand-maintained twin of ours, because neither store
+    ;; can read the other — so this 400 IS the notification that the two
+    ;; copies diverged. Called "no hub is answering" it sends someone to check
+    ;; whether a hub is running, the one thing that is not wrong.
+    (and (not (:hub @session)) (:hub-refused @session))
+    (assoc :hub-note
+           (str "the hub at " (:hub-configured @session) " REFUSED this"
+                " project's check-in with "
+                (:hub/refused (:hub-refused @session))
+                " — it is running and it rejected what we sent, so this is"
+                " ours to fix, not a missing hub. Its explanation: "
+                (pr-str (:hub/explain (:hub-refused @session)))
+                ". The beat contract crosses the split by COPY"
+                " (slopp.hub/project-beat here, its twin over there),"
+                " so a refusal is where drift between them surfaces"))
+
+    ;; NOT the refused case — cond-> tests every clause in order, so without
+    ;; this guard both fire and the generic note overwrites the specific one
+    (and (not (:hub @session))
+         (not (:hub-refused @session))
+         (:hub-configured @session))
+    (assoc :hub-note
+           (str "no hub is answering at " (:hub-configured @session)
+                " — this project keeps beating, so it appears within one"
+                " interval of a hub starting. Start one (the slopp-ui"
+                " project) or set the slopp.hub.port capability to 0. Until"
+                " then :ui is all there is, and it serves JSON"))
+      relevant   (assoc :relevant relevant))))
+
+(defn ^:export with-history
+  "`session` with its store value HYDRATED: `:deltas` is the line's whole
+  journal (`slopp.store.db/line-deltas`), read now. Returns a NEW atom over a
+  copy of the session — the live session never carries the list. A session
+  with no journal (a bare test fixture over a value built by writes) is
+  returned as it is: its value's own `:deltas` is all the history there is.
+
+  The history views (`query_history`, `query_changes`, a milestone's status,
+  an undo span) are pure over a store value and read `store/deltas`. The
+  value stopped carrying the log — it was 94% of every session's memory and
+  the cost of every open, read for two scalars and a bounded window — so the
+  few readers that genuinely walk all of it are handed a value that has it,
+  at the moment they are asked, and only then."
+  [session]
+  (let [s @session]
+    (if-let [conn (:db s)]
+      (atom (update s :store assoc :deltas
+                    (db/line-deltas conn (engine/session-line session))))
+      session)))
+
+(defn undo!
+  "Walk back your own recent writes — the reach-for-it-without-thinking undo.
+  Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
+  content writes, `:to \"d123\"` undoes everything of yours after that delta.
+  `:to` also takes a NAMED anchor — `:last-commit` (scrap everything since the
+  last milestone — the usual dead-end rollback) or `:last-done` (back to your
+  last done point) — as a keyword or the same string over the wire. One atomic
+  verified group, recorded as honest provenance rather than erased.
+
+  Delta addressing is the point. `revert-form!` looks a form up by name, so it
+  can never undo a DELETE — there is no name left to find. The log still holds
+  the source, so undo puts it back. Forms another agent also wrote in the span
+  are SKIPPED and reported in `:skipped-shared`, never stomped, which is what
+  makes this safe to reach for while others are working.
+
+  **`:deltas n` counts over the LOG, and REFUSES rather than reaching past.**
+  Markers are transparent, but a delta whose op undo cannot invert
+  (`:rename-ns`, `:move-forms`, `:ns-delete`, `:config-put`, a `module_*`
+  declaration, anything that changes more than form sources) stops it, named
+  in `:blocked` with nothing reverted. It used to count over the FILTERED
+  sequence, so *the last one* meant *the last one that passed the filter*: it
+  stepped over the head and reverted an older write while returning
+  `:reverted 1` and `:skipped-shared []`. Reported by a consumer whose
+  already-shipped CSS fix was rolled back underneath them and reached their
+  user as a screenshot of a bug that had been fixed. Measured afterwards: 20
+  op types and 1218 deltas in slopp's own store were steppable, so an
+  ordinary `ns_rename` was enough to arm it.
+
+  The conservative op set is not the bug and is unchanged: undo inverts form
+  SOURCES, and a `:rename-ns` also re-keys the namespace, so inverting it here
+  would restore the text under the new name. Not being able to undo something
+  is fine; reaching past it is not.
+
+  `:to` still walks forward from an anchor the caller named explicitly, which
+  is a different request: there the address is right and the coverage may be
+  partial.
+
+  The log is read from the journal when asked (`with-history`, once, on a
+  copy); the writes at the end go to the live session.
+
+  Returns `{:reverted n :undid [delta-ids] :skipped-shared [...]}`, or
+  `{:reverted 0 :blocked [{:delta :op :why}] :note ...}`."
+  [session & {:keys [deltas to agent prompt]}]
+  (let [;; undo means \"walk back MY writes\"; with no explicit agent that is the
+        ;; session's own id — what every live write is tagged with. Left nil,
+        ;; `mine?` counted every delta as mine while `others` counted every
+        ;; real-agent delta as someone else's, so a session's own forms were
+        ;; skipped as :skipped-shared, leaving the store red. One agent, one
+        ;; ownership test.
+        agent    (or agent (:agent-id @session))
+        ;; the history views below walk the whole log — hydrated once, here,
+        ;; on a COPY: the writes at the end go to the real session
+        hs       (with-history session)
+        all      (store/deltas (:store @hs))
+        ;; :last-commit / :last-done name the two anchors worth rolling back to
+        ;; without knowing a delta id — accepted as keyword or wire string.
+        commit-anchor? (contains? #{:last-commit "last-commit" ":last-commit"} to)
+        done-anchor?   (contains? #{:last-done "last-done" ":last-done"} to)
+        to       (cond
+                   commit-anchor?
+                   (:id (last (filter #(= :commit (:op %)) all)))
+                   done-anchor?
+                   (:id (last (filter #(= :done (:op %)) all)))
+                   :else to)
+        mine?    (fn [d] (and (contains? history/content-ops (:op d))
+                              (= agent (:agent d))))
+        ;; POSITIONAL addressing counts over the LOG. `(take-last n (filter
+        ;; mine? all))` counted over the SURVIVORS, so "the last one" meant
+        ;; "the last one that passed the filter" — a different delta, chosen
+        ;; silently, then reverted while reporting `:reverted 1` and
+        ;; `:skipped-shared []`. Markers are transparent, because nobody means
+        ;; "undo my :verify"; a marker that also carries content — :merge — is
+        ;; not.
+        transparent? (fn [d] (and (contains? fields/markers (:op d))
+                                  (not (contains? history/content-ops (:op d)))))
+        recent   (when-not to
+                   (take-last (max 1 (or deltas 1)) (remove transparent? all)))
+        blocked  (vec (for [d recent :when (not (mine? d))]
+                        {:delta (:id d) :op (:op d)
+                         :why (if (= agent (:agent d))
+                                (str "undo inverts form SOURCES, and " (:op d)
+                                     " changes more than sources — reverting it"
+                                     " here would half-undo it")
+                                (str "written by "
+                                     (or (:agent d) "another agent")))}))
+        target   (if to
+                   (first (filter mine? (rest (drop-while #(not= to (:id %)) all))))
+                   (first recent))]
+    (cond
+      (and (or commit-anchor? done-anchor?) (nil? to))
+      {:reverted 0
+       :note (str "no " (if commit-anchor? "commit" "done")
+                  " to roll back to")}
+
+      ;; BEFORE the not-target case: a blocked head is not "nothing to undo",
+      ;; it is "the thing you named cannot be undone". Reported as a refusal
+      ;; because the ADDRESS is what is wrong — you asked for the last n
+      ;; writes, and reaching past them to revert something OLDER is doing
+      ;; something adjacent to what was asked. `undo` is the tool an agent
+      ;; reaches for at the moment it knows it made a mistake; that is the one
+      ;; behaviour it must never have.
+      (seq blocked)
+      {:reverted 0
+       :blocked blocked
+       :note (str "refused, nothing was reverted: the last "
+                  (count recent) " delta(s) include "
+                  (count blocked) " that undo cannot invert — "
+                  (str/join ", " (map #(str (:delta %) " (" (name (:op %)) ")")
+                                      blocked))
+                  ". Reverting past them would have restored an OLDER write"
+                  " while reporting success, which is what this refusal"
+                  " exists to prevent. To reach the earlier work anyway,"
+                  " name the span explicitly with :to <delta>; to address one"
+                  " form, edit_revert it by name.")}
+
+      (not target)
+      {:reverted 0
+       :note (if to
+               (str "nothing of yours after " to)
+               "no writes of yours to undo")}
+
+      :else
+      (let [from    (:id target)
+            changes (history/query-changes hs :agent agent :from from)
+            span    (drop-while #(not= from (:id %)) all)
+            others  (into #{}
+                          (mapcat history/delta-fids)
+                          (filter #(and (contains? history/content-ops (:op %))
+                                        (not (mine? %)))
+                                  span))
+            {:keys [steps shared]} (history/revert-steps changes others)]
+        (cond
+          (empty? (:forms changes))
+          {:reverted 0 :note (str "nothing of yours changed since " from)}
+
+          (empty? steps)
+          {:reverted 0 :skipped-shared shared
+           :note "every changed form is shared with other agents"}
+
+          :else
+          (let [r (edit-group! session steps
+                               :prompt (or prompt (str "undo back to " from))
+                               :agent agent)]
+            (if (or (:error r) (:conflict r))
+              r
+              (let [undid-ids (mapv :id (filter mine? span))
+                    reverted  (vec (remove (set shared) (map :form (:forms changes))))]
+                ;; mark the dead end so it stays findable: what was scrapped
+                ;; and (if given) why. A vanished exploration teaches nothing.
+                (engine/commit-appended!
+                 session
+                 (fn [base] (first (store/record-revert base :why prompt
+                                                        :forms reverted
+                                                        :undid undid-ids
+                                                        :agent agent)))
+                 [])
+                (assoc r
+                       :reverted (count steps)
+                       :undid undid-ids
+                       :skipped-shared shared)))))))))

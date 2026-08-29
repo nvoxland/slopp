@@ -1406,7 +1406,8 @@
                                                  :user (:user a)))
       "turn_end" (text! (ops/turn-end! session :agent (:agent a)
                                                :note (:note a)))
-      "query_changes" (text! (history/query-changes session :agent (:agent a)
+      "query_changes" (text! (history/query-changes (ops/with-history session)
+                                                   :agent (:agent a)
                                                    :from (:from a) :to (:to a)
                                                    :format (:format a)))
       "episode_revert" (text! (-> (ops/revert-episode! session
@@ -1415,7 +1416,10 @@
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "query_history" (text! (told! session name a
-                                        (let [nm (:name a)]
+                                        (let [nm      (:name a)
+                                              ;; every history view below reads the
+                                              ;; whole log — hydrated once, here
+                                              session (ops/with-history session)]
                                           (cond
                                             (and nm (:at a))
                                             (assoc (history/query-form-at session (sym :ns) (sym :name)
@@ -1470,9 +1474,11 @@
       "query_rules" (text! (told! session name a (rules/query-rules session)))
       "query_capabilities" (text! (told! session name a (query/query-capabilities session)))
       "query_surface" (text! (told! session name a (query/query-surface session)))
-      "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry session :since (:since a))))
+      "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry (ops/with-history session) :since (:since a))))
       "query_cost" (text! (told! session name a (query/query-turn-cost
-                                               session :since (:since a)
+                                               ;; the fold walks the whole log —
+                                               ;; hydrated for this call only
+                                               (ops/with-history session) :since (:since a)
                                                :otel (ops/otel-measurements session)
                                                ;; the per-call rows make :tools a
                                                ;; census with chars-out, not the
