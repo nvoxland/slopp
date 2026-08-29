@@ -565,53 +565,57 @@
       (when (:err r) r))))
 
 (def ^:export default-image-jvm-opts
-  "The JVM budget every owned image launches under. **Empty, and that is a
-  measured result rather than a placeholder.** Host property, never store
+  "The JVM budget every owned image launches under. Host property, never store
   config: a store is shared by every writer and by CI, and how much memory this
   BOX will spend on child JVMs is not a property of the code being written.
+  `SLOPP_IMAGE_JVM_OPTS` overrides it; an explicitly EMPTY value means none,
+  which is the off-arm any re-measurement needs.
 
-  `-Xms32m` shipped here first, on an isolated probe that showed a bare
-  clojure+nREPL child dropping 348 -> 262 MB committed. A controlled A/B against
-  a REAL loaded image — same store, three rounds, arms alternated, a full GC
-  forced before each sample — reversed it:
+  **These two flags are a PAIR, and each alone is worse than neither.** That is
+  the whole reason the budget is a list with a guard rather than two settings:
 
-  | arm | total committed |
+  | arm | committed, loaded image |
   |---|---|
-  | no budget | 722,259 / 722,088 / 722,105 KB |
-  | `-Xms32m` | 721,534 / 746,875 / 747,741 KB |
+  | neither | 722,040 / 724,763 KB |
+  | `-Xms32m` alone | +2.3% — WORSE |
+  | `-XX:+UseSerialGC` alone | ~2x — far worse still |
+  | **both** | **538,189 / 538,544 KB, −25.6%** |
 
-  It never won, and cost ~16 MB (+2.3%) on average. `-Xms` sets the INITIAL
-  heap, and an image that loads a real store allocates past 32m before it is
-  ready — so the heap is sized on demand either way, and starting smaller only
-  overshoots on the way up. The probe's number was never wrong about a BARE
-  JVM; it was wrong that a bare JVM stands in for a loaded one.
+  Measured against a 279-namespace store, arms alternated, a full GC forced
+  before each sample, reproducible to 0.07%. The saving is not the heap alone:
+  the serial collector drops GC bookkeeping from 62 MB to 0.6 MB and takes
+  ~35 MB of collector worker stacks with it, and it sizes the heap SMALLER
+  (278 -> 192 MB) rather than larger.
 
-  Both numbers deserve their weight stated: the in-situ A/B alternated arms and
-  normalised the collection cycle, while the probe took ONE unsynchronised
-  sample per arm — and a single sample here measures GC phase, not the flag.
-  The first in-situ run made exactly that mistake and reported the on-arm 33 MB
-  WORSE, which was also noise. Only the controlled comparison counts.
+  Why neither works alone. `-Xms` sets the INITIAL heap, and an image that
+  loads a real store allocates past 32m before it is ready — so on its own it
+  changes nothing except to make the JVM grow into place, overshooting. And
+  Serial commits its ergonomic initial heap at startup (576 MB on the measuring
+  box) and, unlike G1, never uncommits — so on its own it holds far more than
+  G1 ever would. Told what heap to start with, it holds far less.
 
-  What survives is this seam and its guards, which is what a real budget will
-  need. Two pairings must hold for anything added later, both encoded as tests
-  because a comment cannot fail:
+  **Throughput was the gate and it came back clear.** Serial is
+  single-threaded, and a memory win that costs suite wall clock is not a win.
+  Twelve samples per arm of the whole in-image suite, run repeatedly inside one
+  settled image so process startup could not swamp it: median 2738 ms without,
+  2639 ms with. The difference is not significant (t~0.77) and bounds a
+  regression at about +5% at worst, with the point estimate slightly in the
+  budget's FAVOUR — and serial's spread was half G1's. Correctness was never
+  the question: every assertion passes identically, and the store holds no
+  soft or weak references for a collector change to perturb.
 
-  - **`-XX:+UseSerialGC` must never ship without an `-Xms`.** Alone it nearly
-    DOUBLES the footprint — 681 MB against 348 — because Serial commits its
-    ergonomic initial heap at startup and, unlike G1, never uncommits.
-  - **An `-Xmx` cap must never ship without `-XX:+ExitOnOutOfMemoryError`.** A
-    cap manufactures OutOfMemoryError, and an OOM inside a test run is a RED
-    SUITE that means nothing — the exact false verdict the oracle exists to
-    prevent. Paired, the image DIES instead, which the eval path already
-    reports as the run not having happened rather than as a failure.
+  One honest limit: this is one store's workload. A far more allocation-heavy
+  project could find single-threaded collection costs it more, and the symptom
+  would be slower tests rather than wrong ones. That is what the override is
+  for, and it is documented where a user will meet it.
 
-  And where the memory actually is, measured on a loaded image: heap 278 MB
-  committed, **metaspace 195 MB**, thread stacks 74 MB, GC 63 MB, code cache
-  26 MB. Metaspace is 27% here — most of it the store's own namespaces, defined
-  through a DynamicClassLoader — so neither a shared class archive nor an
-  isolated-classloader runtime can give it back. The remaining levers are the
-  per-process ones."
-  [])
+  Refused, so nobody re-derives them. `-Xss1m` is noise here (one arm landed
+  ABOVE the base) and buys 2% while risking StackOverflow inside a test, which
+  is a FALSE RED. `-Xmx` appears in no winning arm at all and manufactures
+  OutOfMemoryError, the same failure. `-XX:TieredStopAtLevel=1` trades ~35 MB
+  for 2-5x on suite wall clock. `-Xshare:on` refuses to START the VM on a stale
+  archive, and a dead image is a false verdict where a slow one is not."
+  ["-XX:+UseSerialGC" "-Xms32m"])
 
 (defn ^:export image-jvm-opts
   "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set

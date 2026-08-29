@@ -210,3 +210,32 @@
                             :when      (:name e)]
                         [ns-sym (str (:name e))]))]
     (vec (sort (remove present expected)))))
+
+(defn ^:export declared-edge-gap
+  "Which `declared` module edges — `[{:from :to :test-only}]`, the ones this
+  episode added — are absent from the branch's manifests. Empty when the
+  branch has them all.
+
+  The twin of [[landed-gap]], for the same reason and against the same
+  hazard: a verdict is earned against a THREAD and the work then LANDS, so
+  \"green\" and \"on the branch\" are two facts. `landed-gap` joins them for
+  FORMS. A `module_dep` is not a form — it is a `:module-edge` delta folded
+  into the manifest — so it carried exactly that hazard and sat outside the
+  check by construction.
+
+  Measured: three edges were declared and landed, and hours later were gone
+  from the trunk while still present in the declaring session's store. That
+  asymmetry is what makes it expensive. The declaring agent's `full_check`
+  reads its own session and stays GREEN; another agent's reads the trunk and
+  goes red on edges belonging to somebody who cannot see the loss — and
+  `commit_point` gates on the whole-store verdict, so the second agent is
+  blocked by a fact the first one's tools deny.
+
+  `production` and `test` are separate manifests and each edge is checked
+  against its own. They are distinct fields on purpose — a fixture require
+  must not open the production graph — so checking one against the other
+  would report every test-only declaration as lost."
+  [declared production test]
+  (vec (remove (fn [{:keys [from to test-only]}]
+                 (contains? (get (if test-only test production) from) to))
+               declared)))

@@ -1472,7 +1472,34 @@ client-deps (merge (:client-deps st) (:client provided))
               (done/landed-gap
                (into #{} (map (fn [q] [(symbol (namespace q)) (name q)])) touched-q)
                (db/load-elements (:db @session)
-                                 (engine/session-branch-line session))))]
+                                 (engine/session-branch-line session))))
+        ;; the DECLARATION twin. A `module_dep` is not a form — it is a
+        ;; `:module-edge` delta folded into the manifest — so the check above
+        ;; cannot see one go missing, and one going missing is measured rather
+        ;; than hypothetical: three edges declared and landed were gone from
+        ;; the trunk hours later while still present in the declaring session's
+        ;; store, which left that agent GREEN and another agent's milestone
+        ;; blocked by twenty undeclared edges it could not repair.
+        ;;
+        ;; Gated on the episode having declared any at all, which is rare, so
+        ;; the branch read this needs costs nothing on an ordinary done.
+        declared (when (and (:landed land) (:db @session))
+                   (into [] (comp (filter #(and (#{:module-edge :module-test-edge} (:op %))
+                                                (= :add (:action %))
+                                                (= agent (:agent %))))
+                                  (map (fn [d]
+                                         (cond-> {:from (:from d) :to (:to d)}
+                                           (= :module-test-edge (:op d))
+                                           (assoc :test-only true))))
+                                  (distinct))
+                         (history/episode-span st agent)))
+        edge-gap (when (seq declared)
+                   (let [branch (db/load-store (:db @session)
+                                               (engine/session-branch-line session))]
+                     (done/declared-edge-gap
+                      declared
+                      (edit.modules/modules-manifest branch)
+                      (edit.modules/module-test-manifest branch))))]
     ;; the STANDING verdict, verbatim, when nothing was written — carrying its
     ;; :note, so a caller cannot read an inherited verdict as a fresh one
     (if standing standing (cond-> {:done cid
@@ -1495,7 +1522,19 @@ client-deps (merge (:client-deps st) (:client provided))
                                              " green is honest and does not describe"
                                              " what shipped — re-apply them and call"
                                              " done again. Read from the branch, not"
-                                             " from this session.")})))))
+                                             " from this session.")})
+      (seq edge-gap)      (assoc :declared-gap
+                                 {:edges edge-gap
+                                  :note (str "this episode declared " (count edge-gap)
+                                             " module edge(s) that are NOT on the branch"
+                                             " it just landed onto. Re-declare them —"
+                                             " and note that `module_dep` will answer"
+                                             " :already-declared from THIS session,"
+                                             " which still holds them; thread_drop puts"
+                                             " you on the branch where the repair can"
+                                             " take. Until then another agent's"
+                                             " full_check is red on your edges and"
+                                             " cannot milestone.")})))))
 
 (defn ^:export commit-point!
   "Record a MILESTONE (P4-m7): run the full done pipeline (normalize,
@@ -2311,3 +2350,22 @@ client-deps (merge (:client-deps st) (:client provided))
                       "and it is current. `full_check {force true}` re-runs it"
                       " anyway; a write of any kind retires it on its own."))
     (run-full-check! session :affected affected)))
+
+(defn ^:export compact-store!
+  "Reclaim the views settled lines still carry and vacuum the file — the
+  DELIBERATE step for a store that grew before `land-thread!` learned to drop a
+  landed thread's rows. Returns `{:rows-dropped :bytes-before :bytes-after}`
+  plus `:reclaimed` in bytes, or a `:note` when nothing is on disk yet.
+
+  Sits beside [[store-health]] on purpose: that one answers what the store
+  COSTS, this one gives some of it back. It is a tool rather than a side effect
+  of the next land because a consumer said so in as many words — a shrink they
+  run on purpose and can read in numbers beats a file that got smaller when
+  they were not looking, and `VACUUM` on a multi-GB file holds the lock long
+  enough that it should never surprise a concurrent writer."
+  [session]
+  (let [{:keys [db]} @session]
+    (if db
+      (let [r (db/compact! db)]
+        (assoc r :reclaimed (- (:bytes-before r) (:bytes-after r))))
+      {:note "no durable store on disk yet — nothing to compact"})))

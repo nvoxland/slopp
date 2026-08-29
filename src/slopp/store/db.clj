@@ -283,12 +283,28 @@
                            vec)
                 els  (jdbc/execute-one!
                       conn ["SELECT COUNT(*) AS n, SUM(LENGTH(source)) AS b FROM elements"])
+                ;; BY LINE STATUS, because the total cannot say what it is
+                ;; made of. It reported 2,112,267 rows / 3.75 GB flat while
+                ;; 2,010,559 of them sat on 663 LANDED threads that should
+                ;; have held none — a leak this tool was built to catch and
+                ;; could not see. `landed` and `abandoned` should read zero;
+                ;; anything else there is reclaimable and says so.
+                by-st (into (sorted-map)
+                            (map (fn [r]
+                                   [(or (:lines/status r) (:status r) "unknown")
+                                    {:n (or (:n r) 0) :source-bytes (or (:b r) 0)}]))
+                            (jdbc/execute!
+                             conn ["SELECT l.status, COUNT(e.form_id) AS n,
+                                           SUM(LENGTH(e.source)) AS b
+                                    FROM elements e JOIN lines l ON l.id = e.line
+                                    GROUP BY l.status"]))
                 bl   (jdbc/execute-one!
                       conn ["SELECT COUNT(*) AS n, SUM(LENGTH(bytes)) AS b FROM blobs"])]
             {:deltas   {:n (reduce + 0 (map :n by-op))
                         :payload-bytes (reduce + 0 (map :payload-bytes by-op))
                         :by-op by-op}
-             :elements {:n (or (:n els) 0) :source-bytes (or (:b els) 0)}
+             :elements {:n (or (:n els) 0) :source-bytes (or (:b els) 0)
+                        :by-status by-st}
              :blobs    {:n (or (:n bl) 0) :bytes (or (:b bl) 0)}}))
 
 (def ^:private store-dir-gitignore
@@ -576,62 +592,6 @@
                                 ORDER BY seq LIMIT -1 OFFSET ?")
                         (line-head conn line-id) (long n)])))
 
-^:reads (defn ^:export load-store
-  "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
-  empty. Every registry meta row loads through ONE loop (default from :init
-  unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
-  here, so an old db stops re-minting it into fold state); only the bespoke
-  element/delta/blob storage is hand-read.
-
-  `line-id` selects BOTH halves: the materialization comes from that line's
-  `elements` rows, and `:deltas` is that line's ANCESTRY rather than the file's
-  journal. History is shared and a line is a POINTER into it, so the deltas are
-  not copied — they are the ones reachable from this line's head, ordered by
-  seq, which is a valid causal order because a parent is always inserted before
-  its child.
-
-  Scoping the journal is not tidiness. `try-commit!` takes its CAS head from
-  `(last (store/deltas base))`, so a store value carrying another line's
-  deltas yields a head that can never match again — a line nobody can write to.
-
-  There is deliberately no line-less arity. A default would answer for the
-  trunk without saying so, which is the failure this whole layer exists to
-  prevent; every caller resolves its line where a reader can see it.
-
-  **No id counter is loaded.** \"Or nil if empty\" used to be decided by the
-  presence of the `next-id` meta row, which was quietly doing two jobs: it
-  carried the counter AND marked the store as having been persisted at all.
-  Ids are random names now, so the counter is gone and the marker is stated
-  directly — ANY meta row means `write-snapshot!` has run against this file,
-  because it writes the whole field registry on every persist."
-  [conn line-id]
-  (when (seq (jdbc/execute! conn ["SELECT 1 FROM meta LIMIT 1"]))
-    (into
-     {:namespaces (load-elements conn line-id)
-      :deltas     (mapv row->delta
-                        ;; EXPLICIT columns, not SELECT * — an older store still has a dead
-                        ;; `tree` column holding ~1.35MB per :commit marker, and naming the
-                        ;; columns is what keeps it from being fetched and parsed at every open.
-                        (jdbc/execute! conn
-                                       [(str ancestry-cte
-                                             " SELECT id, op, ns, payload FROM deltas
-                                                WHERE id IN (SELECT id FROM anc)
-                                                ORDER BY seq")
-                                        (line-head conn line-id)]))
-
-      ;; NOT loaded at open. :blobs is a partial cache by design — file-content
-      ;; documents the miss and the db fallback owns it, and put-blobs! is
-      ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
-      ;; bytes here cost a compiled JS bundle (~1.8MB) on every session open.
-      :blobs      {}}
-     (map (fn [{:keys [field meta-key init absent-nil? normalize]}]
-            (let [raw (some-> (jdbc/execute-one!
-                               conn ["SELECT v FROM meta WHERE k = ?" meta-key])
-                              :meta/v edn/read-string)
-                  v   (if (and (nil? raw) (not absent-nil?)) init raw)]
-              [field (if (and normalize (some? v)) (normalize v) v)])))
-     (fields/meta-fields))))
-
 (defn ^:export delete-line!
   "Drop a line: its row and its materialized `elements` rows. Returns true if
   a line was there to drop.
@@ -786,6 +746,15 @@
                                 SELECT ?, ns, pos, kind, form_id, name, source, comment
                                 FROM elements WHERE line = ?"
                                branch-line-id thread-line-id])
+            ;; and the thread's OWN view goes, for the reason `abandon-thread!`
+            ;; gives: the `elements` rows are the space, a thread's view is a
+            ;; full copy of its branch's, and they are pure derivation. The
+            ;; branch holds the copy now, so nothing is lost that the journal
+            ;; cannot recompute. This DELETE was missing: 663 landed threads
+            ;; left 2,010,559 rows and 3.4 GB behind — 64% of the store file —
+            ;; and `load-elements` slowed from 410 ms to over a second on the
+            ;; B-tree bloat alone.
+            (jdbc/execute! tx ["DELETE FROM elements WHERE line = ?" thread-line-id])
             (jdbc/execute! tx ["UPDATE lines SET status = 'landed', used_at = ?
                                 WHERE id = ?" now thread-line-id])
             true)))))
@@ -1275,3 +1244,147 @@
   [conn line-id]
   (one-col (jdbc/execute-one!
             conn ["SELECT status FROM lines WHERE id = ?" line-id])))
+
+(defn ^:export thin-commit-manifests
+  "`ds` with `:files` dropped from every `:commit` delta but the NEWEST.
+
+  **The largest single thing a session used to hold.** `commit_point!`
+  snapshots the whole tracked-files manifest into every milestone marker
+  (`(seq (:files st)) (assoc :files (:files st))`), and this loader parsed all
+  of them into every session's store value. Measured on slopp's own store: 554
+  milestones carrying 73.7 MB of payload, of which **`:files` alone was 70.8 MB
+  — 96%** — one marker reaching 2.1 MB beside ~3.8 KB of everything else. As
+  parsed Clojure structure that was the dominant object in a live server's
+  heap, and it grew with every milestone forever.
+
+  Safe by construction rather than by luck, which is the same argument
+  `:blobs` makes two doors down:
+
+  - `slopp.git/insert-commit!` — the projection, and the reader that needs
+    EVERY marker's manifest — takes its deltas straight from the db on its own
+    connection. `ensure-projected!` says so in its docstring: *reads the dbs
+    directly (always-current, no session needed)*. It never sees this value.
+  - `slopp.git/milestone-tree` is the one store-VALUE reader, and it resolves
+    `(last (filter #(= :commit (:op %)) ds))` — the newest, which is kept.
+
+  Only `:files` goes. A milestone's `:description`, `:status`, `:target` and
+  `:agent` are small and ARE read from the store value (`query_commits`, the
+  reviewer timeline), so thinning the whole payload would break them for a few
+  more kilobytes.
+
+  **Both constructors of a store value must call this, and that is why it is
+  exported.** Thinning at load alone fixes a session at OPEN and does nothing
+  for its life: `slopp.ops.engine/refresh-cache!` advances INCREMENTALLY in the
+  common case — `store/replay-delta` over the journal suffix, deliberately
+  avoiding a full re-parse — and a foreign `:commit` delta arrives from
+  `deltas-after` carrying its whole manifest. Every milestone landed during a
+  server's life would add one back. Measured: a fresh server holds ~515 MB
+  post-GC, a worked-in one 2.37 GB."
+  [ds]
+  (let [newest (->> ds
+                    (keep-indexed (fn [i d] (when (= :commit (:op d)) i)))
+                    last)]
+    (if (nil? newest)
+      ds
+      (into []
+            (map-indexed (fn [i d]
+                           (if (and (= :commit (:op d)) (not= i newest))
+                             (dissoc d :files)
+                             d)))
+            ds))))
+
+^:reads (defn ^:export load-store
+  "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
+  empty. Every registry meta row loads through ONE loop (default from :init
+  unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
+  here, so an old db stops re-minting it into fold state); only the bespoke
+  element/delta/blob storage is hand-read.
+
+  `line-id` selects BOTH halves: the materialization comes from that line's
+  `elements` rows, and `:deltas` is that line's ANCESTRY rather than the file's
+  journal. History is shared and a line is a POINTER into it, so the deltas are
+  not copied — they are the ones reachable from this line's head, ordered by
+  seq, which is a valid causal order because a parent is always inserted before
+  its child.
+
+  Scoping the journal is not tidiness. `try-commit!` takes its CAS head from
+  `(last (store/deltas base))`, so a store value carrying another line's
+  deltas yields a head that can never match again — a line nobody can write to.
+
+  There is deliberately no line-less arity. A default would answer for the
+  trunk without saying so, which is the failure this whole layer exists to
+  prevent; every caller resolves its line where a reader can see it.
+
+  **No id counter is loaded.** \"Or nil if empty\" used to be decided by the
+  presence of the `next-id` meta row, which was quietly doing two jobs: it
+  carried the counter AND marked the store as having been persisted at all.
+  Ids are random names now, so the counter is gone and the marker is stated
+  directly — ANY meta row means `write-snapshot!` has run against this file,
+  because it writes the whole field registry on every persist."
+  [conn line-id]
+  (when (seq (jdbc/execute! conn ["SELECT 1 FROM meta LIMIT 1"]))
+    (into
+     {:namespaces (load-elements conn line-id)
+      ;; …and having named the columns, drop the one that is still huge: every
+      ;; milestone's `:files` snapshot but the newest. See thin-commit-manifests
+      ;; — measured at 70.8 MB of 73.7 MB of commit payload on slopp's own store.
+      :deltas     (thin-commit-manifests
+                   (mapv row->delta
+                         ;; EXPLICIT columns, not SELECT * — an older store still has a dead
+                         ;; `tree` column holding ~1.35MB per :commit marker, and naming the
+                         ;; columns is what keeps it from being fetched and parsed at every open.
+                         (jdbc/execute! conn
+                                        [(str ancestry-cte
+                                              " SELECT id, op, ns, payload FROM deltas
+                                                WHERE id IN (SELECT id FROM anc)
+                                                ORDER BY seq")
+                                         (line-head conn line-id)])))
+
+      ;; NOT loaded at open. :blobs is a partial cache by design — file-content
+      ;; documents the miss and the db fallback owns it, and put-blobs! is
+      ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
+      ;; bytes here cost a compiled JS bundle (~1.8MB) on every session open.
+      :blobs      {}}
+     (map (fn [{:keys [field meta-key init absent-nil? normalize]}]
+            (let [raw (some-> (jdbc/execute-one!
+                               conn ["SELECT v FROM meta WHERE k = ?" meta-key])
+                              :meta/v edn/read-string)
+                  v   (if (and (nil? raw) (not absent-nil?)) init raw)]
+              [field (if (and normalize (some? v)) (normalize v) v)])))
+     (fields/meta-fields))))
+
+(defn ^:export compact!
+  "Reclaim what settled lines left behind and hand back the space: delete every
+  `elements` row whose line is `landed` or `abandoned`, then `VACUUM`. Returns
+  `{:rows-dropped n :bytes-before b :bytes-after b'}`.
+
+  A settled line's view is dead weight — nothing opens a landed thread again,
+  and `land-thread!` / `abandon-thread!` now drop it as they settle the line.
+  They did not always: 663 landings before the fix left 2,010,559 rows (3.4 GB,
+  64% of one file) behind, and a bug's fix does not un-write what it wrote.
+  This is the deliberate step for that — run once by an operator who asked for
+  it, reported in numbers, rather than a surprise hidden inside the next land.
+  `VACUUM` cannot run inside a transaction or beside an open statement, so the
+  delete commits first and the vacuum runs on a connection of its own — the
+  caller's is the server's shared one, and it is never idle."
+  [conn]
+  (let [size (fn [] (let [{:keys [page_count page_size]}
+                          (merge (jdbc/execute-one! conn ["PRAGMA page_count"])
+                                 (jdbc/execute-one! conn ["PRAGMA page_size"]))]
+                      (* page_count page_size)))
+        before (size)
+        dropped (-> (jdbc/execute-one!
+                     conn ["DELETE FROM elements
+                            WHERE line IN (SELECT id FROM lines WHERE status IN ('landed','abandoned'))"])
+                    :next.jdbc/update-count)]
+    ;; VACUUM refuses while ANY statement is open on its connection, and the
+    ;; server's connection is shared — some other thread is always mid-read on
+    ;; it. A connection of its own, to the same file, is the only one that is
+    ;; guaranteed idle. Its busy timeout is long because a vacuum of a
+    ;; multi-GB file waits behind whatever write is in flight.
+    (let [file (:file (jdbc/execute-one! conn ["PRAGMA database_list"]))]
+      (with-open [own (jdbc/get-connection
+                       (jdbc/get-datasource {:dbtype "sqlite" :dbname file}))]
+        (jdbc/execute! own ["PRAGMA busy_timeout=600000"])
+        (jdbc/execute! own ["VACUUM"])))
+    {:rows-dropped dropped :bytes-before before :bytes-after (size)}))

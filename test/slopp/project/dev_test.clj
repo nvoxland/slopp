@@ -60,6 +60,19 @@
                              [:config "dev" :values "run.ghost.args"] "--port,1")]
         (is (= {} (dev/runnables orphan)))))
 
+    (testing "a declared url rides along, and an undeclared one is ABSENT"
+      ;; slopp reads a bound port back from the serve! call it generates, but
+      ;; a declared entry is an arbitrary fn and hands back no socket — so an
+      ;; address it wants offered has to be declared. Absent rather than nil
+      ;; because a worker genuinely has no address, and a key that is always
+      ;; present but usually nil trains a reader to skip the one time it is
+      ;; not.
+      (let [addressed (assoc-in st [:config "dev" :values "run.app.url"]
+                                "http://127.0.0.1:8080")]
+        (is (= "http://127.0.0.1:8080" (get-in (dev/runnables addressed) ["app" :url])))
+        (is (not (contains? (get (dev/runnables addressed) "worker") :url))
+            "the worker has no url and should not carry the key")))
+
     (testing "a key the registry does not govern is ignored, not guessed at"
       ;; `run.app.typo` matches no pattern, so `find-entry` answers nil and
       ;; the entry is unaffected — a typo must not silently become a field

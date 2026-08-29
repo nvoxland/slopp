@@ -220,6 +220,30 @@
           (is (pos? (get-in s [:elements :n])))
           (is (pos? (get-in s [:elements :source-bytes])))
           (is (= 0 (get-in s [:blobs :n])))))
+
+      (testing "elements are split by LINE STATUS, so dead rows are visible"
+        ;; This tool exists because a store can rot by growing — and it
+        ;; reported 2,112,267 element rows / 3.75 GB as a flat total while
+        ;; 2,010,559 of them belonged to 663 LANDED threads that should have
+        ;; held none. A total cannot distinguish a store with 30 open lines
+        ;; from a store with one and a leak. The split is what makes the
+        ;; number readable.
+        (let [trunk  (db/trunk-line-id! conn)
+              h      (db/line-head conn trunk)
+              thread (db/adopt-thread! conn trunk "agent-h")
+              st2    (store/ingest st 'sh.more "(ns sh.more)\n\n(def g 1)\n")]
+          (is (true? (db/append! conn st2 [{:id "d3" :op :ingest :ns 'sh.more
+                                            :sources {"g1" "(ns sh.more)"}}]
+                                 ['sh.more] thread h)))
+          (let [before (get-in (db/journal-stats conn) [:elements :by-status])]
+            (is (pos? (get-in before ["open" :n]))
+                (str "an open thread's rows must count as open: " (pr-str before))))
+          (is (true? (db/land-thread! conn thread trunk h)))
+          (let [after (get-in (db/journal-stats conn) [:elements :by-status])]
+            (is (= 0 (get-in after ["landed" :n] 0))
+                (str "a landed thread holds no rows, and the split says so: " (pr-str after)))
+            (is (pos? (get-in after ["open" :n]))
+                "the branch itself is an open line and still holds its view"))))
       (finally (.close conn)))))
 
 (deftest a-forms-comment-survives-persist-and-reload
@@ -823,7 +847,22 @@
                 "including a namespace the thread REWROTE — the copy replaces, never merges")
             (is (= "landed" (:status (row-of thread))))
             (testing "and a landed thread is not handed back to its agent"
-              (is (not= thread (db/adopt-thread! conn trunk "agent-1")))))))
+              (is (not= thread (db/adopt-thread! conn trunk "agent-1"))))
+
+            (testing "and the thread's OWN view is gone — a landed line keeps its
+                      history and loses its materialization, exactly as an
+                      abandoned one does"
+              ;; `abandon-thread!` says why: the elements rows are the space, a
+              ;; thread's view is a full copy of its branch's, and they are pure
+              ;; derivation. That argument holds identically after a land — and
+              ;; the delete was missing here. Measured on this store: 663
+              ;; landed threads, 2,010,559 rows, 3.4 GB, 64% of the file.
+              (let [rows (fn [line] (:n (jdbc/execute-one!
+                                         conn ["SELECT count(*) AS n FROM elements WHERE line = ?" line])))]
+                (is (zero? (rows thread))
+                    (str "the landed thread still holds " (rows thread) " element rows"))
+                (is (pos? (rows trunk))
+                    "the branch, which the land was FOR, must still hold the view"))))))
       (finally (.close conn)))))
 
 (deftest ^:external an-abandoned-thread-keeps-its-history-and-loses-its-view
@@ -1002,3 +1041,102 @@
         (let [all   (db/measurements conn "otel" nil)
               after (db/measurements conn "otel" (:seq (first all)))]
           (is (= 1 (count after)) (pr-str after)))))))
+
+(deftest only-the-newest-milestone-keeps-its-files-manifest-in-memory
+  ;; The same "don't read it at open" lever as the blobs above, and the largest
+  ;; instance of it. `commit_point!` snapshots the WHOLE files manifest into
+  ;; every milestone marker, and `load-store` parses all of them into every
+  ;; session's store value. Measured on this repo: 554 milestones carrying
+  ;; 73.7 MB of payload, of which **:files alone is 70.8 MB (96%)** — a single
+  ;; marker reaching 2.1 MB beside ~3.8 KB of everything else. Parsed into
+  ;; Clojure structure that is the dominant object in a live server's heap.
+  ;;
+  ;; Nothing reads the older ones from a store VALUE. `slopp.git/insert-commit!`
+  ;; reads deltas straight from the db on its own connection (ensure-projected!:
+  ;; "Reads the dbs directly (always-current, no session needed)"), so the
+  ;; projection is untouched. The one store-value reader,
+  ;; `slopp.git/milestone-tree`, takes `(last (filter #(= :commit (:op %)) ds))`
+  ;; and only ever needs the NEWEST.
+  ;;
+  ;; So the newest keeps its manifest and the rest drop it. Everything else
+  ;; about an older milestone — description, status, target, agent — is small
+  ;; and IS read (query_commits, the timeline), so only :files goes.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-commits" (make-array java.nio.file.attribute.FileAttribute 0)))
+        conn (db/open! dir)
+        f1   {"a.md" {:sha "sha-a" :size 1}}
+        f2   {"a.md" {:sha "sha-a" :size 1} "b.md" {:sha "sha-b" :size 2}}
+        mk   (fn [st id files]
+               (update st :deltas conj
+                       {:id id :parent (:id (last (:deltas st)))
+                        :op :commit :ns '*session* :at 1
+                        :description (str "milestone " id)
+                        :status "green" :files files}))
+        s2   (-> (store/empty-store) (mk "dc1" f1) (mk "dc2" f2))]
+    (try
+      (is (true? (db/append! conn s2 (:deltas s2) [] (db/trunk-line-id! conn) nil)))
+      (let [loaded (db/load-store conn (db/trunk-line-id! conn))
+            cs     (filterv #(= :commit (:op %)) (:deltas loaded))]
+        (is (= 2 (count cs)) (pr-str (mapv :id cs)))
+
+        (testing "the newest milestone keeps its manifest — milestone-tree needs it"
+          (is (= f2 (:files (last cs)))))
+
+        (testing "older milestones do not carry theirs into memory"
+          (is (nil? (:files (first cs)))))
+
+        (testing "and everything else about an older milestone survives intact"
+          (is (= "milestone dc1" (:description (first cs))))
+          (is (= "green" (:status (first cs))))
+          (is (= :commit (:op (first cs))))))
+      (finally (.close conn)))))
+
+(deftest compaction-reclaims-what-settled-lines-left-behind
+  ;; `land-thread!` now drops a landed thread's view; it did not for 663
+  ;; landings, and those rows do not disappear because the bug did. A store
+  ;; carrying them needs a DELIBERATE step — run once, reported in numbers —
+  ;; rather than a surprise at the next land, which is what a consumer asked
+  ;; for in so many words: "I would rather run it deliberately than discover
+  ;; the file size later."
+  ;;
+  ;; Reproduces the leak by hand: a thread is landed, then its rows are put
+  ;; back under the landed line exactly as the old `land-thread!` left them.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [s1     (store/ingest (store/empty-store) 'cp.one "(ns cp.one)\n\n(def a 1)\n")
+            trunk  (db/trunk-line-id! conn)
+            _      (db/append! conn s1 (store/deltas s1) ['cp.one] trunk nil)
+            h1     (db/line-head conn trunk)
+            thread (db/adopt-thread! conn trunk "agent-c")
+            s2     (store/ingest s1 'cp.two "(ns cp.two)\n\n(def b 2)\n")
+            _      (db/append! conn s2 (vec (drop (count (store/deltas s1)) (store/deltas s2)))
+                               ['cp.two] thread h1)
+            _      (db/land-thread! conn thread trunk h1)
+            rows   (fn [line] (:n (jdbc/execute-one!
+                                   conn ["SELECT count(*) AS n FROM elements WHERE line = ?" line])))]
+        ;; the leak, re-created: copy the branch's rows back under the LANDED line
+        (jdbc/execute! conn ["INSERT INTO elements
+                                (line,ns,pos,kind,form_id,name,source,comment)
+                              SELECT ?, ns, pos, kind, form_id, name, source, comment
+                              FROM elements WHERE line = ?" thread trunk])
+        (is (pos? (rows thread)) "fixture: the landed line holds leaked rows")
+
+        (let [;; the server's connection is SHARED, and some other thread is always
+              ;; mid-statement on it — a poll, a read, a lease refresh. Run on the
+              ;; real store, the first compaction dropped two million rows and
+              ;; then died at VACUUM with "SQL statements in progress". A
+              ;; ResultSet left open on the caller's connection is that condition.
+              held (.executeQuery (.prepareStatement conn "SELECT id FROM deltas"))
+              _    (.next held)
+              r    (db/compact! conn)]
+          (testing "settled lines lose their rows and the branch keeps its own"
+            (is (zero? (rows thread)) "leaked rows on a landed line were not reclaimed")
+            (is (pos? (rows trunk)) "the open branch's view must survive compaction"))
+          (testing "and the report says what moved, in numbers"
+            (is (pos? (:rows-dropped r)) (pr-str r))
+            (is (number? (:bytes-before r)) (pr-str r))
+            (is (number? (:bytes-after r)) (pr-str r)))
+          (testing "and the file was vacuumed — no free pages left behind"
+            (is (= 0 (:freelist_count (jdbc/execute-one! conn ["PRAGMA freelist_count"])))))))
+      (finally (.close conn)))))

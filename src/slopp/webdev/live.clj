@@ -27,7 +27,7 @@
   incomplete, and reloading a browser into a red half-written state trains
   the author to ignore it."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http]))
+            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http] [slopp.project.dev :as dev] [slopp.currency :as currency] [slopp.kernel.boot :as boot] [slopp.store.render :as store.render]))
 
 (defn derived-port
   "A localhost port DERIVED from the store dir for this project's APP server —
@@ -57,90 +57,6 @@
   [dir]
   (+ 49152 (mod (hash (str "slopp-app:" dir)) 16384)))
 
-(defn serve-plan
-  "What to launch for this store's app server, as data — `{:enabled? :mode
-  :namespaces :host :port :adapter}`, or `{:enabled? false :reason …}`.
-
-  Pure, and separate from the launching on purpose: everything worth getting
-  wrong here (is this a web project, what does it serve, on what address) is
-  decidable from the store, and deciding it inside a function that also
-  spawns a JVM would make it testable only by spawning one.
-
-  `:namespaces` is DERIVED (`web/serving-namespaces`) — the app never hands
-  over a list it can get wrong.
-
-  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES. The
-  registry default of 8080 stands for production, where a known number is the
-  point; a dev session wants collision-freedom instead, because two projects
-  on one machine both taking the default is not a rare case — it is the
-  second project. Same conclusion the API listener reached — see
-  `slopp.api.server/derived-port`, which puts it
-  as a fixed default having \"worked for exactly one project and collided for
-  the second\".
-
-  `:mode` is `:dev`. It rides the plan so nothing downstream reads a dev plan
-  as the shipped one: the two serve the same routes from different stores at
-  different grains, and an unlabelled plan is a stand-in for whichever the
-  reader assumed."
-  [store dir]
-  (if-not (capabilities/effective store "http.enabled")
-    {:enabled? false
-     :reason (str "http.enabled is false — config_file {path \"capabilities\" "
-                  "key \"http.enabled\" value \"true\"} opts this store into web")}
-    {:enabled?   true
-     :mode       :dev
-     :namespaces (rules.http/serving-namespaces store)
-     :host       (capabilities/effective store "http.host")
-     :port       (if (capabilities/stored? store "http.port")
-                   (capabilities/effective store "http.port")
-                   (derived-port dir))
-     :adapter    (capabilities/effective store "http.adapter")
-     ;; what the app NEEDS, not only where it answers. Dropping these is what
-     ;; made a managed server 500 on any app that took slopp's own advice to
-     ;; receive its dependencies as :http/deps.
-     :max-body-bytes  (capabilities/effective store "http.max-body-bytes")
-     :context-builder (rules.http/context-builder store)
-     ;; the app's own assets. A UI's stylesheet and cljs bundle ARE the
-     ;; product, so a managed server that 404s them is not a lesser version
-     ;; of the app — it is an unusable one, and the project it happened to
-     ;; switched the managed server off rather than reading it as a bug.
-     :static          (rules.http/static-mounts store)
-     ;; the url a shell injects, JOINED from the compile output and the
-     ;; mounts above rather than typed on every shell route. nil when no
-     ;; mount reaches the bundle, which `slopp.http/context` refuses at
-     ;; assembly if anything declares itself a shell — the honest failure,
-     ;; where a blank page on every route is the alternative
-     :bundle          (rules.http/bundle-url store)
-     ;; whether the served app HONOURS its declared contracts. Read here rather
-     ;; than in serve-code for the same reason every other derivation is: the
-     ;; plan is what production and the dev server both answer from, and a
-     ;; switch consulted at code-generation time would be a second reader of the
-     ;; config that could disagree with this one.
-     :validate?       (capabilities/enabled? store "rest")
-     ;; WHAT IT WILL ACTUALLY SERVE, counted from the store before anything is
-     ;; spawned. `serve-in!` reports health on the BIND, and a bind succeeds
-     ;; whether or not anything is mounted behind it — so an app whose markers
-     ;; this slopp no longer reads comes up, answers 404 to every path, and is
-     ;; advertised by `session_brief` and `start-app!` as a healthy url. That is
-     ;; what a consuming store experienced the day a marker family moved: the
-     ;; server was up, the url was right, and nothing was behind it.
-     :endpoints       (count (rules.http/endpoints store))
-     ;; ...and the sentence, when it will serve NOTHING. Static-only is not
-     ;; nothing: a store may legitimately serve just its assets, and calling
-     ;; that empty would turn a working configuration into a warning. Both
-     ;; empty is the case where the port answers and every path 404s.
-     :serves-nothing  (when (and (empty? (rules.http/endpoints store))
-                                 (empty? (rules.http/static-mounts store)))
-                        (str "this app will bind its port and answer 404 to"
-                             " EVERY path: the store declares no endpoint this"
-                             " slopp can read, and no static mount. A bind"
-                             " succeeds either way, so the url reported after"
-                             " this is not evidence that anything is behind it."
-                             " If the store was written against an older slopp,"
-                             " its endpoint markers may be a retired spelling —"
-                             " session_brief's :unread-declarations says so and"
-                             " names the current one."))}))
-
 (defn load-order
   "The store namespaces to load into the app image, dependencies first.
 
@@ -168,6 +84,16 @@
                   ;; else pulls its namespace in, and the generated call would
                   ;; require its way out to a classpath the child lacks
                   builder (conj (symbol (namespace builder))))
+        ;; and every DECLARED entry, for exactly the builder's reason: an
+        ;; entry point declares no route and performs no kind, so nothing in
+        ;; the served surface reaches it and the generated call would require
+        ;; its way out to a classpath the child does not have. Measured — the
+        ;; first declared entry that crossed the wire failed with "Could not
+        ;; locate worker/core__init.class", and every pure test above it was
+        ;; green.
+        seeds   (into seeds
+                      (map (comp symbol namespace :main val))
+                      (dev/runnables store))
         want    (into #{} (mapcat #(store/ns-closure store %)) seeds)]
     (filterv want (store/ns-dependency-order store))))
 
@@ -406,6 +332,12 @@
         ;; the image is replaced at every refresh, so assets that changed
         ;; mid-episode would otherwise serve stale from a dir nobody rewrote.
         {:image img
+         ;; WHAT THIS IMAGE HOLDS, so a later refresh can push only what moved
+         ;; instead of replacing the JVM. Without it there is nothing to diff
+         ;; against and the only safe answer is a full re-boot — which is what
+         ;; loses the app's context state at every done.
+         :loaded (into {} (map (juxt identity #(store.render/render-ns store %)))
+                       (load-order store))
          :plan  (assoc plan :static-dir (materialize-static! store (:static plan) (:dir @session)))
          :boot-ms (quot (- (System/nanoTime) t0) 1000000)
          ;; the HEAD DELTA's timestamp, not the wall clock: a boot takes
@@ -507,30 +439,227 @@
     (str d " — free it, or set http.port to another")
     (str "the app image would not serve on port " port ": " raw)))
 
+(defn ^:export run-code
+  "The expression the app image evaluates to start a DECLARED entry, as a
+  STRING — it crosses an nREPL wire, which carries text.
+
+  The sibling of [[serve-code]], and the difference is who decides.
+  `serve-code` GENERATES a `slopp.http/serve!` call from the store, which is
+  what makes the plan's derivations binding. This one calls what the project
+  DECLARED, because a derived call cannot know the flags a developer wants
+  and a worker is not a `serve!` call at all.
+
+  Two things about the WIRE rather than the app:
+
+  **The namespace is REQUIRED, as a form.** The child loads the store's
+  namespaces, but a qualified symbol in evaluated position resolves only if
+  its namespace is loaded — the trap `serve-code` hit twice, with
+  `slopp.rest/validating` and the static mount.
+
+  **The call runs on a DAEMON THREAD and this expression answers
+  immediately.** A server's `-main` usually does not return; that is what
+  makes it a server. Called inline it would wedge the nREPL reply that is
+  slopp's only evidence the start happened, and a wedged wire is
+  indistinguishable from a slow image. Daemon, so it cannot outlive the child
+  — which already dies with its parent through the watchdog.
+
+  **What `:started` proves, and what it does not.** It proves the namespace
+  loaded and the thread spawned. It says nothing about whether the app came
+  up: a declared entry that throws on its second line reports `:started` and
+  is dead. That is the cost of calling an arbitrary fn instead of generating
+  one whose return value is a bound socket, and it is why a declared entry's
+  address is DECLARED rather than observed — slopp has nothing to observe it
+  from. Whether it is HEALTHY is the currency stamp's question, not this
+  expression's.
+
+  Positional rather than a map: two fields at a module boundary would buy a
+  schema and a key-naming rule for nothing."
+  [main args]
+  (pr-str
+   (list 'do
+         (list 'require (list 'quote (symbol (namespace main))))
+         (list 'doto (list 'Thread. (list 'fn [] (list* main args)))
+               (list '.setDaemon true)
+               (list '.start))
+         :started)))
+
+(defn- enabled-runnables
+  "The declared entries a reader asked to be RUNNING — `dev/runnables` minus
+  the silenced ones.
+
+  `runnables` keeps a silenced entry so it is visibly still declared; the
+  PLAN is what gets launched, and launching something declared off is the one
+  reading of `:enabled? false` that would be plainly wrong."
+  [store]
+  (into {} (filter (comp :enabled? val)) (dev/runnables store)))
+
+(defn serve-plan
+  "What to launch for this store's app server, as data — `{:enabled? :mode
+  :namespaces :host :port :adapter}`, or `{:enabled? false :reason …}`.
+
+  Pure, and separate from the launching on purpose: everything worth getting
+  wrong here (is this a web project, what does it serve, on what address) is
+  decidable from the store, and deciding it inside a function that also
+  spawns a JVM would make it testable only by spawning one.
+
+  `:namespaces` is DERIVED (`web/serving-namespaces`) — the app never hands
+  over a list it can get wrong.
+
+  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES. The
+  registry default of 8080 stands for production, where a known number is the
+  point; a dev session wants collision-freedom instead, because two projects
+  on one machine both taking the default is not a rare case — it is the
+  second project. Same conclusion the API listener reached — see
+  `slopp.api.server/derived-port`, which puts it
+  as a fixed default having \"worked for exactly one project and collided for
+  the second\".
+
+  `:mode` is `:dev`. It rides the plan so nothing downstream reads a dev plan
+  as the shipped one: the two serve the same routes from different stores at
+  different grains, and an unlabelled plan is a stand-in for whichever the
+  reader assumed."
+  [store dir]
+  (if-not (or (capabilities/effective store "http.enabled")
+              (seq (enabled-runnables store)))
+    {:enabled? false
+     :reason (str "http.enabled is false — config_file {path \"capabilities\" "
+                  "key \"http.enabled\" value \"true\"} opts this store into web."
+                  " A project that is not a web project can still declare what"
+                  " to run: config_file {path \"dev\" key \"run.<name>.main\""
+                  " value \"my.ns/-main\"}")}
+    {:enabled?   true
+     :mode       :dev
+     ;; what this project SAID to run, which derivation cannot know. Empty for
+     ;; a store that declares nothing — which is every store that worked before
+     ;; this existed, so the derived server below is unchanged for them.
+     :runnables  (enabled-runnables store)
+     :namespaces (rules.http/serving-namespaces store)
+     :host       (capabilities/effective store "http.host")
+     :port       (if (capabilities/stored? store "http.port")
+                   (capabilities/effective store "http.port")
+                   (derived-port dir))
+     :adapter    (capabilities/effective store "http.adapter")
+     ;; what the app NEEDS, not only where it answers. Dropping these is what
+     ;; made a managed server 500 on any app that took slopp's own advice to
+     ;; receive its dependencies as :http/deps.
+     :max-body-bytes  (capabilities/effective store "http.max-body-bytes")
+     :context-builder (rules.http/context-builder store)
+     ;; the app's own assets. A UI's stylesheet and cljs bundle ARE the
+     ;; product, so a managed server that 404s them is not a lesser version
+     ;; of the app — it is an unusable one, and the project it happened to
+     ;; switched the managed server off rather than reading it as a bug.
+     :static          (rules.http/static-mounts store)
+     ;; the url a shell injects, JOINED from the compile output and the
+     ;; mounts above rather than typed on every shell route. nil when no
+     ;; mount reaches the bundle, which `slopp.http/context` refuses at
+     ;; assembly if anything declares itself a shell — the honest failure,
+     ;; where a blank page on every route is the alternative
+     :bundle          (rules.http/bundle-url store)
+     ;; whether the served app HONOURS its declared contracts. Read here rather
+     ;; than in serve-code for the same reason every other derivation is: the
+     ;; plan is what production and the dev server both answer from, and a
+     ;; switch consulted at code-generation time would be a second reader of the
+     ;; config that could disagree with this one.
+     :validate?       (capabilities/enabled? store "rest")
+     ;; WHAT IT WILL ACTUALLY SERVE, counted from the store before anything is
+     ;; spawned. `serve-in!` reports health on the BIND, and a bind succeeds
+     ;; whether or not anything is mounted behind it — so an app whose markers
+     ;; this slopp no longer reads comes up, answers 404 to every path, and is
+     ;; advertised by `session_brief` and `start-app!` as a healthy url. That is
+     ;; what a consuming store experienced the day a marker family moved: the
+     ;; server was up, the url was right, and nothing was behind it.
+     :endpoints       (count (rules.http/endpoints store))
+     ;; ...and the sentence, when it will serve NOTHING. Static-only is not
+     ;; nothing: a store may legitimately serve just its assets, and calling
+     ;; that empty would turn a working configuration into a warning. Both
+     ;; empty is the case where the port answers and every path 404s.
+     :serves-nothing  (when (and (empty? (rules.http/endpoints store))
+                                 (empty? (rules.http/static-mounts store)))
+                        (str "this app will bind its port and answer 404 to"
+                             " EVERY path: the store declares no endpoint this"
+                             " slopp can read, and no static mount. A bind"
+                             " succeeds either way, so the url reported after"
+                             " this is not evidence that anything is behind it."
+                             " If the store was written against an older slopp,"
+                             " its endpoint markers may be a retired spelling —"
+                             " session_brief's :unread-declarations says so and"
+                             " names the current one."))}))
+
+(defn ^:export startup-code
+  "The expressions the app image evaluates to come up, in order — a vector of
+  STRINGS, because they cross an nREPL wire.
+
+  Two answers, and which applies is a property of the PLAN:
+
+  - **nothing declared** → one [[serve-code]], the generated
+    `slopp.http/serve!` call. Unchanged for every store that predates the
+    `dev` config, which is most of them.
+  - **entries declared** → one [[run-code]] each, and NO generated call.
+
+  **Declared REPLACES derived, rather than joining it.** A generated `serve!`
+  running beside a declared entry would bind a port the project never asked
+  for, and a reader who declared one server would have two — with the derived
+  one answering at an address they were never given. A project that wants
+  both says so by declaring both.
+
+  Decided here rather than inside `serve-in!` for the reason `serve-plan`
+  exists at all: everything worth getting wrong is decidable from the store,
+  and deciding it inside the function that also spawns a JVM makes it
+  testable only by spawning one."
+  [plan]
+  (if-let [declared (seq (:runnables plan))]
+    (mapv (fn [[_ {:keys [main args]}]] (run-code main args))
+          (sort-by key declared))
+    [(serve-code plan)]))
+
 (defn- serve-in!
-  "Bind the server inside an already-loaded app image (`boot!`'s result) and
-  return the running map — `{:serving? true :image :plan :port :url}`, or
+  "Bring the app up inside an already-loaded app image (`boot!`'s result) and
+  return the running map — `{:serving? true :image :plan …}`, or
   `{:serving? false :reason …}` with the image stopped.
 
-  The reported `:url` carries the port actually BOUND, which is what the
-  generated call hands back, not the one that was asked for.
+  What it evaluates is [[startup-code]]'s decision, not this function's.
 
-  A failure here is a BIND failure, and by construction it is the only kind
-  left: `boot!` already proved the code loads. So the reason it reports is
-  narrow enough to act on — something else holds the port."
-  [{:keys [image plan boot-ms served-at]}]
+  **Two shapes of success, because there are two shapes of start.** A
+  generated `serve!` answers the port it BOUND, and the reported `:url`
+  carries that rather than the one asked for — an integer is unambiguous
+  evidence a socket is open. A declared entry answers `:started`, which is
+  weaker on purpose: it proves the namespace loaded and a thread spawned, and
+  nothing about whether the app came up. So a declared plan reports the url
+  the project DECLARED, or none, and never invents one.
+
+  For the derived path a failure here is a BIND failure by construction —
+  `boot!` already proved the code loads — so the reason is narrow enough to
+  act on. For a declared entry it is whatever the entry threw on its way out
+  of `require` or its first line."
+  [{:keys [image plan boot-ms served-at loaded]}]
   ;; `:boot-ms` rides through rather than being measured here: hot-loading a
   ;; refresh would remove the BOOT and not the bind, so folding the two into
   ;; one number would make a contended port read as a slow image.
   (try
-    (let [[v] (repl/eval! image (serve-code plan))]
-      (if (integer? v)
-        {:serving? true :image image :plan plan :port v :boot-ms boot-ms
-         :served-at served-at
-         :url (str "http://" (:host plan) ":" v "/")}
-        (do (repl/stop! image)
-            {:serving? false :plan plan
-             :reason (bind-failure (:port plan) v)})))
+    (let [declared? (seq (:runnables plan))
+          results   (mapv (fn [code] (first (repl/eval! image code)))
+                          (startup-code plan))
+          bad       (first (remove #(or (integer? %) (= :started %)) results))]
+      (cond
+        bad (do (repl/stop! image)
+                {:serving? false :plan plan
+                 :reason (bind-failure (:port plan) bad)})
+
+        declared? (let [url (some :url (vals (:runnables plan)))]
+                    (cond-> {:serving? true :image image :plan plan
+                             :boot-ms boot-ms :served-at served-at :loaded loaded
+                             ;; NAMES, so a reader can see which entries this
+                             ;; process is carrying — there may be several and
+                             ;; only one of them has an address
+                             :started (vec (sort (keys (:runnables plan))))}
+                      ;; only when the project DECLARED one. Absent beats a
+                      ;; url nobody can be sure answers.
+                      url (assoc :url url)))
+
+        :else (let [v (first results)]
+                {:serving? true :image image :plan plan :port v
+                 :boot-ms boot-ms :served-at served-at :loaded loaded
+                 :url (str "http://" (:host plan) ":" v "/")})))
     (catch Throwable t
       (repl/stop! image)
       {:serving? false :plan plan
@@ -564,7 +693,15 @@
       (let [booted (boot! session store plan)]
         (if (:reason booted)
           (assoc booted :serving? false :plan plan)
-          (serve-in! booted))))))
+          ;; STAMPED at the start, because it cannot be asked afterwards —
+          ;; see [[currency]]. nil when there is no connection or no line,
+          ;; which `report` keeps as its third state rather than reading as
+          ;; stale.
+          (let [r (serve-in! booted)]
+            (cond-> r
+              (:serving? r)
+              (assoc :currency (currency/of (:db @session)
+                                            (:line @session))))))))))
 
 (defn ^:export refresh!
   "Re-serve `store` on this session's app server and return the running map.
@@ -604,6 +741,115 @@
         (if (:reason booted)
           (assoc booted :serving? false :plan plan)
           (do (stop! (:app-server @session))
-              (let [now (serve-in! booted)]
+              ;; RE-stamped, not inherited. A refresh is a NEW version of the
+              ;; app, and carrying the previous stamp forward would report the
+              ;; new process as current to a store it never saw — the precise
+              ;; failure the stamp exists to end.
+              (let [served (serve-in! booted)
+                    now    (cond-> served
+                             (:serving? served)
+                             (assoc :currency
+                                    (currency/of (:db @session)
+                                                 (:line @session))))]
                 (swap! session assoc :app-server now)
                 now)))))))
+
+(defn ^:export currency
+  "Whether the app this session is running was started from the store as it
+  stands — `slopp.currency/report` over the stamp the running map carries.
+
+  **A declared entry cannot be asked.** It answers `:started` and nothing
+  else: no bound socket, no health, no version. So \"is this process running
+  current code\" is not inferable after the fact and has to be RECORDED at the
+  start, which is what [[start!]] and [[refresh!]] do.
+
+  Reusing `slopp.currency` rather than counting deltas here is deliberate,
+  and the reason is its third state. `:current?` is true, false, or **nil**
+  when nothing could be measured — an unstamped process, or no connection to
+  compare against. A process nobody stamped is not a stale one, and
+  collapsing those two is exactly how a derived value comes to report
+  confidently about a store it never looked at.
+
+  The report rides the running map rather than living in a checker somebody
+  has to remember to call."
+  [conn running]
+  (currency/report conn (:currency running)))
+
+(defn ^:export hot-reload-set
+  "The namespaces to push into an ALREADY-RUNNING app image, dependencies
+  first: what changed between `loaded` (what the image holds, `{ns source}`)
+  and `now`, plus everything that requires them.
+
+  **Reusing `kernel.boot/with-dependents` rather than deciding again here.**
+  It answers exactly this question for `--live`, it is tested, and it carries
+  the reason a source diff alone is not enough: a value captured at `def`
+  time — a schema in var metadata, a `def` built from another namespace's
+  data — does not move when only its own namespace does, so a dependent whose
+  own text is byte-identical goes on holding the old one.
+
+  This store already has two implementations of that failure class
+  (`with-dependents` over the require graph, `rules.currency/stale-after` over
+  currency stamps) and five reload paths between them. A third answer to the
+  same question, in the namespace that spawns app servers, is not what the
+  count needs.
+
+  Empty when nothing changed — a `done` that touched no code must not churn
+  the app image."
+  [loaded now]
+  (let [edited (into #{} (filter #(not= (get loaded %) (get now %))) (keys now))]
+    (if (empty? edited)
+      []
+      (boot/with-dependents now edited))))
+
+(defn ^:export hot-refresh!
+  "Push what MOVED into the already-running app image and keep it serving —
+  `{:hot? true …}` on success, `nil` when this refresh cannot be done in
+  place and the caller should fall back to [[refresh!]].
+
+  **This is the change `serve-code` names and nobody had made.** A full
+  re-boot replaces the child JVM, so `:http/perform-ctx` is rebuilt and any
+  state the app kept there — a cache, a registry, a pool — is silently gone at
+  every `done`. Hot-loading leaves the context alone because it never re-runs
+  the generated call.
+
+  Returns nil rather than throwing for the cases in-place cannot serve, and
+  each is a real one:
+
+  - **nothing running**, or a running map from before this existed and so
+    carrying no `:loaded` — there is nothing to diff against.
+  - **the LOAD ORDER changed** — a namespace appeared or disappeared. A new
+    namespace may need requiring in a dependency order this image never had,
+    and a departed one leaves vars answering that the store no longer defines.
+    `--live` handles the second with `departed-vars`; an app image has no
+    equivalent, so a boot is the honest answer.
+  - **a reload FAILED** — the running version is left untouched and the caller
+    re-boots, which is `refresh!`'s existing safe-swap and is already tested.
+
+  The stamp is retaken on success: this process is now running different code,
+  and a carried-forward stamp would report it current to a store it never saw."
+  [session store running]
+  (let [was (:loaded running)
+        now (into {} (map (juxt identity #(store.render/render-ns store %)))
+                  (load-order store))]
+    (when (and (:serving? running) (seq was)
+               ;; same POPULATION, or an in-place reload cannot be honest
+               (= (set (keys was)) (set (keys now))))
+      (let [todo (hot-reload-set was now)
+            ;; recorded on the session exactly as `refresh!` does, or the
+            ;; session goes on holding the pre-reload map and every later
+            ;; refresh diffs against a `:loaded` that has moved on
+            keep! (fn [r] (swap! session assoc :app-server r) r)]
+        (if (empty? todo)
+          ;; nothing moved: still a successful refresh, and re-stamping is
+          ;; what makes "current" true rather than merely unchanged
+          (keep! (assoc running :hot? true :reloaded []
+                        :currency (currency/of (:db @session) (:line @session))))
+          ;; a failed reload falls out as nil — the running version is
+          ;; untouched and the caller re-boots, which is the safe swap that
+          ;; already exists and is already tested
+          (let [failed (first (keep (fn [n] (image/load-ns! (:image running) store n))
+                                    todo))]
+            (when-not failed
+              (keep! (assoc running :hot? true :reloaded (vec todo) :loaded now
+                            :currency (currency/of (:db @session)
+                                                   (:line @session)))))))))))

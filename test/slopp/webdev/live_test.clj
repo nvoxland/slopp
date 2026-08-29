@@ -7,7 +7,7 @@
   the blue/green swap need a real image and are `^:external`."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.read.orient :as orient]))
+            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.read.orient :as orient] [clojure.java.io :as io]))
 
 (deftest a-serve-plan-is-derived-from-the-store
   (let [src (str "(ns shop.api)\n\n"
@@ -839,3 +839,321 @@
         (is (= 0 (:endpoints p)) (pr-str p))
         (is (nil? (:serves-nothing p))
             (str "an assets-only app was called empty: " (pr-str p)))))))
+
+(deftest a-DECLARED-entry-is-called-rather-than-generated
+  ;; When a project declares what to run, slopp stops writing the `serve!`
+  ;; call for it and calls what was declared. That is the point: a derived
+  ;; call cannot know the flags a developer wants, and a worker is not a
+  ;; `serve!` call at all.
+  ;;
+  ;; Two things the generated form has to get right, and both are about the
+  ;; WIRE rather than about the app:
+  ;;
+  ;; 1. **The namespace must be REQUIRED.** The child loads the store's
+  ;;    namespaces, but a qualified symbol in evaluated position resolves
+  ;;    only if its namespace is loaded — the same trap `serve-code`
+  ;;    documents for `slopp.rest/validating` and the static mount, both of
+  ;;    which are asserted as require FORMS rather than as substrings for
+  ;;    exactly this reason.
+  ;;
+  ;; 2. **It must not BLOCK.** A server's `-main` usually does not return —
+  ;;    that is what makes it a server — and this expression crosses an nREPL
+  ;;    wire whose reply is how slopp learns the start happened. Called
+  ;;    inline, a blocking main wedges the wire and the refresh reads as
+  ;;    hung, which is indistinguishable from a slow image.
+  (let [form (edn/read-string {:default (fn [_ v] v)}
+                              (live/run-code 'shop.core/-main ["--port" "8080"]))
+        nodes (tree-seq coll? seq form)]
+
+    (testing "the entry's namespace is required, as a FORM"
+      (is (some #(= % '(require (quote shop.core))) nodes)
+          (str "nothing requires shop.core, so the symbol resolves only by"
+               " luck: " (pr-str form))))
+
+    (testing "the declared fn is called with its declared args, in order"
+      (is (some #(= % '(shop.core/-main "--port" "8080")) nodes)
+          (pr-str form)))
+
+    (testing "and it does not block the wire"
+      (is (some #(and (seq? %) (= 'Thread. (first %))) nodes)
+          (str "the call is inline, so a -main that does not return wedges"
+               " the nREPL reply: " (pr-str form))))
+
+    (testing "an entry with no args calls the fn with none"
+      (let [bare (edn/read-string {:default (fn [_ v] v)}
+                                  (live/run-code 'shop.jobs/-main []))]
+        (is (some #(= % '(shop.jobs/-main)) (tree-seq coll? seq bare))
+            (pr-str bare))))))
+
+(deftest a-DECLARED-runnable-is-reason-enough-to-serve
+  ;; `http.enabled` is the master web opt-in and it answers "is this a web
+  ;; project". It cannot answer "does this project want a worker running",
+  ;; and a project that declares one has said so as plainly as a config can.
+  ;;
+  ;; So the plan's gate becomes: this store serves HTTP, or it declared
+  ;; something to run. Neither implies the other — a CLI project with a
+  ;; declared worker is not a web project, and a web project that declares
+  ;; nothing still gets its derived server.
+  (let [declared (-> (store/empty-store)
+                     (assoc-in [:config "dev" :values "run.worker.main"]
+                               "shop.jobs/-main"))
+        silenced (assoc-in declared [:config "dev" :values "run.worker.enabled"]
+                           "false")]
+
+    (testing "a declared runnable enables the plan with http.enabled UNSET"
+      ;; the case that matters: a worker is not a web project
+      (let [plan (live/serve-plan declared "/tmp/x")]
+        (is (:enabled? plan) (pr-str plan))
+        (is (= 'shop.jobs/-main (get-in plan [:runnables "worker" :main]))
+            (pr-str plan))))
+
+    (testing "a SILENCED entry is not in the plan"
+      ;; `runnables` keeps it so a reader can see it was asked for; the PLAN
+      ;; is what gets launched, and launching something declared-off is the
+      ;; one reading of `:enabled? false` that would be wrong
+      (let [plan (live/serve-plan silenced "/tmp/x")]
+        (is (empty? (:runnables plan)) (pr-str plan))))
+
+    (testing "and with nothing declared and no http, the plan still declines"
+      ;; the guard on the guard: if a declared runnable enabled the plan, an
+      ;; absent one must not — most stores are not web projects and must not
+      ;; acquire a server by this change
+      (let [plan (live/serve-plan (store/empty-store) "/tmp/x")]
+        (is (not (:enabled? plan)) (pr-str plan))
+        (is (re-find #"http\.enabled" (str (:reason plan))) (pr-str plan))))
+
+    (testing "a web project with nothing declared carries no runnables"
+      ;; the derived server is unchanged by this, which is what keeps every
+      ;; existing store working
+      (let [web  (assoc-in (store/empty-store)
+                           [:config "capabilities" :values "http.enabled"] "true")
+            plan (live/serve-plan web "/tmp/x")]
+        (is (:enabled? plan) (pr-str plan))
+        (is (empty? (:runnables plan)) (pr-str plan))))))
+
+(deftest what-the-child-EVALUATES-is-decided-by-the-plan
+  ;; `serve-in!` used to have one answer: evaluate the generated `serve!`
+  ;; call. With declared entries there are two, and which one applies is a
+  ;; property of the PLAN — so it is decided here, purely, rather than inside
+  ;; the function that also spawns a JVM and binds a socket.
+  ;;
+  ;; That split is the same one `serve-plan` already makes and for the same
+  ;; reason: everything worth getting wrong is decidable from the store.
+  (let [derived  {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+                  :adapter :http-kit :runnables {}}
+        declared {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+                  :adapter :http-kit
+                  :runnables {"app"    {:main 'shop.core/-main
+                                        :args ["--port" "8080"] :enabled? true}
+                              "worker" {:main 'shop.jobs/-main
+                                        :args [] :enabled? true}}}]
+
+    (testing "with nothing declared, the child evaluates the GENERATED serve! call"
+      ;; unchanged for every store that predates this
+      (let [code (live/startup-code derived)]
+        (is (= 1 (count code)) (pr-str code))
+        (is (str/includes? (first code) "slopp.http/serve!") (pr-str code))))
+
+    (testing "with entries declared, it evaluates THOSE and not the generated call"
+      ;; "declared replaces the call" — a derived `serve!` beside a declared
+      ;; entry would bind a port the project never asked for, and the reader
+      ;; would have two servers where they asked for one
+      (let [code (live/startup-code declared)]
+        (is (= 2 (count code)) (pr-str code))
+        (is (not-any? #(str/includes? % "slopp.http/serve!") code)
+            (str "the derived server is still generated beside the declared"
+                 " entries: " (pr-str code)))))
+
+    (testing "one expression per declared entry, each naming its own fn"
+      (let [code (live/startup-code declared)]
+        (is (some #(str/includes? % "shop.core/-main") code) (pr-str code))
+        (is (some #(str/includes? % "shop.jobs/-main") code) (pr-str code))))))
+
+(deftest ^:external a-DECLARED-entry-actually-RUNS-in-the-child
+  ;; Everything above this decides what SHOULD happen: `runnables` reads the
+  ;; config, `serve-plan` gates on it, `startup-code` picks the expression.
+  ;; All three are pure and all three can be right while nothing starts —
+  ;; which is the shape that cost this store a day when a filter was correct
+  ;; and never called.
+  ;;
+  ;; So this one crosses the wire. A real child image, the store's own code,
+  ;; a declared entry that leaves EVIDENCE it ran.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-declared"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        ;; the entry writes a file, because a return value proves nothing here
+        ;; — `run-code` answers :started whatever the fn does, deliberately,
+        ;; and this test exists to check the fn was actually CALLED
+        marker (str dir "/ran.txt")
+        s    (-> (store/empty-store)
+                 (store/ingest 'worker.core
+                               (str "(ns worker.core)\n\n"
+                                    "(defn -main \"Runs.\" [& args]\n"
+                                    "  (spit \"" marker "\" (str \"ran:\" (vec args))))\n"))
+                 (#(first (store/record-config-put % "dev" :manifest
+                                                   "run.worker.main" "worker.core/-main")))
+                 (#(first (store/record-config-put % "dev" :manifest
+                                                   "run.worker.args" "--once,now"))))
+        sess (atom {})
+        r    (live/start! sess s dir)]
+    (try
+      (testing "it comes up on a declared entry alone — no http.enabled anywhere"
+        ;; a worker is not a web project, and needing the web opt-in to run one
+        ;; would be the derivation answering a question it cannot see
+        (is (:serving? r) (str "start! did not serve: " (:reason r))))
+
+      (testing "and it names WHICH entries it is carrying"
+        (is (= ["worker"] (:started r)) (pr-str r)))
+
+      (testing "no url is invented for an entry that declared none"
+        ;; slopp reads a bound port back from the call it GENERATES; it has
+        ;; nothing to read here, and a plausible url nobody can be sure
+        ;; answers is worse than none
+        (is (not (contains? r :url)) (pr-str r)))
+
+      (testing "the declared fn RAN, with its declared arguments in order"
+        ;; the assertion the pure tests above cannot make
+        (let [ran? (loop [n 0]
+                     (cond (.exists (io/file marker)) true
+                           (> n 100) false
+                           :else (do (Thread/sleep 100) (recur (inc n)))))]
+          (is ran? "the entry never ran — :started reported a thread that did nothing")
+          (is (= "ran:[\"--once\" \"now\"]" (slurp marker))
+              "the arguments did not arrive in order")))
+
+      (finally (live/stop! r)))))
+
+(deftest a-running-app-CARRIES-what-it-was-started-from
+  ;; A declared entry answers `:started` and nothing else — no bound socket,
+  ;; no health. So "is this process running current code" cannot be inferred
+  ;; from the start at all, and has to be RECORDED at it.
+  ;;
+  ;; `slopp.currency` is that record, and the reason to reuse it rather than
+  ;; count deltas here is its third state: `:current?` is true, false, or
+  ;; **nil** when nothing could be measured. A process nobody stamped is not
+  ;; a stale one, and collapsing those is how a derived value reports
+  ;; confidently about a store it never looked at.
+  (let [running {:serving? true :currency {:line "L1" :head "d1" :digest {}}}]
+
+    (testing "the report rides the running map rather than living in a checker"
+      (let [r (live/currency nil running)]
+        (is (= {:line "L1" :head "d1" :digest {}} (:derived-from r)) (pr-str r))))
+
+    (testing "with no connection it is nil — NOT false"
+      ;; false would be a claim about the store. nil is the absence of one.
+      (let [r (live/currency nil running)]
+        (is (nil? (:current? r)) (pr-str r))
+        (is (seq (:why r)) "a nil answer must say why it could not measure")))
+
+    (testing "and an unstamped process is also nil, with a different reason"
+      ;; the two nils are different facts and the `:why` is what separates
+      ;; them — "nobody recorded this" is not "I cannot reach the store"
+      (let [r (live/currency nil {:serving? true})]
+        (is (nil? (:current? r)) (pr-str r))
+        (is (not= (:why r) (:why (live/currency nil running)))
+            "an unstamped process and an unreachable store gave the same reason")))))
+
+(deftest a-refresh-reloads-what-CHANGED-and-what-captured-from-it
+  ;; `refresh!` replaces the whole child JVM. `serve-code`'s docstring records
+  ;; the cost: the app's `:http/perform-ctx` is built once per image, so any
+  ;; state the app accumulates in it — a cache, a registry, a connection pool
+  ;; — is silently lost at every `done`. It names hot-loading as the fix and
+  ;; says it is not made.
+  ;;
+  ;; The reload SET is the part worth getting right, and it is the same
+  ;; question `--live` already answers: what changed, PLUS what captured a
+  ;; value from it at def time. `kernel.boot/with-dependents` is that answer
+  ;; and it is tested; a sixth reload implementation in this namespace would
+  ;; be the fifth and sixth solving one failure class two ways, which this
+  ;; store already has two of.
+  (let [loaded {'app.schema "(ns app.schema)\n(def s :old)\n"
+                'app.api    "(ns app.api (:require [app.schema :as sc]))\n(def e sc/s)\n"
+                'app.other  "(ns app.other)\n(def x 1)\n"}
+        moved  (assoc loaded 'app.schema "(ns app.schema)\n(def s :new)\n")]
+
+    (testing "nothing changed, nothing reloads"
+      ;; a done that touched no code must not churn the app image
+      (is (= [] (live/hot-reload-set loaded loaded))))
+
+    (testing "a changed namespace drags what REQUIRES it"
+      ;; app.api's own source is byte-identical and it still has to reload:
+      ;; `(def e sc/s)` captured the value at def time, which is the whole
+      ;; reason with-dependents exists
+      (let [set (live/hot-reload-set loaded moved)]
+        (is (some #{'app.schema} set) (pr-str set))
+        (is (some #{'app.api} set)
+            (str "a dependent that captured a value at def time was left"
+                 " holding the old one: " (pr-str set)))))
+
+    (testing "and dependencies come FIRST"
+      ;; reloading the dependent before its dependency re-captures the value
+      ;; that is about to change — the same bug, one poll later
+      (let [set (vec (live/hot-reload-set loaded moved))]
+        (is (< (.indexOf set 'app.schema) (.indexOf set 'app.api)) (pr-str set))))
+
+    (testing "an untouched namespace is left alone"
+      ;; the cost of hot-loading is reloading more than a poll would; it must
+      ;; not become reloading everything, or it is the image replacement it
+      ;; was written to avoid
+      (is (not-any? #{'app.other} (live/hot-reload-set loaded moved))))))
+
+(deftest ^:external a-refresh-KEEPS-the-child-jvm-when-it-can
+  ;; `hot-reload-set` is pure and tested, and being right about the SET proves
+  ;; nothing about whether anything reloads it. Twice today a correct pure
+  ;; decision sat behind an uncalled caller, so this one crosses the wire.
+  ;;
+  ;; IMAGE IDENTITY is the evidence, and it is the right evidence rather than
+  ;; a convenient one: the app's `:http/perform-ctx` lives in that JVM. Same
+  ;; image across a refresh IS the state surviving; a new image is the loss
+  ;; `serve-code`'s docstring records, whatever else the refresh reports.
+  (let [dir   (str (java.nio.file.Files/createTempDirectory
+                    "slopp-hot" (make-array java.nio.file.attribute.FileAttribute 0)))
+        app   (fn [greeting]
+                (str "(ns demo.app)\n\n"
+                     "(defn greeting \"G.\" [] \"" greeting "\")\n\n"
+                     "(defn ^{:http/method :get :http/path \"/hi\"\n"
+                     "        :http/auth :public} hi \"H.\" [req] {:ok true})\n"))
+        base  (-> (store/empty-store)
+                  (store/ingest 'slopp.http fake-web-src)
+                  (store/ingest 'slopp.http.static fake-static-src)
+                  (store/ingest 'demo.app (app "one"))
+                  (#(first (store/record-config-put % "capabilities" :manifest
+                                                    "http.enabled" "true"))))
+        moved (store/ingest base 'demo.app (app "two"))
+        ;; a SECOND endpoint namespace, so the load order genuinely grows —
+        ;; `load-order` seeds from the served surface, so a namespace with no
+        ;; route was never in it and adding one changes nothing
+        grew  (store/ingest moved 'demo.extra
+                            (str "(ns demo.extra)\n\n"
+                                 "(defn ^{:http/method :get :http/path \"/extra\"\n"
+                                 "        :http/auth :public} ex \"E.\" [req] {:ok true})\n"))
+        sess  (atom {})
+        r     (live/start! sess base dir)]
+    (try
+      (is (:serving? r) (str "fixture did not serve: " (:reason r)))
+
+      (testing "a store whose code MOVED refreshes in place"
+        (let [hot (live/hot-refresh! sess moved r)]
+          (is (some? hot) "it fell back to a re-boot when it did not have to")
+          (is (:hot? hot) (pr-str (dissoc hot :loaded :image)))
+          (is (identical? (:image r) (:image hot))
+              "the child JVM was replaced — the app's context state is gone")
+          (is (some #{'demo.app} (:reloaded hot))
+              (str "the changed namespace was not reloaded: "
+                   (pr-str (:reloaded hot))))))
+
+      (testing "and refreshing again on the SAME store reloads nothing"
+        ;; a done that touched no code must not churn the image. Against
+        ;; `moved`, which is what the image now holds — the previous block
+        ;; updated it
+        (let [hot (live/hot-refresh! sess moved (:app-server @sess))]
+          (is (:hot? hot) (pr-str (dissoc hot :loaded :image)))
+          (is (= [] (:reloaded hot)) (pr-str (:reloaded hot)))))
+
+      (testing "a changed load ORDER falls back rather than pretending"
+        ;; a namespace appearing cannot be served in place: it may need
+        ;; requiring in a dependency order this image never had
+        (is (nil? (live/hot-refresh! sess grew (:app-server @sess)))
+            "it claimed an in-place refresh across a changed load order"))
+
+      (finally (live/stop! (:app-server @sess))))))

@@ -95,3 +95,47 @@
              (done/landed-gap
               #{['app.core "f"] ['app.core "g"]}
               {'app.core {:elements [{:name 'f} {:name nil} {}]}}))))))
+
+(deftest a-verdict-covers-declarations-the-branch-must-actually-have
+  ;; `landed-gap` compares the FORMS a verdict covered against the branch. A
+  ;; `module_dep` is not a form — it is a `:module-edge` delta folded into the
+  ;; manifest — so it carries exactly the hazard that check exists for and sits
+  ;; outside its reach by construction.
+  ;;
+  ;; Measured: three edges declared and landed were gone from the trunk hours
+  ;; later while still present in the declaring session's store. The declaring
+  ;; agent's full_check stayed green (it reads its own session); another
+  ;; agent's went red on twenty undeclared edges belonging to somebody who
+  ;; could not see the loss, and their milestone was blocked by it.
+  ;;
+  ;; The MECHANISM is still unknown — the fold is edge-grained, `merge-logs`
+  ;; unions concurrent declarations, and a two-agent land preserves them
+  ;; (`thread-test/a-module-edge-survives-another-agents-landing`). So this is
+  ;; the detector, and it is also how the mechanism gets caught: it names the
+  ;; loss at the done that loses it, with the episode still in hand.
+  (let [declared [{:from "app.web" :to "app.core"}
+                  {:from "app.web" :to "app.util" :test-only true}]]
+    (testing "everything declared is on the branch — nothing to say"
+      (is (empty? (done/declared-edge-gap
+                   declared
+                   {"app.web" #{"app.core"}}
+                   {"app.web" #{"app.util"}}))))
+
+    (testing "a production edge the branch does not have is NAMED"
+      (is (= [{:from "app.web" :to "app.core"}]
+             (done/declared-edge-gap declared {} {"app.web" #{"app.util"}}))))
+
+    (testing "a TEST-ONLY edge is checked against the test manifest, not the production one"
+      ;; the two are different fields on purpose — a fixture require must not
+      ;; open the production graph — so checking one against the other would
+      ;; report every test-only declaration as lost
+      (is (= [{:from "app.web" :to "app.util" :test-only true}]
+             (done/declared-edge-gap declared {"app.web" #{"app.core"}} {})))
+      (is (empty? (done/declared-edge-gap
+                   [{:from "app.web" :to "app.util" :test-only true}]
+                   {} {"app.web" #{"app.util"}}))))
+
+    (testing "an edge to a module the branch has never heard of counts as missing"
+      (is (= [{:from "app.web" :to "app.core"}]
+             (done/declared-edge-gap [{:from "app.web" :to "app.core"}]
+                                     {"other.thing" #{"app.core"}} {}))))))

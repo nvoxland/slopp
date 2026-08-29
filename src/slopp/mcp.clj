@@ -562,7 +562,15 @@
   (let [dir (:dir @session)]
     (if (and dir (live/managed? (:store @session) server/served-namespaces))
       (locking session
-        (try (live/refresh! session (:store @session) dir)
+        ;; IN PLACE first. A re-boot replaces the child JVM, so the app's
+        ;; `:http/perform-ctx` is rebuilt and any state it kept there — a
+        ;; cache, a registry, a pool — is silently gone at every done point.
+        ;; `hot-refresh!` answers nil for everything in-place cannot serve (a
+        ;; changed load order, a failed reload, nothing running), and the
+        ;; re-boot below is the fallback rather than the default.
+        (try (or (live/hot-refresh! session (:store @session)
+                                    (:app-server @session))
+                 (live/refresh! session (:store @session) dir))
              (catch Throwable t
                {:serving? false :reason (or (.getMessage t) (str t))})))
       (when-let [running (:app-server @session)]
@@ -865,6 +873,9 @@
    "store_doctor"
    (fn [session _a _sym]
      (text! (doctor/diagnose (:store @session))))
+   "store_compact"
+   (fn [session _a _sym]
+     (text! (external/compact-store! session)))
    "ui_serve"
    ;; `:ui-url` is what session_brief announces, and until this only
    ;; `start-ui!` wrote it — so re-serving moved the listener and left the
@@ -937,9 +948,31 @@
    (fn [session _a _sym]
      (text! (branch/query-branches session)))
    "restart"
-   (fn [session _a _sym]
+   (fn [session a _sym]
      (ops/restart! session)
-     (text! "restarted"))
+     ;; the ORACLE is what restart has always re-imaged, and it stays the
+     ;; default. `app true` also re-serves this project's app server — the
+     ;; second half of "reload in place, restart on demand", and it exists
+     ;; because a declared entry answers `:started` once a namespace loads
+     ;; and a thread spawns, so one that came up half dead reports exactly
+     ;; what a healthy one does. Without this the only way to ask again is an
+     ;; unrelated write, to trigger a done that re-serves as a side effect.
+     (if-not (:app a)
+       (text! "restarted")
+       (let [r (refresh-app! session)]
+         (text! (cond-> {:restarted true
+                         :app-restarted (boolean (:serving? r))}
+                  (:url r)     (assoc :app-url (:url r))
+                  (:started r) (assoc :app-started (:started r))
+                  (not (:serving? r))
+                  (assoc :app-note
+                         (or (:reason r)
+                             (str "nothing to restart — this store has no"
+                                  " managed app server. Declare what to run"
+                                  " (config_file {path \"dev\" key"
+                                  " \"run.<name>.main\" value \"my.ns/-main\"}),"
+                                  " or enable http.enabled for the derived"
+                                  " one."))))))))
    "build"
    (fn [session a _sym]
      (text! (external/build! session (:dir a)

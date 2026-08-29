@@ -141,6 +141,18 @@
                           (take-while #(not= (:id %) (:id d)))
                           reverse
                           (some (fn [pd] (get (:sources pd) fid0)))))
+;; The content THEIR line ends up holding for `fid0`, from delta `d`
+        ;; onward — so an `:add` can ask what the form FINISHES as, not only
+        ;; what it started as. The `:add` arm resolves by NAME (a replayed copy
+        ;; arrives under a new id, so the name is all that survives), and a
+        ;; RENAME in their own log is precisely what invalidates that: we look
+        ;; for the pre-rename name, find nothing, append a second copy, and
+        ;; their rename then collides it with the one we already hold.
+        their-final (fn [d fid0]
+                      (->> td
+                           (drop-while #(not= (:id %) (:id d)))
+                           (keep (fn [pd] (get (:sources pd) fid0)))
+                           last))
         ;; successive theirs-ops on ONE diverged form COALESCE into a single
         ;; conflict reflecting the NEWEST theirs — sixteen rows for one form
         ;; bury the real signal (fid-keyed; deps/rename conflicts unaffected)
@@ -262,7 +274,15 @@
                         src    (get (:sources d) fid)
                         node   (p/parse-string src)
                         nm     (store/form-symbol node)
-                        cur    (when nm (store/form-named st ns-sym nm))]
+                        cur    (when nm (store/form-named st ns-sym nm))
+                        ;; what this form FINISHES as on their line. Only
+                        ;; interesting when their own log renames it, which is
+                        ;; the case `cur` cannot see.
+                        fin-src (their-final d fid)
+                        fin-nm  (when (and fin-src (not= fin-src src))
+                                  (store/form-symbol (p/parse-string fin-src)))
+                        fin-cur (when (and fin-nm (not= fin-nm nm))
+                                  (store/form-named st ns-sym fin-nm))]
                     (cond
                       (and cur (= (n/string (:node cur)) src)) ; converged
                       (done st (assoc idmap fid (:id cur)) merged conflicts notes
@@ -298,6 +318,38 @@
                                              :ours nil :theirs src
                                              :reason (str "we deleted it; their line still has it"
                                                           " (a replayed copy under a new id)")})
+                            notes changed new-nses applied)
+
+                      ;; ALREADY HERE, under the name their own log renames it
+                      ;; to. `cur` asked for the name the add MINTED and found
+                      ;; nothing, because we hold the renamed result — usually
+                      ;; from having merged this same work before it was
+                      ;; replayed under fresh ids. Appending here is what
+                      ;; produced two forms of one name: their rename follows
+                      ;; and lands the copy straight onto ours, and the
+                      ;; duplicate postcondition then refuses the WHOLE merge,
+                      ;; naming a collision neither line authored and an action
+                      ;; ("rename on one line first") that whoever reads it
+                      ;; cannot take.
+                      (and fin-cur (= (n/string (:node fin-cur)) fin-src))
+                      (done st (assoc idmap fid (:id fin-cur)) merged conflicts
+                            notes changed new-nses (conj applied (:id d)))
+
+                      ;; Same name, different content: we cannot tell their
+                      ;; replayed form from one we authored ourselves, so this
+                      ;; is the ordinary both-sides-added-this-name question —
+                      ;; reported per FORM, for the agent to resolve. That is
+                      ;; the point: a per-form conflict is answerable, and the
+                      ;; whole-merge refusal it replaces was not.
+                      fin-cur
+                      (done st idmap merged
+                            (conj conflicts {:form (symbol (str ns-sym) (str fin-nm))
+                                             :ns ns-sym :delta (:id d)
+                                             :ours (n/string (:node fin-cur))
+                                             :theirs fin-src
+                                             :reason (str "both sides have " fin-nm
+                                                          " — theirs arrived as " nm
+                                                          " and their own line renamed it")})
                             notes changed new-nses applied)
 
                       :else

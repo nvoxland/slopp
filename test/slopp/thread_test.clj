@@ -423,3 +423,69 @@
                     "B's work is on the branch"))))
           (finally (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-module-edge-survives-another-agents-landing
+  ;; Measured on this store 2026-08-28: three `module_dep` edges were declared
+  ;; and landed, and hours later were GONE from the trunk while still present
+  ;; in the declaring session's store. The other 52 modules survived, so it was
+  ;; not the manifest vanishing — it was those rows.
+  ;;
+  ;; It is silent in both directions at once. The declaring agent's
+  ;; `full_check` reads its OWN session and stays green; another agent's reads
+  ;; the trunk and goes red on twenty undeclared edges belonging to somebody
+  ;; who cannot see the loss. `commit_point` gates on the whole-store verdict,
+  ;; so the second agent is blocked by a fact the first one's tools deny.
+  ;;
+  ;; The fold is already edge-grained and `merge-logs` already unions
+  ;; concurrent declarations (`modules-test/module-edges-are-crdt-grain`), so
+  ;; this exercises the path those two tests do not: a real LAND, across two
+  ;; sessions on one journal.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-medge-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'md.one "(ns md.one)\n\n(defn ^:unused-ok f \"F.\" [] 1)\n"
+                       :agent "setup")
+          (ops/ingest! setup 'md.two "(ns md.two)\n\n(defn ^:unused-ok g \"G.\" [] 2)\n"
+                       :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        ;; both forked from the same head, which is what makes them concurrent
+        (try
+          (ops/module-dep! a "md.one" "md.two" :prompt "a declares an edge" :agent "agent-a")
+          (let [r (external/done! a :label "a declares an edge"
+                                :agent "agent-a" :external? false)]
+            (is (= "main" (:landed (:land r)))
+                (str "fixture: A's declaration reached main: " (pr-str (:land r))))
+            (testing "done CONFIRMS the declaration reached the branch"
+              ;; the declaration twin of :landed-gap, and it reads the BRANCH.
+              ;; A session that declared an edge reports it present whether or
+              ;; not it landed — which is exactly how the measured loss stayed
+              ;; invisible to the agent who caused it.
+              (is (nil? (:declared-gap r))
+                  (str "the edge landed, so nothing is owed: " (pr-str r)))))
+
+          (testing "the edge is on the branch once A lands"
+            (let [conn (:db @a)
+                  main (db/load-store conn (db/trunk-line-id! conn))]
+              (is (contains? (get (:modules main) "md.one") "md.two")
+                  (pr-str (:modules main)))))
+
+          ;; B forked BEFORE A's declaration existed and now lands its own work
+          (ops/edit-replace! b 'md.two 'g "(defn ^:unused-ok g \"G.\" [] 22)"
+                             :prompt "b works, touching nothing of A's" :agent "agent-b")
+          (is (= "main" (:landed (branch/land-thread! b)))
+              "fixture: B's work reached main")
+
+          (testing "and A's edge is STILL on the branch after B lands over it"
+            (let [conn (:db @b)
+                  main (db/load-store conn (db/trunk-line-id! conn))]
+              (is (contains? (get (:modules main) "md.one") "md.two")
+                  (str "B's landing dropped an edge it never touched — this is the"
+                       " loss, and nothing reports it: " (pr-str (:modules main))))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

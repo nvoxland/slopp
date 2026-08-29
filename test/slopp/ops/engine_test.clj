@@ -17,7 +17,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.edit :as edit]
-            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render]))
+            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db]))
 
 (deftest ^:external heal-path-replays-candidate-namespaces
   ;; the extract_ns live failure: hot-load-all!'s heal boots a FRESH image
@@ -666,3 +666,52 @@
                                  #{'p.core-test/theirs-t})))]
         (is (= :mine (:attribution f)))
         (is (= ['p.core-test/theirs-t] (:implicated f)))))))
+
+(deftest an-incremental-refresh-does-not-re-accumulate-milestone-manifests
+  ;; `load-store` thins every milestone's `:files` but the newest. That fixes a
+  ;; session at OPEN and does nothing for its life: `refresh-cache!` advances
+  ;; INCREMENTALLY in the common case — `store/replay-delta` over the journal
+  ;; suffix, deliberately avoiding a full re-parse — and a foreign `:commit`
+  ;; delta arrives from `deltas-after` carrying its whole manifest.
+  ;;
+  ;; So without this, every milestone landed during a server's life adds its
+  ;; manifest back, one at a time, forever. That is the measured shape: a fresh
+  ;; server holds ~515 MB post-GC, a worked-in one 2.37 GB.
+  ;;
+  ;; No image is booted: `refresh-cache!` needs only `:db`, `:line` and
+  ;; `:store`, so the session is a hand-built atom and this stays in-image.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-refresh" (make-array java.nio.file.attribute.FileAttribute 0)))
+        conn (slopp.store.db/open! dir)
+        line (slopp.store.db/trunk-line-id! conn)
+        files (fn [n] (into {} (map (fn [i] [(str "f" i ".md") {:sha (str "s" i) :size i}]))
+                            (range n)))
+        mk   (fn [st id n]
+               (update st :deltas conj
+                       {:id id :parent (:id (last (:deltas st)))
+                        :op :commit :ns '*session* :at 1
+                        :description (str "milestone " id)
+                        :status "green" :files (files n)}))]
+    (try
+      ;; two milestones land before the session opens
+      (let [s2 (-> (slopp.store/empty-store) (mk "dr1" 2) (mk "dr2" 3))]
+        (is (true? (slopp.store.db/append! conn s2 (:deltas s2) [] line nil))))
+      (let [opened (slopp.store.db/load-store conn line)
+            sess   (atom {:db conn :line line :branch "main" :store opened})]
+        (is (= 1 (count (filter :files (filter #(= :commit (:op %)) (:deltas opened)))))
+            "fixture: load-store already thins at open")
+
+        ;; a THIRD milestone lands from outside, and the session refreshes
+        (let [s3 (mk opened "dr3" 4)]
+          (is (true? (slopp.store.db/append! conn s3 [(last (:deltas s3))] []
+                                             line (:id (last (:deltas opened)))))))
+        (slopp.ops.engine/refresh-cache! sess)
+
+        (let [cs (filter #(= :commit (:op %)) (:deltas (:store @sess)))
+              wf (filter :files cs)]
+          (is (= 3 (count cs)) "the refresh saw the new milestone")
+          (is (= 1 (count wf))
+              "only the newest milestone keeps a manifest after an incremental refresh")
+          (is (= "dr3" (:id (last wf))) "and it is the newest one")
+          (is (every? :description cs) "the rest keep everything that is actually read")))
+      (finally (.close conn)))))

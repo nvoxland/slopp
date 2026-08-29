@@ -414,7 +414,7 @@
     (is (< (.indexOf cmd "-J-Xms8m") (.indexOf cmd "-Sdeps"))
         "the budget leads the command line"))
 
-  (testing "an empty budget adds nothing at all — the shipped default"
+  (testing "an empty budget adds nothing at all — the off-arm"
     (is (empty? (filterv #(clojure.string/starts-with? % "-J")
                          (#'slopp.image.repl/default-cmd nil [])))))
 

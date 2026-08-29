@@ -2830,3 +2830,31 @@
       ;; must not be obeyed as its most destructive reading.
       (is (= 600000 (:slopp.ops/branch-image-ttl-ms
                      (opts {"SLOPP_BRANCH_IMAGE_TTL_MS" "soon"})))))))
+
+(deftest ^:external restart-can-reach-the-APP-server-not-only-the-oracle
+  ;; `restart` re-images the ORACLE — the image verification runs in. It has
+  ;; never touched the app server, which `webdev.live`'s notes record as a
+  ;; known gap, and it matters more now than it did.
+  ;;
+  ;; A declared entry answers `:started` and nothing else. If it came up half
+  ;; dead — threw on its second line, bound nothing — there is no health
+  ;; signal to notice it and no way to ask for another attempt short of making
+  ;; an unrelated write to trigger a `done`. "Reload in place, restart on
+  ;; demand" needs the second half to exist.
+  (let [sess (external/open!)]
+    (try
+      (testing "the plain call still answers, as every existing caller expects"
+        (let [r (str (#'mcp/call-tool! sess {:name "restart" :arguments {}}))]
+          (is (str/includes? r "restarted") (pr-str r))))
+
+      (testing "asking for the app says what happened rather than throwing"
+        ;; most stores are not web projects, and an escape hatch that throws
+        ;; on them is one nobody reaches for
+        (let [r (str (#'mcp/call-tool! sess {:name "restart"
+                                            :arguments {:app true}}))]
+          (is (or (str/includes? r "run.")
+                  (str/includes? r "http.enabled"))
+              (str "it restarted no app and did not name what would give this"
+                   " store one: " r))))
+
+      (finally (ops/close! sess)))))

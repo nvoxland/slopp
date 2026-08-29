@@ -519,3 +519,86 @@
               (seq (:conflicts r))
               (seq (:notes r)))
           "the form came back AND nothing in the merge result mentions it"))))
+
+(deftest an-add-their-line-later-RENAMED-is-not-re-added-under-the-old-name
+  ;; The half that already works, pinned so the half that does not is
+  ;; unambiguous. Their line keeps its identities here, so the `:applied` ids
+  ;; our merge delta recorded recognise both deltas on the second pass and
+  ;; skip them. Written expecting a failure and green on the first run, which
+  ;; is the useful kind of wrong answer: it ruled out the recorded-id path and
+  ;; pointed at the replay one, which is where the bug lives (see the sibling
+  ;; test below).
+  (let [b     (base)
+        f1    (first (store/append-form b 'm.core
+                                        (p/parse-string "(defn old-name [] 1)")
+                                        :prompt "fork adds"))
+        fid   (:id (store/form-named f1 'm.core 'old-name))
+        f2    (first (store/apply-changeset f1 :rename 'm.core
+                                            {fid (p/parse-string "(defn new-name [] 1)")}
+                                            :prompt "fork renames"
+                                            :extra {:old 'old-name :new 'new-name}))
+        m1    (merge/merge-logs b f2 :from "fork")
+        ours1 (first (merge/record-merge (:store m1) "fork" m1))
+        f3    (replace! f2 'new-name "(defn new-name [] 2)")
+        m2    (merge/merge-logs ours1 f3 :from "fork")
+        named (fn [m s] (filter #(= s (str (:name %)))
+                                (store/forms (:store m) 'm.core)))]
+
+    (testing "merge #1 delivers the renamed form, once"
+      (is (nil? (:error m1)) (pr-str (dissoc m1 :store)))
+      (is (= 1 (count (named m1 "new-name"))))
+      (is (empty? (named m1 "old-name"))))
+
+    (testing "merge #2 neither refuses nor duplicates it"
+      (is (nil? (:error m2)) (pr-str (dissoc m2 :store)))
+      (is (= 1 (count (named m2 "new-name"))))
+      (is (empty? (named m2 "old-name")))
+      (is (re-find #"new-name \[\] 2"
+                   (store.render/render-ns (:store m2) 'm.core))))))
+
+(deftest a-REPLAYED-add-plus-rename-converges-instead-of-duplicating
+  ;; The sibling that bites, and the one that blocked a real land. Above, their
+  ;; line kept its identities, so our recorded `:applied` recognised the deltas
+  ;; and skipped them. **Landing replays forms under NEW ids** — the `:add`
+  ;; arm's own comment says so — so the same piece of code reaches us again
+  ;; wearing identities we have never seen. `:applied` cannot help, and the
+  ;; only thing left is the NAME.
+  ;;
+  ;; And the name is wrong, because their log renamed it. We look for
+  ;; `old-name`, find nothing, append a second copy, and their rename then
+  ;; lands it onto the `new-name` we already hold — two forms, one name, and
+  ;; the duplicate postcondition refuses the WHOLE merge over a collision
+  ;; neither line authored, naming an action ("rename on one line first") that
+  ;; whoever reads it cannot take.
+  (let [b     (base)
+        mk    (fn [st add-prompt ren-prompt]
+                (let [f1  (first (store/append-form
+                                  st 'm.core (p/parse-string "(defn old-name [] 1)")
+                                  :prompt add-prompt))
+                      fid (:id (store/form-named f1 'm.core 'old-name))]
+                  (first (store/apply-changeset
+                          f1 :rename 'm.core
+                          {fid (p/parse-string "(defn new-name [] 1)")}
+                          :prompt ren-prompt
+                          :extra {:old 'old-name :new 'new-name}))))
+        theirs (mk b "fork adds" "fork renames")
+        m1     (merge/merge-logs b theirs :from "fork")
+        ours1  (first (merge/record-merge (:store m1) "fork" m1))
+        ;; the branch carries a REPLAYED copy of that same work — same code,
+        ;; fresh delta ids and fresh form ids, exactly as a land mints them
+        replay (mk b "replayed add" "replayed rename")
+        m2     (merge/merge-logs ours1 replay :from "branch:main")
+        named  (fn [m s] (filter #(= s (str (:name %)))
+                                 (store/forms (:store m) 'm.core)))]
+
+    (testing "we already hold the renamed form once"
+      (is (= 1 (count (named m1 "new-name")))))
+
+    (testing "the replayed copy converges onto it"
+      (is (nil? (:error m2))
+          (str "merge refused rather than recognising its own code: "
+               (:error m2)))
+      (is (= 1 (count (named m2 "new-name")))
+          "one piece of code, one form")
+      (is (empty? (named m2 "old-name"))
+          "the pre-rename name must not come back from a replay"))))

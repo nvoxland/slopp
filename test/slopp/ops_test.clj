@@ -2260,3 +2260,26 @@
           (is (not-any? #{:schema} (:unverified r)) (pr-str r))))
 
       (finally (ops/close! sess)))))
+
+(deftest ^:external store-compact-keeps-the-open-view-and-reports-in-bytes
+  ;; store_compact is the operator's write beside store_health's read. What
+  ;; it must never do is touch the view a live line holds; what it must always
+  ;; do is answer in numbers, because the consumer who asked for it asked to
+  ;; run it deliberately and read the result rather than find a smaller file.
+  (let [dir  (str (Files/createTempDirectory
+                   "slopp-compact" (make-array FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/create-ns! sess 'compact.core :source "(ns compact.core)\n\n(defn f \"F.\" [x] x)\n")
+      (let [r      (external/compact-store! sess)
+            health (external/store-health sess)]
+        (testing "a store with nothing settled has nothing to drop, and says so in numbers"
+          (is (= 0 (:rows-dropped r)) (pr-str r))
+          (is (= (:reclaimed r) (- (:bytes-before r) (:bytes-after r))) (pr-str r))
+          (is (pos? (:bytes-after r))))
+        (testing "and the open line's view is untouched"
+          (is (pos? (get-in health [:elements :by-status "open" :n])) (pr-str (:elements health)))))
+      (finally
+        (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+          (ops/close! sess)
+          (rm! (io/file dir)))))))

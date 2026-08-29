@@ -34,6 +34,8 @@
     :doc "The entry fn to run under this name (shop.core/-main). The name is the key's own segment: run.admin.main declares `admin`."}
    {:key "run.*.args" :type [:csv-list] :default nil
     :doc "Arguments handed to the entry fn, comma-separated and IN ORDER — --port,8080 arrives as [\"--port\" \"8080\"]. Ordered because arguments are positional, which is why this is :csv-list and not :csv."}
+   {:key "run.*.url" :type [:string] :default nil
+    :doc "Where a human should open this entry (http://127.0.0.1:8080). DECLARED, not observed: slopp generates the serve! call for a derived dev server and reads the bound port back from it, but a declared entry is an arbitrary fn and hands back no socket. Absent = slopp has no address to offer for it, which is the honest answer for a worker."}
    {:key "run.*.enabled" :type [:boolean] :default true
     :doc "Whether to start this entry. Default true, because declaring a runnable IS asking for it; set false to silence one for an afternoon without deleting its entry point."}])
 
@@ -70,9 +72,14 @@
     (into {}
           (keep (fn [nm]
                   (when-let [main (read (str "run." nm ".main"))]
-                    [nm {:main     main
-                         :args     (or (read (str "run." nm ".args")) [])
-                         :enabled? (read (str "run." nm ".enabled"))}])))
+                    [nm (cond-> {:main     main
+                                 :args     (or (read (str "run." nm ".args")) [])
+                                 :enabled? (read (str "run." nm ".enabled"))}
+                          ;; ABSENT rather than nil when undeclared: a worker
+                          ;; has no address, and a key present-but-nil trains
+                          ;; a reader to skip the one that matters
+                          (read (str "run." nm ".url"))
+                          (assoc :url (read (str "run." nm ".url"))))])))
           names)))
 
 (defn ^:export config-refusal

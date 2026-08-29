@@ -846,7 +846,13 @@
                                 st'
                                 (reduced nil)))
                             local suffix)
-              fresh (or incr (db/load-store conn line))]
+              ;; the incremental path replays FOREIGN deltas verbatim, and a
+              ;; :commit marker arrives carrying its whole files manifest — so
+              ;; every milestone landed during this server's life would add one
+              ;; back, undoing at runtime what load-store does at open. The
+              ;; full-load fallback thins itself.
+              fresh (or (some-> incr (update :deltas db/thin-commit-manifests))
+                        (db/load-store conn line))]
           (when fresh
             (swap! session
                    (fn [s]
