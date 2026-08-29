@@ -49,7 +49,34 @@ for a script that means to finish what it started.
 This is the surface for scripts, CI steps, and for answering "how do I check
 this myself" without an MCP client.
 
+## Running your project
+
+To have your own app running while you work on it — so you can open it in a
+browser and watch it change as work lands — declare what to run:
+
+```clojure
+config_file {path "dev" key "run.app.main" value "shop.core/-main"}
+config_file {path "dev" key "run.app.args" value "--port,8080"}
+config_file {path "dev" key "run.app.url"  value "http://127.0.0.1:8080"}
+```
+
+slopp starts it in a dedicated image and re-serves it at every `done`. Declare
+as many as you need — `run.worker.main`, `run.admin.main` — each under its own
+name, each startable and silenceable on its own (`run.worker.enabled false`).
+
+**The `dev` path never leaves the database.** It reaches no built tree and no
+git projection, because what to run on a laptop is not a fact about the
+program. `capabilities`, `rules` and `gates` still travel with the product.
+
+There is no flag for this. Declaring an entry is the whole opt-in, and
+freshness comes from the way slopp starts it rather than from something you
+pass on a command line.
+
 ## Serving modes
+
+These are about the slopp SERVER's own code, not about your app — a
+distinction worth keeping, because one word covered both for a long time and
+cost several confident wrong diagnoses.
 
 ```sh
 slopp . --live       # hot-reload the server's own namespaces as the store changes

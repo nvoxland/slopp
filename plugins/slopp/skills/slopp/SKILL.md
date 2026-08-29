@@ -69,11 +69,19 @@ edit, not a batch — see "Choosing the write tool"); and a failing test with
 its implementation, because red-first means you have to SEE the red. `done`
 ends a turn's batch by definition — its verdict is what decides the next move.
 
-1. **Orient with ONE small call: `session_brief`.** Form names, recent
-   milestones with their asks, git alignment, the loop — everything a
-   fresh session needs to start working. Skip `query_project` unless you
-   need arities/flags for a specific ns (`query_source {ns}` = the outline).
-   `query_search {pattern}` to find things.
+1. **Orient with ONE small call per session: `session_brief`.** Form
+   names, recent milestones with their asks, git alignment, the loop —
+   everything a fresh session needs to start working. **Then ONE call per
+   ask: `orient {ask "<the ask, verbatim>"}`** — the forms that matter for
+   it, ranked by a walk over the reference graph and the tests that cover
+   them, fitted to `tokens` (default 1500). Every row is a card (sig, doc
+   line, recorded why, test warranty) and carries `:via` — the edge that put
+   it there (`seed` / `called by X` / `calls X` / `covered by T`) — so it
+   names the entry point AND its neighbourhood in one read; `:more` counts
+   what the budget cut. Add `seeds ["ns/name"]` for forms you already know.
+   Skip `query_project` unless you need arities/flags for a specific ns
+   (`query_source {ns}` = the outline). `query_search {pattern}` is for
+   text you cannot name.
 2. **Read only what the brief can't tell you — and prefer NOT reading.**
    About to edit a function? `query_slice {ns name}` (add `match`+`window` on giant forms — the neighborhood, not the whole thing) is THE read: full
    source of that one form + interface CARDS (sig, doc, why, test
@@ -146,14 +154,15 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    `commit_point` is what refuses to PUBLISH a red done — and a red done
    STANDS until new work supersedes it, so you cannot clear it by
    committing without changing anything.
-   **`done` is EPISODE-scoped**, and its `:scope` field says so every
-   time: lint and dead-surface cover only the namespaces you touched, and
-   the full `^:external`/`^:integration` tiers do not run. `full_check`
-   answers the whole-store question — see below.
-   **Read `:scope` for whether the external slice actually RAN.** done runs
-   the impacted `^:external` tests, but above a cap it defers the whole lot
-   and runs NONE — and it still returns `:green`, because the tests that ran
-   passed. `:scope` now says when nothing external ran. The inversion is
+   **`done` is EPISODE-scoped** (`:scope :episode` on every result — the
+   keyword, not a paragraph; the `done` tool description carries the
+   teaching once): lint and dead-surface cover only the namespaces you
+   touched, and the full `^:external`/`^:integration` tiers do not run.
+   `full_check` answers the whole-store question — see below.
+   **Read `:external-pending` for whether the external slice actually RAN.**
+   done runs the impacted `^:external` tests, but above a cap it defers the
+   whole lot and runs NONE — and it still returns `:green`, because the
+   tests that ran passed. `:external-pending :note` says so. The inversion is
    worth internalising: the deferral gets likelier as your change gets
    BROADER, since narrowing saves nothing once the impacted set approaches
    the whole suite. So a sweeping edit earns LESS external evidence than a
@@ -342,7 +351,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    Any `n > 0` means the page you are about to screenshot is not the code you
    just wrote, and a partly-updated page renders BROKEN rather than merely
    old. `done` re-serves.
-7. **Close ONCE.** Exactly ONE `commit_point {description}` at the end
+7. **Close ONCE.** Exactly ONE `commit_point {label}` at the end
    (it runs `done` and gates on that verdict — it has no checks of its own)
    unless the user asks for more.
 
@@ -442,21 +451,21 @@ walkable, they just stop being on anybody's way forward.
 | New namespace (grow with TDD) | `ns_create {ns, requires}` — create dependency nses first |
 | New namespace, source ready | `ns_create {ns, source}` — whole text, one verified call |
 | Require add/remove | `ns_add_require` / `ns_remove_require` |
-| New form | `edit_add_form` (`before` anchors placement) |
+| New form — or SEVERAL | `edit_add_form`. `source` holding N top-level forms lands them as one atomic write, verified once, reported per form in `:forms` — grow a namespace in one call, not one per form |
 | Change a whole form | `edit_replace_form` |
-| Small change INSIDE a big form | `edit_subform {ns form match source}` — match ONE subform or ONE pair; a missed match returns `:source-now` (correct + resend); `text: true` for strings/docstrings; `where: {key value}` addresses the unique MAP containing those entries (registry rows — no exact text needed) |
+| Small change INSIDE a big form | `edit_subform {ns name match source}` — match ONE subform or ONE pair; a missed match returns `:source-now` (correct + resend); `text: true` for strings/docstrings; `where: {key value}` addresses the unique MAP containing those entries (registry rows — no exact text needed) |
 | Edit ONE ROW of a registry | `edit_subform {where: {key value}}` — **`where` ADDRESSES a row, it does not assert a value.** Both sides match on the spelling they answer to, so `{"key": "stored-name"}`, `":stored-name"` and `:stored-name` all reach a row stored as `{:key :stored-name …}`, and a string-keyed map is reachable too. This matters because registry rows are keyed by KEYWORDS and JSON has none — before it, the single most common thing `where` exists for was the one thing a caller could not express. A miss names the values that key DOES take (`:key takes :schema-drift, :key-typos, …`), so a wrong value says so instead of reading as a missing row |
 | Put existing code INSIDE something new (a `let`, a `when`, a `try`) | `edit_subform {match <a COMPLETE form>, wrap: true, source "(let [n 1] $1)"}` — `$1` is the matched form, so what was there NESTS inside your template. Without it the only expressible edit is restating the whole enclosing form, since a match that opens a delimiter it doesn't close is refused. Same `$n` templating `change_signature` uses; a template with no `$1` is refused rather than deleting the match |
 | Change a form's NAME METADATA (`^:export`, `^{:malli/schema …}`) | `edit_subform {text: true}` matching the `defn` head — `"^:live-handle open!"` → the new metadata. Structural matching can't address the head on its own, so without this you resend the whole form to change one marker |
 | Edit a form that has NO NAME (`defmethod`, `use-fixtures`) | `edit_subform {form "<form-id>"}` — **the id addresses a form wherever the name does**, and some forms genuinely have no name: a `defmethod` has a dispatch value, `use-fixtures` defines nothing. Ids come from `query_search` hits (`:form` is the id when there is no name) and from any finding that names one. `edit_replace_form` takes a name, so the id route is `edit_subform` |
-| A write refused with `No such namespace: x` | **The refusal names the `ns_add_require` to make.** Run it, then resend the form UNCHANGED — it was correct. slopp resolves the alias against the store (a namespace whose last segment is the alias) and the common `clojure.*` ones; an alias nothing can supply gets no suggestion rather than a wrong one |
+| A write names an alias the ns form lacks | **When exactly ONE namespace can supply it, the pipeline adds the require for you** (a `:system` write with its own prompt) and the write lands — the result carries `:auto-require {:added "[clojure.string :as str]"}`; nothing to resend. slopp resolves the alias against the store (a namespace whose last segment is the alias) and the common `clojure.*` ones. When SEVERAL could, the refusal names each `ns_add_require` call — pick one, then resend the form UNCHANGED. An alias nothing can supply gets no suggestion rather than a wrong one |
 | A write refusal says `ALSO PENDING:` | **Fix every line before resending.** A refusal carries EVERY gate the candidate tripped, not just the first — they were all knowable from the same form, so satisfying them one per round-trip is pure waste |
 | A subform edit refused with `unresolved-symbol`/`invalid-arity` | **Widen the match.** The change spans more of the form than you matched — a binding and its use, a loop and its `recur`, an arglist and its body. Match the enclosing form, or `edit_replace_form` the whole thing. **Two edits to ONE form is ONE edit**; this is NOT cross-form atomicity and there is no batch tool for it (the refusal says so too) |
 | Change a fn's SIGNATURE | `change_signature {ns name source calls}` — new defn + `$1..$9` call-site template; never signature-change form-by-form |
 | Several changes, one reason | just make the writes one at a time — episodes group them for you; interim reds/`:carried-errors` are normal until `done` |
 | Rename ONE form | `edit_rename` (def + all references, shadow-safe); its result lists leftover prose `:mentions` |
 | Rename a namespace ALIAS (`[a.b :as old]` -> `:as new`) | `ns_realias {ns old new}` — the `:as` in the ns form AND every `old/sym` in that namespace's bodies, one verified write. **There is no hand route**, and that is why this is a tool rather than two edits: between the two writes the ns form and the bodies disagree about the qualifier and the namespace does not load, so the alternative is the add-both / migrate / drop dance. **Reach for it right after `ns_rename`**, which rewrites namespaces and walks straight past the `:as` — the moved code keeps being called by its old module's name, and the day that name gets REUSED the alias starts pointing at a real, different module, which is worse than one naming nothing. You do not have to spot them: the rename lists them under `:left-behind :alias`, each with the `:suggest` to pass here. Scoped to one namespace by design: an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift and there is no store-wide version. A BARE `old` is left alone — only `old/x` is the qualifier, and the same spelling is routinely a local or a parameter three tokens away. Read `:sites` (0 means the alias was unused, not that nothing happened) and `:left-behind` |
-| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. **A bare name is swept as a CONCEPT, so its compounds travel with it** — `region` reaches `region-fee`, `region-fees` and `region-t`, which is what makes this one intent rather than a list of renames. Only letters end the name, so `regional` is untouched but `region-ish` is NOT: if you meant the narrower thing, sweep the compound. (A qualified KEYWORD is bounded differently -- see the row below.) **`dry-run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **And READ A FAILED SWEEP'S `:note`.** The namespace renames run BEFORE the atomic text group and are not part of it, so a refusal rolls back the text and leaves every namespace renamed — a store that looks renamed and is not, where `:export "old.prefix"` strings name a subtree that no longer exists and the module rules inherit from the new NAME. The result says so and names the recovery: `thread_drop` (the renames are un-landed), or fix the refusal and re-run the same sweep, which is a no-op for the namespaces. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
+| Rename a CONCEPT ("zone is now region") | `rename_sweep {from to}` — namespaces + vars + keywords + prose, store-wide, ONE call, one verification; never form-by-form. **A bare name is swept as a CONCEPT, so its compounds travel with it** — `region` reaches `region-fee`, `region-fees` and `region-t`, which is what makes this one intent rather than a list of renames. Only letters end the name, so `regional` is untouched but `region-ish` is NOT: if you meant the narrower thing, sweep the compound. (A qualified KEYWORD is bounded differently -- see the row below.) **`dry_run` first and check the count against what you expected** — a mismatch means your pattern is catching something else. Two gotchas: it rewrites prose DESCRIBING the rename (a comment explaining `a -> b` comes out saying `b -> b`), and if a live GATE enforces the thing you are renaming, you need two phases — teach the gate to accept BOTH spellings, sweep, then tighten. A gate runs from the old compiled code while the group rewrites it, so a one-shot sweep is refused at the first form it re-tags. **And READ A FAILED SWEEP'S `:note`.** The namespace renames run BEFORE the atomic text group and are not part of it, so a refusal rolls back the text and leaves every namespace renamed — a store that looks renamed and is not, where `:export "old.prefix"` strings name a subtree that no longer exists and the module rules inherit from the new NAME. The result says so and names the recovery: `thread_drop` (the renames are un-landed), or fix the refusal and re-run the same sweep, which is a no-op for the namespaces. **Pick the most QUALIFIED name that still covers the live references** — a broad name reaches backwards into HISTORY (incident records and frozen fixtures naming what a thing really was called; sweeping those forward invents a past) while a narrow one cannot, and it also misses the unqualified TAIL (`slopp.a.b` as a segment does not match prose writing `b/thing`), so sweep that separately and check user-facing strings — teach strings and error text — for it. If the qualified form leaves a real reference uncovered, that reference wanted naming precisely anyway |
 | Rename a QUALIFIED KEYWORD (`:a/x` -> `:b/x`) | `rename_sweep` — it moves the literals AND the `{:a/keys [x]}` destructuring, which names the key as a SYMBOL with the qualifier one position to the left and so is invisible to a text pass. The entry is matched on the FROM qualifier and only on it, so an unqualified `{:keys [x]}` — which names `:x` and has nothing to do with your rename — is left alone. **A keyword is bounded as a whole TOKEN**, so `-`, digits and `_` end it and sweeping `:a/x` leaves `:a/x-ray` alone — the opposite of the bare-name row above, because `:a/x-ray` is a different marker, usually read by a different rule. **Realias when the alias carries the RENAMED segment, not when it merely sits
 under it.** After renaming `a.web.*` to `a.http.*`, an alias `web.client` for
 `a.http.client` is now a lie and wants `ns_realias`; an alias `client` for the
@@ -484,7 +493,7 @@ a claim about a past that never happened.
 
 **It stays GREEN, which is why it needs saying.** When a frozen fixture and the
 assertion over it are both text, one sweep moves both and they agree
-afterwards; nothing fails. The only signal is `dry-run`'s `:in-strings` bucket,
+afterwards; nothing fails. The only signal is `dry_run`'s `:in-strings` bucket,
 which is what that REVIEW FIRST note is for — read it as "which of these mean
 the name as it is TODAY?", and expect a `[]` there to be the normal case, so a
 non-empty one deserves the time. Measured: one such fixture in this codebase
@@ -517,8 +526,8 @@ your having to guess where. Its honest limit: a corruption that preserved every
 count and produced a name already in your expected set would pass. **Order a family migration so the CONSTITUTIVE marker goes LAST**: the one that declares the thing (`:http/path` declares an endpoint) turns every form into a half-migrated endpoint the moment it moves, and the per-endpoint gates then fire on the siblings that have not moved yet. Sweep the describing markers first and the refusal never happens -- it reads like a missing declaration, and the obvious fix (adding the missing marker by hand) is wrong. **Read `:requalified` and `:left-behind`; absence of either means checked-and-none.** `:requalified` is the half of the diff that is not a text substitution, and worth an eye for that reason alone. `:left-behind` is the half the tool DECLINED: changing the key's NAME (`:a/x` -> `:a/y`) rather than its qualifier cannot be applied to a destructuring, because the symbol is a LOCAL BINDING the body reads — so sweep the qualifier and rename the name as two steps, or finish the named forms by hand. A stranded destructuring presents as nil arriving silently rather than as an error, so the only tests that can catch one are the ones exercising the value END-TO-END — which for a session, a projection or a subprocess means `^:external`, and those are exactly the ones a write DEFERS. Do not read the write's green as coverage here |
 | Rename a CONFIG KEY family (`a.b.*` -> `x.a.b.*`) | **Not `rename_sweep`** — a dotted key is a STRING, and the sweep's whole-word/segment matching is wrong for it in both directions: a segment of the key is usually also a segment of a NAMESPACE and of keys inside the config's own VALUES, so it rewrites things that are not the key, while missing the places the key really lives. Do it by hand and go looking for the three hiding places, none of which a text pass reports: **regex literals** (`#"a\\.b\\..+"` — the sweep REWRITES these now and names them under `:patterns-rewritten`; a row under `:left-behind :via :regex` is the residue it could not reach, and is a finding. Measured at seven in one wave before this was automated, two of which survived three green done-points), **length constants** (`(subs k 19)` standing in for `(count "<the prefix>")` — take the tail from the prefix you matched, so the two cannot disagree), and **a second branch of the same `cond`** a few lines below the one you just fixed. Then `config_file {path "vocabulary" key <old> value <new>}` so the retired spelling is declared. **Do not spell what you can delimit**: split on `=` or whitespace and take the field, rather than writing a character class for what an identifier may contain. A class written from the characters you can call to mind omits the ones you cannot, and in a codebase with naming conventions the UNUSUAL character is the significance marker — `!` marks the effectful vars, `/` marks the wildcard-family key — so the loss is not a random third, it is exactly the marked category. Measured twice in one week: `[a-z.*<>]*` dropped `http.static./assets`, the one mount whose absence is silent. Grep to check yourself with a pattern you did NOT use while editing — a verification grep written from the same assumption as the edit shares its blind spot — and if the new name CONTAINS the old one, anchor the search at a segment boundary or every corrected line reads as a violation |
 | Extract helper / move forms to another ns | `edit_extract` / `edit_move_forms` (new OR existing target; callers everywhere rewritten; `export: true` for a deep target with outside callers). **Propose the cluster you want and let it close the set for you** — it refuses a two-way split and NAMES the forms that would leave a cycle ("the moved set calls [x y] (staying)"). Add those and retry. Guessing the seam leaves a cycle; the refusal IS the analysis. `export: true` WIDENS per var — a var already `^:export` keeps its level without the flag, so you never pass it just to restate something already true, and passing it does not silently widen the rest. Read `:export-not-landed` on the result: the move checks its own POSTCONDITION against the committed store and names the VAR, so a planned export the store did not actually get is reported rather than discovered later. **And read `:shadowed`, which is the one finding a green write does not cover** — refs INTO the target go bare, so a moved form that binds a LOCAL of that name now calls the local: it compiles, the suite passes, and the behaviour changed |
-| Regroup whole namespaces under one prefix | `module_extract {namespaces to}` — the MODULE-grain move, for a namespace that grew into its own component or a set that wants one owning prefix. Each named ns takes its subtree and `-test` sibling. **`dry-run` first, always**: going from two segments to three makes a namespace package-private, so every outside caller breaks at once, and the plan is the only place you see WHICH vars must be hoisted and WHICH CALLERS force each. The write order is the design — hoist (`^:export`), then rename, then declare the edges the moved store actually references — so no intermediate state is one the gate would refuse. Refuses a regroup that would leave a production cycle; a `-test` back-edge is not one |
-| Reorder / delete / undo | `edit_move` / `edit_delete_form` / `edit_revert`. **A delete whose form still has a caller is REFUSED**, naming every caller — the same stance `ns_delete` takes for a namespace something still requires. Only `:static` references count (a quoted symbol or a `^{:covers}` marker names a form without needing it), and a recursive function is not its own caller. To remove a caller and its callee together, delete in REVERSE DEPENDENCY ORDER — callers first, callee last, one call each; every step verifies and every intermediate state loads. Two forms that call EACH OTHER have no valid order: `edit_replace_form` one to drop the call, then delete both. `query_depends {on "ns/name"}` still answers the question BEFORE you write, and is worth asking when you are planning a removal rather than discovering its size from a refusal. Recovery for any write is `undo {deltas 1}` — but `undo` walks back only YOUR OWN writes, so a delete made under a different agent (a `--call` script, another session) answers `no writes of yours to undo` while looking straight at it; that case needs `episode_revert` |
+| Regroup whole namespaces under one prefix | `module_extract {namespaces to}` — the MODULE-grain move, for a namespace that grew into its own component or a set that wants one owning prefix. Each named ns takes its subtree and `-test` sibling. **`dry_run` first, always**: going from two segments to three makes a namespace package-private, so every outside caller breaks at once, and the plan is the only place you see WHICH vars must be hoisted and WHICH CALLERS force each. The write order is the design — hoist (`^:export`), then rename, then declare the edges the moved store actually references — so no intermediate state is one the gate would refuse. Refuses a regroup that would leave a production cycle; a `-test` back-edge is not one |
+| Delete / undo | `edit_delete_form` / `edit_revert`. (There is no reorder: a form's place is DERIVED — definitions before callers, ties by creation order — at every write, so write forms in any order and never ask where one goes.) **A delete whose form still has a caller is REFUSED**, naming every caller — the same stance `ns_delete` takes for a namespace something still requires. Only `:static` references count (a quoted symbol or a `^{:covers}` marker names a form without needing it), and a recursive function is not its own caller. To remove a caller and its callee together, delete in REVERSE DEPENDENCY ORDER — callers first, callee last, one call each; every step verifies and every intermediate state loads. Two forms that call EACH OTHER have no valid order: `edit_replace_form` one to drop the call, then delete both. `query_depends {on "ns/name"}` still answers the question BEFORE you write, and is worth asking when you are planning a removal rather than discovering its size from a refusal. Recovery for any write is `undo {deltas 1}` — but `undo` walks back only YOUR OWN writes, so a delete made under a different agent (a `--call` script, another session) answers `no writes of yours to undo` while looking straight at it; that case needs `episode_revert` |
 | Comment on a form | `edit_comment {ns name text}` — the block rendered above it. A comment BELONGS to a form; there is no such thing as a comment between forms |
 | Risky experiment | `branch_create` → work → `branch_switch` + `branch_merge` |
 | Declare a module dependency | `module_dep {from to prompt}` — one edge, say why; `remove: true` retracts |
@@ -796,7 +805,9 @@ done point runs them) from `:no-covering-tests` (yours to fix) and
 test is `:partial` or `:unverified`, never green — **to see it go red-first,
 `test_run {only ["ns/the-test"]}`: a named `^:external` target runs in its
 own tier automatically (one serial fresh JVM).** You never run `test_run`
-as a ritual — it's for spot-checking one namespace or test mid-flight. Red runs return
+as a ritual — it's for spot-checking one namespace or test mid-flight. A
+run repeated with nothing landed since answers from the run it already made
+(`:standing true`, no image eval, no JVM); `fresh: true` runs anyway. Red runs return
 `:all-failing {file [tests]}` and `:themes` (clustered causes) — read
 those before drilling into blocks.
 
@@ -996,7 +1007,7 @@ same defect solved seven different ways.
 keyword, a module? `query_depends {on X}` answers relations between those, so if
 both ends qualify you are on the easy path.
 
-**Never enumerate call sites with a search — ask `query_depends {on "ns/var"}`.**
+**Never enumerate call sites with a search — ask `query_depends {on "ns/var"}`.** Its `:red-after` is the other half of a var's blast radius: the tests that went red in episodes where the form changed, most often first — what usually breaks when you touch it. The key is ABSENT when nothing has ever gone red beside it; read that as no evidence, not as safety.
 It is alias-blind because the reference graph is kondo-resolved, and a text
 search is not: one namespace is routinely required under several `:as` names,
 so a grep for `alias/name` silently covers a subset. Measured on this codebase:
@@ -1408,6 +1419,67 @@ of every family you have used at any point in it, so a family you stop using
 keeps resolving until the session ends and is gone in the next one. If you are
 checking that removing a capability really removed its reach, check in a fresh
 session.
+
+## Running the project so a human can watch it
+
+**When someone asks to "see it running", "start the app", or "give me a URL",
+this is the answer.** A slopp project declares what it wants RUN while
+somebody is working on it, and slopp keeps that running and refreshes it at
+every `done`.
+
+Declare it once, in the `dev` config path:
+
+```clojure
+config_file {path "dev" key "run.app.main"  value "shop.core/-main"}
+config_file {path "dev" key "run.app.args"  value "--port,8080"}
+config_file {path "dev" key "run.app.url"   value "http://127.0.0.1:8080"}
+```
+
+That is the whole setup. From the next `done`, slopp starts `shop.core/-main`
+with those arguments in a dedicated child image and re-serves it whenever work
+lands.
+
+| key | what it says |
+|---|---|
+| `run.<name>.main` | the entry fn. The NAME is the key's own middle segment — `run.admin.main` declares `admin` |
+| `run.<name>.args` | arguments, comma-separated and **in order** (`--port,8080` → `["--port" "8080"]`) |
+| `run.<name>.url` | where a human should open it — see below, this is DECLARED |
+| `run.<name>.enabled` | `false` silences one without deleting its entry point |
+
+**Named, because projects grow a second process.** A worker, an admin port, a
+scheduler — declare each under its own name and they all start. There is no
+anonymous single entry to redesign later.
+
+### Four things worth knowing before you set this up
+
+**`dev` never ships.** It is in `slopp.store/local-config-paths`, so it
+reaches neither a built tree nor a git projection. A port a developer chose
+stays that developer's business; `capabilities`, `rules` and `gates` still
+travel with the product as they always did. This is why the port belongs here
+and not in `http.port`.
+
+**The URL is DECLARED, not observed.** For a project with no `dev` entries
+slopp GENERATES the `serve!` call and reads the bound port back, so it knows
+the address. A declared entry is an arbitrary function and hands nothing back,
+so if you want a human to be given a link, say what it is. Absent is honest
+for a worker.
+
+**Declared REPLACES derived.** A store with `http.enabled` and no declared
+entry gets the server slopp derives, exactly as before. Declare one and slopp
+stops generating that call — otherwise the reader would get two servers, one
+at an address nobody gave them.
+
+**Starting is not health.** A declared entry reports `:started` once its
+namespace loads and its thread spawns. An entry that throws on its second line
+reports `:started` and is dead. Do not read it as "the app is up"; open the
+url, or drive it.
+
+### A project that is not a web project
+
+`http.enabled` answers *is this a web project*. It cannot answer *does this
+project want a worker running*, so a declared entry is reason enough on its
+own — a CLI project with a background job needs no `http` capability to have
+that job running while somebody works on it.
 
 ## Command-line applications (`cli`)
 
@@ -2064,10 +2136,9 @@ Cypress/Playwright territory someday).
   any pure transform in `.cljc`; the `.cljs` stays thin.
 - **In `.cljs`, definitions must PRECEDE their callers.** There are no
   top-level forward declarations, so a helper written below its caller
-  compiles to an undeclared-var warning. `edit_move {ns name before}` fixes
-  it — but the cold-load gate refuses a move while the violation stands, so
-  break the forward reference first (revert or edit the caller), move, then
-  re-apply. Writing helpers before callers avoids the whole dance.
+  compiles to an undeclared-var warning. The pipeline arranges definitions
+  before their callers at every write, in `.cljs` exactly as in `.clj`, so
+  nothing is yours to do here — write the forms in any order.
 
 ### Non-trivial apps: a REST API and an SPA that consumes it
 

@@ -6111,3 +6111,118 @@ broke the consumer's dead require, their store healed in twenty minutes
 because one namespace failed to load and the brief said so in words, and they
 reported that as the first real use of *a broken namespace you can edit beats
 a store you cannot reach*.
+
+### D-history-off-the-value — the store value carries the head and a window, never the log (2026-08-29)
+
+**Decision.** A store value holds no `:deltas`. It carries `:head`,
+`:line-pos`, `:recent` (since the last milestone plus the done that earned
+it), `:pending`, `:prompts` and `:refs`; history is read from the journal
+through `ops/with-history` / `ops/journal` / `db/line-deltas` at the moment
+a view is asked, and `store/deltas` on a value without them THROWS rather
+than answering `[]`. Form-level history is a join over `delta_forms`.
+
+**Why.** Every production reader of `store/deltas` needed one of four
+things: two scalars (the whole write path), a bounded suffix since the last
+done (every episode-grain rule), the latest delta per form (`prompt-by-form`,
+folding 34 k deltas on every write), or a genuine history query (thirteen
+`read.history` forms, asked a few times a day). None needed the list in RAM.
+Carrying it cost 94% of the value, ~162 MB of heap growing with the line's
+length forever, and 4.6 s of every open. The throw is deliberate: `[]` from a
+value that simply had not been hydrated is the false-empty that would have
+made every history view silently blank.
+
+**What it does not license.** A reader may not reach for `db/line-deltas`
+from a `:pure` namespace (tier-layering catches it — `read.history` went
+external and came back pure with a hydrated-session contract instead), and
+a half-landed flip is not a state the trunk may be in: the `--live` host
+reloads trunk code against its own value, so the value shape and every
+reader of it land in ONE milestone. Learned the hard way at 05:30 when the
+first milestone landed half of it and the running server's `done` threw
+the new message.
+
+### D-one-vocabulary — one argument has one spelling, and the schema is the whole accepted set (2026-08-29)
+
+**Decision.** Across every tool: a form is `ns` + `name`; a rename goes
+`from` → `to`; an exact subform is `match`; flags spell the way tool names
+do (`dry_run`, `to_ns`, `content_type`); a milestone takes `label`, the
+word `done` takes. A tool's `inputSchema` IS its accepted set — the alias
+table behind the dispatch (`extra-accepted-arg-keys`) is deleted, and a
+retired spelling is refused as an unknown argument, by name.
+
+**Why.** Refusals were 9% of calls in the reviewed window, and eight in one
+day were spelling — `:test` vs `:only`, `:form` vs `:name`, `:label` vs
+`:description` — each a full model request producing nothing. The alias
+table treated the symptom: whichever guess an agent made first worked, so
+the names could stay inconsistent and every fresh agent re-learned them.
+With consistent names an alias is only a second spelling, and a second
+spelling is what the strict-argument refusal exists to catch.
+
+**What it does not license.** Not a compatibility layer in either
+direction: there is no window in which the old spelling is accepted with a
+warning. The consumer (slopp-ui) was sent the before/after table before the
+milestone landed and took it in one pass; their one objection — `match`
+over `source` on `edit_extract`, because `source` is what is WRITTEN in
+the three tools that take it and this argument is a needle — was the
+better word and is what shipped.
+
+### D-orient — one budgeted, ranked, provenance-carrying map per ask (2026-08-29)
+
+**Decision.** `orient {ask seeds tokens}` is the first read of an ask: the
+forms that matter for it, ranked by a personalized PageRank over the
+persisted reference graph plus the trace map's coverage edges (calls 1.0,
+coverage 0.3, both directions, d = 0.85, 20 iterations), fitted to a token
+budget the caller names (default 1500), each row a card plus `:via` — the
+edge that made it relevant ("seed", "called by X", "covered by T").
+`session_brief :relevant` is the first six rows of the SAME walk at 700
+tokens, so the two surfaces cannot disagree. Seeds come from the ask's words
+(rarity-weighted over name segments, tests halved, bigram bonus) and/or from
+forms the caller already knows; with seeds, unreached forms are excluded —
+a form no edge connects to the ask is not "relevant with score 0".
+
+**Why.** 48 tool calls per ask and 423 k of context per request, measured;
+the first five of those calls were the agent finding out where to look —
+`session_brief` + `query_search` + several `query_slice`s + a 2,945-line
+skill. Every competitor reconstructs this map from text (Aider's repo map is
+the same PageRank over one edge kind); slopp holds the graph with provenance
+and coverage already, and served none of it. Measured after: 0.5–0.9 s per
+call on this store, one call where five were.
+
+**What it does not license.** Not an endpoint yet: slopp-ui declined it
+until a screen names its reader ("specifying an endpoint for a screen that
+does not exist is how this app would acquire a view justified by its data
+source"). The shape when one appears is `GET /api/orient?ask=…&tokens=…` →
+`{:rows [{…card… :via}] :more N}`. And not embeddings: a codebase that
+changes every write defeats frozen vectors; the graph is what makes a
+`query_search` hit navigable, and text search stays.
+
+### D-derived-order — a form's place is derived from what it references; nothing journals an arrangement (2026-08-29)
+
+**Decision.** A form carries a creation RANK and nothing else about where it
+sits. Its position in a namespace is derived at every commit
+(`engine/try-commit!` → `refs/arrange`): the ns form, declares, then
+definitions before callers by Kahn over the intra-namespace reference graph
+with rank as the tiebreak, unnamed forms riding behind the named form created
+before them. The `:move` op, `store/move-form`, `reorder-to`, `edit_move`
+and the `before` anchor on `edit_add_form` are deleted; `:move` in an older
+journal replays as a no-op. A fold of the journal — the git projection, an
+import base, a merge — arranges the same way before it renders or judges.
+
+**Why.** 1,048 `:move` deltas in this store's journal and 1,658 in the
+consumer's recorded an arrangement the pipeline computed from the forms and
+would compute again; 99.8% of the consumer's were pipeline-written, and the
+agent-written ones here were the same fact chosen by hand. An arrangement in
+the log is also the one merge failure shape that invents a state neither side
+had (§4 of the review, five times in one week), and a cold-load refusal at
+the merge door for a composition no line wrote. The tiebreak is RANK and not
+"current position" because the projection derives each milestone's tree from
+a fold, and a history-dependent tiebreak let the fold and the live store
+disagree about the same forms.
+
+**What it does not license.** Not a stored position with a new name: `pos`
+is still written, because the kernel boots from `elements` before any graph
+exists to derive from, but it is an OUTPUT of the derivation and nothing
+reads it as an input. Not an agent-facing arrangement of any kind — a request
+to put a form "before" another is refused as an unknown argument, and the
+skill says so. And not a claim that a declare is never needed: a genuine
+cycle still gets its marked `(declare …)` from `resolve-cold-load`, which the
+derivation places right after the ns form.

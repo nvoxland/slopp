@@ -118,6 +118,26 @@ sandbox would have opened silently. Now: `edit/parse-one` is the RAW parse and
 `orientation-test/sandbox-refuses-resolver-escapes`, which tests the sandbox
 INDEPENDENT of D3 — that test is what fails if the coupling comes back.
 
+### The gate ADDS a require it can resolve, rather than refusing (2026-08-29)
+
+A write whose form names an alias the namespace lacks (`u/fmt` with no
+`[… :as u]`) used to be refused with the alias named, and the agent's next
+call was `ns_add_require` followed by the identical write — two round trips
+to transcribe what the analyzer already knew. Now `edit/alias-candidates`
+asks the store which namespaces the alias could mean (a canonical alias, or
+a trailing segment naming exactly one namespace); when there is ONE, the
+write goes through with the require added first, marked `:system true` like
+every pipeline-owned write, and the result says so under `:auto-require
+{:added spec :ns ns}`. Zero or several candidates keep the refusal, now
+naming the candidates (`missing-alias-hint`), because guessing between two
+namespaces is how a wrong require lands silently. `no-auto-require` on the
+api turns it off for a caller that wants the old refusal. The same pass gave
+`edit_add_form` its batch shape: `source` holding N forms is ONE atomic
+write, verified once, reported per form in `:forms` — nothing is broken by a
+form that did not exist, so per-form verification of an add was cost without
+evidence (slopp-ui's heaviest friction: a six-form test namespace was six
+round trips).
+
 ## The `^:unsafe` escape hatch (P4-deps M2)
 
 A top-level form tagged `^:unsafe` (or `^{:unsafe true}`) **bypasses D3+D4** —

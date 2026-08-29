@@ -193,7 +193,7 @@
   what it IS; whether that is BEHIND anything is a question about some
   particular store, and the store a jar runs against is often not the store it
   was built from (slopp's own jar serves other projects). That comparison is
-  [[slopp.read.orient/jar-currency]]'s, which has a store to make it against.
+  [[slopp.ops/jar-currency]]'s, which has a store to make it against.
 
   The loader arity is what makes this readable at all from outside the running
   process's own classpath — and testable, which the resource read beside it

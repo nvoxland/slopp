@@ -724,6 +724,36 @@ The oracle must never return a false verdict. Everything here serves that.
    pointing at why. `ns_create`/import stay exempt (whole-ns ingestion is
    the tolerant path).
 
+## Standing runs and the red-after index (2026-08-29)
+
+**A test run repeated with nothing landed STANDS.** `test_run` (and the
+external tier under `done`) answers `{:standing true :recorded <delta>}`
+when the journal already holds an `:observe` for the same scope and
+selection with no code delta after it — the same ask-grain rule
+`full_check` had for itself. Measured on the wave's own telemetry: 26% of
+slopp's wall time in one window was a repeat within one ask (`full_check`
+121 extra runs = 7.9 h, `done` 362, `test_run` 510). The record is found by
+markers the observation carries — `:test-run true` and `:only <selection>`
+(`observation-of` keeps them; `record-run-observation!` strips `:test-run`
+from what the CALLER sees) — and `ops/standing-run` is the one reader.
+`:fresh true` forces a run; a change to any code delta invalidates the
+standing verdict by construction, because the check is "no delta after".
+
+**The red-after index is written, and not yet consulted for selection.**
+`form_reds` (see `store-and-persistence.md`) counts, per (form, test), the
+episodes in which the form changed and the test went red. It is the input
+predictive selection needs — Facebook's bar is 15% of tests run, 95% of
+failures caught, learned from history rather than coverage — and slopp has
+better raw material (a per-form trace map AND the reds). What is
+deliberately NOT done: `impacted-tests` still expands an untraced form to
+its require-closure. Replacing that with history changes what `done` runs,
+which is a correctness posture, so it ships with the number or not at all.
+Two things the first backfill showed a selector must handle: 3,083 of 3,361
+forms carry SOME credit (a rename sweep changes hundreds of forms, and a red
+in that episode credits them all — weight by 1/|changed| rather than count),
+and the top rows are the rule-catalog tests, which go red beside almost any
+rule change (a test that fails for everything predicts nothing).
+
 ## Gotchas
 
 - `clojure.test/*test-out*` does NOT follow `with-out-str` — this is exactly

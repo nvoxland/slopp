@@ -201,7 +201,7 @@ the browser bundle there, so one definition checks both sides of the wire. The
 same goes for any pure transform: put it in `.cljc`, test it on the JVM, use it
 in the browser.
 
-Refactoring works on client code like any other -- `edit_rename`, `edit_move`,
+Refactoring works on client code like any other -- `edit_rename`,
 `edit_extract` and `edit_move_forms` all handle `:cljs` forms, and clj-kondo
 lints each form in its own platform's language, so `js/*` does not draw a false
 unresolved-namespace finding.
@@ -256,9 +256,9 @@ Two details that bite:
   no symbols; a view built around the server's data renders correctly on the
   server and renders `nil`s in the browser.
 - **In `.cljs`, definitions must precede callers** -- there are no top-level
-  forward declarations. `edit_move {ns name before}` fixes it, but break the
-  forward reference first: the cold-load gate refuses a move while the
-  violation stands.
+  forward declarations. The pipeline arranges definitions before their
+  callers at every write, in `.cljs` exactly as in `.clj`; write forms in any
+  order.
 
 ### Enhance progressively where a server route already exists
 

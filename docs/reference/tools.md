@@ -11,7 +11,7 @@ a running server, and is always current for the version you are on.
 | `query_project` | Every namespace's outline -- names, arities, `!`-status, test-ness -- in one response. `since` returns a one-liner when nothing changed. |
 | `query_search {pattern}` | Regex across all store source. Hits are `{:ns :form :line}`. |
 | `query_source {targets}` | Source of several named forms in one call. `{ns}` alone returns the outline; `full: true` dumps the namespace. |
-| `query_slice {ns name}` | The focused read: one form's full source plus interface cards for everything it reaches. `match` + `window` narrows a giant form. |
+| `query_slice {ns name}` | The focused read: one form's full source plus interface cards (signature, doc line, test warranty) for everything it reaches. `match` + `window` narrows a giant form; `verbose` adds each card's recorded why. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |
 | `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus its surface as EDN at `/api/rest/paths`, `/api/http/paths` and `/api/webapp/paths`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
@@ -123,7 +123,7 @@ url and it uses none of this. What follows is for YOUR app behind YOUR proxy.
 
 | Tool | What it does |
 |---|---|
-| `query_depends {on}` | The generic dependency question -- a namespace, a var, or a `:keyword`. `direction` flips between dependents and dependencies. |
+| `query_depends {on}` | The generic dependency question -- a namespace, a var, or a `:keyword`. `direction` flips between dependents and dependencies. A var also carries `:red-after`: the tests that went red in episodes where it changed, most often first. |
 | `query_depends {modules true}` | The module manifest, topological layers, cycles, unused edges, standing debt. Add `on` for one module's surface. |
 | `query_vocabulary` | The store's domain keywords, most-used first. Browse before coining a new one. |
 | `review_scan` | Whole-codebase review triage, risk-ranked: untested, unused, effectful, high-blast, large, lint-flagged, undocumented. Each row's `:evidence` says what kind of coverage stands behind it -- observed, declared, static (with hop distance), off-platform, or none. |
@@ -236,22 +236,21 @@ Three things worth knowing:
 | Tool | What it does |
 |---|---|
 | `ns_create {ns requires\|source}` | A brand-new namespace. Never overwrites. A `requires` clause may name a namespace of yours that does not exist yet: it is created empty and reported in `:also-created`, so spec-first works across a namespace boundary instead of failing to load. Only requires sharing your root are invented — a library is never conjured over. |
-| `ns_rename {old new}` | Rename a whole namespace everywhere. Returns `:left-behind` (what no rewrite reaches — strings, qualified keywords, the `-test` sibling, regex literals spelling the old name, strings carrying source that DECLARES it, and under `:alias` the callers whose `:as` still spells the old name, each with the `:suggest` to hand `ns_realias`) and `:module-debt` (edges to declare, cycles `module_dep` will refuse) — a relocation runs no write gates, so the result is the only notice. |
+| `ns_rename {from to}` | Rename a whole namespace everywhere. Returns `:left-behind` (what no rewrite reaches — strings, qualified keywords, the `-test` sibling, regex literals spelling the old name, strings carrying source that DECLARES it, and under `:alias` the callers whose `:as` still spells the old name, each with the `:suggest` to hand `ns_realias`) and `:module-debt` (edges to declare, cycles `module_dep` will refuse) — a relocation runs no write gates, so the result is the only notice. |
 | `ns_delete {ns}` | Retire an empty namespace. Refuses while any form remains or anything still requires it. |
 | `ns_add_require` / `ns_remove_require` | One require clause. Never hand-edit an `ns` form. |
-| `edit_add_form {ns source}` | Add a top-level form. `before` anchors placement. |
+| `edit_add_form {ns source}` | Add one top-level form — or several in one `source`, verified once. Placement is derived (definitions before callers), never stated. |
 | `edit_replace_form {ns name source}` | Replace a whole form. |
-| `edit_subform {ns form source}` | A change inside a big form, by `match`, `text: true`, or `where: {key value}`. `where` addresses a row by the spelling each side answers to, so `"stored-name"` reaches `:stored-name`; a miss names the values that key does take. |
+| `edit_subform {ns name source}` | A change inside a big form, by `match`, `text: true`, or `where: {key value}`. `where` addresses a row by the spelling each side answers to, so `"stored-name"` reaches `:stored-name`; a miss names the values that key does take. |
 | `edit_delete_form {ns name}` | Delete a form (with `ns-unmap`). Refuses while anything still calls it, naming the callers; to remove a caller and its callee together, delete in reverse dependency order — callers first, callee last. |
-| `edit_move {ns name before}` | Reorder within a namespace. |
 | `edit_comment {ns name text}` | Set (or clear) the comment block rendered above a form. The comment is owned by the form, so it travels with it. |
 | `edit_revert {ns name to?}` | Revert one form to an earlier version. |
 | `change_signature {ns name source calls}` | New `defn` plus a `$1..$9` call-site template, as one intent. |
 | `edit_rename {ns old new}` | Rename a form and all its references, shadow-safe. |
 | `ns_realias {ns old new}` | Rename a namespace's require alias: the `:as` and every `old/sym` in that namespace, as one verified write. The two halves cannot be separate writes — between them the namespace does not load. Reach for it after `ns_rename`, which leaves the `:as` untouched — and names each one it stranded under `:left-behind :alias`, with the alias to pass here. |
-| `rename_sweep {from to}` | A concept rename store-wide: namespaces, vars, keywords, prose. `dry-run` first. Returns `:left-behind` — what it DECLINED, each row tagged with `:via`. `:destructuring` is a `{:a/keys [x]}` whose key NAME changed, since the symbol is a local the body reads. `:regex` is a pattern spelling the name with escaped dots, which shares no literal text with the token: reported rather than rewritten, because whether a `.` in a pattern separates or matches anything is a question about what you meant. |
+| `rename_sweep {from to}` | A concept rename store-wide: namespaces, vars, keywords, prose. `dry_run` first. Returns `:left-behind` — what it DECLINED, each row tagged with `:via`. `:destructuring` is a `{:a/keys [x]}` whose key NAME changed, since the symbol is a local the body reads. `:regex` is a pattern spelling the name with escaped dots, which shares no literal text with the token: reported rather than rewritten, because whether a `.` in a pattern separates or matches anything is a question about what you meant. |
 | `edit_requalify {ns name}` | Namespace a function's option keys in its arglist and every caller's map literal together. |
-| `edit_extract {ns from name}` | Extract a subform into a new fn. Address it by `at` (an anchor) rather than quoting it whole. |
+| `edit_extract {ns from name}` | Extract a subform into a new fn. Address it by `match` (its exact text) or, for a large one, by `at` (an anchor). |
 | `edit_move_forms {ns forms to}` | Relocate a cluster to another namespace, rewriting callers everywhere. |
 | `undo {deltas\|to}` | Walk back your own recent writes. `to: "last-commit"` scraps everything since the milestone. |
 | `episode_revert` | Roll back everything you changed since your last done. |
@@ -263,7 +262,7 @@ Three things worth knowing:
 |---|---|
 | `done {label}` | Close a unit of work. Episode-scoped; reports rather than refuses. |
 | `full_check` | The whole store: every namespace linted, dead surface everywhere, both layering graphs (purity tiers and module rules), the rule catalog swept over every form, every test in every tier. `affected: true` is the middle gear. `:rules` is the only whole-store rule answer there is — a `done`-grain rule sees only what an episode changed, so turning a rule on never checks the code already there; `:not-swept` names the rules a whole-store run cannot ask. Carries `:app {:behind n}` when a managed app server is up — how far the SERVED image lags the store it just called green. |
-| `commit_point {description}` | Record a milestone. Green-gated; `force: true` records a red honestly. `target` marks an earlier spot. |
+| `commit_point {label}` | Record a milestone. Green-gated; `force: true` records a red honestly. `target` marks an earlier spot. |
 | `test_run` | Spot-check specific tests. `{external true}` for the external tier, `{all true}` for the whole in-image suite. |
 | `draft_test {ns name code?}` | Draft a `deftest` from observed calls. Writes nothing. |
 | `build {dir main?}` | Materialize every namespace to `.clj` files. `main` adds a GraalVM native-image recipe. Returns `missing-artifacts` for any derived file absent from the cache, each with the call that refills it. |

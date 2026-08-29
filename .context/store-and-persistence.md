@@ -67,12 +67,32 @@
 - Deltas: `{:id :parent :op :ns :prompt ...}` — ops today: `:ingest`,
   `:replace`, `:add`, `:delete`, `:rename` (multi-form, `:form-ids`),
   `:verify` (result attached). `:parent` = previous delta id (linear now,
-  DAG-ready).
+  DAG-ready). There is no ordering op: see *ORDER IS DERIVED* below.
 - Multi-form coordinated edits go through `apply-changeset` → ONE delta over
   N forms (used by rename).
+- **ORDER IS DERIVED, never journaled (2026-08-29, `D-derived-order`).** A
+  form carries `:rank` — its creation order in the namespace, assigned by
+  `ingest` (source position) and `append-form` (one past the highest), never
+  rewritten, persisted as `elements.rank` beside `pos`. Its PLACE is
+  `slopp.index.refs/derive-order`: the ns form, then any `(declare …)`, then
+  the named forms in `cold-load-order` (Kahn over the intra-ns reference
+  graph, ties by rank), each followed by the unnamed forms — defmethods,
+  registrations — created after it. `store/order-forms` arranges the vector
+  to that sequence and writes NOTHING; `engine/try-commit!` arranges every
+  namespace a commit rewrites, so `pos` (what the kernel boots by, with no
+  graph to derive from) is always the derived position. The `:move` op,
+  `move-form`, `reorder-to`, `edit_move` and `edit_add_form before` are gone;
+  a `:move` in an older journal (1,048 here) replays as a no-op and crosses a
+  merge as applied. Why the rank tiebreak matters: the git projection FOLDS
+  the journal to render a milestone's tree, and a tiebreak by "where the
+  form sits today" made the derivation depend on the vector's history, so a
+  fold (creation order) and the live store (arranged at every write) could
+  disagree; rank is the same fact on both sides. `refs/ns-key` hashes the
+  forms in rank order rather than the rendered text for the same reason.
 - **`:system true` marks a delta the PIPELINE wrote, not the agent** — today
-  only the cold-load auto-reorder (`edit/resolve-cold-load` → `reorder-to` →
-  `move-form`). It exists because a derived view otherwise cannot tell
+  the auto-require (`ops/auto-require-retry`); it was born for the cold-load
+  auto-reorder, which wrote `:move` deltas until order became derived and
+  writes nothing now. It exists because a derived view otherwise cannot tell
   housekeeping from intent: `prompt-by-form` takes the last prompt naming a
   form, so the reorder's constant prompt became the recorded WHY of 142 of
   1,898 forms (7%) — on `form-card`, `query_slice`'s cards and the reviewer
@@ -84,6 +104,28 @@
   owned here and used by the one writer so the two cannot drift.
   **A writer acting on the agent's behalf must mark what it writes**, or it is
   indistinguishable from the agent in every view derived from the log.
+- **The value carries NO history (2026-08-29, `D-history-off-the-value`).**
+  Measured before the change: `:deltas` was 111.8 MB of a 118 MB store value
+  (94%), ~162 MB of live heap growing with every write forever, and 4.6 s of
+  the 7.6 s `load-store` — for a list the write path read two scalars from.
+  The value now carries `:head` (the line's head delta id), `:line-pos`
+  (how many deltas the line holds, the cache cursor), `:recent` (the deltas
+  since the last `:commit` plus the `:done` that earned it — the bounded
+  window every episode-grain reader needs: `forms-changed-since`,
+  `impacted-tests`, `unchanged-since-done`, `session-brief`), `:pending`
+  (un-appended deltas), `:prompts` (`{form-id prompt}`, the WHY per form,
+  maintained at `record-delta` instead of folded from the log), `:last-write`
+  and `:refs` (below). `replay-delta` advances the scalars instead of
+  `conj`ing. A value built by `empty-store` still accumulates `:deltas` —
+  tests fold small journals by hand — and `store/deltas` on a value that
+  has none THROWS, naming the doors, rather than answering `[]` as if the
+  line had no history. The doors: `ops/with-history` (a copy of the
+  session hydrated from `db/line-deltas`, `:ops [:commit]` when only the
+  milestones are wanted), `ops/journal`, and `db/line-deltas` itself, whose
+  op filter is SQL so a reader of forty markers never parses the payloads it
+  did not ask for. `slopp.read.history` is `:pure` and takes a hydrated
+  session; a bare one reaches the throw. After: `load-store` ~3 s (3.5 s
+  with the reference index below).
 - **Purity is load-bearing:** transactional/atomic behaviors at the api layer
   (e.g. group validation) work by applying store fns to a value and only
   committing the result on success.
@@ -99,14 +141,46 @@
     `parent` is a COLUMN as well as a payload key, and the column wins on
     read — it was payload-only until 2026-08-15, which made the DAG
     unreachable from SQL and is why a second line had to be a separate FILE.
-  - `elements(line, ns, pos, kind, form_id, name, source, comment)` —
+  - `elements(line, ns, pos, kind, form_id, name, source, comment, rank)` —
     materialized current state, PER LINE; `source` is the CST's canonical
     serialization (re-parsed on load; must reparse to exactly ONE node —
-    asserted).
+    asserted). `pos` is the DERIVED position (the kernel boots by it);
+    `rank` the creation order it was derived with (filled from `pos` once at
+    `open!` for rows older than the column).
   - `lines(id, name, kind, head, base, parent, agent, created_at, used_at,
     status)` — a line is a POINTER to a head delta. A named line is a
     BRANCH; an anonymous one is an agent's THREAD. One row shape, because
     they are one thing.
+  - `delta_forms(delta_id, form_id)` (2026-08-29) — one row per form a
+    delta names (`db/delta-form-ids`: `:form-id`, `:form-ids`, the keys of
+    `:sources`), written in `append!`'s transaction and backfilled once by
+    `index-journal-forms!`. History BY FORM is a join, not a parse:
+    `sources-at` narrows to the forms asked about, `prompt-for-forms` reads
+    the last non-`:system` ask per form.
+  - `form_refs(line, ns, seq, from_form, to_ns, to_name, row)` +
+    `refs_keys(line, ns, refs_key)` (2026-08-29) — THE REFERENCE GRAPH,
+    persisted. The `:refs` index the value carries (`slopp.index.refs`: one
+    entry per namespace, keyed on the SHA-256 of its rendered source, rows =
+    the edges leaving its forms) is written beside a namespace's elements
+    whenever those are (`write-snapshot!` → `persist-refs!`) and read back
+    at open (`load-refs`). Per line, like `elements`, and it follows a
+    line's view (`copy-view!` / `drop-view!` on fork, land, abandon,
+    compact). `ns-refs` uses an entry whose key matches the current source
+    and recomputes otherwise, so a stale entry costs one kondo pass and never
+    a wrong answer; `done` runs `ops/refresh-index!` before landing so the
+    trunk's rows are current. Measured: `refs` cold 9.3 s → 0.43 s; per
+    write 1.8 s → 66 ms.
+  - `form_reds(form_id, test, n, last_delta)` (2026-08-29) — the RED-AFTER
+    index: how many times test T went red in an EPISODE that changed form F.
+    `credit-reds!` writes it inside `append!` for every `:verify`/`:observe`
+    delta with qualified red failures, finding the episode by a recursive
+    walk from the red's parent that stops at the first `:done`; backfilled
+    once by `index-journal-reds!`. NOT per line — a red on a thread is
+    evidence about the code whether the thread lands or dies. Read by
+    `reds-for`, surfaced as `query_depends :red-after`. On this store the
+    backfill took 380 ms for 19,500 rows.
+  - `measurements(seq, at, kind, delta, payload)` — telemetry OFF the journal
+    (`tool-call`, `otel`, …): a measurement never moves a line's head.
   - `meta(k,v)` — git pins, saved remotes, the fold-field registry. No id
     counter: any row here also marks the store as persisted, which is what
     `load-store`'s "nil if empty" reads.
@@ -133,11 +207,12 @@ branch used to need its own db file:
   materialization. `write-snapshot!`'s DELETE carries `AND line = ?`; without
   it, one line's write does not return a wrong answer, it ERASES another
   line's namespace and the result looks like a write that never happened.
-- **A line's `:deltas` is its ANCESTRY**, walked from its head through the
+- **A line's HISTORY is its ANCESTRY**, walked from its head through the
   `parent` column (23,719 deltas in 69 ms — the walk is not the cost;
-  EDN-parsing them is). Not tidiness: `try-commit!` takes its CAS head from
-  `(last (store/deltas base))`, so a store value carrying another line's
-  deltas yields a head that can never match — a line nobody can write to.
+  EDN-parsing them was, which is why the value no longer holds them: see
+  *The value carries NO history* above). `try-commit!` takes its CAS head
+  from the value's `:head`, so a store value loaded for another line yields
+  a head that can never match — a line nobody can write to.
 - **A split copies the MATERIALIZATION, never the history** — one
   `INSERT … SELECT` over the form rows (~2,481 here) against 23,719 deltas to
   fold. Pinning is what keeps that valid: the base never moves under the new
