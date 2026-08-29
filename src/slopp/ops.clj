@@ -4533,6 +4533,19 @@
                                               " routes to the external tier automatically)")))
                           t0)))))
 
+(defn red-after
+  "What usually breaks when `on` (\"ns/name\") changes: the tests that went red
+   in episodes where the form changed, most often first, as `[{:test :n
+   :last}]` — read from the index the reds themselves wrote (`db/reds-for`).
+   nil when there is no evidence, or no durable store to hold any: a caller
+   leaves the key OFF rather than sending an empty list that reads as safe."
+  [session on]
+  (when-let [conn (:db @session)]
+    (let [[nsx nm] (str/split (str on) #"/" 2)]
+      (when-let [fid (and nm (:id (store/form-named (:store @session)
+                                                     (symbol nsx) (symbol nm))))]
+        (not-empty (mapv #(dissoc % :form-id) (db/reds-for conn [fid])))))))
+
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
   pipeline + hot-reload, then re-verify — only the tests the trace map says

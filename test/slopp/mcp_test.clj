@@ -1688,14 +1688,29 @@
             ;; feature that cannot be found
             (is (= (:url r) (:ui-url @sess)))
             (is (= (:url r) (:ui (ops/session-brief sess)))))
-          (testing "starting the UI does NOT make the brief claim a hub — no
-                    hub is running here, and this assertion used to be
-                    `(swap! sess assoc :hub …)` followed by reading it back,
-                    which proved only that assoc works. The claim it was
-                    standing in for was false: `:hub` was set from the
-                    CONFIGURED port whether or not anything answered"
-            (let [b (ops/session-brief sess)]
-              (is (nil? (:hub b)) (pr-str (select-keys b [:ui :hub])))))
+          (testing "starting the UI does NOT make the brief claim a hub — a
+                    :hub in the brief is a claim that something ANSWERS
+                    there. This assertion used to be `(swap! sess assoc
+                    :hub …)` followed by reading it back, which proved only
+                    that assoc works; the claim it stood in for was false,
+                    because `:hub` was set from the CONFIGURED port whether
+                    or not anything answered. It then asserted `nil`, which
+                    is only true on a machine with no hub up — and a hub
+                    running here (slopp-ui's, most days) turned every
+                    whole-store check red for a fact about the machine. So:
+                    absent, or answering."
+            (let [b (ops/session-brief sess)
+                  h (:hub b)
+                  answers? (fn [url]
+                             (let [u (java.net.URI. (str url))]
+                               (with-open [s (java.net.Socket.)]
+                                 (try (.connect s (java.net.InetSocketAddress.
+                                                   (.getHost u) (.getPort u)) 500)
+                                      true
+                                      (catch java.io.IOException _ false)))))]
+              (is (or (nil? h) (answers? h))
+                  (str "the brief claims a hub nothing answers at: "
+                       (pr-str (select-keys b [:ui :hub]))))))
           (server/stop!)))
       (finally
         (server/stop!)
@@ -2911,4 +2926,32 @@
                      (call! sess "edit_extract" {:ns "ra" :from "f" :name "z"})))
         (is (re-find #"missing required argument :ns"
                      (call! sess "query_source" {}))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-var-answers-what-usually-breaks-when-it-changes
+  ;; The one thing a developer re-explains every session — "when I touch this,
+  ;; THAT test goes red" — is in the journal and was never handed back.
+  ;; query_depends on a var now carries :red-after — the tests that went red
+  ;; in episodes where the form changed, most often first — read from the
+  ;; index the red itself wrote.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rq.core" :source "(ns rq.core)\n(defn f [x] x)\n(defn g [x] x)\n"})
+      (call! sess "done" {:label "fixture"})
+      (testing "before any red, the key is absent — no evidence is not evidence"
+        (let [r (edn/read-string (call! sess "query_depends" {:on "rq.core/f"}))]
+          (is (not (contains? r :red-after)) (pr-str r))))
+      ;; one episode: f changes AND a test that watches it goes red
+      (call! sess "edit_replace_form" {:ns "rq.core" :name "f" :source "(defn f [x] (* 2 x))"
+                                       :prompt "double"})
+      (call! sess "ns_create" {:ns "rq.core-test"
+                               :source (str "(ns rq.core-test (:require [clojure.test :refer [deftest is]] [rq.core :as c]))\n"
+                                            "(deftest t (is (= 3 (c/f 1))))\n")})
+      (testing "after it, the var names the test that went red beside it"
+        (let [r (edn/read-string (call! sess "query_depends" {:on "rq.core/f"}))]
+          (is (= ['rq.core-test/t] (mapv :test (:red-after r))) (pr-str r))
+          (is (pos? (:n (first (:red-after r)))))))
+      (testing "a form that did not change in that episode is not blamed"
+        (let [r (edn/read-string (call! sess "query_depends" {:on "rq.core/g"}))]
+          (is (not (contains? r :red-after)) (pr-str r))))
       (finally (ops/close! sess)))))

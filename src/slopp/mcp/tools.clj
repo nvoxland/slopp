@@ -66,7 +66,7 @@
                                :verbose {:type "boolean"}}
                   :required ["ns" "name"]}}
    {:name "query_depends"
-    :description "THE generic dependency question: what depends on X — a namespace (who requires it + qualified refs), a var ns/name (blast radius), or a :keyword (field flow). modules=true reads the MODULE system: alone = the manifest (declared edges + standing debt); with on=<module> = that module's SURFACE (public fns + exported deep vars with sig/doc, its deps, its consumers) — the cheap browse before calling into a module. Ask this first; query_slice {ns name} and query_brief {ns name} give per-form depth."
+    :description "THE generic dependency question: what depends on X — a namespace (who requires it + qualified refs), a var ns/name (blast radius — plus :red-after, the tests that went red in episodes where the form changed, most often first: what usually breaks when you touch it), or a :keyword (field flow). modules=true reads the MODULE system: alone = the manifest (declared edges + standing debt); with on=<module> = that module's SURFACE (public fns + exported deep vars with sig/doc, its deps, its consumers) — the cheap browse before calling into a module. Ask this first; query_slice {ns name} and query_brief {ns name} give per-form depth."
     :inputSchema {:type "object"
                   :properties {:on {:type "string"}
                                :direction {:type "string" :enum ["dependents" "dependencies"]}

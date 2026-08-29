@@ -1615,3 +1615,53 @@
               (is (true? (db/abandon-thread! conn t2)))
               (is (empty? (keyed t2)))))))
       (finally (.close conn)))))
+
+(deftest ^:external a-red-run-is-credited-to-the-forms-its-episode-changed
+  ;; The journal has always known which tests went red after which forms
+  ;; changed — a `:verify`/`:observe` delta names its red tests, and the code
+  ;; deltas since the last `:done` name their forms — but only as a parse of
+  ;; every payload. `form_reds` keeps that as a count per (form, test), written
+  ;; in the same transaction as the red, so "what usually breaks when this
+  ;; changes" is one indexed read. The episode is the grain: a form changed
+  ;; BEFORE the last done is not blamed for a red after it.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st0   (-> (store/empty-store)
+                      (store/ingest 'rb.core "(ns rb.core)\n(defn f [x] x)\n(defn g [x] x)\n"))
+            fid   (:id (store/form-named st0 'rb.core 'f))
+            gid   (:id (store/form-named st0 'rb.core 'g))
+            st1   (store/record-delta st0 {:id "done-1" :op :done :ns '*session*
+                                          :parent (:head st0) :at 1})
+            st2   (first (store/replace-node st1 'rb.core 'f
+                                             (p/parse-string "(defn f [x] (inc x))")
+                                             :prompt "off by one"))
+            st3   (store/record-verification st2 'rb.core
+                                             {:status :red
+                                              :failures [{:test 'rb.core-test/t}
+                                                         {:test 'bare-name}]})]
+        (is (true? (db/append! conn st3 (store/deltas st3) ['rb.core] trunk nil)))
+        (is (= [{:form-id fid :test 'rb.core-test/t :n 1 :last (:head st3)}]
+               (db/reds-for conn [fid gid]))
+            "f changed this episode and t went red: credited once; g did not change since the done; a bare test name is not evidence")
+        (testing "a second red in a later episode counts up"
+          (let [st4 (store/record-delta st3 {:id "done-2" :op :done :ns '*session*
+                                            :parent (:head st3) :at 2})
+                st5 (first (store/replace-node st4 'rb.core 'f
+                                               (p/parse-string "(defn f [x] (+ x 2))")
+                                               :prompt "off by two"))
+                st6 (store/record-observation st5 ['rb.core-test]
+                                              {:tier :external :status :red :ran 1
+                                               :failures [{:test 'rb.core-test/t}]})]
+            (is (true? (db/append! conn st6 (vec (drop (count (store/deltas st3)) (store/deltas st6)))
+                                   ['rb.core] trunk (:head st3))))
+            (is (= [{:form-id fid :test 'rb.core-test/t :n 2 :last (:head st6)}]
+                   (db/reds-for conn [fid])))))
+        (testing "a journal written before the index existed is indexed once at open"
+          (jdbc/execute! conn ["DELETE FROM form_reds"])
+          (is (empty? (db/reds-for conn [fid])) "fixture: the index is gone")
+          (is (pos? (db/index-journal-reds! conn)))
+          (is (= 2 (:n (first (db/reds-for conn [fid])))))
+          (is (zero? (db/index-journal-reds! conn)) "and never twice")))
+      (finally (.close conn)))))

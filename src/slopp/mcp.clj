@@ -1376,11 +1376,19 @@
                                                         :window (:window a)
                                                         :verbose (:verbose a))))
       "query_depends" (text! (told! session name a
-                                        (graph/query-depends session (:on a)
-                                                          :modules (:modules a)
-                                                          :detail (:detail a)
-                                                          :direction (if (= "dependencies" (:direction a))
-                                                                       :dependencies :dependents))))
+                                        (let [r (graph/query-depends session (:on a)
+                                                                     :modules (:modules a)
+                                                                     :detail (:detail a)
+                                                                     :direction (if (= "dependencies" (:direction a))
+                                                                                  :dependencies :dependents))
+                                              ;; the journal's own answer to "what usually
+                                              ;; breaks when this changes" — a var's blast
+                                              ;; radius is callers AND the tests that went
+                                              ;; red beside it. Absent when there is no
+                                              ;; evidence: an empty list would read as safe.
+                                              reds (when (= :var (:kind r))
+                                                     (ops/red-after session (:on a)))]
+                                          (cond-> r reds (assoc :red-after reds)))))
       "session_brief" (text! (let [b    (ops/session-brief session)
                                        conn (:db @session)
                                        al   (when (and conn (:dir @session))
