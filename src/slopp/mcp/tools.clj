@@ -192,12 +192,6 @@
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "lib"]}}
-   {:name "edit_move"
-    :description "Move a form to just before another (definitions precede callers)."
-    :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :name {:type "string"}
-                               :before {:type "string"} :prompt {:type "string"}}
-                  :required ["ns" "name" "before"]}}
    {:name "edit_comment"
     :description "Set (or clear, with empty text) the comment rendered above form `name`. Owned by the form; no anchor, no verification."
     :inputSchema {:type "object"
@@ -213,10 +207,9 @@
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source"]}}
    {:name "edit_add_form"
-    :description "Add ONE top-level form — or SEVERAL: `source` holding N forms lands them as one atomic write, verified once, reported per form in :forms (growing a namespace is no longer one call per form). `before` anchors a single form (default tail). A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
+    :description "Add ONE top-level form — or SEVERAL: `source` holding N forms lands them as one atomic write, verified once, reported per form in :forms (growing a namespace is no longer one call per form). WHERE a form lands is not yours to say: definitions are arranged before their callers at every write, so write forms in any order. A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :source {:type "string"}
-                               :before {:type "string"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "source"]}}
@@ -521,7 +514,7 @@
     :description "The LEGACY sweep: elements that predate a rule slopp now enforces and that no ordinary tool can reach — hand-written (declare …) the ordering pipeline cannot see, two elements in one namespace defining ONE name (a form-addressed edit cannot say which you mean, and the last wins at load), and metadata that looks like one of slopp's dials but is not (^:unusedok waives nothing while reading as though it does). Every finding carries the call that fixes it. A THIRD question: full_check asks whether the store is CORRECT, store_health what it COSTS in bytes, this what is in here that the current rules would never have let in. Reach for it right after adopting an existing codebase (git_clone / import), where every form predates every rule — a store written entirely through slopp is normally clean."
     :inputSchema {:type "object" :properties {}}}
    {:name "store_compact"
-    :description "Reclaim what settled lines left behind and VACUUM the file: every elements row belonging to a landed or abandoned line is deleted, then SQLite gives the space back. Returns {:rows-dropped :bytes-before :bytes-after :reclaimed}. Deliberate, not automatic: land-thread! now drops a landed thread's view as it lands, but 663 landings before that fix left 3.4 GB (64% of one file) behind, and a fix does not un-write what it wrote. store_health's :elements :by-status shows what this would reclaim — run it when the 'landed' rows are not zero. VACUUM holds the file lock for as long as the copy takes, so run it when no other writer is mid-land."
+    :description "Reclaim what settled lines left behind and VACUUM the file: every elements row belonging to a landed or abandoned line is deleted, then SQLite gives the space back. Returns {:rows-dropped :bytes-before :bytes-after :reclaimed}. Deliberate, not automatic: land-thread! now drops a landed thread's view as it lands, but 663 landings before that fix left 3.4 GB (64% of one file) behind, and a fix does not un-write what it wrote. store_health's :elements :by-status shows what this would reclaim — run it when the 'landed' rows are not zero. Read its :source-bytes as a FLOOR, not an estimate: it is LENGTH() over the source text, and the file also carries row overhead, indexes and free pages for those rows (measured 1.37× on one store, 269 MB back against 197 MB of text). VACUUM holds the file lock for as long as the copy takes, so run it when no other writer is mid-land."
     :inputSchema {:type "object" :properties {}}}
    {:name "ui_serve"
     :description "Serve THIS project's own API listener — /api/* as JSON, plus this project's own SURFACE as EDN, one document per capability: /api/rest/paths (typed endpoints and their schemas), /api/http/paths (the content it serves — usually empty), /api/webapp/paths (the addresses its browser routes to, one row per :webapp/path page, with the endpoints each page calls — usually empty). It has NO pages in it: `/` answers 404, so a human handed this url sees JSON. The screens live in the HUB, a separate application that renders every page and fronts this project at /p/<slug>/ (D-hub part 4) — when the answer is for a human, hand over session_brief's :hub, not its :ui. Served on the LIVE session, so warranty and observed examples are the ones this session actually has; a process that opened the same store fresh would show every form as covered by nothing. Returns {:url :port}. `port` pins the address for THIS run only — there is no capability for it, because this port is an output: DERIVED from the store dir so several projects on one machine never collide, stable across restarts, and reported rather than set. 7359 is slopp.hub.port, a different setting and a real one; `stop: true` shuts it down. Serving again EVICTS the running server rather than hunting for a free port, and a port someone else holds comes back as a sentence, not a stack trace."
@@ -642,7 +635,7 @@ WRITE:   work like a REPL: small individual writes, each verifies and returns
          until done re-checks them.
          edit_add_form / edit_replace_form {ns name source prompt}
          edit_rename {ns from to}   <- never rename by editing call sites
-         edit_extract {ns from match name} · edit_move {ns name before}
+         edit_extract {ns from match name}
          ns_create {ns requires?|source?}  <- NEW namespace: scaffold+grow, or whole source at once
          ns_add_require / ns_remove_require  <- never hand-edit the ns form
 RULES:   every write must compile -- but form ORDER is not your job: write
@@ -669,7 +662,7 @@ FINISH:  done {label} (tidies, lints, marks the unit boundary)
 (def write-tools
   (into single-write-tools
         ["edit_delete_form" "edit_rename" "edit_extract"
-         "edit_move" "ns_add_require" "ns_remove_require" "ns_create"
+         "ns_add_require" "ns_remove_require" "ns_create"
          "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
          "deps_pure" "change_signature" "ns_realias"]))
 

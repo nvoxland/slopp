@@ -4,7 +4,7 @@
   consume. Producers normalize here; consumers never re-integrate."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.index.refs :as refs]
-            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str] [slopp.read.modules :as read.modules] [rewrite-clj.parser :as p]))
+            [slopp.store :as store] [clojure.set :as set] [clojure.string :as str] [slopp.read.modules :as read.modules] [rewrite-clj.parser :as p] [rewrite-clj.node :as n]))
 
 (deftest the-graph-sees-every-reference-kind
   (let [st (-> (store/empty-store)
@@ -542,3 +542,32 @@
         (is (not= (refs/ns-key st 'pn.core) (refs/ns-key st2 'pn.core)))
         (is (= (:id (store/form-named st2 'pn.core 'f))
                (:to-form (first (filter #(= 'pn.two (:from-ns %)) (refs/refs st2))))))))))
+
+(deftest derive-order-is-a-function-of-forms-and-ranks-alone
+  ;; ORDER IS DERIVED, never journaled. A form's place is its creation RANK
+  ;; (stored on the element, never rewritten); its load position is Kahn
+  ;; over the intra-ns reference graph with rank as the tiebreak. So the same
+  ;; forms with the same ranks derive the same order whatever vector they
+  ;; happen to sit in — which is what lets a journal fold (append order) and
+  ;; the live store (reordered at every write) render the same bytes without
+  ;; a :move delta ever being written.
+  (let [st    (store/ingest (store/empty-store) 'do.core
+                            (str "(ns do.core)\n"
+                                 "(defn a [] (c))\n"          ; rank 1, needs c
+                                 "(defmulti area :kind)\n"    ; rank 2
+                                 "(defmethod area :sq [_] 1)\n" ; rank 3, unnamed
+                                 "(defn b [] 2)\n"            ; rank 4
+                                 "(defn c [] (b))\n"))        ; rank 5, needs b
+        names (fn [st fids] (mapv #(:name (store/form-by-id st %)) fids))
+        order (refs/derive-order st 'do.core)]
+    (testing "definitions precede callers; ties break by rank; an unnamed form stays with the named form created before it"
+      (is (= '[do.core area nil b c a] (names st order)) (pr-str (names st order))))
+    (testing "the same forms in a scrambled vector derive the same order"
+      (let [shuffled (update-in st [:namespaces 'do.core :elements]
+                                (fn [es] (vec (cons (first es) (reverse (rest es))))))]
+        (is (= order (refs/derive-order shuffled 'do.core)))))
+    (testing "a declare sorts right after the ns form, whatever its rank"
+      (let [[st2 d] (store/append-form st 'do.core (p/parse-string "(declare zed)"))
+            o2      (refs/derive-order st2 'do.core)]
+        (is (= "(declare zed)" (n/string (:node (store/form-by-id st2 (second o2))))))
+        (is (= (:form-id d) (second o2)))))))

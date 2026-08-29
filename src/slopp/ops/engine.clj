@@ -798,7 +798,16 @@
   merge folds a hydrated value — is committed like any other, and the live
   value stays the journal's facts, not the journal."
   [session base st' nses]
-  (let [st'    (refs/refresh st' nses)
+  (let [;; then ARRANGED: every namespace this commit rewrites takes its
+        ;; derived order (definitions before callers, ties by creation
+        ;; rank) here, at the one chokepoint — so a revert, an extract, an
+        ;; ingest and a merge are arranged by the same rule a plain write
+        ;; is, and the positions `write-snapshot!` persists are the ones a
+        ;; fold of the journal derives. The refresh comes first because the
+        ;; arrangement is derived FROM the index (which is order-insensitive)
+        st'    (let [st' (refs/refresh st' nses)]
+                 (reduce refs/arrange st'
+                         (filter #(get-in st' [:namespaces %]) nses)))
         landed (dissoc (store/committed st') :deltas)]
     (if-let [conn (ensure-db! session)]
       (if (db/append! conn st' (:pending st') (vec nses)

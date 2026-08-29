@@ -586,10 +586,17 @@
 
 (defn ^:export ns-key
   "What a namespace's reference rows are a function of, as one digest: the
-  namespace's rendered source. An index entry carrying this key was computed
-  from exactly this text; one carrying any other key was not, and `ns-refs`
-  recomputes it rather than serve it. Portable — SHA-256 of the text, not
-  `hash` — because the entry is persisted and read back by another process.
+  source of its forms, in creation order. An index entry carrying this key was
+  computed from exactly these forms; one carrying any other key was not, and
+  `ns-refs` recomputes it rather than serve it. Portable — SHA-256 of the
+  text, not `hash` — because the entry is persisted and read back by another
+  process.
+
+  Keyed on the forms in RANK order rather than on the rendered namespace,
+  deliberately: the rendered order is derived FROM the reference graph, so a
+  key that depended on it would go stale on every rearrangement — and a
+  journal fold, whose vector is creation order, could never hit an entry the
+  live store wrote. The rows do not depend on the arrangement at all.
 
   Deliberately NOT keyed on which other namespaces exist, although a row is
   kept only when its target namespace does: that would stale every entry in
@@ -601,7 +608,10 @@
   refused by the write gate for a `:require`, and for a bare qualified
   symbol it heals on the referrer's next write."
   [st nsx]
-  (store/sha256-of (.getBytes ^String (store.render/render-ns st nsx) "UTF-8")))
+  (store/sha256-of
+   (.getBytes ^String (apply str (interpose "\n" (map #(n/string (:node %))
+                                                     (sort-by :rank (store/forms st nsx)))))
+              "UTF-8")))
 
 (defn- ns-rows
   "The INDEX rows for `nsx`: every reference leaving it — kondo statics,
@@ -685,7 +695,9 @@
   declare, which the reorder alone can't remove."
   [store nsx]
   (let [forms   (vec (store/forms store nsx))
-        pos     (into {} (map-indexed (fn [i f] [(:name f) i])) forms)
+        ;; ties break by creation RANK, not by where the form sits today —
+        ;; the arrangement is derived from this, so it cannot also be an input
+        pos     (into {} (map-indexed (fn [i f] [(:name f) (or (:rank f) i)])) forms)
         names   (set (keep :name forms))
         ;; intra-ns dependency: caller NEEDS callee before it
         needs   (reduce (fn [m r]
@@ -815,3 +827,59 @@
               (update s :refs dissoc nsx)))
           st
           nses))
+
+(defn ^:export derive-order
+  "THE arrangement of `nsx`'s forms, as form ids — derived, never stored.
+  The ns declaration first; then any `(declare …)` forms, by rank, because a
+  declare exists to precede what it names; then the named forms in
+  `cold-load-order` (definitions before callers, ties by creation RANK), each
+  followed by the unnamed forms — defmethods, extend-*, registrations —
+  created after it and before the next named form. A pure function of the
+  forms, their references and their ranks: the same namespace derives the
+  same arrangement whatever vector it happens to sit in, which is what lets
+  a journal fold (creation order) and the live store (arranged at every
+  write) render the same bytes without any ordering delta in the log.
+
+  A genuine cycle has no full order; `cold-load-order` names it, and the
+  members ride in rank order behind a declare the write pipeline inserts."
+  [store nsx]
+  (let [forms   (vec (sort-by :rank (store/forms store nsx)))
+        ns-decl (some #(when (= nsx (:name %)) (:id %)) forms)
+        decl?   (fn [f]
+                  (let [s (try (n/sexpr (:node f)) (catch Exception _ nil))]
+                    (and (seq? s) (= 'declare (first s)))))
+        decls   (into [] (comp (filter decl?) (map :id)) forms)
+        body    (remove #(or (= ns-decl (:id %)) (decl? %)) forms)
+        ;; an unnamed form belongs with the named form created just before it
+        tail    (reduce (fn [{:keys [cur groups]} f]
+                          (if (:name f)
+                            {:cur (:id f) :groups (assoc groups (:id f) [])}
+                            {:cur cur :groups (update groups cur (fnil conj []) (:id f))}))
+                        {:cur ::head :groups {::head []}}
+                        body)
+        named   (remove #{ns-decl} (:order (cold-load-order store nsx)))]
+    (-> (cond-> [] ns-decl (conj ns-decl))
+        (into decls)
+        (into (get-in tail [:groups ::head]))
+        (into (mapcat (fn [fid] (cons fid (get-in tail [:groups fid]))) named)))))
+
+(defn ^:export arrange
+  "`nsx`'s forms in their derived order (`derive-order`) — the vector the
+  namespace renders and cold-loads in. Writes no delta; the write pipeline
+  calls this on every touched namespace and a journal fold calls it before
+  rendering, and both land on the same vector because the derivation reads
+  nothing but the forms."
+  [store nsx]
+  (store/order-forms store nsx (derive-order store nsx)))
+
+(defn ^:export arrange-all
+  "Every namespace of `store` in its derived order. What a FOLDED store —
+  a milestone's tree, an import's merge base — needs before it is rendered:
+  the journal records creation order and content, and the arrangement is
+  recomputed here exactly as the live writes computed it. `refs` seeds the
+  value's reference index (persisted rows from the live store, keyed on each
+  namespace's forms) so that a namespace the fold holds in the same state as
+  the live store costs a lookup rather than an analysis."
+  [store & {:keys [refs]}]
+  (let [st (cond-> store (seq refs) (assoc :refs refs))]
+    (reduce arrange st (keys (:namespaces st)))))

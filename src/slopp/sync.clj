@@ -110,25 +110,6 @@
               {:noop true :trivia true}
               {:steps (mapv :step verdicts) :order (mapv :name newf)})))))))
 
-(defn- reorder-to!
-  "Best-effort: make `ns-sym`'s form order match `order` (the remote file's)
-  so rendered trees converge byte-wise. Skip-optimized right-to-left
-  move-form! pass — each form is placed immediately before its desired
-  successor, skipping pairs already adjacent; forms absent on either side
-  stay put."
-  [session ns-sym order agent]
-  (let [present (into #{} (keep :name) (store/forms (:store @session) ns-sym))
-        want    (filterv present order)]
-    (doseq [i (range (- (count want) 2) -1 -1)]
-      (let [nm    (nth want i)
-            succ  (nth want (inc i))
-            names (into [] (keep :name) (store/forms (:store @session) ns-sym))
-            pos   (.indexOf ^java.util.List names nm)
-            spos  (.indexOf ^java.util.List names succ)]
-        (when (not= (inc pos) spos)
-          (ops/move-form! session ns-sym nm :before succ
-                          :prompt "pull: match remote form order" :agent agent))))))
-
 (defn- apply-deps!
   "Absorb remote deps.edn changes (base→tip) into the manifest: applied when
   OUR coord still equals the base's (clean), conflict when all three
@@ -190,9 +171,13 @@
                                      :prompt (str "pull: " path) :agent agent)]
               (if (:error r)
                 (conflict! path ns-sym (str "failed to apply: " (:error r)))
-                (do (reorder-to! session ns-sym (:order plan) agent)
-                    (when (not= (query/query-source session ns-sym) new)
-                      (note! (str path ": applied, but trivia differs from the remote")))
+                ;; no reorder to the remote's file order: the arrangement is derived
+                ;; from the forms at the write (a remote projection was derived
+                ;; the same way, so the trees converge; a hand-arranged file
+                ;; yields to the derivation and the note below says so)
+                (do (when (not= (query/query-source session ns-sym) new)
+                      (note! (str path ": applied, but the arrangement or trivia"
+                                  " differs from the remote")))
                     (applied! ns-sym))))))))))
 
 ^:reads (defn conflicts

@@ -27,7 +27,7 @@
             [next.jdbc :as jdbc]
             [slopp.build :as build]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render] [slopp.store :as store])
+            [slopp.store.render :as store.render] [slopp.store :as store] [slopp.index.refs :as refs])
   (:import [java.nio.charset StandardCharsets]
            [java.time Instant ZoneOffset]
            [org.eclipse.jgit.dircache DirCache DirCacheEntry]
@@ -486,7 +486,7 @@
   it would rebuild is state nothing consults.
 
   `ctx` is an OPAQUE handle from `open-ctx!` — see `close-ctx!`."
-  [ctx line-label deltas & {:keys [base]}]
+  [ctx line-label deltas & {:keys [base refs]}]
   (let [map-conn         (:slopp.git/map-conn ctx)
         ^Repository repo (:slopp.git/repo ctx)
         dv       (vec deltas)
@@ -506,7 +506,12 @@
         ;; `source-tree`, aliased locally: the fold holds the store as it stood
         ;; at this milestone, which is the only point where a namespace's
         ;; platform and role are both known.
-        tree-of  source-tree]
+        ;; ARRANGED before it is rendered: the journal records creation order
+        ;; and content, never an arrangement, so the fold derives the order
+        ;; from the forms exactly as every write did. `refs` — the store's
+        ;; persisted reference index — makes that a lookup for every
+        ;; namespace the milestone holds in its live state.
+        tree-of  (fn [st] (source-tree (refs/arrange-all st :refs refs)))]
     (:parent
      (reduce
       (fn [{:keys [parent store held]} d]
@@ -567,12 +572,14 @@
             ;; reference visible to renames/moves/the unused gate
             (try ((store/late-ref 'slopp.git.client/fetch-remote!) repo url)
                  (catch Exception _ nil))))
-        (let [main-tip (project-journal! ctx "main" main-ds :base base)
+        (let [main-tip (project-journal! ctx "main" main-ds :base base
+                                         :refs (db/load-refs map-conn (db/trunk-line-id! map-conn)))
               refs     (into {"main" main-tip}
                              (map (fn [[nm line-id]]
                                     [nm (project-journal!
                                          ctx nm (db/deltas-after map-conn line-id 0)
-                                         :base base)]))
+                                         :base base
+                                         :refs (db/load-refs map-conn line-id))]))
                              (branch-journals map-conn))]
           (doseq [[nm sha] refs :when sha]
             (set-branch-ref! repo nm sha))
@@ -607,5 +614,5 @@
                            (let [st' (or (store/replay-delta st d) st)]
                              (if (= (:id d) upto) (reduced st') st')))
                          (store/empty-store) deltas)]
-        (commit-paths (source-tree st) (:deps marker) (:files marker)
+        (commit-paths (source-tree (refs/arrange-all st)) (:deps marker) (:files marker)
                       (:config marker) blob-of)))))

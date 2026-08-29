@@ -451,23 +451,6 @@
         (map #(symbol (str ns-sym) (str %)))
         (:names e)))
 
-(defn- place-form
-  "Splice `form-elem` into `elems` — before `anchor-idx`, or at the tail when
-  it is nil.
-
-  There is nothing to splice AROUND any more. This used to absorb trailing
-  whitespace, preserve a trailing comment, and pick between one newline and
-  two, all so that a fresh append and a journal replay produced the same
-  bytes; the blank line between forms is now supplied by `render-ns` and
-  stored nowhere, so the position is the whole decision. Still SHARED by
-  `append-form` (live write) and `replay-delta`'s `:add` (journal replay),
-  because agreeing on position is the part that still matters."
-  [elems form-elem anchor-idx]
-  (if anchor-idx
-    (into (conj (subvec elems 0 anchor-idx) form-elem)
-          (subvec elems anchor-idx))
-    (conj elems form-elem)))
-
 (defn forms-named
   "EVERY form in `ns-sym` that answers to `nm` — the plural of `form-named`,
   and the same matcher, so the two can never drift. `nm` may be a NAME or a
@@ -1067,8 +1050,9 @@
                 (cond-> {:id (:id d)} p (assoc :prompt p))))))
 
 (defn ingest
-  "Parse `source` into `ns-sym`'s ordered elements, assigning a fresh id to each
-  form, and append an `:ingest` delta. Returns the new store."
+  "Parse `source` into `ns-sym`'s ordered elements, assigning a fresh id and a
+  creation rank (its position in the source) to each form, and append an
+  `:ingest` delta. Returns the new store."
   [store ns-sym source & {:keys [agent]}]
   (let [nodes (n/children (p/parse-string-all source))]
     (loop [store store, nodes nodes, elements []]
@@ -1078,11 +1062,12 @@
             (recur store (rest nodes)
                    (conj elements {:id id :kind :form
                                    :name (form-symbol node)
-                         :names (form-symbols node) :node node})))
+                                   :names (form-symbols node) :node node})))
           (recur store (rest nodes)
                  (conj elements {:kind :sep :node node})))
         (let [[did store] (gen-id store "d")
-              elements     (fold-comments elements)
+              elements     (vec (map-indexed (fn [i e] (assoc e :rank i))
+                                             (fold-comments elements)))
               comments     (into {} (keep (fn [e]
                                             (when (and (:id e) (:comment e))
                                               [(:id e) (:comment e)])))
@@ -1100,6 +1085,8 @@
                         :parent (:head store)
                         :op :ingest :ns ns-sym
                         :at (now-ms)
+                        ;; :form-ids IS the creation order — a replay ranks
+                        ;; the forms by their position in it
                         :form-ids (into [] (keep :id) elements)
                         ;; per-version content (C3/C4): history must be
                         ;; reconstructible from the log alone. That was
@@ -1149,38 +1136,6 @@
              (record-delta delta))
          delta]))))
 
-(defn append-form
-  "Add a new form to `ns-sym` with a fresh id; ONE `:add` delta. Default:
-  appended at the tail (blank-line separated). `:before <form-name>` anchors it
-  immediately before that form instead — the delta records the anchor's
-  form-ID so foreign replay converges on the same position. Returns
-  [store' delta]; nil when the namespace — or the named anchor — doesn't
-  exist."
-  [store ns-sym node & {:keys [prompt group agent before]}]
-  (when-let [elems (get-in store [:namespaces ns-sym :elements])]
-    (let [anchor-idx (when before
-                       (first (keep-indexed
-                               (fn [i e] (when (and (= :form (:kind e))
-                                                    (= before (:name e))) i))
-                               elems)))]
-      (when (or (nil? before) anchor-idx)
-        (let [[fid store]  (gen-id store "f")
-              [did store'] (gen-id store "d")
-              form-elem    {:id fid :kind :form :name (form-symbol node)
-                      :names (form-symbols node) :node node}
-              new-elems    (place-form elems form-elem anchor-idx)
-              delta        (cond-> {:id did :parent (:head store)
-                                    :op :add :ns ns-sym :form-id fid :prompt prompt
-                                    :at (now-ms)
-                                    :sources {fid (n/string node)}}
-                             anchor-idx (assoc :before (:id (nth elems anchor-idx)))
-                             group (assoc :group group)
-                             agent (assoc :agent agent))]
-          [(-> store'
-               (assoc-in [:namespaces ns-sym :elements] new-elems)
-               (record-delta delta))
-           delta])))))
-
 (defn remove-form
   "Remove the form named `nm` from `ns-sym`; ONE `:delete` delta. Returns
   [store' delta], or nil if no such form.
@@ -1205,38 +1160,6 @@
                                   :prompt prompt :at (now-ms)}
                            group (assoc :group group)
                            agent (assoc :agent agent))]
-        [(-> store'
-             (assoc-in [:namespaces ns-sym :elements] new-elems)
-             (record-delta delta))
-         delta]))))
-
-(defn move-form
-  "Move the form named `nm` to just before the form named `before-nm` (S2 —
-  fixes append-only forward references). ONE `:move` delta. Returns
-  [store' delta], or nil if either form is missing."
-  [store ns-sym nm before-nm & {:keys [prompt group agent system]}]
-  (let [elems  (get-in store [:namespaces ns-sym :elements])
-        idx-of (fn [es n]
-                 (first (keep-indexed
-                         (fn [i e] (when (and (= :form (:kind e)) (= n (:name e))) i))
-                         es)))
-        i (idx-of elems nm)
-        j (idx-of elems before-nm)]
-    (when (and i j (not= nm before-nm))
-      (let [moved     (nth elems i)
-            without   (into (subvec elems 0 i) (subvec elems (inc i)))
-            j'        (idx-of without before-nm)
-            new-elems (-> (subvec without 0 j')
-                          (conj moved)
-                          (into (subvec without j')))
-            [did store'] (gen-id store "d")
-            delta (cond-> {:id did :parent (:head store)
-                           :op :move :ns ns-sym
-                           :form-id (:id moved) :before before-nm
-                           :prompt prompt :at (now-ms)}
-                    group  (assoc :group group)
-                    agent  (assoc :agent agent)
-                    system (assoc :system true))]
         [(-> store'
              (assoc-in [:namespaces ns-sym :elements] new-elems)
              (record-delta delta))
@@ -1491,34 +1414,6 @@
                 prompt (assoc :prompt prompt)
                 agent  (assoc :agent agent))]
     [(record-delta (fields/fold store' delta) delta) delta]))
-
-(defn reorder-to
-  "Reorder `ns-sym`'s forms to match `name-order` (a vector of form names,
-  the ns declaration first) using the fewest trivia-preserving `move-form`s
-  — each an ordinary replayable `:move` delta, so the reorder survives a
-  fresh journal reload. Right-to-left insertion: for each adjacent target
-  pair, ensure the earlier name precedes the later, skipping pairs already
-  ordered. Returns [store' moved-count]."
-  [store ns-sym name-order & {:keys [group prompt agent system]}]
-  (let [target (vec (remove #{ns-sym} name-order))]
-    (loop [st store, i (dec (count target)), moved 0]
-      (if (< i 1)
-        [st moved]
-        (let [earlier (nth target (dec i))
-              later   (nth target i)
-              elems   (get-in st [:namespaces ns-sym :elements])
-              pos     (into {}
-                            (keep-indexed
-                             (fn [k e] (when (and (= :form (:kind e)) (:name e))
-                                         [(:name e) k])))
-                            elems)]
-          (if (and (pos earlier) (pos later) (< (pos earlier) (pos later)))
-            (recur st (dec i) moved)                     ; already ordered
-            (if-let [[st' _] (move-form st ns-sym earlier later
-                                        :group group :prompt prompt :agent agent
-                                        :system system)]
-              (recur st' (dec i) (inc moved))
-              (recur st (dec i) moved))))))))
 
 (defn record-module-tier
   "Declare a module's purity TIER (:pure/:internal/:external) — the per-module
@@ -1956,6 +1851,41 @@
   [store]
   (assoc store :pending []))
 
+(defn- next-rank
+  "The rank a form appended to `elems` takes: one past the highest present,
+  0 in an empty namespace. A rank is a CREATION fact — when this form arrived
+  relative to its neighbours — and it is never rewritten: arranging the
+  vector (`order-forms`) leaves every rank where it was, which is what makes
+  the derived load order a function of the forms alone."
+  [elems]
+  (inc (reduce max -1 (keep :rank elems))))
+
+(defn append-form
+  "Add a new form to `ns-sym` with a fresh id and the next creation rank; ONE
+  `:add` delta, appended at the tail. WHERE it renders is not this function's
+  business: the load order is derived from the forms' references at every
+  write (`slopp.edit/resolve-cold-load`) and at every fold of the journal, so
+  an anchor would be a fact the store recomputes a moment later — `:before`
+  was exactly that, and it is gone. Returns [store' delta]; nil when the
+  namespace doesn't exist."
+  [store ns-sym node & {:keys [prompt group agent]}]
+  (when-let [elems (get-in store [:namespaces ns-sym :elements])]
+    (let [[fid store]  (gen-id store "f")
+          [did store'] (gen-id store "d")
+          form-elem    {:id fid :kind :form :name (form-symbol node)
+                        :names (form-symbols node) :node node
+                        :rank (next-rank elems)}
+          delta        (cond-> {:id did :parent (:head store)
+                                :op :add :ns ns-sym :form-id fid :prompt prompt
+                                :at (now-ms)
+                                :sources {fid (n/string node)}}
+                         group (assoc :group group)
+                         agent (assoc :agent agent))]
+      [(-> store'
+           (assoc-in [:namespaces ns-sym :elements] (conj elems form-elem))
+           (record-delta delta))
+       delta])))
+
 (defn replay-delta
   "Apply a FOREIGN delta from the SAME journal (linear history — ids are
   authoritative, nothing remaps) onto a trailing cached store. Returns the
@@ -2030,33 +1960,27 @@
               cmts (:comments d)]
           (with-d
             (assoc-in store [:namespaces (:ns d) :elements]
-                      (mapv (fn [fid]
+                      (vec (map-indexed
+                            (fn [rank fid]
                               (let [node (p/parse-string (get srcs fid))]
                                 (cond-> {:id fid :kind :form
                                          :name (form-symbol node)
-                                         :names (form-symbols node) :node node}
+                                         :names (form-symbols node) :node node
+                                         :rank rank}
                                   (get cmts fid) (assoc :comment (get cmts fid)))))
-                            (:form-ids d)))))
+                            (:form-ids d))))))
 
         :move
         ;; the form id is authoritative, the anchor is a NAME within the same
         ;; namespace. A missing form or a vanished anchor leaves the order
         ;; alone rather than guessing — the same choice `:add` makes.
-        (let [fid (:form-id d), before (:before d)]
-          (with-d
-            (update-in store [:namespaces (:ns d) :elements]
-                       (fn [elems]
-                         (let [i       (idx-of elems #(= fid (:id %)))
-                               moved   (when i (nth elems i))
-                               without (if i
-                                         (into (subvec elems 0 i) (subvec elems (inc i)))
-                                         elems)
-                               j       (when i
-                                         (idx-of without #(and (= :form (:kind %))
-                                                               (= before (:name %)))))]
-                           (if j
-                             (into (conj (subvec without 0 j) moved) (subvec without j))
-                             elems))))))
+        ;; HISTORICAL. Journals written before 2026-08-29 carry these — 1,048 in
+        ;; this store's — recording an arrangement the pipeline had derived
+        ;; from the forms. Order is derived at every write and every fold
+        ;; now (`slopp.index.refs/derive-order`), so replaying one would
+        ;; impose an order the next derivation recomputes anyway. It is a
+        ;; bookkeeping step here, not a reload: the log is still complete.
+        (with-d store)
 
         :comment
         (let [fid (:form-id d)
@@ -2090,15 +2014,15 @@
             (with-d
               (update-in store [:namespaces ns-sym :elements]
                          (fn [elems]
-                           (let [node       (p/parse-string src)
-                                 form-elem  {:id fid :kind :form
-                                             :name (form-symbol node)
-                                             :names (form-symbols node) :node node}
-                                 ;; anchored add (:before = anchor form-id):
-                                 ;; same position as the writer; gone → append
-                                 anchor-idx (when (:before d)
-                                              (idx-of elems #(= (:before d) (:id %))))]
-                             (place-form elems form-elem anchor-idx)))))))
+                           ;; appended with the next rank, exactly as the live
+                           ;; write did — an older delta's :before anchor is
+                           ;; ignored, since the position it recorded is one
+                           ;; the derived order recomputes
+                           (let [node (p/parse-string src)]
+                             (conj elems {:id fid :kind :form
+                                          :name (form-symbol node)
+                                          :names (form-symbols node) :node node
+                                          :rank (next-rank elems)})))))))
 
         :delete
         (let [fid (:form-id d)]
@@ -2117,3 +2041,21 @@
 
         ;; a retired or unknown op → full reload
         nil))))
+
+(defn order-forms
+  "Arrange `ns-sym`'s forms in the sequence `fids` — every form id of the
+  namespace, once. Writes NO delta. The arrangement is DERIVED from the forms,
+  their references and their ranks (`slopp.index.refs/derive-order`), so the
+  log has nothing to record about it: a fold that recomputes it from the same
+  forms lands on the same vector, and that is the whole reason the `:move` op
+  could go. Returns the store unchanged when `fids` is not a permutation of
+  the namespace's forms — a caller that derived an order for a different set
+  of forms is not allowed to drop any."
+  [store ns-sym fids]
+  (let [elems (get-in store [:namespaces ns-sym :elements])
+        by-id (into {} (map (juxt :id identity)) elems)]
+    (if (and elems
+             (= (count fids) (count elems))
+             (= (set fids) (set (keys by-id))))
+      (assoc-in store [:namespaces ns-sym :elements] (mapv by-id fids))
+      store)))

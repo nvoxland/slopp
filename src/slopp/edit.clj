@@ -9,7 +9,7 @@
             [rewrite-clj.zip :as z]
             [slopp.store :as store]
             [slopp.store.render :as store.render]
-            [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [clojure.set :as set] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.edit.gates :as gates] [slopp.store.fields :as fields]))
+            [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [clojure.set :as set] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.edit.gates :as gates]))
 
 (def ^:private banned-heads
   "D4 — user macros are banned."
@@ -647,49 +647,47 @@
                      (map (fn [{:keys [ns form symbol row def-row]}]
                             (str ns "/" (or form "<top-level>") " (line " row
                                  ") references " symbol
-                                 " defined later (line " def-row ") — fix: edit_move {ns "
-                                 ns " name " (name symbol) " before "
-                                 (or form "<the referencing form>") "}"))
+                                 " defined later (line " def-row ")"))
                           findings))
-           " — or add (declare ...)"))))
+           " — every write arranges definitions before their callers, so a reference"
+           " still forward after arranging is either a cycle (the write declares"
+           " it itself) or one the reference graph cannot see"))))
 
 (defn resolve-cold-load
-  "AUTO-AVOID-DECLARE: make `store`'s `ns-sym` cold-load WITHOUT the agent ever
-  writing (declare …). Returns {:store <fixed> …} or nil (already cold-loads).
-  Two moves, both silent to the agent (the pipeline OWNS form ordering):
-  - **Reorder** (acyclic forward ref): definitions moved above their callers
-    — {:store :moved n}. A fresh load then resolves top-to-bottom, no declare.
+  "ARRANGE `ns-sym` so it cold-loads WITHOUT the agent ever writing (declare …)
+  or saying where a form goes. Returns {:store <arranged> …} or nil (the
+  namespace cannot be made to load). Two moves, both silent to the agent —
+  the pipeline OWNS form ordering:
+  - **Arrange** (the common case, every write): the forms take their DERIVED
+    order — definitions before callers, ties by creation rank
+    (`slopp.index.refs/arrange`). No delta records it: the same forms derive
+    the same arrangement in any fold of the journal, which is why the `:move`
+    op could be retired. {:store :moved n} counts the forms whose position
+    changed, 0 when the namespace was already arranged.
   - **Auto-declare** (a genuine cycle — mutual recursion, no legal order):
-    insert a MARKED `^{:auto-declare \"<why>\"} (declare …)` for the cycle
-    members — {:store :declared [names]}. The marker's value is the why
+    append a MARKED `^{:auto-declare \"<why>\"} (declare …)` for the cycle
+    members — {:store :declared [names]}; the derived order puts a declare
+    right after the ns form. The marker's value is the why
     (markers-carry-their-why); `fix-declares!` removes it once the cycle
     breaks. The write pipeline calls this so agents never hand-write declares."
   [store ns-sym & {:keys [prompt agent]}]
-  (when (cold-load-errors store [ns-sym])
-    (let [{:keys [order cycle]} (refs/cold-load-order store ns-sym)]
-      (if cycle
-        (let [names  (mapv #(symbol (name %)) cycle)
-              why    (str "mutual recursion: " (str/join ", " (map str names)))
-              decl   (declare-node names :why why)
-              nameset (set names)
-              anchor (some #(when (nameset (:name %)) (:name %))
-                           (store/forms store ns-sym))
-              [st' _] (store/append-form store ns-sym decl
-                                         :before anchor
-                                         :prompt (or prompt (str "auto-declare: " why))
-                                         :agent agent)]
-          (when (and st' (nil? (cold-load-errors st' [ns-sym])))
-            {:store st' :declared names}))
-        (let [names   (mapv #(:name (store/form-by-id store %)) order)
-              [st' n] (store/reorder-to store ns-sym names
-                                        :prompt (or prompt fields/auto-reorder-prompt)
-                                        :agent agent
-                                        ;; the pipeline OWNS ordering (see the
-                                        ;; docstring) — mark it, so this stops
-                                        ;; overwriting the author's recorded why
-                                        :system true)]
-          (when (and (pos? n) (nil? (cold-load-errors st' [ns-sym])))
-            {:store st' :moved n}))))))
+  (when (get-in store [:namespaces ns-sym])
+    (let [before (mapv :id (store/forms store ns-sym))
+          st'    (refs/arrange store ns-sym)
+          moved  (count (remove true? (map = before (mapv :id (store/forms st' ns-sym)))))]
+      (if-not (cold-load-errors st' [ns-sym])
+        {:store st' :moved moved}
+        (let [{:keys [cycle]} (refs/cold-load-order st' ns-sym)]
+          (when cycle
+            (let [names   (mapv #(symbol (name %)) cycle)
+                  why     (str "mutual recursion: " (str/join ", " (map str names)))
+                  decl    (declare-node names :why why)
+                  [st'' _] (store/append-form st' ns-sym decl
+                                              :prompt (or prompt (str "auto-declare: " why))
+                                              :agent agent)
+                  st''    (some-> st'' (refs/arrange ns-sym))]
+              (when (and st'' (nil? (cold-load-errors st'' [ns-sym])))
+                {:store st'' :declared names}))))))))
 
 (defn ns-form-delete-error
   "Refuse deleting the (ns …) form itself. A namespace without its ns form

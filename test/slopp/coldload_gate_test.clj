@@ -52,24 +52,21 @@
           (is (re-find #":auto-declare" (query/query-source sess 'cl.cyc))
               "a MARKED declare was inserted by the pipeline")))
 
-      (testing "move: relocating a caller before its callee is still REFUSED (explicit order)"
-        (ops/ingest! sess 'cl.mv "(ns cl.mv)\n(defn early [] 1)\n(defn late [] 2)\n(defn tail [] (late))\n")
-        (let [r (ops/move-form! sess 'cl.mv 'tail :before 'late
-                                :prompt "m" :agent "t")]
-          (is (:error r))
-          (is (re-find #"cold-load" (str (:error r))))))
-
       (testing "legal writes still land"
         (let [r (ops/edit-replace! sess 'cl.core 'tail "(defn tail [] (early))"
                                    :prompt "ok" :agent "t")]
           (is (nil? (:error r)) (pr-str r))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external merge-replay-that-breaks-cold-load-is-refused
+(deftest ^:external a-merge-arranges-what-two-lines-interleaved
   ;; Each line is individually gate-legal, but the MERGE interleaves into a
   ;; forward ref: main deletes the (now-satisfied) declare while the branch
-  ;; grows a new forward use of the declared var. The merge door must hold
-  ;; the same invariant as every other write door.
+  ;; grows a new forward use of the declared var. This used to be REFUSED at
+  ;; the merge door — order was journaled, and neither line had written the
+  ;; move that would fix it. Order is derived now: the merge arranges every
+  ;; namespace it touched exactly as a write would, so the composition that
+  ;; no line wrote is fixed by the same derivation, and the door only refuses
+  ;; what no arrangement can load (a genuine cycle it could not declare).
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-coldload-merge" (make-array java.nio.file.attribute.FileAttribute 0)))
         sess (external/open! {:slopp.ops/dir dir})]
@@ -96,13 +93,15 @@
         (is (nil? (:error r)) (pr-str r))
         (is (not (re-find #"declare" (query/query-source sess 'm.core)))
             "setup: the declare must be gone on main"))
-      ;; the merge would land g→(h) with no declare and h defined after g
-      (let [before (query/query-source sess 'm.core)
-            r      (branch/branch-merge! sess "side")]
-        (is (:error r) (pr-str r))
-        (is (re-find #"cold-load" (str (:error r))))
-        (testing "nothing committed, image intact"
-          (is (= before (query/query-source sess 'm.core)))
+      ;; the merge lands g→(h) with no declare: h is arranged before g
+      (let [r (branch/branch-merge! sess "side")]
+        (is (nil? (:error r)) (pr-str r))
+        (let [src ^String (query/query-source sess 'm.core)]
+          (is (< (.indexOf src "defn h") (.indexOf src "defn g")) src)
+          (is (not (re-find #"declare" src)) "no declare was minted for an acyclic forward ref"))
+        (is (nil? (edit/cold-load-errors (:store @sess) '[m.core])))
+        (testing "and the image agrees"
+          (is (= [2] (ops/query-eval sess "(m.core/g)")))
           (is (= [:indep] (ops/query-eval sess "(m.core/f)")))))
       (finally
         (ops/close! sess)

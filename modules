@@ -18,7 +18,7 @@ slopp.eval-findings: slopp.read slopp.store slopp.ops (test)
 slopp.extract: slopp.read slopp.ops (test)
 slopp.f3c: slopp.read slopp.ops (test)
 slopp.files: slopp.store slopp.ops (test)
-slopp.git: slopp.build slopp.store
+slopp.git: slopp.build slopp.index slopp.store
 slopp.git-client: slopp.git slopp.read slopp.ops (test)
 slopp.git-concurrency: slopp.git slopp.ops (test)
 slopp.git-projection: slopp.git slopp.read slopp.store slopp.ops (test)

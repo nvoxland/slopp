@@ -16,7 +16,7 @@
             [slopp.ops :as ops]
             [slopp.store.db :as db]
             [slopp.git :as git]
-            [slopp.store :as store] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external])
+            [slopp.store :as store] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.lib ObjectId Repository]
@@ -434,3 +434,29 @@
                (pr-str (into {} (filter (fn [[_ v]]
                                           (str/includes? (str v) "run.app.main"))
                                         tree))))))))
+
+(deftest ^:external the-projection-orders-forms-exactly-as-the-live-store-does
+  ;; The projection FOLDS the journal to render each milestone's tree, and the
+  ;; journal no longer carries a single ordering delta. So the fold and the
+  ;; live store must derive the same arrangement from the same facts — forms,
+  ;; references, ranks — or a checkout would hold a file the live store never
+  ;; showed anyone, possibly one that does not cold-load.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (is (pos? (:forms (ops/ingest! sess 'po.core "(ns po.core)\n(defn ^:unused-ok a [] 1)\n"))))
+      (is (nil? (:error (ops/add-form! sess 'po.core "(defn ^:unused-ok c [] 2)" :prompt "c"))))
+      ;; a now needs c, which was created AFTER it: the live write reorders
+      (is (nil? (:error (ops/edit-replace! sess 'po.core 'a "(defn ^:unused-ok a [] (c))" :prompt "a calls c"))))
+      (is (= '[po.core c a] (mapv :name (store/forms (:store @sess) 'po.core))))
+      (let [r (external/commit-point! sess "ordered" :agent "alice")]
+        (is (nil? (:error r)) (pr-str r)))
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [tip  (get-in (git/ensure-projected! ctx) [:refs "main"])
+                repo (:slopp.git/repo ctx)]
+            (is (= (store.render/render-ns (:store @sess) 'po.core)
+                   (blob-text repo tip "src/po/core.clj"))
+                "the folded tree and the live store agree byte for byte"))
+          (finally (git/close-ctx! ctx))))
+      (finally (ops/close! sess)))))

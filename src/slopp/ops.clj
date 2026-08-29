@@ -131,7 +131,11 @@
     {:error pre}
     (try
       (let [base      (:store @session)
-            candidate (store/ingest base ns-sym source :agent agent)
+            ;; arranged before it is loaded: a whole namespace pasted in any
+            ;; order loads in its derived order (definitions before callers),
+            ;; and a genuine cycle gets its marked declare here like any write
+            candidate (let [c (store/ingest base ns-sym source :agent agent)]
+                        (or (:store (edit/resolve-cold-load c ns-sym :agent agent)) c))
             load?     (store/jvm-loadable? base ns-sym)]
         (if-let [derr (or (edit/dialect-scan candidate ns-sym)
                           ;; bulk imports (clone) land reality first and derive
@@ -422,17 +426,17 @@
 (defn- apply-group-step
   "Apply one edit-group step to a store VALUE. Returns {:store :delta :hot ...}
   or {:error msg}. `:hot` is the hot-reload action for the commit phase.
-  Actions: :replace, :add (optionally anchored via :before), :delete,
-  :move (:name before :before — reordering inside the atomic group; image
-  vars are order-independent, so no hot action), :subform (:match + :source,
-  `:text true` for raw-text matches — a small change INSIDE a big form
-  without re-transcribing it), and :require (one require clause into the ns
-  form). Subform/require compute the new source and reduce to :replace, so
-  every gate (dialect, Q7 isolation, Q9 teaching errors) rides along.
-  :replace and :delete carry the same destructive-write guards as the
-  single-form paths — ambiguity, rename-collision, ns-form protection —
-  since undo!/revert-episode!/sweeps all ride through here."
-  [st gid prompt agent {:keys [action ns name source before match text] :as step}]
+  Actions: :replace, :add, :delete, :subform (:match + :source, `:text true`
+  for raw-text matches — a small change INSIDE a big form without
+  re-transcribing it), and :require (one require clause into the ns form).
+  There is no :move and no :before: a form's place is derived from what it
+  references at commit (`edit/resolve-cold-load`), so an arrangement is not
+  a step an author can take. Subform/require compute the new source and
+  reduce to :replace, so every gate (dialect, Q7 isolation, Q9 teaching
+  errors) rides along. :replace and :delete carry the same destructive-write
+  guards as the single-form paths — ambiguity, rename-collision, ns-form
+  protection — since undo!/revert-episode!/sweeps all ride through here."
+  [st gid prompt agent {:keys [action ns name source match text] :as step}]
   (case action
     :replace (let [{:keys [node error]} (edit/parse-form source)
                    iso (when node
@@ -474,12 +478,10 @@
                  iso   {:error iso}
                  (and nm (store/form-named st ns nm))
                  {:error (str nm " already exists in " ns)}
-                 (and before (not (store/form-named st ns before)))
-                 {:error (str "no anchor form named " before " in " ns)}
                  :else
                  (if-let [[st' d] (store/append-form st ns node
                                                      :prompt prompt :group gid
-                                                     :agent agent :before before)]
+                                                     :agent agent)]
                    (if-let [merr (when nm (gates/gate-refusal st' ns nm))]
                      {:error merr}
                      {:store st' :delta d :hot [:load (:form-id d)]})
@@ -509,11 +511,6 @@
                                                      :agent agent)]
                    {:store st' :delta d :hot [:unmap ns name]}
                    (edit/missing-form-error st ns name)))
-    :move    (if-let [[st' d] (store/move-form st ns name before
-                                               :prompt prompt :agent agent)]
-               {:store st' :delta d :hot nil}
-               {:error (str "cannot move " name " before " before " in " ns
-                            " — both must be existing forms")})
     {:error (str "unknown action: " action)}))
 
 (defn edit-group!
@@ -675,31 +672,6 @@
                       (:carried load-res) (assoc :carried-errors (:carried load-res))
                       (pos? existing)    (assoc :existing-warnings existing))
                     t0))))))))))
-
-(defn move-form!
-  "S2: reorder — move form `nm` to just before `:before` in its namespace (the
-  fix for append-only forward references). Image vars are order-independent so
-  nothing re-evals; the next fresh load / restart uses the new order — which
-  is exactly why the move itself must pass the cold-load check (S1b): a move
-  can CREATE the forward reference a fresh load dies on."
-  [session ns-sym nm & {:keys [before prompt agent]}]
-  (cond
-    (nil? (store/form-named (:store @session) ns-sym nm))
-    (edit/missing-form-error (:store @session) ns-sym nm)
-
-    (nil? (store/form-named (:store @session) ns-sym before))
-    (edit/missing-form-error (:store @session) ns-sym before)
-
-    :else
-    (let [base0 (:store @session)]
-      (if-let [[st' delta] (store/move-form base0 ns-sym nm before
-                                            :prompt prompt :agent agent)]
-        (if-let [cold (edit/cold-load-errors st' [ns-sym])]
-          {:error cold}
-          (if-not (engine/try-commit! session base0 st' [ns-sym])
-            {:conflict {:reason "store changed concurrently — retry"}}
-            {:delta delta :moved {:form nm :before before}}))
-        {:error (str "cannot move " nm)}))))
 
 (defn forms-changed-since
   "Ids of forms touched by deltas after `since-id` (nil = since the beginning
@@ -868,9 +840,10 @@
 (defn extract!
   "Phase-3 structural op: extract a UNIQUE subform of `from` into a new fn
   `new-name` — params are the free locals in first-use order (computed from
-  the index's local analysis), the new fn lands BEFORE `from` (compile order),
-  and the subform becomes the call. One atomic intent: three grouped deltas
-  (add, move, replace), compile-checked before commit, verified once."
+  the index's local analysis), the new fn is appended and the derived order places it
+  before `from` (compile order), and the subform becomes the call. One atomic
+  intent: two grouped deltas (add, replace), compile-checked before commit,
+  verified once."
   [session ns-sym from new-name subform-src & {:keys [prompt at]}]
   (let [st   (:store @session)
         plan (refactor/extract-plan st ns-sym from subform-src new-name :at at)]
@@ -890,10 +863,11 @@
           (let [[gid st0] (store/alloc-id st "g")
                 [st1 d1]  (store/append-form st0 ns-sym (:node pd)
                                              :prompt prompt :group gid)
-                [st2 _]   (store/move-form st1 ns-sym new-name from
-                                           :prompt prompt :group gid)
-                [st3 d3]  (store/replace-node st2 ns-sym from (:node pf)
-                                              :prompt prompt :group gid)]
+                [st3 d3]  (store/replace-node st1 ns-sym from (:node pf)
+                                              :prompt prompt :group gid)
+                ;; no move: `from` now calls the new fn, and arranging the
+                ;; namespace puts the definition before its caller
+                st3       (or (:store (edit/resolve-cold-load st3 ns-sym)) st3)]
             (if-let [err (:err (engine/hot-load-all! session st3
                                               [(:form-id d1) (:form-id d3)]))]
               (edit/compile-error st3 err "extract failed to compile: ")
@@ -4423,24 +4397,20 @@
   one delta per form, every gate per form, ONE verification over the batch,
   nothing landed if any form fails — reported per form as `:forms`. The
   batch face of `add-form!`, which routes here when `source` holds more
-  than one top-level form. Appended at the tail: `before` anchors a single
-  form and is refused for a batch rather than guessed at."
-  [session ns-sym nodes & {:keys [prompt agent before]}]
-  (if before
-    {:error (str "several forms in one write are appended at the tail — `before`"
-                 " anchors ONE form; add the anchored one on its own")}
-    (let [r (edit-group! session
-                         (mapv (fn [node] {:action :add :ns ns-sym :source (n/string node)})
-                               nodes)
-                         :prompt prompt :agent agent)]
-      (if (or (:error r) (:conflict r))
-        r
-        (let [st (:store @session)]
-          (assoc r :forms
-                 (mapv (fn [d]
-                         (let [e (store/form-by-id st (:form-id d))]
-                           (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
-                       (:deltas r))))))))
+  than one top-level form."
+  [session ns-sym nodes & {:keys [prompt agent]}]
+  (let [r (edit-group! session
+                       (mapv (fn [node] {:action :add :ns ns-sym :source (n/string node)})
+                             nodes)
+                       :prompt prompt :agent agent)]
+    (if (or (:error r) (:conflict r))
+      r
+      (let [st (:store @session)]
+        (assoc r :forms
+               (mapv (fn [d]
+                       (let [e (store/form-by-id st (:form-id d))]
+                         (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
+                     (:deltas r)))))))
 
 (defn standing-run
   "The STANDING verdict for a test run of `scope` (a namespace symbol, or
@@ -4765,10 +4735,10 @@
 
 (defn add-form!
   "Add a new top-level form to `ns-sym` (O1 base write): dialect gate, `:add`
-  delta, hot-reload into the image, verification, provenance. `:before
-  <form-name>` anchors the new form immediately before that one (default:
-  appended at the tail) — define-before-use without a follow-up move.
-  Returns {:delta :warnings :test :affected} or {:error msg}.
+  delta, hot-reload into the image, verification, provenance. Appended; its
+  place in the namespace is derived at commit (definitions before callers),
+  so there is nothing to say about WHERE. Returns {:delta :warnings :test
+  :affected} or {:error msg}.
 
   `source` holding SEVERAL top-level forms is the batch write (`add-forms!`):
   one atomic group, verified once, reported per form as `:forms` — growing a
@@ -4784,11 +4754,11 @@
   SKIPS the per-form hot-load (`:load? false`) and defers verification to the
   ClojureScript compiler — reporting `cljs-deferred-summary` (:unverified,
   reason :cljs-deferred-to-compile) rather than running the suite. D-web-cljs."
-  [session ns-sym source & {:keys [prompt agent before no-auto-require]}]
+  [session ns-sym source & {:keys [prompt agent no-auto-require]}]
   (let [t0 (System/nanoTime)
         pfs (edit/parse-forms source)]
     (if (and (nil? (:error pfs)) (< 1 (count (:nodes pfs))))
-      (add-forms! session ns-sym (:nodes pfs) :prompt prompt :agent agent :before before)
+      (add-forms! session ns-sym (:nodes pfs) :prompt prompt :agent agent)
       (let [{:keys [node error]} (edit/parse-form source)
             nm (some-> node store/form-symbol)
             iso (when node
@@ -4808,18 +4778,10 @@
                 r (engine/rebased-write!
                    session
                    (fn [base]
-                     (cond
-                       (and nm (store/form-named base ns-sym nm))
+                     (if (and nm (store/form-named base ns-sym nm))
                        {:error (str nm " already exists in " ns-sym)}
-
-                       (and before (not (store/form-named base ns-sym before)))
-                       {:error (str "no anchor form named " before " in " ns-sym
-                                    " — :before must name an existing form")}
-
-                       :else
                        (if-let [[st' d] (store/append-form base ns-sym node
-                                                           :prompt prompt :agent agent
-                                                           :before before)]
+                                                           :prompt prompt :agent agent)]
                          ;; nameless forms too: a defmethod names its TARGET, so nm is nil
                          ;; here — and `(when nm …)` skipped the whole chassis for
                          ;; exactly the carrier whose ^:app/entry marker can only be
@@ -4837,7 +4799,7 @@
                 r
                 (auto-require-retry session ns-sym r
                                     #(add-form! session ns-sym source
-                                                :prompt prompt :agent agent :before before
+                                                :prompt prompt :agent agent
                                                 :no-auto-require true)))
               (let [edited     (if nm #{(symbol (str ns-sym) (str nm))} #{})
                     affected   (when (and load? nm) (engine/affected-tests session ns-sym nm))

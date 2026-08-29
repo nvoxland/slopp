@@ -1665,3 +1665,32 @@
           (is (= 2 (:n (first (db/reds-for conn [fid])))))
           (is (zero? (db/index-journal-reds! conn)) "and never twice")))
       (finally (.close conn)))))
+
+(deftest ^:external a-forms-rank-round-trips-and-older-rows-take-their-position
+  ;; `elements.rank` is the creation order the derived load order breaks ties
+  ;; by. It rides beside `pos` (the derived position, which the kernel reads
+  ;; at boot without a reference graph to derive from). A store written
+  ;; before the column existed has rows with no rank; `open!` fills them
+  ;; from `pos` once, which is exactly the tiebreak those rows were
+  ;; arranged by.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st    (-> (store/empty-store)
+                      (store/ingest 'rr.core "(ns rr.core)\n(defn a [] 1)\n(defn b [] 2)\n"))
+            a     (:id (store/form-named st 'rr.core 'a))
+            b     (:id (store/form-named st 'rr.core 'b))
+            nsf   (:id (store/form-named st 'rr.core 'rr.core))
+            st    (store/order-forms st 'rr.core [nsf b a])]
+        (is (true? (db/append! conn st (store/deltas st) ['rr.core] trunk nil)))
+        (let [loaded (db/load-store conn trunk)]
+          (is (= '[[rr.core 0] [b 2] [a 1]]
+                 (mapv (juxt :name :rank) (store/forms loaded 'rr.core)))
+              "the arranged order comes back by pos, the rank by its own column"))
+        (testing "rows from before the column take their position as their rank"
+          (jdbc/execute! conn ["UPDATE elements SET rank = NULL WHERE line = ?" trunk])
+          (with-open [c2 (db/open! dir)]
+            (is (= '[[rr.core 0] [b 1] [a 2]]
+                   (mapv (juxt :name :rank) (store/forms (db/load-store c2 trunk) 'rr.core)))))))
+      (finally (.close conn)))))

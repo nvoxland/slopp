@@ -365,24 +365,6 @@
         (is (not (re-find #"\(declare" (query/query-source sess 'ar.core)))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external add-caller-before-callee-auto-reorders
-  ;; the .ideas motivating case: the agent adds a caller anchored ABOVE the
-  ;; callee it references. That is a forward ref — the pipeline reorders the
-  ;; callee above the caller silently, no declare, no refusal.
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'cc.core "(ns cc.core)\n\n(defn callee \"C.\" [x] (inc x))\n")
-      (testing "adding a caller :before its callee resolves the forward ref"
-        (let [r (ops/add-form! sess 'cc.core "(defn caller \"C.\" [x] (callee x))"
-                               :before 'callee)]
-          (is (nil? (:error r)) (pr-str r))
-          (is (nil? (:reordered r)) "silent — no ordering key leaks")))
-      (testing "callee precedes caller; cold-loads; no declare"
-        (is (= '[cc.core callee caller] (mapv :name (store/forms (:store @sess) 'cc.core))))
-        (is (nil? (edit/cold-load-errors (:store @sess) '[cc.core])))
-        (is (not (re-find #"\(declare" (query/query-source sess 'cc.core)))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external genuine-cycle-auto-declares-with-marker
   ;; mutual recursion has no legal form order — the pipeline OWNS the declare:
   ;; it inserts a MARKED (declare …) itself so the ns cold-loads. The agent

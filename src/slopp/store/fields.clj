@@ -360,11 +360,12 @@
         field-registry))
 
 (def ^:export auto-reorder-prompt
-  "THE prompt the pipeline's auto-reorder writes. One constant with one
-  home, because two readers care about it: `slopp.edit/resolve-cold-load`
-  writes it, and `prompt-by-form` has to recognise it on deltas written
-  before the `:system` mark existed — the log is append-only, so those
-  cannot be re-stamped. Two string literals would drift silently."
+  "THE prompt the pipeline's auto-reorder USED to write on its `:move`
+  deltas. Nothing writes it any more — order is derived at every write and
+  recorded nowhere — but `prompt-by-form` still has to recognise it on the
+  deltas written before the `:system` mark existed (142 in slopp's own
+  store): the log is append-only, so those cannot be re-stamped, and a form
+  they touched must not report a reorder as its recorded why."
   "auto-reorder: define before use")
 
 (def ^:export auto-require-prompt

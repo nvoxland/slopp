@@ -193,23 +193,30 @@
         "an id we have already merged, carrying content it never had, is refused")
     (is (re-find #"recreated" (:error m2)))))
 
-(deftest move-deltas-replay-order-across-the-merge
+(deftest a-historical-move-delta-crosses-the-merge-as-applied-and-changes-nothing
+  ;; `:move` used to REPLAY across a merge because order was load-bearing and
+  ;; journaled. Order is derived now — from the forms, at every write and
+  ;; every fold — so a journal older than that change carries moves the
+  ;; merge has nothing to do with: they are marked applied (never replayed
+  ;; again) and touch nothing, and the merged store is arranged by whoever
+  ;; commits it.
   (let [b      (base)
         ours   (replace! b 'a "(defn a [x] (+ x 1))")
-        theirs (-> b
-                   (store/move-form 'm.core 'c 'a :prompt "c precedes a" :agent "them")
-                   first)
+        c      (:id (store/form-named b 'm.core 'c))
+        theirs (store/record-delta b {:id "their-move" :op :move :ns 'm.core
+                                      :parent (:head b) :form-id c :before 'a
+                                      :prompt "c precedes a" :agent "them"})
         r      (merge/merge-logs ours theirs)]
     (is (empty? (:conflicts r)))
-    (let [src (store.render/render-ns (:store r) 'm.core)]
-      (testing "their reordering lands: c is defined before a"
-        (is (< (.indexOf src "defn c") (.indexOf src "defn a")) src))
-      (testing "our same-file divergence still merges clean beside it"
-        (is (re-find #"\(\+ x 1\)" src))))
-    (testing "the replay is applied, not skipped"
-      (is (not-any? #(= :move (:skipped %)) (:notes r)) (pr-str (:notes r))))))
+    (testing "applied, so it never replays again; not skipped, not counted"
+      (is (contains? (set (:applied r)) "their-move") (pr-str (:applied r)))
+      (is (not-any? #(= :move (:skipped %)) (:notes r)) (pr-str (:notes r))))
+    (testing "our same-form divergence still merges clean beside it, in our arrangement"
+      (let [src (store.render/render-ns (:store r) 'm.core)]
+        (is (re-find #"\(\+ x 1\)" src))
+        (is (< (.indexOf src "defn a") (.indexOf src "defn c")) src)))))
 
-(deftest iterated-merge-with-id-collisions-keeps-adds-and-order
+(deftest iterated-merge-with-id-collisions-keeps-adds-and-ranks
   (let [add     (fn [st src agent]
                   (first (store/append-form st 'm.core (p/parse-string src)
                                             :prompt "t" :agent agent)))
@@ -220,19 +227,18 @@
         ours2   (add ours1 "(defn mine [x] x)" "us")
         theirs2 (-> theirs1
                     (add "(defn prim [x] x)" "them")
-                    (add "(defn gate [x] (prim x))" "them")
-                    (store/move-form 'm.core 'gate 'c :prompt "order" :agent "them") first
-                    (store/move-form 'm.core 'prim 'gate :prompt "order" :agent "them") first)
+                    (add "(defn gate [x] (prim x))" "them"))
         r       (merge/merge-logs ours2 theirs2 :from "web")
-        src     (store.render/render-ns (:store r) 'm.core)]
+        src     (store.render/render-ns (:store r) 'm.core)
+        rank-of (fn [nm] (:rank (store/form-named (:store r) 'm.core nm)))]
     (testing "their adds survive the cross-line id collision"
       (is (re-find #"defn prim" src) src)
       (is (re-find #"defn gate" src) src))
     (testing "our colliding add survives beside them"
       (is (re-find #"defn mine" src) src))
-    (testing "their move-fixed order replays through the remap"
-      (is (< (.indexOf src "defn prim") (.indexOf src "defn gate")) src)
-      (is (< (.indexOf src "defn gate") (.indexOf src "defn c")) src))
+    (testing "the replayed adds take ranks in arrival order, so the derived arrangement is theirs too"
+      (is (< (rank-of 'prim) (rank-of 'gate)))
+      (is (< (.indexOf src "defn prim") (.indexOf src "defn gate")) src))
     (testing "no conflicts — different work, the granularity dodge"
       (is (empty? (:conflicts r)) (pr-str (:conflicts r))))))
 

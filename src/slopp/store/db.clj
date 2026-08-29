@@ -40,7 +40,10 @@
         node (parse-node (:elements/source row))]
     (if (= :form kind)
       (cond-> {:id   (:elements/form_id row) :kind :form
-               :name (some-> (:elements/name row) symbol) :node node}
+               :name (some-> (:elements/name row) symbol) :node node
+               ;; the creation rank the derived order breaks ties by; a row
+               ;; older than the column has had it filled from pos at open!
+               :rank (or (:elements/rank row) (:elements/pos row))}
         (:elements/comment row) (assoc :comment (:elements/comment row)))
       {:kind :sep :node node})))
 
@@ -1330,12 +1333,17 @@
                               ORDER BY seq DESC LIMIT ?")
                        (line-head conn line-id) (name op) (long n)])))
 
-^:reads (defn- load-refs
+^:reads (defn ^:export load-refs
   "ONE LINE's persisted reference index, in the shape the value carries:
   `{ns-sym {:key refs-key :rows [record …]}}`, rows in the order they were
   written. Only namespaces with an `refs_keys` row are present — a namespace
   written without an entry has none here either, and `slopp.index.refs`
-  recomputes it on first read."
+  recomputes it on first read.
+
+  Exported for the git projection, which folds a journal into a store that
+  has no index of its own and seeds it with this one, so a namespace the
+  milestone holds in its live state is arranged from a lookup rather than an
+  analysis."
   [conn line-id]
   (let [keys-of (into {}
                       (map (fn [r] [(symbol (:refs_keys/ns r)) (:refs_keys/refs_key r)]))
@@ -1480,11 +1488,11 @@
                        line-id (str ns-sym)])
     (doseq [[pos e] (map-indexed vector
                                  (get-in store [:namespaces ns-sym :elements]))]
-      (jdbc/execute! tx ["INSERT INTO elements (line,ns,pos,kind,form_id,name,source,comment)
-                          VALUES (?,?,?,?,?,?,?,?)"
+      (jdbc/execute! tx ["INSERT INTO elements (line,ns,pos,kind,form_id,name,source,comment,rank)
+                          VALUES (?,?,?,?,?,?,?,?,?)"
                          line-id (str ns-sym) pos (name (:kind e)) (:id e)
                          (some-> (:name e) str) (n/string (:node e))
-                         (:comment e)])))
+                         (:comment e) (:rank e)])))
   ;; the reference index, beside the elements it was computed from
   (persist-refs! tx store nses line-id)
   ;; No id counter is persisted. It was the one statement here with a
@@ -1527,8 +1535,8 @@
   caller's to drop first (`drop-view!`)."
   [tx from to]
   (jdbc/execute! tx ["INSERT INTO elements
-                        (line,ns,pos,kind,form_id,name,source,comment)
-                      SELECT ?, ns, pos, kind, form_id, name, source, comment
+                        (line,ns,pos,kind,form_id,name,source,comment,rank)
+                      SELECT ?, ns, pos, kind, form_id, name, source, comment, rank
                       FROM elements WHERE line = ?" to from])
   (jdbc/execute! tx ["INSERT INTO form_refs (line,ns,seq,from_form,to_ns,to_name,row)
                       SELECT ?, ns, seq, from_form, to_ns, to_name, row
@@ -2106,7 +2114,16 @@
          ;; Same story as `tree` above: SQLite has no ADD COLUMN IF NOT EXISTS,
          ;; so adding it to an existing store throws and that is the no-op.
          (try (jdbc/execute! conn ["ALTER TABLE elements ADD COLUMN comment TEXT"])
-     (catch java.sql.SQLException _ nil))
+              (catch java.sql.SQLException _ nil))
+         ;; A FORM'S CREATION RANK, beside its derived position. `pos` is the
+         ;; arrangement — definitions before callers — which the kernel reads
+         ;; at boot, when there is no reference graph yet to derive it from;
+         ;; `rank` is when the form arrived, the tiebreak that arrangement was
+         ;; derived WITH. A store older than the column has rows whose only
+         ;; ordering fact is their position, so it becomes their rank once.
+         (try (jdbc/execute! conn ["ALTER TABLE elements ADD COLUMN rank INTEGER"])
+              (catch java.sql.SQLException _ nil))
+         (jdbc/execute! conn ["UPDATE elements SET rank = pos WHERE rank IS NULL"])
 ;; …and `line` is the one column that idiom cannot add: it belongs to the
          ;; PRIMARY KEY, and SQLite can neither add nor drop a key in place. So an
          ;; existing table is COPIED into the new shape with every row backfilled

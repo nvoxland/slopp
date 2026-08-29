@@ -42,43 +42,6 @@
     (is (= 'add (:name (store/form-named s 'foo 'add))))
     (is (nil? (store/form-named s 'foo 'missing)))))
 
-(deftest anchored-add-inserts-before-the-anchor
-  (let [base (store/ingest (store/empty-store) 'an.core
-                           "(ns an.core)\n(defn early [] 1)\n(defn late [] 2)\n")
-        [st d] (store/append-form base 'an.core
-                                  (rewrite-clj.parser/parse-string "(defn mid [] 3)")
-                                  :prompt "anchored" :before 'late)]
-    (testing "lands between early and late (element order IS the store truth)"
-      (is (= '[an.core early mid late]
-             (mapv :name (store/forms st 'an.core)))))
-    (testing "the delta records the anchor's form-id for replay"
-      (is (= (:id (store/form-named base 'an.core 'late)) (:before d))))
-    (testing "a foreign store replays the add into the SAME position"
-      (is (= '[an.core early mid late]
-             (mapv :name (store/forms (store/replay-delta base d) 'an.core)))))
-    (testing "a missing anchor name returns nil (caller errors)"
-      (is (nil? (store/append-form base 'an.core
-                                   (rewrite-clj.parser/parse-string "(defn x [] 4)")
-                                   :before 'nope))))))
-
-(deftest reorder-to-realizes-a-target-order
-  (let [base (store/ingest (store/empty-store) 'ro.core
-                           "(ns ro.core)\n(defn c [] 3)\n(defn a [] 1)\n(defn b [] 2)\n")
-        names #(mapv :name (store/forms % 'ro.core))]
-    (testing "reorders to the requested sequence, ns decl first"
-      (let [[st n] (store/reorder-to base 'ro.core '[ro.core a b c])]
-        (is (= '[ro.core a b c] (names st)))
-        (is (pos? n) "some moves happened")))
-    (testing "an already-correct order needs no moves"
-      (let [[st n] (store/reorder-to base 'ro.core '[ro.core c a b])]
-        (is (= '[ro.core c a b] (names st)))
-        (is (zero? n))))
-    (testing "the moves are ordinary :move deltas (replay-tested in multiproc)"
-      (let [[st n] (store/reorder-to base 'ro.core '[ro.core a b c])]
-        (is (= n (count (filter #(= :move (:op %))
-                                (drop (count (:deltas base)) (:deltas st)))))
-            "each move is one :move delta")))))
-
 (deftest form-symbols-reports-what-a-form-actually-defines
   ;; The store's premise was "one form ↔ one name", via form-symbol's (second s).
   ;; Probed against kondo 2026-07-17, it is wrong in BOTH directions:
@@ -148,14 +111,9 @@
   (let [base      (store/ingest (store/empty-store) 't.core
                                 "(ns t.core)\n\n(defn a [] 1)\n")
         [s-b d-b] (store/append-form base 't.core (p/parse-string "(defn b [] 2)"))
-        [s-c _]   (store/append-form s-b 't.core (p/parse-string "(defn c [] 3)")
-                                     :before 'b)
         render    (fn [st] (store.render/render-ns st 't.core))]
     (testing "a tail-appended form gets a blank line before it (top-level convention)"
       (is (= "(ns t.core)\n\n(defn a [] 1)\n\n(defn b [] 2)\n" (render s-b))))
-    (testing "an anchored insert is blank-line separated on both sides"
-      (is (= "(ns t.core)\n\n(defn a [] 1)\n\n(defn c [] 3)\n\n(defn b [] 2)\n"
-             (render s-c))))
     (testing "journal replay of the :add renders identically to the live append"
       (is (= (render s-b) (render (store/replay-delta base d-b)))))))
 
@@ -319,36 +277,28 @@
         "a form nothing ever asked about is absent, not blank")))
 
 (deftest prompt-by-form-ignores-housekeeping-writes
-  ;; The pipeline OWNS form ordering — resolve-cold-load's own docstring
-  ;; calls its two moves "silent to the agent". They were not silent in the
-  ;; recorded intent: because the LAST prompt naming a form wins, an
-  ;; auto-reorder overwrote the author's ask. Measured on slopp's own store
-  ;; before the fix: 142 of 1,898 forms with a recorded why (7%) reported
-  ;; "auto-reorder: define before use" as theirs — on form-card,
-  ;; query_slice's cards, and the reviewer UI alike.
+  ;; A pipeline-owned write must not become a form's recorded WHY: because
+  ;; the LAST prompt naming a form wins, the old auto-reorder overwrote the
+  ;; author's ask — measured on slopp's own store before the fix, 142 of
+  ;; 1,898 forms with a recorded why (7%) reported "auto-reorder: define
+  ;; before use" as theirs. The reorder writes nothing at all now (order is
+  ;; derived), but the rule outlived it: the auto-require is a `:system`
+  ;; write, and the journals those 142 reorders sit in are append-only.
   ;;
   ;; The discriminator is a MARK on the delta, not the op and not the
-  ;; prompt text: edit_move is the same op with a real intent behind it.
-  ;; The rule lives in `record-delta`, the one door every append takes.
+  ;; prompt text. The rule lives in `record-delta`, the one door every
+  ;; append takes.
   (testing "a marked housekeeping delta does not become a form's why"
     (let [st (reduce store/record-delta (store/empty-store)
                      [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
-                      {:id "d2" :op :move :form-id "f1" :system true
-                       :prompt "auto-reorder: define before use"}])]
+                      {:id "d2" :op :replace :form-id "f1" :system true
+                       :prompt "auto-require: add the alias the form names"}])]
       (is (= "the authored ask" (get (store/prompt-by-form st) "f1")))))
-  (testing "an UNMARKED move still counts — edit_move carries a real intent"
+  (testing "an UNMARKED write still counts — it carries a real intent"
     (let [st (reduce store/record-delta (store/empty-store)
                      [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
-                      {:id "d2" :op :move :form-id "f1" :prompt "move it where it belongs"}])]
-      (is (= "move it where it belongs" (get (store/prompt-by-form st) "f1")))))
-  (testing "reorder-to marks what it writes"
-    (let [st      (store/ingest (store/empty-store) 'demo.core
-                                "(ns demo.core)\n\n(defn a [] (b))\n\n(defn b [] 1)\n")
-          [st' n] (store/reorder-to st 'demo.core '[demo.core b a]
-                                    :prompt "auto-reorder: define before use"
-                                    :system true)]
-      (is (pos? n) "the fixture must actually move something")
-      (is (every? :system (filter #(= :move (:op %)) (store/deltas st'))))))
+                      {:id "d2" :op :replace :form-id "f1" :prompt "make it faster"}])]
+      (is (= "make it faster" (get (store/prompt-by-form st) "f1")))))
   (testing "deltas written BEFORE the mark existed are recognised by their prompt"
     ;; the log is append-only, so 142 already-written reorders cannot be
     ;; re-stamped. One constant, owned by the registry and used by the one
@@ -422,19 +372,20 @@
   (let [s0   (store/ingest (store/empty-store) 'w.core
                            "(ns w.core)\n\n(defn a [] 1)\n\n(defn b [] 2)\n")
         seps (fn [st] (filter #(= :sep (:kind %))
-                              (get-in st [:namespaces 'w.core :elements])))]
+                              (get-in st [:namespaces 'w.core :elements])))
+        fid  (fn [st nm] (:id (store/form-named st 'w.core nm)))]
     (testing "ingest"
       (is (empty? (seps s0))))
-    (testing "append — at the tail, and anchored before a form"
+    (testing "append"
       (let [[s1] (store/append-form s0 'w.core (p/parse-string "(defn c [] 3)"))
-            [s2] (store/append-form s1 'w.core (p/parse-string "(defn d [] 4)")
-                                    :before 'a)]
+            [s2] (store/append-form s1 'w.core (p/parse-string "(defn d [] 4)"))]
         (is (empty? (seps s2)))
-        (is (= (str "(ns w.core)\n\n(defn d [] 4)\n\n(defn a [] 1)\n\n"
-                    "(defn b [] 2)\n\n(defn c [] 3)\n")
+        (is (= (str "(ns w.core)\n\n(defn a [] 1)\n\n(defn b [] 2)\n\n"
+                    "(defn c [] 3)\n\n(defn d [] 4)\n")
                (store.render/render-ns s2 'w.core)))
-        (testing "move and delete — neither has a trailing separator to carry"
-          (let [[s3] (store/move-form s2 'w.core 'c 'a)
+        (testing "arrange and delete — neither has a trailing separator to carry"
+          (let [s3 (store/order-forms s2 'w.core
+                                      (mapv #(fid s2 %) '[w.core d c a b]))
                 [s4] (store/remove-form s3 'w.core 'b)]
             (is (empty? (seps s4)))
             (is (= "(ns w.core)\n\n(defn d [] 4)\n\n(defn c [] 3)\n\n(defn a [] 1)\n"
@@ -461,7 +412,7 @@
       (is (= "(ns d.core)\n\n#_(defn old [] 1)\n(defn fresh [] 2)\n"
              (store.render/render-ns s 'd.core))))))
 
-(deftest replay-covers-ingest-and-move
+(deftest replay-covers-ingest-from-the-log-alone
   ;; `replay-delta` returning nil means "I cannot do this — reload everything".
   ;; That was honest while the log was incomplete: `:ingest` predated
   ;; `:sources`/`:comments`, so the elements table was the only record of what
@@ -476,14 +427,8 @@
     (testing ":ingest replays from the log alone — order, sources and comments"
       (let [back (store/replay-delta base d1)]
         (is (some? back) "ingest must not force a reload")
-        (is (= (store.render/render-ns s1 'r.core) (store.render/render-ns back 'r.core)))))
-    (testing ":move replays to the same order the live write produced"
-      (let [[s2 d2] (store/move-form s1 'r.core 'b 'a)
-            back    (store/replay-delta s1 d2)]
-        (is (some? back) "move must not force a reload")
-        (is (= (store.render/render-ns s2 'r.core) (store.render/render-ns back 'r.core)))
-        (is (= ['r.core 'b 'a]
-               (mapv :name (get-in back [:namespaces 'r.core :elements]))))))))
+        (is (= (store.render/render-ns s1 'r.core) (store.render/render-ns back 'r.core)))
+        (is (= [0 1 2] (mapv :rank (store/forms back 'r.core))) "and the ranks")))))
 
 (deftest replay-covers-the-changeset-ops
   ;; Four ops forced a full reload for no reason at all. Every one of them is
@@ -531,30 +476,36 @@
   ;;
   ;; This is the synthetic standing version. It is weaker than that check by
   ;; construction — it only covers the ops it exercises — so a NEW op earns
-  ;; its place here as well as in `replay-delta`.
+  ;; its place here as well as in `replay-delta`. ORDER is not among the
+  ;; things the log accounts for: it is derived from the forms at every fold
+  ;; and every write (`the-projection-orders-forms-exactly-as-the-live-store-does`
+  ;; is the end-to-end proof), so the store fns here leave the vector in
+  ;; creation order on both sides.
   (let [s0     (store/ingest (store/empty-store) 'j.core
                              "(ns j.core)\n\n;; the seed\n(defn a [] 1)\n\n(defn b [] 2)\n")
         [s1 _] (store/append-form s0 'j.core (p/parse-string "(defn c [] 3)"))
-        [s2 _] (store/append-form s1 'j.core (p/parse-string "(defn d [] 4)") :before 'b)
+        [s2 _] (store/append-form s1 'j.core (p/parse-string "(defn d [] 4)"))
         fid    (:id (first (filter #(= 'a (:name %))
                                    (get-in s2 [:namespaces 'j.core :elements]))))
         [s3 _] (store/apply-changeset s2 :replace 'j.core
                                       {fid (p/parse-string "(defn a [] 100)")})
         [s4 _] (store/set-comment s3 'j.core 'c ";; added later")
-        [s5 _] (store/move-form s4 'j.core 'c 'a)
-        [s6 _] (store/remove-form s5 'j.core 'b)
-        [s7 _] (store/set-comment s6 'j.core 'a "")
-        s8     (store/ingest s7 'j.other "(ns j.other)\n\n(defn z [] 9)\n")
+        [s5 _] (store/remove-form s4 'j.core 'b)
+        [s6 _] (store/set-comment s5 'j.core 'a "")
+        s7     (store/ingest s6 'j.other "(ns j.other)\n\n(defn z [] 9)\n")
         folded (reduce (fn [s d] (when s (store/replay-delta s d)))
                        (store/empty-store)
-                       (store/deltas s8))]
+                       (store/deltas s7))]
     (testing "every delta replays — a nil here is an unreconstructible milestone"
       (is (some? folded)))
     (testing "and the result renders identically, namespace for namespace"
-      (is (= (set (keys (:namespaces s8))) (set (keys (:namespaces folded)))))
-      (doseq [n (keys (:namespaces s8))]
-        (is (= (store.render/render-ns s8 n) (store.render/render-ns folded n))
+      (is (= (set (keys (:namespaces s7))) (set (keys (:namespaces folded)))))
+      (doseq [n (keys (:namespaces s7))]
+        (is (= (store.render/render-ns s7 n) (store.render/render-ns folded n))
             (str n " does not survive a journal round trip"))))
+    (testing "including each form's creation rank"
+      (is (= (mapv (juxt :name :rank) (store/forms s7 'j.core))
+             (mapv (juxt :name :rank) (store/forms folded 'j.core)))))
     (testing "including the comment lifecycle — set, carried, and cleared"
       (is (= ";; added later"
              (:comment (first (filter #(= 'c (:name %))
@@ -1007,3 +958,36 @@
     (testing "a milestone with no done before it keeps just itself"
       (is (= ["c1"] (map :id (:recent (store/record-delta (store/empty-store)
                                                            {:id "c1" :op :commit :ns '*session*}))))))))
+
+(deftest a-form-carries-its-creation-rank-and-order-writes-no-delta
+  ;; The `:move` op is gone: 1,048 deltas in this store's journal (and 1,658
+  ;; in a consumer's — 99.8% pipeline-written) recorded an arrangement the
+  ;; pipeline recomputes from the forms anyway. A form now carries `:rank`,
+  ;; its creation order in the namespace, and that is the only ordering fact
+  ;; the store keeps; `order-forms` arranges the vector to a derived sequence
+  ;; and appends NOTHING to the log.
+  (let [s0 (store/ingest (store/empty-store) 'rk.core
+                         "(ns rk.core)\n(defn a [] 1)\n(defn b [] 2)\n")
+        ranks (fn [st] (mapv (juxt :name :rank) (store/forms st 'rk.core)))]
+    (testing "ingest ranks forms in source order, from the ns form"
+      (is (= '[[rk.core 0] [a 1] [b 2]] (ranks s0))))
+    (testing "an append takes the next rank, whatever the vector's order"
+      (let [[s1 _] (store/append-form s0 'rk.core (p/parse-string "(defn c [] 3)"))]
+        (is (= '[[rk.core 0] [a 1] [b 2] [c 3]] (ranks s1)))
+        (testing "and replaying the :add assigns the same rank"
+          (is (= (ranks s1)
+                 (ranks (store/replay-delta s0 (last (store/deltas s1)))))))))
+    (testing "order-forms arranges the vector and writes no delta"
+      (let [c   (:id (store/form-named s0 'rk.core 'rk.core))
+            a   (:id (store/form-named s0 'rk.core 'a))
+            b   (:id (store/form-named s0 'rk.core 'b))
+            s2  (store/order-forms s0 'rk.core [c b a])]
+        (is (= '[rk.core b a] (mapv :name (store/forms s2 'rk.core))))
+        (is (= (store/deltas s0) (store/deltas s2)) "no :move, no delta of any kind")
+        (is (= '[[rk.core 0] [b 2] [a 1]] (ranks s2)) "ranks are creation facts and do not follow the arrangement")))
+    (testing "a :move from an older journal replays as a no-op — order is derived, not replayed"
+      (let [d {:id "old-move" :op :move :ns 'rk.core :parent (:head s0)
+               :form-id (:id (store/form-named s0 'rk.core 'b)) :before 'a}
+            back (store/replay-delta s0 d)]
+        (is (some? back) "an old op still replays — it is not a reload")
+        (is (= '[rk.core a b] (mapv :name (store/forms back 'rk.core))))))))

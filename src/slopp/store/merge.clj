@@ -506,20 +506,14 @@
                   ;; Their form-id maps through idmap; our current NAME is
                   ;; resolved from it (rename-proof); a missing form or target
                   ;; on our side skips with a note, never errors.
-                  (let [fid (live-fid st idmap (:form-id d))
-                        nm  (:name (store/form-by-id st fid))
-                        r   (when nm
-                              (store/move-form st (:ns d) nm (:before d)
-                                               :prompt (:prompt d)
-                                               :agent (:agent d)))]
-                    (if r
-                      (done (tag-merged (first r) (:id d)) idmap (inc merged)
-                            conflicts notes changed new-nses
-                            (conj applied (:id d)))
-                      (done st idmap merged conflicts
-                            (conj notes {:skipped :move :ns (:ns d)
-                                         :reason "moved form or target absent on our side"})
-                            changed new-nses (conj applied (:id d)))))
+                  ;; HISTORICAL: a `:move` in a journal older than 2026-08-29 recorded an
+                  ;; arrangement the pipeline had derived. Order is derived at every
+                  ;; write and every fold now, so there is nothing to replay — the
+                  ;; merged store is arranged by whoever commits it (merge-into-session!
+                  ;; resolves every changed namespace). Applied, so it never replays
+                  ;; again; not counted, because it changed nothing.
+                  (done st idmap merged conflicts notes changed new-nses
+                        (conj applied (:id d)))
 
                   ;; module edges are CRDT-grain: fold theirs in (adds union,
                   ;; removes disj) — never a conflict. A union CAN close a

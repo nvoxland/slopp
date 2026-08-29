@@ -1,7 +1,7 @@
 (ns slopp.eval-findings-test
   "Fixes for what the symmetric eval surfaced (S-series)."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external]))
 
 (deftest ^:external s1-non-compiling-forms-are-rejected-not-silently-committed
   (let [sess (external/open!)
@@ -40,7 +40,7 @@
           (is (= [7] (ops/query-eval sess "(s1.core/f 7)")))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external s2-forward-refs-rejected-at-write-time-and-move-reorders
+(deftest ^:external s2-forward-refs-are-rejected-at-write-time-and-order-is-derived
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 's2.core "(ns s2.core)\n")
@@ -51,22 +51,17 @@
       (ops/add-form! sess 's2.core "(defn helper [x] (* 2 x))")
       (ops/add-form! sess 's2.core "(defn caller [x] (helper x))")
       (ops/add-form! sess 's2.core "(defn util [] :u)")
-      (testing "edit_move reorders the store (stylistic/structural ordering)"
-        (let [r (ops/move-form! sess 's2.core 'util :before 'helper
-                                :prompt "group utils first")]
-          (is (nil? (:error r)))
-          (let [src ^String (query/query-source sess 's2.core)]
-            (is (< (.indexOf src "util") (.indexOf src "helper"))))))
-      (testing "a FRESH load respects the new order; everything still works"
+      (testing "the arrangement is derived: a definition precedes its callers,
+                and there is no tool to say otherwise — `edit_move` and the
+                `:move` op are gone"
+        (let [src ^String (query/query-source sess 's2.core)]
+          (is (< (.indexOf src "defn helper") (.indexOf src "defn caller"))))
+        (is (empty? (filter #(= :move (:op %)) (ops/journal sess)))
+            "nothing about the order was written to the log"))
+      (testing "a FRESH load loads in that order; everything still works"
         (ops/restart! sess)
         (is (= [10] (ops/query-eval sess "(s2.core/caller 5)")))
         (is (= [:u] (ops/query-eval sess "(s2.core/util)"))))
-      (testing "lineage records the :move"
-        (is (contains? (set (map :op (history/query-lineage (ops/with-history sess) 's2.core 'util)))
-                       :move)))
-      (testing "validation"
-        (is (:error (ops/move-form! sess 's2.core 'nope :before 'caller)))
-        (is (:error (ops/move-form! sess 's2.core 'helper :before 'nope))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external x3-image-loads-follow-dependency-order

@@ -50,7 +50,15 @@
       {:merged 0 :conflicts [] :note "already converged — nothing to merge"}
 
       :else
-      (let [st'      (:store r)
+      (let [touched  (filter #(contains? (:namespaces (:store r)) %)
+                              (distinct (concat (keep :ns (:pending (:store r)))
+                                                (:new-nses r))))
+            ;; ARRANGE before judging: a merge replays content and ranks, never
+            ;; an arrangement (there is no :move op), so every namespace the
+            ;; merge touched is derived here exactly as a write would derive it
+            ;; — and a genuine cycle two lines composed gets its declare here
+            st'      (reduce (fn [s n] (or (:store (edit/resolve-cold-load s n)) s))
+                             (:store r) touched)
             load-err (or ;; cold-load first (S1b): two individually-legal lines can
                       ;; interleave into a forward ref — refuse before the
                       ;; image is touched
@@ -66,12 +74,7 @@
                             (str "the merge brings dependencies the image"
                                  " could not hot-add: " (pr-str new-deps)
                                  " — " (:err r)))))
-                      (edit/cold-load-errors
-                       st'
-                       (filter #(contains? (:namespaces st') %)
-                               (distinct
-                                (concat (keep :ns (:pending st'))
-                                        (:new-nses r)))))
+                      (edit/cold-load-errors st' touched)
                       ;; ONE dependency-ordered pass, new-ns loads and
                       ;; changed-form hot-loads INTERLEAVED: a new ns that
                       ;; calls forms the merge just added to an EXISTING
