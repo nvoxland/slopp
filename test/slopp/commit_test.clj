@@ -29,10 +29,10 @@
         (is (some? (:commit r)))
         (testing "a commit point IMPLIES a done (episode closed)"
           (is (some? (:done r)))
-          (is (empty? (:forms (history/query-changes sess :agent "alice")))))
+          (is (empty? (:forms (history/query-changes (ops/with-history sess) :agent "alice")))))
         (testing "the marker delta is real provenance"
           (let [d (first (filter #(= :commit (:op %))
-                                 (store/deltas (:store @sess))))]
+                                 (ops/journal sess)))]
             (is (= "v1: plus-ten shipped" (:description d)))
             (is (= (:target r) (:target d)))
             (is (= "alice" (:agent d))))))
@@ -48,14 +48,14 @@
           (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}" (str (:at c2))))))
       (testing "commit targets anchor query-changes spans (diff between milestones)"
         (let [[c2 c1] (ops/query-commits sess)
-              c (history/query-changes sess :from (:target c1) :to (:target c2))]
+              c (history/query-changes (ops/with-history sess) :from (:target c1) :to (:target c2))]
           (is (some #(= 'cm.core/g (:form %)) (:forms c)))))
       (testing "the collapsed history shows the milestone; contains finds it"
-        (let [rows (history/query-history sess :collapse true :contains "plus-ten shipped")]
+        (let [rows (history/query-history (ops/with-history sess) :collapse true :contains "plus-ten shipped")]
           (is (= "v1: plus-ten shipped"
                  (get-in (first rows) [:commit :description]))))
         (is (re-find #"COMMIT \"v2: minus-two\""
-                     (history/query-history sess :collapse true :format "text"))))
+                     (history/query-history (ops/with-history sess) :collapse true :format "text"))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external commit-point-green-gate

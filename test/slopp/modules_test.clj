@@ -91,7 +91,7 @@
           (is (= {:from "mb.app" :to "ma.core" :action :add}
                  (select-keys r [:from :to :action])))
           (let [d (last (filter #(= :module-edge (:op %))
-                                (store/deltas (:store @sess))))]
+                                (ops/journal sess)))]
             (is (= "the app renders core's data" (:prompt d)))))
         (is (nil? (:error (ops/ingest! sess 'mb.app
                                        (str "(ns mb.app (:require [ma.core :as core]\n"
@@ -1189,7 +1189,7 @@
       (ops/ingest! sess 'mx.one "(ns mx.one)\n(defn a \"A.\" [] 1)\n")
       (ops/ingest! sess 'mx.two "(ns mx.two)\n(defn b \"B.\" [] 2)\n")
       (let [verifies #(count (filter (fn [d] (= :verify (:op d)))
-                                     (store/deltas (:store @sess))))
+                                     (ops/journal sess)))
             before   (verifies)
             r        (ops/module-extract! sess ['mx.one 'mx.two] "mx.core"
                                           :prompt "regroup under one prefix")]

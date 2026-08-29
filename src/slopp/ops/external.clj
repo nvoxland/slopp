@@ -1665,7 +1665,7 @@ client-deps (merge (:client-deps st) (:client provided))
 
       target
       (if (db/on-line? (:db @session) (engine/session-line session) target)
-        (mark! target (history/status-at (:store (ops/with-history session)) target) {} extra)
+        (mark! target (history/status-at (:store @(ops/with-history session)) target) {} extra)
         {:error (str "no delta " target " in this branch's history")})
 
       :else
@@ -1700,7 +1700,7 @@ client-deps (merge (:client-deps st) (:client provided))
                           (:findings cp)
                           (ops/last-judged-done st))
                 status  (or (:test-status verdict)
-                            (history/status-at (:store (ops/with-history session)) head))
+                            (history/status-at (:store @(ops/with-history session)) head))
                 status (if (= :unknown status) :green status) ; nothing ever ran red
                 ;; NO tree is captured. A milestone used to carry a byte-exact
                 ;; snapshot of every namespace, because comments lived

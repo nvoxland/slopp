@@ -31,7 +31,6 @@
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
             [slopp.rules.keywords :as keywords]
-            [slopp.read.history :as history]
             [slopp.read.orient :as orient]
             [slopp.read.telemetry :as telemetry]
             [slopp.edit :as edit]
@@ -328,7 +327,13 @@
                          (filter #(and (not (contains? (:via %) :observed))
                                        (not (seen (:test %)))))
                          (mapv #(select-keys % [:test :via :hops]))))
-          why     (last (history/query-lineage session ns-sym nm))]
+          ;; the author's newest recorded ask for this form — the value carries
+          ;; it (`:prompts`, kept by every write), so the dossier never walks
+          ;; the log. The enclosing turn intent and the agent are one
+          ;; `query_history {name}` away, on the log, where they live.
+          why     (let [fid (:id (store/form-named (:store @session) ns-sym nm))]
+                    (some->> (get (store/prompt-by-form (:store @session)) fid)
+                             (hash-map :prompt)))]
       (cond-> {:ns ns-sym :name nm :source (:source sym)}
         (:effectful? sym) (assoc :effectful? true)
         (:reads? sym)     (assoc :reads? true)
@@ -339,10 +344,7 @@
         (and (seq tmap) (empty? tests) (empty? reached) (not (:test? sym)))
         (assoc :untested true)
         (empty? tmap)     (assoc :coverage :unknown)
-        why               (assoc :why (cond-> {:op     (:op why)
-                                               :prompt (:prompt why)}
-                                        (:agent why)       (assoc :agent (:agent why))
-                                        (:turn-intent why) (assoc :intent (:turn-intent why))))))))
+        why               (assoc :why why)))))
 
 (defn ^:export cause-chain
   "An exception as `Class: message <- Class: message …`, outermost first,

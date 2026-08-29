@@ -9,7 +9,6 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
             [slopp.ops :as ops]
-            [slopp.store :as store]
             [slopp.ops.branch :as branch] [slopp.ops.external :as external] [slopp.read.history :as history])
 )
 
@@ -21,7 +20,7 @@
                          :prompt "bump" :agent "replacer")
       (ops/add-form! sess 'at.core "(defn g [x] (f x))" :agent "adder")
       (ops/rename! sess 'at.core 'g 'h :agent "renamer")
-      (let [by-op (into {} (map (juxt :op :agent)) (slopp.store/deltas (:store @sess)))]
+      (let [by-op (into {} (map (juxt :op :agent)) (slopp.ops/journal sess))]
         (is (= "ingester" (by-op :ingest)))
         (is (= "replacer" (by-op :replace)))
         (is (= "adder"    (by-op :add)))
@@ -80,9 +79,9 @@
             (testing "merge verification ran BOTH sides' tests green"
               (is (zero? (+ (:fail (:test r)) (:error (:test r))))))
             (testing "provenance: the merge delta + their agent attribution"
-              (is (some #(= :merge (:op %)) (store/deltas (:store @sess))))
+              (is (some #(= :merge (:op %)) (slopp.ops/journal sess)))
               (is (re-find #"forker"
-                           (pr-str (history/query-history sess :contains "double-apply"))))))
+                           (pr-str (history/query-history (slopp.ops/with-history sess) :contains "double-apply"))))))
           ;; 6. merging again is a no-op (idempotent)
           (let [r2 (branch/merge! sess b-dir)]
             (is (zero? (:merged r2)))

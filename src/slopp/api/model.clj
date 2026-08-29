@@ -121,7 +121,12 @@
   Milestones come from `history/milestone-rows`, the pure fold, not from
   `query-commits`: this namespace is :pure and query-commits opens the db
   to join the git projection's pinned shas. The cost is exactly that —
-  `:sha` appears only for milestones whose DELTA carries one."
+  `:sha` appears only for milestones whose DELTA carries one. The fold
+  needs the value's `:deltas` to hold the `:commit` markers and nothing
+  more (`slopp.ops/with-history` with `:ops [:commit]`); the working set
+  is the RECENT window the value always carries — everything since the
+  newest milestone plus the done that earned it, and the content filter
+  drops that marker."
   [session]
   (let [st         (:store @session)
         rows       (history/milestone-rows st :titles-only true)
@@ -138,12 +143,8 @@
                                          (update :status #(some-> % name)))
                                prev (assoc :range (str prev ".." (:commit row))))))
                          rows))
-        ds         (store/deltas st)
-        last-commit (:id (last (filter #(= :commit (:op %)) ds)))
-        since      (if last-commit
-                     (rest (drop-while #(not= last-commit (:id %)) ds))
-                     ds)
-        mine       (filter #(contains? history/content-ops (:op %)) since)
+        last-commit (:commit (first rows))
+        mine       (filter #(contains? history/content-ops (:op %)) (:recent st))
         asks       (vec (keep :prompt mine))
         shown      8]
     {:milestones milestones

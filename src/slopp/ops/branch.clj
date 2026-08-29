@@ -31,7 +31,11 @@
   persist, verify every touched namespace, and record ONE `:merge` delta."
   [session theirs from-label]
   (let [t0   (System/nanoTime)
-        base (:store @session)
+        ;; OUR side, hydrated: the merge folds both logs from the fork point,
+        ;; and the live value carries none — the list is read here, for this
+        ;; merge, and `committed` drops it from what lands
+        base (assoc (:store @session) :deltas
+                    (db/line-deltas (:db @session) (engine/session-line session)))
         r    (merge/merge-logs base theirs :from from-label)]
     (cond
       (:error r)
@@ -188,7 +192,7 @@
 
       :else
       (let [conn   (db/open! (str f))
-            theirs (try (db/load-store conn (slopp.store.db/trunk-line-id! conn))
+            theirs (try (db/load-store-with-history conn (slopp.store.db/trunk-line-id! conn))
                         (finally (.close ^java.sql.Connection conn)))]
         (merge-into-session! session theirs (str other-dir))))))
 
@@ -418,7 +422,11 @@
     (if (= nm (:branch @session))
       {:error "cannot merge a branch into itself — switch to the target line first"}
       (if-let [target (line-view session nm)]
-        (merge-into-session! session (:store target)
+        (merge-into-session! session
+                             ;; the merge folds their history — read for this
+                             ;; merge; a line's loaded value carries none
+                             (assoc (:store target) :deltas
+                                    (db/line-deltas (:db @session) (:id target)))
                              (str "branch:" nm "#" (or (:id target) "unknown")))
         {:error (str "no branch named " nm)}))))
 
@@ -514,7 +522,7 @@
                     ;; per-line CAS created, arriving at the one path whose whole
                     ;; job is to cross lines.
                     _ (engine/refresh-cache! session)
-                    m (merge-into-session! session (db/load-store conn branch-id)
+                    m (merge-into-session! session (db/load-store-with-history conn branch-id)
                                            (str "branch:" branch-nm "#" branch-id))]
                 (cond
                   (:error m)

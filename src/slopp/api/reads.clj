@@ -40,7 +40,7 @@
   "Read performer: the reviewer landing model — milestones plus the
   working set."
   [{:keys [session]} _]
-  (model/timeline (ops/with-history session)))
+  (model/timeline (ops/with-history session :ops [:commit])))
 
 (defn ^{:http/read :ui/change} change-read
   "Read performer: the review of one `from..to` range, or nil when the

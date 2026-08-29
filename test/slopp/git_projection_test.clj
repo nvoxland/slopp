@@ -95,7 +95,7 @@
     (try
       (ops/ingest! sess 'gp.core seed)
       (let [r (external/commit-point! sess "v1: f ships" :agent "alice")
-            d (->> (store/deltas (:store @sess))
+            d (->> (ops/journal sess)
                    (filter #(= (:commit r) (:id %))) first)]
         (is (nil? (:error r)) (pr-str r))
         (testing "the marker delta carries no rendered source at all"
@@ -126,7 +126,7 @@
       (let [ctx  (git/open-ctx! dir)
             tip  (get-in (git/ensure-projected! ctx) [:refs "main"])
             info (commit-info (:slopp.git/repo ctx) tip)
-            cd   (->> (store/deltas (:store @sess))
+            cd   (->> (ops/journal sess)
                       (filter #(= :commit (:op %))) last)]
         (is tip)
         (testing "the tip is v2, chained on v1, authored by the agent at :at"

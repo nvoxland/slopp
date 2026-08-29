@@ -4,7 +4,6 @@
   conflict (the Phase-1 face of C5's MV-register)."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
-            [slopp.store :as store]
             [slopp.ops :as ops] [slopp.ops.engine :as engine] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
 (def seed
@@ -32,7 +31,7 @@
                   (str nm " lost")))))
         (testing "all four :replace deltas recorded"
           (is (= 4 (count (filter #(= :replace (:op %))
-                                  (store/deltas (:store @sess)))))))
+                                  (ops/journal sess))))))
         (testing "the image agrees with the store"
           (is (= [(+ 5 97)] (ops/query-eval sess "(cc.core/a 5)")))))
       (finally (ops/close! sess)))))
@@ -87,9 +86,9 @@
         (is (= [6] (ops/query-eval sess "(rv.core/f 5)")))
         (testing "the revert is itself provenance"
           (is (re-find #"revert to"
-                       (str (:prompt (last (history/query-lineage sess 'rv.core 'f))))))))
+                       (str (:prompt (last (history/query-lineage (ops/with-history sess) 'rv.core 'f))))))))
       (testing "revert to a specific delta from form history"
-        (let [v1 (first (history/query-form-history sess 'rv.core 'f))
+        (let [v1 (first (history/query-form-history (ops/with-history sess) 'rv.core 'f))
               r  (ops/revert-form! sess 'rv.core 'f :to (:delta v1))]
           (is (nil? (:error r)))
           (is (= [5] (ops/query-eval sess "(rv.core/f 5)")))))

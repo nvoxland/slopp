@@ -38,10 +38,22 @@
 
 (defn ^:export tag-merged
   "Mark the just-appended delta as a replay of THEIR delta `their-id` — it is
-  their work, not ours, and later merges must treat it that way."
+  their work, not ours, and later merges must treat it that way.
+
+  Tagged wherever the value holds that delta: `:pending` (what `try-commit!`
+  sends to the journal — the copy that MATTERS, since a merge is judged
+  causal from the journal on the next round), `:recent`, and `:deltas` when
+  the value carries the list. Tagging only the list, as this once did, left
+  the journal's copy untagged and every iterated merge replaying the same
+  work again."
   [store their-id]
-  (update store :deltas
-          (fn [ds] (conj (pop ds) (assoc (peek ds) :merged-from their-id)))))
+  (let [tag (fn [ds] (if (seq ds)
+                       (conj (pop ds) (assoc (peek ds) :merged-from their-id))
+                       ds))]
+    (cond-> store
+      (:pending store) (update :pending tag)
+      (:recent store)  (update :recent tag)
+      (:deltas store)  (update :deltas tag))))
 
 (defn ^:export merge-logs
   "Phase 4 m2 (C4/C5 activation): merge `theirs` — a store sharing a common

@@ -31,7 +31,7 @@
           (is (= [10] (ops/query-eval sess "(cn.core/f 5)")))))
       (testing ":source carries provenance via :agent"
         (is (some #(= "alice" (:agent %))
-                  (history/query-lineage sess 'cn.core 'f))))
+                  (history/query-lineage (ops/with-history sess) 'cn.core 'f))))
       (testing ":requires still scaffolds an empty namespace"
         (let [r (ops/create-ns! sess 'cn.util :requires ["[clojure.string :as str]"])]
           (is (nil? (:error r)))
@@ -78,7 +78,7 @@
           (is (nil? (:error r)))
           (is (= [42] (ops/query-eval sess "(demo/tainted 42)")))))
       (testing "query.lineage shows provenance (ingest + replaces, with prompts)"
-        (let [lin (history/query-lineage sess 'demo 'tainted)]
+        (let [lin (history/query-lineage (ops/with-history sess) 'demo 'tainted)]
           (is (contains? (set (map :op lin)) :ingest))
           (is (contains? (set (map :op lin)) :replace))
           (is (some #(= "defang" (:prompt %)) lin))))
@@ -249,7 +249,7 @@
           (is (= "nd.gone" (:deleted r)) (pr-str r))
           (is (string? (:delta r)) (pr-str r)))
         (is (nil? (get-in (:store @sess) [:namespaces 'nd.gone])))
-        (is (= :ns-delete (:op (last (store/deltas (:store @sess)))))))
+        (is (= :ns-delete (:op (last (ops/journal sess))))))
       (finally (ops/close! sess)))))
 
 (deftest await-image-is-a-noop-when-sync-and-surfaces-a-boot-failure-when-async
@@ -358,7 +358,7 @@
       (ops/create-ns! sess 'stamp.core :source "(ns stamp.core)\n\n(defn f \"F.\" [x] x)\n")
       (external/build! sess dir)
       (let [stamp (io/file dir "src" boot/head-resource-path)
-            head  (:id (last (store/deltas (:store @sess))))]
+            head  (:head (:store @sess))]
         (is (.exists stamp)
             "the materialization records its provenance ON THE CLASSPATH")
         (is (= {:head head} (clojure.edn/read-string (slurp stamp)))
@@ -1348,7 +1348,7 @@
   (let [sess  (external/open!)
         rows  (fn [n] (vec (for [i (range n)]
                              {:tool "query_slice" :chars 10 :start i :end i})))
-        spans (fn [] (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))]
+        spans (fn [] (filter #(= :read-cost (:op %)) (ops/journal sess)))]
     (try
       (testing "nothing recorded → no delta and no record, rather than an
                 empty one that would read as a span that cost nothing"

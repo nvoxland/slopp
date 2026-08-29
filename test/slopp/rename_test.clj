@@ -58,7 +58,7 @@
           (is (= [nil] (ops/query-eval sess "(resolve 'rdemo/helper)")))
           (is (= [10] (ops/query-eval sess "(rdemo/trap (fn [x] 10))"))))
         (testing "lineage of the new name includes the rename delta"
-          (is (contains? (set (map :op (history/query-lineage sess 'rdemo 'doubler)))
+          (is (contains? (set (map :op (history/query-lineage (ops/with-history sess) 'rdemo 'doubler)))
                          :rename))))
       (finally (ops/close! sess)))))
 
@@ -87,7 +87,7 @@
         (is (re-find #"la/twice" (query/query-source sess2 'libb)))
         (is (= [10] (ops/query-eval sess2 "(libb/use-it 5)")))
         (is (= :rename (:op (last (filter #(= :rename (:op %))
-                                          (store/deltas (:store @sess2)))))))
+                                          (ops/journal sess2))))))
         (finally (ops/close! sess2))))))
 
 (deftest ^:external already-renamed-is-state-not-error
@@ -236,12 +236,12 @@
         ;; because the fixture swept a keyword that matched no namespace name —
         ;; a green on a path it never touched. So assert the property, not the
         ;; instance: NO dry run appends a delta, whatever it matches.
-        (let [before (count (store/deltas (:store @sess)))
+        (let [before (count (ops/journal sess))
               r      (ops/rename-sweep! sess "dr" "renamed" :dry-run true)]
           (is (= '[[dr.core renamed.core]] (:renamed-namespaces r)) (pr-str r))
           (is (contains? (set (keys (:namespaces (:store @sess)))) 'dr.core)
               "the namespace must still exist after a preview")
-          (is (= before (count (store/deltas (:store @sess))))
+          (is (= before (count (ops/journal sess)))
               "a dry run must append NO delta — the shape-level guarantee")))
       (testing "without dry-run it still writes"
         (let [r (ops/rename-sweep! sess ":dr/target" ":dr/renamed"

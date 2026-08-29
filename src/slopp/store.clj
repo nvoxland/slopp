@@ -170,9 +170,25 @@
 
   Each entry carries at least `:id`, `:op`, and the agent and prompt behind
   it; content ops also carry the form ids they touched. This is the raw log:
-  `query-history` tells the story, `query-changes` nets it per form."
+  `query-history` tells the story, `query-changes` nets it per form.
+
+  **A loaded value does not carry it.** The list was 94% of every session's
+  memory and most of every open, read by the write path for two scalars and
+  by the verdict rules for a bounded window — all of which the value now
+  keeps as `:head`, `:line-pos`, `:pending`, `:recent`, `:prompts`,
+  `:last-write`. The views that walk the whole log are handed a value that
+  has it (`slopp.ops/with-history`, `slopp.store.db/line-deltas`) at the
+  moment they are asked. A value built by writes from `empty-store` keeps its
+  own list. Asking a value that has none is a bug in the caller, and it
+  THROWS rather than answering nil: a history read that quietly saw an empty
+  log would judge, revert or diff against nothing and call it done."
   [store]
-  (:deltas store))
+  (or (:deltas store)
+      (throw (ex-info (str "this store value does not carry its history — the"
+                           " delta log lives in the journal. Hydrate the session"
+                           " with slopp.ops/with-history, or read"
+                           " slopp.store.db/line-deltas, before asking for it.")
+                      {:head (:head store) :line-pos (:line-pos store)}))))
 
 (defn ns-of-form-id
   "The namespace whose elements contain the form with `id`, or nil."
@@ -1016,7 +1032,11 @@
                     (not (:system d))
                     (not= fields/auto-reorder-prompt p))]
     (cond-> (-> store
-                (update :deltas conj d)
+                ;; the list, only for a value that carries one — a value built by
+                ;; writes from `empty-store`, or hydrated for a history view.
+                ;; A loaded value has none and must not start one: a partial
+                ;; list would read as a short history rather than as absence
+                (cond-> (:deltas store) (update :deltas conj d))
                 (assoc :head (:id d) :head-at (:at d))
                 (update :line-pos (fnil inc 0))
                 ;; the UNCOMMITTED suffix: what a write has appended since the
@@ -1925,8 +1945,10 @@
 (defn committed
   "The value after the journal has taken its `:pending` suffix: nothing
   pending, head and position untouched. `try-commit!` calls it on the value
-  it just appended; `replay-delta` calls it because a replayed delta CAME
-  from the journal and was never pending here."
+  it just appended (and, separately, drops the delta list the live value must
+  not carry); `replay-delta` calls it because a replayed delta CAME from the
+  journal and was never pending here — and a replay keeps whatever list the
+  value carries, because the merge folds one while it replays."
   [store]
   (assoc store :pending []))
 

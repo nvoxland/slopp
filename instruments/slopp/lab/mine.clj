@@ -51,7 +51,9 @@
   Returns `{:dir :findings [...]}`. Read-only — opens the db and closes it."
   [dir]
   (let [conn (db/open! dir)
-        st   (try (db/load-store conn (slopp.store.db/trunk-line-id! conn))
+        st   (try ;; the instrument folds the whole log — loaded WITH its history, which
+                  ;; a plain load no longer carries
+                  (db/load-store-with-history conn (slopp.store.db/trunk-line-id! conn))
                   (finally (.close ^java.sql.Connection conn)))
         ds   (vec (:deltas st))
         sig  (for [[i d] (map-indexed vector ds)

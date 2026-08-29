@@ -39,7 +39,7 @@
         (testing "the new form is live in the image"
           (is (= [12] (ops/query-eval sess "(adm/triple 4)"))))
         (testing "its lineage starts at the :add delta"
-          (is (= [:add] (mapv :op (history/query-lineage sess 'adm 'triple)))))
+          (is (= [:add] (mapv :op (history/query-lineage (ops/with-history sess) 'adm 'triple)))))
         (testing "verification ran and was recorded"
           (is (zero? (+ (:fail (:test r)) (:error (:test r)))))))
       (testing "effect warnings surface at add time (D6)"

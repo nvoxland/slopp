@@ -355,7 +355,7 @@
       (testing "and the run is recorded as an OBSERVATION that says what content
                 it observed — the key `verdict-cache` was parked for want of"
         (let [st (:store @sess)
-              d  (last (filter #(= :observe (:op %)) (store/deltas st)))]
+              d  (last (filter #(= :observe (:op %)) (:recent st)))]
           (is (some? d) "the external tier appends an :observe delta")
           (is (= '[tt.core] (:scope d)) (pr-str d))
           ;; recomputed by the canonical producer rather than compared to a
@@ -669,7 +669,7 @@
                         "(deftest f-t (is (= 1 (f))))\n"))
       (ops/edit-replace! sess 'ms.core 'f "(defn f \"F.\" [] 1)"
                          :prompt "a write whose verification actually runs")
-      (let [v (last (filter #(= :verify (:op %)) (store/deltas (:store @sess))))
+      (let [v (last (filter #(= :verify (:op %)) (ops/journal sess)))
             ms (get-in v [:result :ms])]
         (is (number? ms) (str "the verify delta must record its own cost: " (pr-str v)))
         (is (<= 0 ms) "a duration is never negative"))
@@ -687,12 +687,12 @@
                    (str "(ns fc.core (:require [clojure.test :refer [deftest is]]))\n"
                         "(defn f \"F.\" [] 1)\n"
                         "(deftest f-t (is (= 1 (f))))\n"))
-      (let [r (external/run-full-check! sess)]
+      (let [r (external/full-check! sess)]
         (is (number? (:ms r)) (str "the whole-store check must report its cost: " (pr-str (keys r))))
         (is (= :green (:status r)) (pr-str r))
         (let [v (last (filter #(and (= :verify (:op %))
                                     (= :full-check (:scope (:result %))))
-                              (store/deltas (:store @sess))))]
+                              (ops/journal sess)))]
           (is (some? v) "the whole-store verdict must land in the journal")
           (is (number? (get-in v [:result :ms])))
           (is (= :green (get-in v [:result :status])))))
@@ -895,7 +895,7 @@
 
       (testing "the observation names the namespaces the run COVERED"
         (let [st (:store @sess)
-              d  (last (filter #(= :observe (:op %)) (store/deltas st)))]
+              d  (last (filter #(= :observe (:op %)) (:recent st)))]
           (is (some? d) "a narrowed run still appends an :observe delta")
           (is (= '[nr.core] (:scope d))
               (str "a run narrowed to nr.core/f-t covered nr.core; scope was "

@@ -206,11 +206,11 @@
       (testing "the session adopted the harness id; the write is stamped with it"
         (is (= "sess-abc123" (:agent-id @sess)))
         (is (= "sess-abc123"
-               (->> (store/deltas (:store @sess))
+               (->> (ops/journal sess)
                     (filter #(= :ingest (:op %)))
                     first :agent))))
       (testing "the turn carries the verbatim prompt"
-        (is (seq (history/query-search-history sess "add a widget feature"))))
+        (is (seq (history/query-search-history (ops/with-history sess) "add a widget feature"))))
       (testing "with no pending intent and no turn, the gate still refuses"
         (call! sess "turn_end" {})
         (let [r (call! sess "edit_add_form" {:ns "pi.core"
@@ -1002,12 +1002,12 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'dw.core "(ns dw.core)\n(defn f [] {:dw/target 1})\n")
-      (let [before (count (store/deltas (:store @sess)))
+      (let [before (count (ops/journal sess))
             r      (call! sess "rename_sweep" {:from ":dw/target"
                                                :to ":dw/renamed"
                                                :dry-run true})]
         (is (re-find #":dry-run true" r) r)
-        (is (= before (count (store/deltas (:store @sess))))
+        (is (= before (count (ops/journal sess)))
             "a preview over the wire must append NO delta")
         (is (re-find #":dw/target" (query/query-source sess 'dw.core))
             "and must not rewrite anything"))
@@ -1479,14 +1479,14 @@
     (try
       (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
       (testing "an unknown key is refused, names itself and the accepted keys, and NOTHING runs"
-        (let [before (count (store/deltas (:store @sess)))
+        (let [before (count (ops/journal sess))
               r      (call! sess "rename_sweep" {:from ":uk/target"
                                                  :to ":uk/renamed"
                                                  :bogus true})]
           (is (re-find #"unknown argument" r) r)
           (is (re-find #":bogus" r) r)
           (is (re-find #":dry-run" r) "the refusal lists the accepted keys")
-          (is (= before (count (store/deltas (:store @sess))))
+          (is (= before (count (ops/journal sess)))
               "a refused call appends NO delta — the sweep must not run")
           (is (re-find #":uk/target" (query/query-source sess 'uk.core))
               "and rewrites nothing")))
@@ -1552,7 +1552,8 @@
   ;; recorded. The wire sees both edges of every call, and the TURN is
   ;; already the user-ask bracket the prompt hook maintains — so the split
   ;; belongs on the :turn-end delta, where it is durable and per-ask.
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        last-turn-end #(last (filter (fn [d] (= :turn-end (:op d))) (ops/journal sess)))]
     (try
       (mcp/handle! sess {:jsonrpc "2.0" :id 1 :method "tools/call"
                          :params {:name "turn_begin"
@@ -1563,7 +1564,7 @@
                          :params {:name "session_brief" :arguments {}}})
       (mcp/handle! sess {:jsonrpc "2.0" :id 4 :method "tools/call"
                          :params {:name "turn_end" :arguments {}}})
-      (let [d (last (filter #(= :turn-end (:op %)) (store/deltas (:store @sess))))
+      (let [d (last-turn-end)
             t (:timing d)]
         (is (some? t) (str "the turn-end delta must carry the split: " (pr-str d)))
         (is (<= 3 (:calls t)) (pr-str t))
@@ -1596,8 +1597,7 @@
                            :params {:name "query_project" :arguments {}}})
         (mcp/handle! sess {:jsonrpc "2.0" :id 7 :method "tools/call"
                            :params {:name "turn_end" :arguments {}}})
-        (let [t (:timing (last (filter #(= :turn-end (:op %))
-                                       (store/deltas (:store @sess)))))]
+        (let [t (:timing (last-turn-end))]
           (is (= 2 (:calls t))
               (str "turn_begin + query_project, and nothing from turn one: "
                    (pr-str t)))))
@@ -1622,7 +1622,7 @@
         ask! (fn [prompt]
                (spit (io/file dir ".slopp" "pending-intent")
                      (str "{\"session-id\":\"sess-rot\",\"prompt\":\"" prompt "\"}")))
-        turns (fn [op] (filter #(= op (:op %)) (store/deltas (:store @sess))))]
+        turns (fn [op] (filter #(= op (:op %)) (ops/journal sess)))]
     (try
       (swap! sess assoc :require-turns? true)
       (io/make-parents (io/file dir ".slopp" "pending-intent"))
@@ -1635,8 +1635,8 @@
         (is (= 2 (count (turns :turn-begin))) "two asks, two turns")
         (is (= 1 (count (turns :turn-end))) "and the first one was closed"))
       (testing "the journal carries BOTH asks, not just the first"
-        (is (seq (history/query-search-history sess "first ask")))
-        (is (seq (history/query-search-history sess "second ask"))))
+        (is (seq (history/query-search-history (ops/with-history sess) "first ask")))
+        (is (seq (history/query-search-history (ops/with-history sess) "second ask"))))
       (testing "the closed turn carries where its wall clock went"
         (let [t (:timing (first (turns :turn-end)))]
           (is (some? t) "timing rides turn-end, which is why it never landed")
@@ -2609,22 +2609,23 @@
   ;;
   ;; So the shape of the test is the shape of the bug: no pending intent is
   ;; ever written here, no turn rotates, and the span must land anyway.
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        of   (fn [op] (filter #(= op (:op %)) (ops/journal sess)))]
     (try
       (call! sess "query_rules" {})               ; ~23k against an 8000 gate
       (call! sess "query_project" {})
-      (is (empty? (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))
+      (is (empty? (of :read-cost))
           "nothing is due yet — a delta per read would bury the journal")
 
       ;; `done` is a WRITE and a work boundary, so it forces the flush. That
       ;; it is also excluded from turn rotation is the point: the read record
       ;; no longer needs a turn to exist.
       (call! sess "done" {})
-      (let [d (last (filter #(= :read-cost (:op %)) (store/deltas (:store @sess))))
+      (let [d (last (of :read-cost))
             rd (:reads d)]
         (is (some? d)
             (str "a work boundary passed and the span was never written: "
-                 (pr-str (take-last 3 (store/deltas (:store @sess))))))
+                 (pr-str (take-last 3 (ops/journal sess)))))
         (is (= '*session* (:ns d)) (pr-str d))
         (is (pos-int? (:calls rd)) (pr-str rd))
         (is (pos-int? (:chars rd)) (pr-str rd))
@@ -2637,7 +2638,7 @@
                  (pr-str rd)))
 
         (testing "no turn closed to make that happen"
-          (is (empty? (filter #(= :turn-end (:op %)) (store/deltas (:store @sess))))
+          (is (empty? (of :turn-end))
               "the whole point is that this no longer depends on a turn")))
       (finally (ops/close! sess)))))
 

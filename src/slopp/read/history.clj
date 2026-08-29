@@ -555,11 +555,151 @@
         (recur (rest ds) open out))
       out)))
 
+(def ^:export content-ops
+  #{:ingest :add :replace :delete :rename :normalize :move :merge})
+
+(defn ^:export episode-boundary
+  "Where `agent-label`'s episode begins: its own last :done — or, for
+  an agent that has never marked done, the last stable spot (ANY agent's
+  done) before its first activity, so pre-existing history is never
+  mistaken for contested work. nil = log start."
+  [store agent-label]
+  (let [;; the recent window: since the last milestone plus the done that
+        ;; earned it. An agent whose own last done is older than that has no
+        ;; un-judged work newer than the milestone's done, so that done is
+        ;; the right boundary for it too
+        ds  (:recent store)
+        own (last (filter #(and (= :done (:op %))
+                                (= agent-label (:agent %)))
+                          ds))]
+    (:id (or own
+             (let [ckpts     (filter #(= :done (:op %)) ds)
+                   first-own (first (filter #(and (contains? content-ops (:op %))
+                                                  (= agent-label (:agent %)))
+                                            ds))]
+               (if first-own
+                 (let [pos  (into {} (map-indexed (fn [i d] [(:id d) i])) ds)
+                       fpos (get pos (:id first-own))]
+                   (last (filter #(< (get pos (:id %)) fpos) ckpts)))
+                 (last ckpts)))))))
+
+(defn ^:export episode-span
+  "Deltas after `agent`'s episode boundary (all agents' — callers filter).
+  Walks the RECENT window — everything since the last milestone plus the
+  done that earned it — which is exactly where `episode-boundary` finds the
+  boundary, so a plain store value answers this: no log, no hydration."
+  [store agent]
+  (let [ds (:recent store)]
+    (if-let [b (episode-boundary store agent)]
+      (rest (drop-while #(not= b (:id %)) ds))
+      ds)))
+
+(defn span-anchor
+  "Resolve a NAMED span anchor to the delta id a span should START at:
+  `:start` (the whole log), `:last-commit` (work since the last milestone),
+  `:last-done` (work since the last done) — the same vocabulary `undo!`
+  accepts, as keyword or wire string. Anything else passes through as a
+  literal delta id.
+
+  Why: `from` used to demand a raw delta id, so \"what changed across this
+  lifetime, with code\" began with a hunt through `query_history` for the
+  right id — and when the hunt didn't pay off, agents left for `git diff`
+  (eval9 measured ~20k chars of it in one handoff step). An anchor that
+  points at nothing resolves to nil, which falls back to the episode view
+  rather than throwing."
+  [st from]
+  (let [ds     (store/deltas st)
+        named? (fn [ks] (contains? ks from))
+        ;; the delta AFTER the last marker — the span starts with the work
+        ;; that FOLLOWS the milestone/done, not the marker itself
+        after  (fn [pred]
+                 (when-let [m (last (filter pred ds))]
+                   (:id (second (drop-while #(not= (:id m) (:id %)) ds)))))]
+    (cond
+      (named? #{:start "start" ":start"})
+      (:id (first ds))
+
+      (named? #{:last-commit "last-commit" ":last-commit"})
+      (after #(= :commit (:op %)))
+
+      (named? #{:last-done "last-done" ":last-done"})
+      (after #(= :done (:op %)))
+
+      :else from)))
+
+(defn ^:export fid-ns-at
+  "form-id → owning namespace as of delta `at-id`, folded from the log (each
+  content delta carries its `:ns` and the form-ids it touched). Lets
+  time-travel disambiguate same-named forms in different namespaces at a
+  PAST point, without depending on the current store's membership."
+  [store at-id]
+  (reduce (fn [m d]
+            (let [m (reduce #(assoc %1 %2 (:ns d)) m (delta-fids d))]
+              (if (= at-id (:id d)) (reduced m) m)))
+          {} (store/deltas store)))
+
+(def ^:export verdict-inert-ops
+  "Delta ops that cannot change what a WHOLE-STORE check would say.
+
+  Bookkeeping only: a verdict, a done boundary, a milestone marker, a turn
+  bracket, a run observation, a read-cost record. None is code, a
+  declaration, a dependency or a module edge, so none can move lint, dead
+  surface, layering, the rule sweep or a test.
+
+  **Everything not listed here counts as a change, including an op this set
+  has never heard of.** That direction is deliberate: `content-ops` — forms
+  only — would be the tempting predicate and is too narrow, because a
+  `:config-put` can arm a whole capability's rules, a `:module-edge` changes
+  the architecture graph, and a `:deps-add` changes the manifest, none of
+  which touches a form. A new delta kind must not inherit \"harmless\" by
+  being unclassified; the cost of being wrong here is a stale green."
+  #{:verify :done :commit :turn-begin :turn-end :observe :read-cost})
+
+(defn ^:export
+  ^{:breaking-ok "the 1-arity walked the store's whole delta list for the newest whole-store check; the value no longer carries the list, so the two reads are handed in from slopp.store.db and this keeps only the judgement. Its one caller moved in the same write."}
+  standing-full-check
+  "The whole-store verdict that STILL STANDS — the most recent `full_check`
+  result when nothing since it could have changed what it says — or nil.
+  `check` is that newest `:verify` delta scoped `:full-check`
+  (`slopp.store.db/last-full-check`, nil when there is none) and `after` the
+  `{:id :op :ns}` rows the line gained after it (`slopp.store.db/ops-after`);
+  both are the caller's to read, because this is the pure half.
+
+  **Why this exists.** `full_check` is the most expensive operation slopp
+  performs, ~236s on this store, almost all of it fresh JVM boots in the
+  external tier. Read over its own journal: 325 runs, and 117 of them repeats
+  inside a SINGLE ask — 7.6 hours spent re-asking a question already
+  answered. `commit_point` has always returned an unchanged milestone rather
+  than re-minting one; this is the same courtesy for the slowest thing here.
+
+  Only the most recent whole-store check counts. An older one that a change
+  has since invalidated says nothing about now, and an EPISODE-scoped
+  `:verify` — the kind `done` writes — is not a whole-store verdict at all;
+  reading one as standing would report coverage that never happened.
+
+  Conservative by construction: see `verdict-inert-ops`. Anything not
+  provably bookkeeping means re-run, so the failure mode is a check you did
+  not need rather than a green you did not earn."
+  [check after]
+  (when (and check (= :full-check (get-in check [:result :scope])))
+    (when (every? #(verdict-inert-ops (:op %)) after)
+      (:result check))))
+
+(defn- with-log
+  "`session`'s store value — which every entry point here needs WITH its
+  delta log. A value built by writes carries the list; a session over a
+  journal does not, and `slopp.ops/with-history` is the one door that reads
+  it in. This namespace stays a pure fold over what it is handed, so the
+  caller walks through that door: a bare journaled session reaches
+  `store/deltas` and is refused there with the door named."
+  [session]
+  (:store @session))
+
 (defn ^:export query-lineage
   "Provenance chain for `nm`: the deltas that created or changed its form (who
   touched it, via which op, driven by which prompt)."
   [session ns-sym nm]
-  (let [st (:store @session)
+  (let [st (with-log session)
         id (:id (store/form-named st ns-sym nm))]
     (when id
       (let [ti (turn-intents (store/deltas st))]
@@ -587,7 +727,7 @@
     red→green cycles, distinct asks, recorded time, and how much of the life
     that time actually covers."
   [session ns-sym nm & {:keys [format effort]}]
-  (let [st (:store @session)
+  (let [st (with-log session)
         id (:id (store/form-named st ns-sym nm))]
     (when id
       (let [ti       (turn-intents (store/deltas st))
@@ -622,7 +762,7 @@
   [session pattern & {:keys [limit] :or {limit 25}}]
   (if (str/blank? (str pattern))
     {:error "query-search-history needs a non-blank pattern"}
-    (let [st  (:store @session)
+    (let [st  (with-log session)
           ds  (store/deltas st)
           ti  (turn-intents ds)
           pat (str/lower-case (str pattern))
@@ -663,15 +803,14 @@
   [session & {:keys [ns contains limit collapse format]
               dead-ends? :dead-ends
               :or {limit 20}}]
-  (let [
+  (let [st   (with-log session)
         rows
         (cond
           dead-ends?
-          (dead-ends (:store @session)
-                     (when (string? dead-ends?) dead-ends?))
+          (dead-ends st (when (string? dead-ends?) dead-ends?))
 
           collapse
-          (let [ds       (store/deltas (:store @session))
+          (let [ds       (store/deltas st)
                 relevant (filter #(or (contains? #{:ingest :add :replace :delete
                                                    :rename :normalize :move :merge}
                                                  (:op %))
@@ -682,7 +821,7 @@
             (collapse-rows  ds pos rows contains limit))
 
           :else
-          (->> (store/deltas (:store @session))
+          (->> (store/deltas st)
                reverse
                (filter #(or (nil? ns) (= ns (:ns %))))
                (filter #(or (nil? contains)
@@ -697,75 +836,6 @@
     (cond-> rows
       (= "text" (some-> format name)) render-history-text)))
 
-(def ^:export content-ops
-  #{:ingest :add :replace :delete :rename :normalize :move :merge})
-
-(defn ^:export episode-boundary
-  "Where `agent-label`'s episode begins: its own last :done — or, for
-  an agent that has never marked done, the last stable spot (ANY agent's
-  done) before its first activity, so pre-existing history is never
-  mistaken for contested work. nil = log start."
-  [store agent-label]
-  (let [;; the recent window: since the last milestone plus the done that
-        ;; earned it. An agent whose own last done is older than that has no
-        ;; un-judged work newer than the milestone's done, so that done is
-        ;; the right boundary for it too
-        ds  (:recent store)
-        own (last (filter #(and (= :done (:op %))
-                                (= agent-label (:agent %)))
-                          ds))]
-    (:id (or own
-             (let [ckpts     (filter #(= :done (:op %)) ds)
-                   first-own (first (filter #(and (contains? content-ops (:op %))
-                                                  (= agent-label (:agent %)))
-                                            ds))]
-               (if first-own
-                 (let [pos  (into {} (map-indexed (fn [i d] [(:id d) i])) ds)
-                       fpos (get pos (:id first-own))]
-                   (last (filter #(< (get pos (:id %)) fpos) ckpts)))
-                 (last ckpts)))))))
-
-(defn ^:export episode-span
-  "Deltas after `agent`'s episode boundary (all agents' — callers filter)."
-  [store agent]
-  (let [ds (store/deltas store)]
-    (if-let [b (episode-boundary store agent)]
-      (rest (drop-while #(not= b (:id %)) ds))
-      ds)))
-
-(defn span-anchor
-  "Resolve a NAMED span anchor to the delta id a span should START at:
-  `:start` (the whole log), `:last-commit` (work since the last milestone),
-  `:last-done` (work since the last done) — the same vocabulary `undo!`
-  accepts, as keyword or wire string. Anything else passes through as a
-  literal delta id.
-
-  Why: `from` used to demand a raw delta id, so \"what changed across this
-  lifetime, with code\" began with a hunt through `query_history` for the
-  right id — and when the hunt didn't pay off, agents left for `git diff`
-  (eval9 measured ~20k chars of it in one handoff step). An anchor that
-  points at nothing resolves to nil, which falls back to the episode view
-  rather than throwing."
-  [st from]
-  (let [ds     (store/deltas st)
-        named? (fn [ks] (contains? ks from))
-        ;; the delta AFTER the last marker — the span starts with the work
-        ;; that FOLLOWS the milestone/done, not the marker itself
-        after  (fn [pred]
-                 (when-let [m (last (filter pred ds))]
-                   (:id (second (drop-while #(not= (:id m) (:id %)) ds)))))]
-    (cond
-      (named? #{:start "start" ":start"})
-      (:id (first ds))
-
-      (named? #{:last-commit "last-commit" ":last-commit"})
-      (after #(= :commit (:op %)))
-
-      (named? #{:last-done "last-done" ":last-done"})
-      (after #(= :done (:op %)))
-
-      :else from)))
-
 (defn ^:export query-changes
   "The agent's EPISODE — everything since `:agent`'s last done: net
   per-form diffs (:was/:now), the step list, and the verification arc. The
@@ -773,7 +843,7 @@
   distinct :agent labels each see only their own work. `:format \"text\"`
   renders it as a human story with LINE diffs instead of full sources."
   [session & {:keys [agent from to format]}]
-  (let [st       (:store @session)
+  (let [st       (with-log session)
         from     (span-anchor st from)
         boundary (if from
                    ;; historical span: `from`/`to` are delta ids (e.g. from a
@@ -838,7 +908,7 @@
   before it. Returns {:at :status (:green|:red|:unknown) :verify <delta-id>}
   or {:error} for an unknown delta."
   [session & {:keys [at]}]
-  (let [st (:store @session)]
+  (let [st (with-log session)]
     (cond
       (nil? at)              {:error "query-status-at needs :at"}
       (nil? (resolve-at st at)) {:error (str "no delta " at
@@ -846,17 +916,6 @@
       :else (let [rid (resolve-at st at)]
               (cond-> {:at rid :status (status-at st rid)}
                 (verify-at st rid) (assoc :verify (:id (verify-at st rid))))))))
-
-(defn ^:export fid-ns-at
-  "form-id → owning namespace as of delta `at-id`, folded from the log (each
-  content delta carries its `:ns` and the form-ids it touched). Lets
-  time-travel disambiguate same-named forms in different namespaces at a
-  PAST point, without depending on the current store's membership."
-  [store at-id]
-  (reduce (fn [m d]
-            (let [m (reduce #(assoc %1 %2 (:ns d)) m (delta-fids d))]
-              (if (= at-id (:id d)) (reduced m) m)))
-          {} (store/deltas store)))
 
 (defn ^:export query-form-at
   "Time-travel: form `nm` in `ns-sym` as its SOURCE stood at delta `at` (a
@@ -867,7 +926,7 @@
   the name it had then). The form's source is stored verbatim per version,
   so this is exact, not reconstructed."
   [session ns-sym nm & {:keys [at]}]
-  (let [st (:store @session)]
+  (let [st (with-log session)]
     (cond
       (nil? at)
       {:error "query-form-at needs :at (a delta id or a commit-point id)"}
@@ -888,50 +947,3 @@
           {:ns ns-sym :name nm :at rid :source (get srcs fid)
            :status (status-at st rid)}
           {:error (str nm " was not present in " ns-sym " at " rid)})))))
-
-(def ^:export verdict-inert-ops
-  "Delta ops that cannot change what a WHOLE-STORE check would say.
-
-  Bookkeeping only: a verdict, a done boundary, a milestone marker, a turn
-  bracket, a run observation, a read-cost record. None is code, a
-  declaration, a dependency or a module edge, so none can move lint, dead
-  surface, layering, the rule sweep or a test.
-
-  **Everything not listed here counts as a change, including an op this set
-  has never heard of.** That direction is deliberate: `content-ops` — forms
-  only — would be the tempting predicate and is too narrow, because a
-  `:config-put` can arm a whole capability's rules, a `:module-edge` changes
-  the architecture graph, and a `:deps-add` changes the manifest, none of
-  which touches a form. A new delta kind must not inherit \"harmless\" by
-  being unclassified; the cost of being wrong here is a stale green."
-  #{:verify :done :commit :turn-begin :turn-end :observe :read-cost})
-
-(defn ^:export
-  ^{:breaking-ok "the 1-arity walked the store's whole delta list for the newest whole-store check; the value no longer carries the list, so the two reads are handed in from slopp.store.db and this keeps only the judgement. Its one caller moved in the same write."}
-  standing-full-check
-  "The whole-store verdict that STILL STANDS — the most recent `full_check`
-  result when nothing since it could have changed what it says — or nil.
-  `check` is that newest `:verify` delta scoped `:full-check`
-  (`slopp.store.db/last-full-check`, nil when there is none) and `after` the
-  `{:id :op :ns}` rows the line gained after it (`slopp.store.db/ops-after`);
-  both are the caller's to read, because this is the pure half.
-
-  **Why this exists.** `full_check` is the most expensive operation slopp
-  performs, ~236s on this store, almost all of it fresh JVM boots in the
-  external tier. Read over its own journal: 325 runs, and 117 of them repeats
-  inside a SINGLE ask — 7.6 hours spent re-asking a question already
-  answered. `commit_point` has always returned an unchanged milestone rather
-  than re-minting one; this is the same courtesy for the slowest thing here.
-
-  Only the most recent whole-store check counts. An older one that a change
-  has since invalidated says nothing about now, and an EPISODE-scoped
-  `:verify` — the kind `done` writes — is not a whole-store verdict at all;
-  reading one as standing would report coverage that never happened.
-
-  Conservative by construction: see `verdict-inert-ops`. Anything not
-  provably bookkeeping means re-run, so the failure mode is a check you did
-  not need rather than a green you did not earn."
-  [check after]
-  (when (and check (= :full-check (get-in check [:result :scope])))
-    (when (every? #(verdict-inert-ops (:op %)) after)
-      (:result check))))

@@ -17,7 +17,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.edit :as edit]
-            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db]))
+            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n]))
 
 (deftest ^:external heal-path-replays-candidate-namespaces
   ;; the extract_ns live failure: hot-load-all!'s heal boots a FRESH image
@@ -151,92 +151,6 @@
       (is (= '[dm.t/meth-t dm.t/multi-t]
              (vec (sort (engine/affected-tests sess 'dm.core 'area))))))))
 
-(deftest impacted-tests-falls-back-per-form-not-globally
-  ;; THE collapse (measured 2026-07-17): done! discarded ALL narrowing when ONE
-  ;; changed form had no trace evidence — (when (not-any? nil? per) ...). An ns
-  ;; form can never be traced and ns_add_require edits one, so 54.4% of real
-  ;; episodes (43.2% via ns forms alone) reverted to whole-closure runs, and
-  ;; the evidence for every OTHER form in the episode was thrown away.
-  ;;
-  ;; Per-form is equally sound and far less pessimistic: an untraced form
-  ;; contributes every test whose require-closure reaches ITS namespace — the
-  ;; same tests the global fallback would run FOR THAT FORM, since
-  ;; test-nses-reaching over a union of nses is the union of the per-ns calls —
-  ;; while a traced form keeps contributing exactly its observed tests.
-  (let [st (-> (store/empty-store)
-               (store/ingest 'pf.a "(ns pf.a)\n\n(defn f \"F.\" [x] x)\n\n(defn g \"G.\" [x] x)\n")
-               (store/ingest 'pf.b "(ns pf.b)\n\n(defn h \"H.\" [x] x)\n")
-               (store/ingest 'pf.a-test
-                             (str "(ns pf.a-test (:require [pf.a :as a]\n"
-                                  "                        [clojure.test :refer [deftest is]]))\n\n"
-                                  "(deftest f-t (is (= 1 (a/f 1))))\n\n"
-                                  "(deftest g-t (is (= 1 (a/g 1))))\n"))
-               (store/ingest 'pf.b-test
-                             (str "(ns pf.b-test (:require [pf.b :as b]\n"
-                                  "                        [clojure.test :refer [deftest is]]))\n\n"
-                                  "(deftest h-t (is (= 1 (b/h 1))))\n")))
-        sess (atom {:store st
-                    :test-map {'pf.a-test/f-t #{'pf.a/f}
-                               'pf.a-test/g-t #{'pf.a/g}
-                               'pf.b-test/h-t #{'pf.b/h}}})
-        fid  (fn [nsx nm] (:id (store/form-named st nsx nm)))]
-    (testing "all-traced: exactly the evidence, nothing else"
-      (is (= '[pf.a-test/f-t]
-             (engine/impacted-tests sess st [(fid 'pf.a 'f)]))))
-    (testing "an untraced form (pf.b's NS FORM — the 43.2% case) expands to the
-              tests reaching ITS namespace only"
-      (is (= '[pf.b-test/h-t]
-             (engine/impacted-tests sess st [(fid 'pf.b 'pf.b)]))))
-    (testing "mixed episode: the traced form KEEPS its narrow set — g-t, whose
-              subject was not touched, is not dragged in by pf.b's ns form"
-      (is (= '[pf.a-test/f-t pf.b-test/h-t]
-             (engine/impacted-tests sess st [(fid 'pf.a 'f) (fid 'pf.b 'pf.b)]))))
-    (testing "a deleted fid is skipped, not an error"
-      (is (= '[pf.a-test/f-t]
-             (engine/impacted-tests sess st [(fid 'pf.a 'f) "f999"]))))))
-
-(deftest an-alias-only-require-addition-impacts-nothing
-  ;; frictions #2: ns_add_require on a hub namespace invalidated every
-  ;; external test in its closure (331 on slopp.api) though an added alias
-  ;; changes the resolution of NOTHING. The ns-form fallback is now
-  ;; SEMANTIC — an added-requires-only diff, alias-only specs, each added
-  ;; ns in-store with no method-carrying forms → zero impacted tests.
-  ;; Everything else keeps the conservative whole-closure fallback.
-  (let [st  (-> (store/empty-store)
-                (store/ingest 'ir.a "(ns ir.a)\n\n(defn f \"F.\" [x] x)\n")
-                (store/ingest 'ir.m (str "(ns ir.m)\n\n(defmulti area :kind)\n\n"
-                                         "(defmethod area :sq [s] s)\n"))
-                (store/ingest 'ir.b (str "(ns ir.b (:require [clojure.string :as s]))\n\n"
-                                         "(defn h \"H.\" [x] (s/trim x))\n"))
-                (store/ingest 'ir.b-test
-                              (str "(ns ir.b-test (:require [ir.b :as b]\n"
-                                   "                        [clojure.test :refer [deftest is]]))\n\n"
-                                   "(deftest h-t (is (= \"1\" (b/h \" 1 \"))))\n")))
-        sess (atom {:store st :test-map {'ir.b-test/h-t #{'ir.b/h}}})
-        edit (fn [src] (first (store/replace-node st 'ir.b 'ir.b
-                                                  (p/parse-string src)
-                                                  :prompt "t")))
-        fid  (:id (store/form-named st 'ir.b 'ir.b))]
-    (testing "adding an alias-only in-store require impacts nothing"
-      (let [st' (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
-                           "                   [ir.a :as a]))"))]
-        (is (= [] (engine/impacted-tests sess st' [fid])))))
-    (testing "an added :refer is NOT inert — it can change resolution"
-      (let [st' (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
-                           "                   [ir.a :refer [f]]))"))]
-        (is (= '[ir.b-test/h-t] (engine/impacted-tests sess st' [fid])))))
-    (testing "an added ns carrying defmethods is NOT inert — loading registers"
-      (let [st' (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
-                           "                   [ir.m :as m]))"))]
-        (is (= '[ir.b-test/h-t] (engine/impacted-tests sess st' [fid])))))
-    (testing "an out-of-store lib is NOT inert — load effects unknown"
-      (let [st' (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
-                           "                   [clojure.set :as cset]))"))]
-        (is (= '[ir.b-test/h-t] (engine/impacted-tests sess st' [fid])))))
-    (testing "a require REMOVAL is NOT inert"
-      (let [st' (edit "(ns ir.b)")]
-        (is (= '[ir.b-test/h-t] (engine/impacted-tests sess st' [fid])))))))
-
 (deftest inert-require-respects-transitive-loads-and-metadata
   ;; review V-F1/V-F2: inert-ns-require-change? classified as inert two edits
   ;; that CAN change behaviour, so `done` skipped external tests it should
@@ -250,22 +164,25 @@
                (store/ingest 'tr.b "(ns tr.b)\n\n(defn h \"H.\" [x] x)\n"))
         edit (fn [src] (first (store/replace-node st 'tr.b 'tr.b
                                                   (p/parse-string src) :prompt "t")))
-        fid  (:id (store/form-named st 'tr.b 'tr.b))]
+        fid  (:id (store/form-named st 'tr.b 'tr.b))
+        ;; the baseline is the caller's to name — the ns form as it stood
+        ;; before the edit, exactly what the write path reads from the journal
+        before (fn [store fid] (n/string (:node (store/form-by-id store fid))))]
     (testing "V-F1: adding a method-free lib whose CLOSURE loads defmethods is NOT inert"
       (let [st' (edit "(ns tr.b (:require [tr.leaf :as l]))")]
-        (is (not (engine/inert-ns-require-change? st' fid)))))
+        (is (not (engine/inert-ns-require-change? st' fid (before st fid))))))
     (testing "a genuinely quiet leaf (no methods anywhere in its closure) stays inert"
       (let [st2 (store/ingest st 'tr.quiet "(ns tr.quiet)\n\n(defn q [x] x)\n")
             fid2 (:id (store/form-named st2 'tr.b 'tr.b))
             st' (first (store/replace-node st2 'tr.b 'tr.b
                                            (p/parse-string "(ns tr.b (:require [tr.quiet :as q]))")
                                            :prompt "t"))]
-        (is (engine/inert-ns-require-change? st' fid2))))
+        (is (engine/inert-ns-require-change? st' fid2 (before st2 fid2)))))
     (testing "V-F2: an ns-NAME metadata change bundled with an alias add is NOT inert"
       (let [st' (edit "(ns ^:no-doc tr.b (:require [tr.quiet :as q]))")]
         ;; tr.quiet doesn't exist in `st` here, but the metadata change alone
         ;; must defeat inertness regardless
-        (is (not (engine/inert-ns-require-change? st' fid)))))))
+        (is (not (engine/inert-ns-require-change? st' fid (before st fid))))))))
 
 (deftest an-endpoint-selects-the-tests-that-drive-its-route
   (let [s (store/ingest (store/empty-store) 'shop.api
@@ -639,55 +556,6 @@
         (is (= :mine (:attribution f)))
         (is (= ['p.core-test/theirs-t] (:implicated f)))))))
 
-(deftest an-incremental-refresh-does-not-re-accumulate-milestone-manifests
-  ;; `load-store` thins every milestone's `:files` but the newest. That fixes a
-  ;; session at OPEN and does nothing for its life: `refresh-cache!` advances
-  ;; INCREMENTALLY in the common case — `store/replay-delta` over the journal
-  ;; suffix, deliberately avoiding a full re-parse — and a foreign `:commit`
-  ;; delta arrives from `deltas-after` carrying its whole manifest.
-  ;;
-  ;; So without this, every milestone landed during a server's life adds its
-  ;; manifest back, one at a time, forever. That is the measured shape: a fresh
-  ;; server holds ~515 MB post-GC, a worked-in one 2.37 GB.
-  ;;
-  ;; No image is booted: `refresh-cache!` needs only `:db`, `:line` and
-  ;; `:store`, so the session is a hand-built atom and this stays in-image.
-  (let [dir  (str (java.nio.file.Files/createTempDirectory
-                   "slopp-refresh" (make-array java.nio.file.attribute.FileAttribute 0)))
-        conn (slopp.store.db/open! dir)
-        line (slopp.store.db/trunk-line-id! conn)
-        files (fn [n] (into {} (map (fn [i] [(str "f" i ".md") {:sha (str "s" i) :size i}]))
-                            (range n)))
-        mk   (fn [st id n]
-               (update st :deltas conj
-                       {:id id :parent (:id (last (:deltas st)))
-                        :op :commit :ns '*session* :at 1
-                        :description (str "milestone " id)
-                        :status "green" :files (files n)}))]
-    (try
-      ;; two milestones land before the session opens
-      (let [s2 (-> (slopp.store/empty-store) (mk "dr1" 2) (mk "dr2" 3))]
-        (is (true? (slopp.store.db/append! conn s2 (:deltas s2) [] line nil))))
-      (let [opened (slopp.store.db/load-store conn line)
-            sess   (atom {:db conn :line line :branch "main" :store opened})]
-        (is (= 1 (count (filter :files (filter #(= :commit (:op %)) (:deltas opened)))))
-            "fixture: load-store already thins at open")
-
-        ;; a THIRD milestone lands from outside, and the session refreshes
-        (let [s3 (mk opened "dr3" 4)]
-          (is (true? (slopp.store.db/append! conn s3 [(last (:deltas s3))] []
-                                             line (:id (last (:deltas opened)))))))
-        (slopp.ops.engine/refresh-cache! sess)
-
-        (let [cs (filter #(= :commit (:op %)) (:deltas (:store @sess)))
-              wf (filter :files cs)]
-          (is (= 3 (count cs)) "the refresh saw the new milestone")
-          (is (= 1 (count wf))
-              "only the newest milestone keeps a manifest after an incremental refresh")
-          (is (= "dr3" (:id (last wf))) "and it is the newest one")
-          (is (every? :description cs) "the rest keep everything that is actually read")))
-      (finally (.close conn)))))
-
 (defn- journaled!
   "A session over `st` WITH a journal: `st`'s whole delta log appended to a
   fresh store on disk, the trunk as the session's line, `test-map` as its
@@ -701,6 +569,98 @@
         trunk (slopp.store.db/trunk-line-id! conn)]
     (slopp.store.db/append! conn st (store/deltas st) (vec (keys (:namespaces st))) trunk nil)
     (atom {:store (store/committed st) :db conn :line trunk :test-map test-map})))
+
+(deftest impacted-tests-falls-back-per-form-not-globally
+  ;; THE collapse (measured 2026-07-17): done! discarded ALL narrowing when ONE
+  ;; changed form had no trace evidence — (when (not-any? nil? per) ...). An ns
+  ;; form can never be traced and ns_add_require edits one, so 54.4% of real
+  ;; episodes (43.2% via ns forms alone) reverted to whole-closure runs, and
+  ;; the evidence for every OTHER form in the episode was thrown away.
+  ;;
+  ;; Per-form is equally sound and far less pessimistic: an untraced form
+  ;; contributes every test whose require-closure reaches ITS namespace — the
+  ;; same tests the global fallback would run FOR THAT FORM, since
+  ;; test-nses-reaching over a union of nses is the union of the per-ns calls —
+  ;; while a traced form keeps contributing exactly its observed tests.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'pf.a "(ns pf.a)\n\n(defn f \"F.\" [x] x)\n\n(defn g \"G.\" [x] x)\n")
+               (store/ingest 'pf.b "(ns pf.b)\n\n(defn h \"H.\" [x] x)\n")
+               (store/ingest 'pf.a-test
+                             (str "(ns pf.a-test (:require [pf.a :as a]\n"
+                                  "                        [clojure.test :refer [deftest is]]))\n\n"
+                                  "(deftest f-t (is (= 1 (a/f 1))))\n\n"
+                                  "(deftest g-t (is (= 1 (a/g 1))))\n"))
+               (store/ingest 'pf.b-test
+                             (str "(ns pf.b-test (:require [pf.b :as b]\n"
+                                  "                        [clojure.test :refer [deftest is]]))\n\n"
+                                  "(deftest h-t (is (= 1 (b/h 1))))\n")))
+        sess (journaled! st {'pf.a-test/f-t #{'pf.a/f}
+                             'pf.a-test/g-t #{'pf.a/g}
+                             'pf.b-test/h-t #{'pf.b/h}})
+        fid  (fn [nsx nm] (:id (store/form-named st nsx nm)))]
+    (try
+      (testing "all-traced: exactly the evidence, nothing else"
+        (is (= '[pf.a-test/f-t]
+               (engine/impacted-tests sess st [(fid 'pf.a 'f)]))))
+      (testing "an untraced form (pf.b's NS FORM — the 43.2% case) expands to the
+                tests reaching ITS namespace only"
+        (is (= '[pf.b-test/h-t]
+               (engine/impacted-tests sess st [(fid 'pf.b 'pf.b)]))))
+      (testing "mixed episode: the traced form KEEPS its narrow set — g-t, whose
+                subject was not touched, is not dragged in by pf.b's ns form"
+        (is (= '[pf.a-test/f-t pf.b-test/h-t]
+               (engine/impacted-tests sess st [(fid 'pf.a 'f) (fid 'pf.b 'pf.b)]))))
+      (testing "a deleted fid is skipped, not an error"
+        (is (= '[pf.a-test/f-t]
+               (engine/impacted-tests sess st [(fid 'pf.a 'f) "f999"]))))
+      (finally (.close ^java.sql.Connection (:db @sess))))))
+
+(deftest an-alias-only-require-addition-impacts-nothing
+  ;; frictions #2: ns_add_require on a hub namespace invalidated every
+  ;; external test in its closure (331 on slopp.api) though an added alias
+  ;; changes the resolution of NOTHING. The ns-form fallback is now
+  ;; SEMANTIC — an added-requires-only diff, alias-only specs, each added
+  ;; ns in-store with no method-carrying forms → zero impacted tests.
+  ;; Everything else keeps the conservative whole-closure fallback.
+  ;;
+  ;; The prior source is read from the JOURNAL, so each candidate edit is
+  ;; journaled before the engine judges it.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'ir.a "(ns ir.a)\n\n(defn f \"F.\" [x] x)\n")
+                 (store/ingest 'ir.m (str "(ns ir.m)\n\n(defmulti area :kind)\n\n"
+                                          "(defmethod area :sq [s] s)\n"))
+                 (store/ingest 'ir.b (str "(ns ir.b (:require [clojure.string :as s]))\n\n"
+                                          "(defn h \"H.\" [x] (s/trim x))\n"))
+                 (store/ingest 'ir.b-test
+                               (str "(ns ir.b-test (:require [ir.b :as b]\n"
+                                    "                        [clojure.test :refer [deftest is]]))\n\n"
+                                    "(deftest h-t (is (= \"1\" (b/h \" 1 \"))))\n")))
+        tm   {'ir.b-test/h-t #{'ir.b/h}}
+        edit (fn [src] (first (store/replace-node st 'ir.b 'ir.b
+                                                  (p/parse-string src)
+                                                  :prompt "t")))
+        fid  (:id (store/form-named st 'ir.b 'ir.b))
+        judge (fn [st']
+                (let [sess (journaled! st' tm)]
+                  (try (engine/impacted-tests sess st' [fid])
+                       (finally (.close ^java.sql.Connection (:db @sess))))))]
+    (testing "adding an alias-only in-store require impacts nothing"
+      (is (= [] (judge (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
+                                  "                   [ir.a :as a]))"))))))
+    (testing "an added :refer is NOT inert — it can change resolution"
+      (is (= '[ir.b-test/h-t]
+             (judge (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
+                               "                   [ir.a :refer [f]]))"))))))
+    (testing "an added ns carrying defmethods is NOT inert — loading registers"
+      (is (= '[ir.b-test/h-t]
+             (judge (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
+                               "                   [ir.m :as m]))"))))))
+    (testing "an out-of-store lib is NOT inert — load effects unknown"
+      (is (= '[ir.b-test/h-t]
+             (judge (edit (str "(ns ir.b (:require [clojure.string :as s]\n"
+                               "                   [clojure.set :as cset]))"))))))
+    (testing "a require REMOVAL is NOT inert"
+      (is (= '[ir.b-test/h-t] (judge (edit "(ns ir.b)")))))))
 
 (deftest impacted-tests-diffs-against-the-last-done-not-the-newest-delta
   ;; review V-F3: an episode with TWO ns edits — the first adds a :refer

@@ -85,7 +85,7 @@ X-Slopp-Main: slopp.kernel.boot/-main
         (is (= {:path "README.md" :content "# hello\n"}
                (ops/file-get sess "README.md"))))
       (testing "put overwrites, and :at still sees the old content"
-        (let [before (:id (last (:deltas (:store @sess))))]
+        (let [before (:head (:store @sess))]
           (ops/file-put! sess "README.md" "# v2\n" :prompt "revise")
           (is (= "# v2\n" (:content (ops/file-get sess "README.md"))))
           (is (= "# hello\n" (:content (ops/file-get sess "README.md" :at before)))

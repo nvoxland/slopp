@@ -43,7 +43,9 @@
           ;; renderer's retired byte-exact contract rather than persistence
           (is (= (store.render/render-ns s 'ns) (store.render/render-ns loaded 'ns))
               (str "render round-trip failed for: " (pr-str src)))
-          (is (= (store/deltas s) (store/deltas loaded)))
+          (is (= (store/deltas s)
+                 (db/line-deltas conn2 (slopp.store.db/trunk-line-id! conn2)))
+              "the journal reads back exactly what the value recorded")
           (is (= (map :id (store/forms s 'ns)) (map :id (store/forms loaded 'ns))))
           (is (= (:next-id s) (:next-id loaded)))
           (.close conn2))))))
@@ -72,10 +74,10 @@
         (testing "the image was reloaded from the store"
           (is (= [6] (ops/query-eval sess2 "(demo/add 2 3)"))))
         (testing "lineage (incl. prompt and verification) survives"
-          (let [lin (history/query-lineage sess2 'demo 'add)]
+          (let [lin (history/query-lineage (ops/with-history sess2) 'demo 'add)]
             (is (some #(= "off-by-one" (:prompt %)) lin))
             (is (contains? (set (map :op lin)) :ingest)))
-          (is (= :verify (:op (last (store/deltas (:store @sess2)))))))
+          (is (= :verify (:op (last (ops/journal sess2))))))
         (testing "new edits continue cleanly (no id collisions with history)"
           (let [r (ops/edit-replace! sess2 'demo 'add "(defn add [x y] (* x y))"
                                      :prompt "mul")]
@@ -360,7 +362,7 @@
     (db/persist! conn s1 (last (:deltas s1)))
     (.close conn)
     (let [conn2 (db/open! dir)
-          d     (last (:deltas (db/load-store conn2 (slopp.store.db/trunk-line-id! conn2))))]
+          d     (last (db/line-deltas conn2 (slopp.store.db/trunk-line-id! conn2)))]
       (testing "the scope survives as a VECTOR of namespace symbols"
         (is (= '[a.one-test a.two-test a.three-test] (:scope d)) (pr-str d)))
       (testing "so a reader can ask about ONE namespace without parsing a symbol"
@@ -630,8 +632,8 @@
               newa   (vec (drop (count (store/deltas sa)) (store/deltas sa2)))]
           (is (true? (db/append! conn sa2 newa ['aj.later] trunk head-a)))
 
-          (let [log-a (mapv :id (store/deltas (db/load-store conn trunk)))
-                log-b (mapv :id (store/deltas (db/load-store conn other)))
+          (let [log-a (mapv :id (db/line-deltas conn trunk))
+                log-b (mapv :id (db/line-deltas conn other))
                 b-own (mapv :id newb)
                 a-own (mapv :id newa)]
             (is (= 1 (count a-own)) "fixture: one new delta per line")
@@ -1045,18 +1047,16 @@
 (deftest only-the-newest-milestone-keeps-its-files-manifest-in-memory
   ;; The same "don't read it at open" lever as the blobs above, and the largest
   ;; instance of it. `commit_point!` snapshots the WHOLE files manifest into
-  ;; every milestone marker, and `load-store` parses all of them into every
-  ;; session's store value. Measured on this repo: 554 milestones carrying
+  ;; every milestone marker. Measured on this repo: 554 milestones carrying
   ;; 73.7 MB of payload, of which **:files alone is 70.8 MB (96%)** — a single
-  ;; marker reaching 2.1 MB beside ~3.8 KB of everything else. Parsed into
-  ;; Clojure structure that is the dominant object in a live server's heap.
+  ;; marker reaching 2.1 MB beside ~3.8 KB of everything else.
   ;;
-  ;; Nothing reads the older ones from a store VALUE. `slopp.git/insert-commit!`
-  ;; reads deltas straight from the db on its own connection (ensure-projected!:
-  ;; "Reads the dbs directly (always-current, no session needed)"), so the
-  ;; projection is untouched. The one store-value reader,
-  ;; `slopp.git/milestone-tree`, takes `(last (filter #(= :commit (:op %)) ds))`
-  ;; and only ever needs the NEWEST.
+  ;; A loaded value carries NO delta list any more, so nothing parses these at
+  ;; open. The lever now sits on `line-deltas` — the history a VIEW hydrates
+  ;; with — which must not hand a view every milestone's manifest either.
+  ;; Nothing reads the older ones: `slopp.git/insert-commit!` reads deltas
+  ;; straight from the db on its own connection, and `slopp.git/milestone-tree`
+  ;; takes `(last (filter #(= :commit (:op %)) ds))` — only ever the NEWEST.
   ;;
   ;; So the newest keeps its manifest and the rest drop it. Everything else
   ;; about an older milestone — description, status, target, agent — is small
@@ -1067,22 +1067,22 @@
         f1   {"a.md" {:sha "sha-a" :size 1}}
         f2   {"a.md" {:sha "sha-a" :size 1} "b.md" {:sha "sha-b" :size 2}}
         mk   (fn [st id files]
-               (update st :deltas conj
-                       {:id id :parent (:id (last (:deltas st)))
-                        :op :commit :ns '*session* :at 1
-                        :description (str "milestone " id)
-                        :status "green" :files files}))
+               (store/record-delta st {:id id :parent (:head st)
+                                       :op :commit :ns '*session* :at 1
+                                       :description (str "milestone " id)
+                                       :status "green" :files files}))
         s2   (-> (store/empty-store) (mk "dc1" f1) (mk "dc2" f2))]
     (try
-      (is (true? (db/append! conn s2 (:deltas s2) [] (db/trunk-line-id! conn) nil)))
-      (let [loaded (db/load-store conn (db/trunk-line-id! conn))
-            cs     (filterv #(= :commit (:op %)) (:deltas loaded))]
+      (is (true? (db/append! conn s2 (:pending s2) [] (db/trunk-line-id! conn) nil)))
+      (testing "a loaded value carries no list at all"
+        (is (nil? (:deltas (db/load-store conn (db/trunk-line-id! conn))))))
+      (let [cs (filterv #(= :commit (:op %)) (db/line-deltas conn (db/trunk-line-id! conn)))]
         (is (= 2 (count cs)) (pr-str (mapv :id cs)))
 
         (testing "the newest milestone keeps its manifest — milestone-tree needs it"
           (is (= f2 (:files (last cs)))))
 
-        (testing "older milestones do not carry theirs into memory"
+        (testing "older milestones do not carry theirs into a hydrated history"
           (is (nil? (:files (first cs)))))
 
         (testing "and everything else about an older milestone survives intact"
@@ -1500,4 +1500,29 @@
       (is (= :green (get-in (db/last-full-check conn trunk) [:result :status])))
       (let [thread (db/adopt-thread! conn trunk "agent-f")]
         (is (= "v4" (:id (db/last-full-check conn thread))) "a thread inherits the branch's verdicts"))
+      (finally (.close conn)))))
+
+(deftest ^:external line-deltas-narrows-to-the-ops-a-reader-asks-for
+  ;; `session_brief` and the reviewer's landing page want the MILESTONES —
+  ;; a few dozen rows — and hydrating the whole log to find them costs the
+  ;; same seconds and the same hundred megabytes as a genuine history view.
+  ;; The filter is the journal's, in SQL, so the payloads never leave the db.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            s1    (-> (store/empty-store)
+                      (store/ingest 'ld.one "(ns ld.one)\n\n(def a 1)\n")
+                      (store/record-observation '[ld.one-test]
+                                                {:tier :external :status :green :ran 1 :failures []}))]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['ld.one] trunk nil)))
+        (is (= [:ingest :observe] (mapv :op (db/line-deltas conn trunk)))
+            "fixture: two kinds on the line")
+        (is (= [:observe] (mapv :op (db/line-deltas conn trunk :ops [:observe])))
+            "only the asked-for kind comes back")
+        (is (= '[ld.one-test]
+               (:scope (first (db/line-deltas conn trunk :ops [:observe]))))
+            "and it is the whole delta, not a projection")
+        (is (empty? (db/line-deltas conn trunk :ops [:commit]))
+            "a kind the line never wrote is an empty answer, not an error"))
       (finally (.close conn)))))

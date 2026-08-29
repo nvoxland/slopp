@@ -72,7 +72,7 @@
 
           (testing "provenance shows which server did what"
             (ops/sync-with-journal! s2)
-            (let [hist (pr-str (history/query-history s2))]
+            (let [hist (pr-str (history/query-history (ops/with-history s2)))]
               (is (re-find #"server-1" hist))
               (is (re-find #"server-2" hist))))
           (finally (ops/close! s2))))
@@ -203,7 +203,7 @@
         (ops/sync-with-journal! s)
         (is (re-find #"\+ x 99" (query/query-source s 'oob.core))
             "the rows moved under the server and the journal did not")
-        (is (= 2 (count (store/deltas (:store @s))))
+        (is (= 2 (count (ops/journal s)))
             "and the journal is untouched — this was never a delta"))
       (finally
         (ops/close! s)

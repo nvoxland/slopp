@@ -1216,7 +1216,7 @@
                        :endpoints (count wrappers)
                        :platform  platform
                        :source    (str url)
-                       :delta     (:id (last (:deltas (:store @session))))}
+                       :delta     (:head (:store @session))}
                 (seq gone)     (assoc :dropped gone)
                 ;; the test is about the WRAPPERS. A shared helper generation
                 ;; emits under both contracts survives the write and is not
@@ -1394,7 +1394,7 @@
                    :wrappers  (mapv (comp str :fn-name) wrappers)
                    :endpoints (count wrappers)
                    :platform  platform
-                   :delta     (:id (last (:deltas (:store @session))))}
+                   :delta     (:head (:store @session))}
             checks         (assoc :checks checks)
             ;; a `:cljs` namespace never loads into any JVM, so writing one
             ;; could not stale a process. A `:cljc` one does — and for a

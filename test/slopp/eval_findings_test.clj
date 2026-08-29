@@ -1,21 +1,21 @@
 (ns slopp.eval-findings-test
   "Fixes for what the symmetric eval surfaced (S-series)."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.store :as store]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
 (deftest ^:external s1-non-compiling-forms-are-rejected-not-silently-committed
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        n-deltas #(count (ops/journal sess))]
     (try
       (ops/ingest! sess 's1.core
                    (str "(ns s1.core (:require [clojure.test :refer [deftest is]]))\n"
                         "(defn f [x] x)\n"))
       (testing "an add whose form doesn't compile returns {:error}, nothing committed"
-        (let [n (count (store/deltas (:store @sess)))
+        (let [n (n-deltas)
               r (ops/add-form! sess 's1.core "(defn bad [] (undefined-fn 1))")]
           (is (:error r))
           (is (re-find #"compile" (:error r)))
-          (is (= n (count (store/deltas (:store @sess)))))
+          (is (= n (n-deltas)))
           (is (not (re-find #"bad" (query/query-source sess 's1.core))))))
       (testing "the sonnet case: a test referencing an undefined fn is a loud error, not {:ok :ran 0}"
         (let [r (ops/add-form! sess 's1.core "(deftest ghost-t (is (= 1 (ghost 1))))")]
@@ -26,7 +26,7 @@
           (is (re-find #"\(defn f \[x\] x\)" (query/query-source sess 's1.core)))
           (is (= [7] (ops/query-eval sess "(s1.core/f 7)")))))
       (testing "a group with a non-compiling step commits nothing and the image stays faithful"
-        (let [n (count (store/deltas (:store @sess)))
+        (let [n (n-deltas)
               r (ops/edit-group! sess
                                  [{:action :replace :ns 's1.core :name 'f
                                    :source "(defn f [x] (* 2 x))"}
@@ -34,7 +34,7 @@
                                    :source "(defn g [] (missing))"}]
                                  :prompt "should fail atomically")]
           (is (:error r))
-          (is (= n (count (store/deltas (:store @sess)))))
+          (is (= n (n-deltas)))
           ;; first step's compile succeeded in the image before step 2 failed —
           ;; the image must be restored to match the (unchanged) store
           (is (= [7] (ops/query-eval sess "(s1.core/f 7)")))))
@@ -62,7 +62,7 @@
         (is (= [10] (ops/query-eval sess "(s2.core/caller 5)")))
         (is (= [:u] (ops/query-eval sess "(s2.core/util)"))))
       (testing "lineage records the :move"
-        (is (contains? (set (map :op (history/query-lineage sess 's2.core 'util)))
+        (is (contains? (set (map :op (history/query-lineage (ops/with-history sess) 's2.core 'util)))
                        :move)))
       (testing "validation"
         (is (:error (ops/move-form! sess 's2.core 'nope :before 'caller)))

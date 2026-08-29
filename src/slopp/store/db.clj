@@ -17,7 +17,7 @@
             [clojure.java.io :as io]
             [next.jdbc :as jdbc]
             [rewrite-clj.parser :as p]
-            [rewrite-clj.node :as n] [slopp.store.fields :as fields] [slopp.store :as store]))
+            [rewrite-clj.node :as n] [slopp.store.fields :as fields] [slopp.store :as store] [clojure.string :as str]))
 
 ^:reads (defn ^:export data-version
   "SQLite's cheap foreign-commit detector: this value changes when ANOTHER
@@ -1529,17 +1529,12 @@
         ;; …and having named the columns, drop the one that is still huge: every
         ;; milestone's `:files` snapshot but the newest. See thin-commit-manifests
         ;; — measured at 70.8 MB of 73.7 MB of commit payload on slopp's own store.
-        :deltas     (thin-commit-manifests
-                     (mapv row->delta
-                           ;; EXPLICIT columns, not SELECT * — an older store still has a dead
-                           ;; `tree` column holding ~1.35MB per :commit marker, and naming the
-                           ;; columns is what keeps it from being fetched and parsed at every open.
-                           (jdbc/execute! conn
-                                          [(str ancestry-cte
-                                                " SELECT id, op, ns, payload FROM deltas
-                                                  WHERE id IN (SELECT id FROM anc)
-                                                  ORDER BY seq")
-                                           (line-head conn line-id)])))
+        ;; NO delta list. It was 94% of the value (111 MB of 118 on one store,
+        ;; ~162 MB live) and 4.5 s of every 7.6 s open — EDN-parsing every
+        ;; payload the line had ever written to carry a history the value
+        ;; read for two scalars and a bounded window. Those are the keys
+        ;; below; the views that walk the whole log read `line-deltas`
+        ;; when asked.
 
         ;; NOT loaded at open. :blobs is a partial cache by design — file-content
         ;; documents the miss and the db fallback owns it, and put-blobs! is
@@ -1840,25 +1835,33 @@
 
 ^:reads (defn ^:export line-deltas
           "ONE LINE's whole journal as delta maps, oldest first — or only the part
-  after delta `since` when given. This is the read the history VIEWS
-  (`query_history`, `query_changes`, a milestone's tree, an episode diff)
-  hydrate with, at the moment they are asked: a session no longer carries its
-  line's history in the value, because the value read it for two scalars and
-  a bounded window, and the views that genuinely need all of it are asked a
-  few times a day. Milestone `:files` manifests are thinned exactly as
-  `load-store` thins them."
-          [conn line-id & {:keys [since]}]
+  after delta `since` when given, or only the deltas whose op is in `ops`
+  (a milestone list wants `[:commit]` and nothing else). This is the read
+  the history VIEWS (`query_history`, `query_changes`, a milestone's tree,
+  an episode diff) hydrate with, at the moment they are asked: a session no
+  longer carries its line's history in the value, because the value read it
+  for two scalars and a bounded window, and the views that genuinely need
+  all of it are asked a few times a day. The op filter is SQL, so a reader
+  that wants a few dozen markers never parses the payloads it does not want.
+  Milestone `:files` manifests are thinned exactly as `load-store` thins
+  them."
+          [conn line-id & {:keys [since ops]}]
           (thin-commit-manifests
            (mapv row->delta
                  (jdbc/execute!
-                  conn (cond-> [(str ancestry-cte
-                                     " SELECT id, op, ns, payload FROM deltas
-                                       WHERE id IN (SELECT id FROM anc)"
-                                     (when since
-                                       " AND seq > (SELECT seq FROM deltas WHERE id = ?)")
-                                     " ORDER BY seq")
-                                (line-head conn line-id)]
-                         since (conj since))))))
+                  conn (into [(str ancestry-cte
+                                   " SELECT id, op, ns, payload FROM deltas
+                                     WHERE id IN (SELECT id FROM anc)"
+                                   (when since
+                                     " AND seq > (SELECT seq FROM deltas WHERE id = ?)")
+                                   (when (seq ops)
+                                     (str " AND op IN ("
+                                          (str/join "," (repeat (count ops) "?"))
+                                          ")"))
+                                   " ORDER BY seq")
+                              (line-head conn line-id)]
+                             (concat (when since [since])
+                                     (map name ops)))))))
 
 ^:reads (defn ^:export sources-at
           "`{form-id source}` for each of `fids` as of delta `at-id` (inclusive) on
@@ -1930,3 +1933,12 @@
                               WHERE id IN (SELECT id FROM anc) AND op = ?
                               ORDER BY seq DESC LIMIT ?")
                        (line-head conn line-id) (name op) (long n)])))
+
+^:reads (defn ^:export load-store-with-history
+          "`load-store` plus the line's whole journal as `:deltas` — the shape the
+  merge needs for the side it is merging from, read at merge time. Nothing
+  keeps a value like this: the merge's result is committed through
+  `store/committed`, which drops the list again."
+          [conn line-id]
+          (some-> (load-store conn line-id)
+                  (assoc :deltas (line-deltas conn line-id))))

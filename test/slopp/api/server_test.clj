@@ -290,7 +290,7 @@
             (testing "and the batch is recorded beside the journal, not IN it"
               (is (= (inc before) (count ms))
                   (str "the post over the wire must have added exactly one row: " (pr-str ms)))
-              (is (empty? (filter #(= :otel (:op %)) (:deltas (:store @sess))))
+              (is (empty? (filter #(= :otel (:op %)) (:recent (:store @sess))))
                   "a measurement must never move the head a writer CASes against")
               (is (= 1 (count (:requests p))) (pr-str p)))
 

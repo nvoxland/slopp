@@ -137,7 +137,7 @@
                   (is (= (query/query-source sa 'gc.core)
                          (query/query-source sb 'gc.core))))
                 (testing "the pull marker carries :git-sha (the chain node)"
-                  (let [d (->> (store/deltas (:store @sb))
+                  (let [d (->> (ops/journal sb)
                                (filter #(= :commit (:op %))) last)]
                     (is (= (:pushed p2) (:git-sha d)))))))
 
@@ -593,7 +593,7 @@
               (is (nil? (:error r2)) (pr-str r2))
               (is (string? (:marker r2))
                   (str "the second pass must close the import: " (pr-str r2)))
-              (let [d (->> (store/deltas (:store @sb))
+              (let [d (->> (ops/journal sb)
                            (filter #(= :commit (:op %))) last)]
                 (is (string? (:git-sha d))
                     (str "the closing milestone carries the chain node: " (pr-str d))))))
@@ -748,7 +748,7 @@
                   (str "both edits must land: "
                        (pr-str (get-in @sb [:store :files "NOTES.md"])))))
             (testing "and the history says it was a merge, not an authored put"
-              (let [d (->> (store/deltas (:store @sb))
+              (let [d (->> (ops/journal sb)
                            (filter #(= :file-put (:op %))) last)]
                 (is (re-find #"merged" (str (:prompt d)))
                     (str "the delta must record HOW the content arrived: "

@@ -26,10 +26,10 @@
     (try
       (ops/ingest! sess 'er.core "(ns er.core)\n(defn f [x] x)\n")
       (testing "add with unbalanced source: {:error}, nothing committed"
-        (let [n (count (store/deltas (:store @sess)))
+        (let [n (count (ops/journal sess))
               r (ops/add-form! sess 'er.core "(defn broken [x")]
           (is (:error r))
-          (is (= n (count (store/deltas (:store @sess)))))))
+          (is (= n (count (ops/journal sess))))))
       (testing "replace and ingest too"
         (is (:error (ops/edit-replace! sess 'er.core 'f "(defn f [x")))
         (is (:error (ops/ingest! sess 'er2.core "(ns er2.core"))))

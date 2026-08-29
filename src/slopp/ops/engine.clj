@@ -437,16 +437,6 @@
             (.close ^java.sql.Connection conn))
           (:db s)))))
 
-(defn- prior-source
-  "The source `fid` held immediately BEFORE the newest delta that touched it,
-  read from the journal — nil when unknown (created by ingest, or touched
-  only once), which callers treat conservatively."
-  [store fid]
-  (->> (rseq (:deltas store))
-       (keep #(get (:sources %) fid))
-       (drop 1)
-       first))
-
 (defn inert-ns-require-change?
   "True when an ns-form edit only ADDED require specs that cannot change the
   resolution or load behaviour of anything already compiled: alias-only
@@ -457,54 +447,54 @@
   non-require edit — is not inert. Conservative: an unreadable or absent
   baseline answers false.
 
-  `old-src` is the ns form's source at the baseline to diff against — the
-  1-arity uses the delta immediately prior (the write path, one edit); the
-  done path passes the LAST-DONE source so a multi-edit episode where an
-  earlier edit added a :refer isn't masked by a later alias-only edit
-  (review V-F3).
+  `old-src` is the ns form's source at the baseline to diff against, and the
+  caller names it: the write path hands the delta immediately prior
+  (`prior-source`, one edit); the done path hands the LAST-DONE source so a
+  multi-edit episode where an earlier edit added a :refer isn't masked by a
+  later alias-only edit (review V-F3). A pure question over a value and a
+  string — the journal read that finds the baseline stays with the caller.
 
   frictions #2: ns_add_require on slopp.api invalidated 331 external tests
   for an edit whose blast radius is zero — the require-closure fallback
   treated a require-list touch as a code change to the whole namespace."
-  ([store fid] (inert-ns-require-change? store fid (prior-source store fid)))
-  ([store fid old-src]
-   (let [read* (fn [s] (try (n/sexpr (p/parse-string (str s)))
-                            (catch Exception _ nil)))
-         e     (store/form-by-id store fid)
-         new   (some-> e :node n/sexpr)
-         old   (read* old-src)
-         req?  (fn [c] (and (seq? c) (= :require (first c))))
-         reqs  (fn [form] (set (mapcat rest (filter req? (drop 2 form)))))
-         ;; the ns form with its require clauses stripped — everything whose
-         ;; change is NOT a plain require add: name, docstring, :import,
-         ;; :require-macros, :gen-class …
-         non-req (fn [form] (cons (second form) (remove req? (drop 2 form))))
-         ;; metadata is invisible to = (on symbols and colls alike), and a
-         ;; test-selector tag / load hint on the ns name is behaviourally
-         ;; live — compare the metadata of every node explicitly (V-F2)
-         metas   (fn [form] (mapv meta (tree-seq coll? seq form)))
-         ;; a required ns is quiet only if its WHOLE in-store closure
-         ;; registers no methods — loading it loads them all (V-F1)
-         quiet?  (fn [lib]
-                   (not-any? store/method-carrying?
-                             (mapcat #(store/forms store %)
-                                     (store/ns-closure store lib))))]
-     (boolean
-      (and (seq? old) (seq? new)
-           (= 'ns (first old) (first new))
-           (= (non-req old) (non-req new))
-           (= (metas (non-req old)) (metas (non-req new)))
-           (set/subset? (reqs old) (reqs new))
-           (let [added (set/difference (reqs new) (reqs old))]
-             (and (seq added)
-                  (every? (fn [spec]
-                            (and (vector? spec)
-                                 (symbol? (first spec))
-                                 (even? (count (rest spec)))
-                                 (every? #(= :as %) (take-nth 2 (rest spec)))
-                                 (contains? (:namespaces store) (first spec))
-                                 (quiet? (first spec))))
-                          added))))))))
+  [store fid old-src]
+  (let [read* (fn [s] (try (n/sexpr (p/parse-string (str s)))
+                           (catch Exception _ nil)))
+        e     (store/form-by-id store fid)
+        new   (some-> e :node n/sexpr)
+        old   (read* old-src)
+        req?  (fn [c] (and (seq? c) (= :require (first c))))
+        reqs  (fn [form] (set (mapcat rest (filter req? (drop 2 form)))))
+        ;; the ns form with its require clauses stripped — everything whose
+        ;; change is NOT a plain require add: name, docstring, :import,
+        ;; :require-macros, :gen-class …
+        non-req (fn [form] (cons (second form) (remove req? (drop 2 form))))
+        ;; metadata is invisible to = (on symbols and colls alike), and a
+        ;; test-selector tag / load hint on the ns name is behaviourally
+        ;; live — compare the metadata of every node explicitly (V-F2)
+        metas   (fn [form] (mapv meta (tree-seq coll? seq form)))
+        ;; a required ns is quiet only if its WHOLE in-store closure
+        ;; registers no methods — loading it loads them all (V-F1)
+        quiet?  (fn [lib]
+                  (not-any? store/method-carrying?
+                            (mapcat #(store/forms store %)
+                                    (store/ns-closure store lib))))]
+    (boolean
+     (and (seq? old) (seq? new)
+          (= 'ns (first old) (first new))
+          (= (non-req old) (non-req new))
+          (= (metas (non-req old)) (metas (non-req new)))
+          (set/subset? (reqs old) (reqs new))
+          (let [added (set/difference (reqs new) (reqs old))]
+            (and (seq added)
+                 (every? (fn [spec]
+                           (and (vector? spec)
+                                (symbol? (first spec))
+                                (even? (count (rest spec)))
+                                (every? #(= :as %) (take-nth 2 (rest spec)))
+                                (contains? (:namespaces store) (first spec))
+                                (quiet? (first spec))))
+                         added)))))))
 
 (def cljs-deferred-summary
   "Verification summary for a write to a :cljs (non-jvm-loadable) namespace.
@@ -794,24 +784,30 @@
   `:head` for the CAS, `:pending` for the suffix, `:line-pos` to decide
   whether the cache advanced. It used to recover all three from two whole
   delta lists — the base's count dropped off the candidate's — which is the
-  reason the lists had to be in RAM at all."
+  reason the lists had to be in RAM at all.
+
+  What lands in the session carries NO delta list: `store/committed` clears
+  the suffix and the list is dropped here. A candidate that carries one — a
+  merge folds a hydrated value — is committed like any other, and the live
+  value stays the journal's facts, not the journal."
   [session base st' nses]
-  (if-let [conn (ensure-db! session)]
-    (if (db/append! conn st' (:pending st') (vec nses)
-                    (session-line session) (:head base))
-      (do (swap! session
-                 (fn [s]
-                   (if (< (:line-pos (:store s) 0) (:line-pos st' 0))
-                     (assoc s :store (store/committed st'))
-                     s)))
-          true)
-      false)
-    (let [[old _] (swap-vals! session
-                              (fn [s]
-                                (if (identical? (:store s) base)
-                                  (assoc s :store (store/committed st'))
-                                  s)))]
-      (identical? (:store old) base))))
+  (let [landed (dissoc (store/committed st') :deltas)]
+    (if-let [conn (ensure-db! session)]
+      (if (db/append! conn st' (:pending st') (vec nses)
+                      (session-line session) (:head base))
+        (do (swap! session
+                   (fn [s]
+                     (if (< (:line-pos (:store s) 0) (:line-pos st' 0))
+                       (assoc s :store landed)
+                       s)))
+            true)
+        false)
+      (let [[old _] (swap-vals! session
+                                (fn [s]
+                                  (if (identical? (:store s) base)
+                                    (assoc s :store landed)
+                                    s)))]
+        (identical? (:store old) base)))))
 
 (defn refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
@@ -857,8 +853,7 @@
               ;; every milestone landed during this server's life would add one
               ;; back, undoing at runtime what load-store does at open. The
               ;; full-load fallback thins itself.
-              fresh (or (some-> incr (update :deltas db/thin-commit-manifests))
-                        (db/load-store conn line))]
+              fresh (or incr (db/load-store conn line))]
           (when fresh
             (swap! session
                    (fn [s]
@@ -899,6 +894,20 @@
                      " writer is landing continuously. Ordinary contention on a"
                      " busy branch: call again.")
                 {:retryable true}))))))
+
+(defn prior-source
+  "The source `fid` held immediately BEFORE the newest delta that touched it,
+  read from the journal — nil when unknown (created by ingest, or touched
+  only once), which callers treat conservatively. One indexed read over the
+  deltas that touched this form (`db/deltas-touching`), newest first. Takes
+  the SESSION, not the store value: the value no longer carries its log, and
+  this is the write path's one baseline read between dones."
+  [session fid]
+  (->> (db/deltas-touching (:db @session) (session-line session) [fid])
+       reverse
+       (keep #(get (:sources %) fid))
+       (drop 1)
+       first))
 
 (defn ^:export used-families
   "The capabilities whose framework family `store` USES — the set both the
@@ -1774,7 +1783,7 @@
                                       store fid
                                       (if baseline
                                         (get base-src fid)
-                                        (prior-source store fid))))
+                                        (prior-source session fid))))
                                 []
 
                                 :else

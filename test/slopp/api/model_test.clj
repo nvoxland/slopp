@@ -43,18 +43,21 @@
 (deftest timeline-is-the-reviewer-landing-model
   ;; The landing page answers two questions in the order a reviewer asks
   ;; them: "what has been finished?" (milestones, newest first) and "what is
-  ;; in flight?" (everything written since the newest one). Both are folds
-  ;; over the delta log, so the fixture IS a delta log, written longhand.
-  (let [st (assoc (store/empty-store)
+  ;; in flight?" (everything written since the newest one). The first is a
+  ;; fold over the milestone markers, the second over the RECENT window the
+  ;; value carries — so the fixture is both, written longhand.
+  (let [recent [{:id "d5" :op :replace :ns 'demo.core :form-id "f1" :prompt "sharpen it"}
+                {:id "d6" :op :add :ns 'demo.util :form-id "f3" :prompt "a helper"}]
+        st (assoc (store/empty-store)
                   :deltas
-                  [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "the first form"}
-                   {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
-                    :description "first milestone\nand a body line"}
-                   {:id "d3" :op :add :ns 'demo.core :form-id "f2" :prompt "a second form"}
-                   {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000
-                    :description "second milestone"}
-                   {:id "d5" :op :replace :ns 'demo.core :form-id "f1" :prompt "sharpen it"}
-                   {:id "d6" :op :add :ns 'demo.util :form-id "f3" :prompt "a helper"}])
+                  (into [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "the first form"}
+                         {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
+                          :description "first milestone\nand a body line"}
+                         {:id "d3" :op :add :ns 'demo.core :form-id "f2" :prompt "a second form"}
+                         {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000
+                          :description "second milestone"}]
+                        recent)
+                  :recent recent)
         tl (model/timeline (atom {:store st}))]
     (testing "milestones read newest first — the reviewer's scan order"
       (is (= ["d4" "d2"] (mapv :commit (:milestones tl)))))
@@ -247,13 +250,15 @@
   ;; this reason. Bounded here rather than in the page, so a JSON sink is
   ;; bounded too.
   (let [long-text (fn [n] (apply str (repeat n "and on ")))
+        recent    (vec (for [i (range 15)]
+                         {:id (str "d" i) :op :add :ns 'demo.core :form-id (str "f" i)
+                          :prompt (str "ask " i " " (long-text 40))}))
         st (assoc (store/empty-store)
                   :deltas
                   (into [{:id "c1" :op :commit :status :green :at 1784900000000
                           :description (str "a title that runs on " (long-text 40))}]
-                        (for [i (range 15)]
-                          {:id (str "d" i) :op :add :ns 'demo.core :form-id (str "f" i)
-                           :prompt (str "ask " i " " (long-text 40))})))
+                        recent)
+                  :recent recent)
         tl (model/timeline (atom {:store st}))]
     (testing "a milestone title is capped, and says it was cut"
       (let [d (:description (first (:milestones tl)))]
@@ -267,8 +272,8 @@
       (is (= 15 (get-in tl [:working :forms]))
           "the COUNT is exact; only the listing is capped"))
     (testing "under the cap there is no more-prompts key at all"
-      (let [small (assoc (store/empty-store) :deltas
-                         [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "one ask"}])]
+      (let [one   [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "one ask"}]
+            small (assoc (store/empty-store) :deltas one :recent one)]
         (is (nil? (get-in (model/timeline (atom {:store small})) [:working :more-prompts])))))))
 
 (deftest source-tokens-are-a-lossless-view-of-the-stored-cst

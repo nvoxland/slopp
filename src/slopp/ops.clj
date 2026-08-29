@@ -231,7 +231,7 @@
     (when timing
       (when-let [conn (:db @session)]
         (db/record-measurement! conn "ask"
-                                (:id (peek (:deltas (:store @session))))
+                                (:head (:store @session))
                                 timing)))
     (cond-> {:turn :closed :agent agent}
       timing (assoc :timing timing))))
@@ -411,7 +411,8 @@ load? (store/jvm-loadable? (:store @session) ns-sym)
                                      ;; namespace reach (frictions #2); [] is honest
                                      ;; (:coverage :none), never a claimed green
                                      (when (engine/inert-ns-require-change?
-                                            (:store @session) (:form-id (:delta r)))
+                                            (:store @session) (:form-id (:delta r))
+                                            (engine/prior-source session (:form-id (:delta r))))
                                        []))]
                              ;; …and re-point it through the rename, exactly as
                              ;; `edited` is one binding above. The affected set was
@@ -1125,36 +1126,6 @@ recompiled (engine/after-write! session ns-sym)]
                                  " routes to the external tier automatically)")))
              t0)))
 
-^:reads (defn query-commits
-  "Milestones, newest first:
-  [{:commit :description :target :status :agent :at :sha}]. The list rung
-  carries each description's TITLE LINE only (+ :more-lines when a body
-  follows) — needing one sha used to fetch five whole milestone essays;
-  `:commit \"dN\"` returns that ONE milestone with its full description.
-  Commit `:target` ids plug straight into query-changes :from/:to for
-  between-milestone diffs. `:sha` (P4-m8) is the milestone's git commit id —
-  present once the git projection has minted it (imported markers carry
-  theirs from birth).
-
-  This is `history/milestone-rows` — a pure fold over the delta log — plus
-  the one thing that needs the db: joining the shas the git projection
-  pinned. The split is why the reviewer UI can read milestones at :pure."
-  [session & {:keys [commit]}]
-  (let [{:keys [dir]} @session
-        st   (:store @session)
-        shas (when dir
-               (try (with-open [conn (db/open! dir)]
-                      (db/commit-shas conn))
-                    (catch Exception _ nil)))
-        join (fn [row]
-               (if-let [s (or (:sha row) (get shas (:commit row)))]
-                 (assoc row :sha s)
-                 row))]
-    (if commit
-      (some #(when (= (str commit) (:commit %)) (join %))
-            (history/milestone-rows st))
-      (mapv join (history/milestone-rows st :titles-only true)))))
-
 (defn deps-remove!
   "Drop external dependency `lib` from the manifest. A jar can't be unloaded,
   so this always restarts the image. Returns {:removed lib :restarted true}
@@ -1245,81 +1216,6 @@ recompiled (engine/after-write! session ns-sym)]
       (edit-replace! session ns-sym form-name (:new-form-src plan)
                      :prompt (or prompt (str "subform edit in " form-name))
                      :agent agent))))
-
-(defn revert-form!
-  "One-call rollback (item 4): replace `nm` with an earlier version of itself —
-  by default the previous one, or the version at delta `:to` (see
-  query-form-history). Rides the standard replace pipeline, so the revert is
-  itself compile-gated, verified, and recorded provenance."
-  [session ns-sym nm & {:keys [to prompt agent]}]
-  (let [hist (history/query-form-history session ns-sym nm)]
-    (cond
-      (nil? hist)
-      (edit/missing-form-error (:store @session) ns-sym nm)
-
-      (< (count hist) 2)
-      {:error (str nm " has no earlier version to revert to")}
-
-      :else
-      (let [target (if to
-                     (first (filter #(= to (:delta %)) hist))
-                     (nth hist (- (count hist) 2)))]
-        (if-not target
-          {:error (str "no version of " nm " at delta " to)}
-          (edit-replace! session ns-sym nm (:source target)
-                         :prompt (or prompt
-                                     (str "revert to " (:delta target)))
-                         :agent agent))))))
-
-(defn revert-episode!
-  "Scrap the agent's episode: roll every form it changed since its last
-  done back to the boundary state — as ONE atomic verified group
-  (honest provenance, not history erasure). Forms that OTHER agents also
-  touched since the boundary are SKIPPED and reported in :skipped-shared,
-  never stomped.
-
-  This is the whole-episode grain. To walk back one write, or a short chain
-  that went off the rails, without losing the rest of the episode, use
-  `undo!` — same inverse, addressed by delta."
-  [session & {:keys [agent prompt]}]
-  (let [;; no explicit agent means \"MY episode\" — the session's own id, what
-        ;; every live write carries. Left nil, `others` counted every
-        ;; real-agent delta as someone else's and skipped the session's own
-        ;; forms.
-        agent   (or agent (:agent-id @session))
-        changes (history/query-changes session :agent agent)
-        others  (into #{}
-                      (mapcat history/delta-fids)
-                      (filter #(and (contains? history/content-ops (:op %))
-                                    (not= agent (:agent %)))
-                              (history/episode-span (:store @session) agent)))
-        {:keys [steps shared]} (history/revert-steps changes others)]
-    (cond
-      (empty? (:forms changes))
-      {:reverted 0 :note "episode is empty — already at the last done"}
-
-      (empty? steps)
-      {:reverted 0 :skipped-shared shared
-       :note "every changed form is shared with other agents"}
-
-      :else
-      (let [r (edit-group! session steps
-                           :prompt (or prompt
-                                       (str "revert episode"
-                                            (when agent (str " of " agent))))
-                           :agent agent)]
-        (if (or (:error r) (:conflict r))
-          r
-          (let [reverted (vec (remove (set shared) (map :form (:forms changes))))]
-            (engine/commit-appended!
-             session
-             (fn [base] (first (store/record-revert base :why prompt
-                                                    :forms reverted
-                                                    :agent agent)))
-             [])
-            (assoc r
-                   :reverted (count steps)
-                   :skipped-shared shared)))))))
 
 (defn rename!
   "Rename `ns-sym/old-name` to `new-name` everywhere: ONE coordinated delta over
@@ -2054,88 +1950,6 @@ recompiled (engine/after-write! session ns-sym)]
            :note  (str "no examples — pass :code (a driver expression) to observe"
                        " real calls and get value-true assertions instead of holes")})))
     (edit/missing-form-error (:store @session) ns-sym nm)))
-
-^:reads (defn report
-  "The handoff/summary composite (ratio push): milestones, net form-level
-  changes with their recorded ASKS, and the last verification state — the
-  history fan-out (query_history + query_history {contains} + query_changes +
-  query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions.
-
-  A history read: the line's journal is read here, when asked (a handoff is
-  written a few times a day), rather than carried in the value."
-  [session & {:keys [since contains limit] :or {limit 50}}]
-  (let [st        (:store @session)
-        conn      (:db @session)
-        line      (engine/session-line session)
-        after     (vec (db/line-deltas conn line :since since))
-        after-ids (into #{} (map :id) after)
-        content   #{:add :replace :delete :rename :move}
-        changes   (->> after
-                       (filter (comp content :op))
-                       (mapcat (fn [d]
-                                 (for [fid (or (:form-ids d)
-                                               (some-> (:form-id d) vector))]
-                                   {:ns (:ns d) :fid fid :op (:op d)
-                                    :ask (:prompt d)})))
-                       (group-by (juxt :ns :fid))
-                       (map (fn [[[nsx fid] es]]
-                              {:ns nsx
-                               :form (let [e (store/form-by-id st fid)]
-                                       (or (:name e) fid))
-                               :ops (vec (distinct (map :op es)))
-                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))}))
-                       (filter (fn [row]
-                                 (or (nil? contains)
-                                     (some #(str/includes? (str %) (str contains))
-                                           (cons (str (:form row)) (:asks row))))))
-                       (sort-by (juxt (comp str :ns) (comp str :form)))
-                       (take limit)
-                       vec)
-        ms        (->> (query-commits session)
-                       (filter #(and (or (nil? since) (after-ids (:commit %)))
-                                     (or (nil? contains)
-                                         (str/includes? (str (:description %))
-                                                        (str contains)))))
-                       (take 20)
-                       (mapv #(-> (select-keys % [:commit :description :at :status])
-                                  (update :description orient/snip 110))))
-        verify*   (db/last-marker conn line :verify)
-        dead      (->> after
-                       (filter #(= :revert (:op %)))
-                       (mapv (fn [d] (cond-> {:why (:why d)
-                                              :forms (vec (:forms d))}
-                                       (:at d) (assoc :at (history/human-time (:at d)))))))
-        ;; the USER's verbatim asks, recorded on turn-begin. A handoff's first
-        ;; question is \"what was I asked to do?\", and per-form :asks answer a
-        ;; different one (what each write intended). Without these, handoffs
-        ;; read the journal by hand — eval9 shelled out to sqlite3 on
-        ;; .slopp/store.db to get exactly this.
-        intents   (->> after
-                       (filter #(= :turn-begin (:op %)))
-                       (keep :intent)
-                       distinct
-                       (mapv #(orient/snip % 160)))]
-    (orient/fit-report
-     (cond-> {:milestones ms
-             :changes changes
-             :suite (when verify*
-                      {:as-of (:id verify*)
-                       :status (or (get-in verify* [:summary :status])
-                                   (:status verify*) :unknown)})
-             ;; the report is names + asks; the CODE lives one call away.
-             ;; Say so here, or a handoff goes hunting in `git diff` (eval9
-             ;; measured ~20k chars of it) for something slopp already has.
-             :code "query_changes {from \"start\"} = every form's :was/:now across this lifetime (or from \"last-commit\"); format=text for line diffs"
-             :verify (str "writes self-verify; test_run {all true} re-runs the "
-                          "whole in-image suite (bare {} only returns guidance); "
-                          "test_run {:external true} = the full external suite. "
-                          "HANDOFF one-shots (humans/scripts, no session needed): "
-                          "`slopp --call test_run '{\"external\":true}'` and "
-                          "`slopp --call query_commits` — quote these in handoff "
-                          "docs; no need to read skill files for the CLI forms")}
-       (seq intents) (assoc :intents intents)
-       (seq dead)    (assoc :dead-ends dead)))))
 
 (defn remember-observation!
   "Persist what an observation SAW (up to two {:args :ret} captures) under
@@ -4460,6 +4274,139 @@ recompiled (engine/after-write! session ns-sym)]
     (when-let [at (:served-at running)]
       (db/code-deltas-after (:db @session) (engine/session-line session) {:at at}))))
 
+(defn ^:export with-history
+  "`session` with its store value HYDRATED: `:deltas` is the line's whole
+  journal (`slopp.store.db/line-deltas`), read now — or, with `:ops`, only
+  the deltas of those kinds (`[:commit]` for a milestone list), which is the
+  difference between a few dozen rows and the whole log for readers that
+  want one kind of marker. Returns a NEW atom over a copy of the session —
+  the live session never carries the list. A session with no journal (a bare
+  test fixture over a value built by writes) is returned as it is: its
+  value's own `:deltas` is all the history there is.
+
+  The history views (`query_history`, `query_changes`, a milestone's status,
+  an undo span) are pure over a store value and read `store/deltas`. The
+  value stopped carrying the log — it was 94% of every session's memory and
+  the cost of every open, read for two scalars and a bounded window — so the
+  few readers that genuinely walk all of it are handed a value that has it,
+  at the moment they are asked, and only then."
+  [session & {:keys [ops]}]
+  (let [s @session]
+    (if-let [conn (:db s)]
+      (atom (update s :store assoc :deltas
+                    (db/line-deltas conn (engine/session-line session) :ops ops)))
+      session)))
+
+^:reads (defn query-commits
+  "Milestones, newest first:
+  [{:commit :description :target :status :agent :at :sha}]. The list rung
+  carries each description's TITLE LINE only (+ :more-lines when a body
+  follows) — needing one sha used to fetch five whole milestone essays;
+  `:commit \"dN\"` returns that ONE milestone with its full description.
+  Commit `:target` ids plug straight into query-changes :from/:to for
+  between-milestone diffs. `:sha` (P4-m8) is the milestone's git commit id —
+  present once the git projection has minted it (imported markers carry
+  theirs from birth).
+
+  This is `history/milestone-rows` — a pure fold over the delta log — plus
+  the one thing that needs the db: joining the shas the git projection
+  pinned. The split is why the reviewer UI can read milestones at :pure."
+  [session & {:keys [commit]}]
+  (let [{:keys [dir]} @session
+        st   (:store @(with-history session :ops [:commit]))
+        shas (when dir
+               (try (with-open [conn (db/open! dir)]
+                      (db/commit-shas conn))
+                    (catch Exception _ nil)))
+        join (fn [row]
+               (if-let [s (or (:sha row) (get shas (:commit row)))]
+                 (assoc row :sha s)
+                 row))]
+    (if commit
+      (some #(when (= (str commit) (:commit %)) (join %))
+            (history/milestone-rows st))
+      (mapv join (history/milestone-rows st :titles-only true)))))
+
+(defn revert-form!
+  "One-call rollback (item 4): replace `nm` with an earlier version of itself —
+  by default the previous one, or the version at delta `:to` (see
+  query-form-history). Rides the standard replace pipeline, so the revert is
+  itself compile-gated, verified, and recorded provenance."
+  [session ns-sym nm & {:keys [to prompt agent]}]
+  (let [hist (history/query-form-history (with-history session) ns-sym nm)]
+    (cond
+      (nil? hist)
+      (edit/missing-form-error (:store @session) ns-sym nm)
+
+      (< (count hist) 2)
+      {:error (str nm " has no earlier version to revert to")}
+
+      :else
+      (let [target (if to
+                     (first (filter #(= to (:delta %)) hist))
+                     (nth hist (- (count hist) 2)))]
+        (if-not target
+          {:error (str "no version of " nm " at delta " to)}
+          (edit-replace! session ns-sym nm (:source target)
+                         :prompt (or prompt
+                                     (str "revert to " (:delta target)))
+                         :agent agent))))))
+
+(defn revert-episode!
+  "Scrap the agent's episode: roll every form it changed since its last
+  done back to the boundary state — as ONE atomic verified group
+  (honest provenance, not history erasure). Forms that OTHER agents also
+  touched since the boundary are SKIPPED and reported in :skipped-shared,
+  never stomped.
+
+  This is the whole-episode grain. To walk back one write, or a short chain
+  that went off the rails, without losing the rest of the episode, use
+  `undo!` — same inverse, addressed by delta.
+
+  The views that decide WHAT to revert walk the log, read from the journal
+  once onto a copy (`with-history`); the group itself writes to the live
+  session."
+  [session & {:keys [agent prompt]}]
+  (let [;; no explicit agent means \"MY episode\" — the session's own id, what
+        ;; every live write carries. Left nil, `others` counted every
+        ;; real-agent delta as someone else's and skipped the session's own
+        ;; forms.
+        agent   (or agent (:agent-id @session))
+        hs      (with-history session)
+        changes (history/query-changes hs :agent agent)
+        others  (into #{}
+                      (mapcat history/delta-fids)
+                      (filter #(and (contains? history/content-ops (:op %))
+                                    (not= agent (:agent %)))
+                              (history/episode-span (:store @hs) agent)))
+        {:keys [steps shared]} (history/revert-steps changes others)]
+    (cond
+      (empty? (:forms changes))
+      {:reverted 0 :note "episode is empty — already at the last done"}
+
+      (empty? steps)
+      {:reverted 0 :skipped-shared shared
+       :note "every changed form is shared with other agents"}
+
+      :else
+      (let [r (edit-group! session steps
+                           :prompt (or prompt
+                                       (str "revert episode"
+                                            (when agent (str " of " agent))))
+                           :agent agent)]
+        (if (or (:error r) (:conflict r))
+          r
+          (let [reverted (vec (remove (set shared) (map :form (:forms changes))))]
+            (engine/commit-appended!
+             session
+             (fn [base] (first (store/record-revert base :why prompt
+                                                    :forms reverted
+                                                    :agent agent)))
+             [])
+            (assoc r
+                   :reverted (count steps)
+                   :skipped-shared shared)))))))
+
 ^:reads (defn session-brief
   "THE one-call orientation, task-shaped (knowledge-differential stance):
   breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
@@ -4717,25 +4664,87 @@ recompiled (engine/after-write! session ns-sym)]
                 " then :ui is all there is, and it serves JSON"))
       relevant   (assoc :relevant relevant))))
 
-(defn ^:export with-history
-  "`session` with its store value HYDRATED: `:deltas` is the line's whole
-  journal (`slopp.store.db/line-deltas`), read now. Returns a NEW atom over a
-  copy of the session — the live session never carries the list. A session
-  with no journal (a bare test fixture over a value built by writes) is
-  returned as it is: its value's own `:deltas` is all the history there is.
+^:reads (defn report
+  "The handoff/summary composite (ratio push): milestones, net form-level
+  changes with their recorded ASKS, and the last verification state — the
+  history fan-out (query_history + query_history {contains} + query_changes +
+  query_commits + git diffs) as ONE deterministic read. `:since` = a
+  delta/milestone id; `:contains` filters asks/descriptions.
 
-  The history views (`query_history`, `query_changes`, a milestone's status,
-  an undo span) are pure over a store value and read `store/deltas`. The
-  value stopped carrying the log — it was 94% of every session's memory and
-  the cost of every open, read for two scalars and a bounded window — so the
-  few readers that genuinely walk all of it are handed a value that has it,
-  at the moment they are asked, and only then."
-  [session]
-  (let [s @session]
-    (if-let [conn (:db s)]
-      (atom (update s :store assoc :deltas
-                    (db/line-deltas conn (engine/session-line session))))
-      session)))
+  A history read: the line's journal is read here, when asked (a handoff is
+  written a few times a day), rather than carried in the value."
+  [session & {:keys [since contains limit] :or {limit 50}}]
+  (let [st        (:store @session)
+        conn      (:db @session)
+        line      (engine/session-line session)
+        after     (vec (db/line-deltas conn line :since since))
+        after-ids (into #{} (map :id) after)
+        content   #{:add :replace :delete :rename :move}
+        changes   (->> after
+                       (filter (comp content :op))
+                       (mapcat (fn [d]
+                                 (for [fid (or (:form-ids d)
+                                               (some-> (:form-id d) vector))]
+                                   {:ns (:ns d) :fid fid :op (:op d)
+                                    :ask (:prompt d)})))
+                       (group-by (juxt :ns :fid))
+                       (map (fn [[[nsx fid] es]]
+                              {:ns nsx
+                               :form (let [e (store/form-by-id st fid)]
+                                       (or (:name e) fid))
+                               :ops (vec (distinct (map :op es)))
+                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))}))
+                       (filter (fn [row]
+                                 (or (nil? contains)
+                                     (some #(str/includes? (str %) (str contains))
+                                           (cons (str (:form row)) (:asks row))))))
+                       (sort-by (juxt (comp str :ns) (comp str :form)))
+                       (take limit)
+                       vec)
+        ms        (->> (query-commits session)
+                       (filter #(and (or (nil? since) (after-ids (:commit %)))
+                                     (or (nil? contains)
+                                         (str/includes? (str (:description %))
+                                                        (str contains)))))
+                       (take 20)
+                       (mapv #(-> (select-keys % [:commit :description :at :status])
+                                  (update :description orient/snip 110))))
+        verify*   (db/last-marker conn line :verify)
+        dead      (->> after
+                       (filter #(= :revert (:op %)))
+                       (mapv (fn [d] (cond-> {:why (:why d)
+                                              :forms (vec (:forms d))}
+                                       (:at d) (assoc :at (history/human-time (:at d)))))))
+        ;; the USER's verbatim asks, recorded on turn-begin. A handoff's first
+        ;; question is \"what was I asked to do?\", and per-form :asks answer a
+        ;; different one (what each write intended). Without these, handoffs
+        ;; read the journal by hand — eval9 shelled out to sqlite3 on
+        ;; .slopp/store.db to get exactly this.
+        intents   (->> after
+                       (filter #(= :turn-begin (:op %)))
+                       (keep :intent)
+                       distinct
+                       (mapv #(orient/snip % 160)))]
+    (orient/fit-report
+     (cond-> {:milestones ms
+             :changes changes
+             :suite (when verify*
+                      {:as-of (:id verify*)
+                       :status (or (get-in verify* [:summary :status])
+                                   (:status verify*) :unknown)})
+             ;; the report is names + asks; the CODE lives one call away.
+             ;; Say so here, or a handoff goes hunting in `git diff` (eval9
+             ;; measured ~20k chars of it) for something slopp already has.
+             :code "query_changes {from \"start\"} = every form's :was/:now across this lifetime (or from \"last-commit\"); format=text for line diffs"
+             :verify (str "writes self-verify; test_run {all true} re-runs the "
+                          "whole in-image suite (bare {} only returns guidance); "
+                          "test_run {:external true} = the full external suite. "
+                          "HANDOFF one-shots (humans/scripts, no session needed): "
+                          "`slopp --call test_run '{\"external\":true}'` and "
+                          "`slopp --call query_commits` — quote these in handoff "
+                          "docs; no need to read skill files for the CLI forms")}
+       (seq intents) (assoc :intents intents)
+       (seq dead)    (assoc :dead-ends dead)))))
 
 (defn undo!
   "Walk back your own recent writes — the reach-for-it-without-thinking undo.
@@ -4897,3 +4906,12 @@ recompiled (engine/after-write! session ns-sym)]
                        :reverted (count steps)
                        :undid undid-ids
                        :skipped-shared shared)))))))))
+
+(defn ^:export journal
+  "`session`'s line's whole delta log, oldest first, read now — the list the
+  value no longer carries. A session with no journal answers its value's own
+  list. For a caller that wants the deltas THEMSELVES (a test counting
+  them, a fixture pinning an order); the views over them live in
+  `slopp.read.history`, and the write path never needs this."
+  [session]
+  (store/deltas (:store @(with-history session))))

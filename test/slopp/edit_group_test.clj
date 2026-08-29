@@ -7,7 +7,6 @@
   it would be for one form. An edit that is correct alone and wrong in company
   is the whole reason this verb exists."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.store :as store]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external]))
 
 (def buggy
@@ -24,8 +23,8 @@
     (try
       (ops/ingest! sess 'gdemo buggy)
       (ops/test-run! sess 'gdemo)                       ; red + builds trace map
-      (let [verifies-before (count (filter #(= :verify (:op %))
-                                           (store/deltas (:store @sess))))
+      (let [verifies (fn [] (count (filter #(= :verify (:op %)) (ops/journal sess))))
+            verifies-before (verifies)
             r (ops/edit-group!
                sess
                [{:action :replace :ns 'gdemo :name 'tier
@@ -45,8 +44,7 @@
           (is (= 2 (count (:deltas r))))
           (is (apply = (map :group (:deltas r)))))
         (testing "verified ONCE, green, with NO mid-refactor red restart"
-          (is (= (inc verifies-before)
-                 (count (filter #(= :verify (:op %)) (store/deltas (:store @sess))))))
+          (is (= (inc verifies-before) (verifies)))
           (is (zero? (+ (:fail (:test r)) (:error (:test r)))))
           (is (nil? (:fresh-confirmed (:test r)))))
         (testing "both forms live in the image"
@@ -57,7 +55,7 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'gdemo buggy)
-      (let [deltas-before (count (store/deltas (:store @sess)))
+      (let [deltas-before (count (ops/journal sess))
             src-before    (query/query-source sess 'gdemo)
             r (ops/edit-group!
                sess
@@ -70,7 +68,7 @@
           (is (:error r))
           (is (= 1 (:step r))))
         (testing "NOTHING was committed — store, deltas, and image untouched"
-          (is (= deltas-before (count (store/deltas (:store @sess)))))
+          (is (= deltas-before (count (ops/journal sess))))
           (is (= src-before (query/query-source sess 'gdemo)))
           ;; the first step's change never reached the image either
           (is (not= [[1 :+ 2]] (ops/query-eval sess "(gdemo/tier #{:+} [1 :+ 2])")))))

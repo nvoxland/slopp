@@ -8,7 +8,6 @@
   omission."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.index.normalize :as normalize]
-            [slopp.store :as store]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
 (defn- normed [src] (:src (normalize/normalize-source src)))
@@ -59,9 +58,9 @@
           (is (zero? (+ (:fail (:test r)) (:error (:test r)))))
           (is (= [:pos] (ops/query-eval sess "(cp.core/classify 5)"))))
         (testing "provenance: a :normalize delta + a :done boundary"
-          (is (contains? (set (map :op (history/query-lineage sess 'cp.core 'classify)))
+          (is (contains? (set (map :op (history/query-lineage (ops/with-history sess) 'cp.core 'classify)))
                          :normalize))
-          (is (= :done (:op (last (store/deltas (:store @sess))))))))
+          (is (= :done (:op (last (ops/journal sess)))))))
       (testing "an immediate second done is a no-op"
         (let [r (external/done! sess)]
           (is (zero? (:normalized r)))

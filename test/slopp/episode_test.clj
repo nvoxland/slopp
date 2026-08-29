@@ -4,7 +4,6 @@
   collapse into one braid, with a shared-form guard on revert."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
-            [slopp.store :as store]
             [slopp.mcp.turn]
             [slopp.mcp]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
@@ -17,7 +16,8 @@
        "(deftest f-t (is (= 2 (f 1))))\n"))
 
 (deftest ^:external solo-episode-lifecycle
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        hist #(ops/with-history sess)]
     (try
       (ops/ingest! sess 'ep.core seed)
       (external/done! sess :label "baseline")
@@ -27,7 +27,7 @@
       (ops/edit-replace! sess 'ep.core 'f "(defn f [x] (+ x 10))"
                          :prompt "implement +10")
       (testing "query-changes = my work since my last stable spot"
-        (let [c (history/query-changes sess)]
+        (let [c (history/query-changes (hist))]
           (is (= 2 (count (:steps c))))
           (is (= #{'ep.core/f 'ep.core/f-t}
                  (set (map :form (:forms c)))))
@@ -39,14 +39,17 @@
             (is (= [1 0] (mapv :fail (:verification-arc c)))))))
       (testing "done closes the episode"
         (external/done! sess :label "plus-ten")
-        (is (empty? (:forms (history/query-changes sess)))))
+        (is (empty? (:forms (history/query-changes (hist))))))
       (testing "collapsed history reads at episode grain"
-        (let [rows (history/query-history sess :collapse true)]
+        (let [rows (history/query-history (hist) :collapse true)]
           (is (some #(= "plus-ten" (get-in % [:episode :label])) rows))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external parallel-agents-have-independent-episodes
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        changed-by (fn [agent]
+                     (set (map :form (:forms (history/query-changes (ops/with-history sess)
+                                                                    :agent agent)))))]
     (try
       (ops/ingest! sess 'ep.core seed)
       (external/done! sess :label "baseline")
@@ -56,15 +59,12 @@
       (ops/edit-replace! sess 'ep.core 'g "(defn g [x] (- x 2))"
                          :prompt "bob's work" :agent "bob")
       (testing "each agent sees only ITS episode"
-        (is (= #{'ep.core/f}
-               (set (map :form (:forms (history/query-changes sess :agent "alice"))))))
-        (is (= #{'ep.core/g}
-               (set (map :form (:forms (history/query-changes sess :agent "bob")))))))
+        (is (= #{'ep.core/f} (changed-by "alice")))
+        (is (= #{'ep.core/g} (changed-by "bob"))))
       (testing "alice marking done does NOT close bob's episode"
         (external/done! sess :label "alice done" :agent "alice")
-        (is (empty? (:forms (history/query-changes sess :agent "alice"))))
-        (is (= #{'ep.core/g}
-               (set (map :form (:forms (history/query-changes sess :agent "bob")))))))
+        (is (empty? (changed-by "alice")))
+        (is (= #{'ep.core/g} (changed-by "bob"))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external episode-revert-scraps-only-my-unshared-work
@@ -109,7 +109,7 @@
                          :prompt "sub impl work" :agent "alice/impl")
       (external/done! sess :label "alice turn done" :agent "alice")
       (testing "the collapsed history nests sub-agent episodes under the turn"
-        (let [rows   (history/query-history sess :collapse true)
+        (let [rows   (history/query-history (ops/with-history sess) :collapse true)
               alice  (first (filter #(= "alice turn done"
                                         (get-in % [:episode :label]))
                                     rows))
@@ -120,8 +120,8 @@
             (is (not-any? #(= "alice/tests" (get-in % [:episode :agent]))
                           rows)))))
       (testing "deltas carry wall-clock provenance"
-        (is (number? (:at (last (store/deltas (:store @sess))))))
-        (is (every? #(number? (:at %)) (store/deltas (:store @sess)))))
+        (is (number? (:at (last (ops/journal sess)))))
+        (is (every? #(number? (:at %)) (ops/journal sess))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external turn-markers-bracket-the-history               ; P4-m6.2
@@ -139,14 +139,14 @@
       (let [r (ops/turn-end! sess :agent "alice")]
         (is (nil? (:error r))))
       (testing "lineage + form-history resolve the enclosing turn's ask"
-        (let [lin (history/query-lineage sess 'ep.core 'f)
-              fh  (history/query-form-history sess 'ep.core 'f)]
+        (let [lin (history/query-lineage (ops/with-history sess) 'ep.core 'f)
+              fh  (history/query-form-history (ops/with-history sess) 'ep.core 'f)]
           (is (= "add rush-order support to checkout"
                  (:turn-intent (last lin))))
           (is (= "add rush-order support to checkout"
                  (:turn-intent (last fh))))))
       (testing "the collapsed history has a TURN bracket with the verbatim ask"
-        (let [rows (history/query-history sess :collapse true)
+        (let [rows (history/query-history (ops/with-history sess) :collapse true)
               turn (first (keep :turn rows))]
           (is (some? turn))
           (is (= "add rush-order support to checkout" (:intent turn)))
@@ -178,7 +178,7 @@
                          :prompt "the fix" :agent "alice")
       (slopp.mcp.turn/-main dir "end" "alice")
       (ops/sync-with-journal! sess)
-      (let [turn (first (keep :turn (history/query-history sess :collapse true)))]
+      (let [turn (first (keep :turn (history/query-history (ops/with-history sess) :collapse true)))]
         (is (= "fix the flaky test" (:intent turn)))
         (is (= 1 (count (:episodes turn)))))
       (finally
@@ -243,7 +243,7 @@
         (slopp.mcp.turn/-main dir "hook-end" "alice"))
       (ops/sync-with-journal! sess)
       (is (not (ops/turn-open? sess "alice")))
-      (let [turn (first (keep :turn (history/query-history sess :collapse true)))]
+      (let [turn (first (keep :turn (history/query-history (ops/with-history sess) :collapse true)))]
         (is (= "please add rush orders — exactly these words" (:intent turn))))
       (finally
         (ops/close! sess)
@@ -265,9 +265,9 @@
                          :prompt "later work" :agent "bob")
       (testing "a PAST episode inspects like the current one: plug the
                 from/to ids from its collapsed row into query_changes"
-        (let [row  (first (keep :turn (history/query-history sess :collapse true)))
+        (let [row  (first (keep :turn (history/query-history (ops/with-history sess) :collapse true)))
               ep   (first (:episodes row))
-              c    (history/query-changes sess :agent "alice"
+              c    (history/query-changes (ops/with-history sess) :agent "alice"
                                       :from (:from ep) :to (:to ep))]
           (is (= #{'ep.core/f 'ep.core/f-t}
                  (set (map :form (:forms c)))))
@@ -278,7 +278,7 @@
           (testing "bob's later work is NOT in the span"
             (is (not-any? #(= 'ep.core/g (:form %)) (:forms c))))))
       (testing "format text renders a human story"
-        (let [txt (history/query-history sess :collapse true :format "text")]
+        (let [txt (history/query-history (ops/with-history sess) :collapse true :format "text")]
           (is (string? txt))
           (is (re-find #"make f add ten" txt))
           (is (re-find #"plus-ten" txt))))
@@ -287,7 +287,8 @@
 (deftest ^:external human-history-timestamps-diffs-and-intent-search
   ;; the human-side gaps: WHEN did it happen, WHAT changed (as a diff, not
   ;; two full sources), and finding a turn by what the user actually asked
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        hist #(ops/with-history sess)]
     (try
       (ops/ingest! sess 'ep.core seed)
       (ops/turn-begin! sess :agent "alice" :intent "teach h to double, loudly")
@@ -301,24 +302,24 @@
                          "(defn h [x]\n  ;; loud on purpose\n  (* x 3))"
                          :prompt "actually triple" :agent "alice")
       (testing "collapsed rows carry human-readable timestamps"
-        (let [rows (history/query-history sess :collapse true)
+        (let [rows (history/query-history (hist) :collapse true)
               turn (first (keep :turn rows))
               ep   (first (:episodes turn))]
           (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}" (str (:at turn))))
           (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}" (str (:at ep))))))
       (testing "raw rows and the text story show when, too"
         (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
-                        (str (:at (first (history/query-history sess))))))
+                        (str (:at (first (history/query-history (hist)))))))
         (is (re-find #"@ \d{4}-\d{2}-\d{2} \d{2}:\d{2}"
-                     (history/query-history sess :collapse true :format "text"))))
+                     (history/query-history (hist) :collapse true :format "text"))))
       (testing "contains searches TURN INTENTS in collapsed mode"
-        (let [rows (history/query-history sess :collapse true :contains "loudly")]
+        (let [rows (history/query-history (hist) :collapse true :contains "loudly")]
           (is (= "teach h to double, loudly"
                  (:intent (:turn (first rows))))))
-        (is (empty? (filter :turn (history/query-history sess :collapse true
-                                                     :contains "zz-no-match")))))
+        (is (empty? (filter :turn (history/query-history (hist) :collapse true
+                                                         :contains "zz-no-match")))))
       (testing "query-changes format=text renders line diffs with context"
-        (let [txt (history/query-changes sess :agent "alice" :format "text")]
+        (let [txt (history/query-changes (hist) :agent "alice" :format "text")]
           (is (string? txt))
           (is (re-find #"actually triple" txt))            ; the step's prompt
           (is (re-find #"(?m)^\s+- .*\* x 2" txt))         ; removed line only
@@ -327,7 +328,7 @@
           (is (re-find #"(?m)^\s+;; loud on purpose" txt))
           (is (not (re-find #"(?m)^\s*[-+] .*loud on purpose" txt)))))
       (testing "the EDN shape is unchanged when no format is asked for"
-        (let [c (history/query-changes sess :agent "alice")]
+        (let [c (history/query-changes (hist) :agent "alice")]
           (is (map? c))
           (is (re-find #"\* x 2" (:was (first (:forms c)))))))
       (finally (ops/close! sess)))))
@@ -853,15 +854,15 @@
       (ops/undo! sess :to :last-commit
                  :prompt "approach X: dead end — the suite is CPU-bound, no win")
       (testing "the dead-end is listed with its why and the scrapped form"
-        (let [des (history/query-history sess :dead-ends true)]
+        (let [des (history/query-history (ops/with-history sess) :dead-ends true)]
           (is (= 1 (count des)) (pr-str des))
           (let [d (first des)]
             (is (re-find #"CPU-bound" (:why d)) (pr-str d))
             (is (some #(re-find #"tried-approach" (str %)) (:forms d)) (pr-str d))
             (is (some #(= 'de.core %) (:namespaces d)) (pr-str d)))))
       (testing "filterable to dead-ends that touched a namespace"
-        (is (= 1 (count (history/query-history sess :dead-ends "de.core"))))
-        (is (empty? (history/query-history sess :dead-ends "other.ns"))))
+        (is (= 1 (count (history/query-history (ops/with-history sess) :dead-ends "de.core"))))
+        (is (empty? (history/query-history (ops/with-history sess) :dead-ends "other.ns"))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external report-carries-the-verbatim-user-asks
@@ -917,19 +918,19 @@
       (ops/edit-replace! sess 'sp.core 'g "(defn ^:unused-ok g [x] :after-commit)"
                          :prompt "post-milestone change" :agent "alice")
       (testing ":start spans the whole log and carries the code"
-        (let [c  (history/query-changes sess :from :start)
+        (let [c  (history/query-changes (ops/with-history sess) :from :start)
               fs (set (map :form (:forms c)))]
           (is (contains? fs 'sp.core/f) (pr-str fs))
           (is (contains? fs 'sp.core/g) (pr-str fs))
           (is (some :now (:forms c)) "the span must carry source, not just names")))
       (testing ":last-commit spans only work after the milestone"
-        (let [c  (history/query-changes sess :from :last-commit)
+        (let [c  (history/query-changes (ops/with-history sess) :from :last-commit)
               fs (set (map :form (:forms c)))]
           (is (contains? fs 'sp.core/g) (pr-str fs))
           (is (not (contains? fs 'sp.core/f))
               (str "f predates the milestone: " (pr-str fs)))))
       (testing "an anchor with nothing to point at says so instead of throwing"
-        (is (map? (history/query-changes sess :from :last-done))))
+        (is (map? (history/query-changes (ops/with-history sess) :from :last-done))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external the-turn-refusal-names-the-cause-a-second-store-hits
@@ -998,7 +999,7 @@
   ;; "no CONTENT delta since the last done" — nothing has been written, so there
   ;; is nothing to judge and nothing to record.
   (let [sess (external/open!)
-        n-deltas #(count (store/deltas (:store @sess)))]
+        n-deltas #(count (ops/journal sess))]
     (try
       (ops/ingest! sess 'nd.core "(ns nd.core)\n(defn f [x] x)\n")
       (let [first-done (external/done! sess :label "real work")
@@ -1180,18 +1181,20 @@
   ;; it would record a boundary with no `:timing`, which is the hole wearing a
   ;; hat. The only moment that has both the knowledge (the previous ask is
   ;; over) and the data (the ring) is the next `turn-begin!`, in the server.
-  (let [sess (external/open!)]
+  (let [sess (external/open!)
+        ;; the markers are in the RECENT window the value carries — no log needed
+        recent #(:recent (:store @sess))]
     (try
       (ops/turn-begin! sess :agent "alice" :intent "first ask" :user "nathan")
       ;; stand in for the wire's accounting: one call, one second of it
       (swap! sess assoc :slopp.read.telemetry/calls
              [{:tool "query_slice" :start 1000 :end 2000}])
       (ops/turn-begin! sess :agent "alice" :intent "second ask" :user "nathan")
-      (let [ends (filter #(= :turn-end (:op %)) (:deltas (:store @sess)))]
+      (let [ends (filter #(= :turn-end (:op %)) (recent))]
         (testing "the superseded turn is CLOSED rather than dropped"
           (is (= 1 (count ends))
               (str "a turn that is never closed leaves no record of what the"
-                   " ask cost: " (pr-str (mapv :op (:deltas (:store @sess)))))))
+                   " ask cost: " (pr-str (mapv :op (recent))))))
         (testing "and it carries the wall clock it actually accumulated"
           ;; the whole point — a boundary with no timing would balance the
           ;; counts and still measure nothing
