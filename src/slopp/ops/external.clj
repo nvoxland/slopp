@@ -145,7 +145,7 @@
             :namespaces (count (:namespaces store))
             :recycled?  (some? recycled)
             :failures   (count fails)
-            :head       (:id (peek (:deltas store)))})))
+            :head       (:head store)})))
       ;; ARM only now, with everything stamped: from here an unstamped form
       ;; means never-loaded rather than not-yet-looked-at. Without this the
       ;; registry stayed unarmed for a whole session and every currency
@@ -762,7 +762,7 @@ client-deps (merge (:client-deps st) (:client provided))
           ;; `boot/jar-head` reads this back.
           (let [hf (io/file target "src" boot/head-resource-path)]
             (io/make-parents hf)
-            (spit hf (pr-str {:head (:id (last (store/deltas st)))})))
+            (spit hf (pr-str {:head (:head st)})))
           ;; friction 2: the purity tiers, as a classpath RESOURCE under the
           ;; source root, so they ride into a published jar with the code they
           ;; describe. A tier is a declaration in this store, not anything in
@@ -1661,12 +1661,14 @@ client-deps (merge (:client-deps st) (:client provided))
       {:error "a commit point needs a human-facing :description"}
 
       target
-      (if (some #(= target (:id %)) (store/deltas (:store @session)))
+      (if (db/on-line? (:db @session) (engine/session-line session) target)
         (mark! target (history/status-at (:store @session) target) {} extra)
         {:error (str "no delta " target " in this branch's history")})
 
       :else
-      (let [last-d (last (store/deltas (:store @session)))]
+      (let [;; the newest entry on this session's line, from the journal — the
+            ;; value carries its head's ID, not the delta
+            last-d (db/head-delta (:db @session) (engine/session-line session))]
         (if (= :commit (:op last-d))
           (merge {:commit (:id last-d) :target (:target last-d)
                   :status (:status last-d)
@@ -1682,7 +1684,7 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; but one this episode touched does — exactly what a standalone
                 ;; done catches. :force skips straight to an honest red.
                 st     (:store @session)
-                head   (:id (last (store/deltas st)))
+                head   (:head st)
                 ;; done's OWN verdict — it already accounts for failures, the
                 ;; :error advisories, store-wide lint and store-wide dead
                 ;; surface. Believe it rather than re-deriving a weaker answer.
@@ -1958,8 +1960,8 @@ client-deps (merge (:client-deps st) (:client provided))
              _     (when conn
                      (db/record-measurement!
                       conn "open" nil
-                      {:deltas  (count (:deltas store))
-                       :head    (:id (peek (:deltas store)))
+                      {:deltas  (:line-pos store 0)
+                       :head    (:head store)
                        :load-ms (quot (- (System/nanoTime) t0) 1000000)}))
              ttl   (or branch-image-ttl-ms default-branch-image-ttl-ms)]
          ;; SYNC phase: the store value + everything reads need, no image

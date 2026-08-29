@@ -26,7 +26,7 @@
   exact. Returns [store' delta]."
   [store from {:keys [merged conflicts new-nses applied id-map agent]}]
   (let [[did store'] (store/gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :merge :ns '*session* :from (str from)
                        :at (store/now-ms) :merged merged}
                 agent           (assoc :agent agent)

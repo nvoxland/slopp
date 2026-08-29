@@ -1612,6 +1612,16 @@
                          (line-head conn line-id)]))
               0))
 
+^:reads (defn ^:export head-delta
+          "The delta `line-id` currently points at, as a delta map — or nil for a
+  line never written to. One row by primary key. `commit-point!` reads it
+  to ask whether the newest entry is already a milestone; it used to take
+  `(last deltas)` off the list the value carried."
+          [conn line-id]
+          (when-let [h (line-head conn line-id)]
+            (some-> (jdbc/execute-one! conn ["SELECT * FROM deltas WHERE id = ?" h])
+                    row->delta)))
+
 ^:reads (defn ^:export load-store
   "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
   empty. Every registry meta row loads through ONE loop (default from :init
@@ -1673,6 +1683,8 @@
         ;; bytes here cost a compiled JS bundle (~1.8MB) on every session open.
         :blobs      {}
         :head       (line-head conn line-id)
+        :pending    []
+        :head-at    (:at (head-delta conn line-id))
         :line-pos   (line-length conn line-id)
         :prompts    (prompt-for-forms conn line-id fids
                                       :ignoring #{fields/auto-reorder-prompt})
@@ -1684,3 +1696,13 @@
                     v   (if (and (nil? raw) (not absent-nil?)) init raw)]
                 [field (if (and normalize (some? v)) (normalize v) v)])))
        (fields/meta-fields)))))
+
+^:reads (defn ^:export on-line?
+          "True when delta `id` is on `line-id`'s history — reachable from its head
+  by the parent walk. False for an id on another line only, and for an id the
+  journal has never seen. A retroactive milestone (`commit_point {target}`)
+  asks this before marking a spot; it used to scan the whole in-RAM list."
+          [conn line-id id]
+          (some? (jdbc/execute-one!
+                  conn [(str ancestry-cte " SELECT 1 FROM anc WHERE id = ? LIMIT 1")
+                        (line-head conn line-id) id])))

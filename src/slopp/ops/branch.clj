@@ -66,8 +66,7 @@
                        st'
                        (filter #(contains? (:namespaces st') %)
                                (distinct
-                                (concat (keep :ns (drop (count (store/deltas base))
-                                                        (store/deltas st')))
+                                (concat (keep :ns (:pending st'))
                                         (:new-nses r)))))
                       ;; ONE dependency-ordered pass, new-ns loads and
                       ;; changed-form hot-loads INTERLEAVED: a new ns that
@@ -107,12 +106,12 @@
           (let [[st'' mdelta] (merge/record-merge st' from-label r)]
             (if-not (engine/try-commit! session base st''
                                  (vec (distinct
-                                       (concat (keep :ns (drop (count (store/deltas base))
-                                                               (store/deltas st'')))
+                                       (concat (keep :ns (:pending st''))
                                                (:new-nses r)))))
               {:conflict {:reason "store changed during merge — retry"}}
-              (let [new-deltas   (drop (count (store/deltas base))
-                                       (store/deltas st''))
+              (let [;; what the merge appended: the value's pending suffix, never a
+                    ;; drop-by-count over two whole lists
+                    new-deltas   (:pending st'')
                     touched-nses (vec (distinct
                                        (concat (keep :ns new-deltas)
                                                (:new-nses r))))
@@ -308,8 +307,8 @@
         by-name (into {} (map (juxt :name identity)) rows)
         info    (fn [nm st line]
                   (cond-> {:name nm}
-                    st (assoc :head   (:id (last (store/deltas st)))
-                              :deltas (count (store/deltas st)))
+                    st (assoc :head   (:head st)
+                              :deltas (:line-pos st 0))
                     (:id line) (assoc :id (:id line))
                     (:image line) (assoc :image :parked)))]
     {:current  branch

@@ -343,7 +343,7 @@
          ;; the HEAD DELTA's timestamp, not the wall clock: a boot takes
          ;; seconds, and anything written during it is not in this image —
          ;; stamping "now" would count those as already served
-         :served-at (:at (last (store/deltas store)))})
+         :served-at (:head-at store)})
       (catch Throwable t
         (repl/stop! img)
         {:reason (str "the app image did not come up: " (ex-message t))}))))

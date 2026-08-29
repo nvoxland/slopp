@@ -39,7 +39,7 @@
   nothing this map contains."
   []
   (merge {:namespaces {} :deltas []
-          :head nil :line-pos 0 :prompts {} :last-write {}}
+          :head nil :head-at nil :line-pos 0 :pending [] :prompts {} :last-write {}}
          (fields/field-defaults)))
 
 (defn now-ms
@@ -1014,8 +1014,13 @@
                     (not= fields/auto-reorder-prompt p))]
     (cond-> (-> store
                 (update :deltas conj d)
-                (assoc :head (:id d))
-                (update :line-pos (fnil inc 0)))
+                (assoc :head (:id d) :head-at (:at d))
+                (update :line-pos (fnil inc 0))
+                ;; the UNCOMMITTED suffix: what a write has appended since the
+                ;; journal last held everything. `try-commit!` sends exactly
+                ;; this and `committed` clears it — no more recovering two new
+                ;; entries by dropping one whole list's count off another's
+                (update :pending (fnil conj []) d))
       ask?
       (update :prompts (fn [m] (reduce #(assoc %1 %2 p) (or m {}) fids)))
 
@@ -1054,7 +1059,7 @@
                         ;; that namespace was born, so any walk back
                         ;; through it stopped there. `store` is still
                         ;; pre-append here, so its last delta IS the parent.
-                        :parent (:id (last (:deltas store)))
+                        :parent (:head store)
                         :op :ingest :ns ns-sym
                         :at (now-ms)
                         :form-ids (into [] (keep :id) elements)
@@ -1091,7 +1096,7 @@
             new-elem (assoc elem :node node :name (form-symbol node)
                              :names (form-symbols node))
             [did store] (gen-id store "d")
-            delta    (cond-> {:id did :parent (:id (last (:deltas store)))
+            delta    (cond-> {:id did :parent (:head store)
                               :op op :ns ns-sym :form-id (:id elem) :prompt prompt
                               :at (now-ms)
                               :sources {(:id elem) (n/string node)}}
@@ -1122,7 +1127,7 @@
               form-elem    {:id fid :kind :form :name (form-symbol node)
                       :names (form-symbols node) :node node}
               new-elems    (place-form elems form-elem anchor-idx)
-              delta        (cond-> {:id did :parent (:id (last (:deltas store)))
+              delta        (cond-> {:id did :parent (:head store)
                                     :op :add :ns ns-sym :form-id fid :prompt prompt
                                     :at (now-ms)
                                     :sources {fid (n/string node)}}
@@ -1152,7 +1157,7 @@
       (let [fid          (:id (nth elems idx))
             new-elems    (into (subvec elems 0 idx) (subvec elems (inc idx)))
             [did store'] (gen-id store "d")
-            delta        (cond-> {:id did :parent (:id (last (:deltas store)))
+            delta        (cond-> {:id did :parent (:head store)
                                   :op :delete :ns ns-sym :form-id fid :name nm
                                   :removed-source (n/string (:node (nth elems idx)))
                                   :prompt prompt :at (now-ms)}
@@ -1183,7 +1188,7 @@
                           (conj moved)
                           (into (subvec without j')))
             [did store'] (gen-id store "d")
-            delta (cond-> {:id did :parent (:id (last (:deltas store)))
+            delta (cond-> {:id did :parent (:head store)
                            :op :move :ns ns-sym
                            :form-id (:id moved) :before before-nm
                            :prompt prompt :at (now-ms)}
@@ -1224,7 +1229,7 @@
                  " refactor/unwrap-forms is what it owes.")
             {:forms (vec bad) :ns ns-sym :op op})))
   (let [[did store'] (gen-id store "d")
-        delta (merge (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (merge (cond-> {:id did :parent (:head store)
                               :op op :ns ns-sym :at (now-ms)
                               :form-ids (vec (sort (keys changeset)))
                               :sources  (into {} (map (fn [[fid node]]
@@ -1254,7 +1259,7 @@
   [store label & {:keys [agent findings]}]
   (let [[did store'] (gen-id store "d")]
     [(record-delta store'
-             (cond-> {:id did :parent (:id (last (:deltas store)))
+             (cond-> {:id did :parent (:head store)
                       :op :done :ns '*session* :at (now-ms)}
                label    (assoc :label label)
                agent    (assoc :agent agent)
@@ -1272,10 +1277,10 @@
   :target). Returns [store' delta]."
   [store description & {:keys [agent target status extra]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :commit :ns '*session* :at (now-ms)
                        :description description
-                       :target (or target (:id (last (:deltas store))))}
+                       :target (or target (:head store))}
                 agent  (assoc :agent agent)
                 status (assoc :status status)
                 extra  (as-> d (merge extra d)))]
@@ -1289,7 +1294,7 @@
   like every write. Returns [store' delta]."
   [store lib coord & {:keys [agent prompt namespaces]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :deps-add :ns '*session* :at (now-ms)
                        :lib lib :coord coord}
                 (seq namespaces) (assoc :namespaces (vec namespaces))
@@ -1302,7 +1307,7 @@
   Returns [store' delta]."
   [store lib & {:keys [agent prompt]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :deps-remove :ns '*session* :at (now-ms)
                        :lib lib}
                 agent  (assoc :agent agent)
@@ -1316,7 +1321,7 @@
   Returns [store' delta]."
   [store sym pure? & {:keys [agent prompt]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :deps-pure :ns '*session* :at (now-ms)
                        :sym sym :pure (boolean pure?)}
                 agent  (assoc :agent agent)
@@ -1329,7 +1334,7 @@
   not). Returns [store' delta]."
   [store kind & {:keys [agent intent user note timing]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op kind :ns '*session* :at (now-ms)}
                 agent  (assoc :agent agent)
                 intent (assoc :intent intent)
@@ -1344,170 +1349,11 @@
                 timing (assoc :timing timing))]
     [(record-delta store' delta) delta]))
 
-(defn replay-delta
-  "Apply a FOREIGN delta from the SAME journal (linear history — ids are
-  authoritative, nothing remaps) onto a trailing cached store. Returns the
-  advanced store, or nil when this op needs a full reload.
-
-  Marker ops and field-carrying ops route through the registry
-  (slopp.store.fields) — a NEW op registers there once and this path knows
-  it; only the element-content machinery lives here.
-
-  **A nil is a claim that the journal is not enough**, and it costs more than
-  a reload: the git projection derives each milestone's tree by folding the
-  log, so an op that cannot replay is a milestone whose bytes cannot be
-  reconstructed. That is what the stored `:tree` snapshot used to paper over.
-  Every op slopp writes today replays; the default is for a RETIRED op (a
-  historic `:trivia`, which edited `:sep` elements nothing reads any more)
-  and for anything a future version adds without teaching this."
-  [store d]
-  (let [;; history only. This used to also raise `:next-id` past any id the
-        ;; delta carried, because the counter was INFERRED from content — a
-        ;; store value kept itself ahead of ids it merely observed.
-        ;;
-        ;; The FILE allocates now (`store.db/reserve-id-block!`), so a session
-        ;; mints inside a range nobody else holds. Inferring from a foreign
-        ;; delta would drag this session's counter into the block that delta
-        ;; came FROM, and it would manufacture the exact collision block
-        ;; allocation abolishes — under concurrency only, which is the shape
-        ;; nobody is watching. Inference is not redundant here; it is a second
-        ;; source of truth for a value that now has one.
-        with-d  (fn [st] (record-delta st d))
-        idx-of  (fn [elems pred]
-                  (first (keep-indexed (fn [i e] (when (pred e) i)) elems)))
-        ;; `apply-changeset` rewrites nodes BY FORM-ID, possibly across
-        ;; namespaces — :replace, :rename, :normalize, and the refactors all
-        ;; land here. A refactor's delta names the SOURCE namespace, which is
-        ;; why "these forms now live in :ns" would be a plausible, wrong
-        ;; reading: the relocation rides separate :add/:delete/:ingest deltas.
-        rewrite (fn [st]
-                  (reduce-kv
-                   (fn [s fid src]
-                     (let [ns-sym (ns-of-form-id s fid)]
-                       (if-not ns-sym
-                         s                            ; unknown form: ignore
-                         (update-in s [:namespaces ns-sym :elements]
-                                    (fn [elems]
-                                      (mapv (fn [e]
-                                              (if (= fid (:id e))
-                                                (let [node (p/parse-string src)]
-                                                  (assoc e :node node
-                                                         :name (form-symbol node)
-                                                         :names (form-symbols node)))
-                                                e))
-                                            elems))))))
-                   st (:sources d)))]
-    (cond
-      (contains? fields/markers (:op d))
-      (with-d store)
-
-      (contains? fields/op-registry (:op d))
-      (with-d (fields/fold store d))
-
-      :else
-      (case (:op d)
-        :ingest
-        ;; the whole namespace, from the log: :form-ids IS the order,
-        ;; :sources the content, :comments what each form owns. Before those
-        ;; were recorded this had to say "rebuild from the elements table",
-        ;; which is the gap that made a commit point underivable.
-        (let [srcs (:sources d)
-              cmts (:comments d)]
-          (with-d
-            (assoc-in store [:namespaces (:ns d) :elements]
-                      (mapv (fn [fid]
-                              (let [node (p/parse-string (get srcs fid))]
-                                (cond-> {:id fid :kind :form
-                                         :name (form-symbol node)
-                                         :names (form-symbols node) :node node}
-                                  (get cmts fid) (assoc :comment (get cmts fid)))))
-                            (:form-ids d)))))
-
-        :move
-        ;; the form id is authoritative, the anchor is a NAME within the same
-        ;; namespace. A missing form or a vanished anchor leaves the order
-        ;; alone rather than guessing — the same choice `:add` makes.
-        (let [fid (:form-id d), before (:before d)]
-          (with-d
-            (update-in store [:namespaces (:ns d) :elements]
-                       (fn [elems]
-                         (let [i       (idx-of elems #(= fid (:id %)))
-                               moved   (when i (nth elems i))
-                               without (if i
-                                         (into (subvec elems 0 i) (subvec elems (inc i)))
-                                         elems)
-                               j       (when i
-                                         (idx-of without #(and (= :form (:kind %))
-                                                               (= before (:name %)))))]
-                           (if j
-                             (into (conj (subvec without 0 j) moved) (subvec without j))
-                             elems))))))
-
-        :comment
-        (let [fid (:form-id d)
-              txt (:text d)]
-          (with-d
-            (update-in store [:namespaces (:ns d) :elements]
-                       (fn [elems]
-                         (mapv (fn [e]
-                                 (if (= fid (:id e))
-                                   (if txt (assoc e :comment txt) (dissoc e :comment))
-                                   e))
-                               elems)))))
-
-        (:replace :rename :normalize :move-forms :extract-ns :module-extract)
-        (with-d (rewrite store))
-
-        :rename-ns
-        ;; the rewrite re-addresses every mention; the namespaces map rekeys
-        ;; separately, exactly as `api/ns-rename!` does it
-        (let [old (:old d), new (:new d)]
-          (with-d
-            (update (rewrite store) :namespaces
-                    (fn [m] (-> m (dissoc old) (assoc new (get m old)))))))
-
-        :add
-        (let [ns-sym (:ns d)
-              fid    (:form-id d)
-              src    (get (:sources d) fid)]
-          (if-not (get-in store [:namespaces ns-sym])
-            nil                                     ; ns unknown → full reload
-            (with-d
-              (update-in store [:namespaces ns-sym :elements]
-                         (fn [elems]
-                           (let [node       (p/parse-string src)
-                                 form-elem  {:id fid :kind :form
-                                             :name (form-symbol node)
-                                             :names (form-symbols node) :node node}
-                                 ;; anchored add (:before = anchor form-id):
-                                 ;; same position as the writer; gone → append
-                                 anchor-idx (when (:before d)
-                                              (idx-of elems #(= (:before d) (:id %))))]
-                             (place-form elems form-elem anchor-idx)))))))
-
-        :delete
-        (let [fid (:form-id d)]
-          (with-d
-            (update-in store [:namespaces (:ns d) :elements]
-                       (fn [elems]
-                         (if-let [i (idx-of elems #(= fid (:id %)))]
-                           (into (subvec elems 0 i) (subvec elems (inc i)))
-                           elems)))))
-
-        :ns-delete
-        ;; the writer removed an EMPTY husk; a trailing cache whose copy has
-        ;; grown content since is divergent — full reload gives db truth
-        (when-not (seq (body-forms store (:ns d)))
-          (with-d (update store :namespaces dissoc (:ns d))))
-
-        ;; a retired or unknown op → full reload
-        nil))))
-
 (defn record-verification
   "Append a `:verify` delta recording a test-run result against `ns-sym` — 'what
   was proven green at this point' (C4, D5/D6 verification-provenance)."
   [store ns-sym result]
-  (let [parent (:id (last (:deltas store)))
+  (let [parent (:head store)
         [did store] (gen-id store "d")]
     (record-delta store
                   {:id did :parent parent :op :verify :ns ns-sym :at (now-ms)
@@ -1530,7 +1376,7 @@
         bs      (when binary?
                   (.decode (java.util.Base64/getDecoder) (str text)))
         sha     (when binary? (sha256-of bs))
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :file-put :ns '*session* :at (now-ms)
                        :path (str path)}
                 (not binary?) (assoc :content (str text))
@@ -1548,7 +1394,7 @@
   Returns [store' delta]."
   [store path & {:keys [prompt agent]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :file-remove :ns '*session* :at (now-ms)
                        :path (str path)}
                 prompt (assoc :prompt prompt)
@@ -1562,7 +1408,7 @@
   file format. ONE state-carrying `:config-put` delta. Returns [store' delta]."
   [store path fmt k v & {:keys [prompt agent]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :config-put :ns '*session* :at (now-ms)
                        :path (str path) :format fmt
                        :key (str k) :value (str v)}
@@ -1575,7 +1421,7 @@
   last key goes). ONE `:config-unset` delta. Returns [store' delta]."
   [store path k & {:keys [prompt agent]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :config-unset :ns '*session* :at (now-ms)
                        :path (str path) :key (str k)}
                 prompt (assoc :prompt prompt)
@@ -1596,7 +1442,7 @@
   special case."
   [store from to action & {:keys [prompt agent test-only]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op (if test-only :module-test-edge :module-edge)
                        :ns '*session* :at (now-ms)
                        :from (str from) :to (str to) :action action}
@@ -1647,7 +1493,7 @@
   [store module tier & {:keys [prompt agent action]}]
   (let [[did store'] (gen-id store "d")
         module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta  (cond-> {:id did :parent (:head store)
                         :op :module-tier :ns '*session* :at (now-ms)
                         :module module :tier tier}
                  action (assoc :action action)
@@ -1664,7 +1510,7 @@
   [store & {:keys [why forms undid agent]}]
   (let [[did store'] (gen-id store "d")]
     [(record-delta store'
-             (cond-> {:id did :parent (:id (last (:deltas store)))
+             (cond-> {:id did :parent (:head store)
                       :op :revert :ns '*session* :at (now-ms)}
                why         (assoc :why why)
                (seq forms) (assoc :forms (vec forms))
@@ -1680,7 +1526,7 @@
   Returns [store' delta]."
   [store ns-sym & {:keys [prompt agent]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :ns-delete :ns ns-sym :at (now-ms)}
                 prompt (assoc :prompt prompt)
                 agent  (assoc :agent agent))]
@@ -1704,7 +1550,7 @@
   [store module platform & {:keys [prompt agent action]}]
   (let [[did store'] (gen-id store "d")
         module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta  (cond-> {:id did :parent (:head store)
                         :op :module-platform :ns '*session* :at (now-ms)
                         :module module :platform platform}
                  action (assoc :action action)
@@ -1721,7 +1567,7 @@
   delta; last write per lib wins. Returns [store' delta]."
   [store lib coord & {:keys [prompt agent]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :client-dep-add :ns '*session* :at (now-ms)
                        :lib lib :coord coord}
                 prompt (assoc :prompt prompt)
@@ -1747,7 +1593,7 @@
   One `:js-dep` delta; last write per name wins. Returns [store' delta]."
   [store js-name spec & {:keys [prompt agent remove]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :js-dep :ns '*session* :at (now-ms)
                        :name js-name}
                 remove (assoc :action :remove)
@@ -1776,7 +1622,7 @@
   Returns [store' delta]."
   [store path entry & {:keys [prompt agent remove]}]
   (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta (cond-> {:id did :parent (:head store)
                        :op :artifact-put :ns '*session* :at (now-ms)
                        :path (str path)}
                 remove       (assoc :action :remove)
@@ -1819,7 +1665,7 @@
       (let [norm (when-not (str/blank? (str text))
                    (str/replace (str text) #"\n+\z" ""))
             [did store'] (gen-id store "d")
-            delta (cond-> {:id did :parent (:id (last (:deltas store)))
+            delta (cond-> {:id did :parent (:head store)
                            :op :comment :ns ns-sym
                            :form-id (:id (nth elems idx))
                            :text norm :at (now-ms)}
@@ -1850,7 +1696,7 @@
   [store module role & {:keys [prompt agent action]}]
   (let [[did store'] (gen-id store "d")
         module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+        delta  (cond-> {:id did :parent (:head store)
                         :op :module-role :ns '*session* :at (now-ms)
                         :module module :role role}
                  action (assoc :action action)
@@ -2022,7 +1868,7 @@
   sync full-reloads on every sighting of it."
   ([store scope result] (record-observation store scope result nil))
   ([store scope result closure]
-   (let [parent (:id (last (:deltas store)))
+   (let [parent (:head store)
          [did store] (gen-id store "d")
          scope (vec (if (coll? scope) scope [scope]))]
      (record-delta store
@@ -2052,8 +1898,178 @@
   namespace. Registered in [[slopp.store.fields/markers]] as a no-content op,
   or foreign sync full-reloads on every sighting of it."
   [store reads]
-  (let [parent (:id (last (:deltas store)))
+  (let [parent (:head store)
         [did store] (gen-id store "d")]
     (record-delta store
                   {:id did :parent parent :op :read-cost :ns '*session*
                    :at (now-ms) :reads reads})))
+
+(defn committed
+  "The value after the journal has taken its `:pending` suffix: nothing
+  pending, head and position untouched. `try-commit!` calls it on the value
+  it just appended; `replay-delta` calls it because a replayed delta CAME
+  from the journal and was never pending here."
+  [store]
+  (assoc store :pending []))
+
+(defn replay-delta
+  "Apply a FOREIGN delta from the SAME journal (linear history — ids are
+  authoritative, nothing remaps) onto a trailing cached store. Returns the
+  advanced store, or nil when this op needs a full reload.
+
+  Marker ops and field-carrying ops route through the registry
+  (slopp.store.fields) — a NEW op registers there once and this path knows
+  it; only the element-content machinery lives here.
+
+  **A nil is a claim that the journal is not enough**, and it costs more than
+  a reload: the git projection derives each milestone's tree by folding the
+  log, so an op that cannot replay is a milestone whose bytes cannot be
+  reconstructed. That is what the stored `:tree` snapshot used to paper over.
+  Every op slopp writes today replays; the default is for a RETIRED op (a
+  historic `:trivia`, which edited `:sep` elements nothing reads any more)
+  and for anything a future version adds without teaching this."
+  [store d]
+  (let [;; history only. This used to also raise `:next-id` past any id the
+        ;; delta carried, because the counter was INFERRED from content — a
+        ;; store value kept itself ahead of ids it merely observed.
+        ;;
+        ;; The FILE allocates now (`store.db/reserve-id-block!`), so a session
+        ;; mints inside a range nobody else holds. Inferring from a foreign
+        ;; delta would drag this session's counter into the block that delta
+        ;; came FROM, and it would manufacture the exact collision block
+        ;; allocation abolishes — under concurrency only, which is the shape
+        ;; nobody is watching. Inference is not redundant here; it is a second
+        ;; source of truth for a value that now has one.
+        ;; through the door, then `committed`: a replayed delta CAME from the
+        ;; journal, so it advances the head and the derived maps like any
+        ;; other and is never pending here
+        with-d  (fn [st] (committed (record-delta st d)))
+        idx-of  (fn [elems pred]
+                  (first (keep-indexed (fn [i e] (when (pred e) i)) elems)))
+        ;; `apply-changeset` rewrites nodes BY FORM-ID, possibly across
+        ;; namespaces — :replace, :rename, :normalize, and the refactors all
+        ;; land here. A refactor's delta names the SOURCE namespace, which is
+        ;; why "these forms now live in :ns" would be a plausible, wrong
+        ;; reading: the relocation rides separate :add/:delete/:ingest deltas.
+        rewrite (fn [st]
+                  (reduce-kv
+                   (fn [s fid src]
+                     (let [ns-sym (ns-of-form-id s fid)]
+                       (if-not ns-sym
+                         s                            ; unknown form: ignore
+                         (update-in s [:namespaces ns-sym :elements]
+                                    (fn [elems]
+                                      (mapv (fn [e]
+                                              (if (= fid (:id e))
+                                                (let [node (p/parse-string src)]
+                                                  (assoc e :node node
+                                                         :name (form-symbol node)
+                                                         :names (form-symbols node)))
+                                                e))
+                                            elems))))))
+                   st (:sources d)))]
+    (cond
+      (contains? fields/markers (:op d))
+      (with-d store)
+
+      (contains? fields/op-registry (:op d))
+      (with-d (fields/fold store d))
+
+      :else
+      (case (:op d)
+        :ingest
+        ;; the whole namespace, from the log: :form-ids IS the order,
+        ;; :sources the content, :comments what each form owns. Before those
+        ;; were recorded this had to say "rebuild from the elements table",
+        ;; which is the gap that made a commit point underivable.
+        (let [srcs (:sources d)
+              cmts (:comments d)]
+          (with-d
+            (assoc-in store [:namespaces (:ns d) :elements]
+                      (mapv (fn [fid]
+                              (let [node (p/parse-string (get srcs fid))]
+                                (cond-> {:id fid :kind :form
+                                         :name (form-symbol node)
+                                         :names (form-symbols node) :node node}
+                                  (get cmts fid) (assoc :comment (get cmts fid)))))
+                            (:form-ids d)))))
+
+        :move
+        ;; the form id is authoritative, the anchor is a NAME within the same
+        ;; namespace. A missing form or a vanished anchor leaves the order
+        ;; alone rather than guessing — the same choice `:add` makes.
+        (let [fid (:form-id d), before (:before d)]
+          (with-d
+            (update-in store [:namespaces (:ns d) :elements]
+                       (fn [elems]
+                         (let [i       (idx-of elems #(= fid (:id %)))
+                               moved   (when i (nth elems i))
+                               without (if i
+                                         (into (subvec elems 0 i) (subvec elems (inc i)))
+                                         elems)
+                               j       (when i
+                                         (idx-of without #(and (= :form (:kind %))
+                                                               (= before (:name %)))))]
+                           (if j
+                             (into (conj (subvec without 0 j) moved) (subvec without j))
+                             elems))))))
+
+        :comment
+        (let [fid (:form-id d)
+              txt (:text d)]
+          (with-d
+            (update-in store [:namespaces (:ns d) :elements]
+                       (fn [elems]
+                         (mapv (fn [e]
+                                 (if (= fid (:id e))
+                                   (if txt (assoc e :comment txt) (dissoc e :comment))
+                                   e))
+                               elems)))))
+
+        (:replace :rename :normalize :move-forms :extract-ns :module-extract)
+        (with-d (rewrite store))
+
+        :rename-ns
+        ;; the rewrite re-addresses every mention; the namespaces map rekeys
+        ;; separately, exactly as `api/ns-rename!` does it
+        (let [old (:old d), new (:new d)]
+          (with-d
+            (update (rewrite store) :namespaces
+                    (fn [m] (-> m (dissoc old) (assoc new (get m old)))))))
+
+        :add
+        (let [ns-sym (:ns d)
+              fid    (:form-id d)
+              src    (get (:sources d) fid)]
+          (if-not (get-in store [:namespaces ns-sym])
+            nil                                     ; ns unknown → full reload
+            (with-d
+              (update-in store [:namespaces ns-sym :elements]
+                         (fn [elems]
+                           (let [node       (p/parse-string src)
+                                 form-elem  {:id fid :kind :form
+                                             :name (form-symbol node)
+                                             :names (form-symbols node) :node node}
+                                 ;; anchored add (:before = anchor form-id):
+                                 ;; same position as the writer; gone → append
+                                 anchor-idx (when (:before d)
+                                              (idx-of elems #(= (:before d) (:id %))))]
+                             (place-form elems form-elem anchor-idx)))))))
+
+        :delete
+        (let [fid (:form-id d)]
+          (with-d
+            (update-in store [:namespaces (:ns d) :elements]
+                       (fn [elems]
+                         (if-let [i (idx-of elems #(= fid (:id %)))]
+                           (into (subvec elems 0 i) (subvec elems (inc i)))
+                           elems)))))
+
+        :ns-delete
+        ;; the writer removed an EMPTY husk; a trailing cache whose copy has
+        ;; grown content since is divergent — full reload gives db truth
+        (when-not (seq (body-forms store (:ns d)))
+          (with-d (update store :namespaces dissoc (:ns d))))
+
+        ;; a retired or unknown op → full reload
+        nil))))

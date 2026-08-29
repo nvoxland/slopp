@@ -961,3 +961,21 @@
     (testing "and the two readers answer from those maps"
       (is (= (:prompts st5) (store/prompt-by-form st5)))
       (is (= "d4" (:id (store/last-write-on st5 'rd.other)))))))
+
+(deftest record-delta-keeps-the-uncommitted-suffix-and-committed-clears-it
+  ;; `try-commit!` found the deltas a write produced by dropping the BASE's
+  ;; count off the candidate's whole list — two full lists, compared by
+  ;; length, to recover the two or three entries that were new. The value now
+  ;; carries them as `:pending`: `record-delta` appends, and `committed`
+  ;; clears once the journal holds them, leaving the head where it is.
+  (let [st  (store/empty-store)
+        st1 (store/record-delta st {:id "p1" :op :add :ns 'pc.core :form-id "f1"})
+        st2 (store/record-delta st1 {:id "p2" :op :done :ns '*session*})]
+    (is (= [] (:pending st)))
+    (is (= ["p1" "p2"] (map :id (:pending st2))) "everything appended since the last commit, in order")
+    (let [c (store/committed st2)]
+      (is (= [] (:pending c)) "the journal has them — nothing is pending")
+      (is (= "p2" (:head c)) "the head does not move on commit")
+      (is (= 2 (:line-pos c)))
+      (is (= ["p3"] (map :id (:pending (store/record-delta c {:id "p3" :op :done :ns '*session*}))))
+          "and the next append starts a new suffix"))))

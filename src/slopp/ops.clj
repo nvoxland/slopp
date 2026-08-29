@@ -3504,7 +3504,7 @@ recompiled (engine/after-write! session ns-sym)]
                       session
                       #(first (store/record-ns-delete % ns-sym :prompt prompt :agent agent))
                       [ns-sym])
-                did  (:id (last (store/deltas st')))
+                did  (:head st')
                 ;; A tier or platform describes a NAME — ns-rename! carries them
                 ;; across for exactly this reason. Left behind by a DELETE, one
                 ;; names a namespace that no longer exists and query_depends

@@ -783,28 +783,33 @@
 
 (defn try-commit!
   "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
-  inversion): the new deltas + the full element rows of `nses` land in ONE
-  conditional db transaction (iff the journal head still equals base's
-  head), then the cache follows; the cache is only ever behind the journal,
-  never ahead. Ephemeral sessions commit to the cache alone (identity CAS).
-  True iff committed; false = the head/cache moved — caller refreshes and
-  rebases, or surfaces contention."
+  inversion): st's `:pending` deltas + the full element rows of `nses` land
+  in ONE conditional db transaction (iff the journal head still equals base's
+  `:head`), then the cache follows; the cache is only ever behind the
+  journal, never ahead. Ephemeral sessions commit to the cache alone
+  (identity CAS). True iff committed; false = the head/cache moved — caller
+  refreshes and rebases, or surfaces contention.
+
+  What this reads off the value is exactly what `record-delta` maintains:
+  `:head` for the CAS, `:pending` for the suffix, `:line-pos` to decide
+  whether the cache advanced. It used to recover all three from two whole
+  delta lists — the base's count dropped off the candidate's — which is the
+  reason the lists had to be in RAM at all."
   [session base st' nses]
   (if-let [conn (ensure-db! session)]
-    (if (db/append! conn st' (drop (count (store/deltas base)) (store/deltas st')) (vec nses)
-                (session-line session) (:id (last (store/deltas base))))
+    (if (db/append! conn st' (:pending st') (vec nses)
+                    (session-line session) (:head base))
       (do (swap! session
                  (fn [s]
-                   (if (< (count (store/deltas (:store s)))
-                          (count (store/deltas st')))
-                     (assoc s :store st')
+                   (if (< (:line-pos (:store s) 0) (:line-pos st' 0))
+                     (assoc s :store (store/committed st'))
                      s)))
           true)
       false)
     (let [[old _] (swap-vals! session
                               (fn [s]
                                 (if (identical? (:store s) base)
-                                  (assoc s :store st')
+                                  (assoc s :store (store/committed st'))
                                   s)))]
       (identical? (:store old) base))))
 
@@ -813,7 +818,8 @@
   durable session): INCREMENTALLY when every foreign delta in the suffix
   replays (the common case — no full re-parse), falling back to a full
   load-store otherwise (:ingest/:move/unknown ops). Advance-only — the
-  cache can never regress.
+  cache can never regress, and \"ahead\" is read off `:line-pos`, the
+  position along the line `record-delta` maintains.
 
   When the suffix is EMPTY something still committed, and it is not always
   bookkeeping: `elements` is the journal materialized, and a migration, a
@@ -838,7 +844,7 @@
   (when-let [conn (:db @session)]
     (let [line   (session-line session)
           local  (:store @session)
-          suffix (db/deltas-after conn line (count (store/deltas local)))
+          suffix (db/deltas-after conn line (:line-pos local 0))
           digest (db/elements-digest conn line)]
       (if (seq suffix)
         (let [incr  (reduce (fn [st d]
@@ -856,11 +862,10 @@
           (when fresh
             (swap! session
                    (fn [s]
-                     (if (> (count (store/deltas fresh))
-                            (count (store/deltas (:store s))))
+                     (if (> (:line-pos fresh 0) (:line-pos (:store s) 0))
                        (assoc s :store fresh)
                        s)))))
-        ;; the journal did not move, so the delta-count advance test cannot
+        ;; the journal did not move, so the position advance test cannot
         ;; decide this one — the rows themselves are the evidence, and they
         ;; were just read from the db, so accepting them is not a regression
         (when (not= digest (:elements-digest @session))
@@ -1569,7 +1574,7 @@
                                  (:agent-id @session))]
       (swap! session assoc :line line)
       (when (not= (db/line-head conn line)
-                  (:id (last (store/deltas (:store @session)))))
+                  (:head (:store @session)))
         (swap! session assoc :store (db/load-store conn line))
         (when (:image @session) (fresh-image! session)))
       line)))

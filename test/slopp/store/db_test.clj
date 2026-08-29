@@ -1346,3 +1346,32 @@
           (is (= (:prompts st2) (:prompts loaded)))
           (is (= (:last-write st2) (:last-write loaded)))))
       (finally (.close conn)))))
+
+(deftest a-line-can-name-its-head-delta-and-say-whether-an-id-is-on-it
+  ;; `commit-point!` asked two things of the in-RAM list: "is the newest
+  ;; delta already a milestone" (`(last deltas)`) and "is this target in this
+  ;; branch's history" (`(some #(= target (:id %)) deltas)`). Both are one
+  ;; indexed read over the line's ancestry.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'hd.core "(ns hd.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "h1" :op :ingest :ns 'hd.core :parent nil :sources {"f1" "(ns hd.core)"}}
+                              {:id "h2" :op :commit :ns '*session* :parent "h1" :description "m" :status :green}]
+                             ['hd.core] trunk nil)))
+      (let [thread (db/adopt-thread! conn trunk "agent-h")]
+        (is (true? (db/append! conn st
+                               [{:id "t1" :op :replace :ns 'hd.core :parent "h2" :form-id "f1" :source "x"}]
+                               ['hd.core] thread (db/line-head conn trunk))))
+        (testing "the head delta, as a delta map"
+          (is (= :commit (:op (db/head-delta conn trunk))))
+          (is (= "m" (:description (db/head-delta conn trunk))))
+          (is (= "t1" (:id (db/head-delta conn thread)))))
+        (testing "membership in a line's history"
+          (is (true? (db/on-line? conn trunk "h1")))
+          (is (true? (db/on-line? conn thread "h1")) "the thread inherits the trunk's history")
+          (is (false? (db/on-line? conn trunk "t1")) "the trunk does not see the thread's write")
+          (is (false? (db/on-line? conn trunk "nope")))))
+      (finally (.close conn)))))
