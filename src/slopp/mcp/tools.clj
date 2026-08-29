@@ -229,14 +229,15 @@
    {:name "edit_subform"
     :description "Small change INSIDE a big form. match = ONE exact subform or pair (a missed/ambiguous match returns :source-now — correct and resend, no read needed); text: true matches raw text (strings/docstrings) EXACTLY as :source-now shows it — no extra escaping, backslashes literal; where: {key value} addresses the unique MAP containing those entries (registry rows by :key or :name — no exact text needed), matched by the SPELLING each side answers to, so \"stored-name\" reaches a row stored as :stored-name and a miss names the values that key does take; OR after: a COMPLETE neighboring form/pair — source is INSERTED right behind it (the let-binding splice without shaping a half-open match); OR wrap: true, where source is a TEMPLATE and $1 is the matched form — `(let [n 1] $1)` NESTS what was there inside what you wrote, so introducing a binding around existing code costs the template instead of a retype of the whole enclosing form. The replacement may splice several forms."
     :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :form {:type "string"}
+                  :properties {:ns {:type "string"} :name {:type "string"}
                                :match {:type "string"} :source {:type "string"}
                                :text {:type "boolean"}
                                :wrap {:type "boolean"}
                                :where {:type "object"}
+                               :after {:type "string"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
-                  :required ["ns" "form" "source"]}}
+                  :required ["ns" "name" "source"]}}
    {:name "edit_revert"
     :description "Revert a form to an earlier version (default previous, or a delta id)."
     :inputSchema {:type "object"
@@ -248,7 +249,7 @@
     :description "A concept rename as ONE intent: every namespace, var, keyword, and prose occurrence of `from` (whole word/segment) becomes `to`, store-wide — ns renames + one atomic group, one verification. THE tool for docs-team renames ('zone is now region'); never do those form-by-form. Renaming a KEYWORD also moves its `{:a/keys [x]}` destructuring, which names the key as a SYMBOL and so is invisible to a text pass — matched on the FROM qualifier, so `{:keys [x]}` names `:x` and is left alone by a rename of `:a/x`. READ THE RESULT: :requalified lists the destructurings it restructured (the half of the diff that is not a text substitution), :left-behind the ones it DECLINED — changing a key's NAME rather than its qualifier would rename a local the body reads, so that half is yours. Absence of either means checked-and-none. PREVIEW FIRST with dry-run: it writes nothing and splits the hits into :in-code and :in-strings — the string bucket needs an eye, since a sweep rewrites keyword text inside string literals and a test FIXTURE is data, not prose."
     :inputSchema {:type "object"
                   :properties {:from {:type "string"} :to {:type "string"}
-                               :dry-run {:type "boolean"
+                               :dry_run {:type "boolean"
                                          :description "preview only: write nothing, report :in-code and :in-strings"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
@@ -257,26 +258,26 @@
     :description "Namespace a module-external fn's OPTION KEYS in ONE intent: its arglist destructuring AND every caller's map literal, together. THE way to discharge require-namespaced-keys — a store-wide rename_sweep is unsafe whenever the key means more than one thing (:dir names three different things), and hand-editing dozens of call sites is worse. Keys are DERIVED from the arglist, so half a contract cannot be namespaced and left reading nil. `to-ns` defaults to the target's namespace. Callers passing a NON-literal map are reported under :unknown-shape and left UNTOUCHED — no syntactic reader can see through a binding, and those are yours to check. Call sites outside the store (kernel .clj files) are invisible to it. dry-run previews without writing."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
-                               :to-ns {:type "string"}
-                               :dry-run {:type "boolean"
+                               :to_ns {:type "string"}
+                               :dry_run {:type "boolean"
                                          :description "preview only: write nothing, report the form count and :unknown-shape"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "name"]}}
    {:name "edit_rename"
-    :description "Rename ONE form + every reference across namespaces (shadow-safe). For concept-wide renames (ns + keys + prose) use rename_sweep; to rename a namespace's ALIAS rather than a var, ns_realias."
+    :description "Rename ONE form + every reference across namespaces (shadow-safe): {ns from to}. For concept-wide renames (ns + keys + prose) use rename_sweep; to rename a namespace's ALIAS rather than a var, ns_realias."
     :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :old {:type "string"}
-                               :new {:type "string"} :prompt {:type "string"}
+                  :properties {:ns {:type "string"} :from {:type "string"}
+                               :to {:type "string"} :prompt {:type "string"}
                                :verbose {:type "boolean"}}
-                  :required ["ns" "old" "new"]}}
+                  :required ["ns" "from" "to"]}}
    {:name "ns_realias"
     :description "Rename ONE namespace's require alias as a single intent: the `:as` in its ns form and every `alias/sym` in its bodies, together. THE tool for an alias ns_rename left stale — a rename rewrites namespaces and walks straight past the `:as`, so moved code goes on being called by its old module's name; when that name is later REUSED the alias points at a real, different module, which is worse than one naming nothing. There is no safe hand route: the two halves cannot be separate writes, because between them the ns form and the bodies disagree about the qualifier and the namespace does not load. Scoped to one namespace on purpose — an alias is a name ONE namespace chose, so two namespaces calling a lib different things is not drift. A BARE occurrence of the old alias is LEFT ALONE: only `alias/x` is the qualifier, and the same spelling is routinely a local or a parameter. READ THE RESULT: :sites is how many qualified references moved (0 means the alias was unused, not that nothing happened); :left-behind is the alias named inside STRING literals — fixture source, a docstring saying `alias/f` — reported and never rewritten, because rewriting one half of a fixture is how a half-renamed ns form ships green. Absence means checked-and-none."
     :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :old {:type "string"}
-                               :new {:type "string"} :prompt {:type "string"}
+                  :properties {:ns {:type "string"} :from {:type "string"}
+                               :to {:type "string"} :prompt {:type "string"}
                                :verbose {:type "boolean"}}
-                  :required ["ns" "old" "new"]}}
+                  :required ["ns" "from" "to"]}}
    {:name "change_signature"
     :description "Change a fn's signature atomically: `source` = the new defn (same name); `calls` = arg-list template rebuilding every call site ($1..$9 = the site's existing args; adding a trailing arg = \"$1 $2 nil\"). Higher-order refs return under :manual."
     :inputSchema {:type "object"
@@ -286,10 +287,11 @@
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source" "calls"]}}
    {:name "edit_extract"
-    :description "Extract a subform of `from` into a new fn (params computed from free locals, call site rewritten, verified). Address the subform EITHER by `form` (its exact source) OR by `at` — an ANCHOR, its first line or so, which need not parse on its own (\"(let [turn-brackets\"). Prefer `at` for anything large: quoting a big subform's whole body means transcribing the exact code you were trying not to touch. A non-unique anchor asks you to extend it; a missing one returns :source-now."
+    :description "Extract a subform of `from` into a new fn (params computed from free locals, call site rewritten, verified). Address the subform EITHER by `match` (its exact text — the same word edit_subform and query_slice use) OR by `at` — an ANCHOR, its first line or so, which need not parse on its own (\"(let [turn-brackets\"). Prefer `at` for anything large: quoting a big subform's whole body means transcribing the exact code you were trying not to touch. A non-unique anchor asks you to extend it; a missing one returns :source-now."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :from {:type "string"}
-                               :form {:type "string"}
+                               :match {:type "string"
+                                       :description "the exact subform to extract (or use `at`)"}
                                :at {:type "string"
                                     :description "anchor: the subform's head; resolves to the smallest complete form containing it"}
                                :name {:type "string"}
@@ -304,9 +306,9 @@
    {:name "ns_rename"
     :description "Rename a WHOLE namespace everywhere (decl, requires, qualified refs). Verified. READ THE RESULT: a relocation lands as one changeset and runs NO write gates, so nothing refuses what it breaks. :left-behind lists what no rewrite reaches — strings, qualified KEYWORDS, the -test sibling, and under :alias the callers whose `:as` still spells the OLD name, because a rename rewrites the lib symbol beside an alias and never the alias itself. Each :alias row carries :suggest, the alias to pass ns_realias — absent where that caller already spells another lib that way, since realias would refuse it. An alias that reads correctly for BOTH names (a namespace changing modules under the same last segment) is not reported and needs nothing. :module-debt lists the module_dep edges its callers now need, calls that now reach a package-private ns, and cycles module_dep will refuse. Absence of either means checked-and-none. Run the ns_realias calls now rather than later: a stale alias is harmless only until the old name is REUSED, after which it points at a real and different module — which reads identically in the source and is the worse failure."
     :inputSchema {:type "object"
-                  :properties {:old {:type "string"} :new {:type "string"}
+                  :properties {:from {:type "string"} :to {:type "string"}
                                :prompt {:type "string"}}
-                  :required ["old" "new"]}}
+                  :required ["from" "to"]}}
    {:name "ns_delete"
     :description "Retire a namespace: refuses while any form remains (edit_delete_form them first — each deletion verified) or any other ns still requires it (ns_remove_require) — then removes the empty husk from store, image, and every projection. One :ns-delete delta; say WHY in prompt."
     :inputSchema {:type "object"
@@ -329,7 +331,7 @@
                   :properties {:namespaces {:type "array" :items {:type "string"}
                                             :description "the namespaces to pull; each takes its subtree and -test sibling with it"}
                                :to {:type "string" :description "the owning prefix, e.g. \"my.core\""}
-                               :dry-run {:type "boolean"
+                               :dry_run {:type "boolean"
                                          :description "plan only: write nothing, report renames / exports+who-forces-them / edges / refusal"}
                                :prompt {:type "string"}}
                   :required ["namespaces" "to"]}}
@@ -363,10 +365,10 @@
    {:name "commit_point"
     :description "Record a MILESTONE — it runs a full done (normalize, verify, the IMPACTED ^:external slice, advisories) and gates on that verdict; force=true records red honestly and skips the gate. It does NOT run a whole-store check: a red ^:external test this episode never touched will not stop it, which is `full_check`'s job and yours to call. This said 'green-gated on the FULL ^:external suite' for a while and that was never what it did — a description claiming a stronger gate than exists is worse than one claiming none, because it is trusted instead of checked. The git-projection grain; target=<delta id> marks an earlier spot."
     :inputSchema {:type "object"
-                  :properties {:description {:type "string"}
+                  :properties {:label {:type "string"}
                                :force {:type "boolean"}
                                :target {:type "string"}}
-                  :required ["description"]}}
+                  :required ["label"]}}
    {:name "test_run"
     :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the milestone runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last milestone. Red external runs return :failing + :all-failing {file [tests]} + :themes."
     :inputSchema {:type "object"
@@ -419,7 +421,7 @@
                                :content {:type "string"}
                                :source {:type "string"}
                                :encoding {:type "string"}
-                               :content-type {:type "string"}
+                               :content_type {:type "string"}
                                :prompt {:type "string"}}
                   :required ["path"]}}
 {:name "js_dep"
@@ -443,9 +445,9 @@
                                :file {:type "string"}
                                :source {:type "string"}
                                :npm {:type "string"}
-                               :npm-path {:type "string"}
+                               :npm_path {:type "string"}
                                :integrity {:type "string"}
-                               :source-url {:type "string"}
+                               :source_url {:type "string"}
                                :license {:type "string"}
                                :remove {:type "boolean"}
                                :prompt {:type "string"}}
@@ -670,19 +672,6 @@ FINISH:  done {label} (tidies, lints, marks the unit boundary)
          "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
          "deps_pure" "change_signature" "ns_realias"]))
 
-(def extra-accepted-arg-keys
-  "Per-tool ALIASES the dispatch in slopp.mcp/call-tool! reads via
-   (or (:canonical a) (:alias a)) — deliberately kept OUT of the advertised
-   inputSchema so agents learn the one canonical key, but accepted (not refused
-   as unknown) when a client sends the alias. call-tool! is the source of truth;
-   the arg-forgiveness tests pin every entry, so a missed alias REDS the suite
-   rather than silently refusing documented behaviour."
-  {"edit_rename"    #{:name :from :to}
-   "edit_subform"   #{:from :to :after}
-   "edit_extract"   #{:source :subform}
-   "rename_sweep"   #{:dry_run}
-   "edit_requalify" #{:dry_run}})
-
 (def wire-keys
   "Every key a write result may carry to the agent — ONE list, replacing the
   fourteen hand-maintained `select-keys` allowlists in `call-tool!`.
@@ -820,14 +809,15 @@ FINISH:  done {label} (tidies, lints, marks the unit boundary)
 
 (defn accepted-arg-keys
   "The full set of argument keys tool `name` accepts: its inputSchema
-   properties, its forgiveness aliases (extra-accepted-arg-keys), and the
-   universal cross-cutting keys (:agent stamped by the dispatch, :prompt intent,
-   :verbose full payload). nil for a name the server does not advertise
-   (`edit-group!` is deliberately off-wire; an unknown name) — that tool opts
-   OUT of strict validation rather than refusing every key."
+   properties plus the universal cross-cutting keys (:agent stamped by the
+   dispatch, :prompt intent, :verbose full payload). There are no aliases —
+   one argument has one spelling, and the schema is it. nil for a name the
+   server does not advertise (`edit-group!` is deliberately off-wire; an
+   unknown name) — that tool opts OUT of strict validation rather than
+   refusing every key."
   [name]
   (when-let [d (some #(when (= name (:name %)) %) tools)]
-    (into (into #{:agent :prompt :verbose} (extra-accepted-arg-keys name))
+    (into #{:agent :prompt :verbose}
           (keys (get-in d [:inputSchema :properties])))))
 
 (defn unknown-arg-keys

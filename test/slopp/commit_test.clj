@@ -116,7 +116,7 @@
                                               :params {:name tool :arguments args}})
                            [:result :content 0 :text]))]
         (testing "commit_point closes work — allowed WITHOUT an open turn"
-          (let [r (call "commit_point" {:description "m1" :agent "z"})]
+          (let [r (call "commit_point" {:label "m1" :agent "z"})]
             (is (not (re-find #"turn_begin" r)) r)))
         (testing "query_commits answers over MCP"
           (is (re-find #"m1" (call "query_commits" {})))))

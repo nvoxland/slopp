@@ -992,7 +992,7 @@
      (text! (ops/file-put! session (:path a) (:content a)
                            :prompt (:prompt a) :agent (:agent a)
                            :encoding (:encoding a)
-                           :content-type (:content-type a)
+                           :content-type (:content_type a)
                            :source (:source a))))
 "js_dep"
    (fn [session a _sym]
@@ -1007,9 +1007,9 @@
                           ;; immutable, so this is re-fetchable and verifiable
                           ;; where a CDN url only records how the bytes arrived
                           :npm        (:npm a)
-                          :npm-path   (:npm-path a)
+                          :npm-path   (:npm_path a)
                           :integrity  (:integrity a)
-                          :source-url (:source-url a)
+                          :source-url (:source_url a)
                           :license    (:license a)}
                          :prompt (:prompt a) :agent (:agent a)
                          :remove (:remove a) :source (:source a))))
@@ -1506,10 +1506,10 @@
                                                       :agent (:agent a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
-      "edit_rename" (let [old (or (:old a) (:name a) (:from a))
-                                new (or (:new a) (:to a))]
+      "edit_rename" (let [old (:from a)
+                                new (:to a)]
                             (when-not (and old new)
-                              (throw (ex-info "edit_rename needs :old and :new (aliases: :name/:from, :to)" {})))
+                              (throw (ex-info "edit_rename needs :from and :to" {})))
                             (text! (-> (ops/rename! session (sym :ns) (symbol old)
                                                    (symbol new) :prompt (:prompt a)
                                                    :agent (:agent a))
@@ -1524,10 +1524,10 @@
                                                 :force (:force a)))
       "edit_requalify" (text! (-> (ops/requalify-boundary-keys!
                                    session (sym :ns) (sym :name)
-                                   :to-ns (or (:to-ns a) (:to_ns a))
+                                   :to-ns (:to_ns a)
                                    :prompt (:prompt a)
                                    :agent (:agent a)
-                                   :dry-run (or (:dry-run a) (:dry_run a)))
+                                   :dry-run (:dry_run a))
                                   (select-keys tools/wire-keys)
                                   (summarize (:verbose a))))
       "rename_sweep" (let [{:keys [from to]} a]
@@ -1536,30 +1536,29 @@
                             (text! (-> (ops/rename-sweep! session from to
                                                          :prompt (:prompt a)
                                                          :agent (:agent a)
-                                                         :dry-run (or (:dry-run a) (:dry_run a)))
+                                                         :dry-run (:dry_run a))
                                       (select-keys tools/wire-keys)
                                       (summarize (:verbose a)))))
       "edit_subform" (let [after  (:after a)
-                                anchor (or (:match a) (:from a))
+                                anchor (:match a)
                                 ;; :after is a distinct INSERT anchor — combining
                                 ;; it with :match/:from/:where composed src on
                                 ;; :after's mere PRESENCE while the anchor
                                 ;; preferred :match, splicing a DUPLICATE of the
                                 ;; neighbor at the match site (review host-F1)
                                 _ (when (and after (or anchor (:where a)))
-                                    (throw (ex-info "edit_subform: :after is an INSERT anchor — do not combine it with :match/:from/:where (that would duplicate the neighbor). Use one or the other." {})))
+                                    (throw (ex-info "edit_subform: :after is an INSERT anchor — do not combine it with :match/:where (that would duplicate the neighbor). Use one or the other." {})))
                                 match (or anchor after)
                                 src   (if after
                                         ;; anchor mode: INSERT behind a complete
                                         ;; neighbor — the let-binding splice
                                         ;; without shaping a half-open match
-                                        (str after "\n" (or (:source a) (:to a)))
-                                        (or (:source a) (:to a)))]
+                                        (str after "\n" (:source a))
+                                        (:source a))]
                             (when-not (and (or match (:where a)) src)
                               (throw (ex-info "edit_subform needs :match (exact subform source) OR :where {key value} (the unique map containing it) OR :after (a complete neighboring form to insert behind), plus :source" {})))
                             (text! (-> (ops/edit-subform! session (sym :ns)
-                                            (symbol (or (:form a) (:name a)
-                                                        (throw (ex-info "edit_subform needs :form (the containing form's name; :name works too)" {}))))
+                                            (sym :name)
                                                          match src
                                                          :text (:text a)
                                                          :wrap (:wrap a)
@@ -1581,12 +1580,11 @@
                                                    (:text a)
                                                    :prompt (:prompt a)
                                                    :agent (:agent a)))
-      "edit_extract" (let [subform (or (:form a) (:source a) (:subform a))]
+      "edit_extract" (let [subform (:match a)]
                        (if-not (or subform (:at a))
-                         (text! {:error (str "edit_extract needs :form (the exact subform"
-                                             " source; aliases :source/:subform accepted)"
-                                             " or — better for anything large — :at, an"
-                                             " ANCHOR: the subform's first line, which"
+                         (text! {:error (str "edit_extract needs :match (the exact subform"
+                                             " text) or — better for anything large — :at,"
+                                             " an ANCHOR: the subform's first line, which"
                                              " need not parse on its own")})
                          (text! (-> (ops/extract! session (sym :ns) (sym :from)
                                                   (sym :name) subform
@@ -1627,7 +1625,7 @@
                (text! (if-let [note (app-note-for app)]
                         (assoc r :app-note note)
                         r)))
-      "commit_point" (text! (let [r (external/commit-point! session (:description a)
+      "commit_point" (text! (let [r (external/commit-point! session (:label a)
                                                        :agent (:agent a)
                                                        :force (:force a)
                                                        :target (:target a))
@@ -1708,14 +1706,14 @@
       "ns_delete" (text! (ops/delete-ns! session (sym :ns)
                                               :prompt (:prompt a)
                                               :agent (:agent a)))
-      "ns_rename" (text! (ops/ns-rename! session (:old a) (:new a)
+      "ns_rename" (text! (ops/ns-rename! session (:from a) (:to a)
                                                 :prompt (:prompt a)
                                                 :agent (:agent a)))
 "module_extract" (text! (ops/module-extract!
                                session
                                (mapv symbol (:namespaces a))
                                (symbol (str (:to a)))
-                               :dry-run (or (:dry-run a) (:dry_run a))
+                               :dry-run (:dry_run a)
                                :prompt (:prompt a)
                                :agent (:agent a)))
       "cleanup" (text! (if (:all a)
@@ -1746,7 +1744,7 @@
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
 "ns_realias" (text! (-> (ops/realias! session (sym :ns)
-                                             (sym :old) (sym :new)
+                                             (sym :from) (sym :to)
                                              :prompt (:prompt a)
                                              :agent (:agent a))
                               (select-keys tools/wire-keys)

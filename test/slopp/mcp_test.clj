@@ -93,34 +93,6 @@
         (is (re-find #"pre-flight" (call! sess "done" {:label "noisy"}))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external rename-arg-forgiveness                        ; from the symmetric eval
-  (let [sess (external/open!)]
-    (try
-      (call! sess "ns_create" {:ns "ra" :source "(ns ra)\n(defn f [x] x)\n(defn g [x] (f x))\n"})
-      (testing "the aliases every eval run guessed first now just work"
-        (let [r (edn/read-string (call! sess "edit_rename"
-                                       {:ns "ra" :name "f" :to "h"}))]
-          (is (nil? (:error r)))))
-      (testing "missing args produce a clear message, not a raw conversion error"
-        (is (re-find #"needs :old and :new"
-                     (call! sess "edit_rename" {:ns "ra"})))
-        (is (re-find #"missing required argument :ns"
-                     (call! sess "query_source" {}))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external write-op-arg-forgiveness                      ; eval round 2
-  (let [sess (external/open!)]
-    (try
-      (call! sess "ns_create" {:ns "wa" :source "(ns wa)\n(defn f [x] (+ x x 1))\n(defn g [x] (f x))\n"})
-      (testing "edit_extract accepts :source for :form; missing gets a real message"
-        (let [r (edn/read-string (call! sess "edit_extract"
-                                       {:ns "wa" :from "f" :name "doubled"
-                                        :source "(+ x x 1)"}))]
-          (is (nil? (:error r))))
-        (is (re-find #"needs :form" (call! sess "edit_extract"
-                                          {:ns "wa" :from "f" :name "z"}))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external green-responses-are-terse                     ; B1
   (let [sess (external/open!)]
     (try
@@ -309,14 +281,14 @@
                           "(defn describe\n  \"Applies the bulk-rate tier.\"\n  [n]\n"
                           "  (str \"bulk-rate applies: \" (bulk-rate n)))\n")})
       (testing "the rename result points at docstring/string mentions of the old name (Q11)"
-        (let [r (call! sess "edit_rename" {:ns "pm.core" :old "bulk-rate" :new "volume-rate"})]
+        (let [r (call! sess "edit_rename" {:ns "pm.core" :from "bulk-rate" :to "volume-rate"})]
           (is (re-find #":mentions" r) r)
           (is (re-find #":ns pm.core, :form describe" r) r)))
       (testing "a clean rename carries no :mentions"
         (call! sess "edit_replace_form"
               {:ns "pm.core" :name "describe"
                :source "(defn describe [n] (str \"tier: \" (volume-rate n)))"})
-        (let [r (call! sess "edit_rename" {:ns "pm.core" :old "volume-rate" :new "tier-rate"})]
+        (let [r (call! sess "edit_rename" {:ns "pm.core" :from "volume-rate" :to "tier-rate"})]
           (is (not (re-find #":mentions" r)) r)))
       (finally (ops/close! sess)))))
 
@@ -330,7 +302,7 @@
     (try
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
       (testing "a milestone mirrors into LOCAL git as slopp/<store-branch> (user decision 2026-07-14)"
-        (let [r (call! sess "commit_point" {:description "first"})]
+        (let [r (call! sess "commit_point" {:label "first"})]
           (is (re-find #":published" r) r)
           (is (re-find #"slopp/main" r) r))
         (let [head (:out (sh/sh "git" "-C" dir "rev-parse" "refs/heads/slopp/main"))]
@@ -348,7 +320,7 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (call! sess "ns_create" {:ns "al.core" :source "(ns al.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (call! sess "commit_point" {:description "first"})
+      (call! sess "commit_point" {:label "first"})
       (testing "query_commits carries the alignment PROOF against the local mirror (Q12)"
         (let [r (call! sess "query_commits" {})]
           (is (re-find #":aligned true" r) r)
@@ -445,8 +417,8 @@
         (let [r3 (call! sess "query_source" {:ns "sm.c" :full true})]
           (is (not (re-find #"query_slice" r3)) r3)))
       (testing "a rename streak earns the sweep hint"
-        (call! sess "edit_rename" {:ns "sm.a" :old "f" :new "f2"})
-        (let [r (call! sess "edit_rename" {:ns "sm.a" :old "g" :new "g2"})]
+        (call! sess "edit_rename" {:ns "sm.a" :from "f" :to "f2"})
+        (let [r (call! sess "edit_rename" {:ns "sm.a" :from "g" :to "g2"})]
           (is (re-find #"rename_sweep" r) r)))
       (finally (ops/close! sess)))))
 
@@ -485,7 +457,7 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (call! sess "ns_create" {:ns "mr.core" :source "(ns mr.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (call! sess "commit_point" {:description "first"})
+      (call! sess "commit_point" {:label "first"})
       (testing "git_push mirrors local slopp/* to the remote (and saves the first url)"
         (let [r (call! sess "git_push" {:branches ["main"] :url bare})]
           (is (re-find #":mirrored" r) r))
@@ -515,7 +487,7 @@
             s3   (external/open! {:slopp.ops/dir d2})]
         (try
           (call! s3 "ns_create" {:ns "ng.core" :source "(ns ng.core)\n(defn ^:unused-ok f [x] x)\n"})
-          (let [r (call! s3 "commit_point" {:description "no git here"})]
+          (let [r (call! s3 "commit_point" {:label "no git here"})]
             (is (re-find #":commit" r) r)
             (is (not (re-find #":published" r)) r))
           (is (re-find #"url" (call! s3 "git_push" {})) "no remote: helpful error names :url")
@@ -1005,7 +977,7 @@
       (let [before (count (ops/journal sess))
             r      (call! sess "rename_sweep" {:from ":dw/target"
                                                :to ":dw/renamed"
-                                               :dry-run true})]
+                                               :dry_run true})]
         (is (re-find #":dry-run true" r) r)
         (is (= before (count (ops/journal sess)))
             "a preview over the wire must append NO delta")
@@ -1273,11 +1245,11 @@
         rev  (fn [ref] (clojure.string/trim (:out (sh/sh "git" "-C" dir "rev-parse" ref))))]
     (try
       (call! sess "ns_create" {:ns "bp.core" :source "(ns bp.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (call! sess "commit_point" {:description "trunk milestone"})
+      (call! sess "commit_point" {:label "trunk milestone"})
       (call! sess "branch_create" {:name "feature"})
       (call! sess "edit_add_form" {:ns "bp.core" :source "(defn ^:unused-ok g [x] x)"
                                    :prompt "branch work"})
-      (let [r      (call! sess "commit_point" {:description "branch milestone"})
+      (let [r      (call! sess "commit_point" {:label "branch milestone"})
             pushed (:pushed (:published (edn/read-string r)))
             trunk  (rev "refs/heads/slopp/main")
             head   (rev "refs/heads/slopp/feature")]
@@ -1406,7 +1378,7 @@
              {:ns "sf" :source "(ns sf)\n(defn f [x]\n  (let [a 1]\n    (+ a x)))\n"})
       (testing ":after combined with :match refuses instead of duplicating"
         (let [r (call! sess "edit_subform"
-                       {:ns "sf" :form "f"
+                       {:ns "sf" :name "f"
                         :match "(+ a x)" :after "[a 1]" :source "b 2"})]
           (is (re-find #"(?i)after" (str r)) r)
           (is (re-find #"(?i)refus|combine|one or the other|ambiguous" (str r)) r)))
@@ -1473,8 +1445,8 @@
   ;; The MCP dispatch used to DROP an unrecognised argument — a typo'd flag
   ;; silently ran a real sweep (dry-run-is-honored-over-the-wire is the
   ;; incident). Strict validation REFUSES an unknown key, naming it, so a flag
-  ;; cannot evaporate into the opposite of what was asked. A key the dispatch
-  ;; deliberately accepts as an alias (edit_extract :subform) must still pass.
+  ;; cannot evaporate into the opposite of what was asked. The accepted set is
+  ;; exactly the schema: there is no alias table behind it.
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
@@ -1485,17 +1457,16 @@
                                                  :bogus true})]
           (is (re-find #"unknown argument" r) r)
           (is (re-find #":bogus" r) r)
-          (is (re-find #":dry-run" r) "the refusal lists the accepted keys")
+          (is (re-find #":dry_run" r) "the refusal lists the accepted keys")
           (is (= before (count (ops/journal sess)))
               "a refused call appends NO delta — the sweep must not run")
           (is (re-find #":uk/target" (query/query-source sess 'uk.core))
               "and rewrites nothing")))
-      (testing "an alias the dispatch accepts is not treated as unknown"
+      (testing "a spelling the schema does not carry is unknown, even a once-accepted one"
         (call! sess "ns_create" {:ns "uk2" :source "(ns uk2)\n(defn f [x] (+ x x 1))\n"})
-        (let [r (edn/read-string (call! sess "edit_extract"
-                                        {:ns "uk2" :from "f" :name "doubled"
-                                         :subform "(+ x x 1)"}))]
-          (is (nil? (:error r)) r)))
+        (let [r (call! sess "edit_extract" {:ns "uk2" :from "f" :name "doubled"
+                                            :subform "(+ x x 1)"})]
+          (is (re-find #"unknown argument :subform" r) r)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external module-extract-dry-run-rides-the-wire
@@ -1511,7 +1482,7 @@
                    (str "(ns mx.other (:require [mx.helper :as h]))\n"
                         "(defn b \"B.\" [x] (h/shared x))\n"))
       (let [out (call! sess "module_extract"
-                       {:namespaces ["mx.helper"] :to "mx.core" :dry-run true})]
+                       {:namespaces ["mx.helper"] :to "mx.core" :dry_run true})]
         (is (re-find #"mx\.core\.helper" out) out)
         (testing "the plan names WHO forces each hoist, not just that one is due"
           (is (re-find #"mx\.other/b" out) out))
@@ -2276,14 +2247,14 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (call! sess "commit_point" {:description "first"})
+      (call! sess "commit_point" {:label "first"})
       ;; someone else's history under the mirror ref: the checkout's own root
       ;; commit, which the projection never minted and does not build on
       (let [root (clojure.string/trim
                   (:out (sh/sh "git" "-C" dir "rev-parse" "HEAD")))]
         (sh/sh "git" "-C" dir "branch" "-f" "slopp/main" root)
         (call! sess "ns_create" {:ns "pub.two" :source "(ns pub.two)\n(defn ^:unused-ok g [] 2)\n"})
-        (let [r (call! sess "commit_point" {:description "second"})]
+        (let [r (call! sess "commit_point" {:label "second"})]
           (is (re-find #"REJECTED_NONFASTFORWARD" r)
               (str "the refusal itself still leads: " r))
           (is (re-find #":divergence" r)
@@ -2377,7 +2348,7 @@
              milestone path and not the redef")
 
         (reset! calls [])
-        (call! sess "commit_point" {:description "a milestone is a done point too"})
+        (call! sess "commit_point" {:label "a milestone is a done point too"})
         (is (= [:refreshed] @calls)
             "a milestone runs a done and must re-serve like one — otherwise the
              app a project exists to serve is left behind by the very call that
@@ -2906,3 +2877,38 @@
         (ops/close! sess)
         (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
           (rm! (io/file dir)))))))
+
+(deftest ^:external one-argument-one-spelling
+  ;; The wire used to carry ALIASES — :old/:new beside :from/:to, :subform and
+  ;; :source beside :match — because the names were inconsistent across tools
+  ;; and every eval run guessed a different one first. The fix was to make
+  ;; the names consistent, not to accept every guess: a form is ns + name, a
+  ;; rename goes from → to, a needle is match, and the schema is the whole
+  ;; accepted set. A retired spelling is an unknown argument now, refused by
+  ;; name, and a missing one is named by the tool rather than surfacing as a
+  ;; conversion error.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ra" :source "(ns ra)\n(defn f [x] (+ x x 1))\n(defn g [x] (f x))\n"})
+      (testing "the canonical spellings work"
+        (is (nil? (:error (edn/read-string
+                           (call! sess "edit_extract"
+                                  {:ns "ra" :from "f" :name "doubled"
+                                   :match "(+ x x 1)"})))))
+        (is (nil? (:error (edn/read-string
+                           (call! sess "edit_rename"
+                                  {:ns "ra" :from "g" :to "h"}))))))
+      (testing "a retired alias is an unknown argument, named"
+        (let [r (call! sess "edit_rename" {:ns "ra" :old "f" :new "f2"})]
+          (is (re-find #"unknown arguments? :old" r) r))
+        (let [r (call! sess "edit_extract" {:ns "ra" :from "f" :name "z"
+                                            :source "(+ x x 1)"})]
+          (is (re-find #"unknown argument :source" r) r)))
+      (testing "a missing argument is named by the tool, not by a conversion error"
+        (is (re-find #"needs :from and :to"
+                     (call! sess "edit_rename" {:ns "ra"})))
+        (is (re-find #"needs :match"
+                     (call! sess "edit_extract" {:ns "ra" :from "f" :name "z"})))
+        (is (re-find #"missing required argument :ns"
+                     (call! sess "query_source" {}))))
+      (finally (ops/close! sess)))))

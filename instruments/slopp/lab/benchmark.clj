@@ -51,7 +51,7 @@
             :source "(defn evaluate [s]\n  (->> (tokenize s) (eval-pass #{:* :/}) (eval-pass #{:+ :-}) first))"}}
     {:tool "edit_add_form" :args {:ns "calc.core" :prompt "CLI entry"
                                   :source "(defn run-cli [args]\n  (doseq [expr args]\n    (println (str expr \" = \" (evaluate expr)))))"}}
-    {:tool "edit_rename" :args {:ns "calc.core" :old "eval-pass" :new "reduce-tier" :prompt "clearer name"}}]})
+    {:tool "edit_rename" :args {:ns "calc.core" :from "eval-pass" :to "reduce-tier" :prompt "clearer name"}}]})
 
 (def inventory
   {:name "inventory" :v 1 :test-ns "inv.core"
@@ -67,7 +67,7 @@
     {:tool "edit_add_form" :args {:ns "inv.core" :prompt "behavior tests"
                                   :source "(deftest stock-t\n  (let [s (make-store)]\n    (add-item s :widget 3)\n    (add-item s :widget 2)\n    (add-item s :gadget 1)\n    (is (= {:widget 5 :gadget 1} @s))\n    (is (= 6 (total s)))))"}}
     ;; fix the D6 violation with the structural rename
-    {:tool "edit_rename" :args {:ns "inv.core" :old "add-item" :new "add-item!" :prompt "fix ! violation"}}]})
+    {:tool "edit_rename" :args {:ns "inv.core" :from "add-item" :to "add-item!" :prompt "fix ! violation"}}]})
 
 (def wordstats
   {:name "wordstats" :v 1 :test-ns "ws.core"
@@ -84,7 +84,7 @@
                                   :source "(deftest stats-t\n  (is (= [\"the\" \"cat\"] (words \"The cat\")))\n  (is (= {\"a\" 2 \"b\" 1} (word-freqs \"a b a\")))\n  (is (= [\"a\" \"b\"] (top-words \"a b a a b c\" 2))))"}}
     {:tool "edit_replace_form" :args {:ns "ws.core" :name "top-words" :prompt "sort descending"
                                       :source "(defn top-words [s n]\n  (->> (word-freqs s) (sort-by (comp - val)) (take n) (mapv key)))"}}
-    {:tool "edit_rename" :args {:ns "ws.core" :old "words" :new "tokenize" :prompt "clearer name"}}]})
+    {:tool "edit_rename" :args {:ns "ws.core" :from "words" :to "tokenize" :prompt "clearer name"}}]})
 
 (def apps [calculator inventory wordstats])
 
