@@ -34,7 +34,7 @@
                 (seq id-map)    (assoc :id-map id-map)
                 (seq conflicts) (assoc :conflicts (mapv #(dissoc % :ours) conflicts))
                 (seq new-nses)  (assoc :new-nses (vec new-nses)))]
-    [(update store' :deltas conj delta) delta]))
+    [(store/record-delta store' delta) delta]))
 
 (defn ^:export tag-merged
   "Mark the just-appended delta as a replay of THEIR delta `their-id` — it is
@@ -550,7 +550,7 @@
                           d'  (assoc d :id nid
                                      :parent (:id (last (:deltas st1)))
                                      :merged-from (:id d))
-                          st2 (update (fields/fold st1 d') :deltas conj d')]
+                          st2 (store/record-delta (fields/fold st1 d') d')]
                       (done st2 idmap (inc merged) conflicts notes changed
                             new-nses (conj applied (:id d))))
 

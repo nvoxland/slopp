@@ -9,7 +9,7 @@
             [rewrite-clj.zip :as z]
             [slopp.store :as store]
             [slopp.store.render :as store.render]
-            [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [clojure.set :as set] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.edit.gates :as gates]))
+            [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [clojure.set :as set] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.edit.gates :as gates] [slopp.store.fields :as fields]))
 
 (def ^:private banned-heads
   "D4 — user macros are banned."
@@ -682,7 +682,7 @@
             {:store st' :declared names}))
         (let [names   (mapv #(:name (store/form-by-id store %)) order)
               [st' n] (store/reorder-to store ns-sym names
-                                        :prompt (or prompt store/auto-reorder-prompt)
+                                        :prompt (or prompt fields/auto-reorder-prompt)
                                         :agent agent
                                         ;; the pipeline OWNS ordering (see the
                                         ;; docstring) — mark it, so this stops

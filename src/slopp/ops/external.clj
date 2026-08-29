@@ -78,10 +78,16 @@
   child JVM). On the SYNC path (no :image-ready) a failure throws, as open!
   always did; on the ASYNC path (a background thread) the failure is
   delivered to the ready-promise so `api/await-image!` surfaces it on first
-  oracle use instead of killing the server at startup. Returns the session."
+  oracle use instead of killing the server at startup. Returns the session.
+
+  Every boot is RECORDED as an `image-boot` measurement — `{:ms :namespaces
+  :recycled? :failures :head}` — beside the journal. The JVM-budget A/B was
+  one careful experiment done by hand; a row per boot makes every boot an
+  observation, and variance-vs-drift a query rather than a re-run."
   [session store conn agent-id ttl]
   (try
-    (let [;; A recycled image carrying EXACTLY this store's classpath, or nil
+    (let [t0    (System/nanoTime)
+          ;; A recycled image carrying EXACTLY this store's classpath, or nil
           ;; and a real boot. `add-libs!` cannot be undone, so an image that
           ;; carried deps is no longer the baseline it was parked against.
           ;; Keying by deps is what makes reuse apply to a real project: the
@@ -106,9 +112,9 @@
           ;; session boots reuses it, which is what makes a restart work. A
           ;; private dir here is exactly why restart booted without the
           ;; framework at all.
-          vdir  (engine/framework-dir! session store)
-          image (or (when-not vdir (repl/unpark! (engine/image-deps store)))
-                    (engine/start-image! session store))]
+          vdir     (engine/framework-dir! session store)
+          recycled (when-not vdir (repl/unpark! (engine/image-deps store)))
+          image    (or recycled (engine/start-image! session store))]
       (swap! session assoc :image image)
       (engine/start-spare! session)
       (let [t      (java.util.Timer. "slopp-branch-reaper" true)
@@ -131,7 +137,15 @@
       ;; through the outer catch; a per-namespace compile failure is the
       ;; store's business, and the store stays open to fix it.
       (let [fails (engine/load-all-namespaces! image store)]
-        (swap! session assoc :image-load-failures (not-empty fails)))
+        (swap! session assoc :image-load-failures (not-empty fails))
+        (when conn
+          (db/record-measurement!
+           conn "image-boot" nil
+           {:ms         (quot (- (System/nanoTime) t0) 1000000)
+            :namespaces (count (:namespaces store))
+            :recycled?  (some? recycled)
+            :failures   (count fails)
+            :head       (:id (peek (:deltas store)))})))
       ;; ARM only now, with everything stamped: from here an unstamped form
       ;; means never-loaded rather than not-yet-looked-at. Without this the
       ;; registry stayed unarmed for a whole session and every currency
@@ -1091,9 +1105,27 @@ client-deps (merge (:client-deps st) (:client provided))
                   ;; the measurement exists — and folded into the RESULT rather
                   ;; than passed beside it so the journal and the caller cannot
                   ;; disagree about what the run cost.
-                  (if-let [t (testrun/read-timings dir)]
-                    (assoc result :ns-ms t)
-                    result))))))
+                  (let [r (if-let [t (testrun/read-timings dir)]
+                            (assoc result :ns-ms t)
+                            result)]
+                    ;; and the COST as a `test-run` measurement beside the
+                    ;; journal: the observation above carries the verdict, this
+                    ;; row carries what it took — tier, wall, and the per-
+                    ;; namespace time the shards measured — so variance-vs-
+                    ;; drift is a query over runs rather than a re-run, and a
+                    ;; selection model has something to train on.
+                    (when-let [c (:db @session)]
+                      (db/record-measurement!
+                       c "test-run" nil
+                       {:tier     :external
+                        :status   (:status r)
+                        :ran      (:ran r)
+                        :failures (:failures r)
+                        :errors   (:errors r)
+                        :ms       (- (System/currentTimeMillis) t0)
+                        :shards   (count (get-in r [:cost :shard-ms]))
+                        :ns-ms    (:ns-ms r)}))
+                    r))))))
           (finally
             ;; a full materialized project per run; nothing else ever deletes it
             (delete-dir! (io/file dir))))))))
@@ -1880,7 +1912,17 @@ client-deps (merge (:client-deps st) (:client provided))
   never reached the caller, so nothing could ever release them."
   ([] (open! {}))
   ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image?]}]
-   (let [conn    (when dir (db/open! dir {:create? false}))
+   (let [;; EVERY session has a journal. A named dir is served as a question
+         ;; (no store → nil, never an adoption); a dirless open gets a PRIVATE
+         ;; one in a temp dir that `close!` removes. History is a db read now,
+         ;; and a session whose deltas lived only in the value would need a
+         ;; second code path over an in-memory list, kept alive for tests.
+         ephemeral (when-not dir
+                     (str (java.nio.file.Files/createTempDirectory
+                           "slopp-session"
+                           (make-array java.nio.file.attribute.FileAttribute 0))))
+         dir     (or dir ephemeral)
+         conn    (if ephemeral (db/open! dir) (db/open! dir {:create? false}))
          ;; ONE identity, minted once. `session-identity` generates a fresh
          ;; random id per call, so computing it twice would key this session's
          ;; THREAD to one id and its deltas to another.
@@ -1895,7 +1937,8 @@ client-deps (merge (:client-deps st) (:client provided))
          ;; for a harness slopp does not know, and it costs a store reload and
          ;; a rebuilt image when the thread turns out to hold work.
          stable? (boolean agent-id)
-         session (atom {:db conn :dir dir :branch "main" :lines {}})]
+         session (atom {:db conn :dir dir :branch "main" :lines {}
+                        :ephemeral-dir? (some? ephemeral)})]
      (try
        (let [line  (when (and conn stable?)
                      (db/adopt-thread! conn (db/trunk-line-id! conn) me))
@@ -1903,9 +1946,21 @@ client-deps (merge (:client-deps st) (:client provided))
              ;; the code this session is going to work on rather than the
              ;; branch's — which are the same until a thread holds un-landed
              ;; work, and silently different afterwards
+             t0    (System/nanoTime)
              store (or (some-> conn (db/load-store
                                      (or line (db/trunk-line-id! conn))))
                        (store/empty-store))
+             ;; EVERY open is an observation. `load-store` was 7.6 s on one
+             ;; store and nobody knew until it was timed by hand; a row per
+             ;; open — the journal's length, the head, the milliseconds — is
+             ;; what turns that into a chart. A measurement, never a delta:
+             ;; nothing about what an open cost may move the head.
+             _     (when conn
+                     (db/record-measurement!
+                      conn "open" nil
+                      {:deltas  (count (:deltas store))
+                       :head    (:id (peek (:deltas store)))
+                       :load-ms (quot (- (System/nanoTime) t0) 1000000)}))
              ttl   (or branch-image-ttl-ms default-branch-image-ttl-ms)]
          ;; SYNC phase: the store value + everything reads need, no image
          (swap! session assoc

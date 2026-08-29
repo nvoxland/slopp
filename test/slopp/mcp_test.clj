@@ -2858,3 +2858,50 @@
                    " store one: " r))))
 
       (finally (ops/close! sess)))))
+
+(deftest ^:external every-tool-call-leaves-a-measurement-row-and-a-read-moves-no-head
+  ;; The session ring keeps a turn's calls and `turn-end!` folds the top five
+  ;; onto a delta — so per-call cost was lossy (five tools per turn) and lived
+  ;; in the journal. A row per call in `measurements` is the census: which
+  ;; tool, how long, how many characters it put on the wire (what the next
+  ;; request re-reads), and whether it was a refusal. The last assertion is
+  ;; the whole reason the table exists: a measurement must never move the
+  ;; head, or a read could make a verdict lose its CAS race.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-mcp-rows" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "rows"})]
+    (try
+      (ops/turn-begin! sess :agent "rows" :intent "measure the calls")
+      (call! sess "ns_create" {:ns "rows.core" :source "(ns rows.core)\n\n(def a 1)\n"})
+      (let [conn   (:db @sess)
+            trunk  (db/trunk-line-id! conn)
+            head   (db/line-head conn (:line @sess))
+            before (count (db/measurements conn "tool-call" nil))
+            _      (call! sess "query_search" {:pattern "rows"})
+            _      (call! sess "query_search" {:bogus "x"})
+            rows   (db/measurements conn "tool-call" nil)
+            [ok bad] (map :payload (take-last 2 rows))]
+        (is (= (+ before 2) (count rows)) "one row per call, refusals included")
+        (testing "the row says what the call was and what it cost"
+          (is (= "query_search" (:tool ok)) (pr-str ok))
+          (is (number? (:ms ok)) (pr-str ok))
+          (is (pos? (:chars ok)) "the characters on the wire are the cost the next request pays")
+          (is (false? (:refused? ok))))
+        (testing "a refusal is a row too, and says so"
+          (is (true? (:refused? bad)) (pr-str bad)))
+        (testing "and two reads moved no head, on the thread or the branch"
+          (is (= head (db/line-head conn (:line @sess))))
+          (is (= (db/line-head conn trunk) (db/line-head conn trunk))))
+        (testing "closing the turn writes the ask's rollup as a row of its own, naming its turn-end"
+          ;; the turn-end delta carries `:timing` already; the row beside the
+          ;; journal is what a per-ask chart reads without folding the log
+          (ops/turn-end! sess :agent "rows")
+          (let [ask (last (db/measurements conn "ask" nil))]
+            (is (some? ask) "one ask row per closed turn")
+            (is (= 3 (get-in ask [:payload :calls])) (pr-str (:payload ask)))
+            (is (= (db/line-head conn (:line @sess)) (:delta ask))
+                "the row is ABOUT the turn-end delta, and says so"))))
+      (finally
+        (ops/close! sess)
+        (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+          (rm! (io/file dir)))))))

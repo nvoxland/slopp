@@ -20,7 +20,7 @@
   needs globally-unique ids (uuid / lamport)."
   (:require [clojure.string :as str]
             [rewrite-clj.parser :as p]
-            [rewrite-clj.node :as n] [slopp.store.fields :as fields] [slopp.cache :as cache]))
+            [rewrite-clj.node :as n] [slopp.store.fields :as fields]))
 
 (defn empty-store
   "A fresh store value — the empty starting point every session builds on.
@@ -28,12 +28,18 @@
   cannot exist without a declared :init — what each field means lives on its
   registry entry, not here.
 
+  `:head` (the newest delta's id), `:line-pos` (how many deltas along the
+  line) and the two derived maps `:prompts` / `:last-write` are what
+  `record-delta` maintains: the facts about history a pure reader is handed,
+  so that the log itself does not have to be.
+
   It carries no `:next-id`, and that absence is the point: a store value holds
   no allocation state, so there is nothing about minting to persist, reload,
   fork, park, rebase or fall behind with. `gen-id` mints a random name from
   nothing this map contains."
   []
-  (merge {:namespaces {} :deltas []}
+  (merge {:namespaces {} :deltas []
+          :head nil :line-pos 0 :prompts {} :last-write {}}
          (fields/field-defaults)))
 
 (defn now-ms
@@ -168,172 +174,12 @@
   [store]
   (:deltas store))
 
-(defn remove-form
-  "Remove the form named `nm` from `ns-sym`; ONE `:delete` delta. Returns
-  [store' delta], or nil if no such form.
-
-  `nm` may be a name the form defines OR its form id — names win, matching
-  `form-named` (#131): an id is a registration's only handle, and the delete
-  path addresses defmethods that way."
-  [store ns-sym nm & {:keys [prompt group agent]}]
-  (let [elems (get-in store [:namespaces ns-sym :elements])
-        by-name (fn [e] (and (= :form (:kind e)) (= nm (:name e))))
-        by-id   (fn [e] (and (= :form (:kind e)) (= (str nm) (:id e))))
-        idx   (or (when-not (string? nm)
-                    (first (keep-indexed (fn [i e] (when (by-name e) i)) elems)))
-                  (first (keep-indexed (fn [i e] (when (by-id e) i)) elems)))]
-    (when idx
-      (let [fid          (:id (nth elems idx))
-            new-elems    (into (subvec elems 0 idx) (subvec elems (inc idx)))
-            [did store'] (gen-id store "d")
-            delta        (cond-> {:id did :parent (:id (last (:deltas store)))
-                                  :op :delete :ns ns-sym :form-id fid :name nm
-                                  :removed-source (n/string (:node (nth elems idx)))
-                                  :prompt prompt :at (now-ms)}
-                           group (assoc :group group)
-                           agent (assoc :agent agent))]
-        [(-> store'
-             (assoc-in [:namespaces ns-sym :elements] new-elems)
-             (update :deltas conj delta))
-         delta]))))
-
-(defn move-form
-  "Move the form named `nm` to just before the form named `before-nm` (S2 —
-  fixes append-only forward references). ONE `:move` delta. Returns
-  [store' delta], or nil if either form is missing."
-  [store ns-sym nm before-nm & {:keys [prompt group agent system]}]
-  (let [elems  (get-in store [:namespaces ns-sym :elements])
-        idx-of (fn [es n]
-                 (first (keep-indexed
-                         (fn [i e] (when (and (= :form (:kind e)) (= n (:name e))) i))
-                         es)))
-        i (idx-of elems nm)
-        j (idx-of elems before-nm)]
-    (when (and i j (not= nm before-nm))
-      (let [moved     (nth elems i)
-            without   (into (subvec elems 0 i) (subvec elems (inc i)))
-            j'        (idx-of without before-nm)
-            new-elems (-> (subvec without 0 j')
-                          (conj moved)
-                          (into (subvec without j')))
-            [did store'] (gen-id store "d")
-            delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                           :op :move :ns ns-sym
-                           :form-id (:id moved) :before before-nm
-                           :prompt prompt :at (now-ms)}
-                    group  (assoc :group group)
-                    agent  (assoc :agent agent)
-                    system (assoc :system true))]
-        [(-> store'
-             (assoc-in [:namespaces ns-sym :elements] new-elems)
-             (update :deltas conj delta))
-         delta]))))
-
 (defn ns-of-form-id
   "The namespace whose elements contain the form with `id`, or nil."
   [store id]
   (some (fn [[ns-sym {:keys [elements]}]]
           (when (some #(= id (:id %)) elements) ns-sym))
         (:namespaces store)))
-
-(defn record-done
-  "Append a `:done` boundary delta — a unit-of-work marker (and the
-  close of `agent`'s episode). `:findings` is the done-processing verdict
-  ({:test-status :failures :lint-errors ...}) riding the delta so history
-  and the next session's brief can surface what the episode left behind.
-  Returns [store' delta-id]."
-  [store label & {:keys [agent findings]}]
-  (let [[did store'] (gen-id store "d")]
-    [(update store' :deltas conj
-             (cond-> {:id did :parent (:id (last (:deltas store)))
-                      :op :done :ns '*session* :at (now-ms)}
-               label    (assoc :label label)
-               agent    (assoc :agent agent)
-               findings (assoc :findings findings)))
-     did]))
-
-(defn record-commit
-  "Append a `:commit` MILESTONE marker (P4-m7) — a named pointer at `target`
-  (a delta id, normally the head the done-point just produced) with a human-facing
-  `description`. The important-done grain above turns; git's annotated
-  tag, inside the journal. `extra` merges op-specific payload into the delta
-  (`:git-sha` import identity; it used to carry a `:tree` snapshot of every
-  namespace, which the projection now derives from the log instead) —
-  it must not carry the core keys (:id :op :ns :parent :at :description
-  :target). Returns [store' delta]."
-  [store description & {:keys [agent target status extra]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :commit :ns '*session* :at (now-ms)
-                       :description description
-                       :target (or target (:id (last (:deltas store))))}
-                agent  (assoc :agent agent)
-                status (assoc :status status)
-                extra  (as-> d (merge extra d)))]
-    [(update store' :deltas conj delta) delta]))
-
-(defn record-deps-add
-  "Append a `:deps-add` delta declaring external dependency `lib` at `coord`
-  (a deps.edn coordinate map, e.g. `{:mvn/version \"1.2.3\"}`), and materialize
-  it into the store's `:deps` manifest via the registry fold. A tracked delta
-  (not a pure marker): it rides history / branches / merge / foreign-sync
-  like every write. Returns [store' delta]."
-  [store lib coord & {:keys [agent prompt namespaces]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :deps-add :ns '*session* :at (now-ms)
-                       :lib lib :coord coord}
-                (seq namespaces) (assoc :namespaces (vec namespaces))
-                agent  (assoc :agent agent)
-                prompt (assoc :prompt prompt))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn record-deps-remove
-  "Append a `:deps-remove` delta dropping `lib` from the manifest.
-  Returns [store' delta]."
-  [store lib & {:keys [agent prompt]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :deps-remove :ns '*session* :at (now-ms)
-                       :lib lib}
-                agent  (assoc :agent agent)
-                prompt (assoc :prompt prompt))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn record-deps-pure
-  "Append a `:deps-pure` delta marking qualified `sym` pure (`pure?` true) or
-  un-pure (false) — the narrowing of M3's effectful-by-default boundary (the
-  author asserts this dep var has no effect slopp should track).
-  Returns [store' delta]."
-  [store sym pure? & {:keys [agent prompt]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :deps-pure :ns '*session* :at (now-ms)
-                       :sym sym :pure (boolean pure?)}
-                agent  (assoc :agent agent)
-                prompt (assoc :prompt prompt))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn record-turn
-  "Append a turn marker (:turn-begin carries the VERBATIM user ask — the root
-  intent of everything that follows; :turn-end closes the bracket, stable or
-  not). Returns [store' delta]."
-  [store kind & {:keys [agent intent user note timing]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op kind :ns '*session* :at (now-ms)}
-                agent  (assoc :agent agent)
-                intent (assoc :intent intent)
-                user   (assoc :user user)
-                note   (assoc :note note)
-                ;; where this ask's wall clock went — {:slopp-ms :outside-ms
-                ;; :top …} — and what its answers cost to send, under :reads.
-                ;; Folded by slopp.read.telemetry/call-timing from what the
-                ;; wire saw. Absent when nothing was called, never zeroed; the
-                ;; read half is absent again when no call carried a size,
-                ;; because that turn was not measured rather than free.
-                timing (assoc :timing timing))]
-    [(update store' :deltas conj delta) delta]))
 
 (defn sources-at
   "The {form-id source-text} content view as of delta `at-id` (inclusive;
@@ -348,16 +194,6 @@
                 (if (= at-id (:id d)) (reduced acc) acc)))
             {}
             (:deltas store))))
-
-(defn record-verification
-  "Append a `:verify` delta recording a test-run result against `ns-sym` — 'what
-  was proven green at this point' (C4, D5/D6 verification-provenance)."
-  [store ns-sym result]
-  (let [parent (:id (last (:deltas store)))
-        [did store] (gen-id store "d")]
-    (update store :deltas conj
-            {:id did :parent parent :op :verify :ns ns-sym :at (now-ms)
-             :result result})))
 
 (defn suffix-touched
   "Form ids touched by content deltas in a delta seq."
@@ -376,18 +212,6 @@
   [store ns-sym fid fallback-store]
   (let [e (or (form-by-id store fid) (form-by-id fallback-store fid))]
     (symbol (str ns-sym) (str (or (:name e) fid)))))
-
-(defn record-file-remove
-  "Drop `path` from the `:files` manifest. ONE `:file-remove` delta.
-  Returns [store' delta]."
-  [store path & {:keys [prompt agent]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :file-remove :ns '*session* :at (now-ms)
-                       :path (str path)}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
 
 (defn file-history
   "Every tracked version of manifest file `path`, oldest first:
@@ -430,33 +254,6 @@
                   :else cur))
               nil upto))))
 
-(defn record-config-put
-  "Set one KEY of the structured config file at `path` (format `fmt`, e.g.
-  :manifest) — the non-code analog of a form edit: the store holds SEMANTIC
-  key/values with per-key history; the projection serializes them into the
-  file format. ONE state-carrying `:config-put` delta. Returns [store' delta]."
-  [store path fmt k v & {:keys [prompt agent]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :config-put :ns '*session* :at (now-ms)
-                       :path (str path) :format fmt
-                       :key (str k) :value (str v)}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn record-config-unset
-  "Remove one key from the config file at `path` (the whole entry when the
-  last key goes). ONE `:config-unset` delta. Returns [store' delta]."
-  [store path k & {:keys [prompt agent]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :config-unset :ns '*session* :at (now-ms)
-                       :path (str path) :key (str k)}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
 (defn render-config
   "Serialize a config entry {:format f :values {k v}} to its file text.
   Formats: :manifest (sorted `K: V` lines). Unknown format → ex-info —
@@ -472,28 +269,6 @@
                               (sort-by key (:values entry))))
     (throw (ex-info (str "no serializer for config format " (:format entry))
                     {:entry entry}))))
-
-(defn record-module-edge
-  "Declare (or retract) ONE module dependency edge — the CRDT grain of the
-  module manifest: concurrent edge declarations touch disjoint state and
-  merge as a set union, and each edge carries its own why (:prompt) in the
-  journal instead of vanishing into a file diff. `action` is :add or
-  :remove. Returns [store' delta].
-
-  `test-only` records the edge in the TEST relation (`:module-test-edges`,
-  op `:module-test-edge`) instead: a module's `-test` namespaces may cross
-  it, its production code may not. Two ops rather than one op with a flag,
-  so `:field` stays a fact about the op and the merge machinery needs no
-  special case."
-  [store from to action & {:keys [prompt agent test-only]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op (if test-only :module-test-edge :module-edge)
-                       :ns '*session* :at (now-ms)
-                       :from (str from) :to (str to) :action action}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
 
 (defn modules-cycle
   "A dependency cycle in a module manifest ({module #{deps}}) as a module
@@ -608,34 +383,6 @@
   (let [v (delay (requiring-resolve qsym))]
     (fn [& args] (apply @v args))))
 
-(defn reorder-to
-  "Reorder `ns-sym`'s forms to match `name-order` (a vector of form names,
-  the ns declaration first) using the fewest trivia-preserving `move-form`s
-  — each an ordinary replayable `:move` delta, so the reorder survives a
-  fresh journal reload. Right-to-left insertion: for each adjacent target
-  pair, ensure the earlier name precedes the later, skipping pairs already
-  ordered. Returns [store' moved-count]."
-  [store ns-sym name-order & {:keys [group prompt agent system]}]
-  (let [target (vec (remove #{ns-sym} name-order))]
-    (loop [st store, i (dec (count target)), moved 0]
-      (if (< i 1)
-        [st moved]
-        (let [earlier (nth target (dec i))
-              later   (nth target i)
-              elems   (get-in st [:namespaces ns-sym :elements])
-              pos     (into {}
-                            (keep-indexed
-                             (fn [k e] (when (and (= :form (:kind e)) (:name e))
-                                         [(:name e) k])))
-                            elems)]
-          (if (and (pos earlier) (pos later) (< (pos earlier) (pos later)))
-            (recur st (dec i) moved)                     ; already ordered
-            (if-let [[st' _] (move-form st ns-sym earlier later
-                                        :group group :prompt prompt :agent agent
-                                        :system system)]
-              (recur st' (dec i) (inc moved))
-              (recur st (dec i) moved))))))))
-
 ;; --- Phase 4 m2: the CRDT merge -------------------------------------------
 (defn method-registrations
   "The defmethod registrations of `ns-sym`, as tracer attribution rows:
@@ -701,29 +448,6 @@
     (into (conj (subvec elems 0 anchor-idx) form-elem)
           (subvec elems anchor-idx))
     (conj elems form-elem)))
-
-(defn record-module-tier
-  "Declare a module's purity TIER (:pure/:internal/:external) — the per-module
-  register behind the functional-core gate (D9): one :module-tier delta
-  carrying its why (:prompt); last write per module wins. A module absent
-  from :module-tiers (or declared :external) is unrestricted. The delta keeps
-  the caller's spelling verbatim; the registry fold canonicalizes state
-  (retired :reads/:effects land as :internal/:external).
-
-  `:action :remove` RETIRES the declaration instead of setting it — the
-  rename path needs it, because a tier describes a NAME and an orphaned one
-  both lists a namespace that no longer exists and leaves the renamed code
-  silently ungated. Returns [store' delta]."
-  [store module tier & {:keys [prompt agent action]}]
-  (let [[did store'] (gen-id store "d")
-        module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
-                        :op :module-tier :ns '*session* :at (now-ms)
-                        :module module :tier tier}
-                 action (assoc :action action)
-                 prompt (assoc :prompt prompt)
-                 agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
 
 (defn forms-named
   "EVERY form in `ns-sym` that answers to `nm` — the plural of `form-named`,
@@ -835,58 +559,11 @@
   [store ns-sym nm]
   (some-> (form-named store ns-sym nm) :node form-sexpr))
 
-(defn record-revert
-  "Append a `:revert` DEAD-END marker delta — a scrapped line of work,
-  recorded so history can later surface WHAT was tried and WHY it was
-  abandoned instead of the exploration vanishing. `forms` are the qualified
-  names put back, `undid` the delta ids undone, `why` the reverting agent's
-  reason (may be nil — the revert is still marked). Returns [store' delta-id]."
-  [store & {:keys [why forms undid agent]}]
-  (let [[did store'] (gen-id store "d")]
-    [(update store' :deltas conj
-             (cond-> {:id did :parent (:id (last (:deltas store)))
-                      :op :revert :ns '*session* :at (now-ms)}
-               why         (assoc :why why)
-               (seq forms) (assoc :forms (vec forms))
-               (seq undid) (assoc :undid (vec undid))
-               agent       (assoc :agent agent)))
-     did]))
-
 (defn sha256-of
   "SHA-256 of a byte array as lowercase hex — the blob address."
   [^bytes bs]
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)]
     (apply str (map #(format "%02x" %) d))))
-
-(defn record-file-put
-  "Track a NON-CODE file on the store's `:files` manifest — these ride every
-  projected tree, so they survive slopp pushes. TEXT (the default):
-  {path → string}, delta carries :content. BINARY (`:encoding \"base64\"`):
-  the decoded bytes are CONTENT-ADDRESSED into `:blobs` ({sha → bytes}) and
-  the manifest entry is `{:sha :content-type :bytes}` — the delta carries
-  the sha and size, NEVER the payload, so a large asset costs the journal
-  ~60 bytes and identical content converges on one blob. ONE state-carrying
-  `:file-put` delta either way; the manifest entry folds via the registry
-  (the fold reads the delta, which is why replay needs no payload), and only
-  the blob BYTES are assoc'd here, where they exist. Returns [store' delta]."
-  [store path text & {:keys [prompt agent encoding content-type]}]
-  (let [[did store'] (gen-id store "d")
-        binary? (= "base64" (str encoding))
-        bs      (when binary?
-                  (.decode (java.util.Base64/getDecoder) (str text)))
-        sha     (when binary? (sha256-of bs))
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :file-put :ns '*session* :at (now-ms)
-                       :path (str path)}
-                (not binary?) (assoc :content (str text))
-                binary?       (assoc :sha sha :bytes (count bs))
-                (and binary? content-type) (assoc :content-type (str content-type))
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(-> (fields/fold store' delta)
-         (cond-> binary? (assoc-in [:blobs sha] bs))
-         (update :deltas conj delta))
-     delta]))
 
 (defn file-content
   "The content the store holds at `path` — the ONE accessor, so no consumer
@@ -916,23 +593,6 @@
     (when-let [a (get (:artifacts store) (str path))]
       (assoc a :content (get (:blobs store) (:sha a))))))
 
-(defn record-ns-delete
-  "Remove namespace `ns-sym` from the store — ONE `:ns-delete` delta. The
-  caller (api/delete-ns!) owns the refusals (non-empty, still required);
-  this is the dumb journal write, like every record-*. Persisting with
-  `nses [ns-sym]` clears the element rows (persist!'s delete-always).
-  Returns [store' delta]."
-  [store ns-sym & {:keys [prompt agent]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :ns-delete :ns ns-sym :at (now-ms)}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(-> store'
-         (update :namespaces dissoc ns-sym)
-         (update :deltas conj delta))
-     delta]))
-
 (defn body-forms
   "Semantic forms of `ns-sym` EXCLUDING its (ns …) declaration, identified
   STRUCTURALLY (first sexpr element = `ns`) — a def whose NAME equals the ns
@@ -943,29 +603,6 @@
   (remove (fn [e] (try (= 'ns (first (n/sexpr (:node e))))
                        (catch Exception _ false)))
           (forms store ns-sym)))
-
-(defn record-module-platform
-  "Declare a module's target PLATFORM (:jvm/:cljc/:cljs) — the per-module
-  register behind the client wave (D-web-cljs). :jvm (default; a module absent
-  from :module-platforms) is Clojure loaded into the JVM oracle; :cljc loads on
-  the JVM (its :clj branch) AND compiles to JS; :cljs compiles to JS only and is
-  never loaded into the oracle. One :module-platform delta carrying its why
-  (:prompt); last write per module wins; the registry fold canonicalizes state.
-
-  `:action :remove` RETIRES the declaration instead of setting it — the rename
-  path needs it, so a platform follows the name it describes rather than
-  stranding a `:cljs` marker on a namespace that no longer exists. Returns
-  [store' delta]."
-  [store module platform & {:keys [prompt agent action]}]
-  (let [[did store'] (gen-id store "d")
-        module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
-                        :op :module-platform :ns '*session* :at (now-ms)
-                        :module module :platform platform}
-                 action (assoc :action action)
-                 prompt (assoc :prompt prompt)
-                 agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
 
 (defn platform-for
   "The target PLATFORM governing `ns-sym` — the MOST SPECIFIC :module-platform
@@ -987,22 +624,6 @@
   [store ns-sym]
   (not= :cljs (platform-for store ns-sym)))
 
-(defn record-client-dep
-  "Declare a BUILD-ONLY dependency (the ClojureScript compiler) at `coord` — the
-  client wave's build-only channel (D-web-cljs). Unlike record-deps-add, this
-  NEVER enters the runtime :deps manifest: a client dep is routed to the :cljs
-  alias in the generated deps.edn (so the compile step resolves it) and is never
-  hot-loaded into the JVM oracle nor shipped in the slim jar. One :client-dep-add
-  delta; last write per lib wins. Returns [store' delta]."
-  [store lib coord & {:keys [prompt agent]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :client-dep-add :ns '*session* :at (now-ms)
-                       :lib lib :coord coord}
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
 (defn kondo-lang
   "The clj-kondo `:lang` for `ns-sym`'s platform (companion to `platform-for`):
   `:cljs`/`:cljc` lint as themselves so `js/*` and `cljs.core` resolve; `:jvm`
@@ -1014,154 +635,18 @@
     :cljc :cljc
     :clj))
 
-(def ^:export auto-reorder-prompt
-  "THE prompt the pipeline's auto-reorder writes. One constant with one
-  home, because two readers care about it: `slopp.edit/resolve-cold-load`
-  writes it, and `prompt-by-form` has to recognise it on deltas written
-  before the `:system` mark existed — the log is append-only, so those
-  cannot be re-stamped. Two string literals would drift silently."
-  "auto-reorder: define before use")
-
 (defn ^:export prompt-by-form
   "THE recorded intent per form: `{form-id prompt}`, each form's most recent
-  ask.
+  authored ask. Both id-carrying shapes count (`:form-id`, `:form-ids`); a
+  `:system` housekeeping delta never overwrites an author's ask; a delta with
+  no `:prompt` contributes nothing.
 
-  `form-card` answered this by reversing the whole delta log and scanning it
-  once per form — fine for a single card, quadratic for a page (this store
-  carries 10,728 deltas). One forward fold gives the answer for every form at
-  once.
-
-  Both id-carrying shapes count: `:form-id` (a single write) and `:form-ids`
-  (a group — one intent across several forms). Later prompts overwrite earlier
-  ones, since the question is the LAST ask; a delta with no `:prompt`
-  contributes nothing and never erases what is already recorded.
-
-  Memoized on the immutable store value like the reference graph: the log is
-  append-only, so a new store value is the only way the answer can change."
+  This is the `:prompts` map `record-delta` keeps current on every append and
+  `load-store` rebuilds by index at open. It used to be a fold over the whole
+  delta list, memoized on store identity — so rebuilt after EVERY write, over
+  34k deltas, to put a `:why` on one card."
   [store]
-  (cache/cached-last
-   ::prompt-by-form store
-   (fn []
-     (reduce (fn [m d]
-               ;; a :system delta is pipeline HOUSEKEEPING (the auto-reorder), not an
-               ;; intent ABOUT the form — it used to overwrite the author's ask on
-               ;; 7% of forms, because the last prompt naming a form wins
-               (if-let [p (and (not (:system d))
-                               ;; legacy: deltas written before the mark existed
-                               (not= auto-reorder-prompt (:prompt d))
-                               (:prompt d))]
-                 (reduce (fn [m2 fid] (assoc m2 fid p))
-                         m
-                         (cond-> (or (:form-ids d) [])
-                           (:form-id d) (conj (:form-id d))))
-                 m))
-             {}
-             (deltas store)))))
-
-(defn record-js-dep
-  "Declare (or with `:remove`, retract) a VENDORED JavaScript library.
-
-  The third dependency world (D-web-cljs deferred it): not a Maven coord and
-  not resolvable, because there is no npm here — the bytes are vendored into
-  the store as an ordinary content-addressed blob and this records the
-  DECLARATION over them: version, delivery `:format` (`:iife`/`:umd`/`:esm`),
-  the `:global` it exports, the `:file` path holding it, and provenance
-  (`:source-url`, `:sha`, `:license`).
-
-  Bytes and declaration are separate on purpose. `record-file-put` already
-  content-addresses the file, so the `:sha` recorded here can be CHECKED
-  against it rather than being a number somebody typed — which is the whole
-  value of recording it.
-
-  Name-grained: two lines declaring different libraries union under merge.
-  One `:js-dep` delta; last write per name wins. Returns [store' delta]."
-  [store js-name spec & {:keys [prompt agent remove]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :js-dep :ns '*session* :at (now-ms)
-                       :name js-name}
-                remove (assoc :action :remove)
-                (not remove) (assoc :spec spec)
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn record-artifact
-  "Register (or with `:remove`, drop) a DERIVED file — downloaded or generated.
-
-  Records only what the file must BE (`:sha`, `:bytes`, `:content-type`) and
-  how to get it back (`:recipe`). It takes no content and has no way to
-  accept any: an artifact that COULD carry its bytes eventually would, and
-  the field would rot back into `:files`.
-
-  Recipes come in two shapes today:
-
-      {:kind :download :npm \"roughjs@4.6.6\" :npm-path \"bundled/rough.js\"
-       :integrity \"sha512-…\"}
-      {:kind :build :tool \"compile_client\"}
-
-  Both answer the same question — how do I make this file again — which is
-  what lets the bytes live on disk as a cache rather than in the journal
-  forever. One `:artifact-put` delta; last write per path wins.
-  Returns [store' delta]."
-  [store path entry & {:keys [prompt agent remove]}]
-  (let [[did store'] (gen-id store "d")
-        delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                       :op :artifact-put :ns '*session* :at (now-ms)
-                       :path (str path)}
-                remove       (assoc :action :remove)
-                (not remove) (assoc :entry (dissoc entry :content :bytes-blob))
-                prompt (assoc :prompt prompt)
-                agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
-(defn set-comment
-  "Set (or clear, with blank `text`) the comment block rendered above form
-  `nm` in `ns-sym`. Returns [store' delta] or {:error msg}.
-
-  A comment BELONGS to the form it describes. Stored positionally as a `:sep`
-  it is content that lives nowhere in the delta log — which is precisely why
-  a milestone had to carry a byte-exact tree snapshot to keep it. Owned by a
-  form it is ordinary content: recorded in the delta, replayable from the log
-  alone, and mergeable without a position to reconcile.
-
-  The positional predecessor already conceded this: its delta anchored on the
-  form's id rather than an index, because positions shift under a merge. This
-  finishes the move — the form does not just sit after the comment, it owns
-  it.
-
-  Refuses text containing a code form, same as trivia: forms come in through
-  the form verbs, which verify. Stored WITHOUT a trailing newline; the
-  renderer supplies the separator, because how it is spaced is a rendering
-  decision and not data."
-  [store ns-sym nm text & {:keys [prompt agent]}]
-  (let [elems (get-in store [:namespaces ns-sym :elements])
-        idx   (first (keep-indexed
-                      (fn [i e] (when (and (= :form (:kind e)) (= nm (:name e))) i))
-                      elems))]
-    (cond
-      (nil? elems) {:error (str "no namespace " ns-sym)}
-      (nil? idx)   {:error (str "no form named " nm " in " ns-sym)}
-      (some n/sexpr-able? (n/children (p/parse-string-all (str text))))
-      {:error (str "comments only — that text contains a code form"
-                   " (use edit_add_form for forms)")}
-      :else
-      (let [norm (when-not (str/blank? (str text))
-                   (str/replace (str text) #"\n+\z" ""))
-            [did store'] (gen-id store "d")
-            delta (cond-> {:id did :parent (:id (last (:deltas store)))
-                           :op :comment :ns ns-sym
-                           :form-id (:id (nth elems idx))
-                           :text norm :at (now-ms)}
-                    prompt (assoc :prompt prompt)
-                    agent  (assoc :agent agent))]
-        [(-> store'
-             (assoc-in [:namespaces ns-sym :elements]
-                       (update elems idx
-                               (fn [e] (if norm (assoc e :comment norm)
-                                           (dissoc e :comment)))))
-             (update :deltas conj delta))
-         delta]))))
+  (or (:prompts store) {}))
 
 (defn fold-comments
   "Resolve every run of trivia in `elements`: attach its CONTENT to the form
@@ -1274,31 +759,6 @@
                  (conj done ready))
           (into result remaining))))))
 
-(defn record-module-role
-  "Declare a module's ROLE — :product (the default; a module absent from
-  :module-roles) is code the SYSTEM runs, and it ships; :instrument is code a
-  HUMAN runs by hand — a benchmark, a seeding script, a mining CLI — which R5
-  says lives in one module and does not ship. The role decides where `build!`
-  materializes the code (`instruments/` rather than `src/`, so any build that
-  jars `src` excludes it) and whether the architecture VIEW counts it, since an
-  instrument on the layer map puts a harness at the apex of the product.
-  One :module-role delta carrying its why (:prompt); last write per module
-  wins; the registry fold canonicalizes state.
-
-  `:action :remove` RETIRES the declaration instead of setting it — an absent
-  declaration is not the same claim as :product, and the rename and delete
-  paths both need the difference. Returns [store' delta]."
-  [store module role & {:keys [prompt agent action]}]
-  (let [[did store'] (gen-id store "d")
-        module (str module)
-        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
-                        :op :module-role :ns '*session* :at (now-ms)
-                        :module module :role role}
-                 action (assoc :action action)
-                 prompt (assoc :prompt prompt)
-                 agent  (assoc :agent agent))]
-    [(update (fields/fold store' delta) :deltas conj delta) delta]))
-
 (defn role-for
   "The ROLE governing `ns-sym` — the MOST SPECIFIC :module-role declaration wins
   (the namespace itself, then each enclosing prefix, then its module), else
@@ -1317,125 +777,6 @@
      (or (some #(get roles (str/join "." (take % segs)))
                (range (count segs) 0 -1))
          :product))))
-
-(def name-keyed-registers
-  "Every register keyed by a NAME — the total account of where a namespace or
-  module name appears in the store OUTSIDE the code that spells it.
-
-  A name in code is a REFERENCE and the CST rewrite reaches it. A name in a
-  register is a DECLARATION ABOUT a name: no rewrite walks it, so it has to be
-  re-keyed by the verb that moves the name, and missing one is silent — the
-  declaration is left describing a namespace that no longer exists while the
-  code that moved goes ungated. This store accumulated fifteen orphans in one
-  wave of deletions that way.
-
-  The lesson was learned once, at NAMESPACE grain, and the fix was this map's
-  ancestor. It did not generalise: the two MODULE-grained registers were
-  re-keyed by a hand-written arm that named `:modules` and never
-  `:module-test-edges`, so which failure a rename produced depended on nothing
-  a reader could see — whether the edge happened to be test-only. A sixth
-  register joins by adding a row here, and
-  `a-rename-leaves-no-name-keyed-register-naming-the-old-name` derives its
-  population from the store value, so it grades the row whether or not anyone
-  remembers to grade it.
-
-  Per row: `:kind` is `:declaration` (a claim ABOUT a name) or `:primary` (the
-  index the name itself lives in); `:grain` is `:namespace` — deep namespaces
-  follow by prefix — or `:module`, the first two segments; `:in-values` marks
-  the registers that also name modules in their VALUES, so a re-key must walk
-  both sides; `:record` is the `record-*` fn where the register has one of the
-  namespace-grained shape, and `:rekeyed-by` says who owns the move where it
-  does not.
-
-  `:namespaces` is declared here rather than exempted by omission. It is the
-  primary index, not a claim about a name, and `ns-rename!` re-keys it
-  directly — but a row nobody wrote and a row deliberately handled elsewhere
-  look identical from outside, which is the conflation this registry exists to
-  refuse."
-  {:namespaces        {:kind :primary     :grain :namespace
-                       :rekeyed-by "ns-rename! directly — it IS the index"}
-   :module-tiers      {:kind :declaration :grain :namespace
-                       :record record-module-tier}
-   :module-platforms  {:kind :declaration :grain :namespace
-                       :record record-module-platform}
-   :module-roles      {:kind :declaration :grain :namespace
-                       :record record-module-role}
-   :modules           {:kind :declaration :grain :module :in-values true
-                       :edge-opts {}
-                       :rekeyed-by "rekey-module-registers, via record-module-edge"}
-   :module-test-edges {:kind :declaration :grain :module :in-values true
-                       :edge-opts {:test-only true}
-                       :rekeyed-by "rekey-module-registers, via record-module-edge"}})
-
-(def ns-grained-registers
-  "The registers keyed by NAMESPACE rather than by form — field → the `record-*`
-  fn that writes it. A declaration here describes a NAME, so it has to follow a
-  rename and retire with a delete; both paths iterate this map rather than
-  naming the registers one at a time.
-
-  That is the whole point of it being data. `ns-rename!` and `delete-ns!` each
-  hand-enumerated the set, two arms apiece, and the failure mode of missing one
-  is SILENT: the declaration is left naming a namespace that no longer exists
-  while the code that moved goes ungated, which is how slopp's own store
-  accumulated fifteen orphans in one wave of deletions.
-
-  DERIVED from [[name-keyed-registers]], which is the total account across both
-  grains — a fourth ns-grained register joins by adding a row THERE. Restating
-  the set here is what let the two lists disagree: this one carried
-  `:module-roles` and `refs/occurrences-of`'s copy did not, so a role
-  declaration was re-keyed by the rename and invisible to the report that says
-  what the rename left behind.
-
-  Every value takes `[store module value & {:keys [prompt agent action]}]` and
-  returns `[store' delta]`, with `:action :remove` retiring the declaration —
-  absent is not the same claim as the default."
-  (into {} (for [[reg {:keys [grain record]}] name-keyed-registers
-                 :when (and (= :namespace grain) record)]
-             [reg record])))
-
-(defn rekey-module-registers
-  "Re-key every MODULE-grained register from `old-mod` to `new-mod` → `store'`.
-
-  The manifest names modules on BOTH sides of an edge, so a module that renames
-  has to be rewritten as a KEY (its own outgoing edges) and as a VALUE
-  (everyone else's edges to it). [[name-keyed-registers]] is the population and
-  each row carries its own `:edge-opts`, so the TEST relation is one option
-  rather than one branch — which is exactly what it was, and why
-  `:module-test-edges` was left naming the old module by every rename that ever
-  ran while `:modules` followed correctly beside it.
-
-  A self-edge is dropped rather than recorded: after the substitution both
-  endpoints can be the same module, and a module never declares itself."
-  [store old-mod new-mod & {:keys [prompt agent]}]
-  (let [sub #(if (= old-mod %) new-mod %)]
-    (reduce
-     (fn [s0 [reg row]]
-       (let [edge (fn [st from to action]
-                    (first (apply record-module-edge st from to action
-                                  (mapcat identity (assoc (:edge-opts row)
-                                                          :prompt prompt
-                                                          :agent agent)))))]
-         (reduce
-          (fn [s [m deps]]
-            (cond
-              (= m old-mod)
-              (as-> s $
-                (reduce #(edge %1 m %2 :remove) $ (sort deps))
-                (reduce #(edge %1 new-mod %2 :add) $
-                        (sort (disj (into #{} (map sub) deps) new-mod))))
-
-              (contains? deps old-mod)
-              (as-> s $
-                (edge $ m old-mod :remove)
-                (if (= m new-mod) $ (edge $ m new-mod :add)))
-
-              :else s))
-          ;; rows come from the ORIGINAL store while `s` accumulates: the two
-          ;; registers are disjoint state, and re-reading a register mid-rewrite
-          ;; would walk edges this call had just written
-          s0 (get store reg))))
-     store
-     (filter #(= :module (:grain (val %))) name-keyed-registers))))
 
 (defn ^:export form-name-meta
   "The metadata on a stored form's NAME symbol — `^:generated`, `^:export`,
@@ -1462,72 +803,20 @@
     (when (and (seq? s) (symbol? (second s)))
       (meta (second s)))))
 
-(defn record-observation
-  "Append an `:observe` delta recording that tests RAN and what happened —
-  the second journal citizen beside `:verify`, and deliberately not the same
-  one.
-
-  A VERIFICATION is a claim a WRITE makes about the store. An OBSERVATION is
-  narrower — *these tests ran, in this tier, and this is what happened* —
-  which is why `test_run` and the external tier could not simply append a
-  `:verify`: `done`'s scope logic, milestone `:status` and the trace map all
-  read `:verify`, and widening it would weaken what a verification MEANS.
-
-  Three facts, in three places:
-
-  - `scope` — WHAT was observed. One namespace symbol or a collection of them;
-    it lands in `:scope` as a VECTOR. It does NOT go in `:ns`: that column
-    holds ONE namespace (every consumer reads it that way — replay, merge, the
-    outline), so a collection put there is flattened by `(str …)` into a single
-    symbol whose name is the printed list. Measured before this was fixed: 2293
-    characters for one run, and the scope unreadable per-namespace in all 27
-    recorded observations. `:ns` therefore carries the `*session*` sentinel
-    that `:done`, `:commit` and `:turn-begin` already use for a marker that is
-    not about one namespace — always, so the scope has exactly one home and the
-    two cannot disagree.
-  - `result` — WHAT HAPPENED. Carries `:tier`, `:status`, `:ran`, and
-    `:failures` as a LIST of `{:test <qualified-sym>}` — **the same shape the
-    in-image summary uses**, so a reader of red evidence needs one spelling and
-    not two. Producers must QUALIFY before recording: clojure.test prints
-    `FAIL in (name)` and the external tier's own `:failing` blocks carry that
-    bare name, which cannot be matched back to a form.
-  - `closure` (optional) — AT WHAT CONTENT, as
-    {namespace [[slopp.ops.engine/closure-hashes]]}. This is what makes the
-    record a KEY rather than a diary entry: *these tests were green against
-    exactly this content*, askable later by a different process from the
-    journal alone. Omitted rather than empty when the caller has none, because
-    an empty map reads as \"nothing depended on anything\".
-
-  (`:verify` still puts its namespace list in `:ns` and has the same flattening
-  problem. It is on the verification path rather than the evidence path,
-  nothing reads that list today, and 7918 of them already exist — so it is a
-  separate change with its own risk, not a rename to fold in here.)
-
-  Registered in [[slopp.store.fields/markers]] as a no-content op, or foreign
-  sync full-reloads on every sighting of it."
-  ([store scope result] (record-observation store scope result nil))
-  ([store scope result closure]
-   (let [parent (:id (last (:deltas store)))
-         [did store] (gen-id store "d")
-         scope (vec (if (coll? scope) scope [scope]))]
-     (update store :deltas conj
-             (cond-> {:id did :parent parent :op :observe :ns '*session*
-                      :at (now-ms) :scope scope :result result}
-               (seq closure) (assoc :closure closure))))))
-
 (defn last-write-on
-  "The most recent delta whose subject is `ns-sym`, or nil.
+  "The most recent delta whose subject is `ns-sym` — as `{:id :prompt}` — or
+  nil.
 
   A write reloads its WHOLE namespace, so this is what most recently
   re-evaluated every form in it — a different question from what last changed
   any one form, and the one a staleness report needs. The form a captured
   value has fallen behind is frequently one nobody edited.
 
-  Session-scoped deltas never match and need no filtering: `:done` and
-  `:observe` carry `*session*`, and `:verify` carries a VECTOR of namespaces,
-  so equality against a symbol excludes all three."
+  Read from the `:last-write` map `record-delta` keeps and `load-store`
+  rebuilds; session-scoped markers never enter it. It was an uncached
+  `(last (filter …))` over the whole delta list, on the staleness path."
   [store ns-sym]
-  (last (filter #(= ns-sym (:ns %)) (deltas store))))
+  (get-in store [:last-write ns-sym]))
 
 (def ^:private simple-def-heads
   "Heads whose ONLY definition is the symbol in second position.
@@ -1615,6 +904,125 @@
                                     (drop 2 kids))
                   #{})))))))))
 
+(def ^:export projected-config-paths
+  "Tree paths that are RENDERINGS of structured store state, not authored
+  files — the import side of what `commit-paths` writes.
+
+  Every projected tree carries these: `render-config` turns a `:config` entry
+  into its file format, and the module manifest projects as `modules`. So a
+  git remote always shows them, and an importer that treats them as ordinary
+  files writes a SECOND copy of a fact the store already holds semantically —
+  in `:files`, which the projection also reads, so the two can then disagree.
+  `modules` is the sharpest case: `config_file` refuses that path outright
+  because the manifest is edge-grain, while a file write had no such
+  objection.
+
+  DECLARED rather than derived from `(:config store)`, because the store that
+  needs the answer is often the one missing the entry: a fresh clone holds no
+  config at all, and that is exactly when an incoming change would be blobbed.
+  Callers should treat a path as projected if it is in here OR the store
+  already has `:config` for it — the set covers slopp's own paths on a store
+  that has never seen them, and the store's own keys cover a project's."
+  #{"capabilities" "client" "gates" "rules" "vocabulary"
+    "META-INF/MANIFEST.MF" "modules"})
+
+(defn ^:export name-lost?
+  "True when `node` renders to source that NAMES something while the node
+  itself answers to NO name — a node that has stopped agreeing with its own
+  text.
+
+  **The independent signal.** `stored-name-check` compares an element's
+  `:name` against `form-symbol` of its node, which is right and is
+  structurally blind to this: when a node breaks in a way `form-symbol`
+  cannot read, BOTH sides go nil, they agree, and agreement is what the check
+  reads as health. Two derivations that fail together cannot police each
+  other.
+
+  Re-parsing the rendered string is a different route to the same question, so
+  a node whose identity has drifted from its source is visible without
+  trusting the derivation that drifted.
+
+  Measured cause: a zipper rewrite returned `z/root`'s `:forms` WRAPPER rather
+  than the form inside it. `form-symbol` refuses a wrapper deliberately — one
+  may hold several forms, so the name is genuinely ambiguous — so a form whose
+  source plainly read `(def ^:export rule-catalog …)` was stored anonymous.
+  Every name-addressed surface then lost it silently, and an exported var was
+  reported as package-private by a rule that had no way to know."
+  [node]
+  (and (nil? (form-symbol node))
+       (some? (form-symbol (p/parse-string (n/string node))))))
+
+(def ^:export local-config-paths
+  "Config paths that stay in the DB — they reach neither a built tree nor a
+  projected one.
+
+  Every other config path ships: `ops.external/build!` writes each `:config`
+  entry as a file at its own path, and `git/commit-paths` puts each one in
+  every projected tree. That is right for `capabilities`, `rules` and `gates`,
+  which configure the PRODUCT and must travel with it.
+
+  `dev` does not. It says what to RUN while somebody is working on this
+  project — an entry point, arguments, a port — which is a fact about a
+  development session rather than about the program. Shipping it would put a
+  developer's port number in a jar and a git tree, and a second developer's
+  pull would then carry the first one's choices.
+
+  DECLARED rather than derived, for the same reason
+  [[projected-config-paths]] is: the store that needs the answer is often the
+  one missing the entry, and a fresh clone holds no config at all.
+
+  **This set WINS over the has-config fallback.** That docstring tells callers
+  to treat a path as projected if it is in the projected set OR the store
+  already holds `:config` for it — which is true of every dev entry somebody
+  has set. Read naively, the fallback projects precisely the thing that must
+  never be projected, so the local check comes first:
+
+      (and (not (local-config-paths path))
+           (or (projected-config-paths path) (get-in st [:config path])))
+
+  The two sets are disjoint, and a test asserts it — a path declared both ways
+  has no sensible reading and would fail silently in whichever direction the
+  caller happened to ask."
+  #{"dev"})
+
+(defn record-delta
+  "THE door for appending delta `d` to the store value. Every writer and
+  `replay-delta` come through here, so what the value knows about its own
+  history is maintained in exactly one place:
+
+  - `:head` — `(:id d)`, and `:line-pos` — one more. The whole write path
+    (`try-commit!`, `refresh-cache!`, the CAS in `append!`) ever read the
+    delta list for these two scalars.
+  - `:prompts` — `{form-id prompt}`, each form's newest AUTHORED ask. A
+    `:system` delta is pipeline housekeeping and never overwrites it; nor
+    does the text those writes carried before the mark existed
+    (`auto-reorder-prompt`). `prompt-by-form` used to fold the whole log
+    after every write to answer this for one card.
+  - `:last-write` — `{ns {:id :prompt}}`, the delta that most recently
+    reloaded each namespace. A session-scoped marker reloads none.
+
+  These are the derived facts a PURE reader can be handed; everything else
+  about history — which deltas touched a form, what a form was at a
+  milestone, the merge — is a `slopp.store.db` read over the journal."
+  [store d]
+  (let [ns-sym (:ns d)
+        fids   (cond-> (or (:form-ids d) [])
+                 (:form-id d) (conj (:form-id d)))
+        p      (:prompt d)
+        ask?   (and (string? p) (seq p)
+                    (not (:system d))
+                    (not= fields/auto-reorder-prompt p))]
+    (cond-> (-> store
+                (update :deltas conj d)
+                (assoc :head (:id d))
+                (update :line-pos (fnil inc 0)))
+      ask?
+      (update :prompts (fn [m] (reduce #(assoc %1 %2 p) (or m {}) fids)))
+
+      (and (symbol? ns-sym) (not= '*session* ns-sym))
+      (assoc-in [:last-write ns-sym]
+                (cond-> {:id (:id d)} p (assoc :prompt p))))))
+
 (defn ingest
   "Parse `source` into `ns-sym`'s ordered elements, assigning a fresh id to each
   form, and append an `:ingest` delta. Returns the new store."
@@ -1638,29 +1046,29 @@
                                  elements)]
           (-> store
               (assoc-in [:namespaces ns-sym :elements] elements)
-              (update :deltas conj
-                      (cond-> {:id did
-                               ;; NOT nil. This hardcoded a ROOT, and a log has
-                               ;; exactly one (d0). Every :ingest delta — one per
-                               ;; namespace ever created — cut the chain where
-                               ;; that namespace was born, so any walk back
-                               ;; through it stopped there. `store` is still
-                               ;; pre-append here, so its last delta IS the parent.
-                               :parent (:id (last (:deltas store)))
-                               :op :ingest :ns ns-sym
-                               :at (now-ms)
-                               :form-ids (into [] (keep :id) elements)
-                               ;; per-version content (C3/C4): history must be
-                               ;; reconstructible from the log alone. That was
-                               ;; a claim this delta could not honour while
-                               ;; comments lived in unrecorded :sep elements.
-                               :sources  (into {}
-                                               (keep (fn [e]
-                                                       (when (:id e)
-                                                         [(:id e) (n/string (:node e))])))
-                                               elements)}
-                        (seq comments) (assoc :comments comments)
-                        agent (assoc :agent agent)))))))))
+              (record-delta
+               (cond-> {:id did
+                        ;; NOT nil. This hardcoded a ROOT, and a log has
+                        ;; exactly one (d0). Every :ingest delta — one per
+                        ;; namespace ever created — cut the chain where
+                        ;; that namespace was born, so any walk back
+                        ;; through it stopped there. `store` is still
+                        ;; pre-append here, so its last delta IS the parent.
+                        :parent (:id (last (:deltas store)))
+                        :op :ingest :ns ns-sym
+                        :at (now-ms)
+                        :form-ids (into [] (keep :id) elements)
+                        ;; per-version content (C3/C4): history must be
+                        ;; reconstructible from the log alone. That was
+                        ;; a claim this delta could not honour while
+                        ;; comments lived in unrecorded :sep elements.
+                        :sources  (into {}
+                                        (keep (fn [e]
+                                                (when (:id e)
+                                                  [(:id e) (n/string (:node e))])))
+                                        elements)}
+                 (seq comments) (assoc :comments comments)
+                 agent (assoc :agent agent)))))))))
 
 (defn replace-node
   "Replace the CST node of the form named `nm` in `ns-sym`, keeping its stable id
@@ -1691,7 +1099,7 @@
                        agent (assoc :agent agent))]
         [(-> store
              (assoc-in [:namespaces ns-sym :elements] (assoc elems idx new-elem))
-             (update :deltas conj delta))
+             (record-delta delta))
          delta]))))
 
 (defn append-form
@@ -1723,8 +1131,218 @@
                              agent (assoc :agent agent))]
           [(-> store'
                (assoc-in [:namespaces ns-sym :elements] new-elems)
-               (update :deltas conj delta))
+               (record-delta delta))
            delta])))))
+
+(defn remove-form
+  "Remove the form named `nm` from `ns-sym`; ONE `:delete` delta. Returns
+  [store' delta], or nil if no such form.
+
+  `nm` may be a name the form defines OR its form id — names win, matching
+  `form-named` (#131): an id is a registration's only handle, and the delete
+  path addresses defmethods that way."
+  [store ns-sym nm & {:keys [prompt group agent]}]
+  (let [elems (get-in store [:namespaces ns-sym :elements])
+        by-name (fn [e] (and (= :form (:kind e)) (= nm (:name e))))
+        by-id   (fn [e] (and (= :form (:kind e)) (= (str nm) (:id e))))
+        idx   (or (when-not (string? nm)
+                    (first (keep-indexed (fn [i e] (when (by-name e) i)) elems)))
+                  (first (keep-indexed (fn [i e] (when (by-id e) i)) elems)))]
+    (when idx
+      (let [fid          (:id (nth elems idx))
+            new-elems    (into (subvec elems 0 idx) (subvec elems (inc idx)))
+            [did store'] (gen-id store "d")
+            delta        (cond-> {:id did :parent (:id (last (:deltas store)))
+                                  :op :delete :ns ns-sym :form-id fid :name nm
+                                  :removed-source (n/string (:node (nth elems idx)))
+                                  :prompt prompt :at (now-ms)}
+                           group (assoc :group group)
+                           agent (assoc :agent agent))]
+        [(-> store'
+             (assoc-in [:namespaces ns-sym :elements] new-elems)
+             (record-delta delta))
+         delta]))))
+
+(defn move-form
+  "Move the form named `nm` to just before the form named `before-nm` (S2 —
+  fixes append-only forward references). ONE `:move` delta. Returns
+  [store' delta], or nil if either form is missing."
+  [store ns-sym nm before-nm & {:keys [prompt group agent system]}]
+  (let [elems  (get-in store [:namespaces ns-sym :elements])
+        idx-of (fn [es n]
+                 (first (keep-indexed
+                         (fn [i e] (when (and (= :form (:kind e)) (= n (:name e))) i))
+                         es)))
+        i (idx-of elems nm)
+        j (idx-of elems before-nm)]
+    (when (and i j (not= nm before-nm))
+      (let [moved     (nth elems i)
+            without   (into (subvec elems 0 i) (subvec elems (inc i)))
+            j'        (idx-of without before-nm)
+            new-elems (-> (subvec without 0 j')
+                          (conj moved)
+                          (into (subvec without j')))
+            [did store'] (gen-id store "d")
+            delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                           :op :move :ns ns-sym
+                           :form-id (:id moved) :before before-nm
+                           :prompt prompt :at (now-ms)}
+                    group  (assoc :group group)
+                    agent  (assoc :agent agent)
+                    system (assoc :system true))]
+        [(-> store'
+             (assoc-in [:namespaces ns-sym :elements] new-elems)
+             (record-delta delta))
+         delta]))))
+
+(defn apply-changeset
+  "Coordinated multi-form edit (e.g. rename): replace several forms' nodes —
+  possibly across namespaces — as ONE delta. `changeset` = {form-id new-node}.
+  `extra` is merged into the delta (e.g. {:old .. :new ..}). Returns
+  [store' delta]."
+  [store op ns-sym changeset & {:keys [prompt extra agent]}]
+  ;; REFUSE a node that has stopped naming what its own source names. This is
+  ;; the write that produced the corruption [[name-lost?]] describes, and it is
+  ;; the last place the store can still say no: everything after this addresses
+  ;; the form by a name it no longer has, so the failure surfaces far away and
+  ;; as something else entirely.
+  ;;
+  ;; A THROW rather than a teaching string, because the buggy party is a rewrite
+  ;; pass and not the author — there is no edit an agent could make in response,
+  ;; and a store that quietly holds an unaddressable form is worse than a loud
+  ;; stop.
+  (when-let [bad (seq (sort (for [[fid node] changeset :when (name-lost? node)] fid)))]
+    (throw (ex-info
+            (str "this write would store " (count bad) " form(s) under NO NAME"
+                 " while their own source defines one — " (str/join ", " bad)
+                 " in " ns-sym ". A node that does not name what its text names"
+                 " is unreachable by every name-addressed surface, silently:"
+                 " rename_sweep skips it and reports success, edit_subform says"
+                 " no form named x, and a rule looking the var up reports it"
+                 " missing. The producer is a rewrite pass that returned a"
+                 " z/root :forms wrapper instead of the form inside it —"
+                 " refactor/unwrap-forms is what it owes.")
+            {:forms (vec bad) :ns ns-sym :op op})))
+  (let [[did store'] (gen-id store "d")
+        delta (merge (cond-> {:id did :parent (:id (last (:deltas store)))
+                              :op op :ns ns-sym :at (now-ms)
+                              :form-ids (vec (sort (keys changeset)))
+                              :sources  (into {} (map (fn [[fid node]]
+                                                        [fid (n/string node)]))
+                                              changeset)
+                              :prompt prompt}
+                       agent (assoc :agent agent))
+                     extra)
+        store' (reduce-kv
+                (fn [st ns-key {:keys [elements]}]
+                  (assoc-in st [:namespaces ns-key :elements]
+                            (mapv (fn [e]
+                                    (if-let [node (get changeset (:id e))]
+                                      (assoc e :node node :name (form-symbol node)
+                                     :names (form-symbols node))
+                                      e))
+                                  elements)))
+                store' (:namespaces store'))]
+    [(record-delta store' delta) delta]))
+
+(defn record-done
+  "Append a `:done` boundary delta — a unit-of-work marker (and the
+  close of `agent`'s episode). `:findings` is the done-processing verdict
+  ({:test-status :failures :lint-errors ...}) riding the delta so history
+  and the next session's brief can surface what the episode left behind.
+  Returns [store' delta-id]."
+  [store label & {:keys [agent findings]}]
+  (let [[did store'] (gen-id store "d")]
+    [(record-delta store'
+             (cond-> {:id did :parent (:id (last (:deltas store)))
+                      :op :done :ns '*session* :at (now-ms)}
+               label    (assoc :label label)
+               agent    (assoc :agent agent)
+               findings (assoc :findings findings)))
+     did]))
+
+(defn record-commit
+  "Append a `:commit` MILESTONE marker (P4-m7) — a named pointer at `target`
+  (a delta id, normally the head the done-point just produced) with a human-facing
+  `description`. The important-done grain above turns; git's annotated
+  tag, inside the journal. `extra` merges op-specific payload into the delta
+  (`:git-sha` import identity; it used to carry a `:tree` snapshot of every
+  namespace, which the projection now derives from the log instead) —
+  it must not carry the core keys (:id :op :ns :parent :at :description
+  :target). Returns [store' delta]."
+  [store description & {:keys [agent target status extra]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :commit :ns '*session* :at (now-ms)
+                       :description description
+                       :target (or target (:id (last (:deltas store))))}
+                agent  (assoc :agent agent)
+                status (assoc :status status)
+                extra  (as-> d (merge extra d)))]
+    [(record-delta store' delta) delta]))
+
+(defn record-deps-add
+  "Append a `:deps-add` delta declaring external dependency `lib` at `coord`
+  (a deps.edn coordinate map, e.g. `{:mvn/version \"1.2.3\"}`), and materialize
+  it into the store's `:deps` manifest via the registry fold. A tracked delta
+  (not a pure marker): it rides history / branches / merge / foreign-sync
+  like every write. Returns [store' delta]."
+  [store lib coord & {:keys [agent prompt namespaces]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :deps-add :ns '*session* :at (now-ms)
+                       :lib lib :coord coord}
+                (seq namespaces) (assoc :namespaces (vec namespaces))
+                agent  (assoc :agent agent)
+                prompt (assoc :prompt prompt))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-deps-remove
+  "Append a `:deps-remove` delta dropping `lib` from the manifest.
+  Returns [store' delta]."
+  [store lib & {:keys [agent prompt]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :deps-remove :ns '*session* :at (now-ms)
+                       :lib lib}
+                agent  (assoc :agent agent)
+                prompt (assoc :prompt prompt))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-deps-pure
+  "Append a `:deps-pure` delta marking qualified `sym` pure (`pure?` true) or
+  un-pure (false) — the narrowing of M3's effectful-by-default boundary (the
+  author asserts this dep var has no effect slopp should track).
+  Returns [store' delta]."
+  [store sym pure? & {:keys [agent prompt]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :deps-pure :ns '*session* :at (now-ms)
+                       :sym sym :pure (boolean pure?)}
+                agent  (assoc :agent agent)
+                prompt (assoc :prompt prompt))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-turn
+  "Append a turn marker (:turn-begin carries the VERBATIM user ask — the root
+  intent of everything that follows; :turn-end closes the bracket, stable or
+  not). Returns [store' delta]."
+  [store kind & {:keys [agent intent user note timing]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op kind :ns '*session* :at (now-ms)}
+                agent  (assoc :agent agent)
+                intent (assoc :intent intent)
+                user   (assoc :user user)
+                note   (assoc :note note)
+                ;; where this ask's wall clock went — {:slopp-ms :outside-ms
+                ;; :top …} — and what its answers cost to send, under :reads.
+                ;; Folded by slopp.read.telemetry/call-timing from what the
+                ;; wire saw. Absent when nothing was called, never zeroed; the
+                ;; read half is absent again when no call carried a size,
+                ;; because that turn was not measured rather than free.
+                timing (assoc :timing timing))]
+    [(record-delta store' delta) delta]))
 
 (defn replay-delta
   "Apply a FOREIGN delta from the SAME journal (linear history — ids are
@@ -1754,7 +1372,7 @@
         ;; allocation abolishes — under concurrency only, which is the shape
         ;; nobody is watching. Inference is not redundant here; it is a second
         ;; source of truth for a value that now has one.
-        with-d  (fn [st] (update st :deltas conj d))
+        with-d  (fn [st] (record-delta st d))
         idx-of  (fn [elems pred]
                   (first (keep-indexed (fn [i e] (when (pred e) i)) elems)))
         ;; `apply-changeset` rewrites nodes BY FORM-ID, possibly across
@@ -1885,103 +1503,532 @@
         ;; a retired or unknown op → full reload
         nil))))
 
-(def ^:export projected-config-paths
-  "Tree paths that are RENDERINGS of structured store state, not authored
-  files — the import side of what `commit-paths` writes.
+(defn record-verification
+  "Append a `:verify` delta recording a test-run result against `ns-sym` — 'what
+  was proven green at this point' (C4, D5/D6 verification-provenance)."
+  [store ns-sym result]
+  (let [parent (:id (last (:deltas store)))
+        [did store] (gen-id store "d")]
+    (record-delta store
+                  {:id did :parent parent :op :verify :ns ns-sym :at (now-ms)
+                   :result result})))
 
-  Every projected tree carries these: `render-config` turns a `:config` entry
-  into its file format, and the module manifest projects as `modules`. So a
-  git remote always shows them, and an importer that treats them as ordinary
-  files writes a SECOND copy of a fact the store already holds semantically —
-  in `:files`, which the projection also reads, so the two can then disagree.
-  `modules` is the sharpest case: `config_file` refuses that path outright
-  because the manifest is edge-grain, while a file write had no such
-  objection.
-
-  DECLARED rather than derived from `(:config store)`, because the store that
-  needs the answer is often the one missing the entry: a fresh clone holds no
-  config at all, and that is exactly when an incoming change would be blobbed.
-  Callers should treat a path as projected if it is in here OR the store
-  already has `:config` for it — the set covers slopp's own paths on a store
-  that has never seen them, and the store's own keys cover a project's."
-  #{"capabilities" "client" "gates" "rules" "vocabulary"
-    "META-INF/MANIFEST.MF" "modules"})
-
-(defn ^:export name-lost?
-  "True when `node` renders to source that NAMES something while the node
-  itself answers to NO name — a node that has stopped agreeing with its own
-  text.
-
-  **The independent signal.** `stored-name-check` compares an element's
-  `:name` against `form-symbol` of its node, which is right and is
-  structurally blind to this: when a node breaks in a way `form-symbol`
-  cannot read, BOTH sides go nil, they agree, and agreement is what the check
-  reads as health. Two derivations that fail together cannot police each
-  other.
-
-  Re-parsing the rendered string is a different route to the same question, so
-  a node whose identity has drifted from its source is visible without
-  trusting the derivation that drifted.
-
-  Measured cause: a zipper rewrite returned `z/root`'s `:forms` WRAPPER rather
-  than the form inside it. `form-symbol` refuses a wrapper deliberately — one
-  may hold several forms, so the name is genuinely ambiguous — so a form whose
-  source plainly read `(def ^:export rule-catalog …)` was stored anonymous.
-  Every name-addressed surface then lost it silently, and an exported var was
-  reported as package-private by a rule that had no way to know."
-  [node]
-  (and (nil? (form-symbol node))
-       (some? (form-symbol (p/parse-string (n/string node))))))
-
-(defn apply-changeset
-  "Coordinated multi-form edit (e.g. rename): replace several forms' nodes —
-  possibly across namespaces — as ONE delta. `changeset` = {form-id new-node}.
-  `extra` is merged into the delta (e.g. {:old .. :new ..}). Returns
-  [store' delta]."
-  [store op ns-sym changeset & {:keys [prompt extra agent]}]
-  ;; REFUSE a node that has stopped naming what its own source names. This is
-  ;; the write that produced the corruption [[name-lost?]] describes, and it is
-  ;; the last place the store can still say no: everything after this addresses
-  ;; the form by a name it no longer has, so the failure surfaces far away and
-  ;; as something else entirely.
-  ;;
-  ;; A THROW rather than a teaching string, because the buggy party is a rewrite
-  ;; pass and not the author — there is no edit an agent could make in response,
-  ;; and a store that quietly holds an unaddressable form is worse than a loud
-  ;; stop.
-  (when-let [bad (seq (sort (for [[fid node] changeset :when (name-lost? node)] fid)))]
-    (throw (ex-info
-            (str "this write would store " (count bad) " form(s) under NO NAME"
-                 " while their own source defines one — " (str/join ", " bad)
-                 " in " ns-sym ". A node that does not name what its text names"
-                 " is unreachable by every name-addressed surface, silently:"
-                 " rename_sweep skips it and reports success, edit_subform says"
-                 " no form named x, and a rule looking the var up reports it"
-                 " missing. The producer is a rewrite pass that returned a"
-                 " z/root :forms wrapper instead of the form inside it —"
-                 " refactor/unwrap-forms is what it owes.")
-            {:forms (vec bad) :ns ns-sym :op op})))
+(defn record-file-put
+  "Track a NON-CODE file on the store's `:files` manifest — these ride every
+  projected tree, so they survive slopp pushes. TEXT (the default):
+  {path → string}, delta carries :content. BINARY (`:encoding \"base64\"`):
+  the decoded bytes are CONTENT-ADDRESSED into `:blobs` ({sha → bytes}) and
+  the manifest entry is `{:sha :content-type :bytes}` — the delta carries
+  the sha and size, NEVER the payload, so a large asset costs the journal
+  ~60 bytes and identical content converges on one blob. ONE state-carrying
+  `:file-put` delta either way; the manifest entry folds via the registry
+  (the fold reads the delta, which is why replay needs no payload), and only
+  the blob BYTES are assoc'd here, where they exist. Returns [store' delta]."
+  [store path text & {:keys [prompt agent encoding content-type]}]
   (let [[did store'] (gen-id store "d")
-        delta (merge (cond-> {:id did :parent (:id (last (:deltas store)))
-                              :op op :ns ns-sym :at (now-ms)
-                              :form-ids (vec (sort (keys changeset)))
-                              :sources  (into {} (map (fn [[fid node]]
-                                                        [fid (n/string node)]))
-                                              changeset)
-                              :prompt prompt}
-                       agent (assoc :agent agent))
-                     extra)
-        store' (reduce-kv
-                (fn [st ns-key {:keys [elements]}]
-                  (assoc-in st [:namespaces ns-key :elements]
-                            (mapv (fn [e]
-                                    (if-let [node (get changeset (:id e))]
-                                      (assoc e :node node :name (form-symbol node)
-                                     :names (form-symbols node))
-                                      e))
-                                  elements)))
-                store' (:namespaces store'))]
-    [(update store' :deltas conj delta) delta]))
+        binary? (= "base64" (str encoding))
+        bs      (when binary?
+                  (.decode (java.util.Base64/getDecoder) (str text)))
+        sha     (when binary? (sha256-of bs))
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :file-put :ns '*session* :at (now-ms)
+                       :path (str path)}
+                (not binary?) (assoc :content (str text))
+                binary?       (assoc :sha sha :bytes (count bs))
+                (and binary? content-type) (assoc :content-type (str content-type))
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(-> (fields/fold store' delta)
+         (cond-> binary? (assoc-in [:blobs sha] bs))
+         (record-delta delta))
+     delta]))
+
+(defn record-file-remove
+  "Drop `path` from the `:files` manifest. ONE `:file-remove` delta.
+  Returns [store' delta]."
+  [store path & {:keys [prompt agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :file-remove :ns '*session* :at (now-ms)
+                       :path (str path)}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-config-put
+  "Set one KEY of the structured config file at `path` (format `fmt`, e.g.
+  :manifest) — the non-code analog of a form edit: the store holds SEMANTIC
+  key/values with per-key history; the projection serializes them into the
+  file format. ONE state-carrying `:config-put` delta. Returns [store' delta]."
+  [store path fmt k v & {:keys [prompt agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :config-put :ns '*session* :at (now-ms)
+                       :path (str path) :format fmt
+                       :key (str k) :value (str v)}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-config-unset
+  "Remove one key from the config file at `path` (the whole entry when the
+  last key goes). ONE `:config-unset` delta. Returns [store' delta]."
+  [store path k & {:keys [prompt agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :config-unset :ns '*session* :at (now-ms)
+                       :path (str path) :key (str k)}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-module-edge
+  "Declare (or retract) ONE module dependency edge — the CRDT grain of the
+  module manifest: concurrent edge declarations touch disjoint state and
+  merge as a set union, and each edge carries its own why (:prompt) in the
+  journal instead of vanishing into a file diff. `action` is :add or
+  :remove. Returns [store' delta].
+
+  `test-only` records the edge in the TEST relation (`:module-test-edges`,
+  op `:module-test-edge`) instead: a module's `-test` namespaces may cross
+  it, its production code may not. Two ops rather than one op with a flag,
+  so `:field` stays a fact about the op and the merge machinery needs no
+  special case."
+  [store from to action & {:keys [prompt agent test-only]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op (if test-only :module-test-edge :module-edge)
+                       :ns '*session* :at (now-ms)
+                       :from (str from) :to (str to) :action action}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn reorder-to
+  "Reorder `ns-sym`'s forms to match `name-order` (a vector of form names,
+  the ns declaration first) using the fewest trivia-preserving `move-form`s
+  — each an ordinary replayable `:move` delta, so the reorder survives a
+  fresh journal reload. Right-to-left insertion: for each adjacent target
+  pair, ensure the earlier name precedes the later, skipping pairs already
+  ordered. Returns [store' moved-count]."
+  [store ns-sym name-order & {:keys [group prompt agent system]}]
+  (let [target (vec (remove #{ns-sym} name-order))]
+    (loop [st store, i (dec (count target)), moved 0]
+      (if (< i 1)
+        [st moved]
+        (let [earlier (nth target (dec i))
+              later   (nth target i)
+              elems   (get-in st [:namespaces ns-sym :elements])
+              pos     (into {}
+                            (keep-indexed
+                             (fn [k e] (when (and (= :form (:kind e)) (:name e))
+                                         [(:name e) k])))
+                            elems)]
+          (if (and (pos earlier) (pos later) (< (pos earlier) (pos later)))
+            (recur st (dec i) moved)                     ; already ordered
+            (if-let [[st' _] (move-form st ns-sym earlier later
+                                        :group group :prompt prompt :agent agent
+                                        :system system)]
+              (recur st' (dec i) (inc moved))
+              (recur st (dec i) moved))))))))
+
+(defn record-module-tier
+  "Declare a module's purity TIER (:pure/:internal/:external) — the per-module
+  register behind the functional-core gate (D9): one :module-tier delta
+  carrying its why (:prompt); last write per module wins. A module absent
+  from :module-tiers (or declared :external) is unrestricted. The delta keeps
+  the caller's spelling verbatim; the registry fold canonicalizes state
+  (retired :reads/:effects land as :internal/:external).
+
+  `:action :remove` RETIRES the declaration instead of setting it — the
+  rename path needs it, because a tier describes a NAME and an orphaned one
+  both lists a namespace that no longer exists and leaves the renamed code
+  silently ungated. Returns [store' delta]."
+  [store module tier & {:keys [prompt agent action]}]
+  (let [[did store'] (gen-id store "d")
+        module (str module)
+        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+                        :op :module-tier :ns '*session* :at (now-ms)
+                        :module module :tier tier}
+                 action (assoc :action action)
+                 prompt (assoc :prompt prompt)
+                 agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-revert
+  "Append a `:revert` DEAD-END marker delta — a scrapped line of work,
+  recorded so history can later surface WHAT was tried and WHY it was
+  abandoned instead of the exploration vanishing. `forms` are the qualified
+  names put back, `undid` the delta ids undone, `why` the reverting agent's
+  reason (may be nil — the revert is still marked). Returns [store' delta-id]."
+  [store & {:keys [why forms undid agent]}]
+  (let [[did store'] (gen-id store "d")]
+    [(record-delta store'
+             (cond-> {:id did :parent (:id (last (:deltas store)))
+                      :op :revert :ns '*session* :at (now-ms)}
+               why         (assoc :why why)
+               (seq forms) (assoc :forms (vec forms))
+               (seq undid) (assoc :undid (vec undid))
+               agent       (assoc :agent agent)))
+     did]))
+
+(defn record-ns-delete
+  "Remove namespace `ns-sym` from the store — ONE `:ns-delete` delta. The
+  caller (api/delete-ns!) owns the refusals (non-empty, still required);
+  this is the dumb journal write, like every record-*. Persisting with
+  `nses [ns-sym]` clears the element rows (persist!'s delete-always).
+  Returns [store' delta]."
+  [store ns-sym & {:keys [prompt agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :ns-delete :ns ns-sym :at (now-ms)}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(-> store'
+         (update :namespaces dissoc ns-sym)
+         (record-delta delta))
+     delta]))
+
+(defn record-module-platform
+  "Declare a module's target PLATFORM (:jvm/:cljc/:cljs) — the per-module
+  register behind the client wave (D-web-cljs). :jvm (default; a module absent
+  from :module-platforms) is Clojure loaded into the JVM oracle; :cljc loads on
+  the JVM (its :clj branch) AND compiles to JS; :cljs compiles to JS only and is
+  never loaded into the oracle. One :module-platform delta carrying its why
+  (:prompt); last write per module wins; the registry fold canonicalizes state.
+
+  `:action :remove` RETIRES the declaration instead of setting it — the rename
+  path needs it, so a platform follows the name it describes rather than
+  stranding a `:cljs` marker on a namespace that no longer exists. Returns
+  [store' delta]."
+  [store module platform & {:keys [prompt agent action]}]
+  (let [[did store'] (gen-id store "d")
+        module (str module)
+        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+                        :op :module-platform :ns '*session* :at (now-ms)
+                        :module module :platform platform}
+                 action (assoc :action action)
+                 prompt (assoc :prompt prompt)
+                 agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-client-dep
+  "Declare a BUILD-ONLY dependency (the ClojureScript compiler) at `coord` — the
+  client wave's build-only channel (D-web-cljs). Unlike record-deps-add, this
+  NEVER enters the runtime :deps manifest: a client dep is routed to the :cljs
+  alias in the generated deps.edn (so the compile step resolves it) and is never
+  hot-loaded into the JVM oracle nor shipped in the slim jar. One :client-dep-add
+  delta; last write per lib wins. Returns [store' delta]."
+  [store lib coord & {:keys [prompt agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :client-dep-add :ns '*session* :at (now-ms)
+                       :lib lib :coord coord}
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-js-dep
+  "Declare (or with `:remove`, retract) a VENDORED JavaScript library.
+
+  The third dependency world (D-web-cljs deferred it): not a Maven coord and
+  not resolvable, because there is no npm here — the bytes are vendored into
+  the store as an ordinary content-addressed blob and this records the
+  DECLARATION over them: version, delivery `:format` (`:iife`/`:umd`/`:esm`),
+  the `:global` it exports, the `:file` path holding it, and provenance
+  (`:source-url`, `:sha`, `:license`).
+
+  Bytes and declaration are separate on purpose. `record-file-put` already
+  content-addresses the file, so the `:sha` recorded here can be CHECKED
+  against it rather than being a number somebody typed — which is the whole
+  value of recording it.
+
+  Name-grained: two lines declaring different libraries union under merge.
+  One `:js-dep` delta; last write per name wins. Returns [store' delta]."
+  [store js-name spec & {:keys [prompt agent remove]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :js-dep :ns '*session* :at (now-ms)
+                       :name js-name}
+                remove (assoc :action :remove)
+                (not remove) (assoc :spec spec)
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn record-artifact
+  "Register (or with `:remove`, drop) a DERIVED file — downloaded or generated.
+
+  Records only what the file must BE (`:sha`, `:bytes`, `:content-type`) and
+  how to get it back (`:recipe`). It takes no content and has no way to
+  accept any: an artifact that COULD carry its bytes eventually would, and
+  the field would rot back into `:files`.
+
+  Recipes come in two shapes today:
+
+      {:kind :download :npm \"roughjs@4.6.6\" :npm-path \"bundled/rough.js\"
+       :integrity \"sha512-…\"}
+      {:kind :build :tool \"compile_client\"}
+
+  Both answer the same question — how do I make this file again — which is
+  what lets the bytes live on disk as a cache rather than in the journal
+  forever. One `:artifact-put` delta; last write per path wins.
+  Returns [store' delta]."
+  [store path entry & {:keys [prompt agent remove]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                       :op :artifact-put :ns '*session* :at (now-ms)
+                       :path (str path)}
+                remove       (assoc :action :remove)
+                (not remove) (assoc :entry (dissoc entry :content :bytes-blob))
+                prompt (assoc :prompt prompt)
+                agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(defn set-comment
+  "Set (or clear, with blank `text`) the comment block rendered above form
+  `nm` in `ns-sym`. Returns [store' delta] or {:error msg}.
+
+  A comment BELONGS to the form it describes. Stored positionally as a `:sep`
+  it is content that lives nowhere in the delta log — which is precisely why
+  a milestone had to carry a byte-exact tree snapshot to keep it. Owned by a
+  form it is ordinary content: recorded in the delta, replayable from the log
+  alone, and mergeable without a position to reconcile.
+
+  The positional predecessor already conceded this: its delta anchored on the
+  form's id rather than an index, because positions shift under a merge. This
+  finishes the move — the form does not just sit after the comment, it owns
+  it.
+
+  Refuses text containing a code form, same as trivia: forms come in through
+  the form verbs, which verify. Stored WITHOUT a trailing newline; the
+  renderer supplies the separator, because how it is spaced is a rendering
+  decision and not data."
+  [store ns-sym nm text & {:keys [prompt agent]}]
+  (let [elems (get-in store [:namespaces ns-sym :elements])
+        idx   (first (keep-indexed
+                      (fn [i e] (when (and (= :form (:kind e)) (= nm (:name e))) i))
+                      elems))]
+    (cond
+      (nil? elems) {:error (str "no namespace " ns-sym)}
+      (nil? idx)   {:error (str "no form named " nm " in " ns-sym)}
+      (some n/sexpr-able? (n/children (p/parse-string-all (str text))))
+      {:error (str "comments only — that text contains a code form"
+                   " (use edit_add_form for forms)")}
+      :else
+      (let [norm (when-not (str/blank? (str text))
+                   (str/replace (str text) #"\n+\z" ""))
+            [did store'] (gen-id store "d")
+            delta (cond-> {:id did :parent (:id (last (:deltas store)))
+                           :op :comment :ns ns-sym
+                           :form-id (:id (nth elems idx))
+                           :text norm :at (now-ms)}
+                    prompt (assoc :prompt prompt)
+                    agent  (assoc :agent agent))]
+        [(-> store'
+             (assoc-in [:namespaces ns-sym :elements]
+                       (update elems idx
+                               (fn [e] (if norm (assoc e :comment norm)
+                                           (dissoc e :comment)))))
+             (record-delta delta))
+         delta]))))
+
+(defn record-module-role
+  "Declare a module's ROLE — :product (the default; a module absent from
+  :module-roles) is code the SYSTEM runs, and it ships; :instrument is code a
+  HUMAN runs by hand — a benchmark, a seeding script, a mining CLI — which R5
+  says lives in one module and does not ship. The role decides where `build!`
+  materializes the code (`instruments/` rather than `src/`, so any build that
+  jars `src` excludes it) and whether the architecture VIEW counts it, since an
+  instrument on the layer map puts a harness at the apex of the product.
+  One :module-role delta carrying its why (:prompt); last write per module
+  wins; the registry fold canonicalizes state.
+
+  `:action :remove` RETIRES the declaration instead of setting it — an absent
+  declaration is not the same claim as :product, and the rename and delete
+  paths both need the difference. Returns [store' delta]."
+  [store module role & {:keys [prompt agent action]}]
+  (let [[did store'] (gen-id store "d")
+        module (str module)
+        delta  (cond-> {:id did :parent (:id (last (:deltas store)))
+                        :op :module-role :ns '*session* :at (now-ms)
+                        :module module :role role}
+                 action (assoc :action action)
+                 prompt (assoc :prompt prompt)
+                 agent  (assoc :agent agent))]
+    [(record-delta (fields/fold store' delta) delta) delta]))
+
+(def name-keyed-registers
+  "Every register keyed by a NAME — the total account of where a namespace or
+  module name appears in the store OUTSIDE the code that spells it.
+
+  A name in code is a REFERENCE and the CST rewrite reaches it. A name in a
+  register is a DECLARATION ABOUT a name: no rewrite walks it, so it has to be
+  re-keyed by the verb that moves the name, and missing one is silent — the
+  declaration is left describing a namespace that no longer exists while the
+  code that moved goes ungated. This store accumulated fifteen orphans in one
+  wave of deletions that way.
+
+  The lesson was learned once, at NAMESPACE grain, and the fix was this map's
+  ancestor. It did not generalise: the two MODULE-grained registers were
+  re-keyed by a hand-written arm that named `:modules` and never
+  `:module-test-edges`, so which failure a rename produced depended on nothing
+  a reader could see — whether the edge happened to be test-only. A sixth
+  register joins by adding a row here, and
+  `a-rename-leaves-no-name-keyed-register-naming-the-old-name` derives its
+  population from the store value, so it grades the row whether or not anyone
+  remembers to grade it.
+
+  Per row: `:kind` is `:declaration` (a claim ABOUT a name) or `:primary` (the
+  index the name itself lives in); `:grain` is `:namespace` — deep namespaces
+  follow by prefix — or `:module`, the first two segments; `:in-values` marks
+  the registers that also name modules in their VALUES, so a re-key must walk
+  both sides; `:record` is the `record-*` fn where the register has one of the
+  namespace-grained shape, and `:rekeyed-by` says who owns the move where it
+  does not.
+
+  `:namespaces` is declared here rather than exempted by omission. It is the
+  primary index, not a claim about a name, and `ns-rename!` re-keys it
+  directly — but a row nobody wrote and a row deliberately handled elsewhere
+  look identical from outside, which is the conflation this registry exists to
+  refuse."
+  {:namespaces        {:kind :primary     :grain :namespace
+                       :rekeyed-by "ns-rename! directly — it IS the index"}
+   :module-tiers      {:kind :declaration :grain :namespace
+                       :record record-module-tier}
+   :module-platforms  {:kind :declaration :grain :namespace
+                       :record record-module-platform}
+   :module-roles      {:kind :declaration :grain :namespace
+                       :record record-module-role}
+   :modules           {:kind :declaration :grain :module :in-values true
+                       :edge-opts {}
+                       :rekeyed-by "rekey-module-registers, via record-module-edge"}
+   :module-test-edges {:kind :declaration :grain :module :in-values true
+                       :edge-opts {:test-only true}
+                       :rekeyed-by "rekey-module-registers, via record-module-edge"}})
+
+(def ns-grained-registers
+  "The registers keyed by NAMESPACE rather than by form — field → the `record-*`
+  fn that writes it. A declaration here describes a NAME, so it has to follow a
+  rename and retire with a delete; both paths iterate this map rather than
+  naming the registers one at a time.
+
+  That is the whole point of it being data. `ns-rename!` and `delete-ns!` each
+  hand-enumerated the set, two arms apiece, and the failure mode of missing one
+  is SILENT: the declaration is left naming a namespace that no longer exists
+  while the code that moved goes ungated, which is how slopp's own store
+  accumulated fifteen orphans in one wave of deletions.
+
+  DERIVED from [[name-keyed-registers]], which is the total account across both
+  grains — a fourth ns-grained register joins by adding a row THERE. Restating
+  the set here is what let the two lists disagree: this one carried
+  `:module-roles` and `refs/occurrences-of`'s copy did not, so a role
+  declaration was re-keyed by the rename and invisible to the report that says
+  what the rename left behind.
+
+  Every value takes `[store module value & {:keys [prompt agent action]}]` and
+  returns `[store' delta]`, with `:action :remove` retiring the declaration —
+  absent is not the same claim as the default."
+  (into {} (for [[reg {:keys [grain record]}] name-keyed-registers
+                 :when (and (= :namespace grain) record)]
+             [reg record])))
+
+(defn rekey-module-registers
+  "Re-key every MODULE-grained register from `old-mod` to `new-mod` → `store'`.
+
+  The manifest names modules on BOTH sides of an edge, so a module that renames
+  has to be rewritten as a KEY (its own outgoing edges) and as a VALUE
+  (everyone else's edges to it). [[name-keyed-registers]] is the population and
+  each row carries its own `:edge-opts`, so the TEST relation is one option
+  rather than one branch — which is exactly what it was, and why
+  `:module-test-edges` was left naming the old module by every rename that ever
+  ran while `:modules` followed correctly beside it.
+
+  A self-edge is dropped rather than recorded: after the substitution both
+  endpoints can be the same module, and a module never declares itself."
+  [store old-mod new-mod & {:keys [prompt agent]}]
+  (let [sub #(if (= old-mod %) new-mod %)]
+    (reduce
+     (fn [s0 [reg row]]
+       (let [edge (fn [st from to action]
+                    (first (apply record-module-edge st from to action
+                                  (mapcat identity (assoc (:edge-opts row)
+                                                          :prompt prompt
+                                                          :agent agent)))))]
+         (reduce
+          (fn [s [m deps]]
+            (cond
+              (= m old-mod)
+              (as-> s $
+                (reduce #(edge %1 m %2 :remove) $ (sort deps))
+                (reduce #(edge %1 new-mod %2 :add) $
+                        (sort (disj (into #{} (map sub) deps) new-mod))))
+
+              (contains? deps old-mod)
+              (as-> s $
+                (edge $ m old-mod :remove)
+                (if (= m new-mod) $ (edge $ m new-mod :add)))
+
+              :else s))
+          ;; rows come from the ORIGINAL store while `s` accumulates: the two
+          ;; registers are disjoint state, and re-reading a register mid-rewrite
+          ;; would walk edges this call had just written
+          s0 (get store reg))))
+     store
+     (filter #(= :module (:grain (val %))) name-keyed-registers))))
+
+(defn record-observation
+  "Append an `:observe` delta recording that tests RAN and what happened —
+  the second journal citizen beside `:verify`, and deliberately not the same
+  one.
+
+  A VERIFICATION is a claim a WRITE makes about the store. An OBSERVATION is
+  narrower — *these tests ran, in this tier, and this is what happened* —
+  which is why `test_run` and the external tier could not simply append a
+  `:verify`: `done`'s scope logic, milestone `:status` and the trace map all
+  read `:verify`, and widening it would weaken what a verification MEANS.
+
+  Three facts, in three places:
+
+  - `scope` — WHAT was observed. One namespace symbol or a collection of them;
+    it lands in `:scope` as a VECTOR. It does NOT go in `:ns`: that column
+    holds ONE namespace (every consumer reads it that way — replay, merge, the
+    outline), so a collection put there is flattened by `(str …)` into a single
+    symbol whose name is the printed list. Measured before this was fixed: 2293
+    characters for one run, and the scope unreadable per-namespace in all 27
+    recorded observations. `:ns` therefore carries the `*session*` sentinel
+    that `:done`, `:commit` and `:turn-begin` already use for a marker that is
+    not about one namespace — always, so the scope has exactly one home and the
+    two cannot disagree.
+  - `result` — WHAT HAPPENED. Carries `:tier`, `:status`, `:ran`, and
+    `:failures` as a LIST of `{:test <qualified-sym>}` — **the same shape the
+    in-image summary uses**, so a reader of red evidence needs one spelling and
+    not two. Producers must QUALIFY before recording: clojure.test prints
+    `FAIL in (name)` and the external tier's own `:failing` blocks carry that
+    bare name, which cannot be matched back to a form.
+  - `closure` (optional) — AT WHAT CONTENT, as
+    {namespace [[slopp.ops.engine/closure-hashes]]}. This is what makes the
+    record a KEY rather than a diary entry: *these tests were green against
+    exactly this content*, askable later by a different process from the
+    journal alone. Omitted rather than empty when the caller has none, because
+    an empty map reads as \"nothing depended on anything\".
+
+  (`:verify` still puts its namespace list in `:ns` and has the same flattening
+  problem. It is on the verification path rather than the evidence path,
+  nothing reads that list today, and 7918 of them already exist — so it is a
+  separate change with its own risk, not a rename to fold in here.)
+
+  Registered in [[slopp.store.fields/markers]] as a no-content op, or foreign
+  sync full-reloads on every sighting of it."
+  ([store scope result] (record-observation store scope result nil))
+  ([store scope result closure]
+   (let [parent (:id (last (:deltas store)))
+         [did store] (gen-id store "d")
+         scope (vec (if (coll? scope) scope [scope]))]
+     (record-delta store
+                   (cond-> {:id did :parent parent :op :observe :ns '*session*
+                            :at (now-ms) :scope scope :result result}
+                     (seq closure) (assoc :closure closure))))))
 
 (defn record-read-cost
   "Append a `:read-cost` delta carrying what a SPAN of answers cost to send —
@@ -2007,39 +2054,6 @@
   [store reads]
   (let [parent (:id (last (:deltas store)))
         [did store] (gen-id store "d")]
-    (update store :deltas conj
-            {:id did :parent parent :op :read-cost :ns '*session*
-             :at (now-ms) :reads reads})))
-
-(def ^:export local-config-paths
-  "Config paths that stay in the DB — they reach neither a built tree nor a
-  projected one.
-
-  Every other config path ships: `ops.external/build!` writes each `:config`
-  entry as a file at its own path, and `git/commit-paths` puts each one in
-  every projected tree. That is right for `capabilities`, `rules` and `gates`,
-  which configure the PRODUCT and must travel with it.
-
-  `dev` does not. It says what to RUN while somebody is working on this
-  project — an entry point, arguments, a port — which is a fact about a
-  development session rather than about the program. Shipping it would put a
-  developer's port number in a jar and a git tree, and a second developer's
-  pull would then carry the first one's choices.
-
-  DECLARED rather than derived, for the same reason
-  [[projected-config-paths]] is: the store that needs the answer is often the
-  one missing the entry, and a fresh clone holds no config at all.
-
-  **This set WINS over the has-config fallback.** That docstring tells callers
-  to treat a path as projected if it is in the projected set OR the store
-  already holds `:config` for it — which is true of every dev entry somebody
-  has set. Read naively, the fallback projects precisely the thing that must
-  never be projected, so the local check comes first:
-
-      (and (not (local-config-paths path))
-           (or (projected-config-paths path) (get-in st [:config path])))
-
-  The two sets are disjoint, and a test asserts it — a path declared both ways
-  has no sensible reading and would fail silently in whichever direction the
-  caller happened to ask."
-  #{"dev"})
+    (record-delta store
+                  {:id did :parent parent :op :read-cost :ns '*session*
+                   :at (now-ms) :reads reads})))

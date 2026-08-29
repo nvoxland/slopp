@@ -97,21 +97,25 @@
         hello   (fid 'demo.a.core 'hello)
         b-ns    (fid 'demo.b.util 'demo.b.util)
         helper  (fid 'demo.b.util 'helper)
-        st      (assoc s1 :deltas
-                       [{:id "d1" :op :ingest :ns 'demo.a.core
-                         :form-ids [a-ns hello]
-                         :sources {a-ns "(ns demo.a.core)" hello "(defn hello [x] x)"}}
-                        {:id "c1" :op :commit :status :green :at 1784900000000
-                         :description "baseline"}
-                        {:id "d2" :op :replace :ns 'demo.a.core :form-id hello
-                         :prompt "make hello increment"
-                         :sources {hello "(defn hello [x] (inc x))"}}
-                        {:id "d3" :op :ingest :ns 'demo.b.util
-                         :form-ids [b-ns helper]
-                         :sources {b-ns "(ns demo.b.util (:require [demo.a.core :as core]))"
-                                   helper "(defn helper [] (core/hello 1))"}}
-                        {:id "c2" :op :commit :status :green :at 1784900060000
-                         :description "the work"}])
+        st      ;; the ingests' own log is discarded and the longhand one appended
+                ;; through the door, so what the value knows about its history
+                ;; (head, prompts, last writes) is built the way a write builds it
+                (reduce store/record-delta
+                        (assoc s1 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                        [{:id "d1" :op :ingest :ns 'demo.a.core
+                          :form-ids [a-ns hello]
+                          :sources {a-ns "(ns demo.a.core)" hello "(defn hello [x] x)"}}
+                         {:id "c1" :op :commit :status :green :at 1784900000000
+                          :description "baseline"}
+                         {:id "d2" :op :replace :ns 'demo.a.core :form-id hello
+                          :prompt "make hello increment"
+                          :sources {hello "(defn hello [x] (inc x))"}}
+                         {:id "d3" :op :ingest :ns 'demo.b.util
+                          :form-ids [b-ns helper]
+                          :sources {b-ns "(ns demo.b.util (:require [demo.a.core :as core]))"
+                                    helper "(defn helper [] (core/hello 1))"}}
+                         {:id "c2" :op :commit :status :green :at 1784900060000
+                          :description "the work"}])
         cv      (model/change-view (atom {:store st}) "c1" "c2")
         by-form (into {} (for [m (:modules cv), n (:namespaces m), f (:forms n)]
                            [(:form f) f]))]

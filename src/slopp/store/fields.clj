@@ -358,3 +358,11 @@
                    :absent-nil? (boolean (:absent-nil? v))
                    :normalize (:normalize v)})))
         field-registry))
+
+(def ^:export auto-reorder-prompt
+  "THE prompt the pipeline's auto-reorder writes. One constant with one
+  home, because two readers care about it: `slopp.edit/resolve-cold-load`
+  writes it, and `prompt-by-form` has to recognise it on deltas written
+  before the `:system` mark existed — the log is append-only, so those
+  cannot be re-stamped. Two string literals would drift silently."
+  "auto-reorder: define before use")

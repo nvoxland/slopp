@@ -1473,7 +1473,11 @@
       "query_rule_telemetry" (text! (told! session name a (query/query-rule-telemetry session :since (:since a))))
       "query_cost" (text! (told! session name a (query/query-turn-cost
                                                session :since (:since a)
-                                               :otel (ops/otel-measurements session))))
+                                               :otel (ops/otel-measurements session)
+                                               ;; the per-call rows make :tools a
+                                               ;; census with chars-out, not the
+                                               ;; turn-end ring's top-five bound
+                                               :tool-calls (ops/tool-call-measurements session))))
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))
@@ -1810,7 +1814,13 @@
         ;; second on its own schedule.
         (swap! session #(-> %
                             (update :slopp.read.telemetry/calls (fnil conj []) entry)
-                            (update :slopp.read.telemetry/reads (fnil conj []) entry))))
+                            (update :slopp.read.telemetry/reads (fnil conj []) entry)))
+        ;; and ONE ROW beside the journal, the census the rings cannot be:
+        ;; the timing ring keeps a turn's top five and the read ring flushes
+        ;; on its own schedule, so neither can answer "every call, and what
+        ;; each sent". A measurement, never a delta — a read must not be able
+        ;; to move the head a verdict is racing for.
+        (ops/record-tool-call! session (assoc entry :agent (:agent params))))
       {:jsonrpc "2.0" :id id :result r})
     "ping" {:jsonrpc "2.0" :id id :result {}}
     (when id

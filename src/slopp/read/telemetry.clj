@@ -338,16 +338,21 @@
   number nobody measured, so the order carries the judgement and the cheap
   repeats sink to the bottom where they cost the reader nothing.
 
-  **`:tools` is a LOWER BOUND, and knowingly.** `call-timing` keeps only the
-  five costliest tools per turn, so a tool that is never in a turn's top five
-  contributes nothing here however often it ran. That biases the ranking
-  toward expensive tools — which is the direction this fold is read in, so it
-  is reported rather than corrected, but a total here is not a census and a
-  cheap tool's absence is not evidence it was not called.
+  **`:tools` stands on one of two bases, and `:calls :basis` names it.**
+  Given `:tool-calls` — the per-call `tool-call` measurement rows, one per
+  call with `:tool :ms :chars :refused?` — it is a CENSUS: every tool, every
+  call, and `:chars`, the characters it put on the wire, which is what every
+  later request re-reads and so what a tool COSTS rather than what it spent.
+  Ranked by `:chars`. Without them it is the `:turn-top` fold — the five
+  costliest tools per turn, ms only — and a LOWER BOUND: a tool never in a
+  turn's top five contributes nothing however often it ran. That biases
+  toward expensive tools, which is the direction the old fold is read in, so
+  it is reported rather than corrected; but a total there is not a census and
+  a cheap tool's absence is not evidence it was not called.
 
   A turn with no `:timing` is ABSENT rather than zero: nothing was measured,
   which is a different fact from nothing having been spent."
-  [store & {:keys [since otel]}]
+  [store & {:keys [since otel tool-calls]}]
   (let [deltas  (:deltas store)
         window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
         ts      (keep :timing window)
@@ -356,7 +361,8 @@
         idle    (sum :idle-ms)
         active  (- elapsed idle)
         in      (sum :slopp-ms)
-        calls   (sum :calls)
+        census? (some? tool-calls)
+        calls   (if census? (count tool-calls) (sum :calls))
         refused (sum (comp :count :refused))
         tally   (fn [rows key-fn val-fn]
                   (reduce (fn [m r] (update m (key-fn r) (fnil + 0) (val-fn r)))
@@ -380,7 +386,8 @@
                 :slopp-ms   in
                 :outside-ms (sum :outside-ms)
                 :slopp-share (str (int (* 100 (/ in (double (max 1 active))))) "%")}
-      :calls   {:total calls}
+      :calls   (cond-> {:total calls :basis (if census? :census :turn-top)}
+                 census? (assoc :chars (reduce + 0 (keep :chars tool-calls))))
       :refused {:count   refused
                 :pct     (int (* 100 (/ refused (double (max 1 calls)))))
                 :by-tool (->> (mapcat (comp :by-tool :refused) ts)
@@ -388,15 +395,26 @@
                               (map (fn [[t n]] {:tool t :n n}))
                               (sort-by (juxt (comp - :n) :tool))
                               vec)}
-      :tools   (let [rows (mapcat :top ts)
-                     ms   (tally rows :tool :ms)
-                     n    (tally rows :tool :n)]
-                 (->> (keys ms)
-                      (map (fn [t]
-                             {:tool t :calls (n t) :ms (ms t)
-                              :avg-ms (long (/ (ms t) (max 1 (n t))))}))
-                      (sort-by (juxt (comp - :ms) :tool))
-                      vec))
+      :tools   (if census?
+                 (let [ms (tally tool-calls :tool #(or (:ms %) 0))
+                       n  (tally tool-calls :tool (constantly 1))
+                       ch (tally tool-calls :tool #(or (:chars %) 0))]
+                   (->> (keys n)
+                        (map (fn [t]
+                               {:tool t :calls (n t) :ms (ms t)
+                                :avg-ms (long (/ (ms t) (max 1 (n t))))
+                                :chars (ch t)}))
+                        (sort-by (juxt (comp - :chars) :tool))
+                        vec))
+                 (let [rows (mapcat :top ts)
+                       ms   (tally rows :tool :ms)
+                       n    (tally rows :tool :n)]
+                   (->> (keys ms)
+                        (map (fn [t]
+                               {:tool t :calls (n t) :ms (ms t)
+                                :avg-ms (long (/ (ms t) (max 1 (n t))))}))
+                        (sort-by (juxt (comp - :ms) :tool))
+                        vec)))
       :repeats (let [rows (mapcat #(filter (fn [x] (> (:n x) 1)) (:top %)) ts)]
                  (->> (group-by :tool rows)
                       (map (fn [[t xs]]

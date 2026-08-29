@@ -295,20 +295,19 @@
   ;; form-card's :why walked the whole delta log REVERSED, per form, to find
   ;; the most recent prompt naming that form. Once per card that is fine; once
   ;; per form on a page it is quadratic in the log (10,728 deltas here).
-  ;; prompt-by-form folds the same answer in one forward pass.
+  ;; `record-delta` now keeps the answer current as each delta is appended.
   ;;
   ;; Two delta shapes carry form ids and BOTH count: :form-id (a single write)
   ;; and :form-ids (a group — one intent, several forms). The log is written
-  ;; out longhand rather than driven through a write path so the orderings
-  ;; that matter are pinned directly.
-  (let [st  (assoc (store/empty-store)
-                   :deltas
-                   [{:id "d1" :op :add        :form-id  "f1" :prompt "first ask"}
-                    {:id "d2" :op :replace    :form-id  "f1" :prompt "second ask"}
-                    {:id "d3" :op :replace    :form-id  "f2"}
-                    {:id "d4" :op :move-forms :form-ids ["f2" "f3"] :prompt "group ask"}
-                    {:id "d5" :op :verify     :result   {}}
-                    {:id "d6" :op :replace    :form-id  "f3"}])
+  ;; out longhand — through the one door rather than a write path — so the
+  ;; orderings that matter are pinned directly.
+  (let [st  (reduce store/record-delta (store/empty-store)
+                    [{:id "d1" :op :add        :form-id  "f1" :prompt "first ask"}
+                     {:id "d2" :op :replace    :form-id  "f1" :prompt "second ask"}
+                     {:id "d3" :op :replace    :form-id  "f2"}
+                     {:id "d4" :op :move-forms :form-ids ["f2" "f3"] :prompt "group ask"}
+                     {:id "d5" :op :verify     :result   {}}
+                     {:id "d6" :op :replace    :form-id  "f3"}])
         idx (store/prompt-by-form st)]
     (is (= "second ask" (get idx "f1"))
         "the LAST ask for a form wins — :why means the most recent intent")
@@ -322,26 +321,25 @@
 (deftest prompt-by-form-ignores-housekeeping-writes
   ;; The pipeline OWNS form ordering — resolve-cold-load's own docstring
   ;; calls its two moves "silent to the agent". They were not silent in the
-  ;; recorded intent: because prompt-by-form takes the LAST prompt naming a
-  ;; form, an auto-reorder overwrote the author's ask. Measured on slopp's
-  ;; own store before the fix: 142 of 1,898 forms with a recorded why
-  ;; (7%) reported "auto-reorder: define before use" as theirs — on
-  ;; form-card, query_slice's cards, and the reviewer UI alike.
+  ;; recorded intent: because the LAST prompt naming a form wins, an
+  ;; auto-reorder overwrote the author's ask. Measured on slopp's own store
+  ;; before the fix: 142 of 1,898 forms with a recorded why (7%) reported
+  ;; "auto-reorder: define before use" as theirs — on form-card,
+  ;; query_slice's cards, and the reviewer UI alike.
   ;;
   ;; The discriminator is a MARK on the delta, not the op and not the
   ;; prompt text: edit_move is the same op with a real intent behind it.
+  ;; The rule lives in `record-delta`, the one door every append takes.
   (testing "a marked housekeeping delta does not become a form's why"
-    (let [st (assoc (store/empty-store)
-                    :deltas
-                    [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
-                     {:id "d2" :op :move :form-id "f1" :system true
-                      :prompt "auto-reorder: define before use"}])]
+    (let [st (reduce store/record-delta (store/empty-store)
+                     [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
+                      {:id "d2" :op :move :form-id "f1" :system true
+                       :prompt "auto-reorder: define before use"}])]
       (is (= "the authored ask" (get (store/prompt-by-form st) "f1")))))
   (testing "an UNMARKED move still counts — edit_move carries a real intent"
-    (let [st (assoc (store/empty-store)
-                    :deltas
-                    [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
-                     {:id "d2" :op :move :form-id "f1" :prompt "move it where it belongs"}])]
+    (let [st (reduce store/record-delta (store/empty-store)
+                     [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
+                      {:id "d2" :op :move :form-id "f1" :prompt "move it where it belongs"}])]
       (is (= "move it where it belongs" (get (store/prompt-by-form st) "f1")))))
   (testing "reorder-to marks what it writes"
     (let [st      (store/ingest (store/empty-store) 'demo.core
@@ -353,13 +351,13 @@
       (is (every? :system (filter #(= :move (:op %)) (store/deltas st'))))))
   (testing "deltas written BEFORE the mark existed are recognised by their prompt"
     ;; the log is append-only, so 142 already-written reorders cannot be
-    ;; re-stamped. One constant, owned here and used by the one writer, so
-    ;; this legacy clause cannot drift from the string it recognises.
-    (let [st (assoc (store/empty-store)
-                    :deltas
-                    [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
-                     {:id "d2" :op :move :form-id "f1"
-                      :prompt store/auto-reorder-prompt}])]
+    ;; re-stamped. One constant, owned by the registry and used by the one
+    ;; writer and both readers, so this legacy clause cannot drift from the
+    ;; string it recognises.
+    (let [st (reduce store/record-delta (store/empty-store)
+                     [{:id "d1" :op :add  :form-id "f1" :prompt "the authored ask"}
+                      {:id "d2" :op :move :form-id "f1"
+                       :prompt fields/auto-reorder-prompt}])]
       (is (= "the authored ask" (get (store/prompt-by-form st) "f1"))))))
 
 (deftest a-comment-belongs-to-the-form-it-describes
@@ -931,3 +929,35 @@
     (testing "so a merge that meets a historical row does not refuse"
       (let [r (merge/merge-logs (store/empty-store) st)]
         (is (nil? (:error r)) (pr-str (:error r)))))))
+
+(deftest record-delta-is-the-one-door-and-it-keeps-the-value-current
+  ;; Thirty-five sites in this namespace `conj`ed onto `:deltas` directly, and
+  ;; two readers folded the whole list back to answer one question each:
+  ;; `prompt-by-form` (every delta, after every write, to put a `:why` on a
+  ;; card) and `last-write-on` (an uncached last-of-filter). The list is
+  ;; leaving the value; what the pure readers need is two small maps kept
+  ;; CURRENT at the door — plus the head and the position, which is all the
+  ;; write path ever read the list for.
+  (let [st  (store/empty-store)
+        st1 (store/record-delta st {:id "d1" :op :replace :ns 'rd.core :form-id "f1" :prompt "the ask"})
+        st2 (store/record-delta st1 {:id "d2" :op :move :ns 'rd.core :form-id "f1" :prompt "put it where it belongs" :system true})
+        st3 (store/record-delta st2 {:id "d3" :op :move :ns 'rd.core :form-id "f1" :prompt fields/auto-reorder-prompt})
+        st4 (store/record-delta st3 {:id "d4" :op :replace :ns 'rd.other :form-ids ["f2" "f3"] :prompt "two at once"})
+        st5 (store/record-delta st4 {:id "d5" :op :done :ns '*session* :label "boundary"})]
+    (testing "the head and the line position advance with every delta, markers included"
+      (is (nil? (:head st)))
+      (is (= 0 (:line-pos st)))
+      (is (= "d5" (:head st5)))
+      (is (= 5 (:line-pos st5))))
+    (testing "the intent per form is the author's newest, never the pipeline's"
+      (is (= {"f1" "the ask"} (:prompts st1)))
+      (is (= {"f1" "the ask"} (:prompts st3)) "a :system move and the legacy reorder text both leave it alone")
+      (is (= {"f1" "the ask" "f2" "two at once" "f3" "two at once"} (:prompts st4)) ":form-ids fan out"))
+    (testing "the last write per namespace is the delta that reloaded it"
+      (is (= "d3" (get-in st5 [:last-write 'rd.core :id])))
+      (is (= "d4" (get-in st5 [:last-write 'rd.other :id])))
+      (is (= "two at once" (get-in st5 [:last-write 'rd.other :prompt])))
+      (is (nil? (get-in st5 [:last-write '*session*])) "a session marker reloads no namespace"))
+    (testing "and the two readers answer from those maps"
+      (is (= (:prompts st5) (store/prompt-by-form st5)))
+      (is (= "d4" (:id (store/last-write-on st5 'rd.other)))))))

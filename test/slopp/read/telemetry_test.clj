@@ -381,3 +381,30 @@
         (is (= 2 (:requests m)) "batches after the since-point count"))
       (let [m (:model (telemetry/turn-cost {:deltas [turn otel]} :since "d2"))]
         (is (nil? m) "nothing after the last delta, so no model section at all")))))
+
+(deftest turn-cost-given-the-per-call-rows-is-a-census-with-bytes-out
+  ;; `:tools` from the turn-end ring is a LOWER BOUND — five tools per turn,
+  ;; ms only. A tool that is never a turn's top five is invisible however often
+  ;; it runs, and nothing said what a tool SENT, which is what the context
+  ;; costs. The per-call measurement rows are the census: every call, its
+  ;; wall, and the characters on the wire.
+  (let [store (store/empty-store)
+        rows  [{:tool "query_slice" :ms 10 :chars 4000 :refused? false}
+               {:tool "query_slice" :ms 12 :chars 6000 :refused? false}
+               {:tool "edit_add_form" :ms 3000 :chars 300 :refused? false}
+               {:tool "edit_add_form" :ms 5 :chars 80 :refused? true}]
+        t     (telemetry/turn-cost store :tool-calls rows)]
+    (testing "every tool is present, with calls, ms and chars summed"
+      (let [by (into {} (map (juxt :tool identity)) (:tools t))]
+        (is (= {:tool "query_slice" :calls 2 :ms 22 :avg-ms 11 :chars 10000}
+               (get by "query_slice")) (pr-str (:tools t)))
+        (is (= 2 (:calls (get by "edit_add_form"))))
+        (is (= 380 (:chars (get by "edit_add_form"))))))
+    (testing "and the ranking is by what a tool SENT, since that is what every later request re-reads"
+      (is (= "query_slice" (:tool (first (:tools t))))))
+    (testing "the totals are carried, and say they are a census"
+      (is (= 4 (get-in t [:calls :total])))
+      (is (= 10380 (get-in t [:calls :chars])))
+      (is (= :census (get-in t [:calls :basis])))))
+  (testing "without the rows the fold is what it was — a lower bound, and it says so"
+    (is (= :turn-top (get-in (telemetry/turn-cost (store/empty-store)) [:calls :basis])))))

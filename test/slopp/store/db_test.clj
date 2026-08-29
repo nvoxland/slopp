@@ -1140,3 +1140,209 @@
           (testing "and the file was vacuumed — no free pages left behind"
             (is (= 0 (:freelist_count (jdbc/execute-one! conn ["PRAGMA freelist_count"])))))))
       (finally (.close conn)))))
+
+(deftest journal-stats-tells-housekeeping-from-authored-work
+  ;; Some ops record a fact the pipeline recomputes anyway — a :move puts a
+  ;; form where cold-load ordering would have put it. When the PIPELINE writes
+  ;; one it is marked `:system true`; when an AGENT writes one, that is a turn
+  ;; spent transcribing a program. The number to watch is the agent's share,
+  ;; and the number that should fall as more of this moves into the pipeline.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-hk" (make-array java.nio.file.attribute.FileAttribute 0)))
+        conn (db/open! dir)
+        st   (store/ingest (store/empty-store) 'hk.core "(ns hk.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "d1" :op :ingest :ns 'hk.core :sources {"f1" "(ns hk.core)"}}
+                              ;; turn one: the agent moves a form by hand, the pipeline moves one too
+                              {:id "d2" :op :turn-begin :ns '*session* :agent "a"}
+                              {:id "d3" :op :move :ns 'hk.core :form-id "f1" :agent "a"}
+                              {:id "d4" :op :move :ns 'hk.core :form-id "f1" :agent "a" :system true}
+                              {:id "d5" :op :turn-end :ns '*session* :agent "a"}
+                              ;; turn two: authored work only
+                              {:id "d6" :op :turn-begin :ns '*session* :agent "a"}
+                              {:id "d7" :op :replace :ns 'hk.core :form-id "f1" :agent "a"}
+                              {:id "d8" :op :turn-end :ns '*session* :agent "a"}]
+                             ['hk.core] trunk nil)))
+      (let [hk (:housekeeping (db/journal-stats conn))]
+        (testing "housekeeping ops are counted by who wrote them"
+          (is (= {:agent 1 :system 1} (get-in hk [:by-op "move"])) (pr-str hk)))
+        (testing "and as a share of the journal, agent-written only"
+          (is (= 1 (:agent hk)) (pr-str hk))
+          (is (= 12.5 (:agent-pct hk)) (pr-str hk)))
+        (testing "and as the share of turns that spent a write on one"
+          (is (= {:n 2 :with-agent-housekeeping 1} (:turns hk)) (pr-str hk))))
+      (finally (.close conn)))))
+
+(deftest every-delta-is-indexed-by-the-forms-it-touched
+  ;; The journal is indexed by namespace and by parent; history BY FORM is
+  ;; not — `form_id` lives inside the EDN payload, so "which deltas touched
+  ;; this form" meant parsing every payload, which is why the store value
+  ;; still carries all 34k deltas in RAM. `delta_forms(delta_id, form_id)`,
+  ;; written at append from every key a delta names a form by, is what makes
+  ;; that a query — and the first graph edge the store persists.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)
+        st   (store/ingest (store/empty-store) 'df.core "(ns df.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)
+        rows  (fn [did] (->> (jdbc/execute! conn ["SELECT form_id FROM delta_forms WHERE delta_id = ? ORDER BY form_id" did])
+                             (map #(or (:delta_forms/form_id %) (:form_id %)))
+                             vec))]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "d1" :op :ingest :ns 'df.core :sources {"f1" "(ns df.core)" "f2" "(def a 1)"}}
+                              {:id "d2" :op :replace :ns 'df.core :form-id "f2" :source "(def a 2)"}
+                              {:id "d3" :op :move-forms :ns 'df.core :form-ids ["f1" "f2"]}
+                              {:id "d4" :op :turn-begin :ns '*session* :agent "x"}]
+                             ['df.core] trunk nil)))
+      (testing "one row per (delta, form), from whichever key the delta names forms by"
+        (is (= ["f1" "f2"] (rows "d1")) "the keys of :sources")
+        (is (= ["f2"] (rows "d2")) ":form-id")
+        (is (= ["f1" "f2"] (rows "d3")) ":form-ids"))
+      (testing "and a delta that touches no form has no row — the index is not padded"
+        (is (= [] (rows "d4"))))
+      (testing "so history by form is one indexed read"
+        (is (= ["d1" "d2" "d3"] (db/delta-ids-touching conn ["f2"]))))
+      (finally (.close conn)))))
+
+(deftest a-journal-older-than-the-form-index-is-indexed-on-open
+  ;; 34k deltas were written before `delta_forms` existed. The index has to
+  ;; cover them or "which deltas touched X" would silently start at the day
+  ;; the table appeared — and a backfill that waits for an operator to run
+  ;; it is a backfill that runs on one store. So `open!` does it: when the
+  ;; journal has entries and the index has none, parse each payload once
+  ;; and write the rows. A cheap existence check on every later open.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      ;; rows written the old way — straight into `deltas`, no index rows
+      (jdbc/execute! conn ["INSERT INTO deltas (id, op, ns, parent, payload) VALUES (?,?,?,?,?)"
+                           "o1" "ingest" "old.core" nil (pr-str {:sources {"f1" "(ns old.core)"}})])
+      (jdbc/execute! conn ["INSERT INTO deltas (id, op, ns, parent, payload) VALUES (?,?,?,?,?)"
+                           "o2" "replace" "old.core" "o1" (pr-str {:form-id "f1" :source "x"})])
+      (jdbc/execute! conn ["INSERT INTO deltas (id, op, ns, parent, payload) VALUES (?,?,?,?,?)"
+                           "o3" "done" "*session*" "o2" (pr-str {:label "l"})])
+      (is (= [] (db/delta-ids-touching conn ["f1"])) "fixture: nothing indexed yet")
+      (.close conn)
+      (let [conn2 (db/open! dir)]
+        (try
+          (is (= ["o1" "o2"] (db/delta-ids-touching conn2 ["f1"]))
+              "the next open indexed the old journal")
+          (finally (.close conn2))))
+      (finally (try (.close conn) (catch Exception _))))))
+
+(deftest a-line-answers-its-own-history-from-the-db
+  ;; Every reader of history today folds the WHOLE delta list held in RAM:
+  ;; `prompt-by-form` walks 34k deltas after every write to find the `:why`
+  ;; on a card, `last-write-on` is an uncached `(last (filter …))`, and
+  ;; `sources-at` folds from the root. These four are the bounded reads that
+  ;; replace them — each one indexed, each one scoped to ONE line's ancestry,
+  ;; because a thread's un-landed delta is not the branch's history and a
+  ;; reader that cannot tell them apart hands one agent another's work.
+  ;;
+  ;; The fixture chains its deltas by `:parent`, as every real write does: a
+  ;; line's history IS that walk, and a delta without one is a root it stops
+  ;; at — the first cut of this test left them off and every line answered
+  ;; only its head.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'lh.core "(ns lh.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "h1" :op :ingest :ns 'lh.core :parent nil :sources {"f1" "(ns lh.core)" "f2" "(def a 1)"} :prompt "seed"}
+                              {:id "h2" :op :replace :ns 'lh.core :parent "h1" :form-id "f2" :source "(def a 2)" :prompt "bump a" :agent "a"}
+                              {:id "h3" :op :done :ns '*session* :parent "h2" :agent "a" :label "first"}
+                              {:id "h4" :op :replace :ns 'lh.other :parent "h3" :form-id "f9" :source "(def z 1)" :prompt "elsewhere"}
+                              {:id "h5" :op :done :ns '*session* :parent "h4" :agent "b" :label "second"}]
+                             ['lh.core 'lh.other] trunk nil)))
+      (let [thread (db/adopt-thread! conn trunk "agent-t")]
+        (is (true? (db/append! conn st
+                               [{:id "t1" :op :replace :ns 'lh.core :parent "h5" :form-id "f2" :source "(def a 3)" :prompt "on the thread" :agent "agent-t"}]
+                               ['lh.core] thread (db/line-head conn trunk))))
+        (testing "deltas-touching: the line's deltas that touched any of the forms, in order, with :since"
+          (is (= ["h1" "h2"] (map :id (db/deltas-touching conn trunk ["f2"]))))
+          (is (= ["h1" "h2" "t1"] (map :id (db/deltas-touching conn thread ["f2"])))
+              "the thread sees its own write; the trunk above did not")
+          (is (= ["h2"] (map :id (db/deltas-touching conn trunk ["f2"] :since "h1")))
+              ":since excludes the named delta and everything before it")
+          (is (= :replace (:op (first (db/deltas-touching conn trunk ["f2"] :since "h1"))))
+              "full delta maps, not ids"))
+        (testing "last-delta-on-ns: the newest delta on a namespace, from the line's view"
+          (is (= "h2" (:id (db/last-delta-on-ns conn trunk 'lh.core))))
+          (is (= "t1" (:id (db/last-delta-on-ns conn thread 'lh.core))))
+          (is (nil? (db/last-delta-on-ns conn trunk 'lh.nowhere))))
+        (testing "last-marker: the newest delta of an op, optionally by agent"
+          (is (= "h5" (:id (db/last-marker conn trunk :done))))
+          (is (= "h3" (:id (db/last-marker conn trunk :done :agent "a"))))
+          (is (nil? (db/last-marker conn trunk :commit))))
+        (testing "prompt-for-forms: the intent behind each form, from its NEWEST prompt-carrying delta"
+          (is (= {"f2" "bump a" "f9" "elsewhere"} (db/prompt-for-forms conn trunk ["f2" "f9"])))
+          (is (= {"f2" "on the thread"} (db/prompt-for-forms conn thread ["f2"])))
+          (is (= {} (db/prompt-for-forms conn trunk ["nope"])))))
+      (finally (.close conn)))))
+
+(deftest the-prompt-behind-a-form-is-the-authors-not-the-pipelines
+  ;; The auto-reorder writes `:move` deltas with a prompt of its own, marked
+  ;; `:system true`. `prompt-by-form` learned to skip them after they had
+  ;; overwritten the author's ask on 7% of forms — the last prompt naming a
+  ;; form wins, and the pipeline writes last. The db read keeps that rule,
+  ;; and takes the legacy text as `:ignoring` for deltas written before the
+  ;; mark existed, because the storage layer cannot see the constant that
+  ;; names it.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (store/ingest (store/empty-store) 'pp.core "(ns pp.core)\n\n(def a 1)\n")
+        trunk (db/trunk-line-id! conn)]
+    (try
+      (is (true? (db/append! conn st
+                             [{:id "p1" :op :replace :ns 'pp.core :parent nil :form-id "f1" :prompt "the authored ask"}
+                              {:id "p2" :op :move :ns 'pp.core :parent "p1" :form-id "f1" :prompt "put it where it belongs" :system true}
+                              {:id "p3" :op :move :ns 'pp.core :parent "p2" :form-id "f1" :prompt "legacy reorder text"}]
+                             ['pp.core] trunk nil)))
+      (is (= {"f1" "legacy reorder text"} (db/prompt-for-forms conn trunk ["f1"]))
+          "unmarked, the newest prompt wins — which is the legacy problem")
+      (is (= {"f1" "the authored ask"}
+             (db/prompt-for-forms conn trunk ["f1"] :ignoring #{"legacy reorder text"}))
+          "the :system delta is skipped by its mark, the legacy one by its text")
+      (finally (.close conn)))))
+
+(deftest a-loaded-store-carries-its-head-position-prompts-and-last-writes
+  ;; `record-delta` keeps four derived facts current on every append. A store
+  ;; LOADED from the journal has to arrive with the same four, or the first
+  ;; read after an open answers from an empty map while a write would have
+  ;; answered correctly — the two paths must agree. They are read by index
+  ;; (the line's head, its ancestry count, `prompt-for-forms` over the forms
+  ;; the materialization holds, the newest delta per namespace), never by
+  ;; folding the payloads, because folding them is the cost this whole item
+  ;; exists to remove.
+  (let [dir   (temp-dir)
+        conn  (db/open! dir)
+        st    (-> (store/empty-store)
+                  (store/ingest 'ld.core "(ns ld.core)\n\n(def a 1)\n")
+                  (store/ingest 'ld.other "(ns ld.other)\n\n(def b 1)\n"))
+        fid   (fn [ns-sym] (:id (first (filter :id (store/elements st ns-sym)))))
+        trunk (db/trunk-line-id! conn)
+        _     (db/append! conn st (store/deltas st) ['ld.core 'ld.other] trunk nil)
+        h0    (db/line-head conn trunk)
+        st2   (-> st
+                  (store/record-delta {:id "x1" :parent h0 :op :replace :ns 'ld.core :form-id (fid 'ld.core) :prompt "the ask"})
+                  (store/record-delta {:id "x2" :parent "x1" :op :move :ns 'ld.core :form-id (fid 'ld.core) :prompt "pipeline" :system true})
+                  (store/record-delta {:id "x3" :parent "x2" :op :done :ns '*session* :label "l"}))
+        _     (db/append! conn st2 (drop (count (store/deltas st)) (store/deltas st2)) ['ld.core] trunk h0)]
+    (try
+      (let [loaded (db/load-store conn trunk)]
+        (testing "head and position"
+          (is (= "x3" (:head loaded)))
+          (is (= (count (store/deltas st2)) (:line-pos loaded))))
+        (testing "the prompt per form, the author's — the :system move did not overwrite it"
+          (is (= "the ask" (get (:prompts loaded) (fid 'ld.core))) (pr-str (:prompts loaded))))
+        (testing "the last write per namespace, session markers excluded"
+          (is (= "x2" (get-in loaded [:last-write 'ld.core :id])) (pr-str (:last-write loaded)))
+          (is (some? (get-in loaded [:last-write 'ld.other :id])))
+          (is (nil? (get-in loaded [:last-write '*session*]))))
+        (testing "and the two paths agree: a load answers what the writes built"
+          (is (= (:prompts st2) (:prompts loaded)))
+          (is (= (:last-write st2) (:last-write loaded)))))
+      (finally (.close conn)))))

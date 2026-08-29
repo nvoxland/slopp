@@ -32,13 +32,17 @@
   released only if present, and each release is ISOLATED — a throwing close
   (broken transport, a spare whose boot failed) must not leak everything
   after it. The spare deref is bounded: boot itself is bounded by start!'s
-  timeout, so the cap only guards a wedged future thread."
+  timeout, so the cap only guards a wedged future thread.
+
+  IDEMPOTENT, and that is load-bearing: the session FORGETS each handle as it
+  releases it. Before that, a second `close!` on one session found the same
+  image still in the atom, reset it again and PARKED IT AGAIN — one process
+  in the pool twice, handed to two later tenants, and the second met a closed
+  socket the moment the first stopped it. It surfaced as an unrelated test
+  dying with `Socket closed`, only when a test that closed in its body and in
+  its `finally` had run before it."
   [session]
   (letfn [(safely! [f] (try (f) (catch Throwable _ nil)))]
-    ;; PARK, not stop: the image's Clojure runtime is identical to the one the
-    ;; next session would spend ~830ms rebuilding. park! verifies the image
-    ;; back to its boot baseline and STOPS it whenever it cannot — so the
-    ;; worst case here is exactly the old behaviour.
     ;; PARK, not stop: the image's Clojure runtime is identical to the one the
     ;; next session would spend ~830ms rebuilding. Keyed by the store's OWN
     ;; dependency manifest — that is what put the jars on this image's
@@ -51,11 +55,18 @@
                 (repl/stop! (deref spare 65000 nil))))   ; reap even if still booting
     (safely! #(when-let [^java.sql.Connection conn (:db @session)]
                 (.close conn)))
+    ;; a dirless session's journal was minted for it alone; it goes with it
+    (safely! #(when (:ephemeral-dir? @session)
+                (letfn [(rm! [^java.io.File f]
+                          (when (.isDirectory f) (run! rm! (.listFiles f)))
+                          (.delete f))]
+                  (rm! (java.io.File. ^String (:dir @session))))))
     (doseq [[_ line] (:lines @session)]
       (safely! #(when-let [img (:image line)] (repl/stop! img)))
       (safely! #(when-let [^java.sql.Connection c (:conn line)]
                   (.close c))))
-    (safely! #(when-let [^java.util.Timer t (:reaper @session)] (.cancel t))))
+    (safely! #(when-let [^java.util.Timer t (:reaper @session)] (.cancel t)))
+    (swap! session dissoc :image :spare :db :reaper :lines :ephemeral-dir?))
   nil)
 
 (defn sync-with-journal!
@@ -213,6 +224,15 @@
                                                  :timing timing))
                       [])
     (swap! session dissoc :slopp.read.telemetry/calls)
+    ;; and the same rollup as an `ask` MEASUREMENT, anchored to the turn-end
+    ;; it describes: the delta carries `:timing` for the fold, the row is what
+    ;; a per-ask chart reads without folding the log — and, once the deltas
+    ;; leave the store value, the only place it is read from at all.
+    (when timing
+      (when-let [conn (:db @session)]
+        (db/record-measurement! conn "ask"
+                                (:id (peek (:deltas (:store @session))))
+                                timing)))
     (cond-> {:turn :closed :agent agent}
       timing (assoc :timing timing))))
 
@@ -4741,4 +4761,41 @@ recompiled (engine/after-write! session ns-sym)]
   [session]
   (if-let [conn (:db @session)]
     (mapv :payload (db/measurements conn "otel" nil))
+    []))
+
+(defn ^:export record-tool-call!
+  "Record one tool call as a MEASUREMENT beside the journal: `{:tool :ms
+  :chars :refused? :agent}`, one row per call. Returns nil.
+
+  The session ring already sees every call, but `turn-end!` folds only a
+  turn's five costliest tools onto its delta, so per-call cost was lossy and
+  lived in the journal. This is the census — every call, its wall, and
+  `:chars`, the characters it put on the wire, which is what every later
+  request re-reads and so what a tool COSTS rather than what it spent.
+
+  A measurement and never a delta, for the reason the table exists: a read
+  that moved the head could make a verdict lose its compare-and-swap. Silent
+  when the session has no db — an ephemeral store keeps no measurements, and
+  accounting is the last thing that should fail somebody's call."
+  [session {:keys [tool start end chars refused? agent]}]
+  (when-let [conn (:db @session)]
+    (db/record-measurement! conn "tool-call" nil
+                            {:tool     tool
+                             :ms       (- (or end 0) (or start 0))
+                             :chars    (or chars 0)
+                             :refused? (boolean refused?)
+                             :agent    (or agent (:agent-id @session))}))
+  nil)
+
+(defn ^:export tool-call-measurements
+  "Every `tool-call` row this store has recorded, as the payloads
+  [[record-tool-call!]] wrote — `[{:tool :ms :chars :refused? :agent} …]`,
+  oldest first. Empty for a session with no journal.
+
+  The read twin of the writer, here rather than in `slopp.read.query` for
+  the reason [[otel-measurements]] is: the front door is declared `:pure`,
+  and reading a table is IO."
+  [session]
+  (if-let [conn (:db @session)]
+    (mapv :payload (db/measurements conn "tool-call" nil))
     []))
