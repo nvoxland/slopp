@@ -366,3 +366,12 @@
   before the `:system` mark existed — the log is append-only, so those
   cannot be re-stamped. Two string literals would drift silently."
   "auto-reorder: define before use")
+
+(def ^:export auto-require-prompt
+  "THE prompt the pipeline's auto-require writes on an ns form: a write
+  named an alias the ns form did not have, exactly one namespace could
+  supply it, and the pipeline added the require rather than refusing the
+  write to teach a two-step. One constant with one home for the same reason
+  `auto-reorder-prompt` has one: the delta is also marked `:system true`,
+  but the prompt is what a reader of the log sees."
+  "auto-require: the write named an alias its ns form did not have")

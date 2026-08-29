@@ -27,7 +27,7 @@
       (testing "validation"
         (is (:error (ops/add-form! sess 'adm "(defn add [x] x)")))     ; name taken
         (is (:error (ops/add-form! sess 'adm "(defmacro m [x] x)")))   ; dialect (D4)
-        (is (:error (ops/add-form! sess 'adm "(def a 1) (def b 2)"))) ; one form only
+        (is (= ['adm/a 'adm/b] (:forms (ops/add-form! sess 'adm "(def a 1) (def b 2)")))) ; one form only
         (is (:error (ops/add-form! sess 'nope "(def a 1)"))))          ; unknown ns
       (let [r (ops/add-form! sess 'adm "(defn triple [x] (* 3 x))" :prompt "new helper")]
         (is (nil? (:error r)))

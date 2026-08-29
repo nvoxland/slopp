@@ -968,7 +968,7 @@
   already bears (mirroring rename!'s collision check): landing it leaves two
   definitions answering to one name — cold-load passes (redefinition is only a
   warning) and every later name-addressed edit refuses as ambiguous."
-  [store ns-sym form-name new-source & {:keys [prompt agent]}]
+  [store ns-sym form-name new-source & {:keys [prompt agent system]}]
   (let [ambiguous (ambiguous-form-error store ns-sym form-name)
         {:keys [node error]} (parse-form new-source)
         new-name  (when node (store/form-symbol node))
@@ -994,7 +994,8 @@
       :else
       (let [old (:node (store/form-named store ns-sym form-name))]
         (if-let [[store' delta] (store/replace-node store ns-sym form-name node
-                                                    :prompt prompt :agent agent)]
+                                                    :prompt prompt :agent agent
+                                                    :system system)]
           (let [{:keys [refuse advisories]}
                 (gates/gate-check store' ns-sym (or (store/form-symbol node) form-name))
                 drift (when old (contract-drift old node))]
@@ -1006,70 +1007,6 @@
                 (seq advisories) (assoc :advisories advisories)
                 (seq drift)      (assoc :drift drift))))
           (missing-form-error store ns-sym form-name))))))
-
-(defn- missing-alias-hint
-  "For a `No such namespace: X` compile failure, the `ns_add_require` call that
-  would supply `X` — or nil when nothing can, because a wrong suggestion costs
-  more than none.
-
-  The commonest mechanical friction measured on real sessions: a write naming
-  an alias the ns form does not have yet is refused with the compiler's own
-  sentence, and the recovery is always the same two-step — add the require,
-  resend the byte-identical form. Three round trips. Every other structural
-  refusal in slopp names the next call (`module_dep`, `module_purity`); this
-  one repeated what the compiler said.
-
-  Two sources, in order: a STORE namespace whose last segment is the alias
-  (`parcel` → `logi.parcel`), which is how the convention actually
-  works, and the handful of clojure.* aliases everyone uses. Ambiguity
-  names every candidate rather than picking — the point is to save the lookup,
-  not to guess."
-  [store err ns-sym]
-  (when-let [alias (second (re-find #"No such namespace:\s+([\w.$-]+)" (str err)))]
-    (let [well-known {"str" 'clojure.string  "set"  'clojure.set
-                      "edn" 'clojure.edn     "io"   'clojure.java.io
-                      "walk" 'clojure.walk   "pp"   'clojure.pprint
-                      "async" 'clojure.core.async}
-          from-store (filter #(= alias (last (str/split (str %) #"\."))) 
-                             (keys (:namespaces store)))
-          cands      (or (seq (sort-by str from-store))
-                         (some-> (well-known alias) vector))]
-      (when (seq cands)
-        (str "add the require first — "
-             (str/join " or "
-                       (for [c cands]
-                         (str "ns_add_require {ns \"" ns-sym "\", require \"["
-                              c " :as " alias "]\"}")))
-             (when (next cands) " (several namespaces could supply it)")
-             ", then resend this form unchanged")))))
-
-(defn compile-error
-  "The standard compile-failure result every 'failed to compile' surface
-  returns: `{:error <prefix + clean message> :form qsym :at snippet}` when
-  the error's VFS coordinate resolves against `store`, else just
-  `{:error <prefix + clean message>}`. The `(file.clj:line:col)` coordinate
-  is ALWAYS stripped from the message — row/col never reaches an agent, even
-  as a fallback (a coordinate no tool consumes is noise, not a clue).
-  `prefix` is the op label ('rename failed to compile: ').
-
-  Given the namespace being written, an unresolvable ALIAS gets the
-  `ns_add_require` call appended TO THE MESSAGE. Two reasons it goes there
-  rather than into a `:fix` key, and the second is the load-bearing one:
-  every other structural refusal in slopp teaches in its message, and each
-  edit tool maintains its OWN result-key allowlist — a new key reaches
-  nobody until ten of them are updated, which has silently happened to three
-  keys already. `:error` is in all of them."
-  ([store err prefix] (compile-error store err prefix nil))
-  ([store err prefix ns-sym]
-   (let [clean (str prefix
-                    (str/trim (str/replace (str err)
-                                           #"\s*(?:at\s+)?\([\w/._-]+\.clj:\d+(?::\d+)?\)\.?"
-                                           "")))
-         hint  (when ns-sym (missing-alias-hint store err ns-sym))
-         msg   (if hint (str clean " — " hint) clean)]
-     (if-let [a (anchor-error store err)]
-       (assoc a :error msg)
-       {:error msg}))))
 
 (defn live-callers-error
   "Refuse deleting `ns-sym/nm` while something still CALLS it — nil when
@@ -1113,3 +1050,115 @@
                    " forms call EACH OTHER there is no valid order: use"
                    " edit_replace_form on one to drop the call, then delete"
                    " both.")})))
+
+(defn- alias-candidates
+  "For a `No such namespace: X` compile failure, `[alias [ns …]]` — the
+  namespaces that could supply the alias, or nil when the error is not that
+  shape or nothing can. Two sources, in order: a STORE namespace whose last
+  segment is the alias (`parcel` → `logi.parcel`), which is how the
+  convention actually works, and the handful of clojure.* aliases everyone
+  uses. Shared by the refusal that names them and the pipeline that adds
+  the one there is."
+  [store err]
+  (when-let [alias (second (re-find #"No such namespace:\s+([\w.$-]+)" (str err)))]
+    (let [well-known {"str" 'clojure.string  "set"  'clojure.set
+                      "edn" 'clojure.edn     "io"   'clojure.java.io
+                      "walk" 'clojure.walk   "pp"   'clojure.pprint
+                      "async" 'clojure.core.async}
+          from-store (filter #(= alias (last (str/split (str %) #"\.")))
+                             (keys (:namespaces store)))
+          cands      (or (seq (sort-by str from-store))
+                         (some-> (well-known alias) vector))]
+      (when (seq cands)
+        [alias (vec cands)]))))
+
+(defn- missing-alias-hint
+  "For a `No such namespace: X` compile failure, the `ns_add_require` call that
+  would supply `X` — or nil when nothing can, because a wrong suggestion costs
+  more than none.
+
+  The commonest mechanical friction measured on real sessions: a write naming
+  an alias the ns form does not have yet was refused with the compiler's own
+  sentence, and the recovery was always the same two-step — add the require,
+  resend the byte-identical form. When ONE namespace can supply the alias the
+  pipeline now takes that step itself (`missing-alias-require`), so this
+  message is reached only when several could — and then it names every
+  candidate rather than picking: the point is to save the lookup, not to
+  guess."
+  [store err ns-sym]
+  (when-let [[alias cands] (alias-candidates store err)]
+    (str "add the require first — "
+         (str/join " or "
+                   (for [c cands]
+                     (str "ns_add_require {ns \"" ns-sym "\", require \"["
+                          c " :as " alias "]\"}")))
+         (when (next cands) " (several namespaces could supply it)")
+         ", then resend this form unchanged")))
+
+(defn compile-error
+  "The standard compile-failure result every 'failed to compile' surface
+  returns: `{:error <prefix + clean message> :form qsym :at snippet}` when
+  the error's VFS coordinate resolves against `store`, else just
+  `{:error <prefix + clean message>}`. The `(file.clj:line:col)` coordinate
+  is ALWAYS stripped from the message — row/col never reaches an agent, even
+  as a fallback (a coordinate no tool consumes is noise, not a clue).
+  `prefix` is the op label ('rename failed to compile: ').
+
+  Given the namespace being written, an unresolvable ALIAS gets the
+  `ns_add_require` call appended TO THE MESSAGE. Two reasons it goes there
+  rather than into a `:fix` key, and the second is the load-bearing one:
+  every other structural refusal in slopp teaches in its message, and each
+  edit tool maintains its OWN result-key allowlist — a new key reaches
+  nobody until ten of them are updated, which has silently happened to three
+  keys already. `:error` is in all of them."
+  ([store err prefix] (compile-error store err prefix nil))
+  ([store err prefix ns-sym]
+   (let [clean (str prefix
+                    (str/trim (str/replace (str err)
+                                           #"\s*(?:at\s+)?\([\w/._-]+\.clj:\d+(?::\d+)?\)\.?"
+                                           "")))
+         hint  (when ns-sym (missing-alias-hint store err ns-sym))
+         msg   (if hint (str clean " — " hint) clean)]
+     (if-let [a (anchor-error store err)]
+       (assoc a :error msg)
+       {:error msg}))))
+
+(defn ^:export missing-alias-require
+  "The ONE require spec — `\"[clojure.string :as str]\"` — that would supply
+  the alias a `No such namespace: X` failure names, or nil when the failure
+  is not that shape, nothing can supply it, or SEVERAL namespaces could
+  (`missing-alias-hint` names those; a guess costs more than a question).
+  The write path adds this as a `:system` require and retries the write."
+  [store err]
+  (when-let [[alias cands] (alias-candidates store err)]
+    (when (= 1 (count cands))
+      (str "[" (first cands) " :as " alias "]"))))
+
+(defn parse-forms
+  "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
+  face of `parse-form`, for a write that lands several new forms at once.
+  Every form passes the same gate one would (`control-char-refusal` on the
+  text, D3/D4 via `dialect-check`, D7's declare ban). Returns
+  `{:nodes [node …]}` or `{:error msg}` — never throws (F3)."
+  [source]
+  (if-let [ctl (control-char-refusal source)]
+    {:error ctl}
+    (try
+      (let [nodes (vec (filter n/sexpr-able? (n/children (p/parse-string-all source))))]
+        (if (empty? nodes)
+          {:error "expected at least one top-level form, got 0"}
+          (or (some (fn [node]
+                      (let [s (n/sexpr node)]
+                        (cond
+                          (and (seq? s) (= 'declare (first s)))
+                          {:error (str "(declare …) is managed for you — slopp orders forms"
+                                       " itself: write your forms in any order (definitions are"
+                                       " reordered above their callers), and a genuine"
+                                       " mutual-recursion cycle gets a marked declare inserted"
+                                       " automatically. Drop the declare and write the real forms.")}
+                          (dialect-check node)
+                          {:error (dialect-check node)})))
+                    nodes)
+              {:nodes nodes})))
+      (catch Exception e
+        {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))

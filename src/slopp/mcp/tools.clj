@@ -205,14 +205,14 @@
                                :prompt {:type "string"}}
                   :required ["ns" "name" "text"]}}
    {:name "edit_replace_form"
-    :description "Replace a whole top-level form (verified write)."
+    :description "Replace a whole top-level form (verified write). A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :source {:type "string"} :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source"]}}
    {:name "edit_add_form"
-    :description "Add a top-level form (verified write); `before` anchors placement, default tail."
+    :description "Add ONE top-level form — or SEVERAL: `source` holding N forms lands them as one atomic write, verified once, reported per form in :forms (growing a namespace is no longer one call per form). `before` anchors a single form (default tail). A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :source {:type "string"}
                                :before {:type "string"}

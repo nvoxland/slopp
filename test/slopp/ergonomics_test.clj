@@ -500,41 +500,46 @@
         (is (re-find #"\[a b\] \(\+ a b\)" (query/query-source sess 'nt.core))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-refused-write-carries-the-require-it-needs
+(deftest ^:external a-write-that-names-a-missing-alias-gets-the-require-added
   ;; The most frequent mechanical friction measured on a real session: ~8
   ;; writes refused with a bare `No such namespace: X`, each followed by
-  ;; `ns_add_require` and a resend of the BYTE-IDENTICAL form. Three round
-  ;; trips for a two-step slopp has all the information to collapse.
+  ;; `ns_add_require` and a resend of the BYTE-IDENTICAL form. The refusal
+  ;; learned to NAME the two-step; now the pipeline TAKES it. kondo already
+  ;; knows which namespace owns the alias; an agent transcribing that into a
+  ;; second call is doing the analyzer's job by hand (§5c of the review).
   ;;
-  ;; The helper is pinned in `edit-test`; this pins the SEAM, and the seam is
-  ;; where the first attempt died. It put the hint in a `:fix` KEY — and every
-  ;; edit tool maintains its own result-key allowlist, so the key was stripped
-  ;; at the wire and the refusal looked exactly as it always had. Three keys
-  ;; have been lost that way before. The MESSAGE is the channel that survives,
-  ;; and it is where every other structural refusal in slopp teaches anyway.
+  ;; The require is a `:system` write with the pipeline's own prompt, so
+  ;; `prompt-by-form` keeps reporting the author's ask for the ns form and
+  ;; the housekeeping share counts it as the pipeline's, not the agent's.
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'ma.core "(ns ma.core)\n(defn f \"F.\" [] 1)\n")
-      (testing "the refusal names the ns_add_require call and says to resend"
+      (testing "an alias one namespace can supply is added and the write lands"
         (let [r (ops/edit-replace! sess 'ma.core 'f
                                    "(defn f \"F.\" [] (str/join \",\" [1 2]))"
-                                   :prompt "use an alias this ns does not have")
+                                   :prompt "use an alias this ns does not have")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:added "[clojure.string :as str]" :ns 'ma.core} (:auto-require r))
+              "and the result says what the pipeline did on the author's behalf")
+          (is (str/includes? (query/query-source sess 'ma.core) "[clojure.string :as str]")
+              "the ns form carries the require")
+          (let [ns-fid (:id (store/form-named (:store @sess) 'ma.core 'ma.core))
+                d      (last (filter #(and (= :replace (:op %)) (= ns-fid (:form-id %)))
+                                     (ops/journal sess)))]
+            (is (:system d) (str "the require is the pipeline's write, marked so: " (pr-str d))))))
+      (testing "an alias SEVERAL namespaces could supply is still a question — refused, naming each"
+        (ops/ingest! sess 'ma.util.alpha "(ns ma.util.alpha)\n(defn g [] 1)\n")
+        (ops/ingest! sess 'ma.other.alpha "(ns ma.other.alpha)\n(defn g [] 2)\n")
+        (let [r (ops/edit-replace! sess 'ma.core 'f
+                                   "(defn f \"F.\" [] (alpha/g))"
+                                   :prompt "an alias two namespaces answer to")
               e (str (:error r))]
           (is (:error r) (pr-str r))
           (is (str/includes? e "ns_add_require") e)
-          (is (str/includes? e "clojure.string") e)
-          (is (str/includes? e "ma.core")
-              "the require goes on the ns being WRITTEN")))
-      (testing "and the two-step it names actually works"
-        (ops/add-require! sess 'ma.core "[clojure.string :as str]"
-                          :prompt "the require the refusal asked for")
-        (let [r (ops/edit-replace! sess 'ma.core 'f
-                                   "(defn f \"F.\" [] (str/join \",\" [1 2]))"
-                                   :prompt "resend unchanged, as the refusal said")]
-          (is (nil? (:error r)) (pr-str r))))
+          (is (str/includes? e "ma.util.alpha") e)
+          (is (str/includes? e "ma.other.alpha") e)
+          (is (nil? (:auto-require r)))))
       (testing "an ordinary compile error is left alone rather than guessed at"
-        ;; a wrong suggestion costs more than none: it sends the next call
-        ;; somewhere real and useless
         (let [r (ops/edit-replace! sess 'ma.core 'f
                                    "(defn f \"F.\" [] (no-such-fn 1))"
                                    :prompt "a genuine unresolved symbol")]
@@ -764,4 +769,37 @@
                                :prompt "green")]
           (is (nil? (:error r)) (pr-str r))
           (is (zero? (+ (:fail (:test r) 0) (:error (:test r) 0))) (pr-str (:test r)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external several-new-forms-land-in-one-call-verified-once
+  ;; slopp-ui friction #3: "growing an existing namespace is strictly one
+  ;; form per call… a 6-form test namespace is 6 round trips. What I would do
+  ;; naturally: write the file." Nothing is broken by a form that did not
+  ;; exist, so N new forms are ONE write: one delta per form, one
+  ;; verification over the batch, reported per form.
+  (let [sess (external/open!)
+        verifies #(count (filter (fn [d] (= :verify (:op d))) (ops/journal sess)))]
+    (try
+      (ops/ingest! sess 'ba.core "(ns ba.core (:require [clojure.test :refer [deftest is]]))\n(defn base [x] x)\n")
+      (let [before (verifies)
+            r (ops/add-form! sess 'ba.core
+                             (str "(defn twice \"Doubles.\" [x] (* 2 (base x)))\n\n"
+                                  "(defn thrice \"Triples.\" [x] (* 3 (base x)))\n\n"
+                                  "(deftest twice-t (is (= 4 (twice 2))))\n")
+                             :prompt "three forms at once")]
+        (is (nil? (:error r)) (pr-str r))
+        (testing "every form is reported, in order, and every one is in the store"
+          (is (= ['ba.core/twice 'ba.core/thrice 'ba.core/twice-t] (:forms r)) (pr-str r))
+          (is (= 3 (count (:deltas r))))
+          (doseq [nm ['twice 'thrice 'twice-t]]
+            (is (store/form-named (:store @sess) 'ba.core nm) (str nm))))
+        (testing "verified ONCE over the batch — not once per form"
+          (is (= (inc before) (verifies)))
+          (is (zero? (+ (:fail (:test r) 0) (:error (:test r) 0))) (pr-str (:test r))))
+        (testing "and the batch is atomic: one bad form lands none"
+          (let [r2 (ops/add-form! sess 'ba.core
+                                  "(defn four [x] (* 4 x))\n\n(defn broken [x] (nope x))\n"
+                                  :prompt "one of these does not compile")]
+            (is (:error r2) (pr-str r2))
+            (is (nil? (store/form-named (:store @sess) 'ba.core 'four))))))
       (finally (ops/close! sess)))))

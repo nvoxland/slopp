@@ -22,6 +22,9 @@
             [slopp.index.normalize :as normalize]
             [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
 
+^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
+(declare add-form! add-require! auto-require-retry edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
+
 (defn close! "Release everything the session owns and return nil: its image, a warm spare
   still booting, the SQLite connection, every per-branch line's image and
   connection, and the idle-image reaper timer.
@@ -340,314 +343,6 @@
   [session]
   (engine/fresh-image! session)
   session)
-
-(defn edit-replace!
-  "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
-  pipeline + hot-reload, then re-verify — only the tests the trace map says
-  exercise this form (D1), cross-checked on a fresh image if red (D5) — and
-  record the outcome as provenance (C4). A replace that RENAMES the form
-  refuses while committed callers still reference the old name — edit_rename
-  is the atomic path (the store must keep cold-loading)."
-  [session ns-sym nm new-source & {:keys [prompt agent]}]
-  (let [t0 (System/nanoTime)
-        pf       (edit/parse-form new-source)
-        ;; a replaced defmethod leaves its OLD dispatch registered unless the
-        ;; replacement re-registers the same [multi dispatch] (#131): hot-load
-        ;; evals the new form, but nothing removes the old method, so the image
-        ;; answers BOTH dispatches while the store says one — green-when-red.
-        old-node (some-> (store/form-named (:store @session) ns-sym nm) :node)
-        old-s    (when old-node
-                   (try (n/sexpr old-node) (catch Exception _ nil)))
-        new-s    (when-not (:error pf)
-                   (try (n/sexpr (:node pf)) (catch Exception _ nil)))
-        unregister
-        (when (and (seq? old-s) (= 'defmethod (first old-s)) (> (count old-s) 2)
-                   (not (and (seq? new-s) (= 'defmethod (first new-s))
-                             (= (second old-s) (second new-s))
-                             (= (nth old-s 2) (nth new-s 2)))))
-          (format "(when-let [v (ns-resolve '%s '%s)]
-                     (when (instance? clojure.lang.MultiFn @v)
-                       (remove-method @v
-                         (binding [*ns* (find-ns '%s)] (eval '%s)))))"
-                  ns-sym (second old-s) ns-sym (pr-str (nth old-s 2))))
-        new-name (when-not (:error pf) (store/form-symbol (:node pf)))
-        stranded (when (and new-name (not= new-name (symbol (str nm)))
-                            (store/form-named (:store @session) ns-sym nm))
-                   (let [st    (:store @session)
-                         known (set (keys (:namespaces st)))]
-                     (vec (distinct
-                           (for [nsx known
-                                 u   (:var-usages (analyze/analyze (store.render/render-ns st nsx)))
-                                 :when (and (= (symbol (str ns-sym)) (:to u))
-                                            (= (symbol (str nm)) (:name u))
-                                            (not (and (= nsx (symbol (str ns-sym)))
-                                                      (= (symbol (str nm)) (:from-var u)))))]
-                             (symbol (str nsx) (str (:from-var u))))))))]
-    (if (seq stranded)
-      {:error (str "this replace RENAMES " nm " → " new-name " but committed"
-                   " callers still reference " ns-sym "/" nm ": " stranded
-                   " — edit_rename rewrites every caller atomically (or land"
-                   " the callers in this same change)")}
-      (let [pre-warned (set (map :var (edit/ns-warnings (:store @session) ns-sym)))
-load? (store/jvm-loadable? (:store @session) ns-sym)
-            r (engine/rebased-write!
-               session
-               (fn [base] (edit/replace-form base ns-sym nm new-source
-                                             :prompt prompt :agent agent))
-               (fn [base] (:node (store/form-named base ns-sym nm)))
-               (symbol (str ns-sym) (str nm))
-               ns-sym
-               :load? load?)]
-        (if (or (:error r) (:conflict r))
-          r
-          (let [qform    (symbol (str ns-sym) (str nm))
-                new-nm   (:name (store/form-by-id (:store r)
-                                                  (:form-id (:delta r))))
-                edited   (into #{qform}
-                               (when new-nm [(symbol (str ns-sym) (str new-nm))]))
-                affected (let [a (or (engine/affected-tests session ns-sym nm)
-                                     ;; an alias-only require addition is semantically
-                                     ;; inert — verify NOTHING rather than the whole
-                                     ;; namespace reach (frictions #2); [] is honest
-                                     ;; (:coverage :none), never a claimed green
-                                     (when (engine/inert-ns-require-change?
-                                            (:store @session) (:form-id (:delta r))
-                                            (engine/prior-source session (:form-id (:delta r))))
-                                       []))]
-                             ;; …and re-point it through the rename, exactly as
-                             ;; `edited` is one binding above. The affected set was
-                             ;; asked for under the OLD name, so when this write
-                             ;; renames the form it comes back naming something the
-                             ;; same write just retired, and the run resolves to
-                             ;; nothing. Only a renamed TEST notices: renaming an
-                             ;; implementation form leaves its covering tests' names
-                             ;; alone. Reported by slopp-ui 2026-08-02, where two
-                             ;; renamed deftests were red and neither said so.
-                             (if (and a new-nm (not= new-nm nm))
-                               (mapv #(if (= % qform)
-                                        (symbol (str ns-sym) (str new-nm))
-                                        %)
-                                     a)
-                               a))
-                untested (and (nil? affected) (seq (:test-map @session))
-                               (not (re-find #"^\(\s*(?:clojure\.test/)?deftest\b"
-                                             (str/triml new-source))))
-                _        (when (and new-nm (not= new-nm nm))
-                           (repl/eval! (:image @session)
-                                       (format "(ns-unmap '%s '%s)" ns-sym nm)))
-                _        (when unregister
-                           (repl/eval! (:image @session) unregister))
-;; ROOT of frictions 1 and 17. A per-form hot-load is equivalent to
-                ;; LOADING the form only when the form's whole contribution to
-                ;; the image is its own var binding. Anything that CAPTURED a
-                ;; value from it — a derived def, an evaluated metadata schema —
-                ;; still holds the old one, and re-evaluating one form replays
-                ;; none of that. `--live` never had this bug because it reloads
-                ;; whole NAMESPACES; the oracle did because it reloads forms.
-                ;;
-                ;; So: keep the fast path, and when something captured, repair
-                ;; through the same `load-ns!` every other loader uses. This is
-                ;; measured to be rare — 35 of 2202 forms in this store capture
-                ;; at load at all — so an ordinary defn write pays nothing.
-                ;; Before verification deliberately: tests must run against a
-                ;; repaired image, not a half-stale one.
-                captured (when load?
-                           (rules.currency/stale-after (:image @session) (:store @session) (:form-id (:delta r))))
-                reloaded (when (seq captured)
-                           (vec (sort (distinct (map (comp symbol namespace)
-                                                     captured)))))
-                reload-errs
-                (when (seq reloaded)
-                  (not-empty
-                   (into {}
-                         (keep (fn [nsx]
-                                 (when-let [e (image/load-ns! (:image @session)
-                                                              (:store @session)
-                                                              nsx)]
-                                   [nsx e])))
-                         reloaded)))
-                ;; what the repair could NOT reach — normally nothing, and
-                ;; reported rather than assumed away when it happens
-                stale    (when (seq reloaded)
-                           (not-empty (rules.currency/stale-after (:image @session) (:store @session) (:form-id (:delta r)))))
-                ;; no trace evidence → fall back to the tests that REACH this
-                ;; namespace, not to tests named after it (there are none)
-                ;; a ^:live-handle constructor changed shape: the map already in
-                ;; the session was built by the OLD code and no write can
-                ;; reach it. Rebuild BEFORE verification, which would
-                ;; otherwise be the first thing to read the stale handle —
-                ;; and discard the warm spare, which was built under the old
-                ;; code too (that is how it broke a second time).
-                handle-shift (when (and old-node (:node pf))
-                               (edit/live-handle-shape-change old-node (:node pf)))
-                ;; The rebuild can FAIL mid-migration and that is normal: a shape
-                ;; change lands on the constructor BEFORE its callers are
-                ;; updated, so the fresh image may launch mis-configured (a
-                ;; renamed option key read as nil). Keep the working image and
-                ;; report it — the episode continues, and the next write once
-                ;; the callers catch up rebuilds cleanly. Throwing here would
-                ;; make a legitimate in-progress migration look like a broken
-                ;; write.
-                rebuild-err
-                (when handle-shift
-                  (swap! session assoc :spare nil)
-                  (try (engine/fresh-image! session) nil
-                       (catch Throwable t (ex-message t))))
-                scope    (if affected
-                           ns-sym
-                           (or (seq (engine/covering-test-nses
-                                     (:store @session) [ns-sym]))
-                               ns-sym))
-                summary  (if load?
-                             (engine/run-verification! session scope affected
-                                                        :edited edited)
-                             engine/cljs-deferred-summary)
-                existing (count (filter (comp pre-warned :var) (:warnings r)))
-recompiled (engine/after-write! session ns-sym)]
-            (engine/commit-appended! session
-                              #(store/record-verification % ns-sym summary) [])
-            (engine/with-ms
-              (cond-> {:delta    (:delta r)
-                       ;; T3: only NEW violations; pre-existing ones as a count
-                       :warnings (vec (remove (comp pre-warned :var) (:warnings r)))
-                       :test     summary
-                       :affected (or affected :all)}
-                (:image-healed r) (assoc :image-healed true)
-                ;; what this write changed BEYOND what was asked — a lost type
-                ;; hint, docstring or arity. Reported, never refused.
-                (seq (:drift r)) (assoc :drift (:drift r))
-                ;; friction 1: forms this write left holding a value computed
-                ;; from the OLD source. Not :drift — that key is taken, and it
-                ;; means something else on this very map.
-                ;; the repair, reported: a namespace reload is a real cost and a
-                ;; silent one reads as an unexplained slow write
-                (seq reloaded) (assoc :image-reloaded reloaded)
-                reload-errs    (assoc :image-reload-failed reload-errs)
-                (seq stale)    (assoc :stale-in-image (vec stale))
-                ;; say WHY the image was replaced — a silent rebuild is a
-                ;; surprising cost, and the reason is the teaching
-                handle-shift (assoc :image-rebuilt
-                                    (cond-> (assoc handle-shift
-                                                   :reason :live-handle-shape-change)
-                                      rebuild-err
-                                      (assoc :rebuild-failed rebuild-err
-                                             :note (str "kept the working image — normal"
-                                                        " MID-MIGRATION, when the constructor"
-                                                        " has changed but its callers have"
-                                                        " not. Update them and the next write"
-                                                        " rebuilds cleanly."))))
-                (pos? existing)   (assoc :existing-warnings existing)
-                untested          (assoc :untested true)
-                (:red-first r)    (assoc :red-first (:red-first r)
-                                         :note (str "these vars don't exist yet — stubbed"
-                                                    " in-image as failing (red-first);"
-                                                    " implement them to go green."))
-                (:carried-errors r) (assoc :carried-errors (:carried-errors r))
-                recompiled          (merge recompiled))
-              t0)))))))
-
-(defn add-form!
-  "Add a new top-level form to `ns-sym` (O1 base write): dialect gate, `:add`
-  delta, hot-reload into the image, verification, provenance. `:before
-  <form-name>` anchors the new form immediately before that one (default:
-  appended at the tail) — define-before-use without a follow-up move.
-  Returns {:delta :warnings :test :affected} or {:error msg}.
-
-  A :cljs (non-jvm-loadable) namespace is authored the same way but its form
-  references js/* / the DOM and cannot load into the JVM oracle, so the write
-  SKIPS the per-form hot-load (`:load? false`) and defers verification to the
-  ClojureScript compiler — reporting `cljs-deferred-summary` (:unverified,
-  reason :cljs-deferred-to-compile) rather than running the suite. D-web-cljs."
-  [session ns-sym source & {:keys [prompt agent before]}]
-  (let [t0 (System/nanoTime)
-        {:keys [node error]} (edit/parse-form source)
-        nm (some-> node store/form-symbol)
-        iso (when node
-              (edit/isolation-refusal
-               (edit/require-aliases (:store @session) ns-sym) node))]
-    (cond
-      error {:error error}
-
-      iso {:error iso}
-
-      (and nm (store/form-named (:store @session) ns-sym nm))
-      {:error (str nm " already exists in " ns-sym)}
-
-      :else
-      (let [pre-warned (set (map :var (edit/ns-warnings (:store @session) ns-sym)))
-            load?      (store/jvm-loadable? (:store @session) ns-sym)
-            r (engine/rebased-write!
-               session
-               (fn [base]
-                 (cond
-                   (and nm (store/form-named base ns-sym nm))
-                   {:error (str nm " already exists in " ns-sym)}
-
-                   (and before (not (store/form-named base ns-sym before)))
-                   {:error (str "no anchor form named " before " in " ns-sym
-                                " — :before must name an existing form")}
-
-                   :else
-                   (if-let [[st' d] (store/append-form base ns-sym node
-                                                       :prompt prompt :agent agent
-                                                       :before before)]
-                     ;; nameless forms too: a defmethod names its TARGET, so nm is nil
-                     ;; here — and `(when nm …)` skipped the whole chassis for
-                     ;; exactly the carrier whose ^:app/entry marker can only be
-                     ;; caught by a gate's nameless arm. Named gates no-op on nil.
-                     (if-let [merr (gates/gate-refusal st' ns-sym nm)]
-                       {:error merr}
-                       {:store st' :delta d})
-                     {:error (str "no namespace " ns-sym " (ingest it first)")})))
-               (fn [base] (when nm (:node (store/form-named base ns-sym nm))))
-               (symbol (str ns-sym) (str (or nm "anonymous")))
-               ns-sym
-               :load? load?)]
-        (if (or (:error r) (:conflict r))
-          r
-          (let [edited     (if nm #{(symbol (str ns-sym) (str nm))} #{})
-                affected   (when (and load? nm) (engine/affected-tests session ns-sym nm))
-                summary    (if load?
-                             (engine/run-verification! session ns-sym affected
-                                                        :edited edited)
-                             engine/cljs-deferred-summary)
-                all-w      (edit/ns-warnings (:store @session) ns-sym)
-                existing   (count (filter (comp pre-warned :var) all-w))
-                advisories (when nm (:advisories (gates/gate-check
-                                                  (:store @session) ns-sym nm)))
-recompiled (engine/after-write! session ns-sym)]
-            (engine/commit-appended! session
-                                      #(store/record-verification % ns-sym summary)
-                                      [])
-            (engine/with-ms
-              (cond-> {:delta    (:delta r)
-                       ;; T3: only NEW violations; pre-existing as a count
-                       :warnings (vec (remove (comp pre-warned :var) all-w))
-                       :test     summary
-                       :affected (or affected :all)}
-                (:image-healed r) (assoc :image-healed true)
-                (pos? existing)   (assoc :existing-warnings existing)
-                (:red-first r)    (assoc :red-first (:red-first r)
-                                         :note (str "these vars don't exist yet —"
-                                                    " stubbed in-image as failing"
-                                                    " (red-first); implement them to"
-                                                    " go green."))
-                (:carried-errors r) (assoc :carried-errors (:carried-errors r))
-                (:red-first-arity r)
-                ;; as-> rather than assoc: a test can BOTH name a missing var
-                ;; and call a known one at a new arity, and a plain assoc would
-                ;; drop the stub note that the other clause just wrote
-                (as-> m (assoc m :red-first-arity (:red-first-arity r)
-                               :note (str (when (:note m) (str (:note m) " "))
-                                          "this calls an existing var at an arity"
-                                          " it does not have yet — the write landed"
-                                          " (red-first) and the call will throw"
-                                          " ArityException until you implement that"
-                                          " arity. That throw IS the red you asked"
-                                          " for, not a bug.")))
-                (seq advisories)    (assoc :advisories advisories)
-                recompiled          (merge recompiled))
-              t0)))))))
 
 (defn delete-form!
   "Delete the form named `nm` from `ns-sym`: `:delete` delta, `ns-unmap` in the
@@ -981,65 +676,6 @@ recompiled (engine/after-write! session ns-sym)]
                       (pos? existing)    (assoc :existing-warnings existing))
                     t0))))))))))
 
-(defn add-require!
-  "F5: add one require clause to `ns-sym`'s ns form — structural edit through
-  the normal replace pipeline (delta, hot-reload, verification).
-
-  Forwards `:agent` (#132): without it the delta landed agent-nil and the edit
-  never entered ANY agent's episode — `done` never linted, normalized, or
-  verified an ns_add_require at the boundary. Found by the collapse fix's own
-  e2e: the ns-form change it staged simply never arrived.
-
-  Attaches `:tier-note` when a TIERED namespace gains an in-store dep no
-  declaration covers: undeclared defaults :external, so the consumer's tier
-  claim dies at the next full_check's layering pass — and the write that
-  creates the dependency is the one moment the declaration is cheap and the
-  author's context is loaded (frictions #4: the signal used to arrive two
-  gates late)."
-  [session ns-sym require-str & {:keys [prompt agent]}]
-  (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
-    (let [r (edit/add-require-source (n/string (:node f)) require-str)]
-      (if (:error r)
-        r
-        (let [res (edit-replace! session ns-sym ns-sym (:src r)
-                                 :prompt (or prompt (str "add require " require-str))
-                                 :agent agent)
-              st  (:store @session)
-              lib (try (let [spec (edn/read-string (str require-str))]
-                         (cond (vector? spec) (first spec)
-                               (symbol? spec) spec))
-                       (catch Exception _ nil))
-              note (when (and (nil? (:error res)) lib
-                              (contains? (:namespaces st) lib)
-                              (tiers/tier-declared? st ns-sym)
-                              (contains? #{:pure :internal}
-                                         (tiers/tier-for st ns-sym))
-                              (not (tiers/tier-declared? st lib)))
-                     (str ns-sym " is declared " (tiers/tier-for st ns-sym)
-                          " and now depends on UNDECLARED " lib " (defaults"
-                          " :external — full_check's tier-layering will flag"
-                          " this). Declare it while the context is loaded:"
-                          " module_purity {module \"" lib "\" tier \"...\"} —"
-                          " a new ns's tier is cheapest at creation."))]
-          (cond-> res
-            note (assoc :tier-note note)))))
-    {:error (str "no namespace " ns-sym " (create it first)")}))
-
-(defn remove-require!
-  "Symmetric counterpart of add-require!: structurally remove `lib`'s require
-  spec from `ns-sym`'s ns form, through the normal replace pipeline.
-  Forwards `:agent` (#132) for the same reason add-require! does — an
-  agent-nil delta never enters any episode."
-  [session ns-sym lib & {:keys [prompt agent]}]
-  (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
-    (let [r (edit/remove-require-source (n/string (:node f)) lib)]
-      (if (:error r)
-        r
-        (edit-replace! session ns-sym ns-sym (:src r)
-                       :prompt (or prompt (str "remove require " lib))
-                       :agent agent)))
-    {:error (str "no namespace " ns-sym)}))
-
 (defn move-form!
   "S2: reorder — move form `nm` to just before `:before` in its namespace (the
   fix for append-only forward references). Image vars are order-independent so
@@ -1181,41 +817,6 @@ recompiled (engine/after-write! session ns-sym)]
         nses (when lib? (vec (get (:dep-ns st) target)))]
     (record-pure! session (or nses [target]) false {:agent agent :prompt prompt})
     (if lib? {:lib target :namespaces nses} {:unpure target})))
-
-(defn edit-subform!
-  "Item 5 — paredit's invariant, agent-shaped: replace the UNIQUE structural
-  occurrence of `match` inside form `form-name` with `new-src`
-  (content-addressed). With `:text true` the match is RAW TEXT instead — the
-  escape hatch for string literals and docstrings. With `:where {k v ...}` the
-  target is the unique MAP containing those entries (registry-style edits
-  by key, no exact text needed) and `match` is ignored. `:where` ADDRESSES
-  a row rather than asserting a value: both sides are compared by the
-  spelling they answer to, so `\"stored-name\"` reaches a row stored as
-  `:stored-name` — registry rows are keyed by keywords and the wire this
-  arrives over has none. Rides the full
-  replace pipeline: dialect gate on the RESULTING form, rebase/conflict
-  commit, verification, provenance.
-
-  With `:wrap true`, `new-src` is a TEMPLATE and `$1` is the matched form —
-  `(let [n 1] $1)` nests what was there inside what you wrote. This docstring
-  used to say wrap was 'just a new subform containing the old', which was true
-  and not cheap: expressing it meant retyping the matched form inside the
-  replacement, so a two-line change to a large form became a large paste.
-  `$1` is the same template mechanism `change_signature` uses for call sites."
-  [session ns-sym form-name match new-src & {:keys [prompt agent text where wrap]}]
-  (let [plan (cond
-               (seq where) (refactor/keyed-replace-plan (:store @session) ns-sym
-                                                        form-name where new-src)
-               text        (refactor/text-replace-plan (:store @session) ns-sym
-                                                       form-name match new-src)
-               :else       (refactor/subform-replace-plan (:store @session) ns-sym
-                                                          form-name match new-src
-                                                          (boolean wrap)))]
-    (if (:error plan)
-      plan
-      (edit-replace! session ns-sym form-name (:new-form-src plan)
-                     :prompt (or prompt (str "subform edit in " form-name))
-                     :agent agent))))
 
 (defn rename!
   "Rename `ns-sym/old-name` to `new-name` everywhere: ONE coordinated delta over
@@ -3071,49 +2672,6 @@ recompiled (engine/after-write! session ns-sym)]
         (some store/method-carrying?
               (mapcat #(store/forms st %) (store/ns-closure st lib))))))
 
-(defn prune-requires!
-  "Done-point require hygiene — the agent never manages unused requires; done
-   does, and there is deliberately no MCP tool for it. For each require kondo
-   reports unused (`done/unused-requires`), TRY removing it and re-verify.
-
-   Removing a kondo-unused require cannot break COMPILATION — nothing used it —
-   so the only ways it can break are (1) a test the removal's own affected set
-   catches, or (2) a load effect a cold load would lose: an orphaned in-store
-   target whose closure REGISTERS something (a defmethod the reference graph
-   can't see). The live image already has that registration loaded, so a green
-   in-image verdict does NOT prove the require dead — `require-orphaned-registrar?`
-   is the static backstop.
-
-   Genuinely dead → drop it. Load-bearing (or the removal went red) → restore it
-   WITH a `^:side-effect` marker, so it no longer reads as unused and done never
-   re-tries it. Returns `{:pruned [lib …] :kept [lib …]}`."
-  [session ns-sym & {:keys [prompt agent]}]
-  (reduce
-   (fn [acc {:keys [lib marked]}]
-     (let [r    (remove-require! session ns-sym lib
-                                 :prompt (or prompt (str "done: try pruning unused require " lib))
-                                 :agent agent)
-           red? (let [t (:test r)]
-                  (boolean (and t (or (pos? (:fail t 0)) (pos? (:error t 0))))))]
-       (cond
-         ;; couldn't remove it at all (conflict/refusal) — leave it untouched
-         (or (:error r) (:conflict r))
-         (update acc :kept conj lib)
-
-         ;; removing it broke a test, or would lose a registration on cold load:
-         ;; restore it, marked, so it is not reported unused or re-tried
-         (or red? (require-orphaned-registrar? (:store @session) lib))
-         (do (add-require! session ns-sym marked
-                           :prompt (str "done: keep load-bearing require " lib
-                                        " (removing it breaks a cold load) — marked ^:side-effect")
-                           :agent agent)
-             (update acc :kept conj lib))
-
-         :else
-         (update acc :pruned conj lib))))
-   {:pruned [] :kept []}
-   (done/unused-requires (:store @session) ns-sym)))
-
 (defn module-extract!
   "Pull `ns-syms` (each with its subtree and `-test` siblings) under
   `to-prefix` — the module-grain regroup, as ONE intent.
@@ -4327,31 +3885,6 @@ recompiled (engine/after-write! session ns-sym)]
             (history/milestone-rows st))
       (mapv join (history/milestone-rows st :titles-only true)))))
 
-(defn revert-form!
-  "One-call rollback (item 4): replace `nm` with an earlier version of itself —
-  by default the previous one, or the version at delta `:to` (see
-  query-form-history). Rides the standard replace pipeline, so the revert is
-  itself compile-gated, verified, and recorded provenance."
-  [session ns-sym nm & {:keys [to prompt agent]}]
-  (let [hist (history/query-form-history (with-history session) ns-sym nm)]
-    (cond
-      (nil? hist)
-      (edit/missing-form-error (:store @session) ns-sym nm)
-
-      (< (count hist) 2)
-      {:error (str nm " has no earlier version to revert to")}
-
-      :else
-      (let [target (if to
-                     (first (filter #(= to (:delta %)) hist))
-                     (nth hist (- (count hist) 2)))]
-        (if-not target
-          {:error (str "no version of " nm " at delta " to)}
-          (edit-replace! session ns-sym nm (:source target)
-                         :prompt (or prompt
-                                     (str "revert to " (:delta target)))
-                         :agent agent))))))
-
 (defn revert-episode!
   "Scrap the agent's episode: roll every form it changed since its last
   done back to the boundary state — as ONE atomic verified group
@@ -4926,3 +4459,549 @@ recompiled (engine/after-write! session ns-sym)]
           (db/persist-index! conn fresh stale (engine/session-line session)))
         (swap! session update :store assoc :refs (:refs fresh))))
     {:refreshed stale}))
+
+(defn- add-forms!
+  "Several NEW forms in one write: an atomic `edit-group!` of `:add` steps —
+  one delta per form, every gate per form, ONE verification over the batch,
+  nothing landed if any form fails — reported per form as `:forms`. The
+  batch face of `add-form!`, which routes here when `source` holds more
+  than one top-level form. Appended at the tail: `before` anchors a single
+  form and is refused for a batch rather than guessed at."
+  [session ns-sym nodes & {:keys [prompt agent before]}]
+  (if before
+    {:error (str "several forms in one write are appended at the tail — `before`"
+                 " anchors ONE form; add the anchored one on its own")}
+    (let [r (edit-group! session
+                         (mapv (fn [node] {:action :add :ns ns-sym :source (n/string node)})
+                               nodes)
+                         :prompt prompt :agent agent)]
+      (if (or (:error r) (:conflict r))
+        r
+        (let [st (:store @session)]
+          (assoc r :forms
+                 (mapv (fn [d]
+                         (let [e (store/form-by-id st (:form-id d))]
+                           (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
+                       (:deltas r))))))))
+
+(defn edit-replace!
+  "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
+  pipeline + hot-reload, then re-verify — only the tests the trace map says
+  exercise this form (D1), cross-checked on a fresh image if red (D5) — and
+  record the outcome as provenance (C4). A replace that RENAMES the form
+  refuses while committed callers still reference the old name — edit_rename
+  is the atomic path (the store must keep cold-loading).
+
+  A write refused only because it named an alias the ns form lacks, when
+  exactly one namespace can supply it, gets the require added as a `:system`
+  write and is retried once (`auto-require-retry`); the result then carries
+  `:auto-require`. `:system true` marks a replace the pipeline itself makes
+  (that require) on its delta."
+  [session ns-sym nm new-source & {:keys [prompt agent system no-auto-require]}]
+  (let [t0 (System/nanoTime)
+        pf       (edit/parse-form new-source)
+        ;; a replaced defmethod leaves its OLD dispatch registered unless the
+        ;; replacement re-registers the same [multi dispatch] (#131): hot-load
+        ;; evals the new form, but nothing removes the old method, so the image
+        ;; answers BOTH dispatches while the store says one — green-when-red.
+        old-node (some-> (store/form-named (:store @session) ns-sym nm) :node)
+        old-s    (when old-node
+                   (try (n/sexpr old-node) (catch Exception _ nil)))
+        new-s    (when-not (:error pf)
+                   (try (n/sexpr (:node pf)) (catch Exception _ nil)))
+        unregister
+        (when (and (seq? old-s) (= 'defmethod (first old-s)) (> (count old-s) 2)
+                   (not (and (seq? new-s) (= 'defmethod (first new-s))
+                             (= (second old-s) (second new-s))
+                             (= (nth old-s 2) (nth new-s 2)))))
+          (format "(when-let [v (ns-resolve '%s '%s)]
+                     (when (instance? clojure.lang.MultiFn @v)
+                       (remove-method @v
+                         (binding [*ns* (find-ns '%s)] (eval '%s)))))"
+                  ns-sym (second old-s) ns-sym (pr-str (nth old-s 2))))
+        new-name (when-not (:error pf) (store/form-symbol (:node pf)))
+        stranded (when (and new-name (not= new-name (symbol (str nm)))
+                            (store/form-named (:store @session) ns-sym nm))
+                   (let [st    (:store @session)
+                         known (set (keys (:namespaces st)))]
+                     (vec (distinct
+                           (for [nsx known
+                                 u   (:var-usages (analyze/analyze (store.render/render-ns st nsx)))
+                                 :when (and (= (symbol (str ns-sym)) (:to u))
+                                            (= (symbol (str nm)) (:name u))
+                                            (not (and (= nsx (symbol (str ns-sym)))
+                                                      (= (symbol (str nm)) (:from-var u)))))]
+                             (symbol (str nsx) (str (:from-var u))))))))]
+    (if (seq stranded)
+      {:error (str "this replace RENAMES " nm " → " new-name " but committed"
+                   " callers still reference " ns-sym "/" nm ": " stranded
+                   " — edit_rename rewrites every caller atomically (or land"
+                   " the callers in this same change)")}
+      (let [pre-warned (set (map :var (edit/ns-warnings (:store @session) ns-sym)))
+            load? (store/jvm-loadable? (:store @session) ns-sym)
+            r (engine/rebased-write!
+               session
+               (fn [base] (edit/replace-form base ns-sym nm new-source
+                                             :prompt prompt :agent agent
+                                             :system system))
+               (fn [base] (:node (store/form-named base ns-sym nm)))
+               (symbol (str ns-sym) (str nm))
+               ns-sym
+               :load? load?)]
+        (if (or (:error r) (:conflict r))
+          (if (or no-auto-require system)
+            r
+            (auto-require-retry session ns-sym r
+                                #(edit-replace! session ns-sym nm new-source
+                                                :prompt prompt :agent agent
+                                                :no-auto-require true)))
+          (let [qform    (symbol (str ns-sym) (str nm))
+                new-nm   (:name (store/form-by-id (:store r)
+                                                  (:form-id (:delta r))))
+                edited   (into #{qform}
+                               (when new-nm [(symbol (str ns-sym) (str new-nm))]))
+                affected (let [a (or (engine/affected-tests session ns-sym nm)
+                                     ;; an alias-only require addition is semantically
+                                     ;; inert — verify NOTHING rather than the whole
+                                     ;; namespace reach (frictions #2); [] is honest
+                                     ;; (:coverage :none), never a claimed green
+                                     (when (engine/inert-ns-require-change?
+                                            (:store @session) (:form-id (:delta r))
+                                            (engine/prior-source session (:form-id (:delta r))))
+                                       []))]
+                             ;; …and re-point it through the rename, exactly as
+                             ;; `edited` is one binding above. The affected set was
+                             ;; asked for under the OLD name, so when this write
+                             ;; renames the form it comes back naming something the
+                             ;; same write just retired, and the run resolves to
+                             ;; nothing. Only a renamed TEST notices: renaming an
+                             ;; implementation form leaves its covering tests' names
+                             ;; alone. Reported by slopp-ui 2026-08-02, where two
+                             ;; renamed deftests were red and neither said so.
+                             (if (and a new-nm (not= new-nm nm))
+                               (mapv #(if (= % qform)
+                                        (symbol (str ns-sym) (str new-nm))
+                                        %)
+                                     a)
+                               a))
+                untested (and (nil? affected) (seq (:test-map @session))
+                               (not (re-find #"^\(\s*(?:clojure\.test/)?deftest\b"
+                                             (str/triml new-source))))
+                _        (when (and new-nm (not= new-nm nm))
+                           (repl/eval! (:image @session)
+                                       (format "(ns-unmap '%s '%s)" ns-sym nm)))
+                _        (when unregister
+                           (repl/eval! (:image @session) unregister))
+                ;; ROOT of frictions 1 and 17. A per-form hot-load is equivalent to
+                ;; LOADING the form only when the form's whole contribution to
+                ;; the image is its own var binding. Anything that CAPTURED a
+                ;; value from it — a derived def, an evaluated metadata schema —
+                ;; still holds the old one, and re-evaluating one form replays
+                ;; none of that. `--live` never had this bug because it reloads
+                ;; whole NAMESPACES; the oracle did because it reloads forms.
+                ;;
+                ;; So: keep the fast path, and when something captured, repair
+                ;; through the same `load-ns!` every other loader uses. This is
+                ;; measured to be rare — 35 of 2202 forms in this store capture
+                ;; at load at all — so an ordinary defn write pays nothing.
+                ;; Before verification deliberately: tests must run against a
+                ;; repaired image, not a half-stale one.
+                captured (when load?
+                           (rules.currency/stale-after (:image @session) (:store @session) (:form-id (:delta r))))
+                reloaded (when (seq captured)
+                           (vec (sort (distinct (map (comp symbol namespace)
+                                                     captured)))))
+                reload-errs
+                (when (seq reloaded)
+                  (not-empty
+                   (into {}
+                         (keep (fn [nsx]
+                                 (when-let [e (image/load-ns! (:image @session)
+                                                              (:store @session)
+                                                              nsx)]
+                                   [nsx e])))
+                         reloaded)))
+                ;; what the repair could NOT reach — normally nothing, and
+                ;; reported rather than assumed away when it happens
+                stale    (when (seq reloaded)
+                           (not-empty (rules.currency/stale-after (:image @session) (:store @session) (:form-id (:delta r)))))
+                ;; a ^:live-handle constructor changed shape: the map already in
+                ;; the session was built by the OLD code and no write can
+                ;; reach it. Rebuild BEFORE verification, which would
+                ;; otherwise be the first thing to read the stale handle —
+                ;; and discard the warm spare, which was built under the old
+                ;; code too (that is how it broke a second time).
+                handle-shift (when (and old-node (:node pf))
+                               (edit/live-handle-shape-change old-node (:node pf)))
+                ;; The rebuild can FAIL mid-migration and that is normal: a shape
+                ;; change lands on the constructor BEFORE its callers are
+                ;; updated, so the fresh image may launch mis-configured (a
+                ;; renamed option key read as nil). Keep the working image and
+                ;; report it — the episode continues, and the next write once
+                ;; the callers catch up rebuilds cleanly. Throwing here would
+                ;; make a legitimate in-progress migration look like a broken
+                ;; write.
+                rebuild-err
+                (when handle-shift
+                  (swap! session assoc :spare nil)
+                  (try (engine/fresh-image! session) nil
+                       (catch Throwable t (ex-message t))))
+                ;; no trace evidence → fall back to the tests that REACH this
+                ;; namespace, not to tests named after it (there are none)
+                scope    (if affected
+                           ns-sym
+                           (or (seq (engine/covering-test-nses
+                                     (:store @session) [ns-sym]))
+                               ns-sym))
+                summary  (if load?
+                             (engine/run-verification! session scope affected
+                                                        :edited edited)
+                             engine/cljs-deferred-summary)
+                existing (count (filter (comp pre-warned :var) (:warnings r)))
+                recompiled (engine/after-write! session ns-sym)]
+            (engine/commit-appended! session
+                              #(store/record-verification % ns-sym summary) [])
+            (engine/with-ms
+              (cond-> {:delta    (:delta r)
+                       ;; T3: only NEW violations; pre-existing ones as a count
+                       :warnings (vec (remove (comp pre-warned :var) (:warnings r)))
+                       :test     summary
+                       :affected (or affected :all)}
+                (:image-healed r) (assoc :image-healed true)
+                ;; what this write changed BEYOND what was asked — a lost type
+                ;; hint, docstring or arity. Reported, never refused.
+                (seq (:drift r)) (assoc :drift (:drift r))
+                ;; friction 1: forms this write left holding a value computed
+                ;; from the OLD source. Not :drift — that key is taken, and it
+                ;; means something else on this very map.
+                ;; the repair, reported: a namespace reload is a real cost and a
+                ;; silent one reads as an unexplained slow write
+                (seq reloaded) (assoc :image-reloaded reloaded)
+                reload-errs    (assoc :image-reload-failed reload-errs)
+                (seq stale)    (assoc :stale-in-image (vec stale))
+                ;; say WHY the image was replaced — a silent rebuild is a
+                ;; surprising cost, and the reason is the teaching
+                handle-shift (assoc :image-rebuilt
+                                    (cond-> (assoc handle-shift
+                                                   :reason :live-handle-shape-change)
+                                      rebuild-err
+                                      (assoc :rebuild-failed rebuild-err
+                                             :note (str "kept the working image — normal"
+                                                        " MID-MIGRATION, when the constructor"
+                                                        " has changed but its callers have"
+                                                        " not. Update them and the next write"
+                                                        " rebuilds cleanly."))))
+                (pos? existing)   (assoc :existing-warnings existing)
+                untested          (assoc :untested true)
+                (:red-first r)    (assoc :red-first (:red-first r)
+                                         :note (str "these vars don't exist yet — stubbed"
+                                                    " in-image as failing (red-first);"
+                                                    " implement them to go green."))
+                (:carried-errors r) (assoc :carried-errors (:carried-errors r))
+                recompiled          (merge recompiled))
+              t0)))))))
+
+(defn add-form!
+  "Add a new top-level form to `ns-sym` (O1 base write): dialect gate, `:add`
+  delta, hot-reload into the image, verification, provenance. `:before
+  <form-name>` anchors the new form immediately before that one (default:
+  appended at the tail) — define-before-use without a follow-up move.
+  Returns {:delta :warnings :test :affected} or {:error msg}.
+
+  `source` holding SEVERAL top-level forms is the batch write (`add-forms!`):
+  one atomic group, verified once, reported per form as `:forms` — growing a
+  namespace no longer costs one round trip per form.
+
+  A write refused only because it named an alias the ns form lacks, when
+  exactly one namespace can supply it, gets the require added as a `:system`
+  write and is retried once (`auto-require-retry`); the result then carries
+  `:auto-require`.
+
+  A :cljs (non-jvm-loadable) namespace is authored the same way but its form
+  references js/* / the DOM and cannot load into the JVM oracle, so the write
+  SKIPS the per-form hot-load (`:load? false`) and defers verification to the
+  ClojureScript compiler — reporting `cljs-deferred-summary` (:unverified,
+  reason :cljs-deferred-to-compile) rather than running the suite. D-web-cljs."
+  [session ns-sym source & {:keys [prompt agent before no-auto-require]}]
+  (let [t0 (System/nanoTime)
+        pfs (edit/parse-forms source)]
+    (if (and (nil? (:error pfs)) (< 1 (count (:nodes pfs))))
+      (add-forms! session ns-sym (:nodes pfs) :prompt prompt :agent agent :before before)
+      (let [{:keys [node error]} (edit/parse-form source)
+            nm (some-> node store/form-symbol)
+            iso (when node
+                  (edit/isolation-refusal
+                   (edit/require-aliases (:store @session) ns-sym) node))]
+        (cond
+          error {:error error}
+
+          iso {:error iso}
+
+          (and nm (store/form-named (:store @session) ns-sym nm))
+          {:error (str nm " already exists in " ns-sym)}
+
+          :else
+          (let [pre-warned (set (map :var (edit/ns-warnings (:store @session) ns-sym)))
+                load?      (store/jvm-loadable? (:store @session) ns-sym)
+                r (engine/rebased-write!
+                   session
+                   (fn [base]
+                     (cond
+                       (and nm (store/form-named base ns-sym nm))
+                       {:error (str nm " already exists in " ns-sym)}
+
+                       (and before (not (store/form-named base ns-sym before)))
+                       {:error (str "no anchor form named " before " in " ns-sym
+                                    " — :before must name an existing form")}
+
+                       :else
+                       (if-let [[st' d] (store/append-form base ns-sym node
+                                                           :prompt prompt :agent agent
+                                                           :before before)]
+                         ;; nameless forms too: a defmethod names its TARGET, so nm is nil
+                         ;; here — and `(when nm …)` skipped the whole chassis for
+                         ;; exactly the carrier whose ^:app/entry marker can only be
+                         ;; caught by a gate's nameless arm. Named gates no-op on nil.
+                         (if-let [merr (gates/gate-refusal st' ns-sym nm)]
+                           {:error merr}
+                           {:store st' :delta d})
+                         {:error (str "no namespace " ns-sym " (ingest it first)")})))
+                   (fn [base] (when nm (:node (store/form-named base ns-sym nm))))
+                   (symbol (str ns-sym) (str (or nm "anonymous")))
+                   ns-sym
+                   :load? load?)]
+            (if (or (:error r) (:conflict r))
+              (if no-auto-require
+                r
+                (auto-require-retry session ns-sym r
+                                    #(add-form! session ns-sym source
+                                                :prompt prompt :agent agent :before before
+                                                :no-auto-require true)))
+              (let [edited     (if nm #{(symbol (str ns-sym) (str nm))} #{})
+                    affected   (when (and load? nm) (engine/affected-tests session ns-sym nm))
+                    summary    (if load?
+                                 (engine/run-verification! session ns-sym affected
+                                                            :edited edited)
+                                 engine/cljs-deferred-summary)
+                    all-w      (edit/ns-warnings (:store @session) ns-sym)
+                    existing   (count (filter (comp pre-warned :var) all-w))
+                    advisories (when nm (:advisories (gates/gate-check
+                                                      (:store @session) ns-sym nm)))
+                    recompiled (engine/after-write! session ns-sym)]
+                (engine/commit-appended! session
+                                          #(store/record-verification % ns-sym summary)
+                                          [])
+                (engine/with-ms
+                  (cond-> {:delta    (:delta r)
+                           ;; T3: only NEW violations; pre-existing as a count
+                           :warnings (vec (remove (comp pre-warned :var) all-w))
+                           :test     summary
+                           :affected (or affected :all)}
+                    (:image-healed r) (assoc :image-healed true)
+                    (pos? existing)   (assoc :existing-warnings existing)
+                    (:red-first r)    (assoc :red-first (:red-first r)
+                                             :note (str "these vars don't exist yet —"
+                                                        " stubbed in-image as failing"
+                                                        " (red-first); implement them to"
+                                                        " go green."))
+                    (:carried-errors r) (assoc :carried-errors (:carried-errors r))
+                    (:red-first-arity r)
+                    ;; as-> rather than assoc: a test can BOTH name a missing var
+                    ;; and call a known one at a new arity, and a plain assoc would
+                    ;; drop the stub note that the other clause just wrote
+                    (as-> m (assoc m :red-first-arity (:red-first-arity r)
+                                   :note (str (when (:note m) (str (:note m) " "))
+                                              "this calls an existing var at an arity"
+                                              " it does not have yet — the write landed"
+                                              " (red-first) and the call will throw"
+                                              " ArityException until you implement that"
+                                              " arity. That throw IS the red you asked"
+                                              " for, not a bug.")))
+                    (seq advisories)    (assoc :advisories advisories)
+                    recompiled          (merge recompiled))
+                  t0)))))))))
+
+(defn add-require!
+  "F5: add one require clause to `ns-sym`'s ns form — structural edit through
+  the normal replace pipeline (delta, hot-reload, verification).
+
+  Forwards `:agent` (#132): without it the delta landed agent-nil and the edit
+  never entered ANY agent's episode — `done` never linted, normalized, or
+  verified an ns_add_require at the boundary. Found by the collapse fix's own
+  e2e: the ns-form change it staged simply never arrived.
+
+  Attaches `:tier-note` when a TIERED namespace gains an in-store dep no
+  declaration covers: undeclared defaults :external, so the consumer's tier
+  claim dies at the next full_check's layering pass — and the write that
+  creates the dependency is the one moment the declaration is cheap and the
+  author's context is loaded (frictions #4: the signal used to arrive two
+  gates late)."
+  [session ns-sym require-str & {:keys [prompt agent system]}]
+  (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
+    (let [r (edit/add-require-source (n/string (:node f)) require-str)]
+      (if (:error r)
+        r
+        (let [res (edit-replace! session ns-sym ns-sym (:src r)
+                                 :prompt (or prompt (str "add require " require-str))
+                                 :agent agent
+                                 :system system)
+              st  (:store @session)
+              lib (try (let [spec (edn/read-string (str require-str))]
+                         (cond (vector? spec) (first spec)
+                               (symbol? spec) spec))
+                       (catch Exception _ nil))
+              note (when (and (nil? (:error res)) lib
+                              (contains? (:namespaces st) lib)
+                              (tiers/tier-declared? st ns-sym)
+                              (contains? #{:pure :internal}
+                                         (tiers/tier-for st ns-sym))
+                              (not (tiers/tier-declared? st lib)))
+                     (str ns-sym " is declared " (tiers/tier-for st ns-sym)
+                          " and now depends on UNDECLARED " lib " (defaults"
+                          " :external — full_check's tier-layering will flag"
+                          " this). Declare it while the context is loaded:"
+                          " module_purity {module \"" lib "\" tier \"...\"} —"
+                          " a new ns's tier is cheapest at creation."))]
+          (cond-> res
+            note (assoc :tier-note note)))))
+    {:error (str "no namespace " ns-sym " (create it first)")}))
+
+(defn remove-require!
+  "Symmetric counterpart of add-require!: structurally remove `lib`'s require
+  spec from `ns-sym`'s ns form, through the normal replace pipeline.
+  Forwards `:agent` (#132) for the same reason add-require! does — an
+  agent-nil delta never enters any episode."
+  [session ns-sym lib & {:keys [prompt agent]}]
+  (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
+    (let [r (edit/remove-require-source (n/string (:node f)) lib)]
+      (if (:error r)
+        r
+        (edit-replace! session ns-sym ns-sym (:src r)
+                       :prompt (or prompt (str "remove require " lib))
+                       :agent agent)))
+    {:error (str "no namespace " ns-sym)}))
+
+(defn edit-subform!
+  "Item 5 — paredit's invariant, agent-shaped: replace the UNIQUE structural
+  occurrence of `match` inside form `form-name` with `new-src`
+  (content-addressed). With `:text true` the match is RAW TEXT instead — the
+  escape hatch for string literals and docstrings. With `:where {k v ...}` the
+  target is the unique MAP containing those entries (registry-style edits
+  by key, no exact text needed) and `match` is ignored. `:where` ADDRESSES
+  a row rather than asserting a value: both sides are compared by the
+  spelling they answer to, so `\"stored-name\"` reaches a row stored as
+  `:stored-name` — registry rows are keyed by keywords and the wire this
+  arrives over has none. Rides the full
+  replace pipeline: dialect gate on the RESULTING form, rebase/conflict
+  commit, verification, provenance.
+
+  With `:wrap true`, `new-src` is a TEMPLATE and `$1` is the matched form —
+  `(let [n 1] $1)` nests what was there inside what you wrote. This docstring
+  used to say wrap was 'just a new subform containing the old', which was true
+  and not cheap: expressing it meant retyping the matched form inside the
+  replacement, so a two-line change to a large form became a large paste.
+  `$1` is the same template mechanism `change_signature` uses for call sites."
+  [session ns-sym form-name match new-src & {:keys [prompt agent text where wrap]}]
+  (let [plan (cond
+               (seq where) (refactor/keyed-replace-plan (:store @session) ns-sym
+                                                        form-name where new-src)
+               text        (refactor/text-replace-plan (:store @session) ns-sym
+                                                       form-name match new-src)
+               :else       (refactor/subform-replace-plan (:store @session) ns-sym
+                                                          form-name match new-src
+                                                          (boolean wrap)))]
+    (if (:error plan)
+      plan
+      (edit-replace! session ns-sym form-name (:new-form-src plan)
+                     :prompt (or prompt (str "subform edit in " form-name))
+                     :agent agent))))
+
+(defn revert-form!
+  "One-call rollback (item 4): replace `nm` with an earlier version of itself —
+  by default the previous one, or the version at delta `:to` (see
+  query-form-history). Rides the standard replace pipeline, so the revert is
+  itself compile-gated, verified, and recorded provenance."
+  [session ns-sym nm & {:keys [to prompt agent]}]
+  (let [hist (history/query-form-history (with-history session) ns-sym nm)]
+    (cond
+      (nil? hist)
+      (edit/missing-form-error (:store @session) ns-sym nm)
+
+      (< (count hist) 2)
+      {:error (str nm " has no earlier version to revert to")}
+
+      :else
+      (let [target (if to
+                     (first (filter #(= to (:delta %)) hist))
+                     (nth hist (- (count hist) 2)))]
+        (if-not target
+          {:error (str "no version of " nm " at delta " to)}
+          (edit-replace! session ns-sym nm (:source target)
+                         :prompt (or prompt
+                                     (str "revert to " (:delta target)))
+                         :agent agent))))))
+
+(defn prune-requires!
+  "Done-point require hygiene — the agent never manages unused requires; done
+   does, and there is deliberately no MCP tool for it. For each require kondo
+   reports unused (`done/unused-requires`), TRY removing it and re-verify.
+
+   Removing a kondo-unused require cannot break COMPILATION — nothing used it —
+   so the only ways it can break are (1) a test the removal's own affected set
+   catches, or (2) a load effect a cold load would lose: an orphaned in-store
+   target whose closure REGISTERS something (a defmethod the reference graph
+   can't see). The live image already has that registration loaded, so a green
+   in-image verdict does NOT prove the require dead — `require-orphaned-registrar?`
+   is the static backstop.
+
+   Genuinely dead → drop it. Load-bearing (or the removal went red) → restore it
+   WITH a `^:side-effect` marker, so it no longer reads as unused and done never
+   re-tries it. Returns `{:pruned [lib …] :kept [lib …]}`."
+  [session ns-sym & {:keys [prompt agent]}]
+  (reduce
+   (fn [acc {:keys [lib marked]}]
+     (let [r    (remove-require! session ns-sym lib
+                                 :prompt (or prompt (str "done: try pruning unused require " lib))
+                                 :agent agent)
+           red? (let [t (:test r)]
+                  (boolean (and t (or (pos? (:fail t 0)) (pos? (:error t 0))))))]
+       (cond
+         ;; couldn't remove it at all (conflict/refusal) — leave it untouched
+         (or (:error r) (:conflict r))
+         (update acc :kept conj lib)
+
+         ;; removing it broke a test, or would lose a registration on cold load:
+         ;; restore it, marked, so it is not reported unused or re-tried
+         (or red? (require-orphaned-registrar? (:store @session) lib))
+         (do (add-require! session ns-sym marked
+                           :prompt (str "done: keep load-bearing require " lib
+                                        " (removing it breaks a cold load) — marked ^:side-effect")
+                           :agent agent)
+             (update acc :kept conj lib))
+
+         :else
+         (update acc :pruned conj lib))))
+   {:pruned [] :kept []}
+   (done/unused-requires (:store @session) ns-sym)))
+
+(defn- auto-require-retry
+  "The write path's repair for the commonest mechanical refusal: `r` failed
+  to compile because it named an alias the ns form lacks and exactly ONE
+  namespace can supply it (`edit/missing-alias-require`). Add that require
+  as a `:system` write with the pipeline's own prompt, then run `retry` —
+  the same write once more — and stamp what happened on its result as
+  `:auto-require {:added spec :ns ns-sym}`. Any other refusal, an ambiguous
+  alias (`missing-alias-hint` names the candidates in the message), or a
+  require that itself fails to land, returns `r` untouched. The caller
+  passes `:no-auto-require true` on the retry so this runs once."
+  [session ns-sym r retry]
+  (if-let [spec (and (:error r)
+                     (edit/missing-alias-require (:store @session) (:error r)))]
+    (let [ar (add-require! session ns-sym spec
+                           :prompt fields/auto-require-prompt :system true)]
+      (if (:error ar)
+        r
+        (let [r2 (retry)]
+          (cond-> r2
+            (nil? (:error r2)) (assoc :auto-require {:added spec :ns ns-sym})))))
+    r))

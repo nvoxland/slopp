@@ -1116,12 +1116,15 @@
 (defn replace-node
   "Replace the CST node of the form named `nm` in `ns-sym`, keeping its stable id
   (C2/O1 whole-form replace); append a `:replace` delta carrying `prompt`.
-  Returns [store' delta], or nil if no such form.
+  Returns [store' delta], or nil if no such form. `:system true` marks a
+  replace the PIPELINE made on the author's behalf (an auto-added require),
+  so `prompt-by-form` keeps reporting the author's ask and the housekeeping
+  share counts it as the pipeline's — the same mark `move-form` carries.
 
   `nm` may be a name the form defines OR its form id — names win, matching
   `form-named` (#131): an id is a registration's only handle, and editing a
   defmethod addresses it that way."
-  [store ns-sym nm node & {:keys [prompt op group agent] :or {op :replace}}]
+  [store ns-sym nm node & {:keys [prompt op group agent system] :or {op :replace}}]
   (let [elems (get-in store [:namespaces ns-sym :elements])
         idx   (or (first (keep-indexed
                           (fn [i e] (when (and (= :form (:kind e)) (= nm (:name e))) i))
@@ -1138,8 +1141,9 @@
                               :op op :ns ns-sym :form-id (:id elem) :prompt prompt
                               :at (now-ms)
                               :sources {(:id elem) (n/string node)}}
-                       group (assoc :group group)
-                       agent (assoc :agent agent))]
+                       group  (assoc :group group)
+                       agent  (assoc :agent agent)
+                       system (assoc :system true))]
         [(-> store
              (assoc-in [:namespaces ns-sym :elements] (assoc elems idx new-elem))
              (record-delta delta))
