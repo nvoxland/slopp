@@ -9,7 +9,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient]))
 
 (def ^:private protocol-version "2024-11-05")
 
@@ -1363,6 +1363,11 @@
                                                  " — the spool keeps the last "
                                                  spool-cap " trimmed responses")})))
       "query_brief" (text! (told! session name a (query/query-brief session (sym :ns) (sym :name))))
+      "orient" (text! (told! session name a
+                            (orient/orient-map session
+                                               :ask (:ask a)
+                                               :seeds (:seeds a)
+                                               :tokens (or (:tokens a) 1500))))
       "query_slice" (text! (told! session name a
                                         (query/query-slice session (sym :ns) (sym :name)
                                                         :depth (or (:depth a) 2)

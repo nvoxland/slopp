@@ -772,3 +772,55 @@
   (testing "and no jar at all is silence, not a warning"
     ;; a checkout or a bare -M run has no artifact to be stale
     (is (nil? (orient/jar-warning nil)))))
+
+(deftest orient-map-ranks-the-neighbourhood-of-an-ask-and-names-why
+  ;; Measured on this store (2026-08-29): 48 tool calls per ask, most of them
+  ;; the same tool with a different name argument, before an agent had the
+  ;; dozen forms an ask actually turns on. `orient-map` is the one budgeted
+  ;; call: seeds from the ask (or named), a personalized walk over the
+  ;; reference graph and the trace map's coverage edges, and every row saying
+  ;; which edge put it there.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'o.core
+                               (str "(ns o.core)\n"
+                                    "(defn c \"Leaf.\" [x] x)\n"
+                                    "(defn b \"Middle — calls c.\" [x] (c x))\n"
+                                    "(defn a \"Entry — calls b.\" [x] (b x))\n"
+                                    "(defn unrelated \"Nothing here.\" [x] x)\n"))
+                 (store/ingest 'o.core-test
+                               (str "(ns o.core-test (:require [clojure.test :refer [deftest is]] [o.core :as c]))\n"
+                                    "(deftest b-t (is (= 1 (c/b 1))))\n")))
+        sess (atom {:store st :test-map {'o.core-test/b-t #{'o.core/b}}})
+        rank (fn [r] (mapv :form (:rows r)))
+        pos  (fn [r q] (.indexOf ^java.util.List (rank r) q))]
+    (testing "seeding on a ranks its callee b above b's callee c, and unrelated last"
+      (let [r (orient/orient-map sess :seeds ["o.core/a"] :tokens 4000)]
+        (is (= ['o.core/a] (:seeds r)))
+        (is (< (pos r 'o.core/a) (pos r 'o.core/b) (pos r 'o.core/c)) (pr-str (rank r)))
+        (is (= -1 (pos r 'o.core/unrelated))
+            "a form the walk never reached is not an answer to the ask")))
+    (testing "every row names the edge that made it relevant"
+      (let [r   (orient/orient-map sess :seeds ["o.core/a"] :tokens 4000)
+            row (fn [q] (first (filter #(= q (:form %)) (:rows r))))]
+        (is (= "seed" (:via (row 'o.core/a))))
+        (is (re-find #"called by o\.core/a" (:via (row 'o.core/b))) (pr-str (row 'o.core/b)))
+        (is (re-find #"covered by o\.core-test/b-t" (:via (row 'o.core/b)))
+            "the trace map's coverage is an edge like any other")
+        (is (re-find #"called by o\.core/b" (:via (row 'o.core/c))) (pr-str (row 'o.core/c)))
+        (is (:sig (row 'o.core/b)) "and a row is a card — signature, doc line")
+        (is (= "Middle — calls c." (:doc (row 'o.core/b))))))
+    (testing "an ask seeds itself from the form names it mentions"
+      (let [r (orient/orient-map sess :ask "make unrelated return twice its input" :tokens 4000)]
+        (is (= ['o.core/unrelated] (:seeds r)) (pr-str r))
+        (is (= 'o.core/unrelated (first (rank r))))))
+    (testing "the budget bounds the answer and says what it left out"
+      (let [big   (orient/orient-map sess :seeds ["o.core/a"] :tokens 4000)
+            small (orient/orient-map sess :seeds ["o.core/a"] :tokens 60)]
+        (is (< (count (:rows small)) (count (:rows big))))
+        (is (<= (:tokens small) 60) (pr-str (select-keys small [:tokens :budget])))
+        (is (pos? (:more small)) "what was cut is counted, not silently dropped")
+        (is (nil? (:more big)))))
+    (testing "with nothing to seed on, the walk is a plain ranking of what the graph turns on"
+      (let [r (orient/orient-map sess :tokens 4000)]
+        (is (empty? (:seeds r)))
+        (is (= 5 (count (:rows r))) (pr-str (rank r)))))))

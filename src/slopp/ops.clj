@@ -4412,11 +4412,11 @@ recompiled (engine/after-write! session ns-sym)]
   breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
   up to one row, form names ride only for solo nses on small stores — and
   depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
-  user's verbatim words, via the prompt hook or turn_begin) is mined
-  against form names, deterministically, and the top matches ride as
-  interface CARDS under :relevant. The agent starts working instead of
-  orienting. :host is the serving process's code-currency record
-  (orient/host-brief over the kernel's boot-info, reached through the
+  user's verbatim words, via the prompt hook or turn_begin) seeds the same
+  walk `orient` makes over the reference graph, and the top rows ride as
+  interface CARDS under :relevant, each with its :via. The agent starts
+  working instead of orienting. :host is the serving process's code-currency
+  record (orient/host-brief over the kernel's boot-info, reached through the
   late-ref carrier — absent when this process didn't boot from a store):
   which code the host actually runs, and what a restart would change.
   :module-cycles rides only when the manifest has one — impossible to create
@@ -4482,7 +4482,7 @@ recompiled (engine/after-write! session ns-sym)]
         ;; one store-wide scan, not two — the cond-> below tests and reports the
         ;; same value
         unread   (orient/unread-declarations st)
-;; the line this session WRITES to, when it is a private one. Read from
+        ;; the line this session WRITES to, when it is a private one. Read from
         ;; the session rather than resolved, deliberately: resolving ADOPTS,
         ;; and orientation must not be the thing that creates a workspace.
         ;; The count is measured from the thread's own base, which is the one
@@ -4507,28 +4507,13 @@ recompiled (engine/after-write! session ns-sym)]
                                        "; nothing outside this session — the running"
                                        " host included — can see them until it does.")))))))
         intent   (:last-intent @session)
-        stop     #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
-                   "tell" "every" "should" "their" "them" "than" "then" "they"
-                   "what" "where" "which" "been" "back" "also" "only" "into"}
-        tokens   (when intent
-                   (into #{}
-                         (comp (map str/lower-case)
-                               (filter #(<= 4 (count %)))
-                               (remove stop))
-                         (re-seq #"[A-Za-z][A-Za-z0-9-]+" intent)))
-        score    (fn [nm]
-                   (let [words (str/split (str/lower-case (str nm)) #"-")]
-                     (count (filter tokens words))))
-        relevant (when (seq tokens)
-                   (->> (for [n nss, f (names n)
-                              :let [s (score f)]
-                              :when (pos? s)]
-                          [s (symbol (str n) (str f))])
-                        (sort-by (comp - first))
-                        (map second)
-                        (take 5)
-                        (keep #(orient/form-card session (symbol (namespace %))
-                                          (symbol (name %))))
+        ;; the ask's MAP, at a small budget: the same walk `orient` makes over
+        ;; the reference graph and the coverage edges, so the brief's
+        ;; :relevant is the first six rows of what `orient {ask}` would say
+        ;; — seeds first, then what they pull in, each with its :via
+        relevant (when (seq (str/trim (str intent)))
+                   (->> (:rows (orient/orient-map session :ask intent :tokens 700))
+                        (take 6)
                         vec
                         not-empty))]
     (cond-> {:project project

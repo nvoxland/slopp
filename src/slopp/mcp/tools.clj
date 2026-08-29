@@ -51,6 +51,12 @@
    {:name "session_brief"
     :description "START HERE, once: namespaces with form names, recent milestones, git alignment, and the working loop — orientation in one small call. Depth on demand: query_source {ns}/query_brief/report."
     :inputSchema {:type "object" :properties {}}}
+   {:name "orient" :image-free true :read-only true
+    :description "THE map for an ask, in ONE budgeted call: the forms that matter for it, ranked by a walk over the reference graph and the tests that cover them, fitted to `tokens` (default 1500). Each row is a card (sig, doc line, recorded why, test warranty) plus :via — the edge that made it relevant (seed / called by X / calls X / covered by T). Give it the ask verbatim (`ask`) and/or the forms you already know (`seeds` [\"ns/name\"]). Read this before query_slice: it names the entry point AND its neighbourhood, so the slice is one call instead of five. :more counts what the budget cut."
+    :inputSchema {:type "object"
+                  :properties {:ask {:type "string"}
+                               :seeds {:type "array" :items {:type "string"}}
+                               :tokens {:type "integer"}}}}
    {:name "query_slice"
     :description "THE focused read: full source of ONE entry-point form + interface CARDS (sig, doc, why, test warranty) for everything it reaches — same-ns private helpers and cross-ns callees, breadth-first to depth (default 2, capped). match=<text> WINDOWS the target to `window` lines (default 25) around the first matching line — use it on giant forms. Trust the cards: edits re-run covering tests, a violated contract turns red with :implicated. Prefer over fetching several forms."
     :inputSchema {:type "object"

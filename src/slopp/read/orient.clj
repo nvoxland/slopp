@@ -16,7 +16,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings]))
+            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings] [slopp.index.refs :as refs]))
 
 (defn ^:export snip
   "Cap `s` at `n` chars with an ellipsis — composites (brief/report) carry
@@ -666,3 +666,190 @@
          (when (not= 1 (:behind currency)) "s")
          " behind this store — anyone reading the ARTIFACT rather than the"
          " store will not see this work until it is rebuilt")))
+
+(defn- ask-seeds
+  "The forms an `ask` names, scored. Two signals:
+
+  - WORDS: each word of three letters or more in the ask (split on spaces,
+    hyphens, underscores and dots, minus function words) matched against
+    the segments of every form's name, scoring the RARITY of each match —
+    1/√(forms whose name carries the word) — so `done`, in three hundred
+    names, moves a form less than `slice`, in nine.
+  - PHRASES: two consecutive ask words that are two consecutive segments of
+    a name — `add form` is `add-form!`, `edit_add_form` is too — score a
+    full point each, over and above the words. This is how a tool name in
+    the ask reaches the form behind it.
+
+  A test form scores HALF: its long descriptive name matches more words
+  than the form it tests, and the form is what the ask is about. Returns
+  `[[qsym score] …]`, best first, for the forms that matched at all.
+  Names, deliberately, not docstrings: a docstring mentions its neighbours,
+  and seeding on those turns every ask into the whole module."
+  [st ask]
+  (let [stop   #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
+                 "tell" "every" "should" "their" "them" "than" "then" "they"
+                 "what" "where" "which" "been" "back" "also" "only" "into"
+                 "make" "return" "returns" "call" "calls" "form" "forms"
+                 "the" "and" "for" "its" "not" "but" "can" "are" "was" "one"
+                 "all" "any" "each" "once" "several" "accept" "does" "use"}
+        raw    (into [] (comp (map str/lower-case) (filter #(<= 3 (count %))))
+                     (re-seq #"[A-Za-z][A-Za-z0-9]*" (str ask)))
+        words  (into #{} (remove stop) raw)
+        grams  (into #{} (map vector raw (rest raw)))
+        named  (for [nsx (keys (:namespaces st))
+                     e   (store/forms st nsx)
+                     :when (and (:name e) (not= (:name e) nsx))
+                     :let [segs (vec (remove str/blank?
+                                             (str/split (str/lower-case (str (:name e)))
+                                                        #"[-_.!?]")))]]
+                 [(symbol (str nsx) (str (:name e))) segs])
+        df     (reduce (fn [m [_ segs]]
+                         (reduce (fn [m w] (if (words w) (update m w (fnil inc 0)) m))
+                                 m (distinct segs)))
+                       {} named)
+        rarity (fn [w] (/ 1.0 (Math/sqrt (double (get df w 1)))))
+        test?  (fn [q] (str/ends-with? (namespace q) "-test"))]
+    (when (seq raw)
+      (->> (for [[q segs] named
+                 :let [hit     (filter words (distinct segs))
+                       phrases (count (filter grams (map vector segs (rest segs))))
+                       s       (+ (reduce + 0.0 (map rarity hit)) phrases)]
+                 :when (pos? s)]
+             [q (* (if (test? q) 0.5 1.0) s)])
+           (sort-by (fn [[q s]] [(- s) (str q)]))
+           vec))))
+
+(defn ^:export orient-map
+  "THE orientation call for an ask: the forms that matter for it, ranked,
+  fitted to a token budget, each row a CARD (`form-card`: sig, doc line, the
+  recorded why, the test warranty) plus `:via` — the edge that made it
+  relevant: `seed`, `called by X`, `calls X`, `covered by T`, `covers F`.
+
+  Seeds are the forms the ask names (`ask-seeds`) and/or `seeds` given as
+  \"ns/name\" strings. From them a personalized PageRank walks the graph the
+  store already holds — every reference in `refs` (calls, carriers,
+  declarations) plus the trace map's coverage edges (a test that exercised
+  a form is an edge to it), both directions — so a callee two hops down
+  outranks an unrelated hub, and the test that covers what you are about
+  to touch arrives beside it. With nothing to seed on, the walk is plain
+  PageRank: what the graph turns on, which is the right answer to a fresh
+  context with no ask yet.
+
+  The budget is honest: rows are taken best-first while their estimated
+  tokens fit `tokens` (default 1500, ~4 chars per token), and `:more` says
+  how many ranked forms were cut. Returns
+  `{:seeds [qsym …] :rows [{:form :via :sig :doc :why :warranty …} …]
+    :tokens n :budget n [:more k]}`.
+
+  Why a walk and not a text search: measured on this store, 48 tool calls
+  per ask, most of them one more `query_slice` with the next name — the
+  agent doing by hand what a ranked map over the graph does in one call.
+  Pure over the value and the session's trace map; nothing here queries."
+  [session & {:keys [ask seeds tokens] :or {tokens 1500}}]
+  (let [st     (:store @session)
+        tmap   (or (:test-map @session) {})
+        nodes  (into {}
+                     (for [nsx (keys (:namespaces st))
+                           e   (store/forms st nsx)
+                           :when (and (:name e) (not= (:name e) nsx))]
+                       [(symbol (str nsx) (str (:name e))) [nsx e]]))
+        node?  #(contains? nodes %)
+        ;; edges: [from to kind], kind names the relation from `from`'s side
+        edges  (concat
+                (for [r (refs/refs st)
+                      :when (and (:from-var r) (symbol? (:from-ns r)))
+                      :let [from (symbol (str (:from-ns r)) (str (:from-var r)))
+                            to   (symbol (str (:to-ns r)) (str (:to-name r)))]
+                      :when (and (node? from) (node? to) (not= from to))]
+                  [from to (if (= :covers (:marker r)) :covers :calls)])
+                (for [[t fs] tmap, f fs
+                      :when (and (node? t) (node? f) (not= t f))]
+                  [t f :covers]))
+        ;; undirected adjacency for the walk; the directed edge kept for :via
+        adj    (reduce (fn [m [a b kind]]
+                         (-> m
+                             (update a (fnil conj []) [b kind :out])
+                             (update b (fnil conj []) [a kind :in])))
+                       {} edges)
+        ;; a call edge carries the structure; a coverage edge carries a
+        ;; test, and a test touches many forms — weighted equally the walk
+        ;; drifts into the test suite and out of the code the ask is about
+        weight (fn [[_ kind _]] (if (= :calls kind) 1.0 0.3))
+        named  (for [s seeds
+                     :let [q (symbol (str s))]
+                     :when (node? q)]
+                 [q 1])
+        found  (take 5 (ask-seeds st ask))
+        seedv  (into {} (concat found named))
+        seed-order (vec (distinct (concat (map first named) (map first found))))
+        ;; personalized PageRank, 20 iterations at d = 0.85; the teleport
+        ;; vector is the seeds (uniform when there are none)
+        all    (vec (keys nodes))
+        tele   (if (seq seedv)
+                 (let [z (reduce + (vals seedv))]
+                   (into {} (map (fn [[q w]] [q (/ w z)])) seedv))
+                 (let [n (count all)] (into {} (map (fn [q] [q (/ 1.0 n)])) all)))
+        d      0.85
+        score  (loop [p tele, i 0]
+                 (if (= i 20)
+                   p
+                   (let [spread (reduce (fn [m [q pq]]
+                                          (let [ns* (get adj q)]
+                                            (if (seq ns*)
+                                              (let [total (reduce + 0.0 (map weight ns*))]
+                                                (reduce (fn [m [nb :as edge]]
+                                                          (update m nb (fnil + 0)
+                                                                  (* d pq (/ (weight edge) total))))
+                                                        m ns*))
+                                              ;; a dead end hands its mass back to the seeds
+                                              (reduce (fn [m [t tw]] (update m t (fnil + 0) (* d pq tw)))
+                                                      m tele))))
+                                        {} p)
+                         p'     (reduce (fn [m [t tw]] (update m t (fnil + 0) (* (- 1 d) tw)))
+                                        spread tele)]
+                     (recur p' (inc i)))))
+        ;; the seeds lead — the ask named them — then everything else by the
+        ;; walk, and a form the walk never reached still ranks (last) rather
+        ;; than vanishing: absence would read as "not in the store"
+        ranked (concat seed-order
+                       (->> all
+                            (remove (set seed-order))
+                            ;; with seeds, a form the walk never reached is
+                            ;; not an answer to the ask and stays out; with
+                            ;; none, everything ranks — the unreached last
+                            (filter (if (seq seedv) #(pos? (get score % 0)) (constantly true)))
+                            (sort-by (fn [q] [(- (get score q 0)) (str q)]))))
+        rank-of (into {} (map-indexed (fn [i q] [q i])) ranked)
+        seed?  (set seed-order)
+        via    (fn [q]
+                 (if (seed? q)
+                   "seed"
+                   ;; the best-ranked neighbour is the edge that pulled this
+                   ;; row in; a coverage edge rides along when there is one,
+                   ;; because it answers the next question ("is it tested?")
+                   (let [nbs   (sort-by (fn [[nb _ _]] (get rank-of nb Long/MAX_VALUE)) (get adj q))
+                         phrase (fn [[nb kind dir]]
+                                  (case [kind dir]
+                                    [:calls :in]   (str "called by " nb)
+                                    [:calls :out]  (str "calls " nb)
+                                    [:covers :in]  (str "covered by " nb)
+                                    [:covers :out] (str "covers " nb)))
+                         best  (first nbs)
+                         cover (first (filter (fn [[_ kind dir]] (and (= :covers kind) (= :in dir))) nbs))]
+                     (str/join "; " (distinct (keep phrase (remove nil? [best cover])))))))
+        row    (fn [q]
+                 (let [[nsx e] (get nodes q)]
+                   (assoc (or (form-card session nsx (:name e)) {:form q})
+                          :via (via q))))
+        est    (fn [r] (quot (+ 3 (count (pr-str r))) 4))
+        fitted (loop [qs ranked, acc [], used 0]
+                 (if (empty? qs)
+                   [acc used 0]
+                   (let [r (row (first qs))
+                         t (est r)]
+                     (if (<= (+ used t) tokens)
+                       (recur (rest qs) (conj acc r) (+ used t))
+                       [acc used (count qs)]))))
+        [rows used more] fitted]
+    (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
+      (pos? more) (assoc :more more))))
