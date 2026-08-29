@@ -375,3 +375,25 @@
   `auto-reorder-prompt` has one: the delta is also marked `:system true`,
   but the prompt is what a reader of the log sees."
   "auto-require: the write named an alias its ns form did not have")
+
+(def ^:export bookkeeping-ops
+  "Delta ops that record NOTHING about the code — the only ops that may appear
+  between two done-points, or between a test run and its repeat, without
+  making the second one meaningful.
+
+  An ALLOW-LIST, and the direction is the point. Naming what counts as nothing
+  means every op not yet thought of is treated as a change: a new op slopp adds
+  later makes `done` record a boundary it maybe did not need, which is the
+  harmless failure. A deny-list fails the other way — the unlisted op reads as
+  nothing, and done silently skips judging real work.
+
+  Learned one edit before this one. The first cut used the eight FORM-level
+  content ops and so classified `:module-tier`, `:config-put`, `:deps-add`
+  and twenty others as nothing. Three tests caught it, each declaring a tier
+  or a capability and then expecting done to have an opinion about it.
+
+  `:merge` and `:revert` are deliberately absent: both change what the store
+  says, and a done after either has something to judge. One home, because two
+  readers now hold this question — `unchanged-since-done` and
+  `standing-run` — and two lists would drift."
+  #{:done :verify :observe :turn-begin :turn-end :commit})

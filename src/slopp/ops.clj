@@ -720,48 +720,6 @@
          distinct
          (filter #(store/ns-of-form-id store %)))))
 
-(defn test-run!
-  "Traced, diagnosed run of `ns-sym`'s tests (all, or just those in `:only`
-  — plain names within `ns-sym`, or ns-qualified names which auto-scope);
-  refreshes the test→form map and records the result (C4). `ns-sym` nil =
-  the WHOLE project in one image eval, instrumentation paid once (F-3c1 —
-  per-ns sweeps were 12 calls and 12 instrumentation passes). D5.1: reds
-  are judged against the forms changed since the last verification;
-  `:fresh true` restarts first for a guaranteed-faithful single run."
-  [session ns-sym & {:keys [only fresh]}]
-  (let [t0          (System/nanoTime)
-        st          (:store @session)
-        only        (seq only)
-        qual        (filter #(str/includes? (str %) "/") only)
-        ns-sym      (or ns-sym
-                        (when (seq qual)
-                          (vec (sort (distinct (map #(symbol (namespace (symbol (str %))))
-                                                    qual)))))
-                        (vec (sort (keys (:namespaces st)))))
-        only'       (seq (map #(let [s (str %)]
-                                 (if (str/includes? s "/")
-                                   (symbol (name (symbol s)))
-                                   %))
-                              only))
-        last-verify (:id (db/last-marker (:db @session) (engine/session-line session) :verify))
-        edited      (into #{}
-                          (keep (fn [id]
-                                  (when-let [e (store/form-by-id st id)]
-                                    (symbol (str (store/ns-of-form-id st id))
-                                            (str (or (:name e) (:id e)))))))
-                          (forms-changed-since st last-verify))
-        summary     (engine/diagnosed-run! session ns-sym only'
-                                    :edited edited :fresh fresh
-                                    :include-integration? true)]  ; M5: explicit run
-    (engine/commit-appended! session
-                      #(store/record-verification % ns-sym summary) [])
-    (engine/with-ms (cond-> summary
-               (and only' (zero? (:test summary 0)))
-               (assoc :note (str "0 tests matched :only " (vec only)
-                                 " — check the names (a named ^:external test"
-                                 " routes to the external tier automatically)")))
-             t0)))
-
 (defn deps-remove!
   "Drop external dependency `lib` from the manifest. A jar can't be unloaded,
   so this always restarts the image. Returns {:removed lib :restarted true}
@@ -4483,6 +4441,95 @@
                          (let [e (store/form-by-id st (:form-id d))]
                            (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
                        (:deltas r))))))))
+
+(defn standing-run
+  "The STANDING verdict for a test run of `scope` (a namespace symbol, or
+  the vector of namespaces a whole-project or narrowed run covered) with
+  `only` (the named tests, nil for all), when nothing has happened since it:
+  the most recent `op` marker (`:verify` for an in-image run, `:observe` for
+  the external tier) of the same scope and selection, provided every delta
+  after it is bookkeeping (`fields/bookkeeping-ops`). Returns that marker's
+  result with `:standing true` and `:recorded <delta id>`, or nil.
+
+  Measured on this store: 26% of slopp's own wall time was a tool repeated
+  inside ONE ask — `test_run` 510 extra runs, `done` 362, `full_check` 121
+  — each re-answering a question nothing had changed. `full_check` and
+  `done` already answer from their standing verdict; this is the same
+  courtesy for a test run. Only a run `test_run` made itself counts (its
+  result carries `:test-run true`): the verify a WRITE records covers the
+  tests the write reached, which is a narrower question than the one being
+  repeated. `:fresh true` runs anyway."
+  [st op scope only]
+  (let [back  (reverse (:recent st))
+        same? (fn [d]
+                (and (= op (:op d))
+                     (:test-run (:result d))
+                     (= scope (case op :verify (:ns d) :observe (:scope d) nil))
+                     (= only (:only (:result d)))))
+        tail  (take-while (complement same?) back)
+        prior (first (filter same? back))]
+    (when (and prior
+               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
+      (assoc (:result prior)
+             :standing true
+             :recorded (:id prior)
+             :note (str "nothing has landed since this run (" (:id prior)
+                        ") — its verdict stands and no second run was made."
+                        " test_run {fresh true} runs it anyway.")))))
+
+(defn test-run!
+  "Traced, diagnosed run of `ns-sym`'s tests (all, or just those in `:only`
+  — plain names within `ns-sym`, or ns-qualified names which auto-scope);
+  refreshes the test→form map and records the result (C4). `ns-sym` nil =
+  the WHOLE project in one image eval, instrumentation paid once (F-3c1 —
+  per-ns sweeps were 12 calls and 12 instrumentation passes). D5.1: reds
+  are judged against the forms changed since the last verification;
+  `:fresh true` restarts first for a guaranteed-faithful single run.
+
+  Repeated with nothing landed since — same scope, same selection — it
+  answers from the run it already made (`standing-run`): `:standing true`
+  and the recorded verdict, no image eval, no second `:verify`. `:fresh`
+  always runs."
+  [session ns-sym & {:keys [only fresh]}]
+  (let [t0          (System/nanoTime)
+        st          (:store @session)
+        only        (seq only)
+        qual        (filter #(str/includes? (str %) "/") only)
+        ns-sym      (or ns-sym
+                        (when (seq qual)
+                          (vec (sort (distinct (map #(symbol (namespace (symbol (str %))))
+                                                    qual)))))
+                        (vec (sort (keys (:namespaces st)))))
+        only'       (seq (map #(let [s (str %)]
+                                 (if (str/includes? s "/")
+                                   (symbol (name (symbol s)))
+                                   %))
+                              only))
+        selection   (when only' (vec only'))]
+    (or (when-not fresh
+          (some-> (standing-run st :verify ns-sym selection)
+                  (engine/with-ms t0)))
+        (let [last-verify (:id (db/last-marker (:db @session) (engine/session-line session) :verify))
+              edited      (into #{}
+                                (keep (fn [id]
+                                        (when-let [e (store/form-by-id st id)]
+                                          (symbol (str (store/ns-of-form-id st id))
+                                                  (str (or (:name e) (:id e)))))))
+                                (forms-changed-since st last-verify))
+              summary     (cond-> (engine/diagnosed-run! session ns-sym only'
+                                                         :edited edited :fresh fresh
+                                                         :include-integration? true)  ; M5: explicit run
+                            ;; what this run WAS, so a repeat can find it
+                            true      (assoc :test-run true)
+                            selection (assoc :only selection))]
+          (engine/commit-appended! session
+                                   #(store/record-verification % ns-sym summary) [])
+          (engine/with-ms (cond-> summary
+                            (and only' (zero? (:test summary 0)))
+                            (assoc :note (str "0 tests matched :only " (vec only)
+                                              " — check the names (a named ^:external test"
+                                              " routes to the external tier automatically)")))
+                          t0)))))
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):

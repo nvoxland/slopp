@@ -14,7 +14,7 @@
   reach passes on a population of zero, which is indistinguishable from
   passing on the truth."
   (:require [clojure.java.shell :as sh]
-            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli] [slopp.rules.webapp :as rules.webapp]))
+            [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli] [slopp.rules.webapp :as rules.webapp] [slopp.store.fields :as fields]))
 
 ^:reads (defn ^:export git-config-value
   "`git config <k>` as git would resolve it in `dir` (local then global), or
@@ -359,26 +359,6 @@
                 :refill (artifacts/refill-instruction (str path) (:recipe r))})))
          (:artifacts st))))
 
-(def ^:private bookkeeping-ops
-  "Delta ops that record NOTHING about the code — the only ops that may appear
-  between two done-points without making the second one meaningful.
-
-  An ALLOW-LIST, and the direction is the point. Naming what counts as nothing
-  means every op not yet thought of is treated as a change: a new op slopp adds
-  later makes `done` record a boundary it maybe did not need, which is the
-  harmless failure. A deny-list fails the other way — the unlisted op reads as
-  nothing, and done silently skips judging real work.
-
-  Learned one edit before this one. The first cut used `query/content-ops`,
-  which names the eight FORM-level ops and so classified `:module-tier`,
-  `:config-put`, `:deps-add` and twenty others as nothing. Three tests caught
-  it, each declaring a tier or a capability and then expecting done to have an
-  opinion about it.
-
-  `:merge` and `:revert` are deliberately absent: both change what the store
-  says, and a done after either has something to judge."
-  #{:done :verify :turn-begin :turn-end :commit})
-
 (defn- unchanged-since-done
   "The STANDING done result when nothing has happened since it, else nil.
 
@@ -407,7 +387,7 @@
         tail  (take-while #(not= :done (:op %)) back)
         prior (first (drop-while #(not= :done (:op %)) back))]
     (when (and prior
-               (every? #(contains? bookkeeping-ops (:op %)) tail))
+               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
       {:done     (:id prior)
        :normalized 0
        :rewrites []
@@ -464,7 +444,10 @@
       ;; as zero packs an expensive namespace as though it were free — the
       ;; exact mistake that made the last re-weighting measure WORSE than the
       ;; boot-count proxy it replaced.
-      (:ns-ms result) (assoc :ns-ms (:ns-ms result)))))
+      (:ns-ms result) (assoc :ns-ms (:ns-ms result))
+      ;; what the run WAS — `standing-run` finds a repeat by these
+      (:test-run result) (assoc :test-run true)
+      (:only result)     (assoc :only (:only result)))))
 
 (defn- record-run-observation!
   "Append the run's result as an `:observe` delta — *these tests ran, in this
@@ -882,6 +865,11 @@ client-deps (merge (:client-deps st) (:client provided))
   true :status :ran :assertions :failures :errors :exit :ms} plus :failing +
   :all-failing {file [tests]} + :themes (clustered causes) when red.
 
+  Repeated with nothing landed since — the same scope and selection — it
+  answers from the `:observe` it recorded (`ops/standing-run`): `:standing
+  true`, no build, no JVM. This tier is where the wall clock goes, and a
+  repeat inside one ask was measured to be a quarter of it.
+
   `:ms` is the wall cost, on EVERY exit including the early ones. This tier
   is where the time goes — measured, ~187s of a ~190s full_check, almost all
   of it the fresh-JVM boots the isolation requires — and it used to report
@@ -928,211 +916,210 @@ client-deps (merge (:client-deps st) (:client provided))
                        (or (:selected aff)
                            (vec (sort (filter #(engine/test-ns? (:store @session) %)
                                               (keys (:namespaces (:store @session))))))))
-            par (cond (some? parallel) parallel
-                      (nil? full-set)  1
-                      :else (testrun/auto-parallel (count full-set)
-                                           (.availableProcessors (Runtime/getRuntime))))
-            shard-nses (when (and (> par 1) (seq full-set)) full-set)
-            ;; A NARROWED run shards too, along namespace lines. Without this
-            ;; :only forced par=1 and one serial JVM, so a 130-test impacted
-            ;; set cost more than the sharded full suite and `done` deferred
-            ;; it instead — measured, 37.5% of recent dones, six of fifteen
-            ;; deferrals in the 52–136 range that the trace map had picked out
-            ;; correctly. Small sets stay serial: sharding four tests buys
-            ;; nothing and costs three extra JVM boots.
-            only-par (when (and (seq only) (nil? ns) (> (count only) 8))
-                       (testrun/auto-parallel
-                        (count (distinct (keep #(namespace (symbol (str %))) only)))
-                        (.availableProcessors (Runtime/getRuntime))))
-            only-groups (when (and only-par (> only-par 1))
-                          (testrun/only-shards (:store @session) only only-par))
-            ;; narrowed runs need the filter-free alias: the :test alias bakes
-            ;; -r \".*\" (inline tests, Q13) which UNIONS with -n and defeats it
-            alias (or alias
-                      (if (or ns aff (seq only) (seq nses) shard-nses)
-                        ":test-run" ":test"))
-            dir (str (java.nio.file.Files/createTempDirectory
-                      "slopp-external"
-                      (make-array java.nio.file.attribute.FileAttribute 0)))]
-        (try
-          (let [tb       (System/currentTimeMillis)
-                b        (build! session dir)
-                ;; materializing the store is a FIXED cost this tier pays before
-                ;; any test runs, so it belongs in the breakdown rather than
-                ;; inside the number narrowing is judged against
-                build-ms (- (System/currentTimeMillis) tb)]
-            (if (:error b)
-              (stamp b)
-              (let [result
-                    (if (or (seq shard-nses) (seq only-groups))
-                      (let [;; balanced by IMAGE BOOTS, not by index: the shards run concurrently,
-                            ;; so this tier costs its SLOWEST shard. Round-robin split
-                            ;; slopp's own 402 boots [139 100 90 73] — one shard still
-                            ;; had 66 to go after the fastest had finished.
-                            ;; ONE shard shape for both cases: the namespaces to discover, and the
-                            ;; vars to run within them (nil = the whole namespace).
-                            ;; Balanced by IMAGE BOOTS either way — the shards run
-                            ;; concurrently, so this tier costs its SLOWEST shard.
-                            shards (if (seq only-groups)
-                                     (mapv (fn [g]
-                                             {:nses (distinct
-                                                     (map #(symbol (namespace (symbol (str %)))) g))
-                                              :only g})
-                                           only-groups)
-                                     (mapv (fn [g] {:nses g})
-                                           (testrun/balance-shards (:store @session)
-                                                                   shard-nses par)))
-                            ;; each shard carries its OWN wall time, because the
-                            ;; spread between the fastest and the slowest is what
-                            ;; says whether narrowing this tier could help — see
-                            ;; [[testrun/shard-cost]]
-                            timed  (fn [grp]
-                                     (let [s (System/currentTimeMillis)
-                                           o (testrun/run-shard! alias dir
-                                                                 (:nses grp) (:only grp))]
-                                       (assoc o :ms (- (System/currentTimeMillis) s))))
-                            runs   (mapv (fn [grp] (future (timed grp))) shards)
-                            outs0  (mapv deref runs)
-                            ;; a shard with NO parseable summary is a JVM-level death
-                            ;; (fork pressure, OOM) — test failures PARSE. Retry those
-                            ;; shards once, SERIALLY, off the concurrent storm.
-                            dead?  (fn [o] (nil? (testrun/parse-test-summary
-                                                  (str (:out o) "\n" (:err o)))))
-                            outs   (mapv (fn [grp o] (if (dead? o) (timed grp) o))
-                                         shards outs0)
-                            retries (count (filter dead? outs0))
-                            out    (str/join "\n" (map #(str (:out %) "\n" (:err %)) outs))
-                            sums   (mapv #(testrun/parse-test-summary (str (:out %) "\n" (:err %))) outs)]
-                        (if (some nil? sums)
-                          (cond-> {:external true :exit (apply max (map :exit outs))
-                                   :status :error
-                                   :shards (count shards)
-                                   :output (->> (str/split-lines out)
-                                                (remove str/blank?)
-                                                (take-last 12) (str/join "\n")
-                                                testrun/anchor-output)}
-                            (pos? retries) (assoc :shard-retries retries))
-                          (let [merged {:ran        (reduce + (map :ran sums))
-                                        :assertions (reduce + (map :assertions sums))
-                                        :failures   (reduce + (map :failures sums))
-                                        :errors     (reduce + (map :errors sums))}
-                                exit   (apply max (map :exit outs))
-                                red?   (pos? (+ (:failures merged) (:errors merged)))]
-                            (cond-> (merge {:external true
-                                            :exit exit
-                                            :shards (count shards)
-                                            :status (cond red?        :red
-                                                          (pos? exit) :error
-                                                          :else       :green)}
-                                           merged
-                                           (when aff {:affected aff})
-                                           (when (pos? retries) {:shard-retries retries})
-                                           (when-let [c (testrun/shard-cost
-                                                         build-ms (keep :ms outs))]
-                                             {:cost c}))
-                              (and (not red?) (pos? exit))
-                              (assoc :note (str "summaries parsed green but a runner"
-                                                " JVM exited nonzero — not trusting"
-                                                " the green"))
-                              red? (assoc :failing (testrun/parse-test-failures out)
-                                          :all-failing (testrun/failing-test-rollup out))
-                              (and red? (seq (testrun/failure-themes out)))
-                              (assoc :themes (testrun/failure-themes out))))))
-                      (let [args (cond-> [repl/clojure-bin (str "-M" alias)]
-                                   ns         (conj "-n" (str ns))
-                                   (seq nses) (into (mapcat #(vector "-n" (str %)) nses))
-                                   aff        (into (mapcat #(vector "-n" (str %))
-                                                            (:selected aff)))
-                                   ;; -n rides along with -v: cognitect's var
-                                   ;; filter only resolves vars in DISCOVERED
-                                   ;; namespaces, and the default discovery
-                                   ;; regex is -test$ — a named test living
-                                   ;; anywhere else was unresolvable
-                                   (seq only) (into (mapcat #(vector "-n" %)
-                                                            (distinct
-                                                             (keep #(namespace (symbol (str %)))
-                                                                   only))))
-                                   (seq only) (into (mapcat #(vector "-v" (str %)) only)))
-                            r    (testrun/run-cmd! args dir)
-                            out  (str (:out r) "\n" (:err r))
-                            s    (testrun/parse-test-summary out)]
-                        (merge {:external true :exit (:exit r)}
-                               (when aff {:affected aff})
-                               (cond
-                                 (nil? s)           {:status :error
-                                                     :output (->> (str/split-lines out)
-                                                                  (remove str/blank?)
-                                                                  (take-last 8) (str/join "\n")
-                                                                  testrun/anchor-output)}
-                                 (= :red (:status s)) (cond-> (assoc s
-                                                                     :failing (testrun/parse-test-failures out)
-                                                                     :all-failing (testrun/failing-test-rollup out))
-                                                        (seq (testrun/failure-themes out))
-                                                        (assoc :themes (testrun/failure-themes out)))
-                                 (pos? (:exit r))
-                                 (assoc s :status :error
-                                        :note (str "summary parsed green but the JVM"
-                                                   " exited nonzero — not trusting"
-                                                   " the green"))
-                                 :else s))))]
-                ;; #121: ONE absorb point for BOTH branches — the external tier is
-                ;; the only place an ^:external test ever runs, so a trace missed
-                ;; here is missed forever. nil when the build carried no runner, so
-                ;; untraced stores behave exactly as before.
-                (engine/absorb-trace! session (testrun/read-traces dir))
-                ;; and the run itself is EVIDENCE — the same argument as the
-                ;; trace one line up: this is the only tier that ever runs an
-                ;; ^:external test, so a red missed here is missed forever, and
-                ;; `:assertions-never-red` had nothing to read for one
-                (stamp
-                 (record-run-observation!
-                  session
-                  (or (seq full-set)
-                      (when ns [(symbol (str ns))])
-                      ;; A NARROWED `:only` run names test VARS; the scope it
-                      ;; covered is their NAMESPACES. Without this the branch
-                      ;; fell through to `[]`, `closure-hashes` was handed
-                      ;; nothing, and the observation carried no content key —
-                      ;; on exactly the runs a verdict cache would read, since
-                      ;; `done` narrows its impacted slice with `:only`. So the
-                      ;; whole-tier runs nobody would cache recorded a key and
-                      ;; the narrowed ones it exists for did not: 16 of the last
-                      ;; 60 observations on this store had one.
-                      (seq (vec (sort (distinct
-                                       (keep #(some-> (symbol (str %))
-                                                      namespace symbol)
-                                             only)))))
-                      [])
-                  ;; The shards' per-namespace wall time, when the build carried
-                  ;; a runner that measured it. Read ONCE, HERE, because `dir`
-                  ;; is deleted in the finally below and this is the last moment
-                  ;; the measurement exists — and folded into the RESULT rather
-                  ;; than passed beside it so the journal and the caller cannot
-                  ;; disagree about what the run cost.
-                  (let [r (if-let [t (testrun/read-timings dir)]
-                            (assoc result :ns-ms t)
-                            result)]
-                    ;; and the COST as a `test-run` measurement beside the
-                    ;; journal: the observation above carries the verdict, this
-                    ;; row carries what it took — tier, wall, and the per-
-                    ;; namespace time the shards measured — so variance-vs-
-                    ;; drift is a query over runs rather than a re-run, and a
-                    ;; selection model has something to train on.
-                    (when-let [c (:db @session)]
-                      (db/record-measurement!
-                       c "test-run" nil
-                       {:tier     :external
-                        :status   (:status r)
-                        :ran      (:ran r)
-                        :failures (:failures r)
-                        :errors   (:errors r)
-                        :ms       (- (System/currentTimeMillis) t0)
-                        :shards   (count (get-in r [:cost :shard-ms]))
-                        :ns-ms    (:ns-ms r)}))
-                    r))))))
-          (finally
-            ;; a full materialized project per run; nothing else ever deletes it
-            (delete-dir! (io/file dir))))))))
+            ;; WHAT this run covers — the observation's scope, computed once
+            ;; here so the record and the standing check cannot disagree
+            scope (vec (or (seq full-set)
+                           (when ns [(symbol (str ns))])
+                           (seq (vec (sort (distinct
+                                            (keep #(some-> (symbol (str %))
+                                                           namespace symbol)
+                                                  only)))))
+                           []))
+            selection (when (seq only) (vec (map #(symbol (str %)) only)))
+            standing  (ops/standing-run (:store @session) :observe scope selection)]
+        (if standing
+          (stamp (assoc standing :external true))
+          (let [par (cond (some? parallel) parallel
+                          (nil? full-set)  1
+                          :else (testrun/auto-parallel (count full-set)
+                                                       (.availableProcessors (Runtime/getRuntime))))
+                shard-nses (when (and (> par 1) (seq full-set)) full-set)
+                ;; A NARROWED run shards too, along namespace lines. Without this
+                ;; :only forced par=1 and one serial JVM, so a 130-test impacted
+                ;; set cost more than the sharded full suite and `done` deferred
+                ;; it instead — measured, 37.5% of recent dones, six of fifteen
+                ;; deferrals in the 52–136 range that the trace map had picked out
+                ;; correctly. Small sets stay serial: sharding four tests buys
+                ;; nothing and costs three extra JVM boots.
+                only-par (when (and (seq only) (nil? ns) (> (count only) 8))
+                           (testrun/auto-parallel
+                            (count (distinct (keep #(namespace (symbol (str %))) only)))
+                            (.availableProcessors (Runtime/getRuntime))))
+                only-groups (when (and only-par (> only-par 1))
+                              (testrun/only-shards (:store @session) only only-par))
+                ;; narrowed runs need the filter-free alias: the :test alias bakes
+                ;; -r \".*\" (inline tests, Q13) which UNIONS with -n and defeats it
+                alias (or alias
+                          (if (or ns aff (seq only) (seq nses) shard-nses)
+                            ":test-run" ":test"))
+                dir (str (java.nio.file.Files/createTempDirectory
+                          "slopp-external"
+                          (make-array java.nio.file.attribute.FileAttribute 0)))]
+            (try
+              (let [tb       (System/currentTimeMillis)
+                    b        (build! session dir)
+                    ;; materializing the store is a FIXED cost this tier pays before
+                    ;; any test runs, so it belongs in the breakdown rather than
+                    ;; inside the number narrowing is judged against
+                    build-ms (- (System/currentTimeMillis) tb)]
+                (if (:error b)
+                  (stamp b)
+                  (let [result
+                        (if (or (seq shard-nses) (seq only-groups))
+                          (let [;; balanced by IMAGE BOOTS, not by index: the shards run concurrently,
+                                ;; so this tier costs its SLOWEST shard. Round-robin split
+                                ;; slopp's own 402 boots [139 100 90 73] — one shard still
+                                ;; had 66 to go after the fastest had finished.
+                                ;; ONE shard shape for both cases: the namespaces to discover, and the
+                                ;; vars to run within them (nil = the whole namespace).
+                                shards (if (seq only-groups)
+                                         (mapv (fn [g]
+                                                 {:nses (distinct
+                                                         (map #(symbol (namespace (symbol (str %)))) g))
+                                                  :only g})
+                                               only-groups)
+                                         (mapv (fn [g] {:nses g})
+                                               (testrun/balance-shards (:store @session)
+                                                                       shard-nses par)))
+                                ;; each shard carries its OWN wall time, because the
+                                ;; spread between the fastest and the slowest is what
+                                ;; says whether narrowing this tier could help — see
+                                ;; [[testrun/shard-cost]]
+                                timed  (fn [grp]
+                                         (let [s (System/currentTimeMillis)
+                                               o (testrun/run-shard! alias dir
+                                                                     (:nses grp) (:only grp))]
+                                           (assoc o :ms (- (System/currentTimeMillis) s))))
+                                runs   (mapv (fn [grp] (future (timed grp))) shards)
+                                outs0  (mapv deref runs)
+                                ;; a shard with NO parseable summary is a JVM-level death
+                                ;; (fork pressure, OOM) — test failures PARSE. Retry those
+                                ;; shards once, SERIALLY, off the concurrent storm.
+                                dead?  (fn [o] (nil? (testrun/parse-test-summary
+                                                      (str (:out o) "\n" (:err o)))))
+                                outs   (mapv (fn [grp o] (if (dead? o) (timed grp) o))
+                                             shards outs0)
+                                retries (count (filter dead? outs0))
+                                out    (str/join "\n" (map #(str (:out %) "\n" (:err %)) outs))
+                                sums   (mapv #(testrun/parse-test-summary (str (:out %) "\n" (:err %))) outs)]
+                            (if (some nil? sums)
+                              (cond-> {:external true :exit (apply max (map :exit outs))
+                                       :status :error
+                                       :shards (count shards)
+                                       :output (->> (str/split-lines out)
+                                                    (remove str/blank?)
+                                                    (take-last 12) (str/join "\n")
+                                                    testrun/anchor-output)}
+                                (pos? retries) (assoc :shard-retries retries))
+                              (let [merged {:ran        (reduce + (map :ran sums))
+                                            :assertions (reduce + (map :assertions sums))
+                                            :failures   (reduce + (map :failures sums))
+                                            :errors     (reduce + (map :errors sums))}
+                                    exit   (apply max (map :exit outs))
+                                    red?   (pos? (+ (:failures merged) (:errors merged)))]
+                                (cond-> (merge {:external true
+                                                :exit exit
+                                                :shards (count shards)
+                                                :status (cond red?        :red
+                                                              (pos? exit) :error
+                                                              :else       :green)}
+                                               merged
+                                               (when aff {:affected aff})
+                                               (when (pos? retries) {:shard-retries retries})
+                                               (when-let [c (testrun/shard-cost
+                                                             build-ms (keep :ms outs))]
+                                                 {:cost c}))
+                                  (and (not red?) (pos? exit))
+                                  (assoc :note (str "summaries parsed green but a runner"
+                                                    " JVM exited nonzero — not trusting"
+                                                    " the green"))
+                                  red? (assoc :failing (testrun/parse-test-failures out)
+                                              :all-failing (testrun/failing-test-rollup out))
+                                  (and red? (seq (testrun/failure-themes out)))
+                                  (assoc :themes (testrun/failure-themes out))))))
+                          (let [args (cond-> [repl/clojure-bin (str "-M" alias)]
+                                       ns         (conj "-n" (str ns))
+                                       (seq nses) (into (mapcat #(vector "-n" (str %)) nses))
+                                       aff        (into (mapcat #(vector "-n" (str %))
+                                                                (:selected aff)))
+                                       ;; -n rides along with -v: cognitect's var
+                                       ;; filter only resolves vars in DISCOVERED
+                                       ;; namespaces, and the default discovery
+                                       ;; regex is -test$ — a named test living
+                                       ;; anywhere else was unresolvable
+                                       (seq only) (into (mapcat #(vector "-n" %)
+                                                                (distinct
+                                                                 (keep #(namespace (symbol (str %)))
+                                                                       only))))
+                                       (seq only) (into (mapcat #(vector "-v" (str %)) only)))
+                                r    (testrun/run-cmd! args dir)
+                                out  (str (:out r) "\n" (:err r))
+                                s    (testrun/parse-test-summary out)]
+                            (merge {:external true :exit (:exit r)}
+                                   (when aff {:affected aff})
+                                   (cond
+                                     (nil? s)           {:status :error
+                                                         :output (->> (str/split-lines out)
+                                                                      (remove str/blank?)
+                                                                      (take-last 8) (str/join "\n")
+                                                                      testrun/anchor-output)}
+                                     (= :red (:status s)) (cond-> (assoc s
+                                                                         :failing (testrun/parse-test-failures out)
+                                                                         :all-failing (testrun/failing-test-rollup out))
+                                                            (seq (testrun/failure-themes out))
+                                                            (assoc :themes (testrun/failure-themes out)))
+                                     (pos? (:exit r))
+                                     (assoc s :status :error
+                                            :note (str "summary parsed green but the JVM"
+                                                       " exited nonzero — not trusting"
+                                                       " the green"))
+                                     :else s))))]
+                    ;; #121: ONE absorb point for BOTH branches — the external tier is
+                    ;; the only place an ^:external test ever runs, so a trace missed
+                    ;; here is missed forever. nil when the build carried no runner, so
+                    ;; untraced stores behave exactly as before.
+                    (engine/absorb-trace! session (testrun/read-traces dir))
+                    ;; and the run itself is EVIDENCE — the same argument as the
+                    ;; trace one line up: this is the only tier that ever runs an
+                    ;; ^:external test, so a red missed here is missed forever, and
+                    ;; `:assertions-never-red` had nothing to read for one
+                    (stamp
+                     (record-run-observation!
+                      session
+                      scope
+                      ;; The shards' per-namespace wall time, when the build carried
+                      ;; a runner that measured it. Read ONCE, HERE, because `dir`
+                      ;; is deleted in the finally below and this is the last moment
+                      ;; the measurement exists — and folded into the RESULT rather
+                      ;; than passed beside it so the journal and the caller cannot
+                      ;; disagree about what the run cost.
+                      (let [timings (testrun/read-timings dir)
+                            r (cond-> result
+                                timings   (assoc :ns-ms timings)
+                                ;; what this run WAS, so a repeat can find it
+                                true      (assoc :test-run true)
+                                selection (assoc :only selection))]
+                        ;; and the COST as a `test-run` measurement beside the
+                        ;; journal: the observation above carries the verdict, this
+                        ;; row carries what it took — tier, wall, and the per-
+                        ;; namespace time the shards measured — so variance-vs-
+                        ;; drift is a query over runs rather than a re-run, and a
+                        ;; selection model has something to train on.
+                        (when-let [c (:db @session)]
+                          (db/record-measurement!
+                           c "test-run" nil
+                           {:tier     :external
+                            :status   (:status r)
+                            :ran      (:ran r)
+                            :failures (:failures r)
+                            :errors   (:errors r)
+                            :ms       (- (System/currentTimeMillis) t0)
+                            :shards   (count (get-in r [:cost :shard-ms]))
+                            :ns-ms    (:ns-ms r)}))
+                        r))))))
+              (finally
+                ;; a full materialized project per run; nothing else ever deletes it
+                (delete-dir! (io/file dir))))))))))
 
 (defn ^:export done!
   "The DONE-POINT: call when you believe your changes are complete. Marks

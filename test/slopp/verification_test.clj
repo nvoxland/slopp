@@ -788,7 +788,9 @@
                 caller reads that as a clean run"
         (with-redefs-fn {#'image/traced-test-run
                          (fn [& _] "Execution error: No namespace: nh.nope found")}
-          #(let [r (ops/test-run! sess 'nh.core-test)]
+          ;; `:fresh` — the sane run just above would otherwise STAND (nothing
+          ;; landed between the two), and this test is about the runner
+          #(let [r (ops/test-run! sess 'nh.core-test :fresh true)]
              (is (map? r) (pr-str r))
              (is (pos? (:error r 0))
                  (str "an absent summary must count as an error, or a run that"

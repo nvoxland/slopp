@@ -2518,3 +2518,39 @@
         (testing "a second pass finds nothing to do"
           (is (empty? (:refreshed (ops/refresh-index! sess))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-test-run-repeated-with-nothing-landed-stands
+  ;; 26% of slopp's own wall time was a tool repeated inside ONE ask —
+  ;; test_run 510 extra runs on this store — re-answering a question nothing
+  ;; had changed. The same courtesy full_check and done already extend.
+  (let [sess (external/open!)
+        verifies #(count (filter (fn [d] (= :verify (:op d))) (ops/journal sess)))]
+    (try
+      (ops/ingest! sess 'sr.core
+                   (str "(ns sr.core (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn f [x] x)\n"
+                        "(deftest f-t (is (= 1 (f 1))))\n"
+                        "(deftest ^:external f-ext-t (is (= 2 (f 2))))\n"))
+      (let [r1 (ops/test-run! sess 'sr.core)
+            n  (verifies)
+            r2 (ops/test-run! sess 'sr.core)]
+        (is (nil? (:standing r1)) (pr-str r1))
+        (is (true? (:standing r2)) (pr-str r2))
+        (is (= n (verifies)) "the repeat records no second verify")
+        (is (= (:pass r1) (:pass r2)) "and answers with the run it made")
+        (testing "a narrower selection is a different question"
+          (is (nil? (:standing (ops/test-run! sess 'sr.core :only ['f-t])))))
+        (testing "the verify a WRITE records does not stand in for a run"
+          (ops/edit-replace! sess 'sr.core 'f "(defn f [x] (identity x))" :prompt "touch")
+          (is (nil? (:standing (ops/test-run! sess 'sr.core))))
+          (is (true? (:standing (ops/test-run! sess 'sr.core)))))
+        (testing "fresh runs it anyway"
+          (is (nil? (:standing (ops/test-run! sess 'sr.core :fresh true))))))
+      (testing "the external tier stands the same way, on its observation"
+        (let [r1 (external/spot-run! sess :only ["sr.core/f-ext-t"])
+              r2 (external/spot-run! sess :only ["sr.core/f-ext-t"])]
+          (is (= :green (:status r1)) (pr-str r1))
+          (is (nil? (:standing r1)))
+          (is (true? (:standing r2)) (pr-str r2))
+          (is (= :green (:status r2)))))
+      (finally (ops/close! sess)))))
