@@ -4470,7 +4470,7 @@
         prior (first (filter same? back))]
     (when (and prior
                (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
-      (assoc (:result prior)
+      (assoc (dissoc (:result prior) :test-run)
              :standing true
              :recorded (:id prior)
              :note (str "nothing has landed since this run (" (:id prior)
@@ -4524,7 +4524,9 @@
                             selection (assoc :only selection))]
           (engine/commit-appended! session
                                    #(store/record-verification % ns-sym summary) [])
-          (engine/with-ms (cond-> summary
+          ;; the marker is for the RECORD (a repeat finds it there); the caller
+          ;; sees the run
+          (engine/with-ms (cond-> (dissoc summary :test-run)
                             (and only' (zero? (:test summary 0)))
                             (assoc :note (str "0 tests matched :only " (vec only)
                                               " — check the names (a named ^:external test"

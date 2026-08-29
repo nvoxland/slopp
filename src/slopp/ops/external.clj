@@ -464,7 +464,9 @@
   did not, and a verdict cache is exactly where that costs a false green.
 
   The shell: [[observation-of]] and `closure-hashes` are the transforms, and
-  the parts that can be WRONG are all in there."
+  the parts that can be WRONG are all in there. Returns the result WITHOUT
+  the `:test-run` marker: that is for the record, where a repeated run finds
+  it (`ops/standing-run`), not for the caller."
   [session scope result]
   (let [st (:store @session)]
     (engine/commit-appended!
@@ -472,7 +474,7 @@
      #(store/record-observation % scope (observation-of st result)
                                 (engine/closure-hashes st scope))
      []))
-  result)
+  (dissoc result :test-run))
 
 (defn- clear-source-roots!
   "Delete the materialized source roots under `target` so the tree about to be
@@ -1287,10 +1289,12 @@ client-deps (merge (:client-deps st) (:client provided))
                     (external-test-run! session :only iso-only)
                     {:pending {:count (count iso-only)
                                :tests (vec (take 5 iso-only))
-                               :note  (str "first 5 shown — this impacted set is most of the"
-                                           " external suite, so narrowing it saves nothing;"
-                                           " full_check runs the whole store and is the"
-                                           " honest answer to a change this broad")}}))))
+                               :note  (str "NO ^:external test ran this time — these "
+                                           (count iso-only) " impacted ones were deferred"
+                                           " (most of the external suite; narrowing saves"
+                                           " nothing), so the green above is the in-image"
+                                           " suite only. full_check is the external evidence"
+                                           " for a change this broad.")}}))))
         findings (let [lint-errors (count (filter #(= :error (:level %)) lint))
       lint-warns  (vec (for [f lint :when (= :warning (:level f))]
                          (select-keys f [:form :type :message])))
@@ -1385,36 +1389,11 @@ client-deps (merge (:client-deps st) (:client provided))
            ;; not run. Say so EVERY time: an unstated omission reads as
            ;; coverage, and that is how a green status comes to mean less than
            ;; the agent thinks it does.
-           :scope
-           (str "EPISODE-scoped: lint + dead-surface cover only the namespaces"
-                " you touched, and the full ^:external / ^:integration tiers"
-                " did not run. `full_check` does the whole store — every"
-                " namespace, every tier. Nothing forces it, including the"
-                " milestone; run it when the change is broad, when you deleted"
-                " a caller, or before a commit you want to stand behind."
-                " They also differ in ISOLATION, and that axis runs the OTHER"
-                " way: done puts every impacted ^:external test in ONE serial"
-                " JVM and full_check shards across four, so a pair that fails"
-                " only TOGETHER fails HERE and can pass there — a red done"
-                " beside a green full_check is not done being wrong"
-                ;; and SAY when the tier ran nothing. Above the cap `iso` is a
-                ;; :pending marker and no ^:external test executes — but the
-                ;; status still comes back :green and this sentence read exactly
-                ;; as it does when the impacted slice DID run, so the two cases
-                ;; were indistinguishable where an agent actually looks.
-                ;;
-                ;; The inversion is the point: the BROADER the change the
-                ;; likelier the deferral, so a sweeping edit earns LESS external
-                ;; evidence than a narrow one. Unstated, that is a green growing
-                ;; weaker exactly as the work grows riskier.
-                (when-let [p (:pending iso)]
-                  (str ". AND NO ^:external TEST RAN AT ALL this time: the "
-                       (:count p) " impacted ones were deferred, so the green"
-                       " above is the in-image suite only. This gets MORE likely"
-                       " as a change gets broader, not less — once the impacted"
-                       " set approaches the whole suite there is nothing for"
-                       " narrowing to save. `full_check` is not optional here;"
-                       " it is the only external evidence this episode can get.")))}
+           ;; a KEYWORD, not the paragraph. The scope was 600 characters of
+           ;; teaching on every done — 2,062 chars average result, measured —
+           ;; and read carefully twice in a session. The teaching lives in the
+           ;; `done` tool description now (read once); the fact rides here.
+           :scope :episode}
     ;; ADVISORY, and named as such: kondo findings slopp's config
     ;; deliberately does not block on, because each is routinely true of a
     ;; form mid-edit. Listed so the agent can judge them, never counted.

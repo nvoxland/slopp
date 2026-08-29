@@ -330,7 +330,12 @@
   skill said `{affected true}` was the gear to reach for by default; measured
   on this store, full = 1297 external tests in ~223s and affected = 839 in
   ~229s — no saving, because the cost is four fresh JVMs rather than the tests
-  inside them. A number nobody can decompose invites exactly that guess."
+  inside them. A number nobody can decompose invites exactly that guess.
+
+  `:note` is ONE sentence naming the reading. The paragraph that taught why
+  rode every whole-store check (~1 KB, byte-identical each time, measured
+  as part of a 3.6 KB average `full_check` result); it lives in the
+  `full_check` tool description now, which is read once."
   [build-ms shard-ms]
   (when (seq shard-ms)
     (let [sorted  (vec (sort shard-ms))
@@ -355,37 +360,17 @@
        :slowest-ms slowest
        :narrowing-ceiling-ms ceiling
        :unbalanced? uneven?
-       :note (str "this tier costs its SLOWEST shard (" (secs slowest) "), not the sum."
-                  " The FASTEST (" (secs floor) ") is the least-loaded shard, and it"
-                  " is NOT the fixed cost: per-namespace timing puts a shard's own"
-                  " JVM boot plus dependency resolution near 8s, so the rest of that"
-                  " number is tests it still ran. Read this ceiling as CONSERVATIVE"
-                  " — a run narrow enough can go below it. So narrowing"
+       :note (str "costs its slowest shard (" (secs slowest) "); the fastest ("
+                  (secs floor) ") still paid a whole JVM boot, so narrowing"
                   (if (zero? ceiling)
-                    " cannot return anything here: one shard is one boot."
-                    (str " can return at most " (secs ceiling) " of it, and only when"
-                         " your changes are local enough to drop whole test"
-                         " namespaces. Reach for {affected true} on a LOCAL episode;"
-                         " a change to a core namespace is reachable from nearly"
-                         " everything and narrows to almost the same set."))
+                    " returns nothing here — one shard is one boot"
+                    (str " returns at most " (secs ceiling)
+                         ", and only for changes local enough to drop whole test namespaces"))
                   (when uneven?
-                    (str " The shards are UNBALANCED (" (secs floor) "…"
-                         (secs slowest) "): this tier costs its slowest, so part"
-                         " of that is the SPREAD rather than the work, and running"
-                         " fewer tests does not address it. An even split would land"
-                         " near " (secs (long mean)) " and the largest single"
-                         " namespace is about HALF that, so the work does divide —"
-                         " and re-balancing has still measured WORSE three times,"
-                         " most recently on per-namespace times measured directly"
-                         " (266.1s against the boot proxy's 237.8s). The reason is"
-                         " that there is no stable per-namespace cost to pack with:"
-                         " across two runs of one suite the same namespace measured"
-                         " 0.8s and 27.1s, 17.8s and 114.5s, 44.6s and 3.7s. These"
-                         " tests boot JVMs and shell subprocesses, so a namespace"
-                         " costs what its NEIGHBOURS leave it. Treat :ns-ms as"
-                         " evidence about a run, never as a weight for the next"
-                         " one."))
-                  " Materializing the project cost " (secs build-ms) " on top.")})))
+                    (str "; UNBALANCED — the spread between shards (" (secs floor) "…"
+                         (secs slowest) ") is part of the cost, and running fewer"
+                         " tests does not address it"))
+                  ".")})))
 
 (defn ^{:export "slopp.verification"} read-timings
   "Merge the per-namespace TIMINGS this run's shards wrote into the built

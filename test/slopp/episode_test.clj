@@ -541,10 +541,12 @@
               ;; deferral — so a sweeping edit gets LESS external evidence than
               ;; a narrow one, and nothing said so. Hit four times in one
               ;; session before it was noticed.
-              (is (re-find #"(?i)did not run at all|no \^:external test"
-                           (str (get-in r [:findings :scope])))
+              (is (= :episode (get-in r [:findings :scope]))
+                  "the scope is a keyword now — the teaching is in the tool description")
+              (is (re-find #"(?i)no \^:external test ran"
+                           (str (get-in r [:findings :external-pending :note])))
                   (str "a deferred tier reads like a covered one: "
-                       (get-in r [:findings :scope]))))
+                       (get-in r [:findings :external-pending]))))
             (is (<= 41 (get-in r [:findings :external-pending :count]))
                 (pr-str (:findings r)))
             (is (seq (get-in r [:findings :external-pending :tests]))))))
@@ -702,9 +704,9 @@
                                :prompt "wrong arity")]
           (is (:error r) (pr-str r))
           (is (re-find #"invalid-arity" (str (:error r))) (str (:error r)))))
-      (testing "done names its scope and points at full_check every time"
+      (testing "done states its scope as a keyword — the teaching is in the tool description, once"
         (let [f (:findings (external/done! sess :label "scope note"))]
-          (is (re-find #"full_check" (str (:scope f))) (pr-str f))))
+          (is (= :episode (:scope f)) (pr-str f))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external done-runs-the-whole-suite-regardless-of-what-was-touched
