@@ -1373,7 +1373,8 @@
                                                         :depth (or (:depth a) 2)
                                                         :limit (or (:limit a) 8)
                                                         :match (:match a)
-                                                        :window (:window a))))
+                                                        :window (:window a)
+                                                        :verbose (:verbose a))))
       "query_depends" (text! (told! session name a
                                         (graph/query-depends session (:on a)
                                                           :modules (:modules a)

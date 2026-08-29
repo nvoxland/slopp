@@ -236,6 +236,15 @@
         (let [r (query/query-slice sess 'sl.core 'total :depth 1)]
           (is (= #{'sl.core/tax 'sl.util/fmt}
                  (set (map :form (:cards r)))) (pr-str r))))
+      (testing "a card's recorded WHY rides only when asked — a slice is read to edit, not to audit"
+        (ops/edit-replace! sess 'sl.util 'pad
+                           "(defn pad \"Pads.\" [s] (str \"  \" s))"
+                           :prompt "two spaces, the column lines up")
+        (let [card #(first (filter (comp #{'sl.util/pad} :form) (:cards %)))
+              terse (card (query/query-slice sess 'sl.core 'total))
+              full  (card (query/query-slice sess 'sl.core 'total :verbose true))]
+          (is (nil? (:why terse)) (pr-str terse))
+          (is (re-find #"column" (str (:why full))) (pr-str full))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external briefs-arrive-task-shaped

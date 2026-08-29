@@ -58,11 +58,12 @@
                                :seeds {:type "array" :items {:type "string"}}
                                :tokens {:type "integer"}}}}
    {:name "query_slice"
-    :description "THE focused read: full source of ONE entry-point form + interface CARDS (sig, doc, why, test warranty) for everything it reaches — same-ns private helpers and cross-ns callees, breadth-first to depth (default 2, capped). match=<text> WINDOWS the target to `window` lines (default 25) around the first matching line — use it on giant forms. Trust the cards: edits re-run covering tests, a violated contract turns red with :implicated. Prefer over fetching several forms."
+    :description "THE focused read: full source of ONE entry-point form + interface CARDS (sig, doc line, test warranty) for everything it reaches — same-ns private helpers and cross-ns callees, breadth-first to depth (default 2, capped). match=<text> WINDOWS the target to `window` lines (default 25) around the first matching line — use it on giant forms. verbose=true adds each card's recorded why (the last ask that touched it); query_brief carries it always. Trust the cards: edits re-run covering tests, a violated contract turns red with :implicated. Prefer over fetching several forms."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :depth {:type "integer"} :limit {:type "integer"}
-                               :match {:type "string"} :window {:type "integer"}}
+                               :match {:type "string"} :window {:type "integer"}
+                               :verbose {:type "boolean"}}
                   :required ["ns" "name"]}}
    {:name "query_depends"
     :description "THE generic dependency question: what depends on X — a namespace (who requires it + qualified refs), a var ns/name (blast radius), or a :keyword (field flow). modules=true reads the MODULE system: alone = the manifest (declared edges + standing debt); with on=<module> = that module's SURFACE (public fns + exported deep vars with sig/doc, its deps, its consumers) — the cheap browse before calling into a module. Ask this first; query_slice {ns name} and query_brief {ns name} give per-form depth."
@@ -640,8 +641,8 @@ WRITE:   work like a REPL: small individual writes, each verifies and returns
          :test — mid-episode reds are normal; stale callers ride :carried-errors
          until done re-checks them.
          edit_add_form / edit_replace_form {ns name source prompt}
-         edit_rename {ns old new}   <- never rename by editing call sites
-         edit_extract {ns from form name} · edit_move {ns name before}
+         edit_rename {ns from to}   <- never rename by editing call sites
+         edit_extract {ns from match name} · edit_move {ns name before}
          ns_create {ns requires?|source?}  <- NEW namespace: scaffold+grow, or whole source at once
          ns_add_require / ns_remove_require  <- never hand-edit the ns form
 RULES:   every write must compile -- but form ORDER is not your job: write
@@ -660,7 +661,7 @@ SHARE:   git_push {url?} (milestones -> a normal git remote; url saved once)
          tree, another tool's output; no git involved on either side)
          config {key value?} (user.name/user.email = milestone author identity)
 FINISH:  done {label} (tidies, lints, marks the unit boundary)
-         commit_point {description} <- MILESTONE: green-gated, the grain a
+         commit_point {label} <- MILESTONE: green-gated, the grain a
          human diffs and reverts to; coarser than done-points and turns")
 
 (def single-write-tools #{"edit_replace_form" "edit_add_form"})

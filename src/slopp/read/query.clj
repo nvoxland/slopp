@@ -99,7 +99,7 @@
   target — only `:window` lines (default 25) each side of the first line
   containing it ride back, with :window metadata — so one clause of a
   giant form reads without paying for the whole thing."
-  [session ns-sym nm & {:keys [depth limit match window] :or {depth 2 limit 8}}]
+  [session ns-sym nm & {:keys [depth limit match window verbose] :or {depth 2 limit 8}}]
   (if-let [e (store/form-named (:store @session) ns-sym nm)]
     (let [root    (symbol (str ns-sym) (str nm))
           adj     (:calls (graph/query-deps session ns-sym nm))
@@ -115,10 +115,15 @@
                           acc
                           (recur nxt (into seen nxt) (into acc nxt) (inc d))))))
           shown   (vec (take limit reached))
+          ;; the card's recorded WHY is an audit field — the last ask that
+          ;; touched the form. A slice is read to EDIT its target, and every
+          ;; card paid ~90 chars of somebody else's intent on every read;
+          ;; :verbose asks for it, query_brief always carries it.
           cards   (into []
-                        (keep (fn [q] (orient/form-card session
-                                                 (symbol (namespace q))
-                                                 (symbol (name q)))))
+                        (keep (fn [q] (cond-> (orient/form-card session
+                                                                (symbol (namespace q))
+                                                                (symbol (name q)))
+                                        (not verbose) (dissoc :why))))
                         shown)
           src     (n/string (:node e))
           target  (if match
