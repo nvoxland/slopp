@@ -332,12 +332,18 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external whole-ns-source-is-outline-by-default
-  (let [sess (external/open!)]
+  ;; for a LARGE namespace: a small one (≤6k chars) is one read and comes
+  ;; back whole (`a-small-namespace-is-one-read`); the dump stays opt-in
+  ;; only where dumping would cost more than the outline it replaces
+  (let [sess (external/open!)
+        pad  (apply str (for [i (range 80)]
+                          (str "(defn ^:unused-ok p" i " \"Padding form " i ", long enough that the whole namespace is over the size where an outline is the answer.\" [x] (+ x " i "))\n")))]
     (try
-      (call! sess "ns_create" {:ns "gt.core" :source "(ns gt.core)\n(defn f [x] (* x 2))\n(defn g [x] (+ x 1))\n"})
-      (testing "a bare {ns} read returns the outline + the way in, NOT the dump"
+      (call! sess "ns_create" {:ns "gt.core" :source (str "(ns gt.core)\n(defn f [x] (* x 2))\n(defn g [x] (+ x 1))\n" pad)})
+      (testing "a bare {ns} read of a big namespace returns the outline + the way in, NOT the dump"
         (let [r (call! sess "query_source" {:ns "gt.core"})]
           (is (not (re-find #"\(\* x 2\)" r)) r)
+          (is (re-find #":whole false" r) r)
           (is (re-find #"f" r) r)
           (is (re-find #"full" r) r)))
       (testing "named targets stay a cheap direct read"
@@ -378,9 +384,11 @@
     (try
       (call! sess "ns_create"
             {:ns "tk.core"
+             ;; big enough to be an OUTLINE — a small namespace is one read
+             ;; (its source rides), and this test is about the outline's stub
              :source (apply str "(ns tk.core)\n"
-                            (for [i (range 1 6)]
-                              (str "(defn f" i " [x] (+ x " i "))\n")))})
+                            (for [i (range 1 91)]
+                              (str "(defn f" i " \"Form " i ", padded so the namespace is long enough that the outline is the answer.\" [x] (+ x " i "))\n")))})
       (testing "an identical re-read returns an :already-sent stub, not the payload"
         (let [a (call! sess "query_source" {:ns "tk.core"})
               b (call! sess "query_source" {:ns "tk.core"})]
@@ -3382,4 +3390,75 @@
                                          :source "(ns mg.web.core)\n(defn ^:unused-ok page [] (mg.app.core/one))\n"})]
           (is (re-find #":auto-module-dep \{:from \"mg\.web\", :to \"mg\.app\"\}" r) r)
           (is (not (re-find #"\{:error" r)) r)))
+      (testing "the eval's shape: aliased requires, TWO crossings, and a deftest as the caller"
+        (let [r (call! sess "ns_create" {:ns "mg.ship.core" :prompt "ship uses util and app"
+                                         :source (str "(ns mg.ship.core (:require [clojure.test :refer [deftest is]] [mg.util.core :as util] [mg.app.core :as app]))\n"
+                                                      "(defn ^:unused-ok ship [x] (util/twice x))\n"
+                                                      "(deftest ship-t (is (= 1 (app/one))))\n")})]
+          (is (re-find #":auto-module-dep" r) r)
+          (is (re-find #":auto-module-deps \[\{:from \"mg\.ship\", :to \"mg\.(util|app)\"\}" r) r)
+          (is (not (re-find #"\{:error" r)) r)))
+      (testing "a TWO-segment namespace — the namespace is its own module — with a deftest crossing"
+        (let [r (call! sess "ns_create" {:ns "mg.two" :prompt "two uses util"
+                                         :source (str "(ns mg.two (:require [clojure.test :refer [deftest is]] [mg.util.core :as util]))\n"
+                                                      "(defn ^:unused-ok f [x] x)\n"
+                                                      "(deftest two-t (is (= 4 (util/twice 2))))\n")})]
+          (is (re-find #":auto-module-dep \{:from \"mg\.two\", :to \"mg\.util\"\}" r) r)
+          (is (not (re-find #"\{:error" r)) r)))
+      (testing "the eval's exact case: red-first — the deftest names a var not written yet — AND a crossing"
+        (let [r (call! sess "ns_create" {:ns "mg.red" :prompt "test first, crossing util"
+                                         :source (str "(ns mg.red (:require [clojure.test :refer [deftest is]] [mg.util.core :as util]))\n"
+                                                      "(deftest red-t (is (= 8 (quad (util/twice 1)))))\n")})]
+          (is (not (re-find #"does not declare" r)) (str "the edge question must be answered, not asked: " r))
+          (is (re-find #":auto-module-dep \{:from \"mg\.red\", :to \"mg\.util\"\}" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-small-namespace-is-one-read
+  ;; eval10 opus s4: 13 query_source calls per lifetime cell on namespaces of
+  ;; ~10 forms — the outline first, then the forms it named. Plain-files opus
+  ;; `cat`s the file once. When the whole namespace fits comfortably, the
+  ;; outline is a detour: answer with the source. A big namespace keeps the
+  ;; outline (and says why), and `full true` still forces the source.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "sm.core" :source "(ns sm.core)\n(defn ^:unused-ok a [x] x)\n(defn ^:unused-ok b [x] (a x))\n"})
+      (call! sess "ns_create" {:ns "big.core"
+                               :source (apply str "(ns big.core)\n"
+                                              (for [i (range 120)]
+                                                (str "(defn ^:unused-ok f" i " \"Form number " i ", padded out to make the namespace long enough that an outline is the right answer.\" [x] (+ x " i "))\n")))})
+      (testing "small: the source, and a note saying it is the whole namespace"
+        (let [r (call! sess "query_source" {:ns "sm.core"})]
+          (is (re-find #":source \"\(ns sm\.core\)" r) r)
+          (is (re-find #":whole true" r) r)
+          (is (not (re-find #":outline" r)) r)))
+      (testing "big: the outline, with the size that decided it"
+        (let [r (call! sess "query_source" {:ns "big.core"})]
+          (is (re-find #":outline" r) r)
+          (is (re-find #"over 6k" r) r)
+          (is (re-find #":whole false" r) "the shape names itself in both branches; nobody branches on an absent key")
+          (is (not (re-find #"defn \^:unused-ok f1 " r)) "no source rode along")))
+      (testing "full true is still the whole thing, whatever the size"
+        (is (re-find #"defn \^:unused-ok f1 " (call! sess "query_source" {:ns "big.core" :full true}))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-test-first-namespace-with-its-tests-beside-the-code-lands-red
+  ;; eval10 s5, step 1: the agent wrote `logi.oversize` test-first — a
+  ;; deftest naming `oversize?` before writing it — and ns_create answered
+  ;; "namespace failed to load: Unable to resolve symbol: oversize?", so the
+  ;; agent wrote stubs by hand and tried twice more. The red-first seam only
+  ;; knew `-test` namespaces; this terrain keeps its tests beside the code.
+  (let [sess (external/open!)]
+    (try
+      (let [r (call! sess "ns_create" {:ns "rf.core" :prompt "test first"
+                                       :source (str "(ns rf.core (:require [clojure.test :refer [deftest is]]))\n"
+                                                    "(defn ^:unused-ok helper [x] x)\n"
+                                                    "(deftest rf-t (is (= 4 (quad 2))))\n")})]
+        (is (re-find #":red-first \[rf\.core/quad\]" r) r)
+        (is (not (re-find #"failed to load" r)) r)
+        (is (re-find #":fail 1|:error 1" r) "the spec lands as an honest red naming the stub"))
+      (testing "a production form's genuine unresolved symbol is still the compile error it is"
+        (let [r (call! sess "ns_create" {:ns "rf.broken" :prompt "not a test"
+                                         :source "(ns rf.broken)\n(defn ^:unused-ok f [x] (nowhere x))\n"})]
+          (is (re-find #"failed to load" r) r)
+          (is (not (re-find #":red-first" r)) r)))
       (finally (ops/close! sess)))))

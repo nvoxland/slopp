@@ -30,7 +30,7 @@
                                :limit {:type "integer"}}
                   :required ["pattern"]}}
    {:name "query_source"
-    :description "Form source from the store. targets [{ns name}…] reads SEVERAL named forms in ONE call — the normal read. ns alone returns the OUTLINE (name forms, or pass full: true for a whole-namespace dump — rarely needed; compose edits from the outline and let :source-now correct misses)."
+    :description "{ns} alone: the WHOLE source when the namespace is small (≤6k chars, :whole true) — one read, not an outline and then its forms — and the outline (with :chars) when it is not; full: true forces the source. Form source from the store. targets [{ns name}…] reads SEVERAL named forms in ONE call — the normal read. ns alone returns the OUTLINE (name forms, or pass full: true for a whole-namespace dump — rarely needed; compose edits from the outline and let :source-now correct misses)."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :full {:type "boolean"}

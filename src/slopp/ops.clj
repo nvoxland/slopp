@@ -155,12 +155,28 @@
                 res     (if load? (load!) {})
                 ;; the generic red-first seam, ingest face: a spec ns naming
                 ;; not-yet-written vars stubs + retries instead of refusing
-                stubbed (when (and load? (:err res))
-                          (engine/stub-missing-test-vars! (:image @session) candidate [ns-sym]))
-                res     (if (and stubbed (nil? (:err (load!)))) {} res)]
+                ;; stub and retry until the namespace loads or nothing new
+                ;; was stubbed: the graph names aliased/qualified/referred
+                ;; missing vars at once, the load error names an unqualified
+                ;; one at a time
+                [res stubbed]
+                (if (and load? (:err res))
+                  (loop [res res, acc [], n 0]
+                    (if (or (nil? (:err res)) (<= 12 n))
+                      [res (not-empty acc)]
+                      (let [s   (or (engine/stub-missing-test-vars! (:image @session) candidate [ns-sym])
+                                    (engine/stub-unresolved-test-symbol! (:image @session) candidate ns-sym (:err res)))
+                            new (remove (set acc) s)]
+                        (if (seq new)
+                          (recur (load!) (into acc new) (inc n))
+                          [res (not-empty acc)]))))
+                  [res nil])
+                res     (if (and stubbed (nil? (:err res))) {} res)]
             (cond
               (:err res)
-              {:error (str "namespace failed to load: " (:err res))}
+              ;; through the same door every other write's compile failure
+              ;; takes: coordinate stripped, form anchored, alias hint appended
+              (edit/compile-error candidate (:err res) "namespace failed to load: " ns-sym)
 
               (not (engine/try-commit! session base candidate [ns-sym]))
               {:conflict {:reason "store changed during ingest — retry"}}
@@ -4442,9 +4458,11 @@
   twice, returns the refusal untouched. The caller passes
   `:no-auto-module-dep true` on the retry so this runs once per write."
   [session r retry & {:keys [agent]}]
-  (let [edge (fn [r] (when (:error r)
-                       (when-let [[_ from to] (re-find #"module_dep \{from \"([^\"]+)\" to \"([^\"]+)\"\}"
-                                                       (:error r))]
+  (let [edge (fn [r] (when-let [msg (:error r)]
+                       ;; the call the refusal spells, or the sentence it makes —
+                       ;; either names the edge
+                       (when-let [[_ from to] (or (re-find #"module_dep \{from \"([^\"]+)\" to \"([^\"]+)\"\}" msg)
+                                                  (re-find #"module (\S+) does not declare (\S+?)(?:\s|—|$)" msg))]
                          {:from from :to to})))]
     (loop [r r, declared [], n 0]
       (let [e (edge r)]

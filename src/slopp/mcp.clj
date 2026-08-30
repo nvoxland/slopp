@@ -1678,12 +1678,25 @@
       "query_source" (text! (told! session name a
                                         (let [full?   (:full a)
                                               gate    (fn [n]
-                                                        {:ns n
-                                                         :outline (:forms (query/query-outline session n))
-                                                         :note (str "outline by default — name the"
-                                                                    " forms you need (targets"
-                                                                    " [{ns name}]) or pass full:"
-                                                                    " true for the whole namespace")})]
+                                                        ;; a SMALL namespace is one read — the
+                                                        ;; outline-then-targets two-step cost opus
+                                                        ;; 13 query_source calls per cell on
+                                                        ;; namespaces of ten forms
+                                                        (let [src   (query/query-source session n)
+                                                              src   (if (string? src) src (:source src))
+                                                              chars (count (str src))]
+                                                          (if (and src (<= chars 6000))
+                                                            {:ns n :source src :whole true}
+                                                            ;; no size in the payload: an outline must
+                                                            ;; stay identical across body edits, which is
+                                                            ;; what makes its re-read a stub
+                                                            {:ns n
+                                                             :whole false
+                                                             :outline (:forms (query/query-outline session n))
+                                                             :note (str "outline — the namespace is over 6k"
+                                                                        " chars; name the forms you need"
+                                                                        " (targets [{ns name}]) or pass"
+                                                                        " full: true for it all")})))]
                                           (if-let [ts (some-> (:targets a) normalize-targets seq)]
                                             (mapv (fn [t]
                                                     (if (or full? (:name t))

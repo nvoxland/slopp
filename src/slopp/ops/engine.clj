@@ -64,17 +64,28 @@
 (defn stub-missing-test-vars!
   "The GENERIC red-first seam (command-agnostic — every write path that
   compiles through the image inherits it, including future ops): when a
-  -test namespace fails to load, intern a throwing stub in `image` for
-  every store var the CANDIDATE store shows it referencing but not
-  defining — aliased/qualified calls via kondo rows, :refer'd names via
-  the ns form (stubs precede the require, so the refer check passes) —
-  then the caller retries the load and the spec lands as an honest RED
-  naming the stub. Never touches the store; the real implementation
-  redefines the var. Returns the stubbed qsyms (nil when none — the
-  failure wasn't red-first)."
+  namespace with TESTS fails to load, intern a throwing stub in `image` for
+  every store var its tests reference but nothing defines — aliased and
+  qualified calls via kondo rows, :refer'd names via the ns form (stubs
+  precede the require, so the refer check passes) — then the caller retries
+  the load and the spec lands as an honest RED naming the stub. Never
+  touches the store; the real implementation redefines the var. Returns the
+  stubbed qsyms (nil when none — the failure wasn't red-first).
+
+  A `-test` namespace counts whole. A namespace that keeps its deftests
+  beside its code counts too — eval10's terrain does, and a test-first
+  `ns_create` there failed to load instead of landing red, so the agent
+  wrote the stubs by hand — but only usages FROM its deftest forms are
+  stubbed there: a production form's genuine unresolved symbol stays the
+  compile error it is."
   [image candidate ns-syms]
   (let [nses    (set (keys (:namespaces candidate)))
-        tests   (filter #(str/ends-with? (str %) "-test") ns-syms)
+        head    (fn [e] (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                          (when (seq? s) (first s))))
+        deftests (fn [t] (into #{} (comp (filter #(= 'deftest (head %))) (keep :name))
+                               (store/forms candidate t)))
+        test-ns? (fn [t] (str/ends-with? (str t) "-test"))
+        tests   (filter #(or (test-ns? %) (seq (deftests %))) ns-syms)
         ns-form (fn [t]
                   (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
                            (when (and (seq? s) (= 'ns (first s))) s))
@@ -82,11 +93,14 @@
         missing (vec (distinct
                       (concat
                        (for [t tests
+                             :let [from-tests (when-not (test-ns? t) (deftests t))]
                              u (:var-usages (analyze/analyze (store.render/render-ns candidate t)))
                              :when (and (contains? nses (:to u)) (:name u)
+                                        (or (nil? from-tests) (contains? from-tests (:from-var u)))
                                         (not (store/form-named candidate (:to u) (:name u))))]
                          (symbol (str (:to u)) (str (:name u))))
                        (for [t tests
+                             :when (test-ns? t)
                              :let [form (ns-form t)]
                              clause (when form
                                       (mapcat rest
@@ -1888,3 +1902,29 @@
   median 43 of 46 external test namespaces and deferred 84.6% of changes."
   [session store changed]
   (external-among store (impacted-tests session store changed)))
+
+(defn stub-unresolved-test-symbol!
+  "The red-first seam's second source. `stub-missing-test-vars!` reads the
+  reference graph, and an UNQUALIFIED symbol a deftest names in its own
+  namespace before it exists has no row there — kondo reports it as
+  unresolved, and only the load error names it. When `err` is `Unable to
+  resolve symbol: X` and the form it failed in (`edit/anchor-error`) is a
+  deftest, intern a throwing stub for `ns-sym/X` in `image` and return
+  `[qsym]`; nil for anything else, so a production form's genuine
+  unresolved symbol stays the compile error it is. eval10 s5: a test-first
+  `ns_create` on a namespace that keeps its tests beside its code failed to
+  load three times while the agent wrote the stubs by hand."
+  [image candidate ns-sym err]
+  (when-let [[_ sym] (re-find #"Unable to resolve symbol: ([^\s/]+) in this context" (str err))]
+    (let [anchor (edit/anchor-error candidate err)
+          form   (some-> (:form anchor) name symbol)
+          e      (when form (store/form-named candidate ns-sym form))
+          head   (when e (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                           (when (seq? s) (first s))))]
+      (when (and (= 'deftest head)
+                 (not (store/form-named candidate ns-sym (symbol sym))))
+        (let [q (symbol (str ns-sym) sym)]
+          (repl/eval! image
+                      (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
+                              ns-sym sym q q))
+          [q])))))
