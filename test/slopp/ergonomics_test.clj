@@ -240,7 +240,7 @@
                         "                           [clojure.test :refer [deftest is]]))\n"
                         "(deftest seed-t (is (= 1 (c/seed 1))))\n"))
       (testing "a GROUP step spec lands red with the missing var named"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :add :ns 'rg.core-test
                                    :source "(deftest dbl-t (is (= 4 (c/dbl 2))))"}]
                                  :prompt "red first via group")]

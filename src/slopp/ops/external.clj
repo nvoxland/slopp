@@ -2155,6 +2155,13 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; wired in (friction #19); `module-debt` itself already existed and
         ;; was asked only by the graph view and by `module_dep`.
         mods  (read.modules/module-debt st)
+        ;; the edges the PIPELINE declared on writes' behalf and nobody
+        ;; retracted. Each was the refusal the agent would have obeyed; the
+        ;; refusal was also the one moment anybody asked whether the call
+        ;; should exist, and that moment is gone by design — so the
+        ;; accumulation is reported here, always, as a count a reader can
+        ;; branch on (the wire keeps the edges behind verbose)
+        autoedges (read.modules/auto-declared-edges (ops/journal session))
         ;; the RULE CATALOG, and the identical argument one layer up. A
         ;; `:grain :done` rule fires over forms an EPISODE changed, so a
         ;; violation older than the rule is invisible to `done` — and stays
@@ -2231,6 +2238,7 @@ client-deps (merge (:client-deps st) (:client provided))
              :lint-warnings (count warns)
              :checked checked
              :rules sweep
+             :modules {:auto-declared (count autoedges) :edges autoedges}
              :test tests
              :status (if red? :red :green)}
       affected (assoc :scope (str "lint, dead surface, tier layering, module"

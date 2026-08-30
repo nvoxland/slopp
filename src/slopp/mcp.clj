@@ -489,8 +489,13 @@
           ;; a PREVIEW's payload is the whole point of asking for one —
           ;; dropping it here made dry-run look like a silent no-op
           (:dry-run r)  (assoc :dry-run true)
+          ;; the covering tests by NAME when there are few — "verified by
+          ;; base-t and quad-t" is what makes a re-run visibly redundant; a
+          ;; count only says something ran
           (:affected r) (assoc :affected (let [a (:affected r)]
-                                           (if (= :all a) :all (count a))))
+                                           (cond (= :all a)        :all
+                                                 (<= (count a) 8)  (vec a)
+                                                 :else             (count a))))
           t             (assoc :test (cond-> {:ran (:test t 0) :pass (:pass t 0)
                                               ;; a run that executed NOTHING is unverified, not green — green must
                                               ;; mean tests ran and passed, or an agent learns to distrust
@@ -1146,7 +1151,7 @@
                            (remove (fn [[k v]]
                                      (or (#{:episode-status :test-status :lint-errors :ms :failures
                                             :unloadable-namespaces :external-pending :host-stale
-                                            :http-dangling-route-refs :red-attribution} k)
+                                            :http-dangling-route-refs :red-attribution :scope} k)
                                          (and (coll? v) (empty? v))
                                          (nil? v))))
                            f)
@@ -1338,6 +1343,22 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) \u2014 call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers!))
+
+(defn wire-steps
+  "`edit_group`'s step maps as `ops/edit-group!` takes them: keys keywordized
+  whether the transport left them strings or keywords, `action` a keyword,
+  `ns`/`name` symbols, a `where` map's keys keywordized the way a single
+  `edit_subform` sees them. Everything else rides through untouched."
+  [steps]
+  (let [kw   (fn [m] (into {} (map (fn [[k v]] [(keyword (name k)) v])) m))]
+    (mapv (fn [s]
+            (let [s (kw s)]
+              (cond-> s
+                (:action s) (update :action #(keyword (name %)))
+                (:ns s)     (update :ns symbol)
+                (:name s)   (update :name symbol)
+                (map? (:where s)) (update :where kw))))
+          steps)))
 
 (defn- call-tool! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -1670,8 +1691,25 @@
                                                          :agent (:agent a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
-      "full_check" (text! (external/full-check! session :affected (:affected a)
-                                                :force (:force a)))
+      "edit_group" (text! (-> (ops/edit-group! session (wire-steps (:steps a))
+                                               :prompt (:prompt a) :agent (:agent a))
+                              (select-keys tools/wire-keys)
+                              (summarize (:verbose a))))
+      "full_check" (text! (-> (external/full-check! session :affected (:affected a)
+                                                    :force (:force a))
+                              ;; graded on rows (inside), reported as counts:
+                              ;; an info-only rule's rows never change and
+                              ;; never flip anything — slopp-ui read ~40 of
+                              ;; them once and paid for them fifteen times
+                              (update-in [:rules :findings]
+                                         rules/fold-standing-info
+                                         :verbose? (:verbose a))
+                              ;; same rule for the edges the pipeline declared
+                              ;; on writes' behalf: the count is what a reader
+                              ;; branches on; the edges ride on verbose
+                              (update :modules #(if (or (:verbose a) (nil? %))
+                                                  %
+                                                  (dissoc % :edges)))))
       "edit_requalify" (text! (-> (ops/requalify-boundary-keys!
                                    session (sym :ns) (sym :name)
                                    :to-ns (:to_ns a)

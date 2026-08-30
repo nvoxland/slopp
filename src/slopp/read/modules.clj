@@ -22,7 +22,7 @@
   crossed back."
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [clojure.set :as set] [slopp.edit.tiers :as tiers]))
+            [slopp.store :as store] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [clojure.set :as set] [slopp.edit.tiers :as tiers] [slopp.store.fields :as fields]))
 
 (defn ^:export modules-config-entry
   "The module manifest PROJECTED as a structured-config entry — how the
@@ -511,3 +511,32 @@
                     :let [libs (get by-alias as)]]
                 (cond-> {:ns ns :lib lib :as as :canonical want}
                   (< 1 (count libs)) (assoc :ambiguous (vec libs))))))))
+
+(defn ^:export auto-declared-edges
+  "The production module edges the PIPELINE declared on a write's behalf
+  (`fields/auto-module-dep-prompt`) that still stand — `[{:from :to :delta}]`
+  over a line's `deltas`, oldest first; a later `:remove` of the same edge
+  retires it, a hand-declared edge never counts, and test edges are a
+  different relation.
+
+  Why it is reported: each auto-declared edge is reasonable alone — the
+  write's first call across a boundary, the refusal the agent would have
+  obeyed anyway. Twenty of them over a week is the module graph growing
+  with nobody having said so out loud, and the moment the refusal used to
+  provide (should this call exist at all?) is gone by design. slopp-ui asked
+  for the accumulation, not the prompt: the count is what a reader branches
+  on, the edges are what they read once they decide to look."
+  [deltas]
+  (->> deltas
+       (filter #(= :module-edge (:op %)))
+       (reduce (fn [standing {:keys [from to action prompt id]}]
+                 (case action
+                   :add    (if (= prompt fields/auto-module-dep-prompt)
+                             (assoc standing [from to] id)
+                             (dissoc standing [from to]))
+                   :remove (dissoc standing [from to])
+                   standing))
+               {})
+       (map (fn [[[from to] id]] {:from from :to to :delta id}))
+       (sort-by (juxt :from :to))
+       vec))

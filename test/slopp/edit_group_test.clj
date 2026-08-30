@@ -25,7 +25,7 @@
       (ops/test-run! sess 'gdemo)                       ; red + builds trace map
       (let [verifies (fn [] (count (filter #(= :verify (:op %)) (ops/journal sess))))
             verifies-before (verifies)
-            r (ops/edit-group!
+            r (ops/edit-group-once!
                sess
                [{:action :replace :ns 'gdemo :name 'tier
                  :source (str "(defn tier [ops tokens]\n"
@@ -57,7 +57,7 @@
       (ops/ingest! sess 'gdemo buggy)
       (let [deltas-before (count (ops/journal sess))
             src-before    (query/query-source sess 'gdemo)
-            r (ops/edit-group!
+            r (ops/edit-group-once!
                sess
                [{:action :replace :ns 'gdemo :name 'tier
                  :source "(defn tier [ops tokens] tokens)"}
@@ -78,7 +78,7 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'gdemo "(ns gdemo)\n(defn old-helper [x] x)\n")
-      (let [r (ops/edit-group!
+      (let [r (ops/edit-group-once!
                sess
                [{:action :add :ns 'gdemo :source "(defn new-helper [x] (* 2 x))"}
                 {:action :delete :ns 'gdemo :name 'old-helper}]
@@ -108,7 +108,7 @@
                         "(defn f\n  \"Doc.\"\n  [{:keys [^String a]} b] [a b])\n\n"
                         "(defn g [x] x)\n"))
       (testing "a group replace that drops a hint reports it"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'gd.core :name 'f
                                    :source "(defn f\n  \"Doc.\"\n  [{:keys [a]} b] [a b])"}]
                                  :prompt "drop the hint in a group")]
@@ -116,7 +116,7 @@
           (is (some #(= :metadata-lost (:kind %)) (:drift r))
               (str "a group write must surface drift too: " (pr-str r)))))
       (testing "drift names the form, since a group touches many"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'gd.core :name 'f
                                    :source "(defn f [{:keys [a]} b] [a b])"}
                                   {:action :replace :ns 'gd.core :name 'g
@@ -124,7 +124,7 @@
                                  :prompt "one step drifts, one does not")]
           (is (= '[gd.core/f] (mapv :form (:drift r))) (pr-str r))))
       (testing "a clean group reports no drift"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'gd.core :name 'g
                                    :source "(defn g [x] (identity x))"}]
                                  :prompt "same contract")]
@@ -142,19 +142,19 @@
     (try
       (ops/ingest! sess 'gg.core "(ns gg.core)\n(defn a [] 1)\n(defn b [] 2)\n")
       (testing "a group replace may not rename onto an existing name"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'gg.core :name 'a
                                    :source "(defn b [] 99)"}]
                                  :prompt "collide")]
           (is (re-find #"already exists" (str (:error r))) (pr-str r))))
       (testing "a group delete may not behead the namespace"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :delete :ns 'gg.core :name 'gg.core}]
                                  :prompt "behead")]
           (is (re-find #"(?i)ns form" (str (:error r))) (pr-str r))))
       (testing "a group replace refuses an ambiguous name instead of editing the first"
         (ops/ingest! sess 'gg.amb "(ns gg.amb)\n(declare x)\n(defn x [] 1)\n")
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'gg.amb :name 'x
                                    :source "(defn x [] 2)"}]
                                  :prompt "ambiguous")]

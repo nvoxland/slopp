@@ -22,8 +22,8 @@
             [slopp.index.normalize :as normalize]
             [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
 
-^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
-(declare add-form! add-require! auto-require-retry edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
+^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
+(declare add-form! add-require! auto-require-retry edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
 
 (defn close! "Release everything the session owns and return nil: its image, a warm spare
   still booting, the SQLite connection, every per-branch line's image and
@@ -364,9 +364,8 @@
   last, one call each. The refusal says so and names `query_depends` for the
   list.
 
-  `edit-group!` is deliberately NOT guarded this way, and it is an INTERNAL
-  seam rather than an escape hatch — it is deliberately NOT on the wire, and
-  this docstring used to offer it as though it were. Its steps apply in order to one store value and
+  `edit-group!` (`edit_group` on the wire) is deliberately NOT guarded this
+  way: its steps apply in order to one store value and
   verify once at the end, so a mid-sequence state holding a dangling reference
   is legitimate. That is what keeps `undo!` / `revert-episode!` /
   `change-signature!` / the rename sweeps working: they replay
@@ -512,166 +511,6 @@
                    {:store st' :delta d :hot [:unmap ns name]}
                    (edit/missing-form-error st ns name)))
     {:error (str "unknown action: " action)}))
-
-(defn edit-group!
-  "Apply several form writes as ONE atomic intent (F2). All steps are validated
-  and applied to a store value first — any error rejects the WHOLE group with
-  nothing committed (store, deltas, image untouched). On success: all deltas
-  (sharing a `:group` id) commit and persist, every change hot-reloads, and
-  verification runs ONCE at the end — no meaningless mid-refactor red, no
-  wasted diagnostic restart. Steps: [{:action :replace|:add|:delete
-  :ns sym :name sym :source str} ...].
-
-  DELIBERATELY NOT AN MCP TOOL, and it must stay that way. This is an
-  IMPLEMENTATION PRIMITIVE for transformations a TOOL derives from a single
-  stated intent — `change-signature!`, `rename-sweep!`, `revert-episode!`,
-  `undo!`, `sync/apply-ns!`. Their intermediate states are invalid by
-  construction and no one was ever asked to reason about them.
-
-  Exposed to agents it becomes a shopping list, and that was measured to go
-  badly: agents batched a whole feature into one call instead of working
-  incrementally, which is too much to hold at once and skips the property that
-  makes this system work — every step is a VALID PROGRAM, verified, with the
-  automated checks at `done` and the judgement call about completeness made
-  there too.
-
-  The test for whether a multi-form op belongs on the wire: does the AGENT
-  choose the steps, or does the TOOL derive them from one intent? `rename_sweep
-  {from to}` is one intent. `edit_group [step step step]` is a shopping list.
-  If you are reaching for this because a single-form edit would not compile,
-  you almost certainly need a BIGGER MATCH on that one form, not atomicity
-  across several."
-  [session steps & {:keys [prompt agent]}]
-  (if (empty? steps)
-    {:error "edit-group needs at least one step"}
-    (let [t0 (System/nanoTime)
-          base0 (:store @session)
-          pre-warned (into #{}
-                           (mapcat (fn [ns-sym]
-                                     (map :var (edit/ns-warnings (:store @session) ns-sym))))
-                           (distinct (map :ns steps)))
-          [gid st0] (store/alloc-id base0 "g")]
-      (loop [st st0, remaining steps, deltas [], hots [], i 0]
-        (if-let [step (first remaining)]
-          (let [r (apply-group-step st gid prompt agent step)]
-            (if (:error r)
-              (cond-> {:error (str "step " i ": " (:error r)) :step i}
-                (:source-now r) (assoc :source-now (:source-now r)))
-              (recur (:store r) (rest remaining)
-                     (conj deltas (:delta r)) (conj hots (:hot r)) (inc i))))
-          ;; commit phase — checked loads FIRST (S1), commit only if all compile
-          (let [st       (reduce (fn [s ns-sym]
-                                   (if-let [rz (edit/resolve-cold-load
-                                                s ns-sym
-                                                :prompt "auto-reorder: define before use"
-                                                :agent agent)]
-                                     (:store rz) s))
-                                 st (distinct (map :ns steps)))
-                lr       (lintgate/lint-refusals base0 st (distinct (map :ns steps))
-                                             (keep :form-id deltas))
-                load-res (if-let [gate (or (edit/cold-load-errors st (distinct (map :ns steps)))
-                                           (:refuse lr))]
-                           {:err gate}
-                           (merge (engine/hot-load-all! session st
-                                                 (keep (fn [[k a]] (when (#{:load :load-unmap} k) a))
-                                                       hots))
-                                  (select-keys lr [:carried])))]
-            (cond
-              (:err load-res)
-              (edit/compile-error st (:err load-res) "group failed to compile: ")
-
-              (not (engine/try-commit! session base0 st
-                                (vec (distinct (map :ns steps)))))
-              (do ;; the group's forms are already hot-loaded — never leave the loser's
-      ;; code answering for the winner's store
-      (engine/fresh-image! session)
-      {:conflict {:reason "store changed during multi-form op — retry"}})
-
-              :else
-              (let [image    (:image @session)
-                    _        (doseq [[kind a b c] hots]
-                               (cond
-                                 (= :unmap kind)
-                                 (repl/eval! image (format "(ns-unmap '%s '%s)" a b))
-                                 (= :load-unmap kind)
-                                 (repl/eval! image (format "(ns-unmap '%s '%s)" b c))))
-                    ;; per-step names double as the D5.1 edited set
-                    step-nms (map (fn [{:keys [action ns name source]}]
-                                    (let [nm (case action
-                                               :add (some-> (edit/parse-form source)
-                                                            :node store/form-symbol)
-                                               name)]
-                                      (when nm [action ns nm])))
-                                  steps)
-                    edited   (into #{}
-                                   (keep (fn [x]
-                                           (when-let [[_ ns nm] x]
-                                             (symbol (str ns) (str nm)))))
-                                   step-nms)
-                    ;; affected = union across steps; unknown → conservative full
-                    per-step (map (fn [x]
-                                    (if-let [[action ns nm] x]
-                                      (let [a (engine/affected-tests session ns nm)]
-                                        (cond
-                                          (some? a)       (set a)
-                                          (= action :add) #{}
-                                          :else           :unknown))
-                                      :unknown))
-                                  step-nms)
-                    affected (when (not-any? #{:unknown} per-step)
-                               (vec (sort (apply set/union per-step))))
-                    ;; F-3c5: with no/partial trace info the fallback run must
-                    ;; cover EVERY touched namespace, not just the first step's
-                    ;; the fallback scope is a GRAPH question: tests that REACH the
-                    ;; touched namespaces. Running tests IN the production
-                    ;; namespaces found none, so a group write with incomplete
-                    ;; trace evidence verified nothing at all.
-                    touched  (vec (distinct (map :ns steps)))
-                    main-ns  (or (seq (engine/covering-test-nses
-                                       (:store @session) touched))
-                                 touched)
-                    summary  (engine/run-verification! session main-ns
-                                                (when (seq affected) affected)
-                                                :edited edited)]
-                (engine/commit-appended! session
-                                  #(store/record-verification % main-ns summary)
-                                  [])
-                (let [all-w    (->> (map :ns steps) distinct
-                                    (mapcat #(edit/ns-warnings (:store @session) %)))
-                      existing (count (filter (comp pre-warned :var) all-w))]
-                  (engine/with-ms
-                    (cond-> {:group    gid
-                             :deltas   deltas
-                             :changed-nses (vec (distinct (map :ns steps)))
-                             :warnings (vec (remove (comp pre-warned :var) all-w))
-                             :test     summary
-                             :affected (or (not-empty affected) :all)
-                             ;; drift for the WHOLE group, read off the deltas —
-                             ;; every step kind (including :subform, which
-                             ;; computes its own source) records its final
-                             ;; source there, so one place covers them all.
-                             ;; Detecting it per-step would need a loop arity
-                             ;; change; the deltas already carry the answer.
-                             :drift
-                             (vec (for [d     deltas
-                                        :when (= :replace (:op d))
-                                        :let  [fid (:form-id d)
-                                               e   (store/form-by-id base0 fid)
-                                               nu  (some-> (get (:sources d) fid)
-                                                           edit/parse-form :node)]
-                                        :when (and (:node e) nu)
-                                        x     (edit/contract-drift (:node e) nu)]
-                                    (assoc x :form (symbol (str (:ns d))
-                                                           (str (or (:name e) fid))))))}
-                      (:healed load-res) (assoc :image-healed true)
-                      (:stubbed load-res) (assoc :red-first (:stubbed load-res)
-                                                 :note (str "these vars don't exist yet —"
-                                                            " stubbed in-image as failing"
-                                                            " (red-first); implement them to"
-                                                            " go green."))
-                      (:carried load-res) (assoc :carried-errors (:carried load-res))
-                      (pos? existing)    (assoc :existing-warnings existing))
-                    t0))))))))))
 
 (defn forms-changed-since
   "Ids of forms touched by deltas after `since-id` (nil = since the beginning
@@ -1415,31 +1254,6 @@
          :rendered (store/render-config entry)}
         {:error (str path " has no structured config")}))))
 
-(defn change-signature!
-  "P2: change `ns-sym/fn-name`'s signature as ONE atomic intent — replace
-  the defn with `new-source` (keep the name; the lint gate is the oracle if
-  you don't) and mechanically rewrite every call site's argument list from
-  `args-template` ($1..$9 = the site's existing arg sources; the callee
-  stays as written, so aliases survive — see refactor/change-signature-plan).
-  Executes through edit-group! (one gate pass, one verification).
-  References that can't be rewritten come back under :manual."
-  [session ns-sym fn-name new-source args-template & {:keys [prompt agent]}]
-  (let [st (:store @session)]
-    (if (nil? (store/form-named st ns-sym fn-name))
-      (edit/missing-form-error st ns-sym fn-name)
-      (let [plan (refactor/change-signature-plan st ns-sym fn-name args-template)]
-        (if (:error plan)
-          plan
-          (let [steps (into [{:action :replace :ns ns-sym :name fn-name
-                              :source new-source}]
-                            (:caller-steps plan))
-                r     (edit-group! session steps
-                                   :prompt (or prompt
-                                               (str "change signature: " fn-name))
-                                   :agent agent)]
-            (cond-> (assoc r :rewrote (count (:caller-steps plan)))
-              (seq (:manual plan)) (assoc :manual (:manual plan)))))))))
-
 ^:reads (defn draft-test
   "Rock 5: a ready-to-EDIT deftest draft for `ns-sym/nm`. With `:code` (a
   driver expression) it OBSERVES real calls and turns each capture into an
@@ -1966,104 +1780,6 @@
                                 (seq (:advisories r))   (assoc :advisories (:advisories r)))]
                       (when (seq hit) (assoc hit :ns (:ns r)))))
                   rs))})))
-
-(defn requalify-boundary-keys!
-  "Namespace a module-external fn's OPTION KEYS in one verified intent: its
-  arglist destructuring AND the map literals its callers pass, together.
-
-  This exists because `require-namespaced-keys` was otherwise UNDISCHARGEABLE.
-  Its last violation, `api/open!`, has 60 call sites; a store-wide
-  `rename_sweep` is unsafe whenever the key means more than one thing (`:dir`
-  names three different things here), and 60 hand edits is worse. A rule
-  nobody can discharge trains people to ignore the channel — the rule's own
-  docstring says so.
-
-  `to-ns` defaults to the target's namespace. The keys are DERIVED — every
-  unqualified key its first arg destructures — so the caller cannot namespace
-  half a contract and leave the rest reading nil.
-
-  A call site counts only when its head RESOLVES to the target: the defining
-  ns's own name, the caller's alias for it, or the fully-qualified symbol.
-  Matching by bare name instead silently included `slopp.db/open!` alongside
-  `slopp.ops.external/open!` — caught by a dry-run reporting 62 forms and 24 unknowns
-  where the caller graph said 60 and 4.
-
-  Reports `:unknown-shape`: callers passing a non-literal (`(open! opts)`),
-  which no syntactic reader can rewrite. Those are left untouched and NAMED,
-  never silently skipped — the count is the part you still owe by hand. Call
-  sites OUTSIDE the store (the kernel's own .clj files) are invisible to this
-  and to every store-based analysis; check them yourself.
-  `:dry-run true` previews without writing."
-  [session ns-sym nm & {:keys [to-ns prompt agent dry-run]}]
-  (let [st     (:store @session)
-        ns-sym (symbol (str ns-sym))
-        nm     (symbol (str nm))
-        form   (store/named-sexpr st ns-sym nm)]
-    (if-not form
-      (edit/missing-form-error st ns-sym nm)
-      (let [tons (str (or to-ns ns-sym))
-            ks   (vec (sort (remove namespace (:destructured (shape/read-keys form)))))]
-        (if (empty? ks)
-          {:error (str ns-sym "/" nm " destructures no unqualified keys —"
-                       " nothing to requalify")}
-          (let [why     (or prompt (str "namespace " ns-sym "/" nm "'s option keys"
-                                        " under " tons))
-                heads   (fn [nsx]
-                          (cond-> #{(str ns-sym "/" nm)}
-                            (= nsx ns-sym) (conj (str nm))
-                            true (into (for [[alias lib] (edit/require-aliases st nsx)
-                                             :when (= (symbol (str lib)) ns-sym)]
-                                         (str alias "/" nm)))))
-                rewrite (fn [src nsx target?]
-                          (reduce (fn [s k]
-                                    (let [s' (refactor/requalify-call-args
-                                              s (heads nsx) (name k) tons)]
-                                      (if target?
-                                        (refactor/requalify-keys s' (name k) nil tons)
-                                        s')))
-                                  src ks))
-                steps   (vec (for [nsx (store/ns-dependency-order st)
-                                   e   (store/forms st nsx)
-                                   :when (:name e)
-                                   :let [src  (n/string (:node e))
-                                         tgt? (and (= nsx ns-sym) (= (:name e) nm))
-                                         src' (rewrite src nsx tgt?)]
-                                   :when (not= src src')]
-                               {:action :replace :ns nsx :name (:name e) :source src'}))
-                opaque? (fn [nsx e]
-                          (let [hs (heads nsx)]
-                            (some (fn [node]
-                                    (and (seq? node)
-                                         (symbol? (first node))
-                                         (contains? hs (str (first node)))
-                                         (next node)
-                                         (not (map? (second node)))))
-                                  (tree-seq coll? seq (store/form-sexpr (:node e))))))
-                unknown (vec (sort (for [nsx (keys (:namespaces st))
-                                         e   (store/forms st nsx)
-                                         :when (and (:name e) (opaque? nsx e))]
-                                     (symbol (str nsx) (str (:name e))))))
-                report  (cond-> {:keys ks :to-ns tons :forms (count steps)
-                                 ;; a preview that only COUNTS is not a preview: you
-                                 ;; cannot check 62 rewrites against a caller graph
-                                 ;; you are not shown. The bare-name bug looked
-                                 ;; exactly like a correct run until the numbers
-                                 ;; were compared.
-                                 :in-code (vec (sort (map #(symbol (str (:ns %))
-                                                                   (str (:name %)))
-                                                          steps)))}
-                          (seq unknown)
-                          (assoc :unknown-shape unknown
-                                 :note (str (count unknown) " call site(s) pass a"
-                                            " non-literal map — no syntactic reader"
-                                            " can see through a binding, so those"
-                                            " are UNTOUCHED and yours to check")))]
-            (cond
-              (empty? steps) {:error (str "no call site or arglist to rewrite for "
-                                          ns-sym "/" nm)}
-              dry-run        (assoc report :dry-run true)
-              :else          (let [r (edit-group! session steps :prompt why :agent agent)]
-                               (if (:error r) r (merge r report))))))))))
 
 (defn last-judged-done
   "The most recent verdict that actually JUDGED something (`:test-status`
@@ -3085,37 +2801,6 @@
            {:ns nsx :form (:name e) :via :destructuring
             :text (str "{" entry " [" kname "]}")}))))
 
-(defn realias!
-  "Rename ONE namespace's require alias as a single atomic intent: the `:as`
-  in its `ns` form and every `alias/sym` in its bodies, through `edit-group!`
-  — one gate pass, one verification.
-
-  This exists because the two halves cannot be written separately. Between
-  them sits a namespace whose ns form and bodies disagree about what the
-  qualifier is, which does not load — so the three-step add-both / migrate /
-  drop dance was the only hand-safe route, and at 62 call sites across a
-  468-line dispatch the retyping was a worse risk than the stale alias it
-  removed. Both stayed wrong for two phases for exactly that reason.
-
-  Scoped to `ns-sym`, because an alias is a name ONE namespace chose. Two
-  namespaces calling a lib by different names is not drift.
-
-  Returns the edit-group result plus `:sites` (qualified references rewritten)
-  and, when the alias is also named inside STRING literals, `:left-behind` —
-  fixture source and prose a symbol rewriter cannot reach. See
-  `refactor/realias-plan` for why those are reported rather than rewritten."
-  [session ns-sym old new & {:keys [prompt agent]}]
-  (let [ns-sym (symbol (str ns-sym))
-        plan   (refactor/realias-plan (:store @session) ns-sym old new)]
-    (if (:error plan)
-      plan
-      (let [r (edit-group! session (:steps plan)
-                           :prompt (or prompt (str "realias " ns-sym ": "
-                                                   old " → " new))
-                           :agent agent)]
-        (cond-> (assoc r :sites (:sites plan) :lib (:lib plan))
-          (seq (:left-behind plan)) (assoc :left-behind (:left-behind plan)))))))
-
 (defn module-role!
   "Declare a module's ROLE — what KIND of code this is, which decides whether
   it ships: :product (the default) is code the system runs, materialized under
@@ -3356,233 +3041,6 @@
                                " the author meant, not something to guess. Read"
                                " each one."))])))))
 
-(defn rename-sweep!
-  "Q14: the docs-team rename as ONE intent — every namespace, var, keyword,
-  and prose occurrence of `from` (as a whole word/segment, boundary-guarded)
-  becomes `to`, store-wide: matching namespaces rename first (requires
-  rewrite along), then every still-matching form rewrites in ONE atomic
-  group with ONE verification. The textual segment match is deliberate: a
-  sweep means 'everything named that', locals and prose included; the
-  dialect/isolation gates and the test run judge the result. eval9's
-  measured loss (13.6k tokens / 37 calls / one restart for zone->region
-  across 41 nses vs sed's one pass) is this op's demand signal.
-
-  A KEYWORD rename (both sides starting `:`) carries a structural half the
-  text pass cannot see: `{:a/keys [x]}` names its key as a SYMBOL, with the
-  qualifier written in the entry beside it. That entry is matched on the FROM
-  qualifier and only on it — `{:keys [x]}` names `:x` and survives a rename of
-  `:a/x` untouched. Two reports come out of it, because neither half is a text
-  substitution and both were silent once:
-
-  - `:requalified` — destructurings this call restructured. A keyword rename's
-    diff should not contain a semantic change without naming it.
-  - `:left-behind` — what it DECLINED, each row tagged with `:via`. For
-    `:destructuring`: changing a key's NAME rather than its qualifier cannot
-    move the symbol, since the symbol is a local binding the body still reads,
-    so the rename is yours to finish.
-
-  **REGEX literals move too, and that is a reversal.** A pattern spells a
-  dotted name `web\\.static`, which shares no literal text with `web.static`,
-  so the text pass walks past every one. Measured at seven in a single wave,
-  two of them surviving every write and three green done-points: one rule then
-  refused EVERY declared auth group as unknown, teaching the author to
-  configure the key it was already reading past.
-
-  These were REPORTED and not rewritten, on the reasoning that a pattern is an
-  INTENT — whether a `.` in one separates or matches anything is a question
-  about what the author meant. Sound, and too broad: **slopp owns the dialect,
-  and a dot in a dotted name it governs is a SEPARATOR.** No pattern
-  legitimately means `web<any>static`, so there was never an intent to guess
-  at — only a report somebody had to act on by hand, which is what the two
-  survivors above did not get.
-
-  Only the NAME moves; the rest of the pattern is the author's own matching.
-  The rewrite is REPORTED under `:patterns-rewritten` for the reason
-  `:requalified` is: a rename's diff must not contain a change to what a
-  predicate MATCHES without naming it. `:left-behind :via :regex` survives as
-  the RESIDUE — what the rewrite did not reach — and should now be empty."
-  [session from to & {:keys [prompt agent dry-run]}]
-  (let [from (str from)
-        to   (str to)
-        ;; what ENDS the name differs by what is being swept — a keyword is a
-        ;; complete token, a bare name is a concept that carries its compounds
-        cls  (refactor/name-boundary-class from)
-        pat  (re-pattern (str "(?<![" cls "])"
-                              (java.util.regex.Pattern/quote from)
-                              "(?![" cls "])"))
-        why  (or prompt (str "sweep " from " -> " to))]
-    (cond
-      (or (str/blank? from) (str/blank? to))
-      {:error "rename_sweep needs :from and :to"}
-
-      (= from to)
-      {:error ":from and :to are identical"}
-
-      :else
-      (let [nses (filterv #(re-find pat (str %))
-                          (keys (:namespaces (:store @session))))
-            ;; namespace renames WRITE, so a preview must not run them — it
-                     ;; reports what they would be instead
-                     nsr  (if dry-run
-                            {:renamed-namespaces
-                             (mapv (fn [nsx]
-                                     [nsx (symbol (str/replace (str nsx) pat to))])
-                                   (sort nses))}
-                            (reduce (fn [acc nsx]
-                                      (if (:error acc)
-                                        acc
-                                        (let [new-ns (str/replace (str nsx) pat to)
-                                              r (ns-rename! session (str nsx) new-ns
-                                                            :prompt why :agent agent)]
-                                          (if (:error r)
-                                            {:error (str "renaming " nsx ": " (:error r))}
-                                            (update acc :renamed-namespaces conj
-                                                    [nsx (symbol new-ns)])))))
-                                    {:renamed-namespaces []}
-                                    (sort nses)))]
-        (if (:error nsr)
-          nsr
-          (let [st      (:store @session)
-                kw?     (and (str/starts-with? from ":")
-                             (str/starts-with? to ":"))
-                qual    (fn [k] (let [b (subs k 1)]
-                                  (when (str/includes? b "/")
-                                    (first (str/split b #"/")))))
-                lname   (fn [k] (last (str/split (subs k 1) #"/")))
-                kname   (when kw? (lname from))
-                from-ns (when kw? (qual from))
-                to-ns   (when kw? (qual to))
-                ;; only a rename that leaves the key's NAME alone can move the
-                ;; symbol — it is a local binding, not a keyword
-                requal? (and kw? (= kname (lname to)) (not= from-ns to-ns))
-                from-k  (when kw? (str (refactor/keys-entry from-ns)))
-                ;; select on the REWRITE, not the pattern: a form whose only
-                ;; occurrence is a :keys destructuring holds no keyword literal
-                rows    (vec (for [nsx (store/ns-dependency-order st)
-                                   e   (store/forms st nsx)
-                                   :when (:name e)
-                                   :let [src  (n/string (:node e))
-                                         txt0 (str/replace src pat to)
-                                         ;; the ESCAPED-dot spelling, which a
-                                         ;; regex literal uses and the text pass
-                                         ;; above shares no literal text with —
-                                         ;; reported and left alone until
-                                         ;; d32361, and the residue is what once
-                                         ;; made a rule refuse every declared
-                                         ;; auth group as unknown
-                                         txt  (refactor/rewrite-patterns txt0 from to)
-                                         src' (if (and requal?
-                                                       (str/includes? txt from-k)
-                                                       (str/includes? txt kname))
-                                                (refactor/requalify-keys
-                                                 txt kname from-ns to-ns)
-                                                txt)]
-                                   :when (not= src src')]
-                               {:ns nsx :name (:name e) :source src'
-                                :patterns? (not= txt0 txt)
-                                :requalified? (not= txt src')}))
-                steps   (mapv #(-> (select-keys % [:ns :name :source])
-                                   (assoc :action :replace))
-                              rows)
-                requal  (vec (for [r rows :when (:requalified? r)]
-                               {:ns (:ns r) :form (:name r)}))
-                ;; REPORTED even though it is now done for you, and for the
-                ;; reason `:requalified` is: moving what a pattern MATCHES is a
-                ;; semantic change, and a rename's diff must not contain one
-                ;; without naming it
-                pats    (vec (for [r rows :when (:patterns? r)]
-                               {:ns (:ns r) :form (:name r)}))]
-            (cond
-              (and (empty? steps) (empty? (:renamed-namespaces nsr)))
-              {:error (str "nothing named " from
-                           " in the store — query_search shows what exists")}
-
-              ;; PREVIEW: a sweep is store-wide and rewrites string literals as
-              ;; well as code. Sweeping prose is intended; rewriting a test
-              ;; FIXTURE is not, and does it silently. Separate the two so the
-              ;; string hits get an eye before anything lands.
-              dry-run
-              (let [classify (fn [{:keys [ns name]}]
-                               (let [src (n/string (:node (store/form-named
-                                                           (:store @session) ns name)))
-                                     s?  (refactor/match-in-strings? src pat)
-                                     ;; SHOW the matched text, not just the form
-                                     ;; name. This is the one bucket a sweep asks
-                                     ;; a human to read, and a list of names
-                                     ;; cannot be triaged — reviewing it meant
-                                     ;; opening each form, so on a wave with
-                                     ;; thirty hits it was read as a count and
-                                     ;; approved. A frozen manifest went through
-                                     ;; that review and was rewritten into a claim
-                                     ;; about a past that never happened. One line
-                                     ;; separates "prose describing the name",
-                                     ;; which should move, from a dated artifact,
-                                     ;; which must not.
-                                     line (when s?
-                                            (when-let [l (first (filter #(re-find pat %)
-                                                                        (str/split-lines src)))]
-                                              (let [t (str/trim l)]
-                                                (if (> (count t) 120)
-                                                  (str (subs t 0 117) "…")
-                                                  t))))]
-                                 (cond-> {:form (symbol (str ns) (str name))
-                                          :strings? s?}
-                                   line (assoc :match line))))
-                    rows'    (mapv classify steps)
-                    left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
-                                          (sweep-patterns-left-behind st from pat)))
-                    note     (sweep-note from left (some :strings? rows'))]
-                (merge nsr
-                       {:dry-run true
-                        :forms (count steps)
-                        :in-code (filterv (complement :strings?) rows')
-                        :in-strings (filterv :strings? rows')}
-                       (when (seq requal) {:requalified requal})
-                       (when (seq left) {:left-behind left})
-                       (when note {:note note})))
-
-              (empty? steps)
-              (assoc nsr :forms 0)
-
-              :else
-              (let [r (edit-group! session steps :prompt why :agent agent)]
-                (if (:error r)
-                  ;; THE TEXT ROLLED BACK; THE NAMESPACE RENAMES DID NOT.
-                  ;; They ran above as ordinary writes, one per namespace, and
-                  ;; the atomic group covers only the form rewrites — so a
-                  ;; refusal here leaves a store that LOOKS renamed and is not:
-                  ;; `:export "old.prefix"` strings name a subtree that no
-                  ;; longer exists, and the module rules inherit from the NAME.
-                  ;;
-                  ;; This used to return the refusal bare, with
-                  ;; `:renamed-namespaces` computed and then discarded. A bare
-                  ;; refusal reads as "the sweep did nothing" — it was read that
-                  ;; way, and reported that way, while 24 namespaces had moved.
-                  (cond-> r
-                    (seq (:renamed-namespaces nsr))
-                    (-> (merge nsr)
-                        (assoc :note
-                               (str (count (:renamed-namespaces nsr))
-                                    " namespace rename(s) are STILL APPLIED — they ran"
-                                    " before the atomic group and were NOT rolled back"
-                                    " with it, so this store is half-migrated. They are"
-                                    " un-landed, so thread_drop takes them off and puts"
-                                    " you back where the branch is. Or fix the refusal"
-                                    " above and run the same sweep again: it is a no-op"
-                                    " for the namespaces and applies only the text."))))
-                  ;; read off the store AFTER the write, over the OLD token:
-                  ;; whatever still names it was, by construction, not rewritten
-                  (let [st*  (:store @session)
-                        left (vec (concat (when kw?
-                                            (sweep-left-behind st* kname from-ns))
-                                          (sweep-patterns-left-behind st* from pat)))
-                        note (sweep-note from left false)]
-                    (cond-> (merge r (assoc nsr :forms (count steps)))
-                      (seq requal) (assoc :requalified requal)
-                      (seq pats)   (assoc :patterns-rewritten pats)
-                      (seq left)   (assoc :left-behind left)
-                      note         (assoc :note note))))))))))))
-
 (defn flush-reads!
   "Fold whatever the read ring has accumulated onto a `:read-cost` delta and
   clear it. Returns the record, or nil when nothing was written.
@@ -3816,61 +3274,6 @@
       (some #(when (= (str commit) (:commit %)) (join %))
             (history/milestone-rows st))
       (mapv join (history/milestone-rows st :titles-only true)))))
-
-(defn revert-episode!
-  "Scrap the agent's episode: roll every form it changed since its last
-  done back to the boundary state — as ONE atomic verified group
-  (honest provenance, not history erasure). Forms that OTHER agents also
-  touched since the boundary are SKIPPED and reported in :skipped-shared,
-  never stomped.
-
-  This is the whole-episode grain. To walk back one write, or a short chain
-  that went off the rails, without losing the rest of the episode, use
-  `undo!` — same inverse, addressed by delta.
-
-  The views that decide WHAT to revert walk the log, read from the journal
-  once onto a copy (`with-history`); the group itself writes to the live
-  session."
-  [session & {:keys [agent prompt]}]
-  (let [;; no explicit agent means \"MY episode\" — the session's own id, what
-        ;; every live write carries. Left nil, `others` counted every
-        ;; real-agent delta as someone else's and skipped the session's own
-        ;; forms.
-        agent   (or agent (:agent-id @session))
-        hs      (with-history session)
-        changes (history/query-changes hs :agent agent)
-        others  (into #{}
-                      (mapcat history/delta-fids)
-                      (filter #(and (contains? history/content-ops (:op %))
-                                    (not= agent (:agent %)))
-                              (history/episode-span (:store @hs) agent)))
-        {:keys [steps shared]} (history/revert-steps changes others)]
-    (cond
-      (empty? (:forms changes))
-      {:reverted 0 :note "episode is empty — already at the last done"}
-
-      (empty? steps)
-      {:reverted 0 :skipped-shared shared
-       :note "every changed form is shared with other agents"}
-
-      :else
-      (let [r (edit-group! session steps
-                           :prompt (or prompt
-                                       (str "revert episode"
-                                            (when agent (str " of " agent))))
-                           :agent agent)]
-        (if (or (:error r) (:conflict r))
-          r
-          (let [reverted (vec (remove (set shared) (map :form (:forms changes))))]
-            (engine/commit-appended!
-             session
-             (fn [base] (first (store/record-revert base :why prompt
-                                                    :forms reverted
-                                                    :agent agent)))
-             [])
-            (assoc r
-                   :reverted (count steps)
-                   :skipped-shared shared)))))))
 
 ^:reads (defn session-brief
   "THE one-call orientation, task-shaped (knowledge-differential stance):
@@ -4197,6 +3600,665 @@
        (seq intents) (assoc :intents intents)
        (seq dead)    (assoc :dead-ends dead)))))
 
+(defn ^:export journal
+  "`session`'s line's whole delta log, oldest first, read now — the list the
+  value no longer carries. A session with no journal answers its value's own
+  list. For a caller that wants the deltas THEMSELVES (a test counting
+  them, a fixture pinning an order); the views over them live in
+  `slopp.read.history`, and the write path never needs this."
+  [session]
+  (store/deltas (:store @(with-history session))))
+
+(defn ^:export refresh-index!
+  "Bring the session's reference index current: recompute the `:refs` entry
+  of every namespace whose entry is missing or keyed on an older source,
+  persist those rows beside the elements (`db/persist-index!`), and leave the
+  live value carrying them. Returns `{:refreshed [ns …]}`.
+
+  The write path keeps the namespaces IT rewrote current; what this catches
+  is everything else that changes a value — a journal replay of another
+  agent's deltas, a merge, a store written before the index existed.
+  `ns-refs` already recomputes a stale entry on every read, correctly; this
+  is what makes it stop paying for that. Called at the done-point, which is
+  the cadence a stale entry can accumulate at. Not a journal write: nothing
+  here moves the head, so the value is swapped in place the way
+  `refresh-cache!` swaps a re-read materialization."
+  [session]
+  (let [st    (:store @session)
+        stale (vec (for [nsx (sort (keys (:namespaces st)))
+                         :when (not= (get-in st [:refs nsx :key]) (refs/ns-key st nsx))]
+                     nsx))]
+    (when (seq stale)
+      (let [fresh (refs/refresh st stale)]
+        (when-let [conn (:db @session)]
+          (db/persist-index! conn fresh stale (engine/session-line session)))
+        (swap! session update :store assoc :refs (:refs fresh))))
+    {:refreshed stale}))
+
+(defn standing-run
+  "The STANDING verdict for a test run of `scope` (a namespace symbol, or
+  the vector of namespaces a whole-project or narrowed run covered) with
+  `only` (the named tests, nil for all), when nothing has happened since it:
+  the most recent `op` marker (`:verify` for an in-image run, `:observe` for
+  the external tier) of the same scope and selection, provided every delta
+  after it is bookkeeping (`fields/bookkeeping-ops`). Returns that marker's
+  result with `:standing true` and `:recorded <delta id>`, or nil.
+
+  Measured on this store: 26% of slopp's own wall time was a tool repeated
+  inside ONE ask — `test_run` 510 extra runs, `done` 362, `full_check` 121
+  — each re-answering a question nothing had changed. `full_check` and
+  `done` already answer from their standing verdict; this is the same
+  courtesy for a test run. Only a run `test_run` made itself counts (its
+  result carries `:test-run true`): the verify a WRITE records covers the
+  tests the write reached, which is a narrower question than the one being
+  repeated. `:fresh true` runs anyway."
+  [st op scope only]
+  (let [back  (reverse (:recent st))
+        same? (fn [d]
+                (and (= op (:op d))
+                     (:test-run (:result d))
+                     (= scope (case op :verify (:ns d) :observe (:scope d) nil))
+                     (= only (:only (:result d)))))
+        tail  (take-while (complement same?) back)
+        prior (first (filter same? back))]
+    (when (and prior
+               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
+      (assoc (dissoc (:result prior) :test-run)
+             :standing true
+             :recorded (:id prior)
+             :note (str "nothing has landed since this run (" (:id prior)
+                        ") — its verdict stands and no second run was made."
+                        " test_run {fresh true} runs it anyway.")))))
+
+(defn test-run!
+  "Traced, diagnosed run of `ns-sym`'s tests (all, or just those in `:only`
+  — plain names within `ns-sym`, or ns-qualified names which auto-scope);
+  refreshes the test→form map and records the result (C4). `ns-sym` nil =
+  the WHOLE project in one image eval, instrumentation paid once (F-3c1 —
+  per-ns sweeps were 12 calls and 12 instrumentation passes). D5.1: reds
+  are judged against the forms changed since the last verification;
+  `:fresh true` restarts first for a guaranteed-faithful single run.
+
+  Repeated with nothing landed since — same scope, same selection — it
+  answers from the run it already made (`standing-run`): `:standing true`
+  and the recorded verdict, no image eval, no second `:verify`. `:fresh`
+  always runs."
+  [session ns-sym & {:keys [only fresh]}]
+  (let [t0          (System/nanoTime)
+        st          (:store @session)
+        only        (seq only)
+        qual        (filter #(str/includes? (str %) "/") only)
+        ns-sym      (or ns-sym
+                        (when (seq qual)
+                          (vec (sort (distinct (map #(symbol (namespace (symbol (str %))))
+                                                    qual)))))
+                        (vec (sort (keys (:namespaces st)))))
+        only'       (seq (map #(let [s (str %)]
+                                 (if (str/includes? s "/")
+                                   (symbol (name (symbol s)))
+                                   %))
+                              only))
+        selection   (when only' (vec only'))]
+    (or (when-not fresh
+          (some-> (standing-run st :verify ns-sym selection)
+                  (engine/with-ms t0)))
+        (let [last-verify (:id (db/last-marker (:db @session) (engine/session-line session) :verify))
+              edited      (into #{}
+                                (keep (fn [id]
+                                        (when-let [e (store/form-by-id st id)]
+                                          (symbol (str (store/ns-of-form-id st id))
+                                                  (str (or (:name e) (:id e)))))))
+                                (forms-changed-since st last-verify))
+              summary     (cond-> (engine/diagnosed-run! session ns-sym only'
+                                                         :edited edited :fresh fresh
+                                                         :include-integration? true)  ; M5: explicit run
+                            ;; what this run WAS, so a repeat can find it
+                            true      (assoc :test-run true)
+                            selection (assoc :only selection))]
+          (engine/commit-appended! session
+                                   #(store/record-verification % ns-sym summary) [])
+          ;; the marker is for the RECORD (a repeat finds it there); the caller
+          ;; sees the run
+          (engine/with-ms (cond-> (dissoc summary :test-run)
+                            (and only' (zero? (:test summary 0)))
+                            (assoc :note (str "0 tests matched :only " (vec only)
+                                              " — check the names (a named ^:external test"
+                                              " routes to the external tier automatically)")))
+                          t0)))))
+
+(defn red-after
+  "What usually breaks when `on` (\"ns/name\") changes: the tests that went red
+   in episodes where the form changed, most often first, as `[{:test :n
+   :last}]` — read from the index the reds themselves wrote (`db/reds-for`).
+   nil when there is no evidence, or no durable store to hold any: a caller
+   leaves the key OFF rather than sending an empty list that reads as safe."
+  [session on]
+  (when-let [conn (:db @session)]
+    (let [[nsx nm] (str/split (str on) #"/" 2)]
+      (when-let [fid (and nm (:id (store/form-named (:store @session)
+                                                     (symbol nsx) (symbol nm))))]
+        (not-empty (mapv #(dissoc % :form-id) (db/reds-for conn [fid])))))))
+
+(defn- delete-callers-refusal
+  "The callers gate for a GROUP: `{:error \"step i: …\" :step i}` for the first
+  `:delete` step whose form something OUTSIDE the group still calls, or nil.
+  A single `delete-form!` refuses at the write; inside a group that gate is
+  deliberately off, since a caller a later step removes is a legitimate
+  mid-sequence state. So the question is asked of the FINAL shape: the
+  callers `base` knows (the reference graph resolves a target only while it
+  exists, so the final value `st` cannot answer it), minus the forms the
+  group deletes, minus the forms it replaces whose final source no longer
+  mentions the callee. What is left is a real dangling reference, named by
+  step and caller rather than surfacing as a compile failure."
+  [base st steps]
+  (let [named    (fn [{:keys [action ns source] :as step}]
+                   (when-let [nm (if (= :add action)
+                                   (some-> (edit/parse-form source) :node store/form-symbol)
+                                   (:name step))]
+                     (symbol (str ns) (str nm))))
+        of       (fn [actions] (into #{} (keep #(when (actions (:action %)) (named %))) steps))
+        deleted  (of #{:delete})
+        replaced (of #{:replace :subform})
+        mentions? (fn [caller nm qsym]
+                    (when-let [e (store/form-named st (symbol (namespace caller))
+                                                   (symbol (name caller)))]
+                      (some #(and (symbol? %) (or (= % qsym) (= (name %) (str nm))))
+                            (tree-seq coll? seq (n/sexpr (:node e))))))]
+    (some (fn [[i {:keys [action ns] :as step}]]
+            (when (= :delete action)
+              (let [nm      (:name step)
+                    qsym    (symbol (str ns) (str nm))
+                    callers (->> (refs/refs-to base qsym)
+                                 (filter #(= :static (:via %)))
+                                 (map #(symbol (str (:from-ns %)) (str (:from-var %))))
+                                 (remove #(= % qsym))
+                                 (remove deleted)
+                                 (remove #(and (replaced %) (not (mentions? % nm qsym))))
+                                 distinct sort vec)]
+                (when (seq callers)
+                  {:error (str "step " i ": " qsym " is still called by "
+                               (str/join ", " (take 8 callers))
+                               " — outside this group. Delete or update the caller"
+                               " in the same group (any order), or first.")
+                   :step i}))))
+          (map-indexed vector steps))))
+
+(defn edit-group-once!
+  "Apply several form writes as ONE atomic intent (F2). All steps are validated
+  and applied to a store value first — any error rejects the WHOLE group with
+  nothing committed (store, deltas, image untouched). On success: all deltas
+  (sharing a `:group` id) commit and persist, every change hot-reloads, and
+  verification runs ONCE at the end — no meaningless mid-refactor red, no
+  wasted diagnostic restart. Steps: [{:action :replace|:add|:delete
+  :ns sym :name sym :source str} ...].
+
+  The single pass. `edit-group!` wraps it with the write path's auto-require
+  and is what the wire (`edit_group`) and the tool-derived multi-form ops
+  (`change-signature!`, `rename-sweep!`, `revert-episode!`, `undo!`,
+  `sync/apply-ns!`) both call; their intermediate states are invalid by
+  construction, which is exactly what one store value verified once allows.
+  Reported per step under `:steps` so a caller knows which form each step
+  landed as without reading anything back."
+  [session steps & {:keys [prompt agent]}]
+  (if (empty? steps)
+    {:error "edit-group needs at least one step"}
+    (let [t0 (System/nanoTime)
+          base0 (:store @session)
+          pre-warned (into #{}
+                           (mapcat (fn [ns-sym]
+                                     (map :var (edit/ns-warnings (:store @session) ns-sym))))
+                           (distinct (map :ns steps)))
+          [gid st0] (store/alloc-id base0 "g")]
+      (loop [st st0, remaining steps, deltas [], hots [], i 0]
+        (if-let [step (first remaining)]
+          (let [r (apply-group-step st gid prompt agent step)]
+            (if (:error r)
+              (cond-> {:error (str "step " i ": " (:error r)) :step i}
+                (:source-now r) (assoc :source-now (:source-now r)))
+              (recur (:store r) (rest remaining)
+                     (conj deltas (:delta r)) (conj hots (:hot r)) (inc i))))
+          ;; commit phase — checked loads FIRST (S1), commit only if all compile
+          (let [st       (reduce (fn [s ns-sym]
+                                   (if-let [rz (edit/resolve-cold-load
+                                                s ns-sym
+                                                :prompt "auto-reorder: define before use"
+                                                :agent agent)]
+                                     (:store rz) s))
+                                 st (distinct (map :ns steps)))
+                dangling (delete-callers-refusal base0 st steps)
+                lr       (lintgate/lint-refusals base0 st (distinct (map :ns steps))
+                                             (keep :form-id deltas))
+                load-res (if-let [gate (or (edit/cold-load-errors st (distinct (map :ns steps)))
+                                           (:refuse lr))]
+                           {:err gate}
+                           (merge (engine/hot-load-all! session st
+                                                 (keep (fn [[k a]] (when (#{:load :load-unmap} k) a))
+                                                       hots))
+                                  (select-keys lr [:carried])))]
+            (cond
+              ;; a deleted form something OUTSIDE the group still calls — named
+              ;; by step and caller, not surfaced as a compile failure
+              dangling dangling
+
+              (:err load-res)
+              (edit/compile-error st (:err load-res) "group failed to compile: ")
+
+              (not (engine/try-commit! session base0 st
+                                (vec (distinct (map :ns steps)))))
+              (do ;; the group's forms are already hot-loaded — never leave the loser's
+      ;; code answering for the winner's store
+      (engine/fresh-image! session)
+      {:conflict {:reason "store changed during multi-form op — retry"}})
+
+              :else
+              (let [image    (:image @session)
+                    _        (doseq [[kind a b c] hots]
+                               (cond
+                                 (= :unmap kind)
+                                 (repl/eval! image (format "(ns-unmap '%s '%s)" a b))
+                                 (= :load-unmap kind)
+                                 (repl/eval! image (format "(ns-unmap '%s '%s)" b c))))
+                    ;; per-step names double as the D5.1 edited set
+                    step-nms (map (fn [{:keys [action ns name source]}]
+                                    (let [nm (case action
+                                               :add (some-> (edit/parse-form source)
+                                                            :node store/form-symbol)
+                                               name)]
+                                      (when nm [action ns nm])))
+                                  steps)
+                    edited   (into #{}
+                                   (keep (fn [x]
+                                           (when-let [[_ ns nm] x]
+                                             (symbol (str ns) (str nm)))))
+                                   step-nms)
+                    ;; affected = union across steps; unknown → conservative full
+                    per-step (map (fn [x]
+                                    (if-let [[action ns nm] x]
+                                      (let [a (engine/affected-tests session ns nm)]
+                                        (cond
+                                          (some? a)       (set a)
+                                          ;; a NEW deftest has no trace yet and
+                                          ;; is its own covering test — a group
+                                          ;; that adds the fn and its test ran
+                                          ;; everything but the test
+                                          (and (= action :add)
+                                               (str/ends-with? (str ns) "-test"))
+                                          #{(symbol (str ns) (str nm))}
+                                          (= action :add) #{}
+                                          :else           :unknown))
+                                      :unknown))
+                                  step-nms)
+                    affected (when (not-any? #{:unknown} per-step)
+                               (vec (sort (apply set/union per-step))))
+                    ;; F-3c5: with no/partial trace info the fallback run must
+                    ;; cover EVERY touched namespace, not just the first step's
+                    ;; the fallback scope is a GRAPH question: tests that REACH the
+                    ;; touched namespaces. Running tests IN the production
+                    ;; namespaces found none, so a group write with incomplete
+                    ;; trace evidence verified nothing at all.
+                    touched  (vec (distinct (map :ns steps)))
+                    main-ns  (or (seq (engine/covering-test-nses
+                                       (:store @session) touched))
+                                 touched)
+                    summary  (engine/run-verification! session main-ns
+                                                (when (seq affected) affected)
+                                                :edited edited)]
+                (engine/commit-appended! session
+                                  #(store/record-verification % main-ns summary)
+                                  [])
+                (let [all-w    (->> (map :ns steps) distinct
+                                    (mapcat #(edit/ns-warnings (:store @session) %)))
+                      existing (count (filter (comp pre-warned :var) all-w))]
+                  (engine/with-ms
+                    (cond-> {:group    gid
+                             :deltas   deltas
+                             :changed-nses (vec (distinct (map :ns steps)))
+                             ;; per step: which form it landed as and its
+                             ;; delta — the report that makes a read-back
+                             ;; after a group visibly redundant
+                             :steps    (vec (map-indexed
+                                             (fn [i [[_ ns nm :as x] d]]
+                                               (cond-> {:step i :action (:action (nth steps i))}
+                                                 x    (assoc :form (symbol (str ns) (str nm)))
+                                                 true (assoc :delta (:id d))))
+                                             (map vector step-nms deltas)))
+                             :warnings (vec (remove (comp pre-warned :var) all-w))
+                             :test     summary
+                             :affected (or (not-empty affected) :all)
+                             ;; drift for the WHOLE group, read off the deltas —
+                             ;; every step kind (including :subform, which
+                             ;; computes its own source) records its final
+                             ;; source there, so one place covers them all.
+                             ;; Detecting it per-step would need a loop arity
+                             ;; change; the deltas already carry the answer.
+                             :drift
+                             (vec (for [d     deltas
+                                        :when (= :replace (:op d))
+                                        :let  [fid (:form-id d)
+                                               e   (store/form-by-id base0 fid)
+                                               nu  (some-> (get (:sources d) fid)
+                                                           edit/parse-form :node)]
+                                        :when (and (:node e) nu)
+                                        x     (edit/contract-drift (:node e) nu)]
+                                    (assoc x :form (symbol (str (:ns d))
+                                                           (str (or (:name e) fid))))))}
+                      (:healed load-res) (assoc :image-healed true)
+                      (:stubbed load-res) (assoc :red-first (:stubbed load-res)
+                                                 :note (str "these vars don't exist yet —"
+                                                            " stubbed in-image as failing"
+                                                            " (red-first); implement them to"
+                                                            " go green."))
+                      (:carried load-res) (assoc :carried-errors (:carried load-res))
+                      (pos? existing)    (assoc :existing-warnings existing))
+                    t0))))))))))
+
+(defn revert-episode!
+  "Scrap the agent's episode: roll every form it changed since its last
+  done back to the boundary state — as ONE atomic verified group
+  (honest provenance, not history erasure). Forms that OTHER agents also
+  touched since the boundary are SKIPPED and reported in :skipped-shared,
+  never stomped.
+
+  This is the whole-episode grain. To walk back one write, or a short chain
+  that went off the rails, without losing the rest of the episode, use
+  `undo!` — same inverse, addressed by delta.
+
+  The views that decide WHAT to revert walk the log, read from the journal
+  once onto a copy (`with-history`); the group itself writes to the live
+  session."
+  [session & {:keys [agent prompt]}]
+  (let [;; no explicit agent means \"MY episode\" — the session's own id, what
+        ;; every live write carries. Left nil, `others` counted every
+        ;; real-agent delta as someone else's and skipped the session's own
+        ;; forms.
+        agent   (or agent (:agent-id @session))
+        hs      (with-history session)
+        changes (history/query-changes hs :agent agent)
+        others  (into #{}
+                      (mapcat history/delta-fids)
+                      (filter #(and (contains? history/content-ops (:op %))
+                                    (not= agent (:agent %)))
+                              (history/episode-span (:store @hs) agent)))
+        {:keys [steps shared]} (history/revert-steps changes others)]
+    (cond
+      (empty? (:forms changes))
+      {:reverted 0 :note "episode is empty — already at the last done"}
+
+      (empty? steps)
+      {:reverted 0 :skipped-shared shared
+       :note "every changed form is shared with other agents"}
+
+      :else
+      (let [r (edit-group-once! session steps
+                           :prompt (or prompt
+                                       (str "revert episode"
+                                            (when agent (str " of " agent))))
+                           :agent agent)]
+        (if (or (:error r) (:conflict r))
+          r
+          (let [reverted (vec (remove (set shared) (map :form (:forms changes))))]
+            (engine/commit-appended!
+             session
+             (fn [base] (first (store/record-revert base :why prompt
+                                                    :forms reverted
+                                                    :agent agent)))
+             [])
+            (assoc r
+                   :reverted (count steps)
+                   :skipped-shared shared)))))))
+
+(defn change-signature!
+  "P2: change `ns-sym/fn-name`'s signature as ONE atomic intent — replace
+  the defn with `new-source` (keep the name; the lint gate is the oracle if
+  you don't) and mechanically rewrite every call site's argument list from
+  `args-template` ($1..$9 = the site's existing arg sources; the callee
+  stays as written, so aliases survive — see refactor/change-signature-plan).
+  Executes through edit-group! (one gate pass, one verification).
+  References that can't be rewritten come back under :manual."
+  [session ns-sym fn-name new-source args-template & {:keys [prompt agent]}]
+  (let [st (:store @session)]
+    (if (nil? (store/form-named st ns-sym fn-name))
+      (edit/missing-form-error st ns-sym fn-name)
+      (let [plan (refactor/change-signature-plan st ns-sym fn-name args-template)]
+        (if (:error plan)
+          plan
+          (let [steps (into [{:action :replace :ns ns-sym :name fn-name
+                              :source new-source}]
+                            (:caller-steps plan))
+                r     (edit-group-once! session steps
+                                   :prompt (or prompt
+                                               (str "change signature: " fn-name))
+                                   :agent agent)]
+            (cond-> (assoc r :rewrote (count (:caller-steps plan)))
+              (seq (:manual plan)) (assoc :manual (:manual plan)))))))))
+
+(defn rename-sweep!
+  "Q14: the docs-team rename as ONE intent — every namespace, var, keyword,
+  and prose occurrence of `from` (as a whole word/segment, boundary-guarded)
+  becomes `to`, store-wide: matching namespaces rename first (requires
+  rewrite along), then every still-matching form rewrites in ONE atomic
+  group with ONE verification. The textual segment match is deliberate: a
+  sweep means 'everything named that', locals and prose included; the
+  dialect/isolation gates and the test run judge the result. eval9's
+  measured loss (13.6k tokens / 37 calls / one restart for zone->region
+  across 41 nses vs sed's one pass) is this op's demand signal.
+
+  A KEYWORD rename (both sides starting `:`) carries a structural half the
+  text pass cannot see: `{:a/keys [x]}` names its key as a SYMBOL, with the
+  qualifier written in the entry beside it. That entry is matched on the FROM
+  qualifier and only on it — `{:keys [x]}` names `:x` and survives a rename of
+  `:a/x` untouched. Two reports come out of it, because neither half is a text
+  substitution and both were silent once:
+
+  - `:requalified` — destructurings this call restructured. A keyword rename's
+    diff should not contain a semantic change without naming it.
+  - `:left-behind` — what it DECLINED, each row tagged with `:via`. For
+    `:destructuring`: changing a key's NAME rather than its qualifier cannot
+    move the symbol, since the symbol is a local binding the body still reads,
+    so the rename is yours to finish.
+
+  **REGEX literals move too, and that is a reversal.** A pattern spells a
+  dotted name `web\\.static`, which shares no literal text with `web.static`,
+  so the text pass walks past every one. Measured at seven in a single wave,
+  two of them surviving every write and three green done-points: one rule then
+  refused EVERY declared auth group as unknown, teaching the author to
+  configure the key it was already reading past.
+
+  These were REPORTED and not rewritten, on the reasoning that a pattern is an
+  INTENT — whether a `.` in one separates or matches anything is a question
+  about what the author meant. Sound, and too broad: **slopp owns the dialect,
+  and a dot in a dotted name it governs is a SEPARATOR.** No pattern
+  legitimately means `web<any>static`, so there was never an intent to guess
+  at — only a report somebody had to act on by hand, which is what the two
+  survivors above did not get.
+
+  Only the NAME moves; the rest of the pattern is the author's own matching.
+  The rewrite is REPORTED under `:patterns-rewritten` for the reason
+  `:requalified` is: a rename's diff must not contain a change to what a
+  predicate MATCHES without naming it. `:left-behind :via :regex` survives as
+  the RESIDUE — what the rewrite did not reach — and should now be empty."
+  [session from to & {:keys [prompt agent dry-run]}]
+  (let [from (str from)
+        to   (str to)
+        ;; what ENDS the name differs by what is being swept — a keyword is a
+        ;; complete token, a bare name is a concept that carries its compounds
+        cls  (refactor/name-boundary-class from)
+        pat  (re-pattern (str "(?<![" cls "])"
+                              (java.util.regex.Pattern/quote from)
+                              "(?![" cls "])"))
+        why  (or prompt (str "sweep " from " -> " to))]
+    (cond
+      (or (str/blank? from) (str/blank? to))
+      {:error "rename_sweep needs :from and :to"}
+
+      (= from to)
+      {:error ":from and :to are identical"}
+
+      :else
+      (let [nses (filterv #(re-find pat (str %))
+                          (keys (:namespaces (:store @session))))
+            ;; namespace renames WRITE, so a preview must not run them — it
+                     ;; reports what they would be instead
+                     nsr  (if dry-run
+                            {:renamed-namespaces
+                             (mapv (fn [nsx]
+                                     [nsx (symbol (str/replace (str nsx) pat to))])
+                                   (sort nses))}
+                            (reduce (fn [acc nsx]
+                                      (if (:error acc)
+                                        acc
+                                        (let [new-ns (str/replace (str nsx) pat to)
+                                              r (ns-rename! session (str nsx) new-ns
+                                                            :prompt why :agent agent)]
+                                          (if (:error r)
+                                            {:error (str "renaming " nsx ": " (:error r))}
+                                            (update acc :renamed-namespaces conj
+                                                    [nsx (symbol new-ns)])))))
+                                    {:renamed-namespaces []}
+                                    (sort nses)))]
+        (if (:error nsr)
+          nsr
+          (let [st      (:store @session)
+                kw?     (and (str/starts-with? from ":")
+                             (str/starts-with? to ":"))
+                qual    (fn [k] (let [b (subs k 1)]
+                                  (when (str/includes? b "/")
+                                    (first (str/split b #"/")))))
+                lname   (fn [k] (last (str/split (subs k 1) #"/")))
+                kname   (when kw? (lname from))
+                from-ns (when kw? (qual from))
+                to-ns   (when kw? (qual to))
+                ;; only a rename that leaves the key's NAME alone can move the
+                ;; symbol — it is a local binding, not a keyword
+                requal? (and kw? (= kname (lname to)) (not= from-ns to-ns))
+                from-k  (when kw? (str (refactor/keys-entry from-ns)))
+                ;; select on the REWRITE, not the pattern: a form whose only
+                ;; occurrence is a :keys destructuring holds no keyword literal
+                rows    (vec (for [nsx (store/ns-dependency-order st)
+                                   e   (store/forms st nsx)
+                                   :when (:name e)
+                                   :let [src  (n/string (:node e))
+                                         txt0 (str/replace src pat to)
+                                         ;; the ESCAPED-dot spelling, which a
+                                         ;; regex literal uses and the text pass
+                                         ;; above shares no literal text with —
+                                         ;; reported and left alone until
+                                         ;; d32361, and the residue is what once
+                                         ;; made a rule refuse every declared
+                                         ;; auth group as unknown
+                                         txt  (refactor/rewrite-patterns txt0 from to)
+                                         src' (if (and requal?
+                                                       (str/includes? txt from-k)
+                                                       (str/includes? txt kname))
+                                                (refactor/requalify-keys
+                                                 txt kname from-ns to-ns)
+                                                txt)]
+                                   :when (not= src src')]
+                               {:ns nsx :name (:name e) :source src'
+                                :patterns? (not= txt0 txt)
+                                :requalified? (not= txt src')}))
+                steps   (mapv #(-> (select-keys % [:ns :name :source])
+                                   (assoc :action :replace))
+                              rows)
+                requal  (vec (for [r rows :when (:requalified? r)]
+                               {:ns (:ns r) :form (:name r)}))
+                ;; REPORTED even though it is now done for you, and for the
+                ;; reason `:requalified` is: moving what a pattern MATCHES is a
+                ;; semantic change, and a rename's diff must not contain one
+                ;; without naming it
+                pats    (vec (for [r rows :when (:patterns? r)]
+                               {:ns (:ns r) :form (:name r)}))]
+            (cond
+              (and (empty? steps) (empty? (:renamed-namespaces nsr)))
+              {:error (str "nothing named " from
+                           " in the store — query_search shows what exists")}
+
+              ;; PREVIEW: a sweep is store-wide and rewrites string literals as
+              ;; well as code. Sweeping prose is intended; rewriting a test
+              ;; FIXTURE is not, and does it silently. Separate the two so the
+              ;; string hits get an eye before anything lands.
+              dry-run
+              (let [classify (fn [{:keys [ns name]}]
+                               (let [src (n/string (:node (store/form-named
+                                                           (:store @session) ns name)))
+                                     s?  (refactor/match-in-strings? src pat)
+                                     ;; SHOW the matched text, not just the form
+                                     ;; name. This is the one bucket a sweep asks
+                                     ;; a human to read, and a list of names
+                                     ;; cannot be triaged — reviewing it meant
+                                     ;; opening each form, so on a wave with
+                                     ;; thirty hits it was read as a count and
+                                     ;; approved. A frozen manifest went through
+                                     ;; that review and was rewritten into a claim
+                                     ;; about a past that never happened. One line
+                                     ;; separates "prose describing the name",
+                                     ;; which should move, from a dated artifact,
+                                     ;; which must not.
+                                     line (when s?
+                                            (when-let [l (first (filter #(re-find pat %)
+                                                                        (str/split-lines src)))]
+                                              (let [t (str/trim l)]
+                                                (if (> (count t) 120)
+                                                  (str (subs t 0 117) "…")
+                                                  t))))]
+                                 (cond-> {:form (symbol (str ns) (str name))
+                                          :strings? s?}
+                                   line (assoc :match line))))
+                    rows'    (mapv classify steps)
+                    left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
+                                          (sweep-patterns-left-behind st from pat)))
+                    note     (sweep-note from left (some :strings? rows'))]
+                (merge nsr
+                       {:dry-run true
+                        :forms (count steps)
+                        :in-code (filterv (complement :strings?) rows')
+                        :in-strings (filterv :strings? rows')}
+                       (when (seq requal) {:requalified requal})
+                       (when (seq left) {:left-behind left})
+                       (when note {:note note})))
+
+              (empty? steps)
+              (assoc nsr :forms 0)
+
+              :else
+              (let [r (edit-group-once! session steps :prompt why :agent agent)]
+                (if (:error r)
+                  ;; THE TEXT ROLLED BACK; THE NAMESPACE RENAMES DID NOT.
+                  ;; They ran above as ordinary writes, one per namespace, and
+                  ;; the atomic group covers only the form rewrites — so a
+                  ;; refusal here leaves a store that LOOKS renamed and is not:
+                  ;; `:export "old.prefix"` strings name a subtree that no
+                  ;; longer exists, and the module rules inherit from the NAME.
+                  ;;
+                  ;; This used to return the refusal bare, with
+                  ;; `:renamed-namespaces` computed and then discarded. A bare
+                  ;; refusal reads as "the sweep did nothing" — it was read that
+                  ;; way, and reported that way, while 24 namespaces had moved.
+                  (cond-> r
+                    (seq (:renamed-namespaces nsr))
+                    (-> (merge nsr)
+                        (assoc :note
+                               (str (count (:renamed-namespaces nsr))
+                                    " namespace rename(s) are STILL APPLIED — they ran"
+                                    " before the atomic group and were NOT rolled back"
+                                    " with it, so this store is half-migrated. They are"
+                                    " un-landed, so thread_drop takes them off and puts"
+                                    " you back where the branch is. Or fix the refusal"
+                                    " above and run the same sweep again: it is a no-op"
+                                    " for the namespaces and applies only the text."))))
+                  ;; read off the store AFTER the write, over the OLD token:
+                  ;; whatever still names it was, by construction, not rewritten
+                  (let [st*  (:store @session)
+                        left (vec (concat (when kw?
+                                            (sweep-left-behind st* kname from-ns))
+                                          (sweep-patterns-left-behind st* from pat)))
+                        note (sweep-note from left false)]
+                    (cond-> (merge r (assoc nsr :forms (count steps)))
+                      (seq requal) (assoc :requalified requal)
+                      (seq pats)   (assoc :patterns-rewritten pats)
+                      (seq left)   (assoc :left-behind left)
+                      note         (assoc :note note))))))))))))
+
 (defn undo!
   "Walk back your own recent writes — the reach-for-it-without-thinking undo.
   Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
@@ -4337,7 +4399,7 @@
            :note "every changed form is shared with other agents"}
 
           :else
-          (let [r (edit-group! session steps
+          (let [r (edit-group-once! session steps
                                :prompt (or prompt (str "undo back to " from))
                                :agent agent)]
             (if (or (:error r) (:conflict r))
@@ -4358,40 +4420,134 @@
                        :undid undid-ids
                        :skipped-shared shared)))))))))
 
-(defn ^:export journal
-  "`session`'s line's whole delta log, oldest first, read now — the list the
-  value no longer carries. A session with no journal answers its value's own
-  list. For a caller that wants the deltas THEMSELVES (a test counting
-  them, a fixture pinning an order); the views over them live in
-  `slopp.read.history`, and the write path never needs this."
-  [session]
-  (store/deltas (:store @(with-history session))))
+(defn requalify-boundary-keys!
+  "Namespace a module-external fn's OPTION KEYS in one verified intent: its
+  arglist destructuring AND the map literals its callers pass, together.
 
-(defn ^:export refresh-index!
-  "Bring the session's reference index current: recompute the `:refs` entry
-  of every namespace whose entry is missing or keyed on an older source,
-  persist those rows beside the elements (`db/persist-index!`), and leave the
-  live value carrying them. Returns `{:refreshed [ns …]}`.
+  This exists because `require-namespaced-keys` was otherwise UNDISCHARGEABLE.
+  Its last violation, `api/open!`, has 60 call sites; a store-wide
+  `rename_sweep` is unsafe whenever the key means more than one thing (`:dir`
+  names three different things here), and 60 hand edits is worse. A rule
+  nobody can discharge trains people to ignore the channel — the rule's own
+  docstring says so.
 
-  The write path keeps the namespaces IT rewrote current; what this catches
-  is everything else that changes a value — a journal replay of another
-  agent's deltas, a merge, a store written before the index existed.
-  `ns-refs` already recomputes a stale entry on every read, correctly; this
-  is what makes it stop paying for that. Called at the done-point, which is
-  the cadence a stale entry can accumulate at. Not a journal write: nothing
-  here moves the head, so the value is swapped in place the way
-  `refresh-cache!` swaps a re-read materialization."
-  [session]
-  (let [st    (:store @session)
-        stale (vec (for [nsx (sort (keys (:namespaces st)))
-                         :when (not= (get-in st [:refs nsx :key]) (refs/ns-key st nsx))]
-                     nsx))]
-    (when (seq stale)
-      (let [fresh (refs/refresh st stale)]
-        (when-let [conn (:db @session)]
-          (db/persist-index! conn fresh stale (engine/session-line session)))
-        (swap! session update :store assoc :refs (:refs fresh))))
-    {:refreshed stale}))
+  `to-ns` defaults to the target's namespace. The keys are DERIVED — every
+  unqualified key its first arg destructures — so the caller cannot namespace
+  half a contract and leave the rest reading nil.
+
+  A call site counts only when its head RESOLVES to the target: the defining
+  ns's own name, the caller's alias for it, or the fully-qualified symbol.
+  Matching by bare name instead silently included `slopp.db/open!` alongside
+  `slopp.ops.external/open!` — caught by a dry-run reporting 62 forms and 24 unknowns
+  where the caller graph said 60 and 4.
+
+  Reports `:unknown-shape`: callers passing a non-literal (`(open! opts)`),
+  which no syntactic reader can rewrite. Those are left untouched and NAMED,
+  never silently skipped — the count is the part you still owe by hand. Call
+  sites OUTSIDE the store (the kernel's own .clj files) are invisible to this
+  and to every store-based analysis; check them yourself.
+  `:dry-run true` previews without writing."
+  [session ns-sym nm & {:keys [to-ns prompt agent dry-run]}]
+  (let [st     (:store @session)
+        ns-sym (symbol (str ns-sym))
+        nm     (symbol (str nm))
+        form   (store/named-sexpr st ns-sym nm)]
+    (if-not form
+      (edit/missing-form-error st ns-sym nm)
+      (let [tons (str (or to-ns ns-sym))
+            ks   (vec (sort (remove namespace (:destructured (shape/read-keys form)))))]
+        (if (empty? ks)
+          {:error (str ns-sym "/" nm " destructures no unqualified keys —"
+                       " nothing to requalify")}
+          (let [why     (or prompt (str "namespace " ns-sym "/" nm "'s option keys"
+                                        " under " tons))
+                heads   (fn [nsx]
+                          (cond-> #{(str ns-sym "/" nm)}
+                            (= nsx ns-sym) (conj (str nm))
+                            true (into (for [[alias lib] (edit/require-aliases st nsx)
+                                             :when (= (symbol (str lib)) ns-sym)]
+                                         (str alias "/" nm)))))
+                rewrite (fn [src nsx target?]
+                          (reduce (fn [s k]
+                                    (let [s' (refactor/requalify-call-args
+                                              s (heads nsx) (name k) tons)]
+                                      (if target?
+                                        (refactor/requalify-keys s' (name k) nil tons)
+                                        s')))
+                                  src ks))
+                steps   (vec (for [nsx (store/ns-dependency-order st)
+                                   e   (store/forms st nsx)
+                                   :when (:name e)
+                                   :let [src  (n/string (:node e))
+                                         tgt? (and (= nsx ns-sym) (= (:name e) nm))
+                                         src' (rewrite src nsx tgt?)]
+                                   :when (not= src src')]
+                               {:action :replace :ns nsx :name (:name e) :source src'}))
+                opaque? (fn [nsx e]
+                          (let [hs (heads nsx)]
+                            (some (fn [node]
+                                    (and (seq? node)
+                                         (symbol? (first node))
+                                         (contains? hs (str (first node)))
+                                         (next node)
+                                         (not (map? (second node)))))
+                                  (tree-seq coll? seq (store/form-sexpr (:node e))))))
+                unknown (vec (sort (for [nsx (keys (:namespaces st))
+                                         e   (store/forms st nsx)
+                                         :when (and (:name e) (opaque? nsx e))]
+                                     (symbol (str nsx) (str (:name e))))))
+                report  (cond-> {:keys ks :to-ns tons :forms (count steps)
+                                 ;; a preview that only COUNTS is not a preview: you
+                                 ;; cannot check 62 rewrites against a caller graph
+                                 ;; you are not shown. The bare-name bug looked
+                                 ;; exactly like a correct run until the numbers
+                                 ;; were compared.
+                                 :in-code (vec (sort (map #(symbol (str (:ns %))
+                                                                   (str (:name %)))
+                                                          steps)))}
+                          (seq unknown)
+                          (assoc :unknown-shape unknown
+                                 :note (str (count unknown) " call site(s) pass a"
+                                            " non-literal map — no syntactic reader"
+                                            " can see through a binding, so those"
+                                            " are UNTOUCHED and yours to check")))]
+            (cond
+              (empty? steps) {:error (str "no call site or arglist to rewrite for "
+                                          ns-sym "/" nm)}
+              dry-run        (assoc report :dry-run true)
+              :else          (let [r (edit-group-once! session steps :prompt why :agent agent)]
+                               (if (:error r) r (merge r report))))))))))
+
+(defn realias!
+  "Rename ONE namespace's require alias as a single atomic intent: the `:as`
+  in its `ns` form and every `alias/sym` in its bodies, through `edit-group!`
+  — one gate pass, one verification.
+
+  This exists because the two halves cannot be written separately. Between
+  them sits a namespace whose ns form and bodies disagree about what the
+  qualifier is, which does not load — so the three-step add-both / migrate /
+  drop dance was the only hand-safe route, and at 62 call sites across a
+  468-line dispatch the retyping was a worse risk than the stale alias it
+  removed. Both stayed wrong for two phases for exactly that reason.
+
+  Scoped to `ns-sym`, because an alias is a name ONE namespace chose. Two
+  namespaces calling a lib by different names is not drift.
+
+  Returns the edit-group result plus `:sites` (qualified references rewritten)
+  and, when the alias is also named inside STRING literals, `:left-behind` —
+  fixture source and prose a symbol rewriter cannot reach. See
+  `refactor/realias-plan` for why those are reported rather than rewritten."
+  [session ns-sym old new & {:keys [prompt agent]}]
+  (let [ns-sym (symbol (str ns-sym))
+        plan   (refactor/realias-plan (:store @session) ns-sym old new)]
+    (if (:error plan)
+      plan
+      (let [r (edit-group-once! session (:steps plan)
+                           :prompt (or prompt (str "realias " ns-sym ": "
+                                                   old " → " new))
+                           :agent agent)]
+        (cond-> (assoc r :sites (:sites plan) :lib (:lib plan))
+          (seq (:left-behind plan)) (assoc :left-behind (:left-behind plan)))))))
 
 (defn- add-forms!
   "Several NEW forms in one write: an atomic `edit-group!` of `:add` steps —
@@ -4400,7 +4556,7 @@
   batch face of `add-form!`, which routes here when `source` holds more
   than one top-level form."
   [session ns-sym nodes & {:keys [prompt agent]}]
-  (let [r (edit-group! session
+  (let [r (edit-group-once! session
                        (mapv (fn [node] {:action :add :ns ns-sym :source (n/string node)})
                              nodes)
                        :prompt prompt :agent agent)]
@@ -4413,109 +4569,33 @@
                          (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
                      (:deltas r)))))))
 
-(defn standing-run
-  "The STANDING verdict for a test run of `scope` (a namespace symbol, or
-  the vector of namespaces a whole-project or narrowed run covered) with
-  `only` (the named tests, nil for all), when nothing has happened since it:
-  the most recent `op` marker (`:verify` for an in-image run, `:observe` for
-  the external tier) of the same scope and selection, provided every delta
-  after it is bookkeeping (`fields/bookkeeping-ops`). Returns that marker's
-  result with `:standing true` and `:recorded <delta id>`, or nil.
+(defn- auto-module-dep-retry!
+  "The write path's repair for the second-commonest mechanical refusal, the
+  mirror of `auto-require-retry`: `r` was refused because its form's first
+  call across a module boundary named an edge nothing had declared, and the
+  refusal itself names the edge (`module_dep {from \"a\" to \"b\"}`). Declare
+  it with the pipeline's own prompt, run `retry` — the same write once more
+  — and stamp `:auto-module-dep {:from :to}` on the result. eval10 measured
+  the two-step this replaces at 7–11 turns per lifetime cell, every one of
+  them the agent doing exactly what the refusal said.
 
-  Measured on this store: 26% of slopp's own wall time was a tool repeated
-  inside ONE ask — `test_run` 510 extra runs, `done` 362, `full_check` 121
-  — each re-answering a question nothing had changed. `full_check` and
-  `done` already answer from their standing verdict; this is the same
-  courtesy for a test run. Only a run `test_run` made itself counts (its
-  result carries `:test-run true`): the verify a WRITE records covers the
-  tests the write reached, which is a narrower question than the one being
-  repeated. `:fresh true` runs anyway."
-  [st op scope only]
-  (let [back  (reverse (:recent st))
-        same? (fn [d]
-                (and (= op (:op d))
-                     (:test-run (:result d))
-                     (= scope (case op :verify (:ns d) :observe (:scope d) nil))
-                     (= only (:only (:result d)))))
-        tail  (take-while (complement same?) back)
-        prior (first (filter same? back))]
-    (when (and prior
-               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
-      (assoc (dissoc (:result prior) :test-run)
-             :standing true
-             :recorded (:id prior)
-             :note (str "nothing has landed since this run (" (:id prior)
-                        ") — its verdict stands and no second run was made."
-                        " test_run {fresh true} runs it anyway.")))))
-
-(defn test-run!
-  "Traced, diagnosed run of `ns-sym`'s tests (all, or just those in `:only`
-  — plain names within `ns-sym`, or ns-qualified names which auto-scope);
-  refreshes the test→form map and records the result (C4). `ns-sym` nil =
-  the WHOLE project in one image eval, instrumentation paid once (F-3c1 —
-  per-ns sweeps were 12 calls and 12 instrumentation passes). D5.1: reds
-  are judged against the forms changed since the last verification;
-  `:fresh true` restarts first for a guaranteed-faithful single run.
-
-  Repeated with nothing landed since — same scope, same selection — it
-  answers from the run it already made (`standing-run`): `:standing true`
-  and the recorded verdict, no image eval, no second `:verify`. `:fresh`
-  always runs."
-  [session ns-sym & {:keys [only fresh]}]
-  (let [t0          (System/nanoTime)
-        st          (:store @session)
-        only        (seq only)
-        qual        (filter #(str/includes? (str %) "/") only)
-        ns-sym      (or ns-sym
-                        (when (seq qual)
-                          (vec (sort (distinct (map #(symbol (namespace (symbol (str %))))
-                                                    qual)))))
-                        (vec (sort (keys (:namespaces st)))))
-        only'       (seq (map #(let [s (str %)]
-                                 (if (str/includes? s "/")
-                                   (symbol (name (symbol s)))
-                                   %))
-                              only))
-        selection   (when only' (vec only'))]
-    (or (when-not fresh
-          (some-> (standing-run st :verify ns-sym selection)
-                  (engine/with-ms t0)))
-        (let [last-verify (:id (db/last-marker (:db @session) (engine/session-line session) :verify))
-              edited      (into #{}
-                                (keep (fn [id]
-                                        (when-let [e (store/form-by-id st id)]
-                                          (symbol (str (store/ns-of-form-id st id))
-                                                  (str (or (:name e) (:id e)))))))
-                                (forms-changed-since st last-verify))
-              summary     (cond-> (engine/diagnosed-run! session ns-sym only'
-                                                         :edited edited :fresh fresh
-                                                         :include-integration? true)  ; M5: explicit run
-                            ;; what this run WAS, so a repeat can find it
-                            true      (assoc :test-run true)
-                            selection (assoc :only selection))]
-          (engine/commit-appended! session
-                                   #(store/record-verification % ns-sym summary) [])
-          ;; the marker is for the RECORD (a repeat finds it there); the caller
-          ;; sees the run
-          (engine/with-ms (cond-> (dissoc summary :test-run)
-                            (and only' (zero? (:test summary 0)))
-                            (assoc :note (str "0 tests matched :only " (vec only)
-                                              " — check the names (a named ^:external test"
-                                              " routes to the external tier automatically)")))
-                          t0)))))
-
-(defn red-after
-  "What usually breaks when `on` (\"ns/name\") changes: the tests that went red
-   in episodes where the form changed, most often first, as `[{:test :n
-   :last}]` — read from the index the reds themselves wrote (`db/reds-for`).
-   nil when there is no evidence, or no durable store to hold any: a caller
-   leaves the key OFF rather than sending an empty list that reads as safe."
-  [session on]
-  (when-let [conn (:db @session)]
-    (let [[nsx nm] (str/split (str on) #"/" 2)]
-      (when-let [fid (and nm (:id (store/form-named (:store @session)
-                                                     (symbol nsx) (symbol nm))))]
-        (not-empty (mapv #(dissoc % :form-id) (db/reds-for conn [fid])))))))
+  A CYCLE is a real question and stays one: when the declaration is itself
+  refused, `r` comes back with the cycle explanation appended so the reader
+  learns both facts from one result. Any other refusal returns `r`
+  untouched. The caller passes `:no-auto-module-dep true` on the retry so
+  this runs once."
+  [session r retry & {:keys [agent]}]
+  (if-let [[_ from to] (and (:error r)
+                            (re-find #"module_dep \{from \"([^\"]+)\" to \"([^\"]+)\"\}"
+                                     (:error r)))]
+    (let [md (module-dep! session from to
+                          :prompt fields/auto-module-dep-prompt :agent agent)]
+      (if (:error md)
+        (update r :error str " The edge could not be declared for you: " (:error md))
+        (let [r2 (retry)]
+          (cond-> r2
+            (nil? (:error r2)) (assoc :auto-module-dep {:from from :to to})))))
+    r))
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
@@ -4584,10 +4664,15 @@
         (if (or (:error r) (:conflict r))
           (if (or no-auto-require system)
             r
-            (auto-require-retry session ns-sym r
-                                #(edit-replace! session ns-sym nm new-source
-                                                :prompt prompt :agent agent
-                                                :no-auto-require true)))
+            ;; a missing require, then a missing module edge — one retry flag
+            ;; covers both, so each runs at most once
+            (let [retry #(edit-replace! session ns-sym nm new-source
+                                        :prompt prompt :agent agent
+                                        :no-auto-require true)
+                  r1    (auto-require-retry session ns-sym r retry)]
+              (if (:error r1)
+                (auto-module-dep-retry! session r1 retry :agent agent)
+                r1)))
           (let [qform    (symbol (str ns-sym) (str nm))
                 new-nm   (:name (store/form-by-id (:store r)
                                                   (:form-id (:delta r))))
@@ -4798,10 +4883,16 @@
             (if (or (:error r) (:conflict r))
               (if no-auto-require
                 r
-                (auto-require-retry session ns-sym r
-                                    #(add-form! session ns-sym source
-                                                :prompt prompt :agent agent
-                                                :no-auto-require true)))
+                ;; the two mechanical refusals the write path repairs itself:
+                ;; a missing require, then a missing module edge. One retry
+                ;; flag covers both, so each runs at most once.
+                (let [retry #(add-form! session ns-sym source
+                                        :prompt prompt :agent agent
+                                        :no-auto-require true)
+                      r1    (auto-require-retry session ns-sym r retry)]
+                  (if (:error r1)
+                    (auto-module-dep-retry! session r1 retry :agent agent)
+                    r1)))
               (let [edited     (if nm #{(symbol (str ns-sym) (str nm))} #{})
                     affected   (when (and load? nm) (engine/affected-tests session ns-sym nm))
                     summary    (if load?
@@ -5030,3 +5121,41 @@
           (cond-> r2
             (nil? (:error r2)) (assoc :auto-require {:added spec :ns ns-sym})))))
     r))
+
+(defn edit-group!
+  "One INTENT as one atomic write — `edit-group-once!` with the write path's
+  two self-repairs. Auto-require: when the group fails to compile because a
+  step named an alias its namespace lacks and exactly one namespace can
+  supply it, the require is added (a `:system` write, as for a single form)
+  and the group runs once more, stamped `:auto-require`; tried against each
+  touched namespace in turn, since the compile error names the alias but not
+  the namespace, and one that already has the alias refuses the require and
+  is skipped. Auto-module-dep: a step refused for its first call across a
+  module boundary gets the edge declared and the group rerun, stamped
+  `:auto-module-dep`; a cycle stays a refusal.
+
+  On the wire as `edit_group` since 2026-08-30 — the reversal of a position
+  this function used to argue in its docstring. The grain an agent thinks in
+  is the intent: the fn, its test, the caller it changes, the require it
+  needs. Measured one form per call on that grain (eval10), it cost a model
+  request per form with reads between them, because no single result was
+  trusted to stand for the group. A group is the intent verified once and
+  reported per step; the completeness judgement is still `done`'s, and a
+  whole feature in one call meets the same gates a whole feature in one form
+  does."
+  [session steps & {:keys [prompt agent no-auto-require]}]
+  (let [once (fn [] (edit-group-once! session steps :prompt prompt :agent agent))
+        r    (once)]
+    (if (or no-auto-require (nil? (:error r)))
+      r
+      (let [r1 (reduce (fn [r ns-sym]
+                         (let [r2 (auto-require-retry session ns-sym r once)]
+                           (cond
+                             (nil? (:error r2))  (reduced r2)   ; the require landed and the group with it
+                             (identical? r2 r)   r              ; nothing to add here; try the next namespace
+                             :else               (reduced r2)))) ; the require landed, the group still failed: say why
+                       r
+                       (distinct (map :ns steps)))]
+        (if (:error r1)
+          (auto-module-dep-retry! session r1 once :agent agent)
+          r1)))))

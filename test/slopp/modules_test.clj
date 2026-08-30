@@ -106,12 +106,23 @@
       (testing "retracting an edge is the same verb and re-arms the gate"
         (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core" :remove true
                                            :prompt "trying decoupling"))))
+        ;; the gate is armed: with the write path's self-repair off, the
+        ;; refusal is the same one as before the edge existed
         (let [r (ops/edit-replace! sess 'mb.app 'use-it
                                    "(defn use-it \"Uses ma.\" [x] (core/shared (inc x)))"
-                                   :prompt "should be blocked again")]
+                                   :prompt "blocked with the repair off"
+                                   :no-auto-require true)]
           (is (re-find #"does not declare" (str (:error r))) (pr-str r)))
-        (is (nil? (:error (ops/module-dep! sess "mb.app" "ma.core"
-                                           :prompt "restored")))))
+        ;; …and answered (2026-08-30): the write's first crossing declares the
+        ;; edge again and says so, rather than teaching the two-step
+        (let [r (ops/edit-replace! sess 'mb.app 'use-it
+                                   "(defn use-it \"Uses ma.\" [x] (core/shared (inc x)))"
+                                   :prompt "the crossing declares its edge")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:from "mb.app" :to "ma.core"} (:auto-module-dep r)) (pr-str r)))
+        (is (:already-declared (ops/module-dep! sess "mb.app" "ma.core"
+                                                :prompt "restored"))
+            "the auto-declared edge is the real edge"))
       (testing "deep vars are package-private; ^:export hoists into the surface"
         (let [r (ops/edit-replace! sess 'mb.app 'use-it
                                    "(defn use-it \"Uses ma.\" [x] (impl/hidden x))"

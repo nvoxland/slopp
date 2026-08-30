@@ -1043,11 +1043,10 @@
                    " query_depends {on \"" qsym "\"} lists every caller."
                    " Deleting it now would be accepted and the RELOAD would"
                    " fail, leaving the store unable to boot. Delete the"
-                   " CALLERS first and this last — dependency order reversed,"
-                   " one edit_delete_form each, every step verified. If two"
-                   " forms call EACH OTHER there is no valid order: use"
-                   " edit_replace_form on one to drop the call, then delete"
-                   " both.")})))
+                   " CALLERS and this together in one edit_group (delete steps, any"
+                   " order — a caller inside the group is fine), or one"
+                   " edit_delete_form each, callers first. If two forms call"
+                   " EACH OTHER, a group deleting both is the valid order.")})))
 
 (defn- alias-candidates
   "For a `No such namespace: X` compile failure, `[alias [ns …]]` — the

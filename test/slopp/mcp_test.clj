@@ -104,7 +104,7 @@
                                         :source "(defn f [x] (identity x))"}))]
           (is (true? (:ok r)))
           (is (nil? (:failures r)))
-          (is (< (count (pr-str r)) 120) (pr-str r))))
+          (is (< (count (pr-str r)) 160) (pr-str r))))
       (testing ":verbose true forces the full shape"
         (let [r (edn/read-string (call! sess "edit_replace_form"
                                        {:ns "b1" :name "f"
@@ -541,8 +541,10 @@
                         (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
                                 [:result :tools]))]
         (is (contains? names "done"))
-        (is (not (contains? names "edit_group"))
-            "episodes are inferred — no agent-facing grouping")
+        ;; episodes are still inferred — done is the completeness judgement. A
+        ;; GROUP is a smaller thing: one intent's steps as one verified write
+        ;; (see an-intent-lands-as-one-verified-group)
+        (is (contains? names "edit_group"))
         (is (not (contains? names "checkpoint"))))
       (finally (ops/close! sess)))))
 
@@ -934,34 +936,6 @@
             (str "an :unverified must name its cause: " r)))
       (finally (ops/close! sess)))))
 
-(deftest ^:external edit-group-stays-off-the-wire-on-purpose
-  ;; Its absence is a MEASURED design decision, not an oversight, and it looks
-  ;; exactly like an oversight from the outside — I argued for registering it
-  ;; within one session of arriving at this codebase, on the grounds that the
-  ;; API had a capability the wire did not.
-  ;;
-  ;; Exposed, agents batch a whole feature into one call instead of working
-  ;; incrementally, which is too much to hold and skips the property the whole
-  ;; system rests on: every step is a VALID PROGRAM, verified, with the
-  ;; completeness judgement made at done.
-  ;;
-  ;; It stays as an internal primitive for transformations a TOOL derives from
-  ;; ONE intent (change-signature!, rename-sweep!, revert-episode!, undo!,
-  ;; sync/apply-ns!) — those intermediates are invalid by construction and
-  ;; nobody was asked to reason about them.
-  (let [sess (external/open!)]
-    (try
-      (let [by-name (into {} (map (juxt :name identity))
-                          (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
-                                  [:result :tools]))]
-        (is (not (contains? by-name "edit_group"))
-            "off the wire on purpose — see slopp.api/edit-group!'s docstring")
-        (testing "while the TOOL-derived multi-form ops that use it stay exposed"
-          (is (contains? by-name "rename_sweep"))
-          (is (contains? by-name "change_signature"))
-          (is (contains? by-name "undo"))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external dry-run-is-honored-over-the-wire
   ;; A preview that silently performs the operation is far worse than no
   ;; preview. api/rename-sweep! gained :dry-run, but the MCP tool schema and
@@ -1137,7 +1111,7 @@
         ;; explaining that the seam is off-wire refers to `edit-group!`, which
         ;; this pattern does not match and should not. Only the form arguing
         ;; what the TOOL would be needs to spell it with an underscore.
-        off-wire {"edit_group" 'slopp.ops/edit-group!}
+        off-wire {} ; edit_group joined the wire 2026-08-30; the shape stays for the next off-wire seam
         pat    #"\b((?:query|edit|ns|module|deps|branch|git|turn|config|file)_[a-z0-9_]+)"
         prod   (remove #(str/ends-with? (str %) "-test") (keys (:namespaces st)))
         bad    (vec (distinct
@@ -2003,7 +1977,7 @@
     (testing "shaping still happens — the big payloads compress, not vanish"
       (is (= "d1" (:delta terse)))
       (is (= 1 (:deltas terse)))
-      (is (= 2 (:affected terse))))))
+      (is (= [1 2] (:affected terse))))))
 
 (deftest the-app-server-comes-up-only-for-a-store-that-asked-for-it
   ;; This is the assertion that keeps the feature from being a menace. The
@@ -3074,3 +3048,127 @@
           (testing "an unknown topic is refused with the index"
             (is (re-find #"(?i)no topic.*nope" (call {:topic "nope"}))))
           (finally (ops/close! sess)))))))
+
+(deftest ^:external an-intent-lands-as-one-verified-group
+  ;; The reversal of `edit-group-stays-off-the-wire-on-purpose` (2026-08-30),
+  ;; made explicitly. The grain an agent thinks in is the INTENT — the fn,
+  ;; its test, the caller it changes, the require it needs — and eval10
+  ;; measured what one-form-per-call costs on that grain: the rename step's
+  ;; three real writes arrived with reads between them, each verified
+  ;; separately, each a model request. A group is that intent as ONE atomic
+  ;; write, every per-step gate intact, verified once, reported per step. It
+  ;; is not a shopping list: the completeness judgement is still done's, and
+  ;; a whole feature in one call is refused by the same gates a whole feature
+  ;; in one form is.
+  (let [sess (external/open!)]
+    (try
+      (testing "it is advertised"
+        (is (contains? (into #{} (map :name)
+                             (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
+                                     [:result :tools]))
+                       "edit_group")))
+      (call! sess "ns_create" {:ns "grp.core.util" :source "(ns grp.core.util)\n(defn ^:unused-ok twice [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "grp.core" :source "(ns grp.core)\n(defn ^:unused-ok base [] 1)\n"})
+      (call! sess "ns_create" {:ns "grp.core-test"
+                               :source "(ns grp.core-test (:require [clojure.test :refer [deftest is]] [grp.core :as core]))\n(deftest base-t (is (= 1 (core/base))))\n"})
+      (testing "one intent: a fn + its test + a change to an existing form, string-keyed as the wire sends them"
+        (let [r (call! sess "edit_group"
+                       {:prompt "quad: the fn, its test, and base uses it"
+                        :steps [{"action" "add" "ns" "grp.core"
+                                 "source" "(defn quad [x] (util/twice (util/twice x)))"}
+                                {"action" "add" "ns" "grp.core-test"
+                                 "source" "(deftest quad-t (is (= 8 (core/quad 2))))"}
+                                {"action" "subform" "ns" "grp.core" "name" "base"
+                                 "match" "1" "source" "(- (quad 1) 3)"}]})]
+          (is (re-find #":group" r) r)
+          (testing "reported per step, with the form each landed"
+            (is (re-find #":steps \[\{:step 0, :action :add, :form grp\.core/quad" r) r)
+            (is (re-find #":step 2, :action :subform, :form grp\.core/base" r) r))
+          (testing "verified ONCE, and the covering tests are NAMED, not counted"
+            (is (re-find #":status :green" r) r)
+            (is (re-find #":affected \[grp\.core-test/base-t grp\.core-test/quad-t\]" r) r))
+          (testing "the missing alias was required for the group, as it is for a single write"
+            (is (re-find #"grp\.core\.util :as util"
+                         (call! sess "query_source" {:targets [{:ns "grp.core" :name "grp.core"}]}))
+                (subs r (max 0 (- (count r) 900)))))))
+      (testing "a bad step refuses the WHOLE group by index, and nothing landed"
+        (let [r (call! sess "edit_group"
+                       {:prompt "one good, one bad"
+                        :steps [{"action" "add" "ns" "grp.core" "source" "(defn never [] 1)"}
+                                {"action" "frobnicate" "ns" "grp.core"}]})]
+          (is (re-find #"step 1: unknown action" r) r)
+          (is (re-find #":error" (call! sess "query_source" {:targets [{:ns "grp.core" :name "never"}]})))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-delete-refuses-a-caller-OUTSIDE-the-group-by-step-and-name
+  ;; slopp-ui, 2026-08-30, on edit_group's announcement: "delete a
+  ;; namespace's forms" is exactly where the callers gate stops being a
+  ;; nuisance and starts being the thing that saves you. Inside a group the
+  ;; single-form gate is deliberately off — a mid-sequence dangling reference
+  ;; is legitimate when a later step removes the caller — so the question has
+  ;; to be asked of the FINAL store value: whatever still calls a deleted form
+  ;; after every step applied is a real dangling caller, and the refusal names
+  ;; the step and the caller rather than surfacing as a compile failure.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "gd.core"
+                               :source "(ns gd.core)\n(defn helper [x] x)\n(defn ^:unused-ok user [x] (helper x))\n(defn ^:unused-ok other [] 1)\n"})
+      (testing "a caller left OUTSIDE the group refuses, naming the step and the caller"
+        (let [r (call! sess "edit_group" {:prompt "drop helper (but user still calls it)"
+                                          :steps [{"action" "delete" "ns" "gd.core" "name" "other"}
+                                                  {"action" "delete" "ns" "gd.core" "name" "helper"}]})]
+          (is (re-find #"step 1:" r) r)
+          (is (re-find #"gd\.core/user" r) r)
+          (is (not (re-find #"failed to compile" r)) r)
+          (is (not (re-find #":error" (call! sess "query_source" {:targets [{:ns "gd.core" :name "other"}]})))
+              "nothing landed — the group is all-or-nothing")))
+      (testing "the caller INSIDE the group is fine: callee and caller go together, in either order"
+        (let [r (call! sess "edit_group" {:prompt "drop helper and its only caller"
+                                          :steps [{"action" "delete" "ns" "gd.core" "name" "helper"}
+                                                  {"action" "delete" "ns" "gd.core" "name" "user"}]})]
+          (is (re-find #":group" r) r)
+          (is (re-find #":error" (call! sess "query_source" {:targets [{:ns "gd.core" :name "helper"}]})))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-first-cross-module-call-declares-its-edge-like-a-require
+  ;; eval10: module_dep was 7–11 turns per lifetime cell, every one of them
+  ;; the agent doing what the refusal told it to — declare the edge, then
+  ;; resend the write. The same shape auto-require already answers: when the
+  ;; only thing between a write and landing is one declaration the refusal
+  ;; itself can name, make it and stamp the result. A CYCLE is a real
+  ;; question and stays a refusal.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "am.util.core" :source "(ns am.util.core)\n(defn ^:export twice [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "am.app.core" :source "(ns am.app.core)\n(defn ^{:export true :unused-ok \"fixture\"} one [] 1)\n"})
+      (testing "the edge is declared for the write and the result says so"
+        (let [r (call! sess "edit_add_form" {:ns "am.app.core" :prompt "app uses util"
+                                             :source "(defn ^:unused-ok quad [x] (am.util.core/twice (am.util.core/twice x)))"})]
+          (is (re-find #":auto-module-dep \{:from \"am\.app\", :to \"am\.util\"\}" r) r)
+          (is (re-find #":ok true" r) r))
+        (is (re-find #"am\.util" (call! sess "query_depends" {:modules true}))
+            "the manifest carries the edge"))
+      (testing "a cycle stays a refusal, and says which"
+        ;; am.util → am.app would close util ↔ app
+        (let [r (call! sess "edit_add_form" {:ns "am.util.core" :prompt "util calls back into app"
+                                             :source "(defn ^:unused-ok back [] (am.app.core/one))"})]
+          (is (re-find #":error" r) r)
+          (is (re-find #"cycle" r) r)
+          (is (not (re-find #":auto-module-dep" r)) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-write-paths-self-repairs-are-stamped-on-the-wire
+  ;; Found 2026-08-30 while wiring auto-module-dep: `:auto-require` had been
+  ;; stamped by add-form!/edit-replace! since it existed and DROPPED by the
+  ;; wire's select-keys — three tool descriptions and the skill promised
+  ;; ":auto-require says so" to agents who could never see it. A repair the
+  ;; result does not report is a write the agent re-checks by hand.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ar.core.util" :source "(ns ar.core.util)\n(defn g [] 1)\n"})
+      (call! sess "ns_create" {:ns "ar.core" :source "(ns ar.core)\n"})
+      (let [r (call! sess "edit_add_form" {:ns "ar.core" :prompt "core uses util"
+                                           :source "(defn ^:unused-ok f [] (util/g))"})]
+        (is (re-find #":auto-require \{:added \"\[ar\.core\.util :as util\]\"" r) r)
+        (is (re-find #":ok true" r) r))
+      (finally (ops/close! sess)))))

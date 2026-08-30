@@ -1407,3 +1407,27 @@
       ;; the control that keeps the scope honest: widening `ours` must not
       ;; start reporting keys that belong to whoever wrote them
       (is (not-any? #(= :myapp/audited (:marker %)) found) (pr-str found)))))
+
+(deftest an-info-only-rule-is-reported-as-a-count-not-a-reprinted-list
+  ;; slopp-ui measured it: ~40 :info rows of http-dangling-route-refs, half
+  ;; carrying the same 60-word :why, reprinted by every full_check for two
+  ;; days, and never once acted on. The COUNT is the fact a reader acts on (40
+  ;; became 41 after touching a view); the rows are read once, when deciding
+  ;; whether the class matters at all.
+  (let [why  "app space is not server space — prefix-links is the remedy"
+        info (fn [n] {:kind :unresolved :value (str "(href " n ")") :attr :href
+                      :method :get :form (symbol "v" (str "f" n)) :severity :info :why why})
+        findings {:http-dangling-route-refs (mapv info (range 40))
+                  :direct-http [{:form 'a/b :severity :error :why "boundary"}]
+                  :marker-why  [{:form 'c/d :severity :advisory}
+                                {:form 'c/e :severity :info}]}
+        r (rules/fold-standing-info findings)]
+    (testing "a rule whose every row is :info folds to a count and ONE why"
+      (is (= {:info 40 :why why :rows "full_check {verbose true}"}
+             (:http-dangling-route-refs r))
+          (pr-str (:http-dangling-route-refs r))))
+    (testing "a rule with a row that can flip the check keeps its rows"
+      (is (= (:direct-http findings) (:direct-http r)))
+      (is (= (:marker-why findings) (:marker-why r))))
+    (testing "verbose keeps everything"
+      (is (= findings (rules/fold-standing-info findings :verbose? true))))))

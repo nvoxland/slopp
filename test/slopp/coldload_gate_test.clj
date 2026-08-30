@@ -29,7 +29,7 @@
 
       (testing "group: add a helper + a caller referencing it AUTO-REORDERS atomically"
         (ops/ingest! sess 'cl.grp "(ns cl.grp)\n(defn early [] 1)\n")
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'cl.grp :name 'early
                                    :source "(defn early [] (brand-new))"}
                                   {:action :add :ns 'cl.grp

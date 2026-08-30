@@ -398,3 +398,12 @@
   readers now hold this question — `unchanged-since-done` and
   `standing-run` — and two lists would drift."
   #{:done :verify :observe :turn-begin :turn-end :commit})
+
+(def ^:export auto-module-dep-prompt
+  "THE prompt the pipeline writes on a module edge it declared for a write:
+  the write's first call across a module boundary named an edge nothing had
+  declared, no cycle stood in the way, and the pipeline declared it rather
+  than refusing the write to teach a two-step. Same argument as
+  `auto-require-prompt`: one constant with one home, so the reader of the
+  log sees the same sentence every time."
+  "auto-module-dep: the write's first call across a module boundary")

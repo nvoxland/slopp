@@ -117,7 +117,7 @@
       (is (nil? (:error (sync/clone! bare dir-b :agent "bob"))))
 
       ;; A moves on: f + its test change together (stays green)
-      (ops/edit-group! sa [{:action :replace :ns 'gc.core :name 'f
+      (ops/edit-group-once! sa [{:action :replace :ns 'gc.core :name 'f
                             :source "(defn f [x] (+ x 10))"}
                            {:action :replace :ns 'gc.core :name 'f-t
                             :source "(deftest f-t (is (= 11 (f 1))))"}]
@@ -145,7 +145,7 @@
               (is (:up-to-date (sync/pull! sb :agent "bob"))))
 
             (testing "B works on top and pushes — fast-forward through the pulled chain"
-              (ops/edit-group! sb [{:action :add :ns 'gc.core
+              (ops/edit-group-once! sb [{:action :add :ns 'gc.core
                                     :source "(defn g [x] (* 2 x))"}
                                    {:action :add :ns 'gc.core
                                     :source "(deftest g-t (is (= 4 (g 2))))"}]
@@ -190,7 +190,7 @@
       (is (nil? (:error (sync/clone! bare dir-b :agent "bob"))))
 
       ;; A changes f (with its test); B changes f divergently (same behavior)
-      (ops/edit-group! sa [{:action :replace :ns 'gc.core :name 'f
+      (ops/edit-group-once! sa [{:action :replace :ns 'gc.core :name 'f
                             :source "(defn f [x] (+ x 10))"}
                            {:action :replace :ns 'gc.core :name 'f-t
                             :source "(deftest f-t (is (= 11 (f 1))))"}]
@@ -217,7 +217,7 @@
                 (is (= "src/gc/core.clj" (:path c)))
                 (is (str/includes? (str (:source c)) "(+ x 10)"))))
             (testing "resolve: adopt the remote content, clear, milestone, push"
-              (ops/edit-group! sb [{:action :replace :ns 'gc.core :name 'f
+              (ops/edit-group-once! sb [{:action :replace :ns 'gc.core :name 'f
                                     :source "(defn f [x] (+ x 10))"}
                                    {:action :replace :ns 'gc.core :name 'f-t
                                     :source "(deftest f-t (is (= 11 (f 1))))"}]

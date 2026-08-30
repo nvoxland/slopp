@@ -27,7 +27,7 @@
           (is (= [7] (ops/query-eval sess "(s1.core/f 7)")))))
       (testing "a group with a non-compiling step commits nothing and the image stays faithful"
         (let [n (n-deltas)
-              r (ops/edit-group! sess
+              r (ops/edit-group-once! sess
                                  [{:action :replace :ns 's1.core :name 'f
                                    :source "(defn f [x] (* 2 x))"}
                                   {:action :add :ns 's1.core

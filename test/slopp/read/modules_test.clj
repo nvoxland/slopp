@@ -11,7 +11,7 @@
   asserts the unexempted case alongside it: a report that had simply stopped
   finding anything would satisfy the first half on its own."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.read.modules :as read.modules] [slopp.store :as store] [slopp.index.refs :as refs] [slopp.ops.external :as external] [slopp.edit.modules :as edit.modules] [slopp.read.graph :as graph]))
+            [slopp.ops :as ops] [slopp.read.modules :as read.modules] [slopp.store :as store] [slopp.index.refs :as refs] [slopp.ops.external :as external] [slopp.edit.modules :as edit.modules] [slopp.read.graph :as graph] [slopp.store.fields :as fields]))
 
 (deftest ^:external the-module-surface-is-browsable
   (let [sess (external/open!)]
@@ -817,3 +817,20 @@
       (let [row (get by ["au.c3" "zz"])]
         (is (some? row) (str "expected a drift row for the residue alias: " (pr-str rows)))
         (is (nil? (:ambiguous row)) (pr-str row))))))
+
+(deftest auto-declared-edges-are-the-ones-the-pipeline-declared-and-nobody-retracted
+  ;; slopp-ui, 2026-08-30, on auto-declared edges: "don't ask me — but make
+  ;; the accumulation visible." Each edge a write declares for itself is
+  ;; reasonable alone; twenty of them over a week is the module graph
+  ;; growing with nobody having said so out loud. The COUNT is what a reader
+  ;; acts on; the edges are what they read once they decide to look.
+  (let [auto fields/auto-module-dep-prompt
+        deltas [{:op :module-edge :from "a" :to "b" :action :add :prompt auto :id "d1"}
+                {:op :module-edge :from "a" :to "c" :action :add :prompt "by hand" :id "d2"}
+                {:op :module-edge :from "b" :to "c" :action :add :prompt auto :id "d3"}
+                {:op :module-edge :from "a" :to "b" :action :remove :prompt "decoupled" :id "d4"}
+                {:op :module-test-edge :from "a" :to "d" :action :add :prompt auto :id "d5"}
+                {:op :replace :ns 'x :prompt auto :id "d6"}]]
+    (is (= [{:from "b" :to "c" :delta "d3"}]
+           (read.modules/auto-declared-edges deltas))
+        "declared by the pipeline, still standing, production edges only")))

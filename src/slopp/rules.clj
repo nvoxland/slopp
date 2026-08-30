@@ -1542,3 +1542,30 @@
     (assoc plan
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
+
+(defn fold-standing-info
+  "`findings` (rule key → rows) with every INFO-ONLY rule folded to
+  `{:info n :why <one> :rows \"full_check {verbose true}\"}`; `:verbose? true`
+  returns it untouched.
+
+  A rule whose every row is `:severity :info` cannot flip a verdict, and its
+  rows do not change from one check to the next — slopp-ui measured ~40
+  `http-dangling-route-refs` rows, half carrying the same 60-word `:why`,
+  reprinted by every `full_check` for two days and never once acted on. The
+  COUNT is what a reader acts on (40 became 41 after touching a view); the
+  rows are read once, when deciding whether the class matters, which is what
+  `verbose` is for. A rule with even one row that can flip the check keeps
+  every row: those are the ones a reader fixes by name.
+
+  Fold AFTER grading (`status-affecting-fired?` reads rows), never before."
+  [findings & {:keys [verbose?]}]
+  (if verbose?
+    findings
+    (into {}
+          (map (fn [[k rows]]
+                 (if (and (seq rows) (every? #(= :info (:severity %)) rows))
+                   [k (cond-> {:info (count rows)
+                               :rows "full_check {verbose true}"}
+                        (some :why rows) (assoc :why (some :why rows)))]
+                   [k rows])))
+          findings)))

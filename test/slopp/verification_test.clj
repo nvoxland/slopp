@@ -511,7 +511,7 @@
               (str "must run the covering test ns found via the graph: "
                    (pr-str (:test r))))))
       (testing "a GROUP write does too — this is where it mattered most"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'cv.core :name 'f
                                    :source "(defn f [] 41)"}]
                                  :prompt "group with no trace evidence")]

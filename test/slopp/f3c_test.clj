@@ -59,7 +59,7 @@
       (seed! sess)
       ;; a reopened durable session has NO trace map — simulate that state
       (swap! sess assoc :test-map {})
-      (let [r (ops/edit-group! sess
+      (let [r (ops/edit-group-once! sess
                                [{:action :replace :ns 'ta.a :name 'f
                                  :source "(defn f [x] (- x))"}
                                 {:action :replace :ns 'ta.b :name 'g

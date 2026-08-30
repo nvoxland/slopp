@@ -200,19 +200,26 @@
                                :prompt {:type "string"}}
                   :required ["ns" "name" "text"]}}
    {:name "edit_replace_form"
-    :description "Replace a whole top-level form (verified write). A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
+    :description "Replace a whole top-level form (verified write). A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal; a first call across a module boundary gets the edge declared for you (:auto-module-dep) unless it would close a cycle, which stays a refusal."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :source {:type "string"} :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source"]}}
    {:name "edit_add_form"
-    :description "Add ONE top-level form — or SEVERAL: `source` holding N forms lands them as one atomic write, verified once, reported per form in :forms (growing a namespace is no longer one call per form). WHERE a form lands is not yours to say: definitions are arranged before their callers at every write, so write forms in any order. A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal."
+    :description "Add ONE top-level form — or SEVERAL: `source` holding N forms lands them as one atomic write, verified once, reported per form in :forms (growing a namespace is no longer one call per form). WHERE a form lands is not yours to say: definitions are arranged before their callers at every write, so write forms in any order. A form naming an alias the ns lacks that exactly one namespace can supply gets the require added for you (:auto-require says so) instead of a refusal; a first call across a module boundary gets the edge declared for you (:auto-module-dep) unless it would close a cycle, which stays a refusal."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :source {:type "string"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["ns" "source"]}}
+   {:name "edit_group"
+    :description "ONE INTENT as one atomic write: several related steps — the fn, its test, the caller it changes, the require it needs — applied together, every per-step gate intact, verified ONCE, reported per step in :steps. steps: [{action: add|replace|subform|delete|require, ns, name, source, match, text, where, require}] — the same keys the single-form tools take. All-or-nothing: a refused step names its index and nothing lands. A missing alias exactly one namespace can supply is required for you (:auto-require). Not a shopping list: a whole feature in one call is refused by the same gates a whole feature in one form is, and done is still the completeness judgement."
+    :inputSchema {:type "object"
+                  :properties {:steps {:type "array" :items {:type "object"}}
+                               :prompt {:type "string"}
+                               :verbose {:type "boolean"}}
+                  :required ["steps" "prompt"]}}
    {:name "edit_delete_form"
     :description "Delete a top-level form (verified write; ns-unmap in the image, and a defmethod is unregistered from its multi). REFUSES while anything still CALLS it, naming the callers — the same stance ns_delete takes for a namespace something still requires, and for the same reason: the delete would commit, the namespace would fail to RELOAD, and the store would boot nowhere. Only compile-time (:static) references block; a quoted symbol or a ^{:covers} marker does not, and a recursive fn is not its own caller. To remove a caller and its callee together, delete the CALLERS first and the callee last — dependency order reversed, one call each. Two forms that call EACH OTHER have no valid order: edit_replace_form one to drop the call, then delete both. Say WHY in prompt."
     :inputSchema {:type "object"
@@ -352,7 +359,8 @@
    {:name "full_check"
     :description "The WHOLE-STORE check, on demand: kondo over every namespace, dead public surface over every namespace, and every test in every tier — in-image, ^:integration, and the external ^:external suite. One call, everything; there is no separate integration-only or lint-only tool. NOTHING forces this — not done, not commit_point. `done` is episode-scoped (it answers whether the work you just did is good); this answers whether the STORE is good, which is slower and is your judgement call. Reach for it when a change was broad, when you deleted a caller (dead surface appears in namespaces you never touched), or before a commit you want to stand behind. affected=true is the MIDDLE GEAR between done and the whole thing: lint/dead-surface/layering/in-image still cover every namespace (they cost ~5-7s), while the ^:external tier — which is ~187s of a ~190s run — narrows to the tests your changes since the last milestone can reach. The result states the narrowing. A verdict that STILL STANDS is returned instead of re-earned: when nothing since the last whole-store check could have changed what it says, you get that verdict back with :standing true in about a millisecond, and no check runs. Asking twice for one answer cost this store 7.6 hours before that existed. force=true runs it anyway; any write of any kind retires the standing verdict on its own. READING :external :cost (read this once, here): the tier costs its SLOWEST shard, not the sum; the FASTEST shard still paid a whole JVM boot plus dependency resolution (~8s of it), so :narrowing-ceiling-ms (slowest minus fastest) is the most affected=true can ever return, and only when your changes are local enough to drop whole test namespaces — a core-namespace change reaches nearly everything and narrows to almost the same set. :unbalanced? true means the SPREAD between shards is part of the cost and fewer tests will not address it; re-balancing has measured worse three times because a namespace's cost here depends on what its neighbours leave it (the same namespace measured 0.8s and 27.1s across two runs), so treat :ns-ms as evidence about a run, never a weight for the next one."
     :inputSchema {:type "object" :properties {:affected {:type "boolean"}
-                                              :force {:type "boolean"}}}}
+                                              :force {:type "boolean"}
+                                              :verbose {:type "boolean"}}}}
    {:name "done"
     :description "Close a unit of work: normalize your touched forms, re-verify, record a labeled boundary. EPISODE-SCOPED (:scope :episode on every result — read this once, here): it runs the whole in-image suite plus the ^:external tests your changes impact, but lint and dead-surface cover only the namespaces you touched and the full ^:external / ^:integration tiers do not run — `full_check` is the whole store. The two also differ in ISOLATION the other way: done puts every impacted ^:external test in ONE serial JVM and full_check shards across four, so a pair that fails only TOGETHER fails here and can pass there — a red done beside a green full_check is not done being wrong. When the impacted ^:external set is most of the suite it is DEFERRED (:external-pending, with the count) and the green is the in-image suite only; that gets likelier as a change gets broader, so on a broad change `full_check` is the only external evidence the episode gets. done REPORTS; it never refuses — an unfixable finding is recorded honestly rather than blocking you. Selection is per form: trace evidence where it exists, the form's own namespace-reach where it does not."
     :inputSchema {:type "object" :properties {:label {:type "string"}}}}
@@ -633,8 +641,10 @@ ORIENT:  orient {ask} (the forms that matter, ranked, with WHY) — one call.
          independent reads go in ONE turn (several calls, one message)
 OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
          query_observe {ns name code} (capture args/returns flowing through a fn)
-WRITE:   in INTENTS: the fn + its test + the caller are ONE edit_add_form
-         whose `source` holds several forms — one atomic write, verified once.
+WRITE:   in INTENTS: the fn + its test + the caller it changes are ONE
+         edit_group {steps [{action add|replace|subform|delete|require …}]}
+         — one atomic write, every gate per step, verified once, reported
+         per step. New forms only: edit_add_form with N forms in `source`.
          edit_replace_form {ns name source} · edit_subform {ns name match source}
          edit_rename {ns from to}   <- never rename by editing call sites
          rename_sweep {from to dry_run true} first, then without
@@ -658,7 +668,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
 
 (def write-tools
   (into single-write-tools
-        ["edit_delete_form" "edit_rename" "edit_extract"
+        ["edit_group" "edit_delete_form" "edit_rename" "edit_extract"
          "ns_add_require" "ns_remove_require" "ns_create"
          "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
          "deps_pure" "change_signature" "ns_realias"]))
@@ -688,7 +698,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
     :delta :deltas :group :forms :affected :renamed :renamed-namespaces
     :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
     :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
-    :extracted :step :to-ns :keys :unknown-shape
+    :extracted :step :steps :auto-require :auto-module-dep :to-ns :keys :unknown-shape
     ;; what a realias moved, and what it declined to
     :sites :lib :left-behind
     ;; what it cost and whether to believe it
@@ -803,8 +813,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
    properties plus the universal cross-cutting keys (:agent stamped by the
    dispatch, :prompt intent, :verbose full payload). There are no aliases —
    one argument has one spelling, and the schema is it. nil for a name the
-   server does not advertise (`edit-group!` is deliberately off-wire; an
-   unknown name) — that tool opts OUT of strict validation rather than
+   server does not advertise (an unknown name) — that tool opts OUT of strict validation rather than
    refusing every key."
   [name]
   (when-let [d (some #(when (= name (:name %)) %) tools)]

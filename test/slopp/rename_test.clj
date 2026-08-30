@@ -130,7 +130,7 @@
                      (str (ops/query-eval sess "(resolve 'gv.core/alpha)")))
             (pr-str (ops/query-eval sess "(resolve 'gv.core/alpha)"))))
       (testing "group replace-that-renames unmaps too"
-        (ops/edit-group! sess [{:action :replace :ns 'gv.core :name 'beta
+        (ops/edit-group-once! sess [{:action :replace :ns 'gv.core :name 'beta
                                 :source "(defn beta2 [x] x)"}]
                          :prompt "rn2")
         (is (re-find #"nil"
@@ -264,7 +264,7 @@
       (ops/ingest! sess 'sd.core
                    (str "(ns sd.core)\n\n"
                         "(defn use-it [^String zsweep-target] zsweep-target)\n"))
-      (let [r (ops/edit-group! sess
+      (let [r (ops/edit-group-once! sess
                                [{:action :replace :ns 'sd.core :name 'use-it
                                  :source "(defn use-it [zsweep-target] zsweep-target)"}]
                                :prompt "a group op that loses a hint")]
@@ -973,7 +973,7 @@
       ;; not run.
       (ops/ingest! sess 'a.note "(ns a.note)\n\n(def where \"the code lives under a.web\")\n")
 
-      (let [r (with-redefs [ops/edit-group! (fn [& _] {:error "forced group failure"})]
+      (let [r (with-redefs [ops/edit-group-once! (fn [& _] {:error "forced group failure"})]
                 (ops/rename-sweep! sess "a.web" "a.http" :prompt "sweep that will fail"))]
 
         (testing "the failure is still reported"

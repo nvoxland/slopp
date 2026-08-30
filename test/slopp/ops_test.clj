@@ -790,7 +790,7 @@
               "excluded-and-reported, the traced-run! :external-pending pattern — never silent")))
 
       (testing "the edit that FIXES the broken namespace verifies against the POST-edit state"
-        (let [r (ops/edit-group! sess
+        (let [r (ops/edit-group-once! sess
                                  [{:action :replace :ns 'app.core :name 'app.core
                                    :source "(ns app.core)"}
                                   {:action :replace :ns 'app.core :name 'g

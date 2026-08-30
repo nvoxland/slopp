@@ -167,7 +167,7 @@
                                (note! (str path ": comment/whitespace-only remote change — "
                                            "not representable as a form edit, skipped")))
             :else
-            (let [r (ops/edit-group! session (:steps plan)
+            (let [r (ops/edit-group-once! session (:steps plan)
                                      :prompt (str "pull: " path) :agent agent)]
               (if (:error r)
                 (conflict! path ns-sym (str "failed to apply: " (:error r)))
