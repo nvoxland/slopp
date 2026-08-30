@@ -824,3 +824,28 @@
       (let [r (orient/orient-map sess :tokens 4000)]
         (is (empty? (:seeds r)))
         (is (= 5 (count (:rows r))) (pr-str (rank r)))))))
+
+(deftest orient-map-carries-the-seeds-source-inside-its-budget
+  ;; eval10 (s1, s2 census): `orient` answered in ~10k chars and the agent
+  ;; still made eleven reads before its first write — the map named the
+  ;; entry point and the agent then fetched it. The forms the ask NAMES are
+  ;; the ones about to be edited, so their source rides the row when the
+  ;; budget allows: seeds first, with source, then the neighbourhood as
+  ;; cards. A budget too small for a seed's source keeps its card.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'os.core
+                               (str "(ns os.core)\n"
+                                    "(defn leaf \"Leaf.\" [x] x)\n"
+                                    "(defn entry \"Entry — calls leaf.\" [x] (leaf x))\n")))
+        sess (atom {:store st :test-map {}})
+        row  (fn [r q] (first (filter #(= q (:form %)) (:rows r))))]
+    (testing "a seed row carries its source; a neighbour stays a card"
+      (let [r (orient/orient-map sess :seeds ["os.core/entry"] :tokens 4000)]
+        (is (re-find #"\(defn entry" (:source (row r 'os.core/entry))) (pr-str (row r 'os.core/entry)))
+        (is (nil? (:source (row r 'os.core/leaf))) "the neighbourhood is cards")
+        (is (<= (:tokens r) 4000))))
+    (testing "the source counts against the budget, and a budget too small for it keeps the card"
+      (let [r (orient/orient-map sess :seeds ["os.core/entry"] :tokens 30)]
+        (is (= 'os.core/entry (:form (first (:rows r)))) "the seed still leads")
+        (is (nil? (:source (first (:rows r)))) (pr-str r))
+        (is (<= (:tokens r) 30))))))

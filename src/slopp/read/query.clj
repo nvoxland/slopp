@@ -65,19 +65,32 @@
   (store.render/render-ns (:store @session) ns-sym))
 
 (defn ^:export query-search
-  "The missing grep: regex over all store source, form-addressed results
-  [{:ns :form :line}], capped at `:limit` (default 30)."
+  "The missing grep: regex over all store source, form-addressed — ONE row
+  per matching form: `{:ns :form :line [:matches n] :sig :doc [:effectful]}`,
+  capped at `:limit` forms (default 30). `:line` is the first matching line,
+  trimmed; `:matches` rides when more lines in the same form matched; the
+  signature and doc line come from the form's card.
+
+  A hit used to be a bare line per match. A line says WHERE; the agent then
+  read the form to learn WHAT, and eval10 measured 6–7 searches per lifetime
+  cell each followed by a `query_source` of the forms the hits named. The
+  card answers the usual next question in the same call."
   [session pattern & {:keys [limit] :or {limit 30}}]
   (try
     (let [re (re-pattern pattern)
           st (:store @session)]
       (->> (for [ns-sym (sort (keys (:namespaces st)))
                  e      (store/forms st ns-sym)
-                 line   (str/split-lines (n/string (:node e)))
-                 :when  (re-find re line)]
-             {:ns ns-sym
-              :form (or (:name e) (:id e))
-              :line (str/trim line)})
+                 :let   [lines (filter #(re-find re %)
+                                       (str/split-lines (n/string (:node e))))]
+                 :when  (seq lines)]
+             (let [nm (:name e)]
+               (cond-> {:ns ns-sym
+                        :form (or nm (:id e))
+                        :line (str/trim (first lines))}
+                 (next lines) (assoc :matches (count lines))
+                 nm           (merge (select-keys (orient/form-card session ns-sym nm)
+                                                  [:sig :doc :effectful])))))
            (take limit)
            vec))
     (catch Exception ex

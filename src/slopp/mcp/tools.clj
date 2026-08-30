@@ -15,7 +15,7 @@
   Split per group so the registry stays editable without touching a monolith,
   and `read-only-tools` rides alongside because the same fact — this never
   modifies the store — decides both the MCP `readOnlyHint` and whether a
-  client has to prompt.")
+  client has to prompt." (:require [clojure.string :as str]))
 
 (def orientation-tools
   "Read/orient tool descriptors: project, search, source, dossiers, the oracle. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
@@ -24,7 +24,7 @@
     :inputSchema {:type "object" :properties {:since {:type "string"}
                                               :detail {:type "boolean"}}}}
    {:name "query_search"
-    :description "Regex search across all store source; hits are {:ns :form :line}. Search before reading."
+    :description "Regex search across all store source; ONE hit per matching form, and the hit is the form's card: {:ns :form :line :sig :doc [:matches n]} — the signature and doc line say what a hit IS without a read. Search before reading."
     :inputSchema {:type "object"
                   :properties {:pattern {:type "string"}
                                :limit {:type "integer"}}
@@ -52,7 +52,7 @@
     :description "START HERE, once: namespaces with form names, recent milestones, git alignment, and the working loop — orientation in one small call. Depth on demand: query_source {ns}/query_brief/report."
     :inputSchema {:type "object" :properties {}}}
    {:name "orient" :image-free true :read-only true
-    :description "THE map for an ask, in ONE budgeted call: the forms that matter for it, ranked by a walk over the reference graph and the tests that cover them, fitted to `tokens` (default 1500). Each row is a card (sig, doc line, recorded why, test warranty) plus :via — the edge that made it relevant (seed / called by X / calls X / covered by T). Give it the ask verbatim (`ask`) and/or the forms you already know (`seeds` [\"ns/name\"]). Read this before query_slice: it names the entry point AND its neighbourhood, so the slice is one call instead of five. :more counts what the budget cut."
+    :description "THE map for an ask, in ONE budgeted call: the forms that matter for it, ranked by a walk over the reference graph and the tests that cover them, fitted to `tokens` (default 1500). Each row is a card (sig, doc line, recorded why, test warranty) plus :via — the edge that made it relevant (seed / called by X / calls X / covered by T). Give it the ask verbatim (`ask`) and/or the forms you already know (`seeds` [\"ns/name\"]). The forms the ask NAMES (the seeds) carry their :source when the budget allows, so the write that follows needs no read in between; the neighbourhood is cards. :more counts what the budget cut."
     :inputSchema {:type "object"
                   :properties {:ask {:type "string"}
                                :seeds {:type "array" :items {:type "string"}}
@@ -632,6 +632,11 @@
 
 (def cheat-sheet
   "slopp cheat-sheet — the one-page loop; help {topic} for a chapter
+TOOLS:   14 families, each an index of its ops: orient, read, depends,
+         history, eval, edit, refactor, declare, verify, build, store,
+         slopp, done, commit_point. An op keeps its name and is called
+         through its family: edit {op edit_add_form ns source prompt};
+         read {op query_slice ns name}. help {topic <op>} is an op's card.
 TURNS:   automatic. A write carrying `prompt` opens its own turn; the prompt
          hook records your ask. turn_begin only when a refusal asks for it.
 ORIENT:  orient {ask} (the forms that matter, ranked, with WHY) — one call.
@@ -771,7 +776,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
   DECLARED on the tool rather than inferred from the dispatch."
   (into #{} (comp (filter :read-only) (map :name)) classified))
 
-(def tools
+(def registry
   "Every tool descriptor the server advertises — derived from [[classified]];
   read-only tools carry the MCP readOnlyHint annotation so plan-mode clients
   auto-permit them.
@@ -816,7 +821,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
    server does not advertise (an unknown name) — that tool opts OUT of strict validation rather than
    refusing every key."
   [name]
-  (when-let [d (some #(when (= name (:name %)) %) tools)]
+  (when-let [d (some #(when (= name (:name %)) %) registry)]
     (into #{:agent :prompt :verbose}
           (keys (get-in d [:inputSchema :properties])))))
 
@@ -829,3 +834,97 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
   [name arguments]
   (when-let [acc (accepted-arg-keys name)]
     (seq (remove acc (keys arguments)))))
+
+(defn missing-required-keys
+  "The keys the registry descriptor for `name` marks `:required` that
+  `arguments` does not carry — nil when none, or for a name the registry
+  lacks. The client used to catch these locally against the op's own
+  schema; under the family surface only `op` can be required there, so the
+  server says by name what is missing (slopp-ui named the trade)."
+  [name arguments]
+  (when-let [d (some #(when (= name (:name %)) %) registry)]
+    (seq (remove #(some? (get arguments (keyword %)))
+                 (get-in d [:inputSchema :required])))))
+
+(def families
+  "The advertised surface: fourteen families, each an INDEX of the ops it
+  holds. `op` is the operation's existing REGISTRY name — every refusal,
+  docstring, skill line and mailbox message that spells `edit_subform` stays
+  exactly right; only the packaging moved. eval10 measured why: 96 advertised
+  tools (~64k chars of descriptions) were all DEFERRED by the client, and the
+  agent paid 19–22 ToolSearch turns per lifetime cell to find them, plus the
+  choosing cost of a 96-name list. `done` and `commit_point` keep their own
+  names: they are the loop's two verbs. `slopp` is the remainder, named as
+  such rather than pretending to be a cluster (slopp-ui, 2026-08-30)."
+  [{:name "orient" :blurb "Where to start: the forms that matter for an ask, ranked with why; or the project brief." :ops ["orient" "session_brief"]}
+   {:name "read" :blurb "Read code by form, never by file: one form with what it reaches, several forms, a search, the outline, a spooled remainder." :ops ["query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project"]}
+   {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
+   {:name "history" :blurb "What changed, why and when: form history, intents, milestones, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
+   {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
+   {:name "edit" :blurb "Verified writes, by form: one intent as a group, or one form at a time." :ops ["edit_group" "edit_add_form" "edit_replace_form" "edit_subform" "edit_delete_form" "edit_comment" "edit_revert" "undo" "episode_revert"]}
+   {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}
+   {:name "declare" :blurb "Namespaces, requires, module edges and dials, dependencies." :ops ["ns_create" "ns_delete" "ns_add_require" "ns_remove_require" "module_dep" "module_purity" "module_role" "module_platform" "deps_add" "deps_remove" "deps_list" "deps_pure" "js_dep"]}
+   {:name "verify" :blurb "A bigger question than one write answers: chosen tests, the whole store, a fresh image, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "restart" "review_scan" "draft_test" "screen"]}
+   {:name "build" :blurb "Artifacts: the jar's sources, the browser bundle, a generated client, the dev server." :ops ["build" "compile_client" "generate_client" "ui_serve"]}
+   {:name "store" :blurb "The store itself: health, doctor, compaction, config, and what it declares (capabilities, rules, vocabulary, surface, telemetry, cost)." :ops ["store_health" "store_doctor" "store_compact" "config" "config_file" "query_capabilities" "query_rules" "query_vocabulary" "query_surface" "query_rule_telemetry" "query_cost"]}
+   {:name "slopp" :blurb "The remainder, named as such: git, branches, threads, files, turns, help." :ops ["git_push" "git_clone" "git_pull" "git_conflicts" "git_resolve" "import_dir" "branch_create" "branch_switch" "branch_merge" "branch_delete" "thread_list" "thread_drop" "merge_from" "file_put" "file_get" "file_list" "file_remove" "turn_begin" "turn_end" "help"]}
+   {:name "done" :ops ["done"]}
+   {:name "commit_point" :ops ["commit_point"]}])
+
+(defn- op-line
+  "One index line for a registry descriptor: `op {required [optional]} — the
+  first sentence of its description`, capped so 96 lines stay one screen."
+  [{:keys [name description inputSchema]}]
+  (let [req  (vec (:required inputSchema))
+        opt  (vec (sort (remove (set req) (map clojure.core/name (keys (:properties inputSchema))))))
+        s    (first (str/split (or description "") #"(?<=[.!?])\s" 2))
+        s    (if (> (count s) 110) (str (subs s 0 107) "…") s)]
+    (str name " {" (str/join " " req)
+         (when (seq opt) (str (when (seq req) " ") "[" (str/join " " opt) "]"))
+         "} — " s)))
+
+(defn- merge-property
+  "Two ops' schemas for the same key, as one property: identical stays as
+  is; different TYPES become a JSON-schema type array so a client that
+  validates locally accepts either (`edit_subform`'s `text` is a boolean,
+  `edit_comment`'s a string). Descriptions keep the first op's."
+  [a b]
+  (if (= a b)
+    a
+    (let [types (fn [x] (let [t (:type x)] (if (vector? t) t (if t [t] []))))]
+      (assoc (merge b a) :type (vec (distinct (concat (types a) (types b))))))))
+
+(defn family-descriptor
+  "The advertised descriptor for one family: a single-op family IS its op's
+  registry descriptor (no `op` to pass); a multi-op family's description is
+  the blurb plus one [[op-line]] per op, its schema `op` (enum, required)
+  plus the union of its ops' properties — the union is for clients that
+  validate locally — and it carries readOnlyHint only when every op does."
+  [{:keys [name blurb ops]}]
+  (let [members (mapv (fn [op] (or (some #(when (= op (:name %)) %) registry)
+                                   (throw (ex-info (str "family " name " names an op the registry lacks: " op)
+                                                   {:family name :op op}))))
+                      ops)]
+    (if (= 1 (count members))
+      (first members)
+      (cond-> {:name name
+               :description (str blurb " Call with op = the operation's name."
+                                 " Each line: op {required [optional]} — what it does;"
+                                 " help {topic op} is the full card.\n"
+                                 (str/join "\n" (map op-line members)))
+               :inputSchema {:type "object"
+                             :properties (reduce (fn [acc m]
+                                                   (merge-with merge-property acc
+                                                               (get-in m [:inputSchema :properties])))
+                                                 {:op {:type "string" :enum ops}}
+                                                 members)
+                             :required ["op"]}}
+        (every? #(get-in % [:annotations :readOnlyHint]) members)
+        (assoc :annotations {:readOnlyHint true})))))
+
+(def tools
+  "Every tool descriptor the server ADVERTISES — the fourteen [[families]],
+  derived from [[registry]] by [[family-descriptor]]. The registry stays the
+  validation and dispatch surface: an op called by its own name still
+  dispatches (the `--call` door, the hooks), it is just not advertised."
+  (mapv family-descriptor families))

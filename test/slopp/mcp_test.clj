@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -29,8 +29,11 @@
       (let [tools (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])]
         (is (seq tools))
         (is (every? #(re-matches #"[a-zA-Z0-9_-]+" (:name %)) tools))
-        (is (contains? (set (map :name tools)) "query_source"))
-        (is (contains? (set (map :name tools)) "edit_replace_form"))))
+        ;; D-families: the names are families; the ops are their enums
+        (is (contains? (set (map :name tools)) "read"))
+        (is (contains? (set (map :name tools)) "edit"))
+        (is (some #{"query_source"} (mapcat #(get-in % [:inputSchema :properties :op :enum]) tools)))
+        (is (some #{"edit_replace_form"} (mapcat #(get-in % [:inputSchema :properties :op :enum]) tools)))))
     (testing "notifications (no id) produce no response"
       (is (nil? (mcp/handle! sess {:method "notifications/initialized"}))))
     (testing "unknown method -> JSON-RPC error"
@@ -525,13 +528,14 @@
       (let [tools   (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
                             [:result :tools])
             by-name (into {} (map (juxt :name identity)) tools)]
-        (is (true? (get-in by-name ["query_source" :annotations :readOnlyHint])))
-        (is (true? (get-in by-name ["query_eval" :annotations :readOnlyHint]))
+        ;; D-families: the hint rides a family only when EVERY op in it is read-only
+        (is (true? (get-in by-name ["read" :annotations :readOnlyHint])))
+        (is (true? (get-in by-name ["eval" :annotations :readOnlyHint]))
             "the oracle is observe-only by gate — clients may trust it")
-        (is (true? (get-in by-name ["session_brief" :annotations :readOnlyHint])))
-        (is (nil? (get-in by-name ["edit_replace_form" :annotations]))
+        (is (true? (get-in by-name ["orient" :annotations :readOnlyHint])))
+        (is (nil? (get-in by-name ["edit" :annotations]))
             "writes carry NO read-only claim")
-        (is (nil? (get-in by-name ["module_dep" :annotations]))))
+        (is (nil? (get-in by-name ["declare" :annotations]))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external the-wire-speaks-done-not-groups
@@ -544,7 +548,7 @@
         ;; episodes are still inferred — done is the completeness judgement. A
         ;; GROUP is a smaller thing: one intent's steps as one verified write
         ;; (see an-intent-lands-as-one-verified-group)
-        (is (contains? names "edit_group"))
+        (is (contains? names "edit") "the edit family indexes edit_group (D-families)")
         (is (not (contains? names "checkpoint"))))
       (finally (ops/close! sess)))))
 
@@ -573,9 +577,10 @@
       (let [tools   (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
                             [:result :tools])
             by-name (into {} (map (juxt :name identity)) tools)]
-        (is (contains? by-name "review_scan"))
-        (is (true? (get-in by-name ["review_scan" :annotations :readOnlyHint]))
-            "a review tool must not prompt in plan mode"))
+        (is (some #{"review_scan"} (get-in by-name ["verify" :inputSchema :properties :op :enum]))
+            "indexed by the verify family (D-families)")
+        (is (contains? tools/read-only-tools "review_scan")
+            "read-only in the registry; the verify family mixes reads and writes, so the hint rides the op, not the family"))
       (call! sess "ns_create" {:ns "rw.io" :source "(ns rw.io)\n(defn zap! [x] (spit \"/dev/null\" x))\n"})
       (let [r (call! sess "review_scan" {})]
         (is (re-find #":flagged" r) r)
@@ -605,7 +610,7 @@
       (is (nil? (#'mcp/tools-note! sess)) "baseline updated after emitting"))))
 
 (deftest query-store-rides-the-wire-read-only
-  (is (some #(= "query_store" (:name %)) tools/tools)
+  (is (some #(= "query_store" (:name %)) tools/registry)
       "the store oracle is a tool")
   (is (contains? @#'tools/read-only-tools "query_store")
       "plan mode may call it without prompts"))
@@ -692,7 +697,7 @@
           (is (not (re-find #"got 0" r)))))
       (testing "a genuinely missing source is a clear message too"
         (let [r (call! sess "edit_replace_form" {:ns "sa" :name "f"})]
-          (is (re-find #"missing required argument :source" r))))
+          (is (re-find #"needs :source" r) r)))
       (testing "edit_add_form guards its source arg the same way"
         (let [r (call! sess "edit_add_form" {:ns "sa" :new_source "(defn g [x] x)"})]
           (is (re-find #"unknown argument" r))
@@ -793,10 +798,11 @@
       (let [by-name (into {} (map (juxt :name identity))
                           (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
                                   [:result :tools]))]
-        (is (contains? by-name "cleanup"))
-        (is (not (contains? by-name "fix_declares"))
-            "superseded — one general tidy, not a declare-specific tool")
-        (is (nil? (get-in by-name ["cleanup" :annotations]))
+        (let [ops (set (get-in by-name ["refactor" :inputSchema :properties :op :enum]))]
+          (is (contains? ops "cleanup") "indexed by the refactor family (D-families)")
+          (is (not (contains? ops "fix_declares"))
+              "superseded — one general tidy, not a declare-specific tool"))
+        (is (nil? (get-in by-name ["refactor" :annotations]))
             "it writes — no read-only claim"))
       (ops/ingest! sess 'fd.wire
                    (str "(ns fd.wire)\n\n"
@@ -817,8 +823,9 @@
       (let [by-name (into {} (map (juxt :name identity))
                           (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
                                   [:result :tools]))]
-        (is (contains? by-name "undo"))
-        (is (nil? (get-in by-name ["undo" :annotations]))
+        (is (some #{"undo"} (get-in by-name ["edit" :inputSchema :properties :op :enum]))
+            "one call away, in the edit family's index (D-families)")
+        (is (nil? (get-in by-name ["edit" :annotations]))
             "it writes — no read-only claim"))
       (call! sess "ns_create" {:ns "un.wire"
                               :source "(ns un.wire)\n(defn keep-me [] 1)\n"})
@@ -1091,7 +1098,7 @@
   ;; needed; the non-empty assertions below are what stops it regressing to
   ;; vacuous a second time.
   (let [st     (external/built-store)
-        known  (into #{} (map :name) tools/tools)
+        known  (into #{} (map :name) tools/registry)
         ;; ONE exclusion by name: git_map is a SQLITE TABLE, not a tool (every
         ;; use is in the sha-mapping code; the prefix alone lies here).
         exempt #{"git_map"}
@@ -1473,7 +1480,7 @@
   (let [sess (external/open!)]
     (try
       (testing "advertised, and NOT read-only — it binds a port"
-        (is (some #(= "ui_serve" (:name %)) tools/tools))
+        (is (some #(= "ui_serve" (:name %)) tools/registry))
         (is (not (contains? tools/read-only-tools "ui_serve"))
             "a readOnlyHint would let plan mode auto-permit binding a port"))
       (testing "it answers with the bound port and a url that serves this session's API"
@@ -1883,10 +1890,10 @@
   ;; (`tools/wire-keys`) and never from a literal list. A literal list is a
   ;; fifteenth chance to disagree about what reaches an agent.
   (let [st  (external/built-store)
-        src (n/string (:node (store/form-named st 'slopp.mcp 'call-tool!)))
+        src (n/string (:node (store/form-named st 'slopp.mcp 'call-op!)))
         literal-lists (re-seq #"select-keys \[[^\]]+\]" src)]
     (testing "there is a population — this reads the real dispatch"
-      (is (< 1000 (count src)) "call-tool! source not found")
+      (is (< 1000 (count src)) "call-op! source not found")
       (is (re-find #"wire-keys" src)
           "the dispatch does not mention the registry at all"))
     (testing "no hand-maintained allowlist survives"
@@ -1916,7 +1923,7 @@
                      (keep (comp #(or (:rest/path %) (:http/path %)) meta))
                      sort vec)
         non-api (remove #(str/starts-with? % "/api") paths)
-        desc    (:description (first (filter #(= "ui_serve" (:name %)) tools/tools)))]
+        desc    (:description (first (filter #(= "ui_serve" (:name %)) tools/registry)))]
     (testing "the FACT this rests on: the listener serves /api and nothing else"
       (is (seq paths) "served-namespaces declared no endpoints at all")
       (is (empty? non-api)
@@ -2114,7 +2121,7 @@
                              x    (tree-seq coll? seq s)
                              :when (string? x)]
                          x))
-        advertised (into #{} (map :name) tools/tools)
+        advertised (into #{} (map :name) tools/registry)
         orphans    (vec (sort (remove literals advertised)))]
     (testing "there is a POPULATION — the sibling guard above spent its whole
               life scanning an empty store, and the fix is the same one line"
@@ -2161,11 +2168,11 @@
            (into #{} (comp (filter :read-only) (map :name)) @#'tools/classified))))
   (testing "every advertised tool carries a resolved boolean — none is unclassified"
     (is (every? #(boolean? (:read-only %)) @#'tools/classified))
-    (is (= (count tools/tools) (count @#'tools/classified))))
+    (is (= (count tools/registry) (count @#'tools/classified))))
   (testing "and the marker NEVER reaches the wire — tools/tools is serialized as-is"
-    (is (not-any? #(contains? % :read-only) tools/tools)
+    (is (not-any? #(contains? % :read-only) tools/registry)
         "an MCP descriptor must carry no key the protocol does not define")
-    (is (some #(= {:readOnlyHint true} (:annotations %)) tools/tools)
+    (is (some #(= {:readOnlyHint true} (:annotations %)) tools/registry)
         "the annotation the marker exists to produce is still set"))
   (testing "the classification itself did not change — this is a refactor"
     ;; positive control on the refactor: same answer, different home
@@ -2210,8 +2217,8 @@
     (is (every? #(boolean? (:image-free %)) @#'tools/classified))
     (is (every? #(boolean? (:read-only %))  @#'tools/classified)))
   (testing "and neither marker reaches the wire"
-    (is (not-any? #(contains? % :image-free) tools/tools))
-    (is (not-any? #(contains? % :read-only) tools/tools)))
+    (is (not-any? #(contains? % :image-free) tools/registry))
+    (is (not-any? #(contains? % :read-only) tools/registry)))
   (testing "the classification did not change — this is a refactor"
     ;; positive control: same answer, different home
     (is (= 27 (count tools/image-free-tools)))
@@ -2662,7 +2669,9 @@
       ;; overwrites the shared slot before A's server gets to it.
       (spit mine "{\"session-id\":\"sess-A\",\"prompt\":\"A's second ask\"}")
       (spit pi   "{\"session-id\":\"sess-B\",\"prompt\":\"B's own ask\"}")
-      (call! sess "query_brief" {})
+      ;; a cheap call with NO required keys: the required-key refusal runs
+      ;; before the mailbox is read, so a refused call reads nothing
+      (call! sess "session_brief" {})
       (testing "A's own ask still reaches A"
         (is (= "A's second ask" (:last-intent @sess))))
       (testing "A's mailbox is emptied once read"
@@ -2805,13 +2814,13 @@
   (let [sess (external/open!)]
     (try
       (testing "the plain call still answers, as every existing caller expects"
-        (let [r (str (#'mcp/call-tool! sess {:name "restart" :arguments {}}))]
+        (let [r (str (#'mcp/call-op! sess {:name "restart" :arguments {}}))]
           (is (str/includes? r "restarted") (pr-str r))))
 
       (testing "asking for the app says what happened rather than throwing"
         ;; most stores are not web projects, and an escape hatch that throws
         ;; on them is one nobody reaches for
-        (let [r (str (#'mcp/call-tool! sess {:name "restart"
+        (let [r (str (#'mcp/call-op! sess {:name "restart"
                                             :arguments {:app true}}))]
           (is (or (str/includes? r "run.")
                   (str/includes? r "http.enabled"))
@@ -3063,10 +3072,11 @@
   (let [sess (external/open!)]
     (try
       (testing "it is advertised"
-        (is (contains? (into #{} (map :name)
-                             (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
-                                     [:result :tools]))
-                       "edit_group")))
+        (is (some #{"edit_group"}
+                  (mapcat #(get-in % [:inputSchema :properties :op :enum])
+                          (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
+                                  [:result :tools])))
+            "an op of the edit family (D-families)"))
       (call! sess "ns_create" {:ns "grp.core.util" :source "(ns grp.core.util)\n(defn ^:unused-ok twice [x] (* 2 x))\n"})
       (call! sess "ns_create" {:ns "grp.core" :source "(ns grp.core)\n(defn ^:unused-ok base [] 1)\n"})
       (call! sess "ns_create" {:ns "grp.core-test"
@@ -3171,4 +3181,156 @@
                                            :source "(defn ^:unused-ok f [] (util/g))"})]
         (is (re-find #":auto-require \{:added \"\[ar\.core\.util :as util\]\"" r) r)
         (is (re-find #":ok true" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-advertised-surface-is-fourteen-families-and-every-op-keeps-its-name
+  ;; eval10: 96 advertised tools (~64k chars of descriptions) — Claude Code
+  ;; DEFERRED every one, and the agent paid 19–22 ToolSearch turns per
+  ;; lifetime cell to find them, plus the choosing cost of a 96-name list.
+  ;; Nathan: "cut harder — merge families into fewer, richer tools". The cut
+  ;; that cannot rot the record (slopp-ui): every operation KEEPS ITS NAME as
+  ;; the family's `op`, so every refusal, docstring and skill line that
+  ;; spells `edit_subform` stays exactly right; only the packaging moves.
+  ;; Direct dispatch by op name survives for `--call` and the hooks.
+  (let [sess (external/open!)]
+    (try
+      (let [advertised (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])
+            names      (into #{} (map :name) advertised)]
+        (testing "fourteen families, and done/commit_point keep their own names"
+          (is (= #{"orient" "read" "depends" "history" "eval" "edit" "refactor" "declare"
+                   "verify" "build" "store" "slopp" "done" "commit_point"}
+                 names)
+              (pr-str (sort names))))
+        (testing "every op lives in exactly one family, and the family's description indexes it"
+          (let [placed (frequencies (mapcat :ops tools/families))]
+            (is (every? #(= 1 %) (vals placed)) (pr-str (filter #(not= 1 (val %)) placed)))
+            (is (= (set (keys placed)) (into #{} (map :name) tools/registry))
+                "the families cover the registry exactly"))
+          (let [edit (some #(when (= "edit" (:name %)) %) advertised)]
+            (is (re-find #"edit_subform \{" (:description edit)) (:description edit))
+            (is (= "edit_add_form"
+                   (some #{"edit_add_form"} (get-in edit [:inputSchema :properties :op :enum]))))
+            (is (= ["op"] (get-in edit [:inputSchema :required])))
+            (is (= #{"boolean" "string"} (set (get-in edit [:inputSchema :properties :text :type])))
+                "two ops' types for one key are both accepted, not the first one's")))
+        (testing "the whole advertised surface is small enough never to be deferred"
+          (is (< (count (pr-str advertised)) 30000) (str (count (pr-str advertised))))))
+      (call! sess "ns_create" {:ns "fam.core" :source "(ns fam.core)\n(defn ^:unused-ok f [x] x)\n"})
+      (testing "a family call is the op call"
+        (let [r (call! sess "edit" {:op "edit_add_form" :ns "fam.core" :prompt "via the family"
+                                    :source "(defn ^:unused-ok g [x] (f x))"})]
+          (is (re-find #":ok true" r) r))
+        ;; the write held g's text in the ask's ledger, so the read through
+        ;; the read family answers with a reference (D-form-ledger) — the
+        ;; family call reached the op either way
+        (is (re-find #":name g, :source-already-sent true"
+                     (call! sess "read" {:op "query_source" :targets [{:ns "fam.core" :name "g"}]}))))
+      (testing "the op's own validation, by name"
+        (is (re-find #"unknown op frobnicate for edit — ops: edit_group edit_add_form" (call! sess "edit" {:op "frobnicate"})))
+        (is (re-find #"unknown argument :nom for edit_subform" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :nom "g"})))
+        (is (re-find #"edit_subform needs :name" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :source "1" :match "x" :prompt "p"}))))
+      (testing "an op called by its own name still dispatches (the --call door, the hooks)"
+        (is (re-find #":ok true" (call! sess "edit_replace_form" {:ns "fam.core" :name "g" :prompt "direct"
+                                                                    :source "(defn ^:unused-ok g [x] (f (f x)))"}))))
+      (testing "help {topic op} is the op's full card"
+        (let [h (call! sess "help" {:topic "edit_subform"})]
+          (is (re-find #"edit_subform" h))
+          (is (re-find #":required" h) h)))
+      (finally (ops/close! sess)))))
+
+(deftest a-green-full-check-is-the-size-of-its-verdict
+  ;; eval10 s2 census: an agent called full_check twice mid-loop, each answer
+  ;; (~19k chars, green) was trimmed at the 8k gate and re-fetched WHOLE via
+  ;; query_detail — 76k chars of result for a verdict that fits in one line.
+  ;; Same rule as `terse-done`: green means the verdict, the populations
+  ;; checked, and anything that is NOT bookkeeping; red keeps the full map.
+  (let [green {:status :green :namespaces 244 :lint-errors 0 :lint-warnings 0
+               :checked {:lint 244 :rule-sweep 3402} :ms 300000
+               :rules {:swept [:a :b] :not-swept [{:rule :c :why "…"}] :forms 3402
+                       :findings {:http-dangling-route-refs {:info 1 :rows "full_check {verbose true}"}}
+                       :note "…"}
+               :rules-note "1 rule(s) with standing findings …"
+               :test {:test 838 :pass 5591 :fail 0 :error 0 :type :summary :ms 2986}
+               :external {:status :green :ran 1475 :failures 0 :errors 0 :ns-ms {'x 1} :cost {:shards 4}}
+               :alias-drift [{:ns 'a :lib 'b :as 'c}] :alias-drift-note "16 require(s) …"
+               :modules {:auto-declared 0}
+               :bundle {:sha "abc" :behind 1 :note "…"}}
+        t     (#'mcp/terse-full-check green)]
+    (testing "green: the verdict, what was checked, and the facts a reader branches on"
+      (is (= :green (:status t)))
+      (is (= {:lint 244 :rule-sweep 3402} (:checked t)))
+      (is (= {:ran 1475 :status :green} (:external t)))
+      (is (= {:auto-declared 0} (:modules t)))
+      (is (= {:http-dangling-route-refs {:info 1 :rows "full_check {verbose true}"}} (:findings t))
+          "standing findings survive, folded; their scaffolding does not")
+      (is (= 1 (get-in t [:bundle :behind])) "an artifact behind the store is news")
+      (is (= 1 (:alias-drift t)) "a count, not the rows and a paragraph")
+      (is (not (contains? t :rules-note)))
+      (is (not (contains? t :test)))
+      (is (< (count (pr-str t)) 600) (pr-str t)))
+    (testing "red keeps the full map"
+      (is (= (assoc green :status :red) (#'mcp/terse-full-check (assoc green :status :red)))))
+    (testing "verbose keeps the full map"
+      (is (= green (#'mcp/terse-full-check green :verbose? true))))))
+
+(deftest a-form-source-the-ask-already-holds-is-a-reference
+  ;; `told!` stubs a whole payload the same call already returned; it knows
+  ;; nothing about forms, so orient → slice → query_source of the same form
+  ;; sends its text three times, and a read after the agent's OWN write sends
+  ;; back what the agent typed. The ledger keys on [form-id, hash of text]:
+  ;; every read that sends a source records it, every write whose full source
+  ;; the agent sent records the stored text, and a later read of a form held
+  ;; at that version says so instead. Ask-scoped, like told! — a stub must
+  ;; not outlive the reader it is about.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'lg.core "(ns lg.core)\n(defn f \"F.\" [x] x)\n(defn g \"G.\" [x] (f x))\n"))
+        sess (atom {:store st :test-map {}})
+        src  (fn [nm] (n/string (:node (store/form-named (:store @sess) 'lg.core nm))))
+        rows (fn [] {:rows [{:form 'lg.core/f :via "seed" :source (src 'f)}
+                            {:form 'lg.core/g :via "calls lg.core/f"}]})
+        items (fn [] [{:ns 'lg.core :name 'f :source (src 'f)}
+                      {:ns 'lg.core :name 'g :source (src 'g)}])]
+    (testing "the first send is whole and is remembered; the second is a reference"
+      (is (= (rows) (#'mcp/dedupe-sources! sess (rows))))
+      (let [r (#'mcp/dedupe-sources! sess (rows))]
+        (is (nil? (get-in r [:rows 0 :source])) (pr-str r))
+        (is (true? (get-in r [:rows 0 :source-already-sent])))
+        (is (= "seed" (get-in r [:rows 0 :via])) "the rest of the row is untouched")))
+    (testing "every read shape that carries source: query_source items and a brief"
+      (let [r (#'mcp/dedupe-sources! sess (items))]
+        (is (true? (:source-already-sent (first r))) "f was sent by the orient row")
+        (is (string? (:source (second r))) "g never was"))
+      (is (true? (:source-already-sent (#'mcp/dedupe-sources! sess {:ns 'lg.core :name 'g :source (src 'g) :callers []})))))
+    (testing "a changed form is sent whole again"
+      (let [st' (first (store/replace-node (:store @sess) 'lg.core 'f
+                                           (:node (edit/parse-form "(defn f \"F2.\" [x] (inc x))"))
+                                           :prompt "changed"))]
+        (swap! sess assoc :store st')
+        (is (string? (get-in (#'mcp/dedupe-sources! sess (rows)) [:rows 0 :source])))))
+    (testing "a write whose full source the agent sent is held: the read after it is a reference"
+      (#'mcp/ledger-written! sess "edit_replace_form" {:ns "lg.core" :name "g" :source (src 'g)})
+      (is (true? (:source-already-sent (#'mcp/dedupe-sources! sess {:ns 'lg.core :name 'g :source (src 'g)})))))
+    (testing "a new ask starts over"
+      (swap! sess update :slopp.mcp/ask (fnil inc 0))
+      (is (string? (get-in (#'mcp/dedupe-sources! sess (rows)) [:rows 0 :source]))))))
+
+(deftest ^:external the-read-after-your-own-write-is-a-reference
+  ;; eval10 s1/s2: `query_source` 13–17 per lifetime cell, a good share of
+  ;; them re-reading a form the agent had just written in full. The ledger
+  ;; holds what a full-source write landed; the read comes back as a
+  ;; reference; a form the ask never held, or one that changed since, is
+  ;; sent whole.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "lw.core" :source "(ns lw.core)\n(defn f [x] x)\n(defn ^:unused-ok g [x] (f x))\n"})
+      (call! sess "edit_replace_form" {:ns "lw.core" :name "f" :prompt "held"
+                                       :source "(defn f \"F.\" [x] (inc x))"})
+      (let [r (call! sess "query_source" {:targets [{:ns "lw.core" :name "f"} {:ns "lw.core" :name "g"}]})]
+        (is (re-find #":name f, :source-already-sent true" r) r)
+        (is (re-find #":name g, :source \"\(defn" r) "g was never sent"))
+      (testing "sent once, a form is a reference on the next read of ANY shape"
+        (is (re-find #":source-already-sent true" (call! sess "query_brief" {:ns "lw.core" :name "g"}))))
+      (testing "changed since: sent whole again"
+        (call! sess "edit_subform" {:ns "lw.core" :name "g" :match "(f x)" :source "(f (f x))" :prompt "changed"})
+        (is (re-find #":name g, :source \"\(defn" (call! sess "query_source" {:targets [{:ns "lw.core" :name "g"}]}))))
       (finally (ops/close! sess)))))

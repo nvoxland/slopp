@@ -85,3 +85,26 @@
   (testing "a message-less exception still names its CLASS"
     (is (= "NullPointerException" (query/cause-chain (NullPointerException.)))
         "the class is the only thing left, and it is more than nothing — with no trailing colon promising a message that is not coming")))
+
+(deftest a-search-hit-is-a-card-not-a-bare-line
+  ;; eval10 census: 6–7 searches per lifetime cell, each followed by a
+  ;; query_source of the forms it named — a bare line says WHERE, and the
+  ;; agent then reads to learn WHAT. A hit carrying the form's signature and
+  ;; doc line answers the usual next question in the same call, and a form
+  ;; matching on several lines is ONE row that counts them.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'sq.core
+                               (str "(ns sq.core)\n"
+                                    "(defn price\n  \"Price in cents.\"\n  [x]\n  (* 100 x))\n"
+                                    "(defn ^:unused-ok twice\n  \"Twice the price.\"\n  [x]\n  (price (price x)))\n")))
+        sess (atom {:store st :test-map {}})
+        hits (query/query-search sess "price")]
+    (is (= ['price 'twice] (mapv :form hits)) (pr-str hits))
+    (testing "one row per form, counting the lines that matched"
+      (is (nil? (:matches (first hits))) "one line matched in price — no count to report")
+      (is (= 2 (:matches (second hits))) (pr-str (second hits)))
+      (is (= "(defn price" (:line (first hits))) "the first matching line rides"))
+    (testing "the row is a card"
+      (is (= '[x] (:sig (first hits))))
+      (is (= "Price in cents." (:doc (first hits))))
+      (is (= "Twice the price." (:doc (second hits)))))))

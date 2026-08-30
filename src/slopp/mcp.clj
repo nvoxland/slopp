@@ -9,7 +9,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit]))
 
 (def ^:private protocol-version "2024-11-05")
 
@@ -1036,70 +1036,6 @@
    (fn [session a _sym]
      (text! (branch/merge! session (:dir a))))})
 
-(defn- told!
-  "Knowledge-differential reads: the session keeps a hash of every
-  cacheable VIEW it has sent, SCOPED TO THE CURRENT ASK; an identical
-  re-read within that ask returns a tiny :unchanged stub instead of the
-  payload. Re-fetching becomes FREE, so agents never carry views in
-  context 'just in case' — the whole don't-hoard stance depends on cheap
-  re-asks, and reads are 52% of all output. Any store change alters the
-  payload, so staleness is impossible by construction.
-
-  **The ask scope is the correction, and it is about WHOSE knowledge this
-  is.** The record lives in the SERVER session, which lasts for the
-  process; the claim it makes is about the READER, which resets on
-  `/clear`, on automatic compaction, and for every subagent. Unscoped, the
-  two diverged and the stub said \"you already know\" to a context that had
-  never seen it — measured twice, once mid-plan after a clear and once
-  mid-build after an automatic compact. Not staleness: WITHHOLDING, with
-  absence-of-payload wearing absence-of-change's clothes.
-
-  The ASK is the boundary and the TURN is not: turns rotate on the
-  write-tool gate, so a read-only planning ask never rotates one — and that
-  is precisely where this was first hit. `absorb-pending-intent!` bumps
-  `::ask` for every prompt the hook records, read-only included.
-
-  `:detail` is the escape for the case the scope cannot cover: a subagent
-  shares the session and runs inside the parent's ask, so it can be told
-  \"you already know\" about something it has never seen. The payload is
-  spooled and the id named, which is the same door `query_detail` already
-  opens for trimmed responses — previously the only way to a read-only
-  tool's withheld payload was a write-capable tool that prompts for
-  permission in plan mode."
-  [session tool a payload]
-  (let [k [tool (select-keys a [:ns :name :targets :since :detail :depth
-                                :limit :contains :full :at :collapse :format
-                                :on :direction])]
-        h     [(get @session ::ask 0) (hash payload)]
-        p-str (pr-str payload)
-        stub  {:already-sent true
-               :view (str tool (when (:ns a) (str " " (:ns a)))
-                          (when (:name a) (str "/" (:name a))))
-               :note (str "already sent in this ask — about what YOU received,"
-                          " NOT whether the store changed (an outline does not"
-                          " move when a body does). query_detail {:detail}"
-                          " re-opens it.")}]
-    (if (and (= h (get-in @session [::told k]))
-             ;; a stub bigger than what it withholds is not a saving, it is a
-             ;; round trip for nothing. This was a constant (130 chars) chosen
-             ;; when the stub was one short sentence; the note then grew and
-             ;; the floor did not, so small views started costing MORE to
-             ;; withhold than to send. Measuring the actual stub cannot drift
-             ;; out of step with the stub the way a number written down
-             ;; elsewhere can. The id is a representative one — they are all
-             ;; the same length — because it cannot be minted before the
-             ;; decision to spool.
-             (< (count (pr-str (assoc stub :detail "s00000000000")))
-                (count p-str)))
-      (let [id (spool! session p-str)]
-        ;; a stub is a withholding, not a saving, until nobody opens it —
-        ;; recorded through the same channel as a trim so one fold can ask
-        ;; both paths the question
-        (note-response! {:stub? true :spooled id})
-        (assoc stub :detail id))
-      (do (swap! session assoc-in [::told k] h)
-          payload))))
-
 (defn- host-image-options
   "The idle-image budget this SERVER opens with, from the host environment.
 
@@ -1201,6 +1137,12 @@
 
       (str/blank? (str topic))
       (str tools/cheat-sheet "\n\n" index)
+
+      ;; an OP's full card — the family index carries one line per op, and
+      ;; this is where the rest of its description and its schema live
+      (some #(when (= (str topic) (:name %)) %) tools/registry)
+      (pr-str (select-keys (some #(when (= (str topic) (:name %)) %) tools/registry)
+                           [:name :description :inputSchema]))
 
       (some #{(str topic)} topics)
       (slurp (io/file dir (str topic ".md")))
@@ -1360,7 +1302,189 @@
                 (map? (:where s)) (update :where kw))))
           steps)))
 
-(defn- call-tool! [session {:keys [name arguments]}]
+(defn- terse-full-check
+  "A GREEN whole-store check as the reader needs it: the verdict, the
+  populations it examined (`:checked` — a read that ran on zero is visibly
+  broken), the external tier's count and status, and every fact a reader
+  branches on — standing findings (folded), the auto-declared edge count,
+  alias drift as a count, an artifact behind the store, a standing verdict.
+  The scaffolding goes: notes, per-namespace timings, the sweep plan, the
+  in-image summary. Red keeps the full map, and so does `verbose`.
+
+  eval10 s2: two green checks of ~19k chars each were trimmed at the gate
+  and re-fetched whole through query_detail — 76k chars for a verdict."
+  [r & {:keys [verbose?]}]
+  (if (or verbose? (not= :green (:status r)))
+    r
+    (cond-> {:status :green :namespaces (:namespaces r) :checked (:checked r)}
+      (:external r)        (assoc :external (select-keys (:external r) [:ran :status]))
+      (:modules r)         (assoc :modules (dissoc (:modules r) :edges))
+      (seq (get-in r [:rules :findings])) (assoc :findings (get-in r [:rules :findings]))
+      (seq (:alias-drift r)) (assoc :alias-drift (count (:alias-drift r)))
+      (:bundle r)          (assoc :bundle (select-keys (:bundle r) [:sha :behind]))
+      (:app r)             (assoc :app (:app r))
+      (:standing r)        (assoc :standing (:standing r))
+      (:scope r)           (assoc :scope (:scope r))
+      (:currency-broken r) (assoc :currency-broken (:currency-broken r))
+      (:empty-namespaces r) (assoc :empty-namespaces (:empty-namespaces r))
+      (:crossings r)       (assoc :crossings (:crossings r)))))
+
+(defn- form-version
+  "`[form-id hash-of-text]` for `ns-sym/nm` on the current store value — the
+  identity the ledger keys on — or nil when there is no such form. The form
+  id is stable across edits, so the text hash is the version."
+  [session ns-sym nm]
+  (when-let [e (store/form-named (:store @session) ns-sym nm)]
+    [(:id e) (hash (n/string (:node e)))]))
+
+(defn- ledger-held?
+  "Is this `[form-id text-hash]` held by the reader of the CURRENT ask? The
+  ledger stores the ask number it was recorded under, so a new ask forgets
+  everything without a sweep — a stub must not outlive the reader it is
+  about, and `told!` scopes the same way."
+  [session v]
+  (and v (= (get-in @session [::ledger v]) (::ask @session 0))))
+
+(defn- ledger-hold!
+  "Record `[form-id text-hash]` as held by the current ask's reader."
+  [session v]
+  (when v (swap! session assoc-in [::ledger v] (::ask @session 0))))
+
+(defn- dedupe-sources!
+  "The one pass over a read's result before it goes out: every map carrying
+  a form's identity (`:ns`+`:name`, or a qualified `:form`) and its `:source`
+  is checked against the ledger — held at this version, the source is
+  replaced by `:source-already-sent true` (everything else on the row
+  stays); not held, it is sent and recorded. Walks the shapes that carry
+  source today: a vector of items (`query_source`), `:rows` (`orient`),
+  `:target` (`query_slice`), or the map itself (`query_brief`). A source
+  whose text is not the form's current text — a window, an older version —
+  is never a reference.
+
+  Why: `told!` stubs a whole payload the same call already returned and
+  knows nothing about forms, so orient → slice → query_source of one form
+  sent its text three times, and the read after the agent's own write sent
+  back what the agent had typed. eval10 measured reads at 52% of all output."
+  [session x]
+  (let [row (fn [m ns-sym nm]
+              (let [s (:source m)
+                    v (when (string? s) (form-version session ns-sym nm))]
+                (cond
+                  (nil? v)                    m
+                  (not= (second v) (hash s))  m
+                  (ledger-held? session v)    (-> m (dissoc :source) (assoc :source-already-sent true))
+                  :else                       (do (ledger-hold! session v) m))))
+        one (fn [m]
+              (cond
+                (not (map? m)) m
+                (and (:ns m) (:name m) (contains? m :source))
+                (row m (symbol (str (:ns m))) (symbol (str (:name m))))
+                (and (symbol? (:form m)) (namespace (:form m)) (contains? m :source))
+                (row m (symbol (namespace (:form m))) (symbol (name (:form m))))
+                :else m))]
+    (cond
+      (vector? x) (mapv one x)
+      (map? x)    (cond-> (one x)
+                    (vector? (:rows x)) (update :rows #(mapv one %))
+                    (map? (:target x))  (update :target one))
+      :else       x)))
+
+(defn- told!
+  "Knowledge-differential reads: the session keeps a hash of every
+  cacheable VIEW it has sent, SCOPED TO THE CURRENT ASK; an identical
+  re-read within that ask returns a tiny :unchanged stub instead of the
+  payload. Re-fetching becomes FREE, so agents never carry views in
+  context 'just in case' — the whole don't-hoard stance depends on cheap
+  re-asks, and reads are 52% of all output. Any store change alters the
+  payload, so staleness is impossible by construction.
+
+  **The ask scope is the correction, and it is about WHOSE knowledge this
+  is.** The record lives in the SERVER session, which lasts for the
+  process; the claim it makes is about the READER, which resets on
+  `/clear`, on automatic compaction, and for every subagent. Unscoped, the
+  two diverged and the stub said \"you already know\" to a context that had
+  never seen it — measured twice, once mid-plan after a clear and once
+  mid-build after an automatic compact. Not staleness: WITHHOLDING, with
+  absence-of-payload wearing absence-of-change's clothes.
+
+  The ASK is the boundary and the TURN is not: turns rotate on the
+  write-tool gate, so a read-only planning ask never rotates one — and that
+  is precisely where this was first hit. `absorb-pending-intent!` bumps
+  `::ask` for every prompt the hook records, read-only included.
+
+  `:detail` is the escape for the case the scope cannot cover: a subagent
+  shares the session and runs inside the parent's ask, so it can be told
+  \"you already know\" about something it has never seen. The payload is
+  spooled and the id named, which is the same door `query_detail` already
+  opens for trimmed responses — previously the only way to a read-only
+  tool's withheld payload was a write-capable tool that prompts for
+  permission in plan mode."
+  [session tool a payload]
+  (let [;; the FORM ledger first: a source the ask already holds at this
+        ;; version leaves as a reference, whichever view carries it
+        payload (dedupe-sources! session payload)
+        k [tool (select-keys a [:ns :name :targets :since :detail :depth
+                                :limit :contains :full :at :collapse :format
+                                :on :direction])]
+        h     [(get @session ::ask 0) (hash payload)]
+        p-str (pr-str payload)
+        stub  {:already-sent true
+               :view (str tool (when (:ns a) (str " " (:ns a)))
+                          (when (:name a) (str "/" (:name a))))
+               :note (str "already sent in this ask — about what YOU received,"
+                          " NOT whether the store changed (an outline does not"
+                          " move when a body does). query_detail {:detail}"
+                          " re-opens it.")}]
+    (if (and (= h (get-in @session [::told k]))
+             ;; a stub bigger than what it withholds is not a saving, it is a
+             ;; round trip for nothing. This was a constant (130 chars) chosen
+             ;; when the stub was one short sentence; the note then grew and
+             ;; the floor did not, so small views started costing MORE to
+             ;; withhold than to send. Measuring the actual stub cannot drift
+             ;; out of step with the stub the way a number written down
+             ;; elsewhere can. The id is a representative one — they are all
+             ;; the same length — because it cannot be minted before the
+             ;; decision to spool.
+             (< (count (pr-str (assoc stub :detail "s00000000000")))
+                (count p-str)))
+      (let [id (spool! session p-str)]
+        ;; a stub is a withholding, not a saving, until nobody opens it —
+        ;; recorded through the same channel as a trim so one fold can ask
+        ;; both paths the question
+        (note-response! {:stub? true :spooled id})
+        (assoc stub :detail id))
+      (do (swap! session assoc-in [::told k] h)
+          payload))))
+
+(defn- ledger-written!
+  "After a write whose FULL source the agent sent landed (`edit_add_form`,
+  `edit_replace_form`, a group's add/replace steps), hold the stored
+  version of every form it wrote: the agent has that text in hand, and the
+  read that used to follow a write to check it is now a reference. A
+  subform edit sends a fragment, so it holds nothing."
+  [session op a]
+  (let [nm-of  (fn [src] (keep #(some-> % store/form-symbol)
+                               (:nodes (edit/parse-forms (str src)))))
+        forms  (case op
+                 "edit_replace_form" [[(:ns a) (:name a)]]
+                 "edit_add_form"     (for [nm (nm-of (:source a))] [(:ns a) nm])
+                 "edit_group"        (for [s (wire-steps (:steps a))
+                                           :when (#{:add :replace} (:action s))
+                                           nm (if (= :add (:action s)) (nm-of (:source s)) [(:name s)])]
+                                       [(:ns s) nm])
+                 nil)]
+    (doseq [[ns-sym nm] forms :when (and ns-sym nm)]
+      (ledger-hold! session (form-version session (symbol (str ns-sym)) (symbol (str nm)))))
+    nil))
+
+(defn- held-after-write!
+  "Threaded into a write branch: when the write LANDED, hold the forms its
+  full source wrote (`ledger-written!`); returns `r` either way."
+  [r session op a]
+  (when (nil? (:error r)) (ledger-written! session op a))
+  r)
+
+(defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
   ;; but the image may still be warming on a background thread. Oracle and
   ;; write tools wait for it here; store-value reads serve immediately.
@@ -1372,6 +1496,16 @@
                          (str/join " " (sort (map #(str ":" (clojure.core/name %))
                                                   (tools/accepted-arg-keys name)))))
                     {:tool name :unknown (vec bad)})))
+  ;; and a MISSING required key, by name: the family schema cannot carry an
+  ;; op's required keys for the client, so the server says what to add
+  (when-let [missing (tools/missing-required-keys name arguments)]
+    (throw (ex-info (let [ks (map #(str ":" %) missing)]
+                      (str name " needs "
+                           (if (next ks)
+                             (str (str/join ", " (butlast ks)) " and " (last ks))
+                             (first ks))
+                           " — required for this op"))
+                    {:tool name :missing (vec missing)})))
   (when-not (contains? tools/image-free-tools name)
     (ops/await-image! session))
   (ops/sync-with-journal! session)      ; m5b: absorb other servers' commits      ; m5b: absorb other servers' commits
@@ -1664,12 +1798,14 @@
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))
+                                    (held-after-write! session name a)
                                     (assoc :forms [(str (sym :ns) "/" (sym :name))])
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "edit_add_form" (text! (-> (ops/add-form! session (sym :ns) (src :source)
                                                    :prompt (:prompt a)
                                                    :agent (:agent a))
+                                    (held-after-write! session name a)
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "edit_delete_form" (text! (-> (ops/delete-form! session (sym :ns) (sym :name)
@@ -1693,6 +1829,7 @@
                                     (summarize (:verbose a))))
       "edit_group" (text! (-> (ops/edit-group! session (wire-steps (:steps a))
                                                :prompt (:prompt a) :agent (:agent a))
+                              (held-after-write! session name a)
                               (select-keys tools/wire-keys)
                               (summarize (:verbose a))))
       "full_check" (text! (-> (external/full-check! session :affected (:affected a)
@@ -1709,7 +1846,8 @@
                               ;; branches on; the edges ride on verbose
                               (update :modules #(if (or (:verbose a) (nil? %))
                                                   %
-                                                  (dissoc % :edges)))))
+                                                  (dissoc % :edges)))
+                              (terse-full-check :verbose? (:verbose a))))
       "edit_requalify" (text! (-> (ops/requalify-boundary-keys!
                                    session (sym :ns) (sym :name)
                                    :to-ns (:to_ns a)
@@ -1934,8 +2072,34 @@
                               (select-keys tools/wire-keys)
                               (summarize (:verbose a))))
       (throw (ex-info (str "unknown tool: " name ". Available: "
-                           (str/join ", " (map :name tools/tools)))
+                           (str/join ", " (map :name tools/registry)))
                       {}))))))
+
+(defn- call-tool!
+  "The wire entry. A FAMILY name (`tools/families`) with `op` resolves to the
+  op's registry name and dispatches through `call-op!`; a single-op family
+  needs no op; an op called by its own name dispatches directly (the
+  `--call` door, the hooks). An unknown or missing op is refused with the
+  family's op list, so the refusal is the index."
+  [session {:keys [name arguments] :as req}]
+  (if-let [fam (some #(when (= name (:name %)) %) tools/families)]
+    (let [ops (:ops fam)
+          op  (some-> (:op arguments) str)]
+      (cond
+        (= 1 (count ops))
+        (call-op! session (assoc req :name (first ops) :arguments (dissoc arguments :op)))
+
+        (nil? op)
+        (throw (ex-info (str name " needs :op — ops: " (str/join " " ops))
+                        {:tool name :ops ops}))
+
+        (not (some #{op} ops))
+        (throw (ex-info (str "unknown op " op " for " name " — ops: " (str/join " " ops))
+                        {:tool name :op op :ops ops}))
+
+        :else
+        (call-op! session (assoc req :name op :arguments (dissoc arguments :op)))))
+    (call-op! session req)))
 
 ^:unsafe (defn handle!
   "Dispatch a JSON-RPC request map; return a response map, or nil for

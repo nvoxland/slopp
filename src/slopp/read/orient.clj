@@ -845,10 +845,24 @@
         fitted (loop [qs ranked, acc [], used 0]
                  (if (empty? qs)
                    [acc used 0]
-                   (let [r (row (first qs))
+                   (let [q (first qs)
+                         r (row q)
                          t (est r)]
                      (if (<= (+ used t) tokens)
-                       (recur (rest qs) (conj acc r) (+ used t))
+                       ;; a SEED is the form the ask names — the one about to
+                       ;; be edited — so its source rides the row when the
+                       ;; budget allows; a map that names it without its
+                       ;; text is followed by a read (eval10: eleven of them
+                       ;; before the first write). Too tight: the card stays.
+                       (let [[r t] (or (when (seed? q)
+                                         (let [[_ e] (get nodes q)
+                                               s     (some-> (:node e) n/string)
+                                               rs    (when s (assoc r :source s))
+                                               ts    (when rs (est rs))]
+                                           (when (and rs (<= (+ used ts) tokens))
+                                             [rs ts])))
+                                       [r t])]
+                         (recur (rest qs) (conj acc r) (+ used t)))
                        [acc used (count qs)]))))
         [rows used more] fitted]
     (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
