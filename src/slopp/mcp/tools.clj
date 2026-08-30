@@ -381,8 +381,8 @@
                                :limit {:type "integer"}}
                   :required ["ns" "name"]}}
    {:name "help" :read-only true :image-free true
-    :description "The workflow cheat-sheet: which tool for what, how to read results."
-    :inputSchema {:type "object" :properties {}}}
+    :description "The cheat-sheet (no argument) or ONE reference topic whole: help {topic} serves the plugin's skills/slopp/reference/<topic>.md — the chapters the one-page skill points at (web, rest, cli, capabilities, results, writing, oracle, tools …). Read a topic when the task needs it, not up front."
+    :inputSchema {:type "object" :properties {:topic {:type "string"}}}}
    {:name "restart"
     :description "Restart the live image; reload all forms. **It does NOT reload the JAR.** The image is rebuilt inside the SAME JVM, so slopp's own code — the tools, the framework vendored into your store — is whatever this process loaded at boot, and a jar rebuilt on disk since then is not in it. A consumer ran this after a framework fix, saw `restarted`, and found the function still had its old arglist. What reaches a new jar is restarting the MCP SERVER, which is the user's to do. Three states, and only the last one decides: what slopp ANNOUNCED, what the jar on disk CARRIES (`unzip -p <jar> META-INF/slopp/head.edn`), and what this process has LOADED — session_brief's :host :jar :head, with :behind counting the deltas between them. `app true` ALSO re-serves this project's own app server, which the plain call has never touched: a declared dev entry (config_file {path \"dev\" key \"run.<name>.main\"}) answers `:started` once its namespace loads and its thread spawns, so one that came up half dead reports exactly what a healthy one does — this is how you ask again without making an unrelated write to trigger a done."
     :inputSchema {:type "object"
@@ -623,39 +623,36 @@
     :inputSchema {:type "object" :properties {:path {:type "string"}}}}])
 
 (def cheat-sheet
-  "slopp cheat-sheet
-TURN:    turn_begin {agent, intent: <user's verbatim ask>} FIRST -- writes are
-         refused without an open turn; turn_end {agent} when done (red is ok)
-ORIENT:  query_project (everything, one call) · query_search {pattern} (the grep)
-         query_source {targets [{ns name}]} (form source) · query_depends {on ns/name}
+  "slopp cheat-sheet — the one-page loop; help {topic} for a chapter
+TURNS:   automatic. A write carrying `prompt` opens its own turn; the prompt
+         hook records your ask. turn_begin only when a refusal asks for it.
+ORIENT:  orient {ask} (the forms that matter, ranked, with WHY) — one call.
+         query_slice {ns name} (one form + the cards it reaches)
+         query_source {targets [{ns name} …]} (several forms, one call)
+         query_search {pattern} · query_depends {on ns/name}
+         independent reads go in ONE turn (several calls, one message)
 OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
          query_observe {ns name code} (capture args/returns flowing through a fn)
-WRITE:   work like a REPL: small individual writes, each verifies and returns
-         :test — mid-episode reds are normal; stale callers ride :carried-errors
-         until done re-checks them.
-         edit_add_form / edit_replace_form {ns name source prompt}
+WRITE:   in INTENTS: the fn + its test + the caller are ONE edit_add_form
+         whose `source` holds several forms — one atomic write, verified once.
+         edit_replace_form {ns name source} · edit_subform {ns name match source}
          edit_rename {ns from to}   <- never rename by editing call sites
-         edit_extract {ns from match name}
-         ns_create {ns requires?|source?}  <- NEW namespace: scaffold+grow, or whole source at once
-         ns_add_require / ns_remove_require  <- never hand-edit the ns form
-RULES:   every write must compile -- but form ORDER is not your job: write
-         forms in any order; the pipeline moves definitions above their
-         callers and mints any (declare) itself. Yours are refused.
+         rename_sweep {from to dry_run true} first, then without
+         edit_extract {ns from match name} · ns_create {ns requires?|source?}
+         ns_add_require / module_dep  <- usually automatic; a refusal names the edge
+         edit_delete_form {ns name} (callers first) · undo {deltas n}
+RULES:   form ORDER is derived — write forms in any order, never a (declare).
          red-first TDD = write the failing test FIRST (missing fns land as
-         :red-first stubs and fail honestly), then implement
-READ RESULTS: {:ok true ...} terse green · :failures = why (expected/actual)
-         :diagnosis :genuine = real red, yours · :staleness-detected = healed
-         :warnings = fix with edit_rename per :suggest · :untested = add a test
-         (draft_test {ns name code} drafts one from OBSERVED calls)
-SHARE:   git_push {url?} (milestones -> a normal git remote; url saved once)
-         git_pull (3-way absorb: remote wins where you're clean; both-touched =
-         conflict, yours stays live, push blocked until git_resolve {path})
-         import_dir {dir} (same absorb from a DIRECTORY — a zip, a scratch
-         tree, another tool's output; no git involved on either side)
-         config {key value?} (user.name/user.email = milestone author identity)
-FINISH:  done {label} (tidies, lints, marks the unit boundary)
-         commit_point {label} <- MILESTONE: green-gated, the grain a
-         human diffs and reverts to; coarser than done-points and turns")
+         :red-first stubs and fail honestly), then implement.
+RESULTS: the result IS the check — do not re-read, restart or test_run after
+         a green write. {:ok true :test {:ran :pass}} green · :failures = why
+         (:implicated :attribution :expected :actual) · :warnings = fix per
+         :suggest · :already-sent = you hold it · :truncated = query_detail {id}
+         only when the missing part changes what you do next
+FINISH:  done runs when you STOP (the Stop hook) — call done {label} yourself
+         only to read the verdict mid-way. full_check (whole store) and
+         commit_point {label} (a milestone) are the human's grain.
+SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)")
 
 (def single-write-tools #{"edit_replace_form" "edit_add_form"})
 

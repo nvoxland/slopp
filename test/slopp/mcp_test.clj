@@ -68,7 +68,7 @@
       (testing "the help tool exists (agents invented the name twice)"
         (let [h (call! sess "help" {})]
           (is (re-find #"edit_replace_form" h))
-          (is (re-find #"query_project" h))))
+          (is (re-find #"help \{topic\}" h) "the cheat-sheet indexes the chapters")))
       (call! sess "ns_create" {:ns "hint" :source "(ns hint (:require [clojure.test :refer [deftest is]]))\n(defn f [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
       (testing "redundant test_runs earn a hint; a write resets the counter"
         (call! sess "test_run" {:ns "hint"})
@@ -2955,3 +2955,122 @@
         (let [r (edn/read-string (call! sess "query_depends" {:on "rq.core/g"}))]
           (is (not (contains? r :red-after)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest a-budgeted-read-is-never-trimmed-and-a-green-result-never-offers-the-spool
+  ;; eval10 (2026-08-29): `orient` fits its own `tokens` budget and was
+  ;; still cut by the 8k gate to 247 chars, after which the agent fetched
+  ;; the 12k spool; `full_check` came back GREEN with "N of M keys shown —
+  ;; query_detail returns all" and the agent dutifully fetched 19k chars of
+  ;; a verdict it already had. 77k chars per cell (36% of all result text)
+  ;; were those re-fetches. Two rules at the one exit: a result that already
+  ;; carries a budget is sent whole, and a green result never advertises
+  ;; the spool — the in-band :truncated marker stays, the invitation goes.
+  (let [sess (atom {})
+        text (fn [x & opts]
+               (with-bindings {#'mcp/*spool-session* sess}
+                 (get-in (apply #'mcp/text! x opts) [:content 0 :text])))
+        big-rows (vec (for [i (range 400)] {:form (symbol (str "app.core/f" i))
+                                            :doc (str "a docstring long enough to matter " i)
+                                            :via "seed"}))]
+    (testing "a budgeted payload over the gate is sent whole"
+      (let [out (text {:rows big-rows :more 3} :budgeted? true)]
+        (is (> (count out) 8000))
+        (is (not (re-find #"query_detail" out)))
+        (is (= 400 (count (:rows (edn/read-string out)))))))
+    (testing "an unbudgeted payload over the gate is still trimmed, and says so"
+      (let [out (text {:rows big-rows})]
+        (is (<= (count out) 8200))
+        (is (re-find #"query_detail" out))))
+    (testing "a GREEN result over the gate keeps the marker and drops the invitation"
+      (let [out (text (into {:status :green}
+                            (for [i (range 1200)]
+                              [(keyword (str "k" i)) (str "a value long enough to need the gate " i)])))]
+        (is (<= (count out) 8200))
+        (is (re-find #"keys shown" out) "what was cut is still named")
+        (is (not (re-find #"query_detail" out)) "but nothing invites the re-fetch")))))
+
+(deftest ^:external the-thread-hint-counts-once-per-head-not-once-per-call
+  ;; Every non-done call ran `db/unlanded-count` — a recursive CTE over the
+  ;; line — to decide whether to say "N changes are on your thread". The
+  ;; count can only move when the head moves, so a burst of reads paid the
+  ;; walk N times for one answer. Keyed on the head, it is paid once per
+  ;; write.
+  (let [sess  (external/open!)
+        calls (atom 0)]
+    (try
+      (ops/ingest! sess 'th.core "(ns th.core)\n(defn f [] 1)\n")
+      (with-redefs [db/unlanded-count (let [orig db/unlanded-count]
+                                        (fn [& args] (swap! calls inc) (apply orig args)))]
+        (mcp/thread-hint! sess "query_slice")
+        (mcp/thread-hint! sess "query_slice")
+        (mcp/thread-hint! sess "query_source")
+        (is (= 1 @calls) "three reads at one head: one walk")
+        (ops/edit-replace! sess 'th.core 'f "(defn f [] 2)" :prompt "two")
+        (mcp/thread-hint! sess "query_slice")
+        (is (= 2 @calls) "a write moved the head: one more walk"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external bookkeeping-results-are-the-size-of-their-answer
+  ;; eval10: `done` averaged 2k chars, `session_brief` 2–3.5k, `report` was
+  ;; unbounded by its own `limit`, and the brief's `:loop` line was 472
+  ;; chars byte-identical in every session of a lifetime — orientation that
+  ;; re-taught what the skill had said. A bookkeeping result says what
+  ;; CHANGED and what needs the agent; a green done is a line.
+  (let [sess (external/open!)
+        call (fn [tool args]
+               (get-in (mcp/handle! sess {:id 1 :method "tools/call"
+                                          :params {:name tool :arguments args}})
+                       [:result :content 0 :text]))]
+    (try
+      (call "ns_create" {:ns "bk.core" :source "(ns bk.core \"a fixture with nothing to advise about\")\n(defn ^{:unused-ok \"fixture\"} f [] 1)\n"})
+      (call "turn_begin" {:intent "make f" :agent (:agent-id @sess)})
+      (call "edit_replace_form" {:ns "bk.core" :name "f" :source "(defn ^{:unused-ok \"fixture\"} f [] 2)" :prompt "two"})
+      (testing "a green done is one line: the id, the verdict, what landed"
+        (let [r (call "done" {:label "bk"})
+              m (edn/read-string r)]
+          (is (= :green (:status m)) r)
+          (is (:done m))
+          (is (< (count r) 400) (str (count r) " chars: " r))
+          (is (not (contains? m :host-stale)) "a current host says nothing")))
+      (testing "the brief carries what changed, not the loop the skill teaches"
+        (let [r (call "session_brief" {})
+              m (edn/read-string r)]
+          (is (not (contains? m :loop)) r)
+          (is (not (contains? m :alignment)) "git alignment is a question, not orientation")
+          (is (< (count r) 1500) (str (count r) " chars"))))
+      (testing "report's limit bounds its intents"
+        (dotimes [i 4]
+          (call "turn_begin" {:intent (str "ask number " i) :agent (:agent-id @sess)})
+          (call "edit_replace_form" {:ns "bk.core" :name "f" :source (str "(defn ^{:unused-ok \"fixture\"} f [] " (+ 10 i) ")") :prompt (str "ask number " i)}))
+        (let [m (edn/read-string (call "report" {:limit 2}))]
+          (is (<= (count (:intents m)) 2) (pr-str (:intents m)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external help-serves-a-topic-from-the-plugins-reference
+  ;; The skill is a page; everything it used to carry (2,900 lines, 70k
+  ;; tokens loaded into every session) lives in the plugin's
+  ;; skills/slopp/reference/<topic>.md and is read WHEN NEEDED — by the
+  ;; agent's own Read, or by `help {topic}` here, which serves the same file
+  ;; so there is one source of truth. No topic → the index of topics.
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "slopp-help" (make-array java.nio.file.attribute.FileAttribute 0)))
+        ref  (io/file root "skills" "slopp" "reference")]
+    (.mkdirs ref)
+    (spit (io/file ref "web.md") "# Web applications\n\nA page is a function.\n")
+    (spit (io/file ref "cli.md") "# Command-line applications\n\nOne entry.\n")
+    (with-redefs [mcp/plugin-root (constantly root)]
+      (let [sess (external/open!)
+            call (fn [args] (get-in (mcp/handle! sess {:id 1 :method "tools/call"
+                                                        :params {:name "help" :arguments args}})
+                                    [:result :content 0 :text]))]
+        (try
+          (testing "a topic returns that reference file, whole"
+            (is (re-find #"A page is a function" (call {:topic "web"}))))
+          (testing "no topic returns the index, naming every topic on disk"
+            (let [r (call {})]
+              (is (re-find #"web" r))
+              (is (re-find #"cli" r))
+              (is (not (re-find #"A page is a function" r)) "the index is not the content")))
+          (testing "an unknown topic is refused with the index"
+            (is (re-find #"(?i)no topic.*nope" (call {:topic "nope"}))))
+          (finally (ops/close! sess)))))))

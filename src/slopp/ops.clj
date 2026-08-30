@@ -3903,7 +3903,7 @@
                                       {:ns n :forms (names n)}))))
                               (sort-by key fams)))
         ms       (->> (query-commits session)
-                      (take 5)
+                      (take 2)
                       (mapv #(-> (select-keys % [:commit :description :at :status])
                                  (update :description orient/snip 110))))
         last-done (let [d (db/last-marker (:db @session) (engine/session-line session) :done)]
@@ -3981,14 +3981,10 @@
                         (take 6)
                         vec
                         not-empty))]
-    (cond-> {:project project
-             ;; the loop is taught in full by the slopp SKILL; the brief only needs to
-             ;; NAME it. Measured: 472 chars, byte-identical in all 5 sessions of an
-             ;; eval9 lifetime — orientation should carry what CHANGED, not re-teach
-             ;; what the skill already said.
-             :loop (str "small verified writes → done {label} at each finish point"
-                        " → ONE commit_point. Results are self-describing: act on"
-                        " them, don't narrate them. (Full loop: the slopp skill.)")}
+    ;; no :loop line: it was 472 chars byte-identical in every session of a
+    ;; lifetime, re-teaching what the skill said. The brief carries what
+    ;; CHANGED and what needs the agent, nothing that is true every time.
+    (cond-> {:project project}
       (seq ms)   (assoc :milestones ms)
       last-done  (assoc :last-done last-done)
       ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
@@ -4174,6 +4170,11 @@
                        (filter #(= :turn-begin (:op %)))
                        (keep :intent)
                        distinct
+                       ;; newest first, and bounded by the same `limit` as the
+                       ;; changes: `limit 1` used to return every ask ever, trimmed
+                       ;; at the wire gate
+                       reverse
+                       (take limit)
                        (mapv #(orient/snip % 160)))]
     (orient/fit-report
      (cond-> {:milestones ms

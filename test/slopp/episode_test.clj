@@ -1205,3 +1205,35 @@
       (testing "the new turn starts from a CLEAR ring — one ask never pays for another"
         (is (empty? (:slopp.read.telemetry/calls @sess))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-write-carrying-its-prompt-opens-its-own-turn
+  ;; eval10: under `claude -p` the prompt hook does not run, so every fresh
+  ;; session's first write was refused with "no open turn" and the agent
+  ;; spent two paid turns (a ToolSearch for turn_begin, then turn_begin) to
+  ;; satisfy a gate it had already satisfied in substance — every write
+  ;; carries a `prompt`, which IS the intent the gate wants. The gate stays
+  ;; (a write with no prompt is still refused); what changes is that the
+  ;; prompt in hand opens the turn.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (ops/ingest! sess 'ep2.core seed)
+      (let [call (fn [tool args]
+                   (get-in (slopp.mcp/handle! sess
+                                             {:id 1 :method "tools/call"
+                                              :params {:name tool :arguments args}})
+                           [:result :content 0 :text]))]
+        (testing "a write with a prompt and no open turn lands, and the turn is open after it"
+          (let [r (call "edit_replace_form"
+                        {:ns "ep2.core" :name "f" :agent "bob"
+                         :source "(defn f [x] (* x 3))" :prompt "triple f"})]
+            (is (not (re-find #"turn_begin" r)) r)
+            (is (ops/turn-open? sess "bob"))))
+        (testing "the turn it opened carries the write's prompt as its intent"
+          (is (re-find #"triple f" (pr-str (ops/report sess)))))
+        (testing "a write with NO prompt is still refused with teaching"
+          (call "turn_end" {:agent "bob"})
+          (is (re-find #"turn_begin"
+                       (call "edit_add_form" {:ns "ep2.core" :agent "bob"
+                                              :source "(defn zz [x] x)"})))))
+      (finally (ops/close! sess)))))

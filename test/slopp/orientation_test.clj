@@ -179,8 +179,10 @@
           (is (some #(re-find #"seeded the br domain" (str (:description %)))
                     (:milestones r))
               (pr-str r)))
-        (testing "the loop is stated and the whole thing is SMALL"
-          (is (re-find #"commit_point" (str (:loop r))) (pr-str r))
+        (testing "no loop prose rides along, and the whole thing is SMALL"
+          ;; the loop is the skill's (one page, loaded once per session); the
+          ;; brief carried it on every call and was the fattest bookkeeping read
+          (is (not (contains? r :loop)) (pr-str r))
           (is (< (count (pr-str r)) 1500) (str (count (pr-str r))))))
       (finally (ops/close! sess)))))
 

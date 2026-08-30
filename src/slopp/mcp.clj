@@ -717,6 +717,11 @@
   thing it describes, and a read gets its silence for the honest reason:
   nothing became invisible.
 
+  **The count is walked once per HEAD, not once per call.** It is a recursive
+  CTE over the line, and it can only move when the head moves; every read
+  used to pay it again for the same answer. Keyed on `[line head]` in the
+  session, so a burst of reads costs one walk and a write costs the next.
+
   `done` and `commit_point` stay quiet by name, and that exclusion is about
   noise rather than detection: a `done` that is red on the episode's own work
   genuinely does leave everything private, and it says so itself, in the
@@ -729,7 +734,13 @@
   (when-not (#{"done" "commit_point"} tool)
     (when-let [conn (:db @session)]
       (when-let [line (:line @session)]
-        (let [n               (db/unlanded-count conn line history/content-ops)
+        (let [head            (:head (:store @session))
+              [at cached]     (::thread-hint-count @session)
+              n               (if (= at [line head])
+                                cached
+                                (let [n (db/unlanded-count conn line history/content-ops)]
+                                  (swap! session assoc ::thread-hint-count [[line head] n])
+                                  n))
               [seen-l seen-n] (::thread-hint-seen @session)
               prev            (if (= seen-l line) seen-n 0)
               [said-l said-n] (::thread-hint-at @session)
@@ -795,7 +806,18 @@
   [m]
   (when *response-facts* (swap! *response-facts* merge m)))
 
-(defn- text! [x]
+(defn- text!
+  "The one exit every tool result takes. `:budgeted? true` says the payload
+  already fitted a budget of its own (`orient`'s tokens, a slice's limit, the
+  brief) and is sent whole whatever its size — the 8k gate cutting `orient`
+  to 247 chars and then having the agent fetch the 12k spool was measured
+  as the single largest waste of context in eval10. A GREEN result over the
+  gate is still fitted, but never INVITES the re-fetch: the in-band
+  `:truncated` marker says what was cut, and the trailing
+  `query_detail … returns all` line — which agents followed on verdicts
+  they already had, 77k chars per session — is reserved for a result whose
+  missing part could change what the agent does next."
+  [x & {:keys [budgeted?]}]
   (when @strict-boundary?
     (when-let [leak (boundary-leak x)]
       (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
@@ -815,8 +837,20 @@
         full    (if (string? x) x (pr-str x))
         slimmed (let [t (trim-failure-strings x)]
                   (if (string? t) t (pr-str t)))
-        out     (if (and (= full slimmed) (<= (count full) 8000))
-                  full
+        green?  (and (map? x)
+                     (or (= :green (:status x))
+                         (= :green (get-in x [:findings :test-status]))
+                         (= :green (get-in x [:test :status]))
+                         (true? (:ok x))))
+        invite  (fn [id] (if green? "" (str " — query_detail {:id \"" id "\"} returns all")))
+        trimmed (fn [id] (if green? "" (str "\n[trimmed — query_detail {:id \"" id
+                                            "\"} returns the full response]")))
+        out     (cond
+                  budgeted? full
+
+                  (and (= full slimmed) (<= (count full) 8000)) full
+
+                  :else
                   (if-let [sess *spool-session*]
                     (let [id  (spool! sess full)
                           ;; every branch below withheld part of this answer,
@@ -833,154 +867,18 @@
                       (cond
                         ;; slimming alone got it under the gate — send it whole
                         (<= (count slimmed) 8000)
-                        (str slimmed "\n[trimmed — query_detail {:id \"" id
-                             "\"} returns the full response]")
+                        (str slimmed (trimmed id))
 
                         ;; drop whole ITEMS: the body stays parseable and usable,
                         ;; so a follow-up can be narrow instead of a full re-fetch
                         fit
-                        (str (:body fit) "\n[" (:note fit)
-                             " — query_detail {:id \"" id "\"} returns all]")
+                        (str (:body fit) "\n[" (:note fit) (invite id) "]")
 
                         ;; nothing to drop (a single huge string/scalar)
                         :else
-                        (str (subs slimmed 0 8000)
-                             "\n[trimmed — query_detail {:id \"" id
-                             "\"} returns the full response]")))
+                        (str (subs slimmed 0 8000) (trimmed id))))
                     (if (<= (count slimmed) 8000) slimmed full)))]
     {:content [{:type "text" :text out}]}))
-
-(def ^:private env-handlers!
-  "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
-  {"deps_add"
-   (fn [session a sym]
-     (text! (ops/deps-add! session (sym :lib)
-                          (or (:coord a)
-                              (when (:version a)
-                                {:mvn/version (:version a)}))
-                          :agent (:agent a) :prompt (:prompt a)
-                          :client (:client a))))
-   "deps_remove"
-   (fn [session a sym]
-     (text! (ops/deps-remove! session (sym :lib)
-                                           :agent (:agent a))))
-   "deps_list"
-   (fn [session _a _sym]
-     (text! (ops/deps-manifest session)))
-   "store_health"
-   (fn [session _a _sym]
-     (text! (external/store-health session)))
-   "store_doctor"
-   (fn [session _a _sym]
-     (text! (doctor/diagnose (:store @session))))
-   "store_compact"
-   (fn [session _a _sym]
-     (text! (external/compact-store! session)))
-   "ui_serve"
-   ;; `:ui-url` is what session_brief announces, and until this only
-   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
-   ;; brief naming the port it came up on at BOOT. Observed live: the brief
-   ;; said 49283 while the listener held 53610 and nobody held 49283. The
-   ;; address a reader is handed has to be the one that was bound, and
-   ;; stopping has to clear it rather than leave an address nothing answers.
-   (fn [session a _sym]
-     (text! (if (:stop a)
-              (let [stopped (boolean (server/stop!))]
-                (swap! session dissoc :ui-url :ui-stamp)
-                {:stopped stopped})
-              (let [r (server/serve! session
-                                     (server/preferred-port (:dir @session) (:port a)))]
-                ;; the stamp rides the SESSION beside the url, because the
-                ;; brief is where a reader finds out anything about this
-                ;; listener and slopp.ops cannot ask slopp.api — that edge
-                ;; runs the other way.
-                (when (:url r)
-                  (swap! session assoc :ui-url (:url r)
-                         :ui-stamp (:derived-from r)))
-                r))))
-"screen"
-   (fn [session a _sym]
-     (text! (webdev.screen/screen! session
-                             :steps (:steps a)
-                             :region (:region a)
-                             :detail (:detail a)
-                             :trace (:trace a)
-                             :url (:url a))))
-   "compile_client"
-   (fn [session a _sym]
-     (text! (if (:output a)
-              (cljs/compile-client! session :output (:output a))
-              (cljs/compile-client! session))))
-   "generate_client"
-   (fn [session a _sym]
-     (text! (cond
-              ;; a contract URL generates against an API this store CONSUMES —
-              ;; two namespaces, and nothing reads the producer's store
-              (:from a) (if (:ns a)
-                          (cljs/generate-client-from! session (:from a) :ns (symbol (:ns a)))
-                          (cljs/generate-client-from! session (:from a)))
-              (:ns a)   (cljs/generate-client! session :ns (symbol (:ns a)))
-              :else     (cljs/generate-client! session))))
-   "deps_pure"
-   (fn [session a sym]
-     (text! (if (false? (:pure a))
-                           (ops/deps-unpure! session (sym :target) :agent (:agent a))
-                           (ops/deps-pure! session (sym :target) :agent (:agent a)))))
-   "branch_create"
-   (fn [session a _sym]
-     (text! (branch/branch! session (:name a))))
-   "branch_switch"
-   (fn [session a _sym]
-     (text! (branch/branch-switch! session (:name a))))
-   "branch_merge"
-   (fn [session a _sym]
-     (text! (branch/branch-merge! session (:name a))))
-   "branch_delete"
-   (fn [session a _sym]
-     (text! (branch/branch-delete! session (:name a))))
-   "thread_list"
-   (fn [session _a _sym]
-     (text! (branch/thread-list session)))
-   "thread_drop"
-   (fn [session a _sym]
-     (text! (branch/thread-drop! session (:id a))))
-   "query_branches"
-   (fn [session _a _sym]
-     (text! (branch/query-branches session)))
-   "restart"
-   (fn [session a _sym]
-     (ops/restart! session)
-     ;; the ORACLE is what restart has always re-imaged, and it stays the
-     ;; default. `app true` also re-serves this project's app server — the
-     ;; second half of "reload in place, restart on demand", and it exists
-     ;; because a declared entry answers `:started` once a namespace loads
-     ;; and a thread spawns, so one that came up half dead reports exactly
-     ;; what a healthy one does. Without this the only way to ask again is an
-     ;; unrelated write, to trigger a done that re-serves as a side effect.
-     (if-not (:app a)
-       (text! "restarted")
-       (let [r (refresh-app! session)]
-         (text! (cond-> {:restarted true
-                         :app-restarted (boolean (:serving? r))}
-                  (:url r)     (assoc :app-url (:url r))
-                  (:started r) (assoc :app-started (:started r))
-                  (not (:serving? r))
-                  (assoc :app-note
-                         (or (:reason r)
-                             (str "nothing to restart — this store has no"
-                                  " managed app server. Declare what to run"
-                                  " (config_file {path \"dev\" key"
-                                  " \"run.<name>.main\" value \"my.ns/-main\"}),"
-                                  " or enable http.enabled for the derived"
-                                  " one."))))))))
-   "build"
-   (fn [session a _sym]
-     (text! (external/build! session (:dir a)
-                                    :main (some-> (:main a) symbol)
-                                    :name (:name a))))
-   "help"
-   (fn [_session _a _sym]
-     (text! tools/cheat-sheet))})
 
 (def ^:private file-handlers!
   "call-tool dispatch \u2014 tracked files + config (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
@@ -1133,10 +1031,6 @@
    (fn [session a _sym]
      (text! (branch/merge! session (:dir a))))})
 
-(def ^:private tail-handlers!
-  "Every handler-map entry (Q4) \u2014 call-tool checks here first."
-  (merge env-handlers! file-handlers! sync-handlers!))
-
 (defn- told!
   "Knowledge-differential reads: the session keeps a hash of every
   cacheable VIEW it has sent, SCOPED TO THE CURRENT ASK; an identical
@@ -1200,6 +1094,250 @@
         (assoc stub :detail id))
       (do (swap! session assoc-in [::told k] h)
           payload))))
+
+(defn- host-image-options
+  "The idle-image budget this SERVER opens with, from the host environment.
+
+  A writer costs several JVMs, not one: the active image, a warm spare, and one
+  parked image per branch line held for the reap lease. Only the first is doing
+  anything. The other two are latency trades — they exist to keep a JVM boot
+  off the critical path — and a host running many concurrent writers is trading
+  the wrong way, because its binding constraint is memory rather than the ~830
+  ms a boot costs.
+
+  Both were already `open!` options; only this server hardcoded them, so there
+  was no way to say so without editing code. **The defaults do not move** —
+  they are what was measured for a session alone on a box — so a single-writer
+  host is unaffected and a swarm operator gets a dial.
+
+  `SLOPP_WARM_SPARE` is off for `0` or `false` and on for anything else,
+  including unset. `SLOPP_BRANCH_IMAGE_TTL_MS` must read as a POSITIVE number
+  to be honoured: a typo parsed as zero would reap every branch image the
+  instant it was parked, which presents as branch switching having got slow and
+  never as a misspelt variable. An unreadable setting must not be obeyed as its
+  most destructive reading.
+
+  `getenv` is a parameter rather than a read, because the process environment
+  is state a test cannot set."
+  [getenv]
+  (let [off?  #{"0" "false"}
+        spare (some-> (getenv "SLOPP_WARM_SPARE") str/trim str/lower-case)
+        ttl   (some-> (getenv "SLOPP_BRANCH_IMAGE_TTL_MS") str/trim parse-long)]
+    {:slopp.ops/warm-spare?         (not (off? spare))
+     :slopp.ops/branch-image-ttl-ms (if (and ttl (pos? ttl))
+                                      ttl
+                                      external/default-branch-image-ttl-ms)}))
+
+(defn- terse-done
+  "A green done is ONE LINE: the id, the verdict, where it landed — plus only
+  what needs the agent (an external tier that ran, a deferral count, a host
+  that drifted, a standing advisory, the app note). eval10 measured `done`
+  at ~2k chars a call, six calls a session, byte-identical prose about
+  episode scope and oracle currency riding every one; a red done keeps the
+  full report, because there the findings are the answer."
+  [r]
+  (let [f (:findings r)]
+    (if-not (and (= :green (:episode-status f))
+                 (= :green (:test-status f))
+                 (zero? (:lint-errors f 0))
+                 (empty? (:unloadable-namespaces f)))
+      r
+      (let [advisory (into {}
+                           (remove (fn [[k v]]
+                                     (or (#{:episode-status :test-status :lint-errors :ms :failures
+                                            :unloadable-namespaces :external-pending :host-stale
+                                            :http-dangling-route-refs :red-attribution} k)
+                                         (and (coll? v) (empty? v))
+                                         (nil? v))))
+                           f)
+            info-only? (every? #(= :info (:severity %)) (:http-dangling-route-refs f))]
+        (cond-> {:done (:done r) :status :green}
+          (:landed (:land r))            (assoc :landed (:landed (:land r)))
+          (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
+          (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
+          (pos? (get-in f [:host-stale :oracle-drift-count] 0))
+          (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :note]))
+          (not info-only?)               (assoc :http-dangling-route-refs (:http-dangling-route-refs f))
+          (seq advisory)                 (assoc :advisories advisory)
+          (:app-note r)                  (assoc :app-note (:app-note r)))))))
+
+(defn plugin-root
+  "Where the plugin's files are, or nil: Claude Code sets CLAUDE_PLUGIN_ROOT for
+  every process the plugin starts, and the MCP server is one. The skill and
+  its reference topics ship there — a different channel from the jar this
+  code runs in — so the one thing the server can do about them is READ them,
+  and this is the seam a test redirects."
+  []
+  (not-empty (System/getenv "CLAUDE_PLUGIN_ROOT")))
+
+(defn help-text
+  "`help {topic}`: the plugin's `skills/slopp/reference/<topic>.md`, whole, or
+  with no topic the index of topics on disk. One source of truth: the same
+  file the agent could Read, served through the tool so a session that has
+  only the one-page skill in context reaches the rest without leaving the
+  loop. The skill is a page because the 2,900-line version cost ~70k tokens
+  in every session that loaded it — 65% of all context the eval10 lifetime
+  cells ever created — and an agent reads a REST or web chapter once per
+  project, not once per turn."
+  [topic]
+  (let [dir    (some-> (plugin-root) (io/file "skills" "slopp" "reference"))
+        topics (when (and dir (.isDirectory dir))
+                 (->> (.listFiles dir)
+                      (filter #(str/ends-with? (.getName %) ".md"))
+                      (map #(subs (.getName %) 0 (- (count (.getName %)) 3)))
+                      sort vec))
+        index  (str "help topics: " (str/join ", " topics)
+                    " — help {topic} returns one whole; each is also"
+                    " skills/slopp/reference/<topic>.md in the plugin.")]
+    (cond
+      (nil? dir)
+      (str tools/cheat-sheet "\n\n(no plugin root in this process — the reference"
+           " topics ship in the plugin under skills/slopp/reference/)")
+
+      (str/blank? (str topic))
+      (str tools/cheat-sheet "\n\n" index)
+
+      (some #{(str topic)} topics)
+      (slurp (io/file dir (str topic ".md")))
+
+      :else
+      (str "no topic named " topic ". " index))))
+
+(def ^:private env-handlers!
+  "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
+  {"deps_add"
+   (fn [session a sym]
+     (text! (ops/deps-add! session (sym :lib)
+                          (or (:coord a)
+                              (when (:version a)
+                                {:mvn/version (:version a)}))
+                          :agent (:agent a) :prompt (:prompt a)
+                          :client (:client a))))
+   "deps_remove"
+   (fn [session a sym]
+     (text! (ops/deps-remove! session (sym :lib)
+                                           :agent (:agent a))))
+   "deps_list"
+   (fn [session _a _sym]
+     (text! (ops/deps-manifest session)))
+   "store_health"
+   (fn [session _a _sym]
+     (text! (external/store-health session)))
+   "store_doctor"
+   (fn [session _a _sym]
+     (text! (doctor/diagnose (:store @session))))
+   "store_compact"
+   (fn [session _a _sym]
+     (text! (external/compact-store! session)))
+   "ui_serve"
+   ;; `:ui-url` is what session_brief announces, and until this only
+   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
+   ;; brief naming the port it came up on at BOOT. Observed live: the brief
+   ;; said 49283 while the listener held 53610 and nobody held 49283. The
+   ;; address a reader is handed has to be the one that was bound, and
+   ;; stopping has to clear it rather than leave an address nothing answers.
+   (fn [session a _sym]
+     (text! (if (:stop a)
+              (let [stopped (boolean (server/stop!))]
+                (swap! session dissoc :ui-url :ui-stamp)
+                {:stopped stopped})
+              (let [r (server/serve! session
+                                     (server/preferred-port (:dir @session) (:port a)))]
+                ;; the stamp rides the SESSION beside the url, because the
+                ;; brief is where a reader finds out anything about this
+                ;; listener and slopp.ops cannot ask slopp.api — that edge
+                ;; runs the other way.
+                (when (:url r)
+                  (swap! session assoc :ui-url (:url r)
+                         :ui-stamp (:derived-from r)))
+                r))))
+"screen"
+   (fn [session a _sym]
+     (text! (webdev.screen/screen! session
+                             :steps (:steps a)
+                             :region (:region a)
+                             :detail (:detail a)
+                             :trace (:trace a)
+                             :url (:url a))))
+   "compile_client"
+   (fn [session a _sym]
+     (text! (if (:output a)
+              (cljs/compile-client! session :output (:output a))
+              (cljs/compile-client! session))))
+   "generate_client"
+   (fn [session a _sym]
+     (text! (cond
+              ;; a contract URL generates against an API this store CONSUMES —
+              ;; two namespaces, and nothing reads the producer's store
+              (:from a) (if (:ns a)
+                          (cljs/generate-client-from! session (:from a) :ns (symbol (:ns a)))
+                          (cljs/generate-client-from! session (:from a)))
+              (:ns a)   (cljs/generate-client! session :ns (symbol (:ns a)))
+              :else     (cljs/generate-client! session))))
+   "deps_pure"
+   (fn [session a sym]
+     (text! (if (false? (:pure a))
+                           (ops/deps-unpure! session (sym :target) :agent (:agent a))
+                           (ops/deps-pure! session (sym :target) :agent (:agent a)))))
+   "branch_create"
+   (fn [session a _sym]
+     (text! (branch/branch! session (:name a))))
+   "branch_switch"
+   (fn [session a _sym]
+     (text! (branch/branch-switch! session (:name a))))
+   "branch_merge"
+   (fn [session a _sym]
+     (text! (branch/branch-merge! session (:name a))))
+   "branch_delete"
+   (fn [session a _sym]
+     (text! (branch/branch-delete! session (:name a))))
+   "thread_list"
+   (fn [session _a _sym]
+     (text! (branch/thread-list session)))
+   "thread_drop"
+   (fn [session a _sym]
+     (text! (branch/thread-drop! session (:id a))))
+   "query_branches"
+   (fn [session _a _sym]
+     (text! (branch/query-branches session)))
+   "restart"
+   (fn [session a _sym]
+     (ops/restart! session)
+     ;; the ORACLE is what restart has always re-imaged, and it stays the
+     ;; default. `app true` also re-serves this project's app server — the
+     ;; second half of "reload in place, restart on demand", and it exists
+     ;; because a declared entry answers `:started` once a namespace loads
+     ;; and a thread spawns, so one that came up half dead reports exactly
+     ;; what a healthy one does. Without this the only way to ask again is an
+     ;; unrelated write, to trigger a done that re-serves as a side effect.
+     (if-not (:app a)
+       (text! "restarted")
+       (let [r (refresh-app! session)]
+         (text! (cond-> {:restarted true
+                         :app-restarted (boolean (:serving? r))}
+                  (:url r)     (assoc :app-url (:url r))
+                  (:started r) (assoc :app-started (:started r))
+                  (not (:serving? r))
+                  (assoc :app-note
+                         (or (:reason r)
+                             (str "nothing to restart — this store has no"
+                                  " managed app server. Declare what to run"
+                                  " (config_file {path \"dev\" key"
+                                  " \"run.<name>.main\" value \"my.ns/-main\"}),"
+                                  " or enable http.enabled for the derived"
+                                  " one."))))))))
+   "build"
+   (fn [session a _sym]
+     (text! (external/build! session (:dir a)
+                                    :main (some-> (:main a) symbol)
+                                    :name (:name a))))
+   "help"
+   (fn [_session a _sym]
+     (text! (help-text (:topic a)) :budgeted? true))})
+
+(def ^:private tail-handlers!
+  "Every handler-map entry (Q4) \u2014 call-tool checks here first."
+  (merge env-handlers! file-handlers! sync-handlers!))
 
 (defn- call-tool! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -1266,23 +1404,29 @@
           ;; since the server takes a dir) never gets one here and the turn
           ;; cannot open itself. Both facts are in hand: the dir, and that no
           ;; pending intent has arrived. Friction 4.
-          (throw (ex-info (str "no open turn for agent " ag
-                               " — call turn_begin {intent: <the user's verbatim"
-                               " ask>, agent: \"" ag "\"} first"
-                               (when-let [d (not-empty (str (:dir @session)))]
-                                 (str " (store: " d ")"))
-                               ". No pending intent has arrived for this store,"
-                               " so nothing opened a turn automatically: the"
-                               " prompt hook records the ask in the store at the"
-                               " session's WORKING DIRECTORY, so a session"
-                               " driving a second store has to open turns here"
-                               " by hand. And a turn belongs to an AGENT: a"
-                               " one-shot process (slopp --call) derives a fresh"
-                               " identity per process, so turn_begin and the"
-                               " write must be passed the SAME agent argument —"
-                               " otherwise the second call opens a second turn"
-                               " and this refusal repeats verbatim.")
-                          {:dir (:dir @session) :agent ag}))))))
+          ;; the write's own `prompt` IS the intent the gate asks for. Under a
+          ;; harness whose prompt hook never ran (claude -p, a second store),
+          ;; every first write used to be refused and the agent paid two turns
+          ;; to open a turn by hand with the same words it had just sent.
+          (if-let [p (not-empty (str (:prompt arguments)))]
+            (ops/turn-begin! session :agent ag :intent p)
+            (throw (ex-info (str "no open turn for agent " ag
+                                 " — a write carrying `prompt` opens its own turn;"
+                                 " otherwise call turn_begin {intent: <the user's"
+                                 " verbatim ask>, agent: \"" ag "\"} first"
+                                 (when-let [d (not-empty (str (:dir @session)))]
+                                   (str " (store: " d ")"))
+                                 ". No pending intent has arrived for this store:"
+                                 " the prompt hook records the ask in the store at"
+                                 " the session's WORKING DIRECTORY, so a session"
+                                 " driving a second store has to open turns here"
+                                 " by hand. And a turn belongs to an AGENT: a"
+                                 " one-shot process (slopp --call) derives a fresh"
+                                 " identity per process, so turn_begin and the"
+                                 " write must be passed the SAME agent argument —"
+                                 " otherwise the second call opens a second turn"
+                                 " and this refusal repeats verbatim.")
+                            {:dir (:dir @session) :agent ag})))))))
   (let [a   (assoc arguments :agent (or (:agent arguments)
                                         (:agent-id @session)))
         sym (fn [k]
@@ -1367,14 +1511,16 @@
                             (orient/orient-map session
                                                :ask (:ask a)
                                                :seeds (:seeds a)
-                                               :tokens (or (:tokens a) 1500))))
+                                               :tokens (or (:tokens a) 1500)))
+                     :budgeted? true)
       "query_slice" (text! (told! session name a
                                         (query/query-slice session (sym :ns) (sym :name)
                                                         :depth (or (:depth a) 2)
                                                         :limit (or (:limit a) 8)
                                                         :match (:match a)
                                                         :window (:window a)
-                                                        :verbose (:verbose a))))
+                                                        :verbose (:verbose a)))
+                                 :budgeted? true)
       "query_depends" (text! (told! session name a
                                         (let [r (graph/query-depends session (:on a)
                                                                      :modules (:modules a)
@@ -1389,14 +1535,10 @@
                                               reds (when (= :var (:kind r))
                                                      (ops/red-after session (:on a)))]
                                           (cond-> r reds (assoc :red-after reds)))))
-      "session_brief" (text! (let [b    (ops/session-brief session)
-                                       conn (:db @session)
-                                       al   (when (and conn (:dir @session))
-                                              (sync/alignment
-                                               (:dir @session) "."
-                                               (str "slopp/" (:branch @session))
-                                               (ops/query-commits session)))]
-                                   (told! session name a (cond-> b al (assoc :alignment al)))))
+      "session_brief" ;; git alignment is a QUESTION (query_git), not orientation: it rode on
+                       ;; every brief as ~500 chars an agent never acted on
+                       (text! (told! session name a (ops/session-brief session))
+                              :budgeted? true)
       "review_scan" (text! (told! session name a
                                             (review/review-scan session
                                                              :ns (:ns a)
@@ -1626,9 +1768,9 @@
                    ;; the truth in the session for session_brief, which is what
                    ;; the note points at.
                    app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)]
-               (text! (if-let [note (app-note-for app)]
-                        (assoc r :app-note note)
-                        r)))
+               (text! (terse-done (if-let [note (app-note-for app)]
+                                   (assoc r :app-note note)
+                                   r))))
       "commit_point" (text! (let [r (external/commit-point! session (:label a)
                                                        :agent (:agent a)
                                                        :force (:force a)
@@ -1854,101 +1996,6 @@
       (.flush out-writer)))
   nil)
 
-(defn call!
-  "One-shot tool invocation against the store at `dir` — the --call CLI's
-  engine and the fallback when no MCP connection exists. Opens a durable
-  session, dispatches ONE tool call, closes. Returns the wire result map
-  ({:content [{:text …}]}; :isError true on tool errors), same as the
-  server would send.
-
-  Writes stay TURN-GATED here, deliberately: provenance is not optional just
-  because the caller is a script. Turns are DURABLE across one-shot processes,
-  so the scripted shape is `--call turn_begin` once, then the writes, then
-  `--call turn_end` — not a turn per call. Reads need nothing.
-
-  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
-  everything here flows through `text!`, whose boundary-leak guard refuses a
-  file:line coordinate, so emitting frames replaced the real diagnostic with a
-  guard exception."
-  [dir tool arguments]
-  (let [session (external/open!
-                 (cond-> {:slopp.ops/dir (str dir)}
-                   ;; a one-shot names its agent in the call, and that name is
-                   ;; the SESSION's identity, not merely the delta's. Turns are
-                   ;; durable across processes and so is the LINE one was opened
-                   ;; on — a fresh identity per process would open a fresh
-                   ;; thread per call, and the turn would be unfindable by the
-                   ;; very write it was opened for.
-                   (:agent arguments)
-                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
-    (swap! session assoc :require-turns? true)
-    (try
-      (let [r (try (call-tool! session {:name tool :arguments arguments})
-                   (catch Exception e
-                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                           msgs  (into [] (comp (take-while some?)
-                                                (map #(str (.getSimpleName (class %))
-                                                           ": " (ex-message %))))
-                                       chain)]
-                       (assoc (text! (str "error: " (str/join " <- " msgs)))
-                              :isError true))))]
-        ;; ...and say what this process could not see. See
-        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-        ;; somebody's thread holds un-landed work that is a different store from
-        ;; the one an MCP session answers from.
-        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-          (update r :content (fnil conj []) {:type "text" :text note})
-          r))
-      (finally (ops/close! session)))))
-
-^:unsafe
-(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
-  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
-  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
-  tool error. args is JSON, EDN, or @file (parse-call-args)."
-  [& [dir tool args-str]]
-  (when (str/blank? tool)
-    (binding [*out* *err*]
-      (println "usage: --call <tool> [<json/edn args or @file>]"))
-    (System/exit 2))
-  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
-    (println (clojure.string/join "\n" (map :text (:content r))))
-    (flush)
-    (System/exit (if (:isError r) 1 0))))
-
-(defn- host-image-options
-  "The idle-image budget this SERVER opens with, from the host environment.
-
-  A writer costs several JVMs, not one: the active image, a warm spare, and one
-  parked image per branch line held for the reap lease. Only the first is doing
-  anything. The other two are latency trades — they exist to keep a JVM boot
-  off the critical path — and a host running many concurrent writers is trading
-  the wrong way, because its binding constraint is memory rather than the ~830
-  ms a boot costs.
-
-  Both were already `open!` options; only this server hardcoded them, so there
-  was no way to say so without editing code. **The defaults do not move** —
-  they are what was measured for a session alone on a box — so a single-writer
-  host is unaffected and a swarm operator gets a dial.
-
-  `SLOPP_WARM_SPARE` is off for `0` or `false` and on for anything else,
-  including unset. `SLOPP_BRANCH_IMAGE_TTL_MS` must read as a POSITIVE number
-  to be honoured: a typo parsed as zero would reap every branch image the
-  instant it was parked, which presents as branch switching having got slow and
-  never as a misspelt variable. An unreadable setting must not be obeyed as its
-  most destructive reading.
-
-  `getenv` is a parameter rather than a read, because the process environment
-  is state a test cannot set."
-  [getenv]
-  (let [off?  #{"0" "false"}
-        spare (some-> (getenv "SLOPP_WARM_SPARE") str/trim str/lower-case)
-        ttl   (some-> (getenv "SLOPP_BRANCH_IMAGE_TTL_MS") str/trim parse-long)]
-    {:slopp.ops/warm-spare?         (not (off? spare))
-     :slopp.ops/branch-image-ttl-ms (if (and ttl (pos? ttl))
-                                      ttl
-                                      external/default-branch-image-ttl-ms)}))
-
 ^:unsafe
 (defn -main
   "Start the stdio MCP server. An optional `dir` argument makes the session
@@ -2053,3 +2100,65 @@
         ;; A minute of a process that has announced a url, withdrawn it, and
         ;; still answers `ps` is exactly the state nobody could interpret.
         (shutdown-agents)))))
+
+(defn call!
+  "One-shot tool invocation against the store at `dir` — the --call CLI's
+  engine and the fallback when no MCP connection exists. Opens a durable
+  session, dispatches ONE tool call, closes. Returns the wire result map
+  ({:content [{:text …}]}; :isError true on tool errors), same as the
+  server would send.
+
+  Writes stay TURN-GATED here, deliberately: provenance is not optional just
+  because the caller is a script. Turns are DURABLE across one-shot processes,
+  so the scripted shape is `--call turn_begin` once, then the writes, then
+  `--call turn_end` — not a turn per call. Reads need nothing.
+
+  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
+  everything here flows through `text!`, whose boundary-leak guard refuses a
+  file:line coordinate, so emitting frames replaced the real diagnostic with a
+  guard exception."
+  [dir tool arguments]
+  (let [session (external/open!
+                 (cond-> {:slopp.ops/dir (str dir)}
+                   ;; a one-shot names its agent in the call, and that name is
+                   ;; the SESSION's identity, not merely the delta's. Turns are
+                   ;; durable across processes and so is the LINE one was opened
+                   ;; on — a fresh identity per process would open a fresh
+                   ;; thread per call, and the turn would be unfindable by the
+                   ;; very write it was opened for.
+                   (:agent arguments)
+                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
+    (swap! session assoc :require-turns? true)
+    (try
+      (let [r (try (call-tool! session {:name tool :arguments arguments})
+                   (catch Exception e
+                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                           msgs  (into [] (comp (take-while some?)
+                                                (map #(str (.getSimpleName (class %))
+                                                           ": " (ex-message %))))
+                                       chain)]
+                       (assoc (text! (str "error: " (str/join " <- " msgs)))
+                              :isError true))))]
+        ;; ...and say what this process could not see. See
+        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+        ;; somebody's thread holds un-landed work that is a different store from
+        ;; the one an MCP session answers from.
+        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+          (update r :content (fnil conj []) {:type "text" :text note})
+          r))
+      (finally (ops/close! session)))))
+
+^:unsafe
+(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
+  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
+  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
+  tool error. args is JSON, EDN, or @file (parse-call-args)."
+  [& [dir tool args-str]]
+  (when (str/blank? tool)
+    (binding [*out* *err*]
+      (println "usage: --call <tool> [<json/edn args or @file>]"))
+    (System/exit 2))
+  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
+    (println (clojure.string/join "\n" (map :text (:content r))))
+    (flush)
+    (System/exit (if (:isError r) 1 0))))
