@@ -2930,66 +2930,6 @@
                            (= mine (root n)))]
             n)))))
 
-(defn create-ns!
-  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
-   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
-     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
-   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
-     land the entire namespace in one verified call — forward refs within the
-     file resolve as a unit, like a real `.clj` load. For ported/reference/data
-     code that isn't subject to red→green.
-   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
-   (module_platform grain = this namespace) BEFORE the source lands, so a
-   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
-   instead of failing to load into the JVM oracle (the inherited-default
-   footgun). A bad platform refuses the whole create.
-
-   **A scaffold may require a namespace that does not exist yet**, which is how
-   red-first works across a namespace boundary: each such require is created
-   EMPTY and reported in `:also-created`. Without it a spec-first write does not
-   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
-   holds the rule for which requires qualify and why a library never does.
-
-   Delegates to `ingest!` (the shared engine); overwrite is refused there."
-  [session ns-sym & {:keys [requires source agent platform prompt]}]
-  (if (and source (seq requires))
-    {:error (str ":source and :requires are mutually exclusive — put requires "
-                 "inside the source's ns form")}
-    ;; platform must be declared FIRST: ingest reads it to decide whether to
-    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
-    (let [perr (when platform
-                 (:error (module-platform! session (str ns-sym) platform
-                                           :prompt (or prompt "platform declared at namespace creation")
-                                           :agent agent)))
-          ;; computed BEFORE the write, while the store still lacks the name
-          shadow (shadow-warning (:store @session) ns-sym)
-          also   (when-not perr
-                   (unwritten-requires (:store @session) ns-sym requires))]
-      (cond
-        perr {:error perr}
-
-        :else
-        (let [;; the subjects come into being BEFORE the spec that requires
-              ;; them, or the spec's own load is the failure again
-              sub-err (some (fn [n]
-                              (:error (ingest! session n (str "(ns " n ")\n")
-                                               :agent agent)))
-                            also)
-              r (if sub-err
-                  {:error sub-err}
-                  (if source
-                    (ingest! session ns-sym source :agent agent)
-                    (ingest! session ns-sym
-                             (str "(ns " ns-sym
-                                  (when (seq requires)
-                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
-                                  ")\n")
-                             :agent agent)))]
-          (cond-> r
-            (seq also) (assoc :also-created (vec also))
-            (and shadow (not (:error r)))
-            (update :warnings (fnil conj []) shadow)))))))
-
 (defn- sweep-patterns-left-behind
   "Forms holding a regex literal that names `from` with escaped dots — what a
   textual sweep could not see, let alone rewrite.
@@ -3512,93 +3452,6 @@
                 " project) or set the slopp.hub.port capability to 0. Until"
                 " then :ui is all there is, and it serves JSON"))
       relevant   (assoc :relevant relevant))))
-
-^:reads (defn report
-  "The handoff/summary composite (ratio push): milestones, net form-level
-  changes with their recorded ASKS, and the last verification state — the
-  history fan-out (query_history + query_history {contains} + query_changes +
-  query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions.
-
-  A history read: the line's journal is read here, when asked (a handoff is
-  written a few times a day), rather than carried in the value."
-  [session & {:keys [since contains limit] :or {limit 50}}]
-  (let [st        (:store @session)
-        conn      (:db @session)
-        line      (engine/session-line session)
-        after     (vec (db/line-deltas conn line :since since))
-        after-ids (into #{} (map :id) after)
-        content   #{:add :replace :delete :rename :move}
-        changes   (->> after
-                       (filter (comp content :op))
-                       (mapcat (fn [d]
-                                 (for [fid (or (:form-ids d)
-                                               (some-> (:form-id d) vector))]
-                                   {:ns (:ns d) :fid fid :op (:op d)
-                                    :ask (:prompt d)})))
-                       (group-by (juxt :ns :fid))
-                       (map (fn [[[nsx fid] es]]
-                              {:ns nsx
-                               :form (let [e (store/form-by-id st fid)]
-                                       (or (:name e) fid))
-                               :ops (vec (distinct (map :op es)))
-                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))}))
-                       (filter (fn [row]
-                                 (or (nil? contains)
-                                     (some #(str/includes? (str %) (str contains))
-                                           (cons (str (:form row)) (:asks row))))))
-                       (sort-by (juxt (comp str :ns) (comp str :form)))
-                       (take limit)
-                       vec)
-        ms        (->> (query-commits session)
-                       (filter #(and (or (nil? since) (after-ids (:commit %)))
-                                     (or (nil? contains)
-                                         (str/includes? (str (:description %))
-                                                        (str contains)))))
-                       (take 20)
-                       (mapv #(-> (select-keys % [:commit :description :at :status])
-                                  (update :description orient/snip 110))))
-        verify*   (db/last-marker conn line :verify)
-        dead      (->> after
-                       (filter #(= :revert (:op %)))
-                       (mapv (fn [d] (cond-> {:why (:why d)
-                                              :forms (vec (:forms d))}
-                                       (:at d) (assoc :at (history/human-time (:at d)))))))
-        ;; the USER's verbatim asks, recorded on turn-begin. A handoff's first
-        ;; question is \"what was I asked to do?\", and per-form :asks answer a
-        ;; different one (what each write intended). Without these, handoffs
-        ;; read the journal by hand — eval9 shelled out to sqlite3 on
-        ;; .slopp/store.db to get exactly this.
-        intents   (->> after
-                       (filter #(= :turn-begin (:op %)))
-                       (keep :intent)
-                       distinct
-                       ;; newest first, and bounded by the same `limit` as the
-                       ;; changes: `limit 1` used to return every ask ever, trimmed
-                       ;; at the wire gate
-                       reverse
-                       (take limit)
-                       (mapv #(orient/snip % 160)))]
-    (orient/fit-report
-     (cond-> {:milestones ms
-             :changes changes
-             :suite (when verify*
-                      {:as-of (:id verify*)
-                       :status (or (get-in verify* [:summary :status])
-                                   (:status verify*) :unknown)})
-             ;; the report is names + asks; the CODE lives one call away.
-             ;; Say so here, or a handoff goes hunting in `git diff` (eval9
-             ;; measured ~20k chars of it) for something slopp already has.
-             :code "query_changes {from \"start\"} = every form's :was/:now across this lifetime (or from \"last-commit\"); format=text for line diffs"
-             :verify (str "writes self-verify; test_run {all true} re-runs the "
-                          "whole in-image suite (bare {} only returns guidance); "
-                          "test_run {:external true} = the full external suite. "
-                          "HANDOFF one-shots (humans/scripts, no session needed): "
-                          "`slopp --call test_run '{\"external\":true}'` and "
-                          "`slopp --call query_commits` — quote these in handoff "
-                          "docs; no need to read skill files for the CLI forms")}
-       (seq intents) (assoc :intents intents)
-       (seq dead)    (assoc :dead-ends dead)))))
 
 (defn ^:export journal
   "`session`'s line's whole delta log, oldest first, read now — the list the
@@ -4575,27 +4428,237 @@
   call across a module boundary named an edge nothing had declared, and the
   refusal itself names the edge (`module_dep {from \"a\" to \"b\"}`). Declare
   it with the pipeline's own prompt, run `retry` — the same write once more
-  — and stamp `:auto-module-dep {:from :to}` on the result. eval10 measured
-  the two-step this replaces at 7–11 turns per lifetime cell, every one of
-  them the agent doing exactly what the refusal said.
+  — and stamp `:auto-module-dep {:from :to}` on the result (every edge
+  under `:auto-module-deps` when there were several). A write can cross
+  SEVERAL boundaries at once — a group's steps, a new namespace's forms —
+  so this loops over DISTINCT edges, bounded, declaring each the refusal
+  names in turn. eval10 measured the two-step this replaces at 7–11 turns
+  per lifetime cell, every one of them the agent doing exactly what the
+  refusal said.
 
   A CYCLE is a real question and stays one: when the declaration is itself
   refused, `r` comes back with the cycle explanation appended so the reader
-  learns both facts from one result. Any other refusal returns `r`
-  untouched. The caller passes `:no-auto-module-dep true` on the retry so
-  this runs once."
+  learns both facts from one result. Any other refusal, or an edge named
+  twice, returns the refusal untouched. The caller passes
+  `:no-auto-module-dep true` on the retry so this runs once per write."
   [session r retry & {:keys [agent]}]
-  (if-let [[_ from to] (and (:error r)
-                            (re-find #"module_dep \{from \"([^\"]+)\" to \"([^\"]+)\"\}"
-                                     (:error r)))]
-    (let [md (module-dep! session from to
-                          :prompt fields/auto-module-dep-prompt :agent agent)]
-      (if (:error md)
-        (update r :error str " The edge could not be declared for you: " (:error md))
-        (let [r2 (retry)]
-          (cond-> r2
-            (nil? (:error r2)) (assoc :auto-module-dep {:from from :to to})))))
-    r))
+  (let [edge (fn [r] (when (:error r)
+                       (when-let [[_ from to] (re-find #"module_dep \{from \"([^\"]+)\" to \"([^\"]+)\"\}"
+                                                       (:error r))]
+                         {:from from :to to})))]
+    (loop [r r, declared [], n 0]
+      (let [e (edge r)]
+        (cond
+          (nil? e)                       (cond-> r
+                                           (and (nil? (:error r)) (seq declared))
+                                           (assoc :auto-module-dep (first declared))
+                                           (and (nil? (:error r)) (next declared))
+                                           (assoc :auto-module-deps declared))
+          (or (some #{e} declared) (<= 6 n)) r
+          :else
+          (let [md (module-dep! session (:from e) (:to e)
+                                :prompt fields/auto-module-dep-prompt :agent agent)]
+            (if (:error md)
+              (update r :error str " The edge could not be declared for you: " (:error md))
+              (recur (retry) (conj declared e) (inc n)))))))))
+
+(defn create-ns!
+  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
+   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
+     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
+   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
+     land the entire namespace in one verified call — forward refs within the
+     file resolve as a unit, like a real `.clj` load. For ported/reference/data
+     code that isn't subject to red→green.
+   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
+   (module_platform grain = this namespace) BEFORE the source lands, so a
+   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
+   instead of failing to load into the JVM oracle (the inherited-default
+   footgun). A bad platform refuses the whole create.
+
+   **A scaffold may require a namespace that does not exist yet**, which is how
+   red-first works across a namespace boundary: each such require is created
+   EMPTY and reported in `:also-created`. Without it a spec-first write does not
+   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
+   holds the rule for which requires qualify and why a library never does.
+
+   Delegates to `ingest!` (the shared engine); overwrite is refused there."
+  [session ns-sym & {:keys [requires source agent platform prompt]}]
+  (if (and source (seq requires))
+    {:error (str ":source and :requires are mutually exclusive — put requires "
+                 "inside the source's ns form")}
+    ;; platform must be declared FIRST: ingest reads it to decide whether to
+    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
+    (let [perr (when platform
+                 (:error (module-platform! session (str ns-sym) platform
+                                           :prompt (or prompt "platform declared at namespace creation")
+                                           :agent agent)))
+          ;; computed BEFORE the write, while the store still lacks the name
+          shadow (shadow-warning (:store @session) ns-sym)
+          also   (when-not perr
+                   (unwritten-requires (:store @session) ns-sym requires))]
+      (cond
+        perr {:error perr}
+
+        :else
+        (let [;; the subjects come into being BEFORE the spec that requires
+              ;; them, or the spec's own load is the failure again
+              sub-err (some (fn [n]
+                              (:error (ingest! session n (str "(ns " n ")\n")
+                                               :agent agent)))
+                            also)
+              r (if sub-err
+                  {:error sub-err}
+                  (if source
+                    ;; a whole namespace is the write most likely to cross a
+                    ;; boundary for the first time; declare its edges as a
+                    ;; single form's write would
+                    (let [once #(ingest! session ns-sym source :agent agent)]
+                      (auto-module-dep-retry! session (once) once :agent agent))
+                    (ingest! session ns-sym
+                             (str "(ns " ns-sym
+                                  (when (seq requires)
+                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
+                                  ")\n")
+                             :agent agent)))]
+          (cond-> r
+            (seq also) (assoc :also-created (vec also))
+            (and shadow (not (:error r)))
+            (update :warnings (fnil conj []) shadow)))))))
+
+(defn- by-ask-rows
+  "The line's content deltas grouped by the ASK that made them: a
+  `:turn-begin` opens an ask (its verbatim intent), and every add / replace
+  / delete / rename after it is its until the next one. Per ask:
+  `{:ask :at :added :changed :deleted :renamed}` (forms as `ns/name`;
+  renames as `{:from :to}`), newest first, asks that changed nothing
+  omitted, bounded by `limit`. Writes before any turn (an ingest, a script)
+  belong to no ask and are not here.
+
+  eval10 p5 asked for a rundown of what changed and why from the records;
+  `report` rolled changes up by namespace with each ask snipped to a line,
+  and the agent read five per-namespace histories to attribute forms to
+  asks. The attribution was in the journal the whole time."
+  [st after limit]
+  (let [name-of (fn [d fid]
+                  (symbol (str (:ns d))
+                          (str (or (:name (store/form-by-id st fid)) (:name d) fid))))
+        step    (fn [{:keys [asks cur] :as acc} d]
+                  (case (:op d)
+                    :turn-begin
+                    {:asks (cond-> asks cur (conj cur))
+                     :cur  (cond-> {:ask (orient/snip (:intent d) 200)}
+                             (:at d) (assoc :at (history/human-time (:at d))))}
+
+                    (:add :replace :delete :rename)
+                    (if-not cur
+                      acc
+                      (let [k (case (:op d) :add :added :replace :changed :delete :deleted :rename :renamed)
+                            v (if (= :rename (:op d))
+                                [{:from (symbol (str (:ns d)) (str (:old d)))
+                                  :to   (symbol (str (:ns d)) (str (:new d)))}]
+                                (mapv #(name-of d %)
+                                      (or (:form-ids d) (some-> (:form-id d) vector))))]
+                        (assoc acc :cur (update cur k (fnil into []) v))))
+
+                    acc))
+        {:keys [asks cur]} (reduce step {:asks [] :cur nil} after)]
+    (->> (cond-> asks cur (conj cur))
+         (filter #(some % [:added :changed :deleted :renamed]))
+         (map (fn [a] (reduce (fn [m k] (cond-> m (contains? m k) (update k #(vec (distinct %)))))
+                              a [:added :changed :deleted :renamed])))
+         reverse
+         (take limit)
+         vec)))
+
+^:reads (defn report
+  "The handoff/summary composite (ratio push): milestones, net form-level
+  changes with their recorded ASKS, and the last verification state — the
+  history fan-out (query_history + query_history {contains} + query_changes +
+  query_commits + git diffs) as ONE deterministic read. `:since` = a
+  delta/milestone id; `:contains` filters asks/descriptions.
+
+  A history read: the line's journal is read here, when asked (a handoff is
+  written a few times a day), rather than carried in the value."
+  [session & {:keys [since contains limit] :or {limit 50}}]
+  (let [st        (:store @session)
+        conn      (:db @session)
+        line      (engine/session-line session)
+        after     (vec (db/line-deltas conn line :since since))
+        after-ids (into #{} (map :id) after)
+        content   #{:add :replace :delete :rename :move}
+        changes   (->> after
+                       (filter (comp content :op))
+                       (mapcat (fn [d]
+                                 (for [fid (or (:form-ids d)
+                                               (some-> (:form-id d) vector))]
+                                   {:ns (:ns d) :fid fid :op (:op d)
+                                    :ask (:prompt d)})))
+                       (group-by (juxt :ns :fid))
+                       (map (fn [[[nsx fid] es]]
+                              {:ns nsx
+                               :form (let [e (store/form-by-id st fid)]
+                                       (or (:name e) fid))
+                               :ops (vec (distinct (map :op es)))
+                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))}))
+                       (filter (fn [row]
+                                 (or (nil? contains)
+                                     (some #(str/includes? (str %) (str contains))
+                                           (cons (str (:form row)) (:asks row))))))
+                       (sort-by (juxt (comp str :ns) (comp str :form)))
+                       (take limit)
+                       vec)
+        ms        (->> (query-commits session)
+                       (filter #(and (or (nil? since) (after-ids (:commit %)))
+                                     (or (nil? contains)
+                                         (str/includes? (str (:description %))
+                                                        (str contains)))))
+                       (take 20)
+                       (mapv #(-> (select-keys % [:commit :description :at :status])
+                                  (update :description orient/snip 110))))
+        verify*   (db/last-marker conn line :verify)
+        dead      (->> after
+                       (filter #(= :revert (:op %)))
+                       (mapv (fn [d] (cond-> {:why (:why d)
+                                              :forms (vec (:forms d))}
+                                       (:at d) (assoc :at (history/human-time (:at d)))))))
+        ;; the USER's verbatim asks, recorded on turn-begin. A handoff's first
+        ;; question is \"what was I asked to do?\", and per-form :asks answer a
+        ;; different one (what each write intended). Without these, handoffs
+        ;; read the journal by hand — eval9 shelled out to sqlite3 on
+        ;; .slopp/store.db to get exactly this.
+        by-ask    (by-ask-rows st after limit)
+        intents   (->> after
+                       (filter #(= :turn-begin (:op %)))
+                       (keep :intent)
+                       distinct
+                       ;; newest first, and bounded by the same `limit` as the
+                       ;; changes: `limit 1` used to return every ask ever, trimmed
+                       ;; at the wire gate
+                       reverse
+                       (take limit)
+                       (mapv #(orient/snip % 160)))]
+    (orient/fit-report
+     (cond-> {:milestones ms
+             :changes changes
+             :suite (when verify*
+                      {:as-of (:id verify*)
+                       :status (or (get-in verify* [:summary :status])
+                                   (:status verify*) :unknown)})
+             ;; the report is names + asks; the CODE lives one call away.
+             ;; Say so here, or a handoff goes hunting in `git diff` (eval9
+             ;; measured ~20k chars of it) for something slopp already has.
+             :code "query_changes {from \"start\"} = every form's :was/:now across this lifetime (or from \"last-commit\"); format=text for line diffs"
+             :verify (str "writes self-verify; test_run {all true} re-runs the "
+                          "whole in-image suite (bare {} only returns guidance); "
+                          "test_run {:external true} = the full external suite. "
+                          "HANDOFF one-shots (humans/scripts, no session needed): "
+                          "`slopp --call test_run '{\"external\":true}'` and "
+                          "`slopp --call query_commits` — quote these in handoff "
+                          "docs; no need to read skill files for the CLI forms")}
+       (seq intents) (assoc :intents intents)
+       (seq by-ask)  (assoc :by-ask by-ask)
+       (seq dead)    (assoc :dead-ends dead)))))
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):

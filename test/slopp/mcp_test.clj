@@ -3334,3 +3334,52 @@
         (call! sess "edit_subform" {:ns "lw.core" :name "g" :match "(f x)" :source "(f (f x))" :prompt "changed"})
         (is (re-find #":name g, :source \"\(defn" (call! sess "query_source" {:targets [{:ns "lw.core" :name "g"}]}))))
       (finally (ops/close! sess)))))
+
+(deftest a-red-with-a-literal-delta-proposes-the-assertion-update
+  ;; eval10: after a deliberate behaviour change the agent read the failing
+  ;; test, found the literal, and rewrote it — three calls for "1400 is now
+  ;; 1600". clojure.test already reports the assertion form and the actual
+  ;; value; when the expected side is a literal and the actual is one too,
+  ;; the update is mechanical, and the result says exactly what one
+  ;; edit_subform {text true} would send. Anything else — a computed
+  ;; expected, a thrown error, a non-equality assertion — proposes nothing.
+  (let [propose #'mcp/propose-assertion]
+    (testing "a literal expected against a literal actual"
+      (is (= {:match "(= 1400 (quote-cents p c))" :source "(= 1600 (quote-cents p c))"
+              :note "accept the new behaviour with edit_subform {ns name match source text true}; or the change is wrong and the test is right"}
+             (propose {:test 'logi.quoting-test/quote-t
+                       :expected "(= 1400 (quote-cents p c))"
+                       :actual "(not (= 1400 1600))"}))))
+    (testing "string and keyword literals, and the actual on either side"
+      (is (= {:match "(= \"a\" (f))" :source "(= \"b\" (f))"}
+             (dissoc (propose {:expected "(= \"a\" (f))" :actual "(not (= \"a\" \"b\"))"}) :note)))
+      (is (= {:match "(= (f) :old)" :source "(= (f) :new)"}
+             (dissoc (propose {:expected "(= (f) :old)" :actual "(not (= :new :old))"}) :note))))
+    (testing "nothing to propose"
+      (is (nil? (propose {:expected "(= (g x) (f x))" :actual "(not (= 1 2))"})) "no literal to move")
+      (is (nil? (propose {:expected "(= 1400 (f))" :actual "java.lang.ArithmeticException: Divide by zero"})) "an error is not a delta")
+      (is (nil? (propose {:expected "(pos? (f))" :actual "(not (pos? -1))"})) "not an equality")
+      (is (nil? (propose {:expected "(= 1400 (f))" :actual "(not (= 1400 [1 2 3]))"})) "a collection is not a literal the agent should accept blind"))))
+
+(deftest ^:external a-group-and-a-new-namespace-declare-their-first-crossing-too
+  ;; eval10 s4 (the jar with auto-declared edges): module_dep was still
+  ;; called nine times — after an edit_group step's refusal ("step 0: x/f
+  ;; uses y/g but module x does not declare y") and after ns_create's. The
+  ;; single-form writes repair the edge; these two paths must too, or the
+  ;; agent learns the two-step from whichever door it happens to use.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "mg.util.core" :source "(ns mg.util.core)\n(defn ^:export twice [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "mg.app.core" :source "(ns mg.app.core)\n(defn ^{:export true :unused-ok \"fixture\"} one [] 1)\n"})
+      (testing "a group whose step crosses a module boundary"
+        (let [r (call! sess "edit_group" {:prompt "app uses util, as a group"
+                                          :steps [{"action" "add" "ns" "mg.app.core"
+                                                   "source" "(defn ^:unused-ok quad [x] (mg.util.core/twice (mg.util.core/twice x)))"}]})]
+          (is (re-find #":auto-module-dep \{:from \"mg\.app\", :to \"mg\.util\"\}" r) r)
+          (is (re-find #":group" r) r)))
+      (testing "a new namespace whose source crosses a module boundary"
+        (let [r (call! sess "ns_create" {:ns "mg.web.core" :prompt "web uses app"
+                                         :source "(ns mg.web.core)\n(defn ^:unused-ok page [] (mg.app.core/one))\n"})]
+          (is (re-find #":auto-module-dep \{:from \"mg\.web\", :to \"mg\.app\"\}" r) r)
+          (is (not (re-find #"\{:error" r)) r)))
+      (finally (ops/close! sess)))))

@@ -141,11 +141,14 @@
                                    :prompt "blocked: exported to ma.core.* only")]
           (is (re-find #"exported only within ma\.core\.\*" (str (:error r)))
               (pr-str r))))
-      (testing "ns_create of a violating namespace is gated too"
+      (testing "ns_create of a crossing namespace is gated too — and the gate is answered by declaring the edge"
         (let [r (ops/create-ns! sess 'mc.rogue
                                 :source (str "(ns mc.rogue (:require [ma.core :as core]))\n"
                                              "(defn steal \"Rogue.\" [x] (core/shared x))\n"))]
-          (is (re-find #"does not declare" (str (:error r))) (pr-str r))))
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:from "mc.rogue" :to "ma.core"} (:auto-module-dep r)) (pr-str r))
+          (is (:already-declared (ops/module-dep! sess "mc.rogue" "ma.core" :prompt "already"))
+              "the declared edge is the real edge")))
       (testing "a public defn without a docstring surfaces at the DONE-POINT (never blocks)"
         (let [r (ops/edit-replace! sess 'mb.app 'use-it
                                    "(defn use-it [x] (impl/hoisted x))"

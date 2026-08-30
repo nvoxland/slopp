@@ -445,96 +445,6 @@
   fails if it grows."
   #{:ms :warnings})
 
-(defn- summarize
-  "B1: a green-and-quiet edit result compresses to a terse shape (the Go
-  baseline showed slopp's verbose green responses were the token loser).
-  :error, NEW red failure detail, or NEW warnings return the full map — a
-  red that carries only :still-red names (episode compression) stays
-  TERSE. Source echoes are stripped EVERYWHERE (Q1); :untested is a terse
-  FLAG; a zero-test verification says :coverage :none (Q8); the :type
-  :summary tag is internal and never rides the wire.
-
-  The terse path SHAPES what a layer returned; it does not re-decide it.
-  Everything in `tools/wire-keys` passes through, and only the bulky keys
-  are compressed (a delta to its id, a delta list and an affected set to
-  their counts, a verification to the rebuilt `:test`). That direction is
-  the registry's own argument, applied one layer later: an allowlist here
-  is a SECOND independent guess at what an agent should see, and it lost
-  the same way the fourteen per-tool lists did.
-
-  Measured when this was fixed: of the 39 routed keys, 21 arrived and 21
-  were dropped — among them `:callers` (so `edit_move_forms` reported the
-  same result whether it rewrote twelve call sites or none),
-  `:export-not-landed` (a postcondition that did NOT hold), and
-  `:unknown-shape` (the call sites a rewrite could not reach, which are the
-  caller's to check by hand). Each looked like a missing feature rather
-  than a dropped one.
-
-  So: an empty collection from a layer is a FINDING — it looked and found
-  none — and it rides the wire as one. A key the layer omits is the layer
-  saying nothing. Deciding which is which is not this function's job."
-  [r verbose?]
-  (let [strip (fn [d] (if (map? d) (dissoc d :source :sources :node) d))
-        r     (cond-> r
-                (:delta r)        (update :delta strip)
-                (seq (:deltas r)) (update :deltas (partial mapv strip)))]
-    (if (or verbose? (:error r) (seq (:warnings r))
-            (and (red? (:test r)) (seq (:failures (:test r)))))
-      (update r :test #(if (map? %) (dissoc % :type) %))
-      (let [t (:test r)]
-        (cond-> (assoc (apply dissoc (select-keys r tools/wire-keys) terse-elided) :ok true)
-          (:delta r)    (assoc :delta (get-in r [:delta :id]))
-          (:deltas r)   (assoc :deltas (count (:deltas r)))
-          (:untested r) (assoc :untested true)
-          ;; a PREVIEW's payload is the whole point of asking for one —
-          ;; dropping it here made dry-run look like a silent no-op
-          (:dry-run r)  (assoc :dry-run true)
-          ;; the covering tests by NAME when there are few — "verified by
-          ;; base-t and quad-t" is what makes a re-run visibly redundant; a
-          ;; count only says something ran
-          (:affected r) (assoc :affected (let [a (:affected r)]
-                                           (cond (= :all a)        :all
-                                                 (<= (count a) 8)  (vec a)
-                                                 :else             (count a))))
-          t             (assoc :test (cond-> {:ran (:test t 0) :pass (:pass t 0)
-                                              ;; a run that executed NOTHING is unverified, not green — green must
-                                              ;; mean tests ran and passed, or an agent learns to distrust
-                                              ;; the status and re-run them by hand
-                                              :status (cond
-                                                        (red? t)                    :red
-                                                        (zero? (:test t 0))         :unverified
-                                                        ;; impacted ^:external tests were DEFERRED — whatever
-                                                        ;; passed here, it wasn't those. Writing an ^:external
-                                                        ;; deftest reported :green off its neighbours in the same
-                                                        ;; namespace: a red-first spec reporting success.
-                                                        (seq (:external-pending t)) :partial
-                                                        :else                       (:status t :green))
-                                              :scope (:scope t)}
-                                       (:staleness-detected t)  (assoc :staleness-healed true)
-                                       (zero? (:test t 0))      ;; name the CAUSE. "no test covers this yet" is the agent's to fix;
-                                       ;; "the scope ran nothing" is a slopp bug. Collapsing the
-                                       ;; two is how an empty verification fallback hid, looking
-                                       ;; like an ordinary untested form.
-                                       (assoc :coverage :none
-                                              :reason (cond
-                                                        ;; nothing ran because everything impacted is
-                                                        ;; ^:external — by DESIGN, and the done point
-                                                        ;; will run them. Not a gap, not a bug.
-                                                        ;; a lower layer already NAMED the reason (e.g. a :cljs write,
-                                                        ;; :cljs-deferred-to-compile) — respect it over the generic guesses
-                                                        (:reason t)                 (:reason t)
-                                                        (seq (:external-pending t)) :all-impacted-external
-                                                        (= :all (:affected r))      :no-covering-tests
-                                                        :else                       :scope-ran-nothing))
-                                       (red? t)                 (assoc :fail (+ (:fail t 0) (:error t 0)))
-                                       (seq (:still-red t))     (assoc :still-red (:still-red t))
-                                       (seq (:went-green t))    (assoc :went-green (:went-green t))
-                                       ;; WHICH tests are deferred, not merely that some are — a
-                                       ;; bare :partial an agent cannot act on becomes noise it
-                                       ;; learns to skip
-                                       (seq (:external-pending t))
-                                       (assoc :external-pending (:external-pending t)))))))))
-
 ^:unsafe (defn refresh-app!
   "Re-serve this project's app on the CURRENT store, or stop a managed server
   the store has opted out of. nil when there is nothing to do. NEVER throws.
@@ -1483,6 +1393,140 @@
   [r session op a]
   (when (nil? (:error r)) (ledger-written! session op a))
   r)
+
+(defn- propose-assertion
+  "For a failure whose assertion is `(= literal expr)` (either order) and whose
+  actual is `(not (= a b))` with both sides scalar literals, the one
+  `edit_subform {text true}` that accepts the new behaviour: `{:match <the
+  assertion as written> :source <the same with the literal replaced> :note}`.
+  nil for anything else — a computed expected, an error, a non-equality
+  assertion, a collection (the agent should not accept a collection blind).
+
+  Why: after a deliberate behaviour change the agent read the failing test,
+  found the literal and rewrote it — three calls for \"1400 is now 1600\".
+  clojure.test already reports the assertion form and the actual value, and
+  when both sides are literals the update is mechanical; saying it is what
+  turns a red into an accept-or-refuse rather than a read-and-rewrite."
+  [{:keys [expected actual]}]
+  (let [scalar? (fn [x] (or (number? x) (string? x) (keyword? x) (boolean? x) (nil? x)))
+        read    (fn [s] (try (clojure.edn/read-string (str s)) (catch Exception _ ::unreadable)))
+        e       (read expected)
+        a       (read actual)]
+    (when (and (seq? e) (= '= (first e)) (= 3 (count e))
+               (seq? a) (= 'not (first a)) (= 2 (count a))
+               (let [inner (second a)] (and (seq? inner) (= '= (first inner)) (= 3 (count inner)))))
+      (let [[_ x y]   e
+            [_ p q]   (second a)
+            lit-left? (and (scalar? x) (not (scalar? y)))
+            lit-right? (and (scalar? y) (not (scalar? x)))
+            old       (cond lit-left? x lit-right? y)
+            new       (when (and (scalar? p) (scalar? q))
+                        (cond (= p old) q (= q old) p))]
+        (when (and (or lit-left? lit-right?) (some? new) (not= new old))
+          {:match  (str expected)
+           :source (pr-str (if lit-left? (list '= new y) (list '= x new)))
+           :note   (str "accept the new behaviour with edit_subform {ns name match source text true};"
+                        " or the change is wrong and the test is right")})))))
+
+(defn- summarize
+  "B1: a green-and-quiet edit result compresses to a terse shape (the Go
+  baseline showed slopp's verbose green responses were the token loser).
+  :error, NEW red failure detail, or NEW warnings return the full map — a
+  red that carries only :still-red names (episode compression) stays
+  TERSE. Source echoes are stripped EVERYWHERE (Q1); :untested is a terse
+  FLAG; a zero-test verification says :coverage :none (Q8); the :type
+  :summary tag is internal and never rides the wire.
+
+  The terse path SHAPES what a layer returned; it does not re-decide it.
+  Everything in `tools/wire-keys` passes through, and only the bulky keys
+  are compressed (a delta to its id, a delta list and an affected set to
+  their counts, a verification to the rebuilt `:test`). That direction is
+  the registry's own argument, applied one layer later: an allowlist here
+  is a SECOND independent guess at what an agent should see, and it lost
+  the same way the fourteen per-tool lists did.
+
+  Measured when this was fixed: of the 39 routed keys, 21 arrived and 21
+  were dropped — among them `:callers` (so `edit_move_forms` reported the
+  same result whether it rewrote twelve call sites or none),
+  `:export-not-landed` (a postcondition that did NOT hold), and
+  `:unknown-shape` (the call sites a rewrite could not reach, which are the
+  caller's to check by hand). Each looked like a missing feature rather
+  than a dropped one.
+
+  So: an empty collection from a layer is a FINDING — it looked and found
+  none — and it rides the wire as one. A key the layer omits is the layer
+  saying nothing. Deciding which is which is not this function's job."
+  [r verbose?]
+  (let [strip (fn [d] (if (map? d) (dissoc d :source :sources :node) d))
+        r     (cond-> r
+                (:delta r)        (update :delta strip)
+                (seq (:deltas r)) (update :deltas (partial mapv strip)))]
+    (if (or verbose? (:error r) (seq (:warnings r))
+            (and (red? (:test r)) (seq (:failures (:test r)))))
+      (-> r
+          (update :test #(if (map? %) (dissoc % :type) %))
+          ;; a red with a literal delta names the one edit that accepts it
+          (update :test (fn [t]
+                          (if (and (map? t) (seq (:failures t)))
+                            (update t :failures
+                                    (fn [fs] (mapv #(if-let [p (propose-assertion %)]
+                                                      (assoc % :proposed p)
+                                                      %)
+                                                   fs)))
+                            t))))
+      (let [t (:test r)]
+        (cond-> (assoc (apply dissoc (select-keys r tools/wire-keys) terse-elided) :ok true)
+          (:delta r)    (assoc :delta (get-in r [:delta :id]))
+          (:deltas r)   (assoc :deltas (count (:deltas r)))
+          (:untested r) (assoc :untested true)
+          ;; a PREVIEW's payload is the whole point of asking for one —
+          ;; dropping it here made dry-run look like a silent no-op
+          (:dry-run r)  (assoc :dry-run true)
+          ;; the covering tests by NAME when there are few — "verified by
+          ;; base-t and quad-t" is what makes a re-run visibly redundant; a
+          ;; count only says something ran
+          (:affected r) (assoc :affected (let [a (:affected r)]
+                                           (cond (= :all a)        :all
+                                                 (<= (count a) 8)  (vec a)
+                                                 :else             (count a))))
+          t             (assoc :test (cond-> {:ran (:test t 0) :pass (:pass t 0)
+                                              ;; a run that executed NOTHING is unverified, not green — green must
+                                              ;; mean tests ran and passed, or an agent learns to distrust
+                                              ;; the status and re-run them by hand
+                                              :status (cond
+                                                        (red? t)                    :red
+                                                        (zero? (:test t 0))         :unverified
+                                                        ;; impacted ^:external tests were DEFERRED — whatever
+                                                        ;; passed here, it wasn't those. Writing an ^:external
+                                                        ;; deftest reported :green off its neighbours in the same
+                                                        ;; namespace: a red-first spec reporting success.
+                                                        (seq (:external-pending t)) :partial
+                                                        :else                       (:status t :green))
+                                              :scope (:scope t)}
+                                       (:staleness-detected t)  (assoc :staleness-healed true)
+                                       (zero? (:test t 0))      ;; name the CAUSE. "no test covers this yet" is the agent's to fix;
+                                       ;; "the scope ran nothing" is a slopp bug. Collapsing the
+                                       ;; two is how an empty verification fallback hid, looking
+                                       ;; like an ordinary untested form.
+                                       (assoc :coverage :none
+                                              :reason (cond
+                                                        ;; nothing ran because everything impacted is
+                                                        ;; ^:external — by DESIGN, and the done point
+                                                        ;; will run them. Not a gap, not a bug.
+                                                        ;; a lower layer already NAMED the reason (e.g. a :cljs write,
+                                                        ;; :cljs-deferred-to-compile) — respect it over the generic guesses
+                                                        (:reason t)                 (:reason t)
+                                                        (seq (:external-pending t)) :all-impacted-external
+                                                        (= :all (:affected r))      :no-covering-tests
+                                                        :else                       :scope-ran-nothing))
+                                       (red? t)                 (assoc :fail (+ (:fail t 0) (:error t 0)))
+                                       (seq (:still-red t))     (assoc :still-red (:still-red t))
+                                       (seq (:went-green t))    (assoc :went-green (:went-green t))
+                                       ;; WHICH tests are deferred, not merely that some are — a
+                                       ;; bare :partial an agent cannot act on becomes noise it
+                                       ;; learns to skip
+                                       (seq (:external-pending t))
+                                       (assoc :external-pending (:external-pending t)))))))))
 
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),

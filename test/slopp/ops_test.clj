@@ -2554,3 +2554,32 @@
           (is (true? (:standing r2)) (pr-str r2))
           (is (= :green (:status r2)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external report-groups-the-changes-by-the-ask-that-made-them
+  ;; eval10 p5 ("a rundown of everything that changed and why, from the
+  ;; project's own records"): `report` answered with changes rolled up by
+  ;; NAMESPACE, each ask snipped to a line, and the agent then read five
+  ;; per-namespace histories to attribute forms to asks. The record already
+  ;; holds the attribution — a turn-begin opens an ask and the content deltas
+  ;; after it are its — so the report says it: per ask, verbatim, what was
+  ;; added, changed, deleted and renamed. Newest first, asks that changed
+  ;; nothing omitted.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ba.core "(ns ba.core)\n(defn ^:unused-ok h [] 1)\n(defn ^:unused-ok k [] 2)\n")
+      (ops/turn-begin! sess :agent "t" :intent "add the f feature")
+      (is (nil? (:error (ops/add-form! sess 'ba.core "(defn ^:unused-ok f [] 1)" :prompt "f"))))
+      (ops/turn-end! sess :agent "t")
+      (ops/turn-begin! sess :agent "t" :intent "k is now g; drop h; f returns 2")
+      (is (nil? (:error (ops/edit-replace! sess 'ba.core 'f "(defn ^:unused-ok f [] 2)" :prompt "f is 2"))))
+      (is (nil? (:error (ops/delete-form! sess 'ba.core 'h :prompt "drop h"))))
+      (is (nil? (:error (ops/rename! sess 'ba.core 'k 'g :prompt "k is g"))))
+      (let [by-ask (:by-ask (ops/report sess))]
+        (is (= ["k is now g; drop h; f returns 2" "add the f feature"] (mapv :ask by-ask)) (pr-str by-ask))
+        (is (= {:added ['ba.core/f]} (select-keys (second by-ask) [:added :changed :deleted :renamed])) (pr-str (second by-ask)))
+        (let [latest (first by-ask)]
+          (is (= ['ba.core/f] (:changed latest)) (pr-str latest))
+          (is (= ['ba.core/h] (:deleted latest)) (pr-str latest))
+          (is (= [{:from 'ba.core/k :to 'ba.core/g}] (:renamed latest)) (pr-str latest))
+          (is (nil? (:added latest)) "nothing was added in the second ask")))
+      (finally (ops/close! sess)))))
