@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -402,3 +402,9 @@
   Neither needs a loaded var, which is why this has no image half."
   [ctx {:keys [query-params]}]
   (config-document (:store @(:session ctx)) (:prefix query-params)))
+
+(defn ^{:http/read :orient/bundle} bundle-read
+  "Read performer: the ask bundle — `orient/bundle-text` over the live
+  session, the ask taken from `?ask=` (blank is the plain ranking)."
+  [{:keys [session]} {:keys [query-params]}]
+  (orient/bundle-text session (str (:ask query-params))))

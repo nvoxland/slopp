@@ -365,3 +365,14 @@
    :http/raw true
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
+
+(defn ^{:http/method :get :rest/path "/api/bundle" :http/auth :public
+        :rest/response contracts/bundle
+        :http/reads {:bundle [:orient/bundle []]}}
+  bundle
+  "GET /api/bundle?ask= — the ask's map as ONE injectable text block: the
+  prompt hook fetches this at prompt time and the model starts with its
+  orientation already in context (moonshot A). Always 200; a blank ask is
+  the plain ranking, exactly as /api/search answers a blank query."
+  [req]
+  {:status 200 :body {:bundle (:bundle (:http/reads req))}})

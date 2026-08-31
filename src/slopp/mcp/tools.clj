@@ -43,6 +43,11 @@
                                                           :properties {:ns {:type "string"}
                                                                        :name {:type "string"}}
                                                           :required ["ns"]}]}}}}}
+   {:name "query_batch" :image-free false :read-only true
+    :description "Several READ questions, ONE call: ops = [{op …args} …] with any read op (query_source, query_search, query_depends, query_history, report, orient, …) — answers [{:op :result} …], each entry through the same already-sent/ledger door as the single call. At most 6 entries; a write op is refused before anything runs. Batch your independent questions here: models do not emit parallel tool calls, so the batch lives inside the call."
+    :inputSchema {:type "object"
+                  :properties {:ops {:type "array" :items {:type "object"}}}
+                  :required ["ops"]}}
    {:name "query_brief"
     :description "THE form dossier, one call: source + effect flags + cross-ns callers + the tests covering it + the recorded WHY (last prompt/intent). Prefer this over separate source/references/lineage reads when you're about to change a form."
     :inputSchema {:type "object"
@@ -204,6 +209,7 @@
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :source {:type "string"} :prompt {:type "string"}
+                               :accept {:type "array" :items {:type "string"}}
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source"]}}
    {:name "edit_add_form"
@@ -211,12 +217,15 @@
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :source {:type "string"}
                                :prompt {:type "string"}
+                               :accept {:type "array" :items {:type "string"}}
                                :verbose {:type "boolean"}}
                   :required ["ns" "source"]}}
    {:name "edit_group"
     :description "ONE INTENT as one atomic write: several related steps — the fn, its test, the caller it changes, the require it needs — applied together, every per-step gate intact, verified ONCE, reported per step in :steps. steps: [{action: add|replace|subform|delete|require, ns, name, source, match, text, where, require}] — the same keys the single-form tools take. All-or-nothing: a refused step names its index and nothing lands. A missing alias exactly one namespace can supply is required for you (:auto-require). Not a shopping list: a whole feature in one call is refused by the same gates a whole feature in one form is, and done is still the completeness judgement."
     :inputSchema {:type "object"
                   :properties {:steps {:type "array" :items {:type "object"}}
+                               :accept {:type "array" :items {:type "string"}
+                                        :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}
                                :prompt {:type "string"}
                                :verbose {:type "boolean"}}
                   :required ["steps" "prompt"]}}
@@ -639,11 +648,11 @@ TOOLS:   14 families, each an index of its ops: orient, read, depends,
          read {op query_slice ns name}. help {topic <op>} is an op's card.
 TURNS:   automatic. A write carrying `prompt` opens its own turn; the prompt
          hook records your ask. turn_begin only when a refusal asks for it.
-ORIENT:  orient {ask} (the forms that matter, ranked, with WHY) — one call.
-         query_slice {ns name} (one form + the cards it reaches)
-         query_source {targets [{ns name} …]} (several forms, one call)
-         query_search {pattern} · query_depends {on ns/name}
-         independent reads go in ONE turn (several calls, one message)
+ORIENT:  your ask ARRIVES with its map (the [slopp] block above it): ranked
+         forms + the sources of what the ask names — current, don't re-read.
+         More questions: query_batch {ops [{op query_source targets […]}
+         {op query_depends on ns/name} …]} — several questions, ONE call.
+         orient {ask} · query_slice {ns name} · query_search {pattern}
 OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
          query_observe {ns name code} (capture args/returns flowing through a fn)
 WRITE:   in INTENTS: the fn + its test + the caller it changes are ONE
@@ -703,7 +712,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
     :delta :deltas :group :forms :affected :renamed :renamed-namespaces
     :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
     :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
-    :extracted :step :steps :auto-require :auto-module-dep :to-ns :keys :unknown-shape
+    :extracted :step :steps :auto-require :auto-module-dep :finisher :accept-unused :to-ns :keys :unknown-shape
     ;; what a realias moved, and what it declined to
     :sites :lib :left-behind
     ;; what it cost and whether to believe it
@@ -857,7 +866,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
   names: they are the loop's two verbs. `slopp` is the remainder, named as
   such rather than pretending to be a cluster (slopp-ui, 2026-08-30)."
   [{:name "orient" :blurb "Where to start: the forms that matter for an ask, ranked with why; or the project brief." :ops ["orient" "session_brief"]}
-   {:name "read" :blurb "Read code by form, never by file: one form with what it reaches, several forms, a search, the outline, a spooled remainder." :ops ["query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project"]}
+   {:name "read" :blurb "Read code by form, never by file: one form with what it reaches, several forms, a search, the outline, a spooled remainder." :ops ["query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project" "query_batch"]}
    {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
    {:name "history" :blurb "What changed, why and when: form history, intents, milestones, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}

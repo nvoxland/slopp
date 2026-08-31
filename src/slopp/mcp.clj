@@ -416,6 +416,18 @@
      ;; session_brief surfaces it, which is where an agent looks and how the
      ;; human gets told.
      (when (:url r) (swap! session assoc :ui-url (:url r)))
+     ;; …and on DISK, for a process that is not this one: the prompt hook
+     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
+     ;; from a file instead of asking the hub. pid + started let it tell a
+     ;; live listener from a dead session's leftover. Best-effort, silent —
+     ;; nothing about the optional UI may cost the MCP loop anything.
+     (when (:url r)
+       (try (let [ph (java.lang.ProcessHandle/current)]
+              (spit (str (:dir @session) "/.slopp/ui-port")
+                    (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d}"
+                            (long (:port r)) (:url r) (.pid ph)
+                            (System/currentTimeMillis))))
+            (catch Throwable _ nil)))
      (.println System/err
                ^String (if (:url r)
                          (str "slopp UI: " (:url r))
@@ -1528,6 +1540,92 @@
                                        (seq (:external-pending t))
                                        (assoc :external-pending (:external-pending t)))))))))
 
+(defn- deep-kw
+  "Keywordize map keys recursively — a batch entry's nested arguments
+  (targets, where) arrive however the transport shaped them, exactly as
+  `wire-steps` handles for a group's steps."
+  [x]
+  (cond
+    (map? x)        (into {} (map (fn [[k v]] [(keyword (name k)) (deep-kw v)])) x)
+    (sequential? x) (mapv deep-kw x)
+    :else           x))
+
+(defn- finish-accepted!
+  "The deterministic finisher (v1): the write's `accept` names the tests
+  whose LITERAL expectations the change was meant to move — the agent's
+  own judgment, made at write time, recorded in the write. For each
+  failing accepted test with exactly ONE literal→literal delta
+  (`propose-assertion`), apply the proposed update as its own delta (one
+  group, prompt = the acceptance + the write's prompt) and let that
+  group's verification stand as the result's `:test`; report
+  `:finisher {:applied [{:test :was :now}] :status …}` in the SAME result
+  — a was/now pair, because a bare symbol says a literal changed without
+  saying to what (slopp-ui). A test with SEVERAL literal deltas is skipped
+  and named under `:skipped-multi`: one delta is the case the writer
+  judged; several is the case they probably did not, and the assertion
+  messages around them may rationalize the old literals. A failing test
+  NOT accepted, or without a literal delta, rides untouched. An accepted
+  test that did not fail is `:accept-unused`. The model-judge seam sits
+  here; the action space stays proposed updates."
+  [r session a]
+  (let [accept (into #{} (map str) (:accept a))]
+    (if (empty? accept)
+      r
+      (let [failures (get-in r [:test :failures])
+            failing  (into #{} (map (comp str :test)) failures)
+            by-test  (group-by :test (for [f failures
+                                           :when (contains? accept (str (:test f)))
+                                           :let  [p (propose-assertion f)]
+                                           :when p]
+                                       {:test (:test f) :proposed p}))
+            multi    (vec (sort (keys (filter #(next (val %)) by-test))))
+            eligible (mapcat val (remove #(next (val %)) by-test))
+            unused   (vec (sort (map symbol (remove failing accept))))]
+        (cond-> r
+          (seq eligible)
+          (as-> r*
+            (let [steps (vec (for [{:keys [test proposed]} eligible]
+                               {:action :subform
+                                :ns     (symbol (namespace test))
+                                :name   (symbol (clojure.core/name test))
+                                :text   true
+                                :match  (:match proposed)
+                                :source (:source proposed)}))
+                  fr    (ops/edit-group! session steps
+                                         :prompt (str "accepted expectation shift declared by the write: "
+                                                      (:prompt a))
+                                         :agent (:agent a)
+                                         :no-auto-require true)]
+              (if (:error fr)
+                (assoc r* :finisher {:applied [] :status :refused :error (:error fr)})
+                (-> r*
+                    (assoc :test (:test fr))
+                    (update :deltas (fnil into []) (:deltas fr))
+                    (assoc :finisher
+                           (cond-> {:applied (vec (sort-by (comp str :test)
+                                                           (map (fn [{:keys [test proposed]}]
+                                                                  {:test test
+                                                                   :was (:match proposed)
+                                                                   :now (:source proposed)})
+                                                                eligible)))
+                                    :status  (if (red? (:test fr)) :red :green)}
+                             (seq multi)
+                             (assoc :skipped-multi multi
+                                    :note (str "several literal deltas in one accepted test —"
+                                               " one is the case you judged, several is the case"
+                                               " you probably did not: re-read the test (its"
+                                               " assertion messages may rationalize the old"
+                                               " literals) and move them yourself"))))))))
+          (and (empty? eligible) (seq multi))
+          (assoc :finisher {:applied []
+                            :skipped-multi multi
+                            :status :skipped
+                            :note (str "several literal deltas in one accepted test — one is"
+                                       " the case you judged, several is the case you probably"
+                                       " did not: re-read the test and move them yourself")})
+          (seq unused)
+          (assoc :accept-unused unused))))))
+
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
   ;; but the image may still be warming on a background thread. Oracle and
@@ -1675,6 +1773,37 @@
                                                           :detail (:detail a))))
       "query_search" (text! (query/query-search session (:pattern a)
                                                   :limit (or (:limit a) 30)))
+      "query_batch"
+      ;; several READ questions, one call. Measured on every eval cell of
+      ;; both cohorts: no model ever emitted two tool_use blocks in one
+      ;; message, so the batch lives INSIDE the call. Each entry recurses
+      ;; through call-op! — validation, told!, the form ledger and the
+      ;; per-entry size gate all apply — and a write op refuses before
+      ;; anything runs.
+      (let [ops (mapv deep-kw (:ops a))
+            bad (some (fn [o]
+                        (let [nm (some-> (:op o) clojure.core/name)]
+                          (cond
+                            (nil? nm) {:error "every batch entry needs :op — a read op name"}
+                            (not (contains? tools/read-only-tools nm))
+                            {:error (str nm " is a write — a batch is READ questions only;"
+                                         " writes have their own grain (edit_group)")}
+                            :else nil)))
+                      ops)]
+        (cond
+          (empty? ops)         (text! {:error "query_batch needs ops — [{op …args} …]"})
+          bad                  (text! bad)
+          (< 6 (count ops))    (text! {:error (str (count ops) " entries — a batch is at most 6;"
+                                                   " past that the answer outgrows the reader")})
+          :else
+          (text! {:results (mapv (fn [o]
+                                   (let [nm (clojure.core/name (:op o))]
+                                     {:op nm
+                                      :result (get-in (call-op! session {:name nm
+                                                                         :arguments (dissoc o :op)})
+                                                      [:content 0 :text])}))
+                                 ops)}
+                 :budgeted? true)))
       "query_source" (text! (told! session name a
                                         (let [full?   (:full a)
                                               gate    (fn [n]
@@ -1856,6 +1985,7 @@
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))
                                     (held-after-write! session name a)
+                                    (finish-accepted! session a)
                                     (assoc :forms [(str (sym :ns) "/" (sym :name))])
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
@@ -1863,6 +1993,7 @@
                                                    :prompt (:prompt a)
                                                    :agent (:agent a))
                                     (held-after-write! session name a)
+                                    (finish-accepted! session a)
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "edit_delete_form" (text! (-> (ops/delete-form! session (sym :ns) (sym :name)
@@ -1887,6 +2018,7 @@
       "edit_group" (text! (-> (ops/edit-group! session (wire-steps (:steps a))
                                                :prompt (:prompt a) :agent (:agent a))
                               (held-after-write! session name a)
+                              (finish-accepted! session a)
                               (select-keys tools/wire-keys)
                               (summarize (:verbose a))))
       "full_check" (text! (-> (external/full-check! session :affected (:affected a)

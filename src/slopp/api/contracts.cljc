@@ -881,3 +881,16 @@
     {:optional true
      :doc "narrow to one block of the keyspace, matching the segments the keys already have — \"http\" gives http.*, \"http.auth\" narrows further. Omit for every setting. A prefix nothing matches answers an EMPTY :config rather than everything"}
     :string]])
+
+(def bundle
+  "`GET /api/bundle?ask=` — the ask's map as one injectable text block.
+
+  The consumer is the plugin's UserPromptSubmit hook, which has ~2 s and a
+  context window to feed: it wants ONE string it can paste, not a structure
+  it must render — the producer owns the layout for the same reason search
+  owns its sort. A blank or absent ask answers 200 with the plain ranking;
+  like search, this endpoint has no subject that can fail to exist."
+  [:map
+   [:bundle {:doc (str "the whole bundle as prompt-ready text: a header that"
+                       " orients, the ask's ranked forms as one-line cards,"
+                       " and the seeds' full sources — inject verbatim")} :string]])

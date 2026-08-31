@@ -298,7 +298,7 @@
       ;; to itself and pass however wrong both were.
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search"
+               "/api/search" "/api/bundle"
                "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
                  "/api/config"}
              (set (keys by-path)))))
@@ -391,7 +391,7 @@
           ;; what deletes the request paths a consumer hand-writes for exactly
           ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
-                   "modules" "module" "search"
+                   "modules" "module" "search" "bundle"
                    "rest-paths" "http-paths" "webapp-paths" "config"}
                  (set (:wrappers out)))
               (pr-str out)))
@@ -1042,6 +1042,7 @@
                     "/api/modules"
                     "/api/timeline"
                     "/api/search?q=hello"
+                    "/api/bundle?ask=hello"
                     (str "/api/form/" hello-id)
                     "/api/source/demo.core/hello"
                     "/api/module/demo.core"]]
@@ -1068,6 +1069,7 @@
                             ["/api/namespaces" "/api/ns/demo.core" "/api/rest/paths"
                              "/api/http/paths" "/api/webapp/paths" "/api/config"
                              "/api/modules" "/api/timeline" "/api/search"
+                             "/api/bundle"
                              "/api/form" "/api/source" "/api/module"]))
             plain  (for [row (:http/routes ctx)
                          :let [p (str (:path row))]
@@ -1299,3 +1301,32 @@
                 (str path " ships key(s) its :rest/response never declares, so a"
                      " generated client cannot see them: "
                      (pr-str (mapv :in errs))))))))))
+
+(deftest the-bundle-endpoint-answers-an-ask-before-the-model-runs
+  ;; Moonshot A: the prompt hook GETs this with ~2 s and injects the body as
+  ;; additionalContext, so the ask ARRIVES with its map — the
+  ;; session_brief + orient + first-read-wave turns (6–10 per eval cell)
+  ;; happen before the model's first token. Same listener the server
+  ;; already runs; same orient walk the tool makes; plain data out.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'bd.core
+                              (str "(ns bd.core \"Pricing.\")\n\n"
+                                   "(defn rate \"Cents per unit.\" [x] (* 100 x))\n\n"
+                                   "(defn quote-cents \"A quote.\" [x] (rate x))\n")))
+        ctx (server/context (atom {:store st :test-map {}}))
+        GET (fn [q] (slopp.http/handle! ctx {:request-method :get
+                                             :uri "/api/bundle"
+                                             :query-string q}))]
+    (testing "an ask naming a form gets its source and neighbourhood back"
+      (let [r (GET "ask=why%20is%20quote-cents%20computed%20off%20rate")
+            b (:bundle (:body r))]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (string? b))
+        (is (re-find #"\(defn quote-cents" b) "the seed's source rides")
+        (is (re-find #"bd\.core/rate" b) "the neighbourhood is named")
+        (is (re-find #"2 namespaces|bd\.core" b) "the project header orients")))
+    (testing "a blank ask is the small header, not an error"
+      (doseq [q [nil "" "ask="]]
+        (let [r (GET q)]
+          (is (= 200 (:status r)) (pr-str q))
+          (is (string? (:bundle (:body r)))))))))

@@ -2184,7 +2184,7 @@
         "the annotation the marker exists to produce is still set"))
   (testing "the classification itself did not change — this is a refactor"
     ;; positive control on the refactor: same answer, different home
-    (is (= 34 (count tools/read-only-tools)))
+    (is (= 35 (count tools/read-only-tools)))
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
     (is (not (contains? tools/read-only-tools "ui_serve")))
@@ -3461,4 +3461,100 @@
                                          :source "(ns rf.broken)\n(defn ^:unused-ok f [x] (nowhere x))\n"})]
           (is (re-find #"failed to load" r) r)
           (is (not (re-find #":red-first" r)) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external one-read-call-carries-several-ops
+  ;; Measured on every eval cell (s1–s6, both cohorts): not ONE assistant
+  ;; message carried two tool_use blocks — "issue independent reads in one
+  ;; turn" has been in the skill since step 1 and no model does it. So the
+  ;; batch lives inside the call: `read {op query_batch ops [...]}` runs
+  ;; several READ ops and answers them as one result vector, each entry
+  ;; through the same told!/ledger door as the single call. A write op in
+  ;; the batch is refused by name — reads compose, writes have their own
+  ;; grain (edit_group).
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "qb.core" :source "(ns qb.core)\n(defn f \"F.\" [x] x)\n(defn g \"G.\" [x] (f x))\n"})
+      (testing "several reads, one call, one result per op"
+        (let [r (call! sess "read" {:op "query_batch"
+                                    :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}
+                                          {"op" "query_search" "pattern" "G\\."}
+                                          {"op" "query_depends" "on" "qb.core/f"}]})]
+          (is (re-find #"\(defn f" r) r)
+          (is (re-find #":form g" r) "the search hit came back as a card")
+          (is (re-find #":op \"query_depends\", :result" r) "the depends answer rode along")
+          (is (not (re-find #"unknown (op|argument)" r)) r)))
+      (testing "the ledger reaches inside the batch: a source the ask holds is a reference"
+        (let [r (call! sess "read" {:op "query_batch"
+                                    :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}]})]
+          (is (re-find #":source-already-sent true" r) r)))
+      (testing "a write op is refused by name; nothing runs"
+        (let [r (call! sess "read" {:op "query_batch"
+                                    :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}
+                                          {"op" "edit_delete_form" "ns" "qb.core" "name" "f"}]})]
+          (is (re-find #"edit_delete_form is a write" r) r)
+          (is (re-find #"\(defn f|:source-already-sent true"
+                       (call! sess "query_source" {:targets [{:ns "qb.core" :name "f"}]}))
+              "f still exists — the refused batch ran nothing")))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-accepted-expectation-shift-finishes-in-the-same-call
+  ;; The finisher, v1, fully deterministic: the judgment "is this red the
+  ;; intended consequence?" is the AGENT's, made at write time — `accept`
+  ;; on the write names the tests whose literal expectations the change is
+  ;; supposed to move. When such a test fails with a literal→literal delta
+  ;; (:proposed), slopp applies the proposed update as its own delta,
+  ;; re-verifies once, and reports :finisher in the SAME result — the
+  ;; read-the-red/patch-the-test/rerun loop (three calls per deliberate
+  ;; change in every eval cell) collapses into the write that caused it.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "fin.core"
+                               :source (str "(ns fin.core (:require [clojure.test :refer [deftest is]]))\n"
+                                            "(defn price [x] (* 100 x))\n"
+                                            "(deftest price-t (is (= 200 (price 2))))\n"
+                                            "(defn ^:unused-ok other [] 7)\n"
+                                            "(deftest other-t (is (= 7 (other))))\n")})
+      (testing "accepted: the shift lands, the test follows, one call, green"
+        (let [r (call! sess "edit_group"
+                       {:prompt "prices go up 10%: 100 -> 110 per unit"
+                        :accept ["fin.core/price-t"]
+                        :steps [{"action" "replace" "ns" "fin.core" "name" "price"
+                                 "source" "(defn price [x] (* 110 x))"}]})]
+          (is (re-find #":finisher \{:applied \[\{:test fin\.core/price-t, :was \"\(= 200 \(price 2\)\)\", :now \"\(= 220 \(price 2\)\)\"\}\], :status :green\}" r) r)
+          (is (re-find #":status :green" r) r)
+          (is (re-find #"= 220" (call! sess "query_source" {:targets [{:ns "fin.core" :name "price-t"}]}))
+              "the assertion moved to the new literal")))
+      (testing "NOT accepted: the red rides the result untouched, :proposed as a draft"
+        (let [r (call! sess "edit_group"
+                       {:prompt "prices go up again"
+                        :steps [{"action" "replace" "ns" "fin.core" "name" "price"
+                                 "source" "(defn price [x] (* 120 x))"}]})]
+          (is (re-find #":fail 1" r) "red keeps the full map, which counts rather than labels")
+          (is (re-find #":proposed" r) r)
+          (is (not (re-find #":finisher" r)) r)
+          (is (re-find #"= 220|:source-already-sent true" (call! sess "query_source" {:targets [{:ns "fin.core" :name "price-t"}]}))
+              "the test was not touched — still the text the ask already holds")))
+      (testing "a single accepted test with SEVERAL moving literals is skipped and named"
+        (call! sess "edit_group" {:prompt "a second pinned view of price"
+                                  :steps [{"action" "replace" "ns" "fin.core" "name" "price"
+                                           "source" "(defn price [x] (* 120 x))"}
+                                          {"action" "replace" "ns" "fin.core" "name" "price-t"
+                                           "source" "(deftest price-t (is (= 240 (price 2))) (is (= 360 (price 3))))"}]})
+        (let [r (call! sess "edit_group"
+                       {:prompt "prices up again — but two pins moved, judge them yourself"
+                        :accept ["fin.core/price-t"]
+                        :steps [{"action" "replace" "ns" "fin.core" "name" "price"
+                                 "source" "(defn price [x] (* 130 x))"}]})]
+          (is (re-find #":skipped-multi \[fin\.core/price-t\]" r) r)
+          (is (re-find #"= 240|:source-already-sent true"
+                       (call! sess "query_source" {:targets [{:ns "fin.core" :name "price-t"}]}))
+              "neither literal was touched — still the text the ask already holds")))
+      (testing "an acceptance that never fired is information"
+        (let [r (call! sess "edit_group"
+                       {:prompt "rename a docstring word; other-t was never going to move"
+                        :accept ["fin.core/other-t"]
+                        :steps [{"action" "replace" "ns" "fin.core" "name" "price"
+                                 "source" "(defn price \"Cents.\" [x] (* 120 x))"}]})]
+          (is (re-find #":accept-unused \[fin\.core/other-t\]" r) r)))
       (finally (ops/close! sess)))))
