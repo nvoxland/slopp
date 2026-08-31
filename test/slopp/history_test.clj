@@ -266,6 +266,8 @@
                         "(defn ^:unused-ok rate-cents-ceil [] 9)\n"
                         "(defn ^:unused-ok rate-cents-doc [] :doc)\n"
                         "(defn ^:unused-ok rate-cents-x [] :x)\n"))
+      (ops/add-require! sess 'pv.core "[clojure.string :as str]"
+                        :prompt "rate-cents groundwork: the ns form gains versions too — it must never be a story")
       (ops/edit-replace! sess 'pv.core 'rate-cents
                          "(defn ^:unused-ok rate-cents [] 250)"
                          :prompt "fuel spike: pass through the June contract uplift")
@@ -278,6 +280,8 @@
             "many matches rank and cap — they never widen past three")
         (is (= 'pv.core/rate-cents (:form (first (:story r))))
             "the most-storied form ranks first — it is the one being asked about")
+        (is (not-any? #(= (name (:form %)) (namespace (:form %))) (:story r))
+            "a namespace FORM is bookkeeping, not a story (logi.carrier/logi.carrier, s9c)")
         (let [rows (:versions (first (:story r)))]
           (is (<= 2 (count rows)) (pr-str (:story r)))
           (is (some #(re-find #"June contract uplift" (str (:ask %))) rows))

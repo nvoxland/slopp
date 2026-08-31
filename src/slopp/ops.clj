@@ -3917,7 +3917,13 @@
                                                        (str/includes? (str (:name e))
                                                                       (str contains)))]
                                         {:ns nsx :form (:name e)})
-                                      (filter (comp symbol? :form) changes))
+                                      (->> changes
+                                           (filter (comp symbol? :form))
+                                           ;; the ns FORM (name == namespace)
+                                           ;; collects require-edit versions
+                                           ;; and outranks the answer — it is
+                                           ;; bookkeeping, not a story (s9c)
+                                           (remove #(= (str (:form %)) (str (:ns %))))))
                                      (map #(select-keys % [:ns :form]))
                                      distinct
                                      (take 8))]

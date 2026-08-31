@@ -153,7 +153,7 @@
 (def history-tools
   "Provenance tool descriptors: history, time-travel, change queries. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "report"
-    :description "THE summary/handoff composite, one read: :by-ask — every ask verbatim with the forms it added, changed, deleted and renamed (newest first) — plus milestones, net form changes, the last verification and alignment. It answers 'what changed here and why' by itself; per-namespace histories are for drilling into ONE form. since=<delta/milestone id>, contains=<filter>. Prefer over stitching query_history/query_changes/query_commits."
+    :description "THE summary/handoff composite, one read: :by-ask — every ask verbatim with the forms it added, changed, deleted and renamed (newest first) — plus milestones, net form changes, the last verification and alignment. It answers 'what changed here and why' by itself; per-namespace histories are for drilling into ONE form. contains matching form NAMES also carries :story — the most-storied forms' version rows (ask/op/at/state): the provenance answer ('why is X what it is') in this same call. since=<delta/milestone id>, contains=<filter>. Prefer over stitching query_history/query_changes/query_commits."
     :inputSchema {:type "object"
                   :properties {:since {:type "string"}
                                :contains {:type "string"}
