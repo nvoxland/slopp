@@ -3835,7 +3835,11 @@
   changes with their recorded ASKS, and the last verification state — the
   history fan-out (query_history + query_history {contains} + query_changes +
   query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions.
+  delta/milestone id; `:contains` filters asks/descriptions — and when it
+  singles out a few named forms, each carries its `:story` inline (version
+  rows: the recorded ask, op, time, verification state), because the
+  provenance question is exactly what a narrow report is asked for and the
+  fan-out re-derived those rows piecewise. Sources stay one call away.
 
   A history read: the line's journal is read here, when asked (a handoff is
   written a few times a day), rather than carried in the value."
@@ -3896,7 +3900,28 @@
                        ;; at the wire gate
                        reverse
                        (take limit)
-                       (mapv #(orient/snip % 160)))]
+                       (mapv #(orient/snip % 160)))
+        ;; the provenance rows the s8 fan-out re-derived piecewise — only for
+        ;; a NARROW report (contains matched ≤3 named forms): a broad report
+        ;; is a handoff, and a story per row would drown it
+        story     (when contains
+                    (let [named (filter (comp symbol? :form) changes)]
+                      (when (<= (count named) 3)
+                        (->> named
+                             (keep (fn [{:keys [ns form]}]
+                                     (when-let [vs (seq (history/query-form-history (with-history session) ns form))]
+                                       {:form (symbol (str ns) (str form))
+                                        :versions (->> vs
+                                                       (take-last 8)
+                                                       (mapv (fn [v]
+                                                               (cond-> {:delta (:delta v)
+                                                                        :op (:op v)
+                                                                        :at (:at v)
+                                                                        :ask (orient/snip (or (:prompt v) (:turn-intent v) "") 140)}
+                                                                 (:status v) (assoc :status (:status v))))))})))
+                             (take 3)
+                             vec
+                             not-empty))))]
     (orient/fit-report
      (cond-> {:milestones ms
              :changes changes
@@ -3917,6 +3942,7 @@
                           "docs; no need to read skill files for the CLI forms")}
        (seq intents) (assoc :intents intents)
        (seq by-ask)  (assoc :by-ask by-ask)
+       story         (assoc :story story)
        (seq dead)    (assoc :dead-ends dead)))))
 
 (defn- rename-callers-refusal

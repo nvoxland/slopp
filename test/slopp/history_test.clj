@@ -246,3 +246,31 @@
           (is (re-find #"warm-pool idea did not pan out" txt) txt)
           (is (re-find #"(?i)dead" txt) txt)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-provenance-ask-is-one-report-call
+  ;; s8 census: the provenance-shaped ask fanned out into report +
+  ;; query_commits + query_history ×4 in BOTH cells — the story of a form
+  ;; (why is it what it is) answered piecewise. When `contains` singles out
+  ;; a few forms, the report carries each form's STORY inline: version rows
+  ;; with the recorded ask, op, time and verification state — the exact
+  ;; rows the fan-out was re-deriving. Sources stay one call away.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pv.core "(ns pv.core)\n(defn ^:unused-ok rate-cents [] 100)\n")
+      (ops/edit-replace! sess 'pv.core 'rate-cents
+                         "(defn ^:unused-ok rate-cents [] 250)"
+                         :prompt "fuel spike: pass through the June contract uplift")
+      (ops/edit-replace! sess 'pv.core 'rate-cents
+                         "(defn ^:unused-ok rate-cents [] 210)"
+                         :prompt "partial rollback after the carrier rebate landed")
+      (let [r (ops/report sess :contains "rate-cents")]
+        (is (seq (:story r)) (pr-str (keys r)))
+        (let [rows (:versions (first (:story r)))]
+          (is (<= 2 (count rows)) (pr-str (:story r)))
+          (is (some #(re-find #"June contract uplift" (str (:ask %))) rows))
+          (is (some #(re-find #"carrier rebate" (str (:ask %))) rows))
+          (is (not-any? :source rows)
+              "the story is asks and states — code lives one call away")))
+      (testing "a broad report carries no story — it is the narrow question's answer"
+        (is (nil? (:story (ops/report sess)))))
+      (finally (ops/close! sess)))))
