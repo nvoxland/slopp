@@ -1467,6 +1467,16 @@ about the file')."* The agent never learns the problem exists. Not derived
 (`:cljs`, before the fix): the three-write dance above. Same transformation,
 opposite outcomes, one variable.
 
+**Revisited at the wire grain (2026-08-30, `edit_group` advertised — D-intent-groups).**
+The question survives; the answer at the wire was wrong about the grain. An
+agent choosing the steps of ONE intent — the fn, its test, the caller it
+changes, the require — is not a shopping list; it is the unit the agent
+actually thinks in, and eval10 measured one-form-per-call on that unit as a
+model request per form with reads between them. What the principle protects
+is DERIVED transformations (order, declares, requires, callers of a rename):
+those the tool derives and the agent never chooses. A whole feature in one
+call is still refused — by the same gates, not by withholding the tool.
+
 **Discipline.** Ask the `edit_group` question at EVERY grain, not just above
 the form: *does the agent choose the steps, or does the tool derive them from
 one stated intent?* When the agent must choose, the intermediate states are

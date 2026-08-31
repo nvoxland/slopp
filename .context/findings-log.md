@@ -1702,3 +1702,79 @@ metric announces its own denominator or its own predicate.** The defence that
 worked all three times was the same — look at the raw rows the number was
 computed from before acting on it. That cost minutes each time and would have
 cost days of misdirected work.
+
+## 2026-08-30 — eval10, the half-the-time wave (lifetime terrain, opus/sonnet medium)
+
+Matched cells against plain files (`projects/eval10-matched/RUNS.md`, the
+same five asks; plain baseline opus 52 turns / 0.94M tokens, sonnet 85 /
+2.5M). slopp round 1: opus 159 turns / 11.5M, sonnet 151 / 11.0M. After
+each step, one grid:
+
+- s1 (skill → one page, terse bookkeeping, self-opening turn): tokens ~0.5×,
+  turns flat — context halved, nothing changed what a turn does.
+- s2 (+ `edit_group`, auto-declared edges): opus 158 / 5.1M, sonnet 122 /
+  3.4M; single-form writes 43 → 22; a green `full_check` re-fetched whole
+  through `query_detail` (76k chars) → terse full_check.
+- s3 (+ fourteen families): sonnet 104 / 3.8M; `ToolSearch` still 11 —
+  Claude Code defers MCP tools whenever tool search is on (the default);
+  `alwaysLoad` in `.mcp.json` is the exemption. Opus aborted on a harness
+  "tool call could not be parsed" (unlogged payload; a flake — passed in s4).
+- s4 (+ alwaysLoad, form ledger, search cards, orient with source): opus 140
+  / 4.8M, sonnet 121 / 3.7M; zero `ToolSearch`; `module_dep` still 9× → the
+  retry ran once per write and skipped `ns_create` (fixed for s5).
+- Census reads that named each mechanism: the handoff ask (p5) drove five
+  per-namespace histories after `report` → `:by-ask`; opus's
+  outline-then-targets on ten-form namespaces → small namespace is one read;
+  the read after one's own write → the ledger.
+
+Wall is not comparable in any cell: my own external test JVMs ran beside
+every grid. Per-call floor measured: refs ~0.5 s once per new store value,
+cached after; slices 1.7 s (card assembly), writes 3–4 s (verification).
+
+- s7/s7b (THE MOONSHOT: ask-arrives-with-its-map bundle, query_batch,
+  accept+finisher, 2-4-call skill loop): opus 108 / 4.31M / $5.06, sonnet
+  114 / 4.18M / $1.87, both 11/11. Tier-1 bundle injected in all 10 steps.
+  Turns -16%/-7%; tokens flat/up — the bundle's ~1.7k-token per-request
+  rent outweighs the reads it replaced while requests stay 100+. Uptake
+  split by model: opus edit_group x11 but accept x0; sonnet accept x2 but
+  edit_group x3 vs 37 single-form writes. 0.5x of plain not reached; the
+  measured floor is write grain + ritual calls + the ~42% thinking-turn
+  harness constant. Ops lesson: editing run10.sh while a cell's bash was
+  mid-loop clobbered its RUNS row writer — bash reads scripts
+  incrementally; never edit a script a running job is executing.
+
+- s8 (one write door + :test-src + bundle diet, milestone d7f99567287a1):
+  opus 91 / 3.32M / $4.91, sonnet 81 / 2.98M / $1.56, both 11/11 — sonnet
+  is the FIRST cell under plain on turns (81 vs 85). The surface change
+  did what prose could not: zero single-form writes in either cell.
+  Bundle rent halved (1-3.3k chars/step). Opus residue is ritual
+  (query_history x10, full_check x4, test_run x4); sonnet residue is
+  reads (query_source x16). accept rarely fires now that :test-src hands
+  the failing test over — the finisher is for deliberate shifts, not a
+  routine path. The opus step-2 harness flake recurred; run10's one-retry
+  absorbed it.
+
+- Consumer-side confirmation of the s8 finding (slopp-ui, 2026-08-31
+  00:50): in their store, every prose-only rule in a ~500-line AGENTS.md
+  eventually failed (once with the correct warning DIRECTLY ABOVE the
+  wrong affordance, read and lost — 28 calls to undo) while every
+  test/gate-enforced rule held. Their phrasing is the durable version:
+  "an argument competes with an affordance and loses, even when the
+  argument is right there and the reader has read it." Design consequence
+  already applied in s8 (surface over prose); the frame generalizes to
+  every future guidance decision. They will exercise `resend` deliberately
+  post-restart — the grid cannot reach it by construction (no compaction
+  inside a 15-turn step), so their session is its first real validation.
+
+- s9 (standing-verdict hook line, report :story, edit_group example):
+  sonnet 71 / 2.32M / $1.35 (0.84x plain turns, ~token parity); opus s9c
+  98 / 3.11M / $4.23 (cost/tokens down vs s8, turns within variance).
+  Ritual shrank (full_check 4->3, test_run 4->2). :story fired only after
+  two field-failure fixes — line-scoped changes missed imported/cloned
+  history, and a <=3-match gate withheld on topic-shaped contains ("fuel")
+  — the general lesson: a narrow-answer feature must resolve against the
+  STORE (names), not the session's recent deltas, and rank-and-cap rather
+  than withhold. Infra: Claude Code caches an MCP connect failure ~15 min
+  across -p sessions in one cwd; one slow first-boot import de-tooled
+  three consecutive eval steps (the cell still went 11/11 via slopp --call
+  and file edits — the CLI door is a real resilience layer).

@@ -35,11 +35,10 @@ NOTHING to disk: no `.slopp/`, no git listener, no session-pause checkpoints.
 So an unadopted repo stays untouched, and you can leave the plugin enabled
 globally without it turning up in unrelated projects.
 
-The one consequence to expect in a brand-new project: the prompt hook has no
-store to record intent against yet, so your first write is refused with
-`no open turn — call turn_begin {intent: <the user's verbatim ask>} first`.
-Make that call and continue; it's once per project, and from then on turns
-open themselves.
+In a brand-new project the prompt hook has no store to record intent against
+yet; nothing to do about it — a write carrying `prompt` opens its own turn,
+so the first write creates the store and its turn in one call, and from then
+on the hook records each ask.
 
 ## Importing a repo that's published this way
 

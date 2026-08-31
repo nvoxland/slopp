@@ -16,9 +16,8 @@ reconstructed later -- it is captured at edit time, when it is still true.
 
 Turns are automatic under the Claude Code plugin: a prompt hook drops the
 verbatim ask where the server picks it up, and identity comes off the harness
-session id. You should never need to call `turn_begin` yourself unless a write
-is refused with `no open turn` -- which happens once, in a brand-new project
-that has no store yet.
+session id. You should never need to call `turn_begin` yourself: a write
+carrying `prompt` opens its own turn when none is open.
 
 Without the hooks (a bare MCP client), open the turn yourself with the user's
 words, not your paraphrase. The verbatim ask is the part that has value later.

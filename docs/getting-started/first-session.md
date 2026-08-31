@@ -37,10 +37,11 @@ failing to load — which is a refusal, not a failing test. Only requires sharin
 your own root are invented this way; a library is never conjured over.
 
 ```clj
-edit_add_form {ns "invoice.total-test"
-               source "(deftest line-total-applies-discount
-                          (is (= 90.0 (total/line-total {:qty 1 :price 100.0 :discount 0.1}))))"
-               prompt "line totals should apply the per-line discount"}
+edit_group {steps [{action "add"
+                    ns "invoice.total-test"
+                    source "(deftest line-total-applies-discount
+                              (is (= 90.0 (total/line-total {:qty 1 :price 100.0 :discount 0.1}))))"}]
+            prompt "line totals should apply the per-line discount"}
 ```
 
 The response comes back red, with `:red-first` naming the vars it stubbed:
@@ -56,12 +57,13 @@ The response comes back red, with `:red-first` naming the vars it stubbed:
 The namespace is already there, empty, waiting for its first form.
 
 ```clj
-edit_add_form {ns "invoice.total"
-               source "(defn line-total
-                         \"Extended price for one line, after its discount.\"
-                         [{:keys [qty price discount]}]
-                         (* qty price (- 1 (or discount 0))))"
-               prompt "implement line-total against the spec"}
+edit_group {steps [{action "add"
+                    ns "invoice.total"
+                    source "(defn line-total
+                              \"Extended price for one line, after its discount.\"
+                              [{:keys [qty price discount]}]
+                              (* qty price (- 1 (or discount 0))))"}]
+            prompt "implement line-total against the spec"}
 ```
 
 ```clj

@@ -2,14 +2,14 @@
 
 There is exactly one bar in slopp, and it is `done`.
 
-## `done` is not a once-per-session ritual
+## `done` runs when you stop
 
-Call it at every point you believe a piece of work is complete, before starting
-the next one. Finishing a unit of work and moving on *is* a done point.
-Multiple `done`s per session is the normal shape.
-
-Each one is cheap, each marks a boundary you can revert to, and each catches a
-problem while the work is still in your context rather than three tasks later.
+Under the Claude Code plugin the Stop hook calls `done` for you, so the agent
+never performs it as a ritual. Call `done {label}` yourself only to read the
+verdict mid-way -- when finishing one unit of work and the next depends on
+knowing the first is green. Each one is cheap, each marks a boundary you can
+revert to, and each catches a problem while the work is still in your context
+rather than three tasks later.
 
 ```clj
 done {label "line discounts"}

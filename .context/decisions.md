@@ -6226,3 +6226,203 @@ to put a form "before" another is refused as an unknown argument, and the
 skill says so. And not a claim that a declare is never needed: a genuine
 cycle still gets its marked `(declare …)` from `resolve-cold-load`, which the
 derivation places right after the ns form.
+
+### D-one-page-skill — the shipped skill is one page; the chapters are `help {topic}` (2026-08-30)
+
+**Decision.** `plugins/slopp/skills/slopp/SKILL.md` is ≤ 4k tokens: what slopp
+is, the loop (orient once → write in intents → trust the result → stop), the
+write-tool table, the two test rules that are irreducibly the agent's, the
+result keys, "refusals teach", and an index of topics. Everything it used to
+carry (web, rest, cli, capabilities, running, the long form of writing and
+results, threads, agreement, oracle, tools) lives in
+`skills/slopp/reference/<topic>.md`, served whole by `help {topic}` from the
+plugin root (`CLAUDE_PLUGIN_ROOT`), and `help` without a topic is the
+cheat-sheet plus the index. The loop prose stops teaching `done` per finish
+(the Stop hook runs it), `full_check`/`commit_point` (the human's grain),
+`restart`/`test_run` after a green write, and `turn_begin` (a write carrying
+`prompt` opens its own turn). New in the same change: `text!` skips the
+spool gate for budgeted reads and never offers `query_detail` on a green
+result; `done` reports a terse verdict when green; `session_brief` dropped
+`:loop` and `:alignment`; `report {limit}` bounds `:intents`; the unlanded
+count is cached per head.
+
+**Why.** eval10 round 1 measured the 200k-char skill at +70,686 tokens on
+request 2 of EVERY session — ~65% of all context created on the lifetime
+cell — and the ritual it taught (`done` ×6, `full_check`, `commit_point`,
+`restart`+`test_run`, `turn_begin`) at 30+ of the 159 turns; the greenfield
+cohort paid 1.15–1.68× plain's tokens while using slopp zero times. A skill
+line is not a fix (Core 4), but a skill that IS the cost is: the page now
+carries only what the agent must know before its first call, and a chapter
+costs exactly one call when the task needs it.
+
+**Not decided here.** Whether the chapters should live in the store as data
+(so the prose test covers them) — today the prose test scans store forms and
+the cheat-sheet; the reference files are checked by hand. The docs site
+(`docs/`) is derived and was audited for the retired ritual lines only.
+
+### D-intent-groups — `edit_group` is on the wire; the intent is the write grain (2026-08-30)
+
+**Decision.** `edit_group {steps [...] prompt}` is an advertised tool: one
+intent's steps (add / replace / subform / delete / require — the single-form
+tools' keys) as one atomic write, every per-step gate intact, one
+verification, reported per step (`:steps [{:step :action :form :delta}]`),
+all-or-nothing by step index. Auto-require applies to the group; a newly
+added `deftest` is its own covering test. Every write result's `:affected`
+names the covering tests when ≤ 8 (a count above). This reverses the
+2026-era "off the wire on purpose" position (its test is replaced by
+`slopp.mcp-test/an-intent-lands-as-one-verified-group`, which carries the
+reasoning); `.context/design-disciplines.md` keeps the underlying principle
+for DERIVED transformations and notes the reversal at the wire grain.
+
+**Why.** eval10 round 1: on the lifetime terrain the rename step's real work
+was three writes that arrived in sequence with reads between them, each its
+own model request, because no single result was trusted to stand for the
+group — 159 turns against plain's 52. The agent thinks in intents; one form
+per call taxes every intent by its form count. Nathan (2026-08-30): no
+collapse of an ask into one `done`, keep iterating and checking; intent-grain
+batching is the right grain. The old position's fear — a whole feature in one
+call — is answered by the gates, which refuse it exactly as they refuse it in
+one form, and by `done` remaining the completeness judgement.
+
+**Not decided here.** `module_dep` as a group step / auto-declared edges
+(plan step 5); the `edit` family tool with `steps` as its natural shape (plan
+step 4), where `edit_group` becomes `edit {steps}`.
+
+### D-families — fourteen advertised tools; every op keeps its registry name (2026-08-30)
+
+**Decision.** `tools/list` advertises fourteen FAMILY descriptors
+(`slopp.mcp.tools/families` → `family-descriptor` → `tools`): orient, read,
+depends, history, eval, edit, refactor, declare, verify, build, store, slopp,
+done, commit_point. A family's description is an index — one line per op:
+`op {required [optional]} — first sentence`; its schema is `op` (enum,
+required) plus the union of its ops' properties. `op` is the operation's
+existing name in `tools/registry` (the 96 descriptors, which remain the
+validation, classification and dispatch surface); `help {topic <op>}` is
+the op's full card. `call-tool!` resolves family + op and dispatches through
+`call-op!`; an op called by its own name still dispatches (the `--call`
+door, the hooks) — it is just not advertised. A missing required key is
+refused by name at the server (`missing-required-keys`), since the family
+schema cannot carry per-op required keys for a client that validates
+locally. `done` and `commit_point` are single-op families and take no `op`.
+
+**Why.** eval10: 96 advertised tools (~64k chars) were all deferred by
+Claude Code, so every session paid `ToolSearch` turns to find them — 19–22
+per lifetime cell (12% of turns) — plus the choosing cost of a 96-name list.
+Nathan: "cut harder — merge families into fewer, richer tools". Keeping the
+op names is what makes the cut safe: every refusal, docstring, skill line
+and mailbox message that spells `edit_subform` stays exactly right, and the
+prose guard (`slopp-prose-never-names-a-tool-that-does-not-exist`) keeps
+checking the registry. slopp-ui's counter-proposal shaped the families:
+`build` and `store` are real clusters, `screen` is a verify, and `slopp` is
+the remainder named as such rather than a 36-op drawer.
+
+**Trade named.** A client that validated required keys locally now spends a
+round trip to learn a missing one — by name, from the server. The
+`ToolSearch` turns it removes are worth more.
+
+### D-form-ledger — a source the ask already holds is a reference, from any view (2026-08-30)
+
+**Decision.** `slopp.mcp` keeps a per-ask FORM ledger: `[form-id, hash of
+the form's text]` → the ask it was recorded under. Every read that `told!`
+guards passes `dedupe-sources!` first: a map carrying a form's identity
+(`:ns`+`:name`, or a qualified `:form`) and its `:source` — a `query_source`
+item, an `orient` row, a `query_slice` target, a `query_brief` — is sent
+whole and recorded the first time, and afterwards comes back with
+`:source-already-sent true` in place of `:source` (the rest of the row
+stays). A write whose FULL source the agent sent (`edit_add_form`,
+`edit_replace_form`, a group's add/replace steps) holds the stored version
+of the forms it wrote (`held-after-write!`), so the read that used to
+follow a write is a reference too. A subform edit holds nothing (the agent
+sent a fragment); a windowed or older text never matches the current hash
+and is never a reference. Scoped to the ask exactly as `told!` is — a stub
+must not outlive the reader it is about (`/clear`, compaction, subagents).
+
+**Why.** `told!` stubs a whole payload the same call already returned and
+knows nothing about forms, so orient → slice → query_source of one form
+sent its text three times, and the read after the agent's own write sent
+back what the agent had just typed; eval10 measured reads at 52% of all
+output and `query_source` at 13–17 calls per lifetime cell. Nathan asked
+for the version-reference idea to be "expanded on or used better"; keying
+on the form rather than the view is the expansion.
+
+**Not decided here.** Cross-session references (the prompt-hook brief is
+the projection there); `:changed-since` on a form held at an OLDER version
+(the diff instead of the whole) — plan step 8's form-level diff.
+
+**Addendum (2026-08-30, s3 census).** Fourteen families alone did not remove
+`ToolSearch`: Claude Code defers MCP tools whenever tool search is on, and
+it is on by DEFAULT (`ENABLE_TOOL_SEARCH` unset; `auto` = a 10%-of-context
+threshold), so the sonnet s3 cell still paid 11 searches — first for op
+names as if they were tools, then for families. The documented exemption is
+server-level: the plugin's `.mcp.json` now carries `"alwaysLoad": true`, so
+the fourteen descriptors (~24k chars) are in context from the first turn.
+That is the reason the surface had to be small before it could be
+always-loaded; 96 tools at ~64k chars could not have been.
+
+
+### D-moonshot — an ask is 2–4 calls: the map arrives with the ask, questions batch, declared shifts settle in the write (2026-08-30)
+
+**Decision.** Three mechanisms compose into the moonshot shape (Nathan:
+"do it all", explicitly WITHOUT whole-namespace rewrites — changes stay
+semantic, told through edit_group steps):
+1. **The ask bundle** (`GET /api/bundle?ask=` + the prompt hook): the
+   listener every MCP session already runs serves `orient/bundle-text` —
+   the ask's ranked forms with the seeds' sources as ONE injectable text
+   block; `start-ui!` writes `.slopp/ui-port` so the hook can find it; the
+   hook (`prompt-hook.py`) has three tiers — HTTP bundle, a sqlite-native
+   mini-bundle (the first prompt of a `-p` session, before the server is
+   up: form names matched from the ask, sources inline), the micro-brief —
+   every failure silent. Orientation happens before the model's first token.
+2. **`query_batch`**: up to six READ ops in one call, each through the
+   told!/ledger door; a write op refuses before anything runs. Measured on
+   every eval cell of both cohorts: no model ever emitted two tool_use
+   blocks in one message, so batching must live inside the call.
+3. **`accept` + the deterministic finisher** (`finish-accepted!` at the
+   wire): the agent pre-judges expectation shifts IN the write; an accepted
+   failing test with a literal→literal delta gets its `:proposed` update
+   applied as its own delta and re-verified in the same call
+   (`:finisher {:applied :status}`); unaccepted reds ride untouched;
+   `:accept-unused` reports a declared shift that never fired. v1 is
+   model-free by decision — "how far can deterministic go? all the way",
+   the agent being the judge at write time; a model judge remains a seam
+   (`finisher.model`) that would only widen WHICH reds qualify.
+
+**Why.** After the half-the-time wave, tokens ≈ requests × context and
+context sits at plain's floor: 0.5× plain-opus ≈ 2–3 tool calls per ask.
+Field anchors: Aider's repo-map-with-the-prompt, Agentless's
+pipeline-over-loop economics, CodeAct's program-shaped actions
+(`ideas/product/road-to-half.md` carries the links and the arithmetic).
+
+**Found on the way.** A stale client-side tool schema silently mangles a
+new array-of-objects argument (my own session's `read` schema predated
+`ops`); production sessions load fresh schemas and never hit it.
+
+## D-one-write-door (2026-08-30, s8 wave)
+
+`edit_group` is the ONE advertised write door; `edit_replace_form` /
+`edit_add_form` are de-advertised wire-compat aliases (still dispatch,
+still gate as writes — `single-write-tools` documents this; benchmarks,
+hooks and --call scripts keep working). Why: the s7 census — skill prose
+saying "one group per ask" did not change the write grain (sonnet: 37
+single-form writes vs 3 groups); the tool surface is what changes habits.
+Preconditions built first: the group path now carries the five single-path
+image repairs (defmethod unregister on replace AND delete, captured-value
+reload, live-handle rebuild, :untested) plus `rename-callers-refusal`
+asked of the group's FINAL shape — so a one-step group IS the single-form
+write. DEVIATION from the plan's "aliases build a one-step group": the
+alias branches keep their original bodies (ops/edit-replace!, add-form!)
+because edit_add_form's multi-form `source` contract doesn't map 1:1 onto
+group steps and the parity port already closed the repair gap; unifying
+the internals can follow without another surface change. `edit_subform`
+stays top-level (different grain; the finisher's vocabulary).
+
+Same wave, same census: a RED write result attaches each newly red
+failure's `:test-src` through `dedupe-sources!` (the next call is the fix,
+not a read — sibling of :source-now/:proposed), and the bundle went on a
+diet: sources capped to 2 seed rows (they were 85% of ~8.8k chars, and
+injected text rides every later request as rent), `?session-id=` returns a
+450-token delta to a session that already has its map, and bundle
+emissions enter the form ledger via a stash (`:pending-bundle-held`) that
+`absorb-pending-intent!` drains — one ledger behind bundle, writes, reads.
+Also: `bin/extract-projection.sh` fixed for the family door
+(`--call build` needs `{"op":"build", …}` since D-families).

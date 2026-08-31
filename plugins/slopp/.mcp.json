@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "slopp": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/slopp-server"
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/slopp-server",
+      "alwaysLoad": true
     }
   }
 }

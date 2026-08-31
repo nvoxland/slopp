@@ -739,20 +739,24 @@ from what the CALLER sees) — and `ops/standing-run` is the one reader.
 `:fresh true` forces a run; a change to any code delta invalidates the
 standing verdict by construction, because the check is "no delta after".
 
-**The red-after index is written, and not yet consulted for selection.**
-`form_reds` (see `store-and-persistence.md`) counts, per (form, test), the
-episodes in which the form changed and the test went red. It is the input
-predictive selection needs — Facebook's bar is 15% of tests run, 95% of
-failures caught, learned from history rather than coverage — and slopp has
-better raw material (a per-form trace map AND the reds). What is
-deliberately NOT done: `impacted-tests` still expands an untraced form to
-its require-closure. Replacing that with history changes what `done` runs,
-which is a correctness posture, so it ships with the number or not at all.
-Two things the first backfill showed a selector must handle: 3,083 of 3,361
-forms carry SOME credit (a rename sweep changes hundreds of forms, and a red
-in that episode credits them all — weight by 1/|changed| rather than count),
-and the top rows are the rule-catalog tests, which go red beside almost any
-rule change (a test that fails for everything predicts nothing).
+**The red-after index is a FLOOR for selection, measured and not a
+selector.** `form_reds` (see `store-and-persistence.md`) counts, per (form,
+test), the episodes in which the form changed and the test went red. The
+number, from a replay of this store's own 37,636-delta trunk (1,490 reds;
+1,420 failing-test instances that were not themselves changed in the
+episode — red-first tests are excluded, because the trace already selects a
+changed test): history-only selection recalls **38% at form grain** (mean
+14.5 tests, p90 40), **48% at namespace grain** (mean 35), 48% combined —
+against Facebook's bar of 95% of failures caught. Raising the threshold k
+lowers recall faster than cost (18% at k = 2). So history never replaces the
+closure fallback for an untraced form; `engine/red-history` is unioned into
+`affected-tests` on the same terms as a `^:covers` declaration and a
+marker reader — a floor that can only add, and what it adds is the trace's
+blind spot learned rather than declared. The 84.6% deferral stays a closure
+problem. Two things the replay also showed: 3,083 of 3,361 forms carry SOME
+credit (a rename sweep credits hundreds of forms at once — a selector would
+weight by 1/|changed|), and the top rows are the rule-catalog tests, which
+go red beside almost any rule change.
 
 ## Gotchas
 

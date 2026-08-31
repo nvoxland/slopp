@@ -124,11 +124,14 @@ write time, instead of a fresh JVM catching it later.
   invalid-arity refusals carry the change_signature hint; stale-CALLER
   arity errors don't refuse at all — they ride `:carried-errors` until
   the done-point.
-- `edit-group!` — INTERNAL changeset machinery only (no wire tool): several
-  steps applied to a store VALUE, committed + hot-reloaded together, verified
-  once, deltas sharing a `:group` id. Used by rename-sweep!,
-  change-signature!, revert paths, and normalize. Agents make individual
-  writes; episodes group them. RULE: pipeline-critical signature changes
+- `edit-group!` — the changeset: several steps applied to a store VALUE,
+  committed + hot-reloaded together, verified once, deltas sharing a
+  `:group` id, reported per step under `:steps`. `edit-group-once!` is the
+  single pass; `edit-group!` adds the write path's auto-require. Used by
+  rename-sweep!, change-signature!, revert paths, normalize — and, since
+  2026-08-30, by agents directly as `edit_group` (D-intent-groups): one
+  intent's steps as one write. Episodes still group writes at the larger
+  grain. RULE: pipeline-critical signature changes
   (anything the write path itself calls) MUST go through a changeset —
   an incremental signature change to the pipeline deadlocks it (see
   decisions.md, self-hosting lesson).
@@ -459,6 +462,19 @@ its store-backed static reader moved to `api.web/store-reader`.
   write result (the agent just sent that text); a zero-test verification
   carries `:coverage :none`. Anything over the size gate is trimmed and
   spooled — `query_detail {id}` returns the full version.
+- **Wire projections added 2026-08-30 (half-the-time wave):** `text!` skips
+  the spool gate for budgeted reads (`orient`, `query_slice`,
+  `session_brief`) and never appends the `query_detail` escape on a green
+  result; `terse-done` and `terse-full-check` fold a green verdict to what a
+  reader branches on (populations checked, external count/status, standing
+  findings folded to counts, auto-declared edge count); `summarize` keeps
+  `:affected` as covering-test NAMES when ≤ 8 and attaches `:proposed` to a
+  failure whose assertion compares a literal against a literal actual
+  (`propose-assertion`); `dedupe-sources!` (D-form-ledger) runs in front of
+  every `told!`-guarded read; `query_source {ns}` answers whole
+  (`:whole true`) under 6k chars and as an outline (`:whole false`) above;
+  `call-tool!` resolves the fourteen family tools (D-families) to registry
+  ops and refuses a missing required key by name.
 - **The series runs itself (Q10/Q11, revised 2026-07-14):** `commit_point`
   in a git checkout MIRRORS the projection into local git as
   `slopp/<store-branch>` and reports `:published {:branch ...}` (errors

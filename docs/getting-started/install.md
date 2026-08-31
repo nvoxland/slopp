@@ -63,10 +63,10 @@ manifest names the launcher and the fn it delegates to).
 Grab the jar from the [releases
 page](https://github.com/nvoxland/slopp3/releases).
 
-Without the Claude Code plugin you lose the prompt hooks, which means turns
-are not opened for you. Your first write will be refused with `no open turn`;
-call `turn_begin {intent: "<the user's verbatim ask>"}` and continue. See
-[history and provenance](../guide/history.md).
+Without the Claude Code plugin you lose the prompt hooks, which record the
+user's verbatim ask as the turn. A write carrying `prompt` opens its own
+turn, so nothing is refused; the turn's intent is then the write's prompt
+rather than the ask. See [history and provenance](../guide/history.md).
 
 ## Starting a new project
 
@@ -78,9 +78,9 @@ writes nothing to disk at all -- no `.slopp/`, no session-pause
 checkpoints -- so leaving the plugin enabled globally does not
 turn unrelated repos into slopp projects.
 
-One consequence in a brand-new project: the prompt hook has no store to record
-intent against yet, so the first write is refused until you call `turn_begin`
-once. From then on turns open themselves.
+In a brand-new project the prompt hook has no store to record intent against
+yet; the first write creates the store and opens its own turn from its
+`prompt`, and from then on the hook records each ask.
 
 ## Working on a repo that is already published this way
 

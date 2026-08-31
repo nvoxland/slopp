@@ -9,11 +9,12 @@ brief.
 
 | Situation | Tool |
 |---|---|
+| One intent, several related steps (the fn, its test, the caller) | `edit_group {steps prompt accept?}` -- one atomic write, every gate per step, verified once, reported per step; `accept` names tests whose literal expectations the change should move, and the finisher applies their proposed updates in the same call |
 | New namespace, grown with TDD | `ns_create {ns requires}` |
 | New namespace, source already written | `ns_create {ns source}` |
 | Add or drop a require | `ns_add_require` / `ns_remove_require` |
-| New form | `edit_add_form` (`before` anchors placement) |
-| Replace a whole form | `edit_replace_form` |
+| New form(s) | `edit_group` -- one `:add` step per form; placement is derived (definitions before callers) |
+| Replace a whole form | `edit_group` -- a one-step `:replace` |
 | Small change inside a big form | `edit_subform` |
 | Change a function's signature | `change_signature` |
 | Rename one form | `edit_rename` |
@@ -38,7 +39,7 @@ the callers first, the callee last, one call each. Every step verifies, and
 every intermediate state is a program that loads.
 
 Two forms that call *each other* have no valid order. Break the cycle first --
-`edit_replace_form` one of them to drop the call -- then delete both.
+replace one of them (a one-step `edit_group`) to drop the call -- then delete both.
 
 `query_depends {on "some.ns/name"}` answers the same question *before* you
 write, which is what you want when you are planning a removal rather than

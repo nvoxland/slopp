@@ -1,7 +1,26 @@
 # Tool index
 
-Every tool a slopp MCP server exposes. `help` prints a shorter cheat-sheet from
-a running server, and is always current for the version you are on.
+Every operation a slopp MCP server exposes. `help` prints a shorter cheat-sheet
+from a running server, and is always current for the version you are on.
+
+## Fourteen families, every operation by its own name
+
+`tools/list` advertises fourteen tools -- `orient`, `read`, `depends`,
+`history`, `eval`, `edit`, `refactor`, `declare`, `verify`, `build`, `store`,
+`slopp`, `done`, `commit_point`. Each family's description is an index of the
+operations it holds, one line per operation, and an operation is called
+through its family with `op`:
+
+```
+edit {op "edit_group", steps [{action "add", ns "app.core", source "(defn f [x] x)"}], prompt "why"}
+read {op "query_slice", ns "app.core", name "f"}
+```
+
+Every name in the tables below is an operation; `help {topic "<op>"}` returns
+its full description and schema. `done` and `commit_point` take no `op`. An
+operation called by its own name (the `--call` door, scripts, hooks) still
+dispatches -- it is just not advertised, because ninety-six advertised tools
+were deferred by the client and cost a search turn each to find.
 
 ## Orientation
 
@@ -9,7 +28,8 @@ a running server, and is always current for the version you are on.
 |---|---|
 | `session_brief` | Start here, once. Namespaces with form names, recent milestones and their asks, git alignment, the loop. |
 | `query_project` | Every namespace's outline -- names, arities, `!`-status, test-ness -- in one response. `since` returns a one-liner when nothing changed. |
-| `query_search {pattern}` | Regex across all store source. Hits are `{:ns :form :line}`. |
+| `query_search {pattern}` | Regex across all store source; one hit per matching form, the hit is the form's card. |
+| `query_batch {ops}` | Several READ questions, one call: `ops = [{op ...} ...]`, answered one result per op. |
 | `query_source {targets}` | Source of several named forms in one call. `{ns}` alone returns the outline; `full: true` dumps the namespace. |
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards (signature, doc line, test warranty) for everything it reaches. `match` + `window` narrows a giant form; `verbose` adds each card's recorded why. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
@@ -227,7 +247,7 @@ Three things worth knowing:
 |---|---|
 | `query_history` | Everything that happened. Routes by args: `{}`, `{ns name}`, `{ns name at}`, `{at}`, `{contains}`, `{dead_ends}`. |
 | `query_changes {from to}` | Net per-form diffs with the red/green arc. `from` takes `"start"`, `"last-commit"`, `"last-done"` or a delta id. |
-| `report` | The summary/handoff composite: milestones, changes with their asks, verification state, alignment. |
+| `report {since? contains? limit?}` | The handoff in one read: `:by-ask` (each ask verbatim with the forms it added, changed, deleted, renamed), milestones, net form changes, the last verification. |
 | `query_commits` | Milestones newest first, with `:alignment` proving the git branch head matches the latest projection. |
 | `query_git` | This session's git view: the saved external remote and the clone base it grafts onto. |
 
@@ -239,8 +259,7 @@ Three things worth knowing:
 | `ns_rename {from to}` | Rename a whole namespace everywhere. Returns `:left-behind` (what no rewrite reaches — strings, qualified keywords, the `-test` sibling, regex literals spelling the old name, strings carrying source that DECLARES it, and under `:alias` the callers whose `:as` still spells the old name, each with the `:suggest` to hand `ns_realias`) and `:module-debt` (edges to declare, cycles `module_dep` will refuse) — a relocation runs no write gates, so the result is the only notice. |
 | `ns_delete {ns}` | Retire an empty namespace. Refuses while any form remains or anything still requires it. |
 | `ns_add_require` / `ns_remove_require` | One require clause. Never hand-edit an `ns` form. |
-| `edit_add_form {ns source}` | Add one top-level form — or several in one `source`, verified once. Placement is derived (definitions before callers), never stated. |
-| `edit_replace_form {ns name source}` | Replace a whole form. |
+| *(de-advertised)* `edit_add_form` / `edit_replace_form` | Wire-compat aliases only — each is the one-step `edit_group` (`:add` / `:replace`) spelled the old way. They still dispatch for `--call` scripts and hooks, but no enum advertises them. |
 | `edit_subform {ns name source}` | A change inside a big form, by `match`, `text: true`, or `where: {key value}`. `where` addresses a row by the spelling each side answers to, so `"stored-name"` reaches `:stored-name`; a miss names the values that key does take. |
 | `edit_delete_form {ns name}` | Delete a form (with `ns-unmap`). Refuses while anything still calls it, naming the callers; to remove a caller and its callee together, delete in reverse dependency order — callers first, callee last. |
 | `edit_comment {ns name text}` | Set (or clear) the comment block rendered above a form. The comment is owned by the form, so it travels with it. |
