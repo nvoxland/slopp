@@ -271,6 +271,18 @@
           (is (some #(re-find #"carrier rebate" (str (:ask %))) rows))
           (is (not-any? :source rows)
               "the story is asks and states — code lives one call away")))
+      (testing "the story does not depend on the line's recent deltas — imported
+                or pre-`since` history is exactly when provenance is asked for"
+        ;; the field failure (sonnet s9 step 2): the seed's history arrived by
+        ;; clone, :changes was line-scoped and EMPTY, and the story — derived
+        ;; from changes — never fired on the ask it was built for. `since` at
+        ;; the head reproduces that shape: no changes, story still owed.
+        (let [head (:id (last (ops/journal sess)))
+              r2   (ops/report sess :since head :contains "rate-cents")]
+          (is (empty? (:changes r2)) (pr-str (:changes r2)))
+          (is (seq (:story r2)) (pr-str (keys r2)))
+          (is (some #(re-find #"June contract uplift" (str (:ask %)))
+                    (:versions (first (:story r2)))))))
       (testing "a broad report carries no story — it is the narrow question's answer"
         (is (nil? (:story (ops/report sess)))))
       (finally (ops/close! sess)))))

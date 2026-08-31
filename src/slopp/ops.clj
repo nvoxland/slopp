@@ -3905,8 +3905,21 @@
         ;; a NARROW report (contains matched ≤3 named forms): a broad report
         ;; is a handoff, and a story per row would drown it
         story     (when contains
-                    (let [named (filter (comp symbol? :form) changes)]
-                      (when (<= (count named) 3)
+                    (let [named (->> (concat
+                                      ;; forms whose NAME matches: imported or
+                                      ;; pre-`since` history has no line delta,
+                                      ;; and that is exactly when provenance
+                                      ;; gets asked (sonnet s9, step 2)
+                                      (for [nsx (keys (:namespaces st))
+                                            e   (store/forms st nsx)
+                                            :when (and (:name e) (not= (:name e) nsx)
+                                                       (str/includes? (str (:name e))
+                                                                      (str contains)))]
+                                        {:ns nsx :form (:name e)})
+                                      (filter (comp symbol? :form) changes))
+                                     (map #(select-keys % [:ns :form]))
+                                     distinct)]
+                      (when (and (seq named) (<= (count named) 3))
                         (->> named
                              (keep (fn [{:keys [ns form]}]
                                      (when-let [vs (seq (history/query-form-history (with-history session) ns form))]
