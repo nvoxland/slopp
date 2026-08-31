@@ -849,3 +849,36 @@
         (is (= 'os.core/entry (:form (first (:rows r)))) "the seed still leads")
         (is (nil? (:source (first (:rows r)))) (pr-str r))
         (is (<= (:tokens r) 30))))))
+
+(deftest a-seed-arrives-with-its-test
+  ;; eval11: bundle coverage of edited pre-existing forms was 60-75% and
+  ;; the misses were almost all DEFTESTS — a seed's test ranked as just one
+  ;; caller among many and fell below the budget cut. Statically (no trace
+  ;; map — the fresh-import case), the test that references a seed is the
+  ;; next thing the ask will touch; it rides guaranteed and marked. The
+  ;; fixture's test deliberately shares no name token with the seed, or it
+  ;; would arrive as a seed itself and prove nothing.
+  (let [src (str "(ns sw.core (:require [clojure.test :refer [deftest is]]))\n"
+                 "(defn rate \"Cents per unit.\" [x] (* 2 x))\n"
+                 "(defn ^:unused-ok a1 \"Caller.\" [x] (rate x))\n"
+                 "(defn ^:unused-ok a2 \"Caller.\" [x] (rate x))\n"
+                 "(defn ^:unused-ok a3 \"Caller.\" [x] (rate x))\n"
+                 "(defn ^:unused-ok a4 \"Caller.\" [x] (rate x))\n"
+                 "(defn ^:unused-ok a5 \"Caller.\" [x] (rate x))\n"
+                 "(defn ^:unused-ok a6 \"Caller.\" [x] (rate x))\n"
+                 "(deftest pricing-behaviour (is (= 4 (rate 2))))\n")
+        sess (atom {:store (store/ingest (store/empty-store) 'sw.core src)})
+        m    (orient/orient-map sess :ask "change how rate is computed" :tokens 220)]
+    (testing "the seed's test is among the rows even under a tight budget"
+      (is (some #(= 'sw.core/pricing-behaviour (:form %)) (:rows m))
+          (pr-str (mapv :form (:rows m)))))
+    (testing "and it is marked as the seed's test — not just another caller"
+      (is (= "tests sw.core/rate"
+             (:via (first (filter #(= 'sw.core/pricing-behaviour (:form %)) (:rows m)))))
+          (pr-str (filter #(= 'sw.core/pricing-behaviour (:form %)) (:rows m)))))
+    (testing "a seed with no test gains no phantom row"
+      (let [m2 (orient/orient-map
+                (atom {:store (store/ingest (store/empty-store) 'nw.core
+                                            "(ns nw.core)\n(defn ^:unused-ok lone \"L.\" [x] x)\n")})
+                :ask "change lone" :tokens 220)]
+        (is (not-any? #(re-find #"^tests " (str (:via %))) (:rows m2)))))))

@@ -1137,24 +1137,35 @@
    (fn [_session a _sym]
      (text! (help-text (:topic a)) :budgeted? true))})
 
-(def ^:private tail-handlers!
-  "Every handler-map entry (Q4) \u2014 call-tool checks here first."
-  (merge env-handlers! file-handlers! sync-handlers!))
-
 (defn wire-steps
   "`edit_group`'s step maps as `ops/edit-group!` takes them: keys keywordized
   whether the transport left them strings or keywords, `action` a keyword,
   `ns`/`name` symbols, a `where` map's keys keywordized the way a single
-  `edit_subform` sees them. Everything else rides through untouched."
+  `edit_subform` sees them. Everything else rides through untouched.
+
+  A `:patch` step — {action: patch, ns, name, replace: [{match, source,
+  text?, where?} …]} — EXPANDS here into one :subform step per entry:
+  several small changes inside one form cost the model one compact step
+  instead of a whole-form retype (eval11: retypes were 2.1x plain's output
+  volume, and output is the slowest, priciest token). The server does the
+  mechanical work; the ops layer never sees :patch."
   [steps]
-  (let [kw   (fn [m] (into {} (map (fn [[k v]] [(keyword (name k)) v])) m))]
-    (mapv (fn [s]
-            (let [s (kw s)]
+  (let [kw  (fn [m] (into {} (map (fn [[k v]] [(keyword (name k)) v])) m))
+        one (fn [s]
               (cond-> s
                 (:action s) (update :action #(keyword (name %)))
                 (:ns s)     (update :ns symbol)
                 (:name s)   (update :name symbol)
-                (map? (:where s)) (update :where kw))))
+                (map? (:where s)) (update :where kw)))]
+    (into []
+          (mapcat (fn [s]
+                    (let [s (kw s)]
+                      (if (and (:action s) (= "patch" (name (:action s))))
+                        (for [e (:replace s)]
+                          (one (assoc (kw e)
+                                      :action :subform
+                                      :ns (:ns s) :name (:name s))))
+                        [(one s)]))))
           steps)))
 
 (defn- terse-full-check
@@ -1680,6 +1691,81 @@
                                  f))
                              f)))
                        fs)))))
+
+(def ^:private intent-handlers!
+  "The changeset program (s10): a whole ask as ONE call. `intent` lands the
+  tests group first and reports which went RED (red-first, watched), lands
+  the impl group, runs the finisher for `accept`, and closes with done —
+  one result carrying the verdict, the finisher's work, and `:test-src` on
+  any residual red. A red done does not land: the thread keeps the work,
+  and the ordinary loop continues from this result — the red path is a
+  continuation, not a separate mode. Step vocabulary is edit_group's plus
+  :patch (expanded by `wire-steps`): the model emits deltas, never retypes."
+  {"intent"
+   (fn [session a _sym]
+     (let [tests (wire-steps (or (:tests a) []))
+           impl  (wire-steps (or (:impl a) []))
+           label (let [p (str (or (:prompt a) "intent"))]
+                   (subs p 0 (min 60 (count p))))]
+       (if (empty? impl)
+         (text! {:error "intent needs :impl steps — tests alone are edit_group {steps …}"})
+         (let [rt (when (seq tests)
+                    (ops/edit-group! session tests
+                                     :prompt (str (:prompt a) " [tests first — expected red]")
+                                     :agent (:agent a)))]
+           (if (and rt (:error rt))
+             (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
+             (let [went-red (vec (:failed-tests (:test rt)))
+                   ri (ops/edit-group! session impl
+                                       :prompt (:prompt a) :agent (:agent a))]
+               (if (:error ri)
+                 (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
+                                       :phase :impl)
+                          (seq tests) (assoc :tests {:landed (count tests)
+                                                     :went-red went-red})))
+                 (let [ri (-> ri
+                              (held-after-write! session "edit_group" a)
+                              (finish-accepted! session a)
+                              (attach-red-context! session))
+                       dn (when-not (red? (:test ri))
+                         ;; a red intent is not a CLOSED unit of work: no
+                         ;; done, no land — the thread keeps the work and
+                         ;; the ordinary loop continues from this result
+                         (external/done! session :label label))]
+                   (text!
+                    (cond->
+                     {:ok true
+                      :impl (select-keys ri [:group :steps :warnings :drift
+                                             :red-first :note])
+                      :test (:test ri)
+                      :done (:done dn)
+                      :status (cond (red? (:test ri)) :red
+                                    (= :red (get-in dn [:findings :test-status])) :red
+                                    :else :green)}
+                      (seq tests)
+                      (assoc :tests
+                             (cond-> {:landed (count tests) :went-red went-red}
+                               (empty? went-red)
+                               (assoc :note (str "the tests landed GREEN — the spec"
+                                                 " was never watched failing; a green"
+                                                 " you did not watch fail proves"
+                                                 " nothing"))))
+                      (:finisher ri)      (assoc :finisher (:finisher ri))
+                      (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
+                      (:landed dn)        (assoc :landed (:landed dn))
+                      (:land dn)          (assoc :land (:land dn))
+                      (:external dn)      (assoc :external (:external dn))
+                      (:findings dn)      (assoc :findings (:findings dn))
+                      (red? (:test ri))
+                      (assoc :note (str "red — nothing LANDED, and nothing is"
+                                        " LOST: the tests and impl are on your"
+                                        " thread, unlanded. Fix forward from"
+                                        " :test-src; your next green intent or"
+                                        " done lands it all."))))))))))))})
+
+(def ^:private tail-handlers!
+  "Every handler-map entry (Q4) — call-tool checks here first."
+  (merge env-handlers! file-handlers! sync-handlers! intent-handlers!))
 
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),

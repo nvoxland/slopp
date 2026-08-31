@@ -3252,7 +3252,7 @@
         (is (re-find #":name g, :source-already-sent true"
                      (call! sess "read" {:op "query_source" :targets [{:ns "fam.core" :name "g"}]}))))
       (testing "the op's own validation, by name"
-        (is (re-find #"unknown op frobnicate for edit — ops: edit_group edit_subform" (call! sess "edit" {:op "frobnicate"})))
+        (is (re-find #"unknown op frobnicate for edit — ops: intent edit_group edit_subform" (call! sess "edit" {:op "frobnicate"})))
         (is (re-find #"unknown argument :nom for edit_subform" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :nom "g"})))
         (is (re-find #"edit_subform needs :name" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :source "1" :match "x" :prompt "p"}))))
       (testing "a de-advertised alias called by its own name still dispatches (the --call door, the hooks, old scripts)"
@@ -3683,4 +3683,44 @@
       (is (re-find #"defn .:unused-ok keeper"
                    (call! sess "query_source" {:targets ["rs.core/keeper"] :resend true}))
           "resend true bypasses the ledger: the full text comes back")
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-ask-lands-as-one-intent
+  ;; s10 wave 2: every axis — wall, tokens, cost — reduced to request count
+  ;; and output volume (eval11 decomposition). The intent op collapses the
+  ;; loop's request-per-gesture floor: tests land first and are WATCHED
+  ;; going red, impl lands (patch steps: deltas, not whole-form retypes),
+  ;; accepts finish, verification and done run — ONE call, one result. The
+  ;; loop remains the red path's fallback.
+  ;;
+  ;; The hold case must BREAK AN EXISTING covered form: a red made only of
+  ;; freshly-added spec tests LANDS by design (red-first — the red IS the
+  ;; spec); a red in code the episode touched is the one the thread holds.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "it.core" :source "(ns it.core (:require [clojure.test :refer [deftest is]]))\n(defn rate [x] (* 2 x))\n(defn ^:unused-ok use-rate [x] (rate x))\n"})
+      (testing "the whole ask is ONE call: tests red-first, impl, verify, done"
+        (let [r (call! sess "intent"
+                       {:prompt "rate doubles then adds a fixed fee of 7"
+                        :tests [{:action "add" :ns "it.core"
+                                 :source "(deftest rate-fee-t (is (= 27 (rate 10))))"}]
+                        :impl  [{:action "patch" :ns "it.core" :name "rate"
+                                 :replace [{:match "(* 2 x)" :source "(+ (* 2 x) 7)"}]}]})
+              m (edn/read-string r)]
+          (is (re-find #":went-red \[it.core/rate-fee-t\]" r)
+              (str "the spec was watched failing: " r))
+          (is (= :green (:status m)) (pr-str (select-keys m [:status :test])))
+          (is (re-find #":done \"d" r) r)))
+      (testing "a red in touched code reports, carries :test-src, and HOLDS"
+        (let [r (call! sess "intent"
+                       {:prompt "the fee becomes 9 — but this impl gets it wrong"
+                        :impl  [{:action "patch" :ns "it.core" :name "rate"
+                                 :replace [{:match "(+ (* 2 x) 7)" :source "(+ (* 2 x) 8)"}]}]})
+              m (edn/read-string r)]
+          (is (re-find #":test-src" r)
+              (str "the failing test's source rides the red: " r))
+          (is (= :red (:status m)) (pr-str (select-keys m [:status :findings])))
+          (is (nil? (:land m))
+              (str "a red in touched code lands nothing — the thread keeps"
+                   " the work: " (pr-str (select-keys m [:land :status :done :findings]))))))
       (finally (ops/close! sess)))))

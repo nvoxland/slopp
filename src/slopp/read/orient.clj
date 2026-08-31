@@ -864,7 +864,40 @@
                                        [r t])]
                          (recur (rest qs) (conj acc r) (+ used t)))
                        [acc used (count qs)]))))
-        [rows used more] fitted]
+        [rows used more] fitted
+        ;; eval11's precision miner: a seed's TEST fell below the budget
+        ;; cut — one caller among many — while being the next thing the ask
+        ;; touches. With trace evidence the coverage edge carries it;
+        ;; statically (a fresh import has no trace map) the deftest that
+        ;; references a seed rides GUARANTEED, appended past the budget and
+        ;; marked for what it is.
+        deftest? (fn [q]
+                   (when-let [[_ e] (get nodes q)]
+                     (let [sx (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                       (and (seq? sx)
+                            (contains? #{'deftest 'clojure.test/deftest} (first sx))))))
+        seed-test (into {}
+                        (keep (fn [q]
+                                (when-let [t (first (for [r (refs/refs st)
+                                                          :when (:from-var r)
+                                                          :let [from (symbol (str (:from-ns r)) (str (:from-var r)))]
+                                                          :when (and (= q (symbol (str (:to-ns r)) (str (:to-name r))))
+                                                                     (not= from q)
+                                                                     (node? from)
+                                                                     (deftest? from))]
+                                                      from))]
+                                  [t q])))
+                        (take 3 seed-order))
+        have     (into #{} (map :form) rows)
+        rows     (-> (mapv (fn [r]
+                             (if-let [q (get seed-test (:form r))]
+                               (assoc r :via (str "tests " q))
+                               r))
+                           rows)
+                      (into (keep (fn [[t q]]
+                                    (when-not (have t)
+                                      (assoc (row t) :via (str "tests " q)))))
+                            seed-test))]
     (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
       (pos? more) (assoc :more more))))
 

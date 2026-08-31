@@ -206,6 +206,15 @@
                                :text {:type "string"}
                                :prompt {:type "string"}}
                   :required ["ns" "name" "text"]}}
+   {:name "intent"
+    :description "A WHOLE ASK as one call — the pipeline the loop otherwise walks: `tests` steps land first and the result reports which went RED (watched failing, red-first honored); `impl` steps land; `accept`'s expectation shifts are finished; ONE verification; done closes the episode — one result with the verdict, and :test-src on any residual red (the next call is the fix, and the ordinary loop continues from it; a red intent lands nothing — the thread keeps the work). Steps take edit_group's vocabulary PLUS {action: patch, ns, name, replace: [{match, source, text?, where?} …]} — several small changes INSIDE one form as deltas, never a whole-form retype. An intent past ~10 steps is two intents. Use intent when you can state the test and the implementation with EQUAL confidence; a test you are writing to FIND something out stays separate (edit_group the test alone) — that red is the answer you came for, and bundling spends it before you read it."
+    :inputSchema {:type "object"
+                  :properties {:prompt {:type "string"}
+                               :tests {:type "array" :items {:type "object"}}
+                               :impl {:type "array" :items {:type "object"}}
+                               :accept {:type "array" :items {:type "string"}
+                                        :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}}
+                  :required ["impl" "prompt"]}}
    {:name "edit_group"
     :description "THE write door — ONE INTENT as one atomic write: several related steps — the fn, its test, the caller it changes, the require it needs — applied together, every per-step gate intact, verified ONCE, reported per step in :steps. A ONE-STEP group is the single-form write: replacing or adding one form is edit_group with one step. steps: [{action: add|replace|subform|delete|require, ns, name, source, match, text, where, require}]. All-or-nothing: a refused step names its index and nothing lands. A missing alias exactly one namespace can supply is required for you (:auto-require); a first call across a module boundary gets the edge declared for you (:auto-module-dep) unless it would close a cycle. Not a shopping list: a whole feature in one call is refused by the same gates a whole feature in one form is, and done is still the completeness judgement. E.g. steps: [{action: replace, ns: app.core, name: rate, source: <the whole new defn>}, {action: add, ns: app.core-test, source: <the deftest>}, {action: require, ns: app.core, require: <one require clause>}]."
     :inputSchema {:type "object"
@@ -630,7 +639,7 @@
 TOOLS:   14 families, each an index of its ops: orient, read, depends,
          history, eval, edit, refactor, declare, verify, build, store,
          slopp, done, commit_point. An op keeps its name and is called
-         through its family: edit {op edit_group steps prompt};
+         through its family: edit {op intent …} · edit {op edit_group steps prompt};
          read {op query_slice ns name}. help {topic <op>} is an op's card.
 TURNS:   automatic. A write carrying `prompt` opens its own turn; the prompt
          hook records your ask. turn_begin only when a refusal asks for it.
@@ -641,12 +650,15 @@ ORIENT:  your ask ARRIVES with its map (the [slopp] block above it): ranked
          orient {ask} · query_slice {ns name} · query_search {pattern}
 OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
          query_observe {ns name code} (capture args/returns flowing through a fn)
-WRITE:   ONE door: edit_group {steps [{action add|replace|subform|delete|require …}]
-         prompt accept?} — the fn + its test + the caller it changes as ONE
-         atomic write, every gate per step, verified once, reported per step.
-         A ONE-STEP group is the single-form write; N new forms are N :add
-         steps. accept: [\"ns/test\" …] declares the expectations this change
-         MOVES — their :proposed updates apply in the same call (:finisher).
+WRITE:   a WHOLE ask is ONE call: intent {prompt tests impl accept?} —
+         tests land first and the result says which went RED (watched),
+         impl lands, accepted shifts finish, one verification, done closes:
+         one result. Touch existing forms with {action patch, ns, name,
+         replace [{match source} …]} — deltas, never a whole-form retype.
+         A red intent lands nothing; continue from its result.
+         Mid-ask single writes: edit_group {steps [{action add|replace|
+         subform|delete|require …}] prompt accept?} — a ONE-STEP group is
+         the single-form write; N new forms are N :add steps.
          edit_subform {ns name match source} (a small change INSIDE a big form)
          edit_rename {ns from to}   <- never rename by editing call sites
          rename_sweep {from to dry_run true} first, then without
@@ -663,8 +675,8 @@ RESULTS: the result IS the check — do not re-read, restart or test_run after
          · :warnings = fix per :suggest · :already-sent = you hold it ·
          :truncated = query_detail {id} only when the missing part changes
          what you do next
-FINISH:  done runs when you STOP (the Stop hook) — call done {label} yourself
-         only to read the verdict mid-way. full_check (whole store) and
+FINISH:  intent closes its own unit of work (done inside the call); done
+         {label} yourself only mid-loop. full_check (whole store) and
          commit_point {label} (a milestone) are the human's grain.
 SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)")
 
@@ -866,7 +878,7 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
    {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
    {:name "history" :blurb "What changed, why and when: form history, intents, milestones, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
-   {:name "edit" :blurb "Verified writes, by intent: a group of steps (one step is fine), a targeted subform, a delete, an undo." :ops ["edit_group" "edit_subform" "edit_delete_form" "edit_comment" "edit_revert" "undo" "episode_revert"]}
+   {:name "edit" :blurb "Verified writes, by intent: a whole ask as one call (intent), a group of steps (one step is fine), a targeted subform, a delete, an undo." :ops ["intent" "edit_group" "edit_subform" "edit_delete_form" "edit_comment" "edit_revert" "undo" "episode_revert"]}
    {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}
    {:name "declare" :blurb "Namespaces, requires, module edges and dials, dependencies." :ops ["ns_create" "ns_delete" "ns_add_require" "ns_remove_require" "module_dep" "module_purity" "module_role" "module_platform" "deps_add" "deps_remove" "deps_list" "deps_pure" "js_dep"]}
    {:name "verify" :blurb "A bigger question than one write answers: chosen tests, the whole store, a fresh image, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "restart" "review_scan" "draft_test" "screen"]}
