@@ -403,8 +403,23 @@
   [ctx {:keys [query-params]}]
   (config-document (:store @(:session ctx)) (:prefix query-params)))
 
-(defn ^{:http/read :orient/bundle} bundle-read
-  "Read performer: the ask bundle — `orient/bundle-text` over the live
-  session, the ask taken from `?ask=` (blank is the plain ranking)."
+(defn ^{:http/read :orient/bundle} bundle-read!
+  "Read performer: the ask bundle — `orient/bundle` over the live session,
+  the ask from `?ask=` (blank is the plain ranking). `?session-id=` is the
+  calling harness's id: when it MATCHES the session's claimed id, this
+  session already has its map in context, so the answer is the small DELTA
+  (tighter budget, one source) — injected text rides every later request as
+  rent, and a second full map pays it twice. What was emitted is stashed on
+  the session as `:pending-bundle-held {:sid :versions}`; absorbing the ask
+  the bundle rode in with drains it into the form ledger, so a read of a
+  bundle-carried form is a reference rather than a second copy."
   [{:keys [session]} {:keys [query-params]}]
-  (orient/bundle-text session (str (:ask query-params))))
+  (let [ask   (str (:ask query-params))
+        sid   (not-empty (str (or (:session-id query-params) "")))
+        same? (and sid (= sid (:intent-sid @session)))
+        {:keys [text sent]} (if same?
+                              (orient/bundle session ask :tokens 450 :sources 1)
+                              (orient/bundle session ask))]
+    (when (seq sent)
+      (swap! session assoc :pending-bundle-held {:sid sid :versions sent}))
+    text))

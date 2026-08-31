@@ -124,7 +124,7 @@
     :escape "fix the schema or the impl so they agree"
     :teach "a written :=> schema disagrees with its live impl (generative mg/check)"}
 {:rule :stored-name :grain :done
-    :escape "rewrite the form so the store recomputes its name — edit_replace_form, or edit_subform addressing it by the form ID the finding names (an id works where the name does not, which is the whole problem)"
+    :escape "rewrite the form so the store recomputes its name — an edit_group :replace step, or edit_subform addressing it by the form ID the finding names (an id works where the name does not, which is the whole problem)"
     :teach (str "a form's stored :name disagrees with the name its own source"
                 " defines. The store keeps both and derives one from the other"
                 " at every write, so a disagreement means some write did not —"

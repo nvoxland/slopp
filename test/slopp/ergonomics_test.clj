@@ -785,3 +785,35 @@
             (is (:error r2) (pr-str r2))
             (is (nil? (store/form-named (:store @sess) 'ba.core 'four))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-write-repairs-what-it-would-have-left-stale
+  ;; friction 1 through the group door: hot-load re-evaluates the edited
+  ;; form, but a def whose VALUE was computed from it still holds the old
+  ;; one. The single-form write reloads the capturing namespaces before
+  ;; verification; the group write must make the same repair.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ds2.core
+                   (str "(ns ds2.core)\n"
+                        "(def base 1)\n"
+                        "(def derived (inc base))\n"
+                        "(defn ^:unused-ok read-it [] derived)\n"))
+      (is (= [2] (ops/query-eval sess "(ds2.core/read-it)")))
+      (let [r (ops/edit-group! sess
+                               [{:action :replace :ns 'ds2.core :name 'base
+                                 :source "(def base 10)"}]
+                               :prompt "bump the base through a group")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (= '[ds2.core] (:image-reloaded r))
+            (str "the namespace holding the captured value was reloaded: "
+                 (pr-str r)))
+        (is (= [11] (ops/query-eval sess "(ds2.core/read-it)"))
+            "derived was recomputed from the new base, not merely reported"))
+      (testing "an ordinary defn group write reloads nothing — no tax on every write"
+        (let [r (ops/edit-group! sess
+                                 [{:action :replace :ns 'ds2.core :name 'read-it
+                                   :source "(defn ^:unused-ok read-it [] (+ 0 derived))"}]
+                                 :prompt "same answer, different spelling")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (nil? (:image-reloaded r)) (pr-str r))))
+      (finally (ops/close! sess)))))

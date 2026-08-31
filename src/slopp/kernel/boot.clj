@@ -691,7 +691,7 @@
   **Best-effort, deliberately (frictions 3b/3f/19).** This used to rethrow on
   the first failure, and the blast radius was the whole system: `slopp.kernel.boot`
   loads every store namespace, so ONE namespace that no longer compiles took
-  down every tool in every process — including the `edit_add_form` that would
+  down every tool in every process — including the very write that would
   have put the missing form back. Three times in one wave a store reached a
   state its own tools could not open, and the only way back was `rm -rf
   .slopp` and a re-import. That is a catastrophic answer to an ordinary

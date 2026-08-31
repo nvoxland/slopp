@@ -868,34 +868,47 @@
     (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
       (pos? more) (assoc :more more))))
 
-(defn ^:export bundle-text
-  "The ASK BUNDLE: `orient-map` rendered as ONE plain-text block sized for
-  prompt-context injection — a header that orients, the ranked rows as
-  one-line cards with their `:via`, and the seeds' full sources at the
-  bottom. The prompt hook GETs this from the running listener and injects
-  it as additionalContext, so the ask ARRIVES with its map and the
-  session_brief → orient → first-read-wave turns happen before the model's
-  first token. A blank ask is the plain ranking, never an error — same
-  stance as the search endpoint."
-  [session ask & {:keys [tokens] :or {tokens 2500}}]
-  (let [st    (:store @session)
-        m     (orient-map session :ask (str ask) :tokens tokens)
-        cards (remove :source (:rows m))
-        srcs  (filter :source (:rows m))
-        line  (fn [{:keys [form sig doc via]}]
-                (str "  " form
-                     (when sig (str " " (pr-str sig)))
-                     (when (seq (str doc)) (str " — " (snip doc 70)))
-                     "  [" via "]"))]
-    (str "[slopp] " (count (:namespaces st)) " namespaces; live store — work"
-         " through the slopp tools (the store is the source, not the files)."
-         " The forms below are ranked for THIS ask; their sources, when"
-         " present, are current — no need to re-read them.\n"
-         (when (seq (:seeds m))
-           (str "seeds: " (str/join " " (:seeds m)) "\n"))
-         (when (seq cards)
-           (str (str/join "\n" (map line cards)) "\n"))
-         (when (seq srcs)
-           (str "--- the forms the ask names, in full ---\n"
-                (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
-                                      srcs)))))))
+(defn ^:export bundle
+  "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.
+  `:text` is `orient-map` rendered as ONE plain-text block sized for prompt
+  injection — a header that orients, the ranked rows as one-line cards with
+  their `:via`, and full sources for at most `sources` seed rows. The cap is
+  the diet: measured, the sources section was 85% of the bundle, and the
+  injected text rides EVERY later request of the session as context rent —
+  rows past the cap stay cards, in rank order. `:sent` is the form versions
+  whose text was emitted, for the caller to stash toward the session's form
+  ledger — the bundle, the write results and the reads share one ledger. A
+  blank ask is the plain ranking, never an error — same stance as the
+  search endpoint."
+  [session ask & {:keys [tokens sources] :or {tokens 1100 sources 2}}]
+  (let [st      (:store @session)
+        m       (orient-map session :ask (str ask) :tokens tokens)
+        withs   (vec (take sources (filter :source (:rows m))))
+        keep?   (into #{} (map :form) withs)
+        cards   (into [] (comp (remove (comp keep? :form))
+                               (map #(dissoc % :source)))
+                      (:rows m))
+        line    (fn [{:keys [form sig doc via]}]
+                  (str "  " form
+                       (when sig (str " " (pr-str sig)))
+                       (when (seq (str doc)) (str " — " (snip doc 70)))
+                       "  [" via "]"))
+        sent    (vec (for [r withs
+                           :let [q (:form r)
+                                 e (store/form-named st (symbol (namespace q))
+                                                     (symbol (name q)))]
+                           :when e]
+                       [(:id e) (hash (:source r))]))]
+    {:sent sent
+     :text (str "[slopp] " (count (:namespaces st)) " namespaces; live store — work"
+                " through the slopp tools (the store is the source, not the files)."
+                " The forms below are ranked for THIS ask; their sources, when"
+                " present, are current — no need to re-read them.\n"
+                (when (seq (:seeds m))
+                  (str "seeds: " (str/join " " (:seeds m)) "\n"))
+                (when (seq cards)
+                  (str (str/join "\n" (map line cards)) "\n"))
+                (when (seq withs)
+                  (str "--- the forms the ask names, in full ---\n"
+                       (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
+                                             withs)))))}))

@@ -27,7 +27,7 @@
   incomplete, and reloading a browser into a red half-written state trains
   the author to ignore it."
   (:require [slopp.project.capabilities :as capabilities]
-            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http] [slopp.project.dev :as dev] [slopp.currency :as currency] [slopp.kernel.boot :as boot] [slopp.store.render :as store.render]))
+            [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http] [slopp.project.dev :as dev] [slopp.currency :as currency] [slopp.kernel.boot :as boot] [slopp.store.render :as store.render] [slopp.rules.webapp :as rules.webapp]))
 
 (defn derived-port
   "A localhost port DERIVED from the store dir for this project's APP server —
@@ -176,7 +176,15 @@
                          (list 'slopp.http.static/mount-routes
                                mounts
                                (list 'slopp.http.static/file-or-resource-reader
-                                     (:static-dir plan)))))]
+                                     (:static-dir plan))))
+                  ;; the client route table, QUOTED — page symbols are
+                  ;; addresses here, not calls; dispatch only matches the
+                  ;; patterns to derive a shell's status (200 on a routed
+                  ;; address, 404 with the same shell bytes on one the
+                  ;; client table does not know)
+                  (seq (:page-routes plan))
+                  (assoc :webapp/routes
+                         (list 'quote (mapv vec (:page-routes plan)))))]
     (pr-str (list* 'do
                    (list 'require ''slopp.http)
                    (concat
@@ -555,6 +563,13 @@
      ;; assembly if anything declares itself a shell — the honest failure,
      ;; where a blank page on every route is the alternative
      :bundle          (rules.http/bundle-url store)
+     ;; the CLIENT route table, derived from the same page markers the
+     ;; build bakes into the browser entry — [[pattern page] …]. Without it
+     ;; the managed server cannot derive a shell's status and answers 200
+     ;; to every address (the compatibility default), which slopp-ui
+     ;; measured on the one surface humans actually browse. Pure store
+     ;; derivation; the child needs no image scan.
+     :page-routes     (mapv (juxt :path :page) (rules.webapp/page-routes store))
      ;; whether the served app HONOURS its declared contracts. Read here rather
      ;; than in serve-code for the same reason every other derivation is: the
      ;; plan is what production and the dev server both answer from, and a

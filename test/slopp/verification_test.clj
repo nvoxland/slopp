@@ -1010,3 +1010,33 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (external/record-or-keep!
                     verdict #(throw (ex-info "corrupt store" {:fatal true}))))))))
+
+(deftest ^:external a-live-handle-shape-change-in-a-group-rebuilds-the-image
+  ;; The single-form write rebuilds the image when a ^:live-handle
+  ;; constructor changes KEY SHAPE — the map already in the session was
+  ;; built by the OLD code and no write can reach it. A group write of the
+  ;; same change left the stale handle in place.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'lh2.core
+                   (str "(ns lh2.core)\n\n"
+                        "(defn ^:live-handle mk [] {:conn 1 :port 2})\n"))
+      (testing "a key-shape change through a group rebuilds the image"
+        (let [r (ops/edit-group! sess
+                                 [{:action :replace :ns 'lh2.core :name 'mk
+                                   :source "(defn ^:live-handle mk [] {:lh/conn 1 :port 2})"}]
+                                 :prompt "namespace a handle key through a group")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= :live-handle-shape-change (:reason (:image-rebuilt r)))
+              (str "a stale handle must be replaced BEFORE anything reads it: "
+                   (pr-str r)))))
+      (testing "the image still works afterwards"
+        (is (= [3] (ops/query-eval sess "(+ 1 2)"))))
+      (testing "a body change with the SAME keys does not rebuild"
+        (let [r (ops/edit-group! sess
+                                 [{:action :replace :ns 'lh2.core :name 'mk
+                                   :source "(defn ^:live-handle mk [] {:lh/conn 9 :port 2})"}]
+                                 :prompt "same shape, different values")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (nil? (:image-rebuilt r)) (pr-str r))))
+      (finally (ops/close! sess)))))

@@ -187,3 +187,79 @@
                           " (if (pos? n) (countdown (dec n)) :done))\n"))
         (is (nil? (:error (ops/delete-form! sess 'dl.rec 'countdown)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-replace-of-a-defmethods-dispatch-unregisters-the-old
+  ;; #131 reached through edit_group: hot-load evals the NEW defmethod but
+  ;; nothing removes the OLD dispatch, so the image answers BOTH while the
+  ;; store says one. Parity with the single-form replace above.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dmr2
+                   (str "(ns dmr2)\n\n(defmulti area :shape)\n\n"
+                        "(defmethod area :square [s] (* (:side s) (:side s)))\n\n"
+                        "(defmethod area :default [_] :unknown)\n"))
+      (let [meth-id (->> (store/forms (:store @sess) 'dmr2)
+                         (filter #(nil? (:name %)))
+                         first :id)
+            r (ops/edit-group! sess
+                               [{:action :replace :ns 'dmr2 :name (symbol meth-id)
+                                 :source "(defmethod area :sq [s] (* (:side s) (:side s)))"}]
+                               :prompt "rename the dispatch through a group")]
+        (is (nil? (:error r)) (pr-str r))
+        (testing "the new dispatch answers"
+          (is (= [4] (ops/query-eval sess "(dmr2/area {:shape :sq :side 2})"))))
+        (testing "the OLD dispatch no longer does — store and image agree"
+          (is (= [:unknown]
+                 (ops/query-eval sess "(dmr2/area {:shape :square :side 2})")))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-delete-of-a-defmethod-unregisters-it
+  ;; ns-unmap is a no-op for a defmethod — its registration lives in the
+  ;; MULTI's method table — so a group :delete left the method answering
+  ;; after the store dropped it. Parity with delete-form!'s unregister.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dmd
+                   (str "(ns dmd)\n\n(defmulti area :shape)\n\n"
+                        "(defmethod area :square [s] (* (:side s) (:side s)))\n\n"
+                        "(defmethod area :default [_] :unknown)\n"))
+      (let [meth-id (->> (store/forms (:store @sess) 'dmd)
+                         (filter #(nil? (:name %)))
+                         first :id)
+            r (ops/edit-group! sess
+                               [{:action :delete :ns 'dmd :name (symbol meth-id)}]
+                               :prompt "drop the square method through a group")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (= [:unknown] (ops/query-eval sess "(dmd/area {:shape :square :side 2})"))
+            (str "the deleted method must stop answering: " (pr-str r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-rename-refuses-stranded-callers-unless-the-group-lands-them
+  ;; A single replace refuses a rename while committed callers still use the
+  ;; old name. Inside a group the question must be asked of the FINAL shape:
+  ;; a caller the group itself updates is not stranded — landing a rename
+  ;; and its callers as one intent is the group's whole point.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'gr.core
+                   (str "(ns gr.core)\n"
+                        "(defn f [x] x)\n"
+                        "(defn ^:unused-ok g [x] (f x))\n"))
+      (testing "a rename whose caller stays on the old name is refused, teaching the way out"
+        (let [r (ops/edit-group! sess
+                                 [{:action :replace :ns 'gr.core :name 'f
+                                   :source "(defn f2 [x] x)"}]
+                                 :prompt "rename f without touching g")]
+          (is (re-find #"(?i)rename" (str (:error r)))
+              (str "a teaching refusal, not a compile failure: " (pr-str r)))
+          (is (re-find #"gr\.core/g" (str (:error r)))
+              (str "…naming the stranded caller: " (pr-str r)))))
+      (testing "the same rename with the caller updated in the SAME group lands"
+        (let [r (ops/edit-group! sess
+                                 [{:action :replace :ns 'gr.core :name 'f
+                                   :source "(defn f2 [x] x)"}
+                                  {:action :replace :ns 'gr.core :name 'g
+                                   :source "(defn ^:unused-ok g [x] (f2 x))"}]
+                                 :prompt "rename f and land its caller together")]
+          (is (nil? (:error r)) (pr-str r))))
+      (finally (ops/close! sess)))))

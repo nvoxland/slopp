@@ -1308,25 +1308,49 @@
   ;; session_brief + orient + first-read-wave turns (6–10 per eval cell)
   ;; happen before the model's first token. Same listener the server
   ;; already runs; same orient walk the tool makes; plain data out.
+  ;;
+  ;; And the bundle is on a DIET (s8): the injected text stays in context
+  ;; for every later request of the session — rent scales with SIZE — so
+  ;; full sources cap at two seed rows, what was emitted is stashed for the
+  ;; form ledger, and a session that already HAS its map (matching
+  ;; ?session-id=) gets the small delta instead of a second full map.
   (let [st  (-> (store/empty-store)
                 (store/ingest 'bd.core
                               (str "(ns bd.core \"Pricing.\")\n\n"
                                    "(defn rate \"Cents per unit.\" [x] (* 100 x))\n\n"
-                                   "(defn quote-cents \"A quote.\" [x] (rate x))\n")))
-        ctx (server/context (atom {:store st :test-map {}}))
-        GET (fn [q] (slopp.http/handle! ctx {:request-method :get
-                                             :uri "/api/bundle"
-                                             :query-string q}))]
+                                   "(defn quote-cents \"A quote.\" [x] (rate x))\n\n"
+                                   "(defn discount \"A discount.\" [x] (- (quote-cents x) 5))\n")))
+        mk  (fn [] (atom {:store st :test-map {}}))
+        GET (fn [sess q] (slopp.http/handle! (server/context sess)
+                                             {:request-method :get
+                                              :uri "/api/bundle"
+                                              :query-string q}))]
     (testing "an ask naming a form gets its source and neighbourhood back"
-      (let [r (GET "ask=why%20is%20quote-cents%20computed%20off%20rate")
+      (let [sess (mk)
+            r (GET sess "ask=why%20is%20quote-cents%20computed%20off%20rate")
             b (:bundle (:body r))]
         (is (= 200 (:status r)) (pr-str r))
         (is (string? b))
         (is (re-find #"\(defn quote-cents" b) "the seed's source rides")
         (is (re-find #"bd\.core/rate" b) "the neighbourhood is named")
-        (is (re-find #"2 namespaces|bd\.core" b) "the project header orients")))
+        (is (re-find #"2 namespaces|bd\.core" b) "the project header orients")
+        (testing "…and the emission is stashed for the form ledger"
+          (is (seq (:versions (:pending-bundle-held @sess)))))))
+    (testing "full sources cap at two — the rest of the rows stay cards"
+      (let [sess (mk)
+            r (GET sess "ask=how%20do%20rate%20quote-cents%20and%20discount%20fit%20together")
+            b (:bundle (:body r))]
+        (is (<= (count (re-seq #"(?m)^;; " b)) 2) b)
+        (is (< (count b) 6500) "sized to ride every request without rent")))
+    (testing "a session that already has its map gets the DELTA (matching sid)"
+      (let [sess  (atom {:store st :test-map {} :intent-sid "sid-9"})
+            full  (:bundle (:body (GET (mk) "ask=why%20is%20quote-cents%20computed%20off%20rate&session-id=other")))
+            delta (:bundle (:body (GET sess "ask=why%20is%20quote-cents%20computed%20off%20rate&session-id=sid-9")))]
+        (is (string? delta))
+        (is (< (count delta) (count full)) "the delta is smaller than the map it assumes")
+        (is (<= (count (re-seq #"(?m)^;; " delta)) 1))))
     (testing "a blank ask is the small header, not an error"
       (doseq [q [nil "" "ask="]]
-        (let [r (GET q)]
+        (let [r (GET (mk) q)]
           (is (= 200 (:status r)) (pr-str q))
           (is (string? (:bundle (:body r)))))))))

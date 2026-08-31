@@ -35,73 +35,6 @@
                                s)
                           {})))))))
 
-(defn- absorb-pending-intent!
-  "Consume this session's pending intent when the plugin's prompt hook has
-  left one. The hook writes {\"session-id\": …, \"prompt\": …} (a bare string
-  is accepted as prompt-only). The session ADOPTS the harness session id as
-  its identity — unless the environment already named the conversation, which
-  is now the ordinary case and makes this path the FALLBACK — so every delta of one
-  Claude session shares a key and concurrent sessions never merge episodes;
-  the prompt is stashed as the next auto-turn's intent.
-
-  **The mailbox is per-STORE, and two live sessions share the directory.**
-  So the id in the file is a claim of OWNERSHIP, not just a label. Once this
-  session has claimed one, an intent naming a DIFFERENT session is left
-  where it lies: consuming it would take the other agent's identity and,
-  through `adopt-line!`, its THREAD — resyncing this session's store and
-  image off somebody else's line. That is the exact failure this promise
-  ('concurrent sessions never merge episodes') exists to prevent, and it was
-  observed live on 2026-08-27: seven writes by one session recorded under
-  another's id, bracketed by turns carrying the other's verbatim asks.
-
-  A claimed session prefers its OWN `pending-intent.<sid>` file, which is
-  what a current hook writes alongside the legacy path; the unscoped file is
-  still read so an older hook keeps working. An intent carrying no id at all
-  has no owner to offend and is always taken."
-  [session]
-  (when-let [dir (:dir @session)]
-    (let [claimed (:intent-sid @session)
-          scoped  (when claimed
-                    (io/file dir ".slopp" (str "pending-intent." claimed)))
-          legacy  (io/file dir ".slopp" "pending-intent")
-          f       (cond (and scoped (.exists scoped)) scoped
-                        (.exists legacy)              legacy
-                        :else                         nil)]
-      (when f
-        (let [raw (slurp f)
-              {:keys [sid prompt]}
-              (or (try (let [m (json/parse-string raw true)]
-                         (when (map? m)
-                           {:sid (:session-id m) :prompt (:prompt m)}))
-                       (catch Exception _ nil))
-                  {:prompt raw})]
-          ;; Somebody else's ask: leave the file, change nothing. Their server
-          ;; is the one that can answer it.
-          (when-not (and sid claimed (not= sid claimed))
-            (.delete f)
-            (when sid (swap! session assoc :intent-sid sid))
-            (when (and sid (not (:pinned-agent? @session)))
-              (swap! session assoc :agent-id sid)
-              ;; identity settled → the session takes THIS agent's thread.
-              ;; It is the first moment it can: the session opened before the
-              ;; harness id existed, so its store and image were loaded from
-              ;; the branch. If this agent left un-landed work last time, both
-              ;; came from the wrong line — and only the store heals on its
-              ;; own, which would leave verification grading the branch's code
-              ;; against the thread's store.
-              (engine/adopt-line! session))
-            (when-not (str/blank? (or prompt ""))
-              ;; a new ask is a new READER, potentially: /clear and automatic
-              ;; compaction both land here and neither is visible any other
-              ;; way. `told!` scopes its sent-view hashes to this counter, so
-              ;; the first read of a view in a fresh context is always a
-              ;; payload. It bumps for READ-ONLY asks too — turns do not, and
-              ;; a read-only planning ask is where the withholding was first
-              ;; hit.
-              (swap! session #(-> %
-                                  (assoc :pending-intent prompt :last-intent prompt)
-                                  (update ::ask (fnil inc 0)))))))))))
-
 (def ^:private ^:dynamic *spool-session*
   "Bound to the session during tools/call so `text` can spool full
   payloads it trims (the headroom pattern: agents get the gist, the full
@@ -1272,6 +1205,86 @@
   [session v]
   (when v (swap! session assoc-in [::ledger v] (::ask @session 0))))
 
+(defn- absorb-pending-intent!
+  "Consume this session's pending intent when the plugin's prompt hook has
+  left one. The hook writes {\"session-id\": …, \"prompt\": …} (a bare string
+  is accepted as prompt-only). The session ADOPTS the harness session id as
+  its identity — unless the environment already named the conversation, which
+  is now the ordinary case and makes this path the FALLBACK — so every delta of one
+  Claude session shares a key and concurrent sessions never merge episodes;
+  the prompt is stashed as the next auto-turn's intent.
+
+  **The mailbox is per-STORE, and two live sessions share the directory.**
+  So the id in the file is a claim of OWNERSHIP, not just a label. Once this
+  session has claimed one, an intent naming a DIFFERENT session is left
+  where it lies: consuming it would take the other agent's identity and,
+  through `adopt-line!`, its THREAD — resyncing this session's store and
+  image off somebody else's line. That is the exact failure this promise
+  ('concurrent sessions never merge episodes') exists to prevent, and it was
+  observed live on 2026-08-27: seven writes by one session recorded under
+  another's id, bracketed by turns carrying the other's verbatim asks.
+
+  A claimed session prefers its OWN `pending-intent.<sid>` file, which is
+  what a current hook writes alongside the legacy path; the unscoped file is
+  still read so an older hook keeps working. An intent carrying no id at all
+  has no owner to offend and is always taken.
+
+  Consuming an intent also DRAINS `:pending-bundle-held` — the form versions
+  the bundle endpoint emitted for the prompt now being absorbed — into the
+  form ledger, under the ask that just opened: what the bundle injected, the
+  session holds, so a read of a bundle-carried form is a reference. A stash
+  recorded for a DIFFERENT harness id is dropped unheld; its bundle went
+  into somebody else's context."
+  [session]
+  (when-let [dir (:dir @session)]
+    (let [claimed (:intent-sid @session)
+          scoped  (when claimed
+                    (io/file dir ".slopp" (str "pending-intent." claimed)))
+          legacy  (io/file dir ".slopp" "pending-intent")
+          f       (cond (and scoped (.exists scoped)) scoped
+                        (.exists legacy)              legacy
+                        :else                         nil)]
+      (when f
+        (let [raw (slurp f)
+              {:keys [sid prompt]}
+              (or (try (let [m (json/parse-string raw true)]
+                         (when (map? m)
+                           {:sid (:session-id m) :prompt (:prompt m)}))
+                       (catch Exception _ nil))
+                  {:prompt raw})]
+          ;; Somebody else's ask: leave the file, change nothing. Their server
+          ;; is the one that can answer it.
+          (when-not (and sid claimed (not= sid claimed))
+            (.delete f)
+            (when sid (swap! session assoc :intent-sid sid))
+            (when (and sid (not (:pinned-agent? @session)))
+              (swap! session assoc :agent-id sid)
+              ;; identity settled → the session takes THIS agent's thread.
+              ;; It is the first moment it can: the session opened before the
+              ;; harness id existed, so its store and image were loaded from
+              ;; the branch. If this agent left un-landed work last time, both
+              ;; came from the wrong line — and only the store heals on its
+              ;; own, which would leave verification grading the branch's code
+              ;; against the thread's store.
+              (engine/adopt-line! session))
+            (when-not (str/blank? (or prompt ""))
+              ;; a new ask is a new READER, potentially: /clear and automatic
+              ;; compaction both land here and neither is visible any other
+              ;; way. `told!` scopes its sent-view hashes to this counter, so
+              ;; the first read of a view in a fresh context is always a
+              ;; payload. It bumps for READ-ONLY asks too — turns do not, and
+              ;; a read-only planning ask is where the withholding was first
+              ;; hit.
+              (swap! session #(-> %
+                                  (assoc :pending-intent prompt :last-intent prompt)
+                                  (update ::ask (fnil inc 0)))))
+            ;; the bundle that rode in WITH this prompt: hold what the
+            ;; endpoint stashed, under the ask that just opened
+            (when-let [pb (:pending-bundle-held @session)]
+              (when (or (nil? (:sid pb)) (nil? sid) (= (:sid pb) sid))
+                (doseq [v (:versions pb)] (ledger-hold! session v)))
+              (swap! session dissoc :pending-bundle-held))))))))
+
 (defn- dedupe-sources!
   "The one pass over a read's result before it goes out: every map carrying
   a form's identity (`:ns`+`:name`, or a qualified `:form`) and its `:source`
@@ -1340,43 +1353,53 @@
   spooled and the id named, which is the same door `query_detail` already
   opens for trimmed responses — previously the only way to a read-only
   tool's withheld payload was a write-capable tool that prompts for
-  permission in plan mode."
+  permission in plan mode.
+
+  `resend: true` is the reader's own escape, WITHIN an ask: compaction
+  replaces the transcript with a summary MID-ASK, invisibly to this wire,
+  and source text is exactly what a summary drops — so every claim above
+  about what the reader holds can be false and the server cannot know.
+  Only the reader knows it is reading a summary of itself. resend bypasses
+  the stub AND the form-ledger references for THIS call and records
+  nothing new; the dedup stays the default everywhere else."
   [session tool a payload]
-  (let [;; the FORM ledger first: a source the ask already holds at this
-        ;; version leaves as a reference, whichever view carries it
-        payload (dedupe-sources! session payload)
-        k [tool (select-keys a [:ns :name :targets :since :detail :depth
-                                :limit :contains :full :at :collapse :format
-                                :on :direction])]
-        h     [(get @session ::ask 0) (hash payload)]
-        p-str (pr-str payload)
-        stub  {:already-sent true
-               :view (str tool (when (:ns a) (str " " (:ns a)))
-                          (when (:name a) (str "/" (:name a))))
-               :note (str "already sent in this ask — about what YOU received,"
-                          " NOT whether the store changed (an outline does not"
-                          " move when a body does). query_detail {:detail}"
-                          " re-opens it.")}]
-    (if (and (= h (get-in @session [::told k]))
-             ;; a stub bigger than what it withholds is not a saving, it is a
-             ;; round trip for nothing. This was a constant (130 chars) chosen
-             ;; when the stub was one short sentence; the note then grew and
-             ;; the floor did not, so small views started costing MORE to
-             ;; withhold than to send. Measuring the actual stub cannot drift
-             ;; out of step with the stub the way a number written down
-             ;; elsewhere can. The id is a representative one — they are all
-             ;; the same length — because it cannot be minted before the
-             ;; decision to spool.
-             (< (count (pr-str (assoc stub :detail "s00000000000")))
-                (count p-str)))
-      (let [id (spool! session p-str)]
-        ;; a stub is a withholding, not a saving, until nobody opens it —
-        ;; recorded through the same channel as a trim so one fold can ask
-        ;; both paths the question
-        (note-response! {:stub? true :spooled id})
-        (assoc stub :detail id))
-      (do (swap! session assoc-in [::told k] h)
-          payload))))
+  (if (:resend a)
+    payload
+    (let [;; the FORM ledger first: a source the ask already holds at this
+          ;; version leaves as a reference, whichever view carries it
+          payload (dedupe-sources! session payload)
+          k [tool (select-keys a [:ns :name :targets :since :detail :depth
+                                  :limit :contains :full :at :collapse :format
+                                  :on :direction])]
+          h     [(get @session ::ask 0) (hash payload)]
+          p-str (pr-str payload)
+          stub  {:already-sent true
+                 :view (str tool (when (:ns a) (str " " (:ns a)))
+                            (when (:name a) (str "/" (:name a))))
+                 :note (str "already sent in this ask — about what YOU received,"
+                            " NOT whether the store changed (an outline does not"
+                            " move when a body does). query_detail {:detail}"
+                            " re-opens it.")}]
+      (if (and (= h (get-in @session [::told k]))
+               ;; a stub bigger than what it withholds is not a saving, it is a
+               ;; round trip for nothing. This was a constant (130 chars) chosen
+               ;; when the stub was one short sentence; the note then grew and
+               ;; the floor did not, so small views started costing MORE to
+               ;; withhold than to send. Measuring the actual stub cannot drift
+               ;; out of step with the stub the way a number written down
+               ;; elsewhere can. The id is a representative one — they are all
+               ;; the same length — because it cannot be minted before the
+               ;; decision to spool.
+               (< (count (pr-str (assoc stub :detail "s00000000000")))
+                  (count p-str)))
+        (let [id (spool! session p-str)]
+          ;; a stub is a withholding, not a saving, until nobody opens it —
+          ;; recorded through the same channel as a trim so one fold can ask
+          ;; both paths the question
+          (note-response! {:stub? true :spooled id})
+          (assoc stub :detail id))
+        (do (swap! session assoc-in [::told k] h)
+            payload)))))
 
 (defn- ledger-written!
   "After a write whose FULL source the agent sent landed (`edit_add_form`,
@@ -1625,6 +1648,38 @@
                                        " did not: re-read the test and move them yourself")})
           (seq unused)
           (assoc :accept-unused unused))))))
+
+(defn- attach-red-context!
+  "Result-carried orientation: a write that lands RED attaches, to each
+  NEWLY red failure entry, `:test-src {:ns :name :source}` — the failing
+  test's CURRENT source — so the next call can be the fix rather than a
+  read. Sibling of `:source-now` (a match miss returns the form's current
+  text) and `:proposed` (the literal fix itself). The source goes through
+  `dedupe-sources!`, the same ledger door every read takes: a test this ask
+  already holds arrives as `:source-already-sent`, and a later read of an
+  attached test is a reference — write results and reads share ONE ledger.
+  Failures are already capped upstream (`traced-run`) and episode-compressed
+  (`shape-episode-reds!` collapses already-reported reds to names), so only
+  fresh failures pay, and each at most once per ask."
+  [r session]
+  (if (empty? (get-in r [:test :failures]))
+    r
+    (update-in r [:test :failures]
+               (fn [fs]
+                 (mapv (fn [f]
+                         (let [t (:test f)]
+                           (if (and (symbol? t) (namespace t))
+                             (let [ns-sym (symbol (namespace t))
+                                   nm     (symbol (clojure.core/name t))
+                                   e      (store/form-named (:store @session) ns-sym nm)]
+                               (if e
+                                 (assoc f :test-src
+                                        (dedupe-sources! session
+                                                         {:ns ns-sym :name nm
+                                                          :source (n/string (:node e))}))
+                                 f))
+                             f)))
+                       fs)))))
 
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -1986,6 +2041,7 @@
                                                        :agent (:agent a))
                                     (held-after-write! session name a)
                                     (finish-accepted! session a)
+                                    (attach-red-context! session)
                                     (assoc :forms [(str (sym :ns) "/" (sym :name))])
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
@@ -1994,6 +2050,7 @@
                                                    :agent (:agent a))
                                     (held-after-write! session name a)
                                     (finish-accepted! session a)
+                                    (attach-red-context! session)
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "edit_delete_form" (text! (-> (ops/delete-form! session (sym :ns) (sym :name)
@@ -2019,6 +2076,7 @@
                                                :prompt (:prompt a) :agent (:agent a))
                               (held-after-write! session name a)
                               (finish-accepted! session a)
+                              (attach-red-context! session)
                               (select-keys tools/wire-keys)
                               (summarize (:verbose a))))
       "full_check" (text! (-> (external/full-check! session :affected (:affected a)

@@ -100,7 +100,7 @@
                       (str " — if this was a targeted subform edit, the change"
                            " spans MORE of this form than you matched (a binding"
                            " and its use, a loop and its recur). Widen the match"
-                           " to the enclosing form, or edit_replace_form the"
+                           " to the enclosing form, or :replace the"
                            " whole thing: two edits to ONE form is ONE edit.")))}
 
       ;; reported, never silent — an agent told nothing would read the

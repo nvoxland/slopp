@@ -47,6 +47,12 @@
         (is (= a (:port (live/serve-plan on "/tmp/shop")))
             "stable across restarts — the url a human bookmarked keeps working")
         (is (< 1024 a 65536))))
+    (testing "the client route table rides the plan, from the page markers"
+      (let [ui (store/ingest on 'shop.ui
+                             "(ns shop.ui)\n(defn ^{:webapp/path \"/app\"} home \"H.\" [_] {:page :home})\n")]
+        (is (= [["/app" 'shop.ui/home]] (:page-routes (live/serve-plan ui "/tmp/shop"))))
+        (is (= [] (:page-routes (live/serve-plan on "/tmp/shop")))
+            "a store with no pages carries an empty table, and serve-code then omits :webapp/routes — the 200 compatibility answer")))
     (testing "the plan says it is dev, so nothing reads it as the shipped one"
       ;; the dev server and the built app answer the same routes from
       ;; different stores at different grains — a plan that does not say
@@ -249,14 +255,25 @@
         ;; the reason to say why this stays: it is not defending against a
         ;; mixture that exists now, it is defending against the next split,
         ;; and reading the entry means nothing here changes when one comes.
-        opt-keys  (fn [v]
+                opt-keys  (fn [v]
                     (let [m (->> (:arglists (meta v)) first first)]
-                      (set (for [[entry syms] m
-                                 :when (and (keyword? entry)
-                                            (= "keys" (name entry))
-                                            (namespace entry))
-                                 s syms]
-                             (keyword (namespace entry) (name s))))))
+                      (into
+                       ;; the */keys families…
+                       (set (for [[entry syms] m
+                                  :when (and (keyword? entry)
+                                             (= "keys" (name entry))
+                                             (namespace entry))
+                                  s syms]
+                              (keyword (namespace entry) (name s))))
+                       ;; …AND the rename entries (`client-routes :webapp/routes`):
+                       ;; an option read under a local name is still an option the
+                       ;; function reads, and this guard not seeing those is how
+                       ;; the managed server shipped answering 200 to every
+                       ;; address — :webapp/routes was destructured exactly there
+                       (for [[sym k] m
+                             :when (and (simple-symbol? sym)
+                                        (keyword? k) (namespace k))]
+                         k))))
         ;; serve! reads the address options and hands the whole map to
         ;; context, which reads the rest. Both, because either alone is half.
         accepted  (into (opt-keys #'slopp.http/serve!) (opt-keys #'slopp.http/context))
@@ -268,7 +285,8 @@
                    :context-builder 'demo.sys/deps
                    :validate? true
                    :bundle "/assets/cljs/main.js"
-                   :static {"/assets" "public"} :static-dir "/tmp/x"}
+                   :static {"/assets" "public"} :static-dir "/tmp/x"
+                   :page-routes [["/app" 'demo.ui/home]]}
         generated (->> (edn/read-string {:default (fn [_ v] v)}
                                         (live/serve-code plan))
                        (tree-seq coll? seq)

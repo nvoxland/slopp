@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -33,7 +33,8 @@
         (is (contains? (set (map :name tools)) "read"))
         (is (contains? (set (map :name tools)) "edit"))
         (is (some #{"query_source"} (mapcat #(get-in % [:inputSchema :properties :op :enum]) tools)))
-        (is (some #{"edit_replace_form"} (mapcat #(get-in % [:inputSchema :properties :op :enum]) tools)))))
+        (is (not-any? #{"edit_replace_form"} (mapcat #(get-in % [:inputSchema :properties :op :enum]) tools))
+            "the single-form aliases are de-advertised (s8): they dispatch, but no enum names them")))
     (testing "notifications (no id) produce no response"
       (is (nil? (mcp/handle! sess {:method "notifications/initialized"}))))
     (testing "unknown method -> JSON-RPC error"
@@ -70,7 +71,7 @@
     (try
       (testing "the help tool exists (agents invented the name twice)"
         (let [h (call! sess "help" {})]
-          (is (re-find #"edit_replace_form" h))
+          (is (re-find #"edit_group" h))
           (is (re-find #"help \{topic\}" h) "the cheat-sheet indexes the chapters")))
       (call! sess "ns_create" {:ns "hint" :source "(ns hint (:require [clojure.test :refer [deftest is]]))\n(defn f [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
       (testing "redundant test_runs earn a hint; a write resets the counter"
@@ -693,22 +694,27 @@
   (is (re-find #"\.clj" (str (#'mcp/boundary-leak {:at "foo.clj:42"})))))
 
 (deftest ^:external source-arg-friction
+  ;; The de-advertised aliases have no schema, so the unknown-argument gate
+  ;; no longer runs for them — the `src` helper is the guard now, and its
+  ;; refusal names the bad key and the right one, which is what this test
+  ;; actually cares about: a misnamed source arg must never surface as a
+  ;; paren/parse error.
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "sa" :source "(ns sa)\n(defn f [x] x)\n"})
       (testing "a misnamed :new_source is refused, naming the bad key and :source — not a paren/parse error"
         (let [r (call! sess "edit_replace_form"
                       {:ns "sa" :name "f" :new_source "(defn f [x] (inc x))"})]
-          (is (re-find #"unknown argument" r))
+          (is (re-find #"missing required argument :source" r))
           (is (re-find #":new_source" r))
-          (is (re-find #":source" r) "the refusal lists :source as accepted")
+          (is (re-find #"the form source goes in :source" r) "the refusal points at :source")
           (is (not (re-find #"got 0" r)))))
       (testing "a genuinely missing source is a clear message too"
         (let [r (call! sess "edit_replace_form" {:ns "sa" :name "f"})]
-          (is (re-find #"needs :source" r) r)))
+          (is (re-find #"missing required argument :source" r) r)))
       (testing "edit_add_form guards its source arg the same way"
         (let [r (call! sess "edit_add_form" {:ns "sa" :new_source "(defn g [x] x)"})]
-          (is (re-find #"unknown argument" r))
+          (is (re-find #"missing required argument :source" r))
           (is (re-find #":new_source" r))))
       (testing "a correctly-named source still lands"
         (let [r (edn/read-string
@@ -1106,7 +1112,11 @@
   ;; needed; the non-empty assertions below are what stops it regressing to
   ;; vacuous a second time.
   (let [st     (external/built-store)
-        known  (into #{} (map :name) tools/registry)
+        known  (into (into #{} (map :name) tools/registry)
+                     ;; the de-advertised single-form aliases DISPATCH — prose
+                     ;; naming them is guidance an agent can follow, which is
+                     ;; the point of de-advertising without renaming (s8)
+                     tools/single-write-tools)
         ;; ONE exclusion by name: git_map is a SQLITE TABLE, not a tool (every
         ;; use is in the sha-mapping code; the prefix alone lies here).
         exempt #{"git_map"}
@@ -3200,6 +3210,11 @@
   ;; the family's `op`, so every refusal, docstring and skill line that
   ;; spells `edit_subform` stays exactly right; only the packaging moves.
   ;; Direct dispatch by op name survives for `--call` and the hooks.
+  ;;
+  ;; s8 tightened the edit family: the single-form write ops are
+  ;; DE-ADVERTISED (a one-step edit_group is the single-form write, and the
+  ;; parity port made that literally true) — but their names still dispatch,
+  ;; pinned below, because refusals, benchmarks and old scripts spell them.
   (let [sess (external/open!)]
     (try
       (let [advertised (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])
@@ -3216,8 +3231,10 @@
                 "the families cover the registry exactly"))
           (let [edit (some #(when (= "edit" (:name %)) %) advertised)]
             (is (re-find #"edit_subform \{" (:description edit)) (:description edit))
-            (is (= "edit_add_form"
-                   (some #{"edit_add_form"} (get-in edit [:inputSchema :properties :op :enum]))))
+            (is (some #{"edit_group"} (get-in edit [:inputSchema :properties :op :enum])))
+            (is (nil? (some #{"edit_add_form" "edit_replace_form"}
+                            (get-in edit [:inputSchema :properties :op :enum])))
+                "the single-form aliases are de-advertised — the group is the write door")
             (is (= ["op"] (get-in edit [:inputSchema :required])))
             (is (= #{"boolean" "string"} (set (get-in edit [:inputSchema :properties :text :type])))
                 "two ops' types for one key are both accepted, not the first one's")))
@@ -3225,8 +3242,9 @@
           (is (< (count (pr-str advertised)) 30000) (str (count (pr-str advertised))))))
       (call! sess "ns_create" {:ns "fam.core" :source "(ns fam.core)\n(defn ^:unused-ok f [x] x)\n"})
       (testing "a family call is the op call"
-        (let [r (call! sess "edit" {:op "edit_add_form" :ns "fam.core" :prompt "via the family"
-                                    :source "(defn ^:unused-ok g [x] (f x))"})]
+        (let [r (call! sess "edit" {:op "edit_group" :prompt "via the family"
+                                    :steps [{:action "add" :ns "fam.core"
+                                             :source "(defn ^:unused-ok g [x] (f x))"}]})]
           (is (re-find #":ok true" r) r))
         ;; the write held g's text in the ask's ledger, so the read through
         ;; the read family answers with a reference (D-form-ledger) — the
@@ -3234,10 +3252,10 @@
         (is (re-find #":name g, :source-already-sent true"
                      (call! sess "read" {:op "query_source" :targets [{:ns "fam.core" :name "g"}]}))))
       (testing "the op's own validation, by name"
-        (is (re-find #"unknown op frobnicate for edit — ops: edit_group edit_add_form" (call! sess "edit" {:op "frobnicate"})))
+        (is (re-find #"unknown op frobnicate for edit — ops: edit_group edit_subform" (call! sess "edit" {:op "frobnicate"})))
         (is (re-find #"unknown argument :nom for edit_subform" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :nom "g"})))
         (is (re-find #"edit_subform needs :name" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :source "1" :match "x" :prompt "p"}))))
-      (testing "an op called by its own name still dispatches (the --call door, the hooks)"
+      (testing "a de-advertised alias called by its own name still dispatches (the --call door, the hooks, old scripts)"
         (is (re-find #":ok true" (call! sess "edit_replace_form" {:ns "fam.core" :name "g" :prompt "direct"
                                                                     :source "(defn ^:unused-ok g [x] (f (f x)))"}))))
       (testing "help {topic op} is the op's full card"
@@ -3557,4 +3575,112 @@
                         :steps [{"action" "replace" "ns" "fin.core" "name" "price"
                                  "source" "(defn price \"Cents.\" [x] (* 120 x))"}]})]
           (is (re-find #":accept-unused \[fin\.core/other-t\]" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-write-is-flagged-untested-like-any-other
+  ;; :untested means "no runtime evidence reaches this form". The
+  ;; single-form write says so; a group write of the same untested form
+  ;; said nothing — and the group is about to become the only write door.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "utg.core" :source "(ns utg.core)\n(defn f [x] x)\n(defn g [x] x)\n"})
+      (call! sess "ns_create" {:ns "utg.core-test" :source "(ns utg.core-test (:require [clojure.test :refer [deftest is]] [utg.core :as c]))\n(deftest f-t (is (= 1 (c/f 1))))\n"})
+      (call! sess "test_run" {:ns "utg.core-test"})
+      (let [r (call! sess "edit_group" {:steps [{:action "replace" :ns "utg.core" :name "g"
+                                                 :source "(defn g [x] (identity x))"}]
+                                        :prompt "touch the untested fn through a group"})]
+        (is (re-find #":untested true" r) r)
+        (is (not (re-find #"identity" r)) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-red-write-carries-the-failing-tests-source
+  ;; Result-carried orientation: when a write goes red, the next call should
+  ;; be the fix, not a read. Each NEWLY red failure carries :test-src — the
+  ;; failing test's current source, sent through the same ledger door as any
+  ;; other source, so a later read of that test is a reference, not a copy.
+  ;; Sibling of :source-now (the match-miss that returns the form's current
+  ;; text) and :proposed (the literal fix itself).
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rc.core" :source "(ns rc.core)\n(defn f [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "rc.core-test" :source "(ns rc.core-test (:require [clojure.test :refer [deftest is]] [rc.core :as c]))\n(deftest f-doubles (is (= 4 (c/f 2))))\n"})
+      (call! sess "test_run" {:ns "rc.core-test"})
+      (testing "a newly red failure carries the failing test's source"
+        (let [r (call! sess "edit_group" {:steps [{:action "replace" :ns "rc.core" :name "f"
+                                                   :source "(defn f [x] (* 3 x))"}]
+                                          :prompt "triple it — f-doubles goes red"})]
+          (is (re-find #":test-src" r) r)
+          (is (re-find #"deftest f-doubles" r)
+              (str "the test's SOURCE rides the failure: " r))
+          (testing "…and entered the form ledger: the read-back is a reference"
+            (let [q (call! sess "query_source" {:targets ["rc.core-test/f-doubles"]})]
+              (is (re-find #":source-already-sent true" q) q)))))
+      (testing "a green write carries nothing extra"
+        (let [r (call! sess "edit_group" {:steps [{:action "replace" :ns "rc.core" :name "f"
+                                                   :source "(defn f [x] (* 2 x))"}]
+                                          :prompt "back to doubling — green"})]
+          (is (not (re-find #":test-src" r)) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-bundle-enters-the-form-ledger
+  ;; Bundle diet 3a: what the bundle injected, the session HOLDS. The
+  ;; endpoint stashes the versions it emitted (:pending-bundle-held); the
+  ;; next absorbed ask — the very prompt the bundle rode in with — drains
+  ;; them into the form ledger under the NEW ask. A read of a
+  ;; bundle-carried form is then a reference, not a second copy: the
+  ;; bundle, the write results and the reads share ONE ledger.
+  ;;
+  ;; The claim comes FIRST: absorbing an intent adopts that id's thread
+  ;; line, so a namespace created before the claim would be left behind
+  ;; on the pre-claim identity's line.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-bundleledger"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})
+        GET  (fn [q] (http/handle! (server/context sess)
+                                   {:request-method :get
+                                    :uri "/api/bundle"
+                                    :query-string q}))]
+    (try
+      ;; ask 1 claims the session for sid-bl…
+      (io/make-parents (io/file dir ".slopp" "pending-intent"))
+      (spit (io/file dir ".slopp" "pending-intent")
+            "{\"session-id\":\"sid-bl\",\"prompt\":\"look around\"}")
+      ;; …and the namespace is created under that identity
+      (call! sess "ns_create" {:ns "bl.core" :source "(ns bl.core)\n(defn ^:unused-ok pick [x] x)\n"})
+      ;; the hook's GET at the next prompt: the server emits pick's source
+      ;; and stashes what it sent
+      (let [r (GET "ask=why%20does%20pick%20behave&session-id=sid-bl")
+            b (:bundle (:body r))]
+        (is (re-find #"defn .:unused-ok pick" (str b)) (str b))
+        (is (seq (:versions (:pending-bundle-held @sess)))
+            "the emission was stashed for the ledger"))
+      ;; the prompt the bundle rode in with arrives; absorbing it drains
+      ;; the stash into the ledger
+      (spit (io/file dir ".slopp" "pending-intent")
+            "{\"session-id\":\"sid-bl\",\"prompt\":\"why does pick behave\"}")
+      (call! sess "query_project" {})
+      (let [q (call! sess "query_source" {:targets ["bl.core/pick"]})]
+        (is (re-find #":source-already-sent true" q)
+            (str "a bundle-carried form re-read is a reference: " q)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-compacted-reader-can-ask-for-a-resend
+  ;; :source-already-sent is a claim about the READER's context, made by the
+  ;; server's ledger — and compaction (a summary replacing the transcript,
+  ;; invisible on the wire) makes it false precisely for source text, which
+  ;; is what a summarizer drops. The dedup stays the default; resend true is
+  ;; the reader saying I LOST IT, the one fact only the reader can know.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rs.core" :source "(ns rs.core)\n(defn ^:unused-ok keeper [x] x)\n"})
+      ;; the first read sends the text and holds it…
+      (is (re-find #"defn .:unused-ok keeper"
+                   (call! sess "query_source" {:targets ["rs.core/keeper"]})))
+      ;; …so the re-read is a reference — the default stands
+      (is (re-find #":source-already-sent true"
+                   (call! sess "query_source" {:targets ["rs.core/keeper"]})))
+      (is (re-find #"defn .:unused-ok keeper"
+                   (call! sess "query_source" {:targets ["rs.core/keeper"] :resend true}))
+          "resend true bypasses the ledger: the full text comes back")
       (finally (ops/close! sess)))))
