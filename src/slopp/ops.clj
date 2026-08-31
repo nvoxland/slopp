@@ -3835,11 +3835,12 @@
   changes with their recorded ASKS, and the last verification state — the
   history fan-out (query_history + query_history {contains} + query_changes +
   query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions — and when it
-  singles out a few named forms, each carries its `:story` inline (version
-  rows: the recorded ask, op, time, verification state), because the
-  provenance question is exactly what a narrow report is asked for and the
-  fan-out re-derived those rows piecewise. Sources stay one call away.
+  delta/milestone id; `:contains` filters asks/descriptions — and carries
+  `:story` for the most-storied matching forms (version rows: the recorded
+  ask, op, time, verification state; ranked, capped at 3, never withheld),
+  because the provenance question is exactly what a narrow report is asked
+  for and the fan-out re-derived those rows piecewise. Sources stay one
+  call away.
 
   A history read: the line's journal is read here, when asked (a handoff is
   written a few times a day), rather than carried in the value."
@@ -3901,15 +3902,15 @@
                        reverse
                        (take limit)
                        (mapv #(orient/snip % 160)))
-        ;; the provenance rows the s8 fan-out re-derived piecewise — only for
-        ;; a NARROW report (contains matched ≤3 named forms): a broad report
-        ;; is a handoff, and a story per row would drown it
+        ;; the provenance rows the s8 fan-out re-derived piecewise. Candidates
+        ;; come from form NAMES as well as the line's changes — imported or
+        ;; pre-`since` history has no line delta, and that is exactly when
+        ;; provenance gets asked (sonnet s9, step 2). RANKED, most-storied
+        ;; first — the deep history is the form being asked about — and capped
+        ;; at 3, never withheld: a topic word matching several forms is the
+        ;; question's normal shape (opus s9c, \"fuel\").
         story     (when contains
                     (let [named (->> (concat
-                                      ;; forms whose NAME matches: imported or
-                                      ;; pre-`since` history has no line delta,
-                                      ;; and that is exactly when provenance
-                                      ;; gets asked (sonnet s9, step 2)
                                       (for [nsx (keys (:namespaces st))
                                             e   (store/forms st nsx)
                                             :when (and (:name e) (not= (:name e) nsx)
@@ -3918,23 +3919,27 @@
                                         {:ns nsx :form (:name e)})
                                       (filter (comp symbol? :form) changes))
                                      (map #(select-keys % [:ns :form]))
-                                     distinct)]
-                      (when (and (seq named) (<= (count named) 3))
-                        (->> named
-                             (keep (fn [{:keys [ns form]}]
-                                     (when-let [vs (seq (history/query-form-history (with-history session) ns form))]
-                                       {:form (symbol (str ns) (str form))
-                                        :versions (->> vs
+                                     distinct
+                                     (take 8))]
+                      (when (seq named)
+                        (let [hs (with-history session)]
+                          (->> named
+                               (keep (fn [{:keys [ns form]}]
+                                       (when-let [vs (seq (history/query-form-history hs ns form))]
+                                         {:form (symbol (str ns) (str form)) :all vs})))
+                               (sort-by (comp - count :all))
+                               (take 3)
+                               (mapv (fn [{:keys [form all]}]
+                                       {:form form
+                                        :versions (->> all
                                                        (take-last 8)
                                                        (mapv (fn [v]
                                                                (cond-> {:delta (:delta v)
                                                                         :op (:op v)
                                                                         :at (:at v)
                                                                         :ask (orient/snip (or (:prompt v) (:turn-intent v) "") 140)}
-                                                                 (:status v) (assoc :status (:status v))))))})))
-                             (take 3)
-                             vec
-                             not-empty))))]
+                                                                 (:status v) (assoc :status (:status v))))))}))
+                               not-empty)))))]
     (orient/fit-report
      (cond-> {:milestones ms
              :changes changes

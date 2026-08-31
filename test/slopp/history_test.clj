@@ -250,13 +250,22 @@
 (deftest ^:external a-provenance-ask-is-one-report-call
   ;; s8 census: the provenance-shaped ask fanned out into report +
   ;; query_commits + query_history ×4 in BOTH cells — the story of a form
-  ;; (why is it what it is) answered piecewise. When `contains` singles out
-  ;; a few forms, the report carries each form's STORY inline: version rows
-  ;; with the recorded ask, op, time and verification state — the exact
-  ;; rows the fan-out was re-deriving. Sources stay one call away.
+  ;; (why is it what it is) answered piecewise. When `contains` names a
+  ;; topic, the report carries the most-storied matching forms' STORY
+  ;; inline: version rows with the recorded ask, op, time and verification
+  ;; state — the exact rows the fan-out was re-deriving. Ranked and capped
+  ;; at 3, never withheld: a topic word matching many forms is the NORMAL
+  ;; shape of the question (opus s9c: \"fuel\" matched fuel-t, half-fuel and
+  ;; the asked-about form, and a ≤3 gate answered with nothing).
   (let [sess (external/open!)]
     (try
-      (ops/ingest! sess 'pv.core "(ns pv.core)\n(defn ^:unused-ok rate-cents [] 100)\n")
+      (ops/ingest! sess 'pv.core
+                   (str "(ns pv.core)\n"
+                        "(defn ^:unused-ok rate-cents [] 100)\n"
+                        "(defn ^:unused-ok rate-cents-floor [] 1)\n"
+                        "(defn ^:unused-ok rate-cents-ceil [] 9)\n"
+                        "(defn ^:unused-ok rate-cents-doc [] :doc)\n"
+                        "(defn ^:unused-ok rate-cents-x [] :x)\n"))
       (ops/edit-replace! sess 'pv.core 'rate-cents
                          "(defn ^:unused-ok rate-cents [] 250)"
                          :prompt "fuel spike: pass through the June contract uplift")
@@ -265,6 +274,10 @@
                          :prompt "partial rollback after the carrier rebate landed")
       (let [r (ops/report sess :contains "rate-cents")]
         (is (seq (:story r)) (pr-str (keys r)))
+        (is (<= (count (:story r)) 3)
+            "many matches rank and cap — they never widen past three")
+        (is (= 'pv.core/rate-cents (:form (first (:story r))))
+            "the most-storied form ranks first — it is the one being asked about")
         (let [rows (:versions (first (:story r)))]
           (is (<= 2 (count rows)) (pr-str (:story r)))
           (is (some #(re-find #"June contract uplift" (str (:ask %))) rows))
@@ -273,10 +286,6 @@
               "the story is asks and states — code lives one call away")))
       (testing "the story does not depend on the line's recent deltas — imported
                 or pre-`since` history is exactly when provenance is asked for"
-        ;; the field failure (sonnet s9 step 2): the seed's history arrived by
-        ;; clone, :changes was line-scoped and EMPTY, and the story — derived
-        ;; from changes — never fired on the ask it was built for. `since` at
-        ;; the head reproduces that shape: no changes, story still owed.
         (let [head (:id (last (ops/journal sess)))
               r2   (ops/report sess :since head :contains "rate-cents")]
           (is (empty? (:changes r2)) (pr-str (:changes r2)))
