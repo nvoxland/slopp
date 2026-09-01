@@ -1883,3 +1883,17 @@ opt-in mode, and the harvest of deep fixes the probe surfaced (same-ns
 red-first through change, the inferred-step verification-scope hole,
 multi-form blobs, the ui-port clobber guard) — all retro-benefiting
 the MCP surface.
+
+## 2026-09-01 — s14 grid (schema diet, adopted)
+
+The s13 law's constructive half, measured: relocating the op-index
+prose into ten registry-derived bundle cards (~0.7k tokens) while the
+advertised surface keeps schemas and enums made every cell faster or
+equal — sonnet-41 83t/$1.61 (best since s9), opus-41 76t (all-time
+best), opus-XL 87t (best ever); output fell 26-31%. Teaching placement
+matters more than teaching volume: cards at the top of the ask beat
+prose inside tool descriptors. Adopted as the default surface, pinned
+by the fourteen-families test (advertised < 15k chars). The one
+regression (sonnet-XL) was an auto-require gap ("No such namespace"
+after a scaffold not caught on the group door) that cost an 18-call
+require rebuild — filed with two fixes named.
