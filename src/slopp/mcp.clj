@@ -76,19 +76,6 @@
                                  f [:expected :actual :message]))
                        fs)))))
 
-(defn- tools-note!
-  "The notifications/tools/list_changed message when the tool registry has
-  DRIFTED from what this session last advertised (a live reload renamed or
-  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
-  client could see it), else nil. Emitting updates the baseline, so each
-  drift notifies exactly once. No baseline (tools/list never served) → nil."
-  [session]
-  (let [h    (hash tools/tools)
-        last (:slopp.mcp/tools-hash @session)]
-    (when (and last (not= last h))
-      (swap! session assoc :slopp.mcp/tools-hash h)
-      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
-
 (def ^:private ^{:ambient-ok "process-global TEST state with no dynamic-var alternative — binding is dialect-banned, and the flag has to reach a boundary crossed on threads other than the one that would bind it; a fixture flips it for the across-the-wire suite and it is off in production"} strict-boundary?
   "When true, the response boundary (text!) THROWS on any file/line
   coordinate leak — the invariant 'agents never think in files' made
@@ -2509,119 +2496,6 @@
         (call-op! session (assoc req :name op :arguments (dissoc arguments :op)))))
     (call-op! session req)))
 
-^:unsafe (defn handle!
-  "Dispatch a JSON-RPC request map; return a response map, or nil for
-  notifications. Tool exceptions become an `isError` result (so the agent sees
-  the message); protocol errors become JSON-RPC errors."
-  [session {:keys [id method params]}]
-  (case method
-    "initialize" {:jsonrpc "2.0" :id id
-                  :result {:protocolVersion protocol-version
-                           :capabilities {:tools {:listChanged true}}
-                           :serverInfo {:name "slopp" :version "0.1.0"}}}
-    "notifications/initialized" nil
-    "tools/list" (let [advertised (cond
-                                      (or (:cli-mode? @session)
-                                          (some? (System/getenv "SLOPP_CLI")))
-                                      ;; the CLI door is the surface; the MCP
-                                      ;; connection stays for hooks/lifecycle
-                                      ;; but pays no schema rent
-                                      []
-
-                                      (or (:diet-mode? @session)
-                                          (some? (System/getenv "SLOPP_DIET")))
-                                      ;; the schema diet: op-index prose
-                                      ;; relocated to the bundle's cards;
-                                      ;; schemas, enums, dispatch untouched
-                                      tools/dieted-tools
-
-                                      :else tools/tools)]
-                   (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
-                   {:jsonrpc "2.0" :id id :result {:tools advertised}})
-    "tools/call"
-    ;; BOTH edges of the call, recorded here because this is the only layer
-    ;; that sees them. The gap between one answer and the next call is time
-    ;; slopp was NOT working — agent reasoning, non-slopp tools, the harness —
-    ;; and it had no producer at all: measured over one real session, 78% of
-    ;; the wall clock was invisible. turn_end folds the ring onto its delta.
-    (let [t0    (System/currentTimeMillis)
-          facts (atom {})
-          r     (binding [;; A smell is once-per-session and rarer, so it speaks first. The
-                          ;; thread reminder is DEFERRED rather than computed here: it
-                          ;; counts what the call is about to make un-landed, which does
-                          ;; not exist yet. `text!` forces it.
-                          *hint* (or (smells/track-hint! session
-                                                         (:name params)
-                                                         (:arguments params))
-                                     (delay (thread-hint! session (:name params))))
-                          *spool-session* session
-                          ;; what the ANSWER did — the trim, the withheld stub,
-                          ;; the id a retrieval went back for. Only the frames
-                          ;; that shape a response know those, and none of them
-                          ;; is on the path back to here.
-                          *response-facts* facts]
-                  (try (call-tool! session params)
-                       (catch Exception e
-                         (assoc (text! (str "error: " (ex-message e)))
-                                :isError true))))
-          why   (refusal-text r)]
-      ;; after the call, so a tool that reads the ring (turn_end) never sees
-      ;; its own half-finished entry
-      (let [entry (merge
-                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
-                    ;; A REFUSAL and the reason it gave, from ONE derivation — see
-                    ;; `refusal-text` for the two shapes it arrives in and for the
-                    ;; deliberate under-count. The message rides along because a
-                    ;; count with no cause can only ever support "read that tool's
-                    ;; contract", which is the guess rather than the finding;
-                    ;; `call-timing` bounds and truncates what reaches the delta.
-                    :refused? (some? why)
-                    :error    why
-                    ;; WHAT IT SENT, taken off the response itself rather than from
-                    ;; whoever built it — characters on the wire, which is the unit
-                    ;; the size gate and the payload fitter are both written in.
-                    ;; The ring had a call's edges and its refusal, so it could say
-                    ;; what slopp SPENT and never what it COST, and reads are 52%
-                    ;; of the bill.
-                    :chars    (count (get-in r [:content 0 :text] ""))}
-                   @facts)]
-        ;; TWO rings, one entry — shared structurally, so the second costs a
-        ;; pointer. They are separate because their LIFECYCLES are: the timing
-        ;; ring is cleared at every `turn-begin!` so an ask measures only its
-        ;; own clock, and the read rows must not inherit that. Turns rotate
-        ;; only when a user prompt arrived and a write followed, so a
-        ;; read-only ask and an event-driven session close none — which are
-        ;; the spans where reads dominate. `ops/flush-reads!` empties the
-        ;; second on its own schedule.
-        (swap! session #(-> %
-                            (update :slopp.read.telemetry/calls (fnil conj []) entry)
-                            (update :slopp.read.telemetry/reads (fnil conj []) entry)))
-        ;; and ONE ROW beside the journal, the census the rings cannot be:
-        ;; the timing ring keeps a turn's top five and the read ring flushes
-        ;; on its own schedule, so neither can answer "every call, and what
-        ;; each sent". A measurement, never a delta — a read must not be able
-        ;; to move the head a verdict is racing for.
-        (ops/record-tool-call! session (assoc entry :agent (:agent params))))
-      {:jsonrpc "2.0" :id id :result r})
-    "ping" {:jsonrpc "2.0" :id id :result {}}
-    (when id
-      {:jsonrpc "2.0" :id id
-       :error {:code -32601 :message (str "method not found: " method)}})))
-
-(defn serve!
-  "Newline-delimited-JSON stdio loop over `in-reader`/`out-writer`."
-  [session in-reader out-writer]
-  (doseq [line (line-seq in-reader) :when (not (str/blank? line))]
-    (when-let [resp (handle! session (json/parse-string line true))]
-      (.write out-writer (str (json/generate-string resp) "\n"))
-      (.flush out-writer))
-    ;; a live reload may have changed the tool registry — tell the client
-    ;; to re-list (ordered: same writer, right after the response)
-    (when-let [note (tools-note! session)]
-      (.write out-writer (str (json/generate-string note) "\n"))
-      (.flush out-writer)))
-  nil)
-
 (defn call!
   "One-shot tool invocation against the store at `dir` — the --call CLI's
   engine and the fallback when no MCP connection exists. Opens a durable
@@ -2843,6 +2717,127 @@
                          (str "slopp UI unavailable: " (:error r))))
      (when (:url r) (start-heartbeat! session dir (:url r)))
      r)))
+
+(defn- advertised-tools
+  "What tools/list would advertise to THIS session right now — the one
+  selection both the list and the drift notifier read, so they can never
+  disagree: empty in CLI mode (the shell is the surface), else the dieted
+  fourteen (s14, adopted by measurement: prose rides the bundle as cards)."
+  [session]
+  (if (or (:cli-mode? @session) (some? (System/getenv "SLOPP_CLI")))
+    []
+    tools/dieted-tools))
+
+^:unsafe (defn handle!
+  "Dispatch a JSON-RPC request map; return a response map, or nil for
+  notifications. Tool exceptions become an `isError` result (so the agent sees
+  the message); protocol errors become JSON-RPC errors."
+  [session {:keys [id method params]}]
+  (case method
+    "initialize" {:jsonrpc "2.0" :id id
+                  :result {:protocolVersion protocol-version
+                           :capabilities {:tools {:listChanged true}}
+                           :serverInfo {:name "slopp" :version "0.1.0"}}}
+    "notifications/initialized" nil
+    "tools/list" (let [advertised (advertised-tools session)]
+                   (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
+                   {:jsonrpc "2.0" :id id :result {:tools advertised}})
+    "tools/call"
+    ;; BOTH edges of the call, recorded here because this is the only layer
+    ;; that sees them. The gap between one answer and the next call is time
+    ;; slopp was NOT working — agent reasoning, non-slopp tools, the harness —
+    ;; and it had no producer at all: measured over one real session, 78% of
+    ;; the wall clock was invisible. turn_end folds the ring onto its delta.
+    (let [t0    (System/currentTimeMillis)
+          facts (atom {})
+          r     (binding [;; A smell is once-per-session and rarer, so it speaks first. The
+                          ;; thread reminder is DEFERRED rather than computed here: it
+                          ;; counts what the call is about to make un-landed, which does
+                          ;; not exist yet. `text!` forces it.
+                          *hint* (or (smells/track-hint! session
+                                                         (:name params)
+                                                         (:arguments params))
+                                     (delay (thread-hint! session (:name params))))
+                          *spool-session* session
+                          ;; what the ANSWER did — the trim, the withheld stub,
+                          ;; the id a retrieval went back for. Only the frames
+                          ;; that shape a response know those, and none of them
+                          ;; is on the path back to here.
+                          *response-facts* facts]
+                  (try (call-tool! session params)
+                       (catch Exception e
+                         (assoc (text! (str "error: " (ex-message e)))
+                                :isError true))))
+          why   (refusal-text r)]
+      ;; after the call, so a tool that reads the ring (turn_end) never sees
+      ;; its own half-finished entry
+      (let [entry (merge
+                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
+                    ;; A REFUSAL and the reason it gave, from ONE derivation — see
+                    ;; `refusal-text` for the two shapes it arrives in and for the
+                    ;; deliberate under-count. The message rides along because a
+                    ;; count with no cause can only ever support "read that tool's
+                    ;; contract", which is the guess rather than the finding;
+                    ;; `call-timing` bounds and truncates what reaches the delta.
+                    :refused? (some? why)
+                    :error    why
+                    ;; WHAT IT SENT, taken off the response itself rather than from
+                    ;; whoever built it — characters on the wire, which is the unit
+                    ;; the size gate and the payload fitter are both written in.
+                    ;; The ring had a call's edges and its refusal, so it could say
+                    ;; what slopp SPENT and never what it COST, and reads are 52%
+                    ;; of the bill.
+                    :chars    (count (get-in r [:content 0 :text] ""))}
+                   @facts)]
+        ;; TWO rings, one entry — shared structurally, so the second costs a
+        ;; pointer. They are separate because their LIFECYCLES are: the timing
+        ;; ring is cleared at every `turn-begin!` so an ask measures only its
+        ;; own clock, and the read rows must not inherit that. Turns rotate
+        ;; only when a user prompt arrived and a write followed, so a
+        ;; read-only ask and an event-driven session close none — which are
+        ;; the spans where reads dominate. `ops/flush-reads!` empties the
+        ;; second on its own schedule.
+        (swap! session #(-> %
+                            (update :slopp.read.telemetry/calls (fnil conj []) entry)
+                            (update :slopp.read.telemetry/reads (fnil conj []) entry)))
+        ;; and ONE ROW beside the journal, the census the rings cannot be:
+        ;; the timing ring keeps a turn's top five and the read ring flushes
+        ;; on its own schedule, so neither can answer "every call, and what
+        ;; each sent". A measurement, never a delta — a read must not be able
+        ;; to move the head a verdict is racing for.
+        (ops/record-tool-call! session (assoc entry :agent (:agent params))))
+      {:jsonrpc "2.0" :id id :result r})
+    "ping" {:jsonrpc "2.0" :id id :result {}}
+    (when id
+      {:jsonrpc "2.0" :id id
+       :error {:code -32601 :message (str "method not found: " method)}})))
+
+(defn- tools-note!
+  "The notifications/tools/list_changed message when the tool registry has
+  DRIFTED from what this session last advertised (a live reload renamed or
+  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
+  client could see it), else nil. Emitting updates the baseline, so each
+  drift notifies exactly once. No baseline (tools/list never served) → nil."
+  [session]
+  (let [h    (hash (advertised-tools session))
+        last (:slopp.mcp/tools-hash @session)]
+    (when (and last (not= last h))
+      (swap! session assoc :slopp.mcp/tools-hash h)
+      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
+
+(defn serve!
+  "Newline-delimited-JSON stdio loop over `in-reader`/`out-writer`."
+  [session in-reader out-writer]
+  (doseq [line (line-seq in-reader) :when (not (str/blank? line))]
+    (when-let [resp (handle! session (json/parse-string line true))]
+      (.write out-writer (str (json/generate-string resp) "\n"))
+      (.flush out-writer))
+    ;; a live reload may have changed the tool registry — tell the client
+    ;; to re-list (ordered: same writer, right after the response)
+    (when-let [note (tools-note! session)]
+      (.write out-writer (str (json/generate-string note) "\n"))
+      (.flush out-writer)))
+  nil)
 
 ^:unsafe
 (defn -main

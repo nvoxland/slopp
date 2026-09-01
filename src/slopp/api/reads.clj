@@ -443,8 +443,11 @@
         ;; family per request. Only when the hook says the session is dieted
         ;; (?diet=1) and only on the FULL bundle: the delta bundle's reader
         ;; already holds its cards in context.
-        text     (if (and (= "1" (str (:diet query-params))) (not same?)
-                          (string? (:op-cards @session)))
+        text     (if (and (not same?) (string? (:op-cards @session)))
+                   ;; every FULL bundle carries the cards — the argument
+                   ;; teaching the dieted surface relocated here (s14,
+                   ;; adopted by measurement); the delta bundle's reader
+                   ;; already holds them in context
                    (str text
                         "\n--- op cards — the calls you will make ({required, [optional]}; help {topic <op>} for more) ---\n"
                         (:op-cards @session))

@@ -3183,7 +3183,8 @@
             (is (nil? (some #{"edit_group" "edit_subform" "edit_delete_form"
                               "edit_add_form" "edit_replace_form" "intent"} enum))
                 "the former write ops are de-advertised aliases")
-            (is (re-find #"THE write door" (:description edit)) (:description edit))
+            (is (re-find #"argument cards ride the \[slopp\] block" (:description edit))
+                (:description edit))
             (is (= ["op"] (get-in edit [:inputSchema :required])))
             ;; :text now comes from edit_comment alone — the multi-op union
             ;; collapsed with the subform descriptor
@@ -3194,8 +3195,9 @@
             (is (some #{"explore"} enum))
             (is (some #{"check"} enum))
             (is (nil? (some #{"query_batch"} enum)) "query_batch is the compat alias")))
-        (testing "the whole advertised surface is small enough never to be deferred"
-          (is (< (count (pr-str advertised)) 30000) (str (count (pr-str advertised))))))
+        (testing "the whole advertised surface is small enough never to be deferred —
+                  and DIETED: the op-index prose rides the bundle as cards (s14)"
+          (is (< (count (pr-str advertised)) 15000) (str (count (pr-str advertised))))))
       (call! sess "ns_create" {:ns "fam.core" :source "(ns fam.core)\n(defn ^:unused-ok f [x] x)\n"})
       (testing "a family call is the op call"
         (let [r (call! sess "edit" {:op "change" :prompt "via the family"
@@ -4092,7 +4094,7 @@
   ;; only the description PROSE shrinks. Dispatch is untouched.
   (let [sess (external/open!)]
     (try
-      (swap! sess assoc :diet-mode? true)
+      
       (let [ts (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])]
         (testing "all fourteen families, op enums intact"
           (is (= 14 (count ts)))
@@ -4108,7 +4110,7 @@
         (let [ctx (server/context sess)
               txt (str (:body (slopp.http/handle!
                                ctx {:request-method :get :uri "/api/bundle"
-                                    :query-string "ask=extend+the+quote&diet=1"})))]
+                                    :query-string "ask=extend+the+quote"})))]
           (is (re-find #"op cards" txt) txt)
           (is (re-find #"change \{impl, prompt" txt))))
       (finally (ops/close! sess)))))
