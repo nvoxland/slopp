@@ -27,6 +27,17 @@ deferred, load them ONCE, in one call —
 — an op name (`query_slice`, `change`) is never a tool name, so
 searching for one finds nothing.
 
+**CLI mode.** If NO slopp MCP tools are loaded (a shell script, CI, or a
+session whose bundle header says "drive it with the slopp CLI"), every op
+in this skill is spelled `slopp <op> '<json args>'` instead — same names,
+same arguments, same results, routed to the running server in
+milliseconds. Do NOT search for tools; there are none to find. Raw-source
+sugar: `slopp add <ns> <<'EOF' …forms… EOF` (multi-form; add/replace
+inferred per form), `slopp replace <ns/name> <<'EOF'`, and
+`slopp change --prompt '…' <<'EOF'` with `;;;tests <ns>` / `;;;impl <ns>`
+section markers. One op's card: `slopp help '{"topic":"<op>"}'`.
+Everything else below applies unchanged.
+
 **What slopp is.** Code lives in a **store**, not files; the unit of
 everything is the **top-level form**; a **live JVM image** runs your code
 continuously. Address code as `ns` + `name` — never a path or a line. Every

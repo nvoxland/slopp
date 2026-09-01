@@ -60,7 +60,10 @@ def http_bundle_once():
                + urllib.parse.quote(prompt[:500])
                # the server answers a session it has already mapped with the
                # small DELTA instead of a second full map (bundle diet 3c)
-               + ("&session-id=" + urllib.parse.quote(SID) if SID else ""))
+               + ("&session-id=" + urllib.parse.quote(SID) if SID else "")
+               # a CLI cell's bundle speaks the CLI loop (SLOPP_CLI cells
+               # advertise no MCP tools, so the MCP voice points at nothing)
+               + ("&cli=1" if os.environ.get("SLOPP_CLI") else ""))
         with urllib.request.urlopen(url, timeout=2.0) as r:
             body = json.loads(r.read().decode("utf-8"))
         b = body.get("bundle")

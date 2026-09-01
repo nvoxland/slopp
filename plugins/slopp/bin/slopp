@@ -20,6 +20,140 @@ if ! command -v java >/dev/null 2>&1; then
   exit 1
 fi
 
+# --help never reaches the JVM: an unrecognized flag used to fall through
+# to SERVE MODE, whose listener overwrote a live server's .slopp/ui-port
+# with its own transient pid and poisoned the fast path (measured, s13).
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  echo "  slopp <op> '{...json...}'                  bare tool call (routed to the running server)"
+  echo "  slopp add <ns> [--prompt P] <<'EOF'        whole-blob write; forms split, add/replace inferred"
+  echo "  slopp replace <ns/name> [--prompt P] <<'EOF'"
+  echo "  slopp change [--prompt P] [--accept a,b] <<'EOF'   with ;;;tests <ns> / ;;;impl <ns> sections"
+  echo "  slopp help '{\"topic\":\"<op>\"}'              one op's full card (args, examples)"
+  exit 0
+fi
+
+# ---- CLI dialect: normalize every spelling to (TOOL, args-file) ----
+#   slopp --call <op> [json|edn|@file]      the long-standing spelling
+#   slopp <op> [json]                       same thing, bare
+#   slopp add <ns> [--prompt P] <<EOF       whole-blob write: forms split and
+#   slopp replace <ns/name> [--prompt P]    add/replace is inferred per form
+#   slopp change [--prompt P] [--accept a,b] <<EOF
+#       with ";;;tests <ns>" / ";;;impl <ns>" section markers between raw forms
+# The heredoc carries RAW source — no JSON escaping, which is the point.
+TOOL=""; ARGSFILE=""
+case "${1:-}" in
+  --call)
+    TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"
+    ARGSFILE="$(mktemp)"
+    if [ "${RAW#@}" != "$RAW" ]; then cat "${RAW#@}" > "$ARGSFILE"; else printf '%s' "$RAW" > "$ARGSFILE"; fi
+    ;;
+  add|replace|change)
+    ARGSFILE="$(mktemp)"; PROG="$(mktemp)"
+    cat > "$PROG" <<'PYEOF'
+import json, sys
+argsfile = sys.argv[1]
+argv = sys.argv[2:]
+verb = argv[0]; rest = list(argv[1:])
+def flag(name, default=None):
+    if name in rest:
+        i = rest.index(name); v = rest[i+1]; del rest[i:i+2]; return v
+    return default
+prompt = flag("--prompt")
+accept = flag("--accept")
+body = sys.stdin.read()
+if verb in ("add", "replace"):
+    target = rest[0] if rest else ""
+    if not target:
+        print(f"slopp {verb}: name the target namespace (slopp {verb} <ns>[/<name>] <<EOF)", file=sys.stderr)
+        sys.exit(2)
+    ns, _, nm = target.partition("/")
+    step = {"ns": ns, "source": body}
+    if nm: step["name"] = nm
+    args = {"prompt": prompt or f"slopp {verb} {target}", "impl": [step]}
+else:
+    args = {"prompt": prompt or "slopp change", "tests": [], "impl": []}
+    if accept: args["accept"] = [a for a in accept.split(",") if a]
+    section, ns, buf = None, None, []
+    def close():
+        if section and ns and "".join(buf).strip():
+            args[section].append({"ns": ns, "source": "".join(buf)})
+    for line in body.splitlines(keepends=True):
+        w = line.split()
+        if len(w) == 2 and w[0] in (";;;tests", ";;;impl"):
+            close(); section, ns, buf = w[0][3:], w[1], []
+        else:
+            buf.append(line)
+    close()
+    if not (args["tests"] or args["impl"]):
+        print("slopp change: stdin needs ';;;tests <ns>' / ';;;impl <ns>' section markers", file=sys.stderr)
+        sys.exit(2)
+    if not args["tests"]: del args["tests"]
+json.dump(args, open(argsfile, "w"))
+print("change")
+PYEOF
+    TOOL="$(python3 "$PROG" "$ARGSFILE" "$@")" || { rm -f "$PROG" "$ARGSFILE"; exit 2; }
+    rm -f "$PROG"
+    ;;
+  -*|"") : ;;
+  *)
+    # bare-verb spelling: `slopp <op> [json]` — any lowercase_word that is
+    # not a directory is a tool call (a typo answers with the tool list)
+    if [ ! -d "${1:-}" ] && printf '%s' "${1:-}" | grep -qE '^[a-z][a-z_]*$'; then
+      TOOL="$1"; RAW="${2-}"; [ -z "$RAW" ] && RAW="{}"
+      ARGSFILE="$(mktemp)"
+      if [ "${RAW#@}" != "$RAW" ]; then cat "${RAW#@}" > "$ARGSFILE"; else printf '%s' "$RAW" > "$ARGSFILE"; fi
+    fi
+    ;;
+esac
+
+# ---- route the normalized call to the RUNNING server, else the JVM ----
+if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
+  if [ -z "${SLOPP_NO_ROUTE:-}" ] && [ -f ".slopp/ui-port" ]; then
+    set +e
+    python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
+import json, os, sys, time, threading, urllib.request
+tool, argsfile = sys.argv[1], sys.argv[2]
+try:
+    pf = json.load(open(".slopp/ui-port"))
+    pid, url, token = pf["pid"], pf["url"], pf.get("token")
+    os.kill(int(pid), 0)
+    if not token:
+        raise RuntimeError("listener predates the routed door (no token)")
+    args = json.load(open(argsfile))
+    if not isinstance(args, dict):
+        raise RuntimeError("arguments must be a JSON object")
+except Exception as e:
+    print(f"slopp: fast path unavailable ({e})", file=sys.stderr)
+    sys.exit(3)
+body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
+stop = threading.Event()
+def beat():
+    t0 = time.time()
+    while not stop.wait(10):
+        print(f"slopp: {tool} still running ({int(time.time()-t0)}s)...", file=sys.stderr)
+threading.Thread(target=beat, daemon=True).start()
+req = urllib.request.Request(url.rstrip("/") + "/api/call", data=body,
+                             headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=3600) as r:
+        out = json.load(r)
+except Exception as e:
+    stop.set()
+    print(f"slopp: fast path failed ({e})", file=sys.stderr)
+    sys.exit(3)
+stop.set()
+print(out.get("text", ""))
+sys.exit(1 if out.get("isError") else 0)
+PYEOF
+    rc=$?
+    set -e
+    if [ "$rc" -ne 3 ]; then rm -f "$ARGSFILE"; exit "$rc"; fi
+    echo "slopp: falling back to the one-shot JVM (slower; no progress until it answers)" >&2
+  fi
+  set -- --call "$TOOL" "@$ARGSFILE"
+fi
+
 checksum() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | cut -d' ' -f1
