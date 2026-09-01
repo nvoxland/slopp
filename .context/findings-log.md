@@ -1836,3 +1836,20 @@ surface shaping is exhausted as a turns lever; server-side levers
 (pre-compute, one-explore-cheapest-read, composed handoff answers) are
 next. Action inference (s11 wave A) carried 55-143 actionless steps per
 cell — the grid would have been a refusal storm without it.
+
+## 2026-09-01 — s12 grid (anticipation, surface frozen; 4 cells + 4 step5 isolations, all 11/11)
+
+Server-side anticipation is the first lever that moved turns without
+touching the surface: require-expansion on whole-ns reads (the only
+change s11->s12) improved every cell — sonnet 117->94 / 112->90 (XL
+back UNDER plain, $1.57 vs $1.67), opus 113->92 / 96->93 (best opus-XL
+ever). Online mechanism evidence matches the offline replay: ~110
+attached require-sources across the grid, 1-2 re-asks total. The
+handoff-report injection, measured in isolation (s12b step5-only
+reruns, injection confirmed fired): no reliable benefit — the eval's
+handoff ask explicitly instructs cited record-consultation, which
+pre-composition cannot substitute. Law refined: pre-emption fills
+unfelt needs; it does not override explicit gather-it-yourself
+instructions. Full detail: projects/eval12-anticipation/WAVE-A.md and
+the RUNS rows; running narrative in
+ideas/product/half-the-time-half-the-tokens.md.
