@@ -45,11 +45,16 @@
                                                           :properties {:ns {:type "string"}
                                                                        :name {:type "string"}}
                                                           :required ["ns"]}]}}}}}
-   {:name "query_batch" :image-free false :read-only true
-    :description "Several READ questions, ONE call: ops = [{op …args} …] with any read op (query_source, query_search, query_depends, query_history, report, orient, …) — answers [{:op :result} …], each entry through the same already-sent/ledger door as the single call. At most 6 entries; a write op is refused before anything runs. Batch your independent questions here: models do not emit parallel tool calls, so the batch lives inside the call."
+   {:name "explore" :image-free false :read-only true
+    :description "THE question verb — several questions, ONE call: ops = [{op …args} …] with any read op (check, query_source, query_search, query_depends, query_history, report, orient, …) — answers [{:op :result} …], each entry through the same already-sent/ledger door as the single call. At most 6 entries; a write op is refused before anything runs. Models do not emit parallel tool calls, so the batch lives inside the call — bring every independent question you have."
     :inputSchema {:type "object"
                   :properties {:ops {:type "array" :items {:type "object"}}}
                   :required ["ops"]}}
+   {:name "check" :image-free false :read-only true
+    :description "Run ASSERTION code against the live image with clojure.test's reporting captured — NOTHING is written: {:value … :pass n :fail n :assertions [{:type :expected :actual} …]}. The find-something-out red belongs here, as an ANSWER — no landed test to clean up, no temptation to fix working code against a wrong assertion. Land it as a real test (change {tests […]}) only once it says what you mean. Plain expressions work too; (clojure.test/is …) forms are what get counted."
+    :inputSchema {:type "object"
+                  :properties {:code {:type "string"}}
+                  :required ["code"]}}
    {:name "query_brief"
     :description "THE form dossier, one call: source + effect flags + cross-ns callers + the tests covering it + the recorded WHY (last prompt/intent). Prefer this over separate source/references/lineage reads when you're about to change a form."
     :inputSchema {:type "object"
@@ -175,7 +180,13 @@
                                :format {:type "string" :enum ["edn" "text"]}}}}])
 
 (def edit-tools
-  "Write tool descriptors: forms, groups, renames, refactors. (Q4: the registry is per-group — editable without touching a monolith.) The single-form write ops (edit_replace_form, edit_add_form) are DE-ADVERTISED: a one-step edit_group is the single-form write, so they live on only as dispatchable aliases (`single-write-tools`), not as descriptors."
+  "Write tool descriptors: the change verb, namespaces, renames, refactors.
+  (Q4: the registry is per-group — editable without touching a monolith.)
+  The former per-form write ops (edit_replace_form, edit_add_form,
+  edit_group, edit_subform, edit_delete_form) and the old verb names
+  (intent, query_batch) are DE-ADVERTISED: their vocabulary lives on as
+  `change` steps and their names as dispatchable aliases
+  (`single-write-tools`), not as descriptors."
   [{:name "ns_create"
     :description "Create a BRAND-NEW namespace (never overwrites). Either `requires` (clause strings) scaffolds an empty ns to grow with red-first TDD, or `source` lands whole namespace text in one verified call (ported/reference code) — mutually exclusive. A `requires` clause MAY name a namespace of yours that does not exist yet: it is created empty and reported in `:also-created`, so spec-first works across a namespace boundary instead of failing to load. `platform` (\"jvm\"/\"cljc\"/\"cljs\") declares the namespace's target platform up front, so a client ns is born :cljs — its js/* forms defer to the ClojureScript compiler (compile_client) instead of failing to load into the JVM oracle."
     :inputSchema {:type "object"
@@ -206,43 +217,16 @@
                                :text {:type "string"}
                                :prompt {:type "string"}}
                   :required ["ns" "name" "text"]}}
-   {:name "intent"
-    :description "A WHOLE ASK as one call — the pipeline the loop otherwise walks: `tests` steps land first and the result reports which went RED (watched failing, red-first honored); `impl` steps land; `accept`'s expectation shifts are finished; ONE verification; done closes the episode — one result with the verdict, and :test-src on any residual red (the next call is the fix, and the ordinary loop continues from it; a red intent lands nothing — the thread keeps the work). Steps take edit_group's vocabulary PLUS {action: patch, ns, name, replace: [{match, source, text?, where?} …]} — several small changes INSIDE one form as deltas, never a whole-form retype. An intent past ~10 steps is two intents. Use intent when you can state the test and the implementation with EQUAL confidence; a test you are writing to FIND something out stays separate (edit_group the test alone) — that red is the answer you came for, and bundling spends it before you read it."
+   {:name "change"
+    :description "THE write door — a whole unit of work, or any slice of one, as ONE call. `tests` steps (OPTIONAL) land first and the result reports which went RED — watched failing, red-first honored; `impl` steps land; `accept`'s expectation shifts finish; ONE verification; one result, with :test-src on any residual red (fix forward from it — a red change lands NOTHING and loses nothing: the work stays on your thread). NO done inside: done is YOUR separate move when the unit is finished — a unit may span change -> explore -> change, and the Stop hook is the landing floor. {prompt, impl} alone is the ordinary write — a docstring, a comment, a one-form fix; tests lead only when there is an expectation to watch fail, and a test you are writing to FIND something out is explore {ops [{op check …}]} instead. Steps: [{action: add|replace|subform|delete|require|patch, ns, name, source, match, text, where, require}] — patch = {action: patch, ns, name, replace: [{match, source, text?, where?} …]}: several small changes INSIDE one form as deltas, never a whole-form retype. A step with no action is inferred (:replace when the named form exists, :add when not). A delete step refuses while callers remain, naming them. Auto-require and auto-module-dep repair as on every write. A change past ~10 steps is two changes."
     :inputSchema {:type "object"
                   :properties {:prompt {:type "string"}
                                :tests {:type "array" :items {:type "object"}}
                                :impl {:type "array" :items {:type "object"}}
                                :accept {:type "array" :items {:type "string"}
-                                        :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}}
-                  :required ["impl" "prompt"]}}
-   {:name "edit_group"
-    :description "THE write door — ONE INTENT as one atomic write: several related steps — the fn, its test, the caller it changes, the require it needs — applied together, every per-step gate intact, verified ONCE, reported per step in :steps. A ONE-STEP group is the single-form write: replacing or adding one form is edit_group with one step. steps: [{action: add|replace|subform|delete|require, ns, name, source, match, text, where, require}]. All-or-nothing: a refused step names its index and nothing lands. A missing alias exactly one namespace can supply is required for you (:auto-require); a first call across a module boundary gets the edge declared for you (:auto-module-dep) unless it would close a cycle. Not a shopping list: a whole feature in one call is refused by the same gates a whole feature in one form is, and done is still the completeness judgement. E.g. steps: [{action: replace, ns: app.core, name: rate, source: <the whole new defn>}, {action: add, ns: app.core-test, source: <the deftest>}, {action: require, ns: app.core, require: <one require clause>}]."
-    :inputSchema {:type "object"
-                  :properties {:steps {:type "array" :items {:type "object"}}
-                               :accept {:type "array" :items {:type "string"}
                                         :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}
-                               :prompt {:type "string"}
                                :verbose {:type "boolean"}}
-                  :required ["steps" "prompt"]}}
-   {:name "edit_delete_form"
-    :description "Delete a top-level form (verified write; ns-unmap in the image, and a defmethod is unregistered from its multi). REFUSES while anything still CALLS it, naming the callers — the same stance ns_delete takes for a namespace something still requires, and for the same reason: the delete would commit, the namespace would fail to RELOAD, and the store would boot nowhere. Only compile-time (:static) references block; a quoted symbol or a ^{:covers} marker does not, and a recursive fn is not its own caller. To remove a caller and its callee together, delete the CALLERS first and the callee last — dependency order reversed, one call each. Two forms that call EACH OTHER have no valid order: replace one (a one-step edit_group :replace) to drop the call, then delete both. Say WHY in prompt."
-    :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :name {:type "string"}
-                               :prompt {:type "string"}
-                               :verbose {:type "boolean"}}
-                  :required ["ns" "name"]}}
-   {:name "edit_subform"
-    :description "Small change INSIDE a big form. match = ONE exact subform or pair (a missed/ambiguous match returns :source-now — correct and resend, no read needed); text: true matches raw text (strings/docstrings) EXACTLY as :source-now shows it — no extra escaping, backslashes literal; where: {key value} addresses the unique MAP containing those entries (registry rows by :key or :name — no exact text needed), matched by the SPELLING each side answers to, so \"stored-name\" reaches a row stored as :stored-name and a miss names the values that key does take; OR after: a COMPLETE neighboring form/pair — source is INSERTED right behind it (the let-binding splice without shaping a half-open match); OR wrap: true, where source is a TEMPLATE and $1 is the matched form — `(let [n 1] $1)` NESTS what was there inside what you wrote, so introducing a binding around existing code costs the template instead of a retype of the whole enclosing form. The replacement may splice several forms."
-    :inputSchema {:type "object"
-                  :properties {:ns {:type "string"} :name {:type "string"}
-                               :match {:type "string"} :source {:type "string"}
-                               :text {:type "boolean"}
-                               :wrap {:type "boolean"}
-                               :where {:type "object"}
-                               :after {:type "string"}
-                               :prompt {:type "string"}
-                               :verbose {:type "boolean"}}
-                  :required ["ns" "name" "source"]}}
+                  :required ["impl" "prompt"]}}
    {:name "edit_revert"
     :description "Revert a form to an earlier version (default previous, or a delta id)."
     :inputSchema {:type "object"
@@ -292,7 +276,7 @@
                                :verbose {:type "boolean"}}
                   :required ["ns" "name" "source" "calls"]}}
    {:name "edit_extract"
-    :description "Extract a subform of `from` into a new fn (params computed from free locals, call site rewritten, verified). Address the subform EITHER by `match` (its exact text — the same word edit_subform and query_slice use) OR by `at` — an ANCHOR, its first line or so, which need not parse on its own (\"(let [turn-brackets\"). Prefer `at` for anything large: quoting a big subform's whole body means transcribing the exact code you were trying not to touch. A non-unique anchor asks you to extend it; a missing one returns :source-now."
+    :description "Extract a subform of `from` into a new fn (params computed from free locals, call site rewritten, verified). Address the subform EITHER by `match` (its exact text — the same word change's :subform steps and query_slice use) OR by `at` — an ANCHOR, its first line or so, which need not parse on its own (\"(let [turn-brackets\"). Prefer `at` for anything large: quoting a big subform's whole body means transcribing the exact code you were trying not to touch. A non-unique anchor asks you to extend it; a missing one returns :source-now."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :from {:type "string"}
                                :match {:type "string"
@@ -302,12 +286,11 @@
                                :name {:type "string"}
                                :prompt {:type "string"}}
                   :required ["ns" "from" "name"]}}
-   {:description "Walk back your OWN recent writes — the cheap, reach-for-it-immediately undo. deltas: n (default 1) undoes your last n writes; to: \"d123\" undoes everything of yours after that delta. to also takes a NAMED anchor: \"last-commit\" scraps everything since the last milestone (the usual dead-end rollback — no delta id to hunt), \"last-done\" goes back to your last done point. Addressed by DELTA, not by name, so it also restores a form you DELETED — the case edit_revert structurally cannot reach (no name left to look up). Forms another agent also wrote in the span are skipped and reported. deltas counts over the LOG and REFUSES rather than reaching past: a delta whose op it cannot invert (ns_rename, edit_move_forms, ns_delete, config_file, module_dep — anything changing more than form sources) comes back in :blocked with NOTHING reverted, rather than being stepped over to undo something older. One atomic verified group. Reach for this the moment a write turns out wrong; use episode_revert only to scrap a whole episode.", :inputSchema {:properties {:prompt {:type "string"}, :deltas {:type "integer"}, :to {:type "string"}}, :type "object"}, :name "undo"}
+   {:description "Walk back your OWN recent writes — the cheap, reach-for-it-immediately undo. deltas: n (default 1) undoes your last n writes; to: \"d123\" undoes everything of yours after that delta. to also takes a NAMED anchor: \"last-commit\" scraps everything since the last milestone (the usual dead-end rollback — no delta id to hunt), \"last-done\" goes back to your last done point. Addressed by DELTA, not by name, so it also restores a form you DELETED. Forms another agent also wrote in the span are skipped and reported. deltas counts over the LOG and REFUSES rather than reaching past: a delta whose op it cannot invert (ns_rename, edit_move_forms, ns_delete, config_file, module_dep — anything changing more than form sources) comes back in :blocked with NOTHING reverted, rather than being stepped over to undo something older. One atomic verified group. Reach for this the moment a write turns out wrong; use episode_revert only to scrap a whole episode.", :inputSchema {:properties {:prompt {:type "string"}, :deltas {:type "integer"}, :to {:type "string"}}, :type "object"}, :name "undo"}
    {:name "episode_revert"
     :description "Roll back everything YOU changed since your last done (other sessions' forms skipped, reported). To walk back just one write, or a short chain, without losing the rest of the episode, use undo."
     :inputSchema {:type "object"
                   :properties {:prompt {:type "string"}}}}
-   
    {:name "ns_rename"
     :description "Rename a WHOLE namespace everywhere (decl, requires, qualified refs). Verified. READ THE RESULT: a relocation lands as one changeset and runs NO write gates, so nothing refuses what it breaks. :left-behind lists what no rewrite reaches — strings, qualified KEYWORDS, the -test sibling, and under :alias the callers whose `:as` still spells the OLD name, because a rename rewrites the lib symbol beside an alias and never the alias itself. Each :alias row carries :suggest, the alias to pass ns_realias — absent where that caller already spells another lib that way, since realias would refuse it. An alias that reads correctly for BOTH names (a namespace changing modules under the same last segment) is not reported and needs nothing. :module-debt lists the module_dep edges its callers now need, calls that now reach a package-private ns, and cycles module_dep will refuse. Absence of either means checked-and-none. Run the ns_realias calls now rather than later: a stale alias is harmless only until the old name is REUSED, after which it points at a real and different module — which reads identically in the source and is the worse failure."
     :inputSchema {:type "object"
@@ -315,7 +298,7 @@
                                :prompt {:type "string"}}
                   :required ["from" "to"]}}
    {:name "ns_delete"
-    :description "Retire a namespace: refuses while any form remains (edit_delete_form them first — each deletion verified) or any other ns still requires it (ns_remove_require) — then removes the empty husk from store, image, and every projection. One :ns-delete delta; say WHY in prompt."
+    :description "Retire a namespace: refuses while any form remains (delete the forms first, callers before callees — each deletion verified) or any other ns still requires it (ns_remove_require) — then removes the empty husk from store, image, and every projection. One :ns-delete delta; say WHY in prompt."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :prompt {:type "string"}}
@@ -636,38 +619,36 @@
 
 (def cheat-sheet
   "slopp cheat-sheet — the one-page loop; help {topic} for a chapter
-TOOLS:   14 families, each an index of its ops: orient, read, depends,
-         history, eval, edit, refactor, declare, verify, build, store,
-         slopp, done, commit_point. An op keeps its name and is called
-         through its family: edit {op intent …} · edit {op edit_group steps prompt};
-         read {op query_slice ns name}. help {topic <op>} is an op's card.
+TOOLS:   14 families; an op is called through its family:
+         read {op explore ops […]} · edit {op change prompt impl […]}.
+         help {topic <op>} is an op's card. done and commit_point take no op.
 TURNS:   automatic. A write carrying `prompt` opens its own turn; the prompt
          hook records your ask. turn_begin only when a refusal asks for it.
-ORIENT:  your ask ARRIVES with its map (the [slopp] block above it): ranked
-         forms + the sources of what the ask names — current, don't re-read.
-         More questions: query_batch {ops [{op query_source targets […]}
-         {op query_depends on ns/name} …]} — several questions, ONE call.
-         orient {ask} · query_slice {ns name} · query_search {pattern}
-OBSERVE: query_eval {code} (your REPL: call anything; cannot redefine code)
-         query_observe {ns name code} (capture args/returns flowing through a fn)
-WRITE:   a WHOLE ask is ONE call: intent {prompt tests impl accept?} —
-         tests land first and the result says which went RED (watched),
-         impl lands, accepted shifts finish, one verification, done closes:
-         one result. Touch existing forms with {action patch, ns, name,
-         replace [{match source} …]} — deltas, never a whole-form retype.
-         A red intent lands nothing; continue from its result.
-         Mid-ask single writes: edit_group {steps [{action add|replace|
-         subform|delete|require …}] prompt accept?} — a ONE-STEP group is
-         the single-form write; N new forms are N :add steps.
-         edit_subform {ns name match source} (a small change INSIDE a big form)
+EXPLORE: your ask ARRIVES with its map (the [slopp] block above it) —
+         current, don't re-read it. EVERY further question is ONE call:
+         explore {ops [{op query_source targets […]} {op check code …}
+         {op query_depends on ns/name} …]} — up to 6 questions at once.
+         check runs assertion code in the image, NOTHING written — the
+         find-something-out red as an ANSWER ({:pass :fail :assertions}).
+         query_eval {code} is your REPL; query_observe captures real calls.
+CHANGE:  every write is ONE call: change {prompt tests? impl accept?} —
+         tests (OPTIONAL) land first and the result says which went RED
+         (watched); impl lands; accepted shifts finish; one verification;
+         one result. {prompt impl} alone is the ordinary write — a
+         docstring, a comment, a fix. Touch existing forms with
+         {action patch, ns, name, replace [{match source} …]} — deltas,
+         never a whole-form retype; a step with no action is inferred
+         (:replace if the form exists, :add if not). A red change lands
+         NOTHING and loses nothing — fix forward from :test-src.
          edit_rename {ns from to}   <- never rename by editing call sites
          rename_sweep {from to dry_run true} first, then without
          edit_extract {ns from match name} · ns_create {ns requires?|source?}
          ns_add_require / module_dep  <- usually automatic; a refusal names the edge
-         edit_delete_form {ns name} (callers first) · undo {deltas n}
+         undo {deltas n} walks back your own writes
 RULES:   form ORDER is derived — write forms in any order, never a (declare).
-         red-first TDD = write the failing test FIRST (missing fns land as
-         :red-first stubs and fail honestly), then implement.
+         red-first TDD = tests ride change {tests […]}, watched failing,
+         then the impl in the same call — or explore {op check} FIRST when
+         the test is a question you want answered before writing anything.
 RESULTS: the result IS the check — do not re-read, restart or test_run after
          a green write. {:ok true :test {:ran :pass}} green · :failures = why
          (:implicated :attribution :expected :actual; :test-src = the failing
@@ -675,18 +656,21 @@ RESULTS: the result IS the check — do not re-read, restart or test_run after
          · :warnings = fix per :suggest · :already-sent = you hold it ·
          :truncated = query_detail {id} only when the missing part changes
          what you do next
-FINISH:  intent closes its own unit of work (done inside the call); done
-         {label} yourself only mid-loop. full_check (whole store) and
-         commit_point {label} (a milestone) are the human's grain.
+FINISH:  done {label} when the UNIT is finished — a unit may span
+         change -> explore -> change, and the Stop hook runs done if you
+         forget. full_check (whole store) and commit_point {label} (a
+         milestone) are the human's grain.
 SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)")
 
 (def single-write-tools
-  "The de-advertised single-form write ALIASES. They are no longer described
-  or advertised — the group is the one write door, and a one-step edit_group
-  IS the single-form write — but the names still DISPATCH (the --call door,
-  hooks, benchmarks, older scripts) and must still gate as writes, which is
-  why this set survives its descriptors."
-  #{"edit_replace_form" "edit_add_form"})
+  "The de-advertised write-and-batch ALIASES. None is described or
+  advertised any more — `change` is the write door and `explore` the
+  question door — but every name still DISPATCHES (the --call door, hooks,
+  benchmarks, older scripts, and every docstring or refusal that spells
+  one), and the write-shaped ones still gate as writes. The prose-names-a-
+  real-tool check unions this set, so prose naming them stays valid."
+  #{"edit_replace_form" "edit_add_form" "edit_group" "edit_subform"
+    "edit_delete_form" "intent" "query_batch"})
 
 (def write-tools
   (into single-write-tools
@@ -874,11 +858,11 @@ SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
   names: they are the loop's two verbs. `slopp` is the remainder, named as
   such rather than pretending to be a cluster (slopp-ui, 2026-08-30)."
   [{:name "orient" :blurb "Where to start: the forms that matter for an ask, ranked with why; or the project brief." :ops ["orient" "session_brief"]}
-   {:name "read" :blurb "Read code by form, never by file: one form with what it reaches, several forms, a search, the outline, a spooled remainder." :ops ["query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project" "query_batch"]}
+   {:name "read" :blurb "Read code by form, never by file: MANY questions in one explore call, an in-image check, one form with what it reaches, a search, the outline, a spooled remainder." :ops ["explore" "check" "query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project"]}
    {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
    {:name "history" :blurb "What changed, why and when: form history, intents, milestones, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
-   {:name "edit" :blurb "Verified writes, by intent: a whole ask as one call (intent), a group of steps (one step is fine), a targeted subform, a delete, an undo." :ops ["intent" "edit_group" "edit_subform" "edit_delete_form" "edit_comment" "edit_revert" "undo" "episode_revert"]}
+   {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it." :ops ["change" "edit_comment" "edit_revert" "undo" "episode_revert"]}
    {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}
    {:name "declare" :blurb "Namespaces, requires, module edges and dials, dependencies." :ops ["ns_create" "ns_delete" "ns_add_require" "ns_remove_require" "module_dep" "module_purity" "module_role" "module_platform" "deps_add" "deps_remove" "deps_list" "deps_pure" "js_dep"]}
    {:name "verify" :blurb "A bigger question than one write answers: chosen tests, the whole store, a fresh image, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "restart" "review_scan" "draft_test" "screen"]}

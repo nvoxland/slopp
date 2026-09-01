@@ -852,30 +852,33 @@
 
 (deftest a-seed-arrives-with-its-test
   ;; eval11: bundle coverage of edited pre-existing forms was 60-75% and
-  ;; the misses were almost all DEFTESTS — a seed's test ranked as just one
-  ;; caller among many and fell below the budget cut. Statically (no trace
-  ;; map — the fresh-import case), the test that references a seed is the
-  ;; next thing the ask will touch; it rides guaranteed and marked. The
-  ;; fixture's test deliberately shares no name token with the seed, or it
-  ;; would arrive as a seed itself and prove nothing.
+  ;; the misses were almost all DEFTESTS. s10 then measured the first
+  ;; fix's cost: rows APPENDED past the budget reshaped step-1 orientation
+  ;; (8->16 turns, two takes). So the guarantee is now bounded: the TOP
+  ;; seed's test only, DISPLACING tail cards inside the budget — never
+  ;; growing the bundle. The fixture's tests share no name token with
+  ;; their subjects, or they would arrive as seeds and prove nothing.
   (let [src (str "(ns sw.core (:require [clojure.test :refer [deftest is]]))\n"
                  "(defn rate \"Cents per unit.\" [x] (* 2 x))\n"
-                 "(defn ^:unused-ok a1 \"Caller.\" [x] (rate x))\n"
-                 "(defn ^:unused-ok a2 \"Caller.\" [x] (rate x))\n"
-                 "(defn ^:unused-ok a3 \"Caller.\" [x] (rate x))\n"
-                 "(defn ^:unused-ok a4 \"Caller.\" [x] (rate x))\n"
-                 "(defn ^:unused-ok a5 \"Caller.\" [x] (rate x))\n"
-                 "(defn ^:unused-ok a6 \"Caller.\" [x] (rate x))\n"
-                 "(deftest pricing-behaviour (is (= 4 (rate 2))))\n")
+                 "(defn levy \"Cents per parcel.\" [x] (+ 7 x))\n"
+                 "(defn ^:unused-ok a1 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(defn ^:unused-ok a2 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(defn ^:unused-ok a3 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(defn ^:unused-ok a4 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(defn ^:unused-ok a5 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(defn ^:unused-ok a6 \"Caller.\" [x] (rate (levy x)))\n"
+                 "(deftest pricing-behaviour (is (= 4 (rate 2))))\n"
+                 "(deftest surcharge-behaviour (is (= 9 (levy 2))))\n")
         sess (atom {:store (store/ingest (store/empty-store) 'sw.core src)})
-        m    (orient/orient-map sess :ask "change how rate is computed" :tokens 220)]
-    (testing "the seed's test is among the rows even under a tight budget"
-      (is (some #(= 'sw.core/pricing-behaviour (:form %)) (:rows m))
-          (pr-str (mapv :form (:rows m)))))
-    (testing "and it is marked as the seed's test — not just another caller"
-      (is (= "tests sw.core/rate"
-             (:via (first (filter #(= 'sw.core/pricing-behaviour (:form %)) (:rows m)))))
-          (pr-str (filter #(= 'sw.core/pricing-behaviour (:form %)) (:rows m)))))
+        m    (orient/orient-map sess :ask "change how rate and levy combine" :tokens 220)]
+    (testing "the TOP seed's test is among the rows even under a tight budget"
+      (is (some #(re-find #"^tests " (str (:via %))) (:rows m))
+          (pr-str (mapv (juxt :form :via) (:rows m)))))
+    (testing "… and only the top seed's — the guarantee is bounded, not per seed"
+      (is (= 1 (count (filter #(re-find #"^tests " (str (:via %))) (:rows m))))
+          (pr-str (mapv (juxt :form :via) (:rows m)))))
+    (testing "the guarantee DISPLACES — the reported budget is not exceeded"
+      (is (<= (:tokens m) 220) (pr-str (select-keys m [:tokens :budget]))))
     (testing "a seed with no test gains no phantom row"
       (let [m2 (orient/orient-map
                 (atom {:store (store/ingest (store/empty-store) 'nw.core

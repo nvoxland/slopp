@@ -887,17 +887,27 @@
                                                                      (deftest? from))]
                                                       from))]
                                   [t q])))
-                        (take 3 seed-order))
+                        (take 1 seed-order))
         have     (into #{} (map :form) rows)
-        rows     (-> (mapv (fn [r]
-                             (if-let [q (get seed-test (:form r))]
-                               (assoc r :via (str "tests " q))
-                               r))
-                           rows)
-                      (into (keep (fn [[t q]]
-                                    (when-not (have t)
-                                      (assoc (row t) :via (str "tests " q)))))
-                            seed-test))]
+        rows     (let [rows    (mapv (fn [r]
+                                       (if-let [q (get seed-test (:form r))]
+                                         (assoc r :via (str "tests " q))
+                                         r))
+                                     rows)
+                        missing (remove (comp have key) seed-test)]
+                    ;; DISPLACE, never append: the s10 grid measured appended
+                    ;; rows reshaping step-1 orientation (8->16 turns) — the
+                    ;; guarantee frees tail cards until the test row fits the
+                    ;; budget, and seeds are never popped
+                    (reduce (fn [rows [t q]]
+                              (let [tr (assoc (row t) :via (str "tests " q))
+                                    tc (est tr)]
+                                (loop [rows rows freed 0]
+                                  (if (or (<= (+ used tc) (+ tokens freed))
+                                          (<= (count rows) (count seed-order)))
+                                    (conj rows tr)
+                                    (recur (pop rows) (+ freed (est (peek rows))))))))
+                            rows missing))]
     (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
       (pos? more) (assoc :more more))))
 

@@ -71,7 +71,7 @@
     (try
       (testing "the help tool exists (agents invented the name twice)"
         (let [h (call! sess "help" {})]
-          (is (re-find #"edit_group" h))
+          (is (re-find #"change" h))
           (is (re-find #"help \{topic\}" h) "the cheat-sheet indexes the chapters")))
       (call! sess "ns_create" {:ns "hint" :source "(ns hint (:require [clojure.test :refer [deftest is]]))\n(defn f [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
       (testing "redundant test_runs earn a hint; a write resets the counter"
@@ -2194,7 +2194,7 @@
         "the annotation the marker exists to produce is still set"))
   (testing "the classification itself did not change — this is a refactor"
     ;; positive control on the refactor: same answer, different home
-    (is (= 35 (count tools/read-only-tools)))
+    (is (= 36 (count tools/read-only-tools)))
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
     (is (not (contains? tools/read-only-tools "ui_serve")))
@@ -3076,58 +3076,6 @@
             (is (re-find #"(?i)no topic.*nope" (call {:topic "nope"}))))
           (finally (ops/close! sess)))))))
 
-(deftest ^:external an-intent-lands-as-one-verified-group
-  ;; The reversal of `edit-group-stays-off-the-wire-on-purpose` (2026-08-30),
-  ;; made explicitly. The grain an agent thinks in is the INTENT — the fn,
-  ;; its test, the caller it changes, the require it needs — and eval10
-  ;; measured what one-form-per-call costs on that grain: the rename step's
-  ;; three real writes arrived with reads between them, each verified
-  ;; separately, each a model request. A group is that intent as ONE atomic
-  ;; write, every per-step gate intact, verified once, reported per step. It
-  ;; is not a shopping list: the completeness judgement is still done's, and
-  ;; a whole feature in one call is refused by the same gates a whole feature
-  ;; in one form is.
-  (let [sess (external/open!)]
-    (try
-      (testing "it is advertised"
-        (is (some #{"edit_group"}
-                  (mapcat #(get-in % [:inputSchema :properties :op :enum])
-                          (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
-                                  [:result :tools])))
-            "an op of the edit family (D-families)"))
-      (call! sess "ns_create" {:ns "grp.core.util" :source "(ns grp.core.util)\n(defn ^:unused-ok twice [x] (* 2 x))\n"})
-      (call! sess "ns_create" {:ns "grp.core" :source "(ns grp.core)\n(defn ^:unused-ok base [] 1)\n"})
-      (call! sess "ns_create" {:ns "grp.core-test"
-                               :source "(ns grp.core-test (:require [clojure.test :refer [deftest is]] [grp.core :as core]))\n(deftest base-t (is (= 1 (core/base))))\n"})
-      (testing "one intent: a fn + its test + a change to an existing form, string-keyed as the wire sends them"
-        (let [r (call! sess "edit_group"
-                       {:prompt "quad: the fn, its test, and base uses it"
-                        :steps [{"action" "add" "ns" "grp.core"
-                                 "source" "(defn quad [x] (util/twice (util/twice x)))"}
-                                {"action" "add" "ns" "grp.core-test"
-                                 "source" "(deftest quad-t (is (= 8 (core/quad 2))))"}
-                                {"action" "subform" "ns" "grp.core" "name" "base"
-                                 "match" "1" "source" "(- (quad 1) 3)"}]})]
-          (is (re-find #":group" r) r)
-          (testing "reported per step, with the form each landed"
-            (is (re-find #":steps \[\{:step 0, :action :add, :form grp\.core/quad" r) r)
-            (is (re-find #":step 2, :action :subform, :form grp\.core/base" r) r))
-          (testing "verified ONCE, and the covering tests are NAMED, not counted"
-            (is (re-find #":status :green" r) r)
-            (is (re-find #":affected \[grp\.core-test/base-t grp\.core-test/quad-t\]" r) r))
-          (testing "the missing alias was required for the group, as it is for a single write"
-            (is (re-find #"grp\.core\.util :as util"
-                         (call! sess "query_source" {:targets [{:ns "grp.core" :name "grp.core"}]}))
-                (subs r (max 0 (- (count r) 900)))))))
-      (testing "a bad step refuses the WHOLE group by index, and nothing landed"
-        (let [r (call! sess "edit_group"
-                       {:prompt "one good, one bad"
-                        :steps [{"action" "add" "ns" "grp.core" "source" "(defn never [] 1)"}
-                                {"action" "frobnicate" "ns" "grp.core"}]})]
-          (is (re-find #"step 1: unknown action" r) r)
-          (is (re-find #":error" (call! sess "query_source" {:targets [{:ns "grp.core" :name "never"}]})))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external a-group-delete-refuses-a-caller-OUTSIDE-the-group-by-step-and-name
   ;; slopp-ui, 2026-08-30, on edit_group's announcement: "delete a
   ;; namespace's forms" is exactly where the callers gate stops being a
@@ -3204,17 +3152,16 @@
 (deftest ^:external the-advertised-surface-is-fourteen-families-and-every-op-keeps-its-name
   ;; eval10: 96 advertised tools (~64k chars of descriptions) — Claude Code
   ;; DEFERRED every one, and the agent paid 19–22 ToolSearch turns per
-  ;; lifetime cell to find them, plus the choosing cost of a 96-name list.
-  ;; Nathan: "cut harder — merge families into fewer, richer tools". The cut
-  ;; that cannot rot the record (slopp-ui): every operation KEEPS ITS NAME as
-  ;; the family's `op`, so every refusal, docstring and skill line that
-  ;; spells `edit_subform` stays exactly right; only the packaging moves.
-  ;; Direct dispatch by op name survives for `--call` and the hooks.
+  ;; lifetime cell to find them. The cut that cannot rot the record: every
+  ;; operation KEEPS ITS NAME as the family's `op`, so refusals, docstrings
+  ;; and skill lines stay right; only the packaging moves. Direct dispatch
+  ;; by op name survives for `--call` and the hooks.
   ;;
-  ;; s8 tightened the edit family: the single-form write ops are
-  ;; DE-ADVERTISED (a one-step edit_group is the single-form write, and the
-  ;; parity port made that literally true) — but their names still dispatch,
-  ;; pinned below, because refusals, benchmarks and old scripts spell them.
+  ;; s11 made the surface TWO VERBS — explore (questions) and change
+  ;; (writes) — after three measurements agreed that only surface forcing
+  ;; moves behavior (s7 prose, s8 de-advertising, s10 advertisement beside
+  ;; a familiar sibling). The former write ops and old verb names live on
+  ;; as dispatchable aliases, pinned below.
   (let [sess (external/open!)]
     (try
       (let [advertised (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])
@@ -3224,43 +3171,56 @@
                    "verify" "build" "store" "slopp" "done" "commit_point"}
                  names)
               (pr-str (sort names))))
-        (testing "every op lives in exactly one family, and the family's description indexes it"
+        (testing "every op lives in exactly one family, and the families cover the registry"
           (let [placed (frequencies (mapcat :ops tools/families))]
             (is (every? #(= 1 %) (vals placed)) (pr-str (filter #(not= 1 (val %)) placed)))
             (is (= (set (keys placed)) (into #{} (map :name) tools/registry))
-                "the families cover the registry exactly"))
-          (let [edit (some #(when (= "edit" (:name %)) %) advertised)]
-            (is (re-find #"edit_subform \{" (:description edit)) (:description edit))
-            (is (some #{"edit_group"} (get-in edit [:inputSchema :properties :op :enum])))
-            (is (nil? (some #{"edit_add_form" "edit_replace_form"}
-                            (get-in edit [:inputSchema :properties :op :enum])))
-                "the single-form aliases are de-advertised — the group is the write door")
+                "the families cover the registry exactly")))
+        (testing "the edit family advertises the ONE write verb"
+          (let [edit (some #(when (= "edit" (:name %)) %) advertised)
+                enum (get-in edit [:inputSchema :properties :op :enum])]
+            (is (some #{"change"} enum))
+            (is (nil? (some #{"edit_group" "edit_subform" "edit_delete_form"
+                              "edit_add_form" "edit_replace_form" "intent"} enum))
+                "the former write ops are de-advertised aliases")
+            (is (re-find #"THE write door" (:description edit)) (:description edit))
             (is (= ["op"] (get-in edit [:inputSchema :required])))
-            (is (= #{"boolean" "string"} (set (get-in edit [:inputSchema :properties :text :type])))
-                "two ops' types for one key are both accepted, not the first one's")))
+            ;; :text now comes from edit_comment alone — the multi-op union
+            ;; collapsed with the subform descriptor
+            (is (= #{"string"} (set (flatten [(get-in edit [:inputSchema :properties :text :type])]))))))
+        (testing "the read family leads with the question verb"
+          (let [rd   (some #(when (= "read" (:name %)) %) advertised)
+                enum (get-in rd [:inputSchema :properties :op :enum])]
+            (is (some #{"explore"} enum))
+            (is (some #{"check"} enum))
+            (is (nil? (some #{"query_batch"} enum)) "query_batch is the compat alias")))
         (testing "the whole advertised surface is small enough never to be deferred"
           (is (< (count (pr-str advertised)) 30000) (str (count (pr-str advertised))))))
       (call! sess "ns_create" {:ns "fam.core" :source "(ns fam.core)\n(defn ^:unused-ok f [x] x)\n"})
       (testing "a family call is the op call"
-        (let [r (call! sess "edit" {:op "edit_group" :prompt "via the family"
-                                    :steps [{:action "add" :ns "fam.core"
-                                             :source "(defn ^:unused-ok g [x] (f x))"}]})]
+        (let [r (call! sess "edit" {:op "change" :prompt "via the family"
+                                    :impl [{:action "add" :ns "fam.core"
+                                            :source "(defn ^:unused-ok g [x] (f x))"}]})]
           (is (re-find #":ok true" r) r))
         ;; the write held g's text in the ask's ledger, so the read through
-        ;; the read family answers with a reference (D-form-ledger) — the
-        ;; family call reached the op either way
+        ;; the read family answers with a reference (D-form-ledger)
         (is (re-find #":name g, :source-already-sent true"
                      (call! sess "read" {:op "query_source" :targets [{:ns "fam.core" :name "g"}]}))))
       (testing "the op's own validation, by name"
-        (is (re-find #"unknown op frobnicate for edit — ops: intent edit_group edit_subform" (call! sess "edit" {:op "frobnicate"})))
-        (is (re-find #"unknown argument :nom for edit_subform" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :nom "g"})))
-        (is (re-find #"edit_subform needs :name" (call! sess "edit" {:op "edit_subform" :ns "fam.core" :source "1" :match "x" :prompt "p"}))))
-      (testing "a de-advertised alias called by its own name still dispatches (the --call door, the hooks, old scripts)"
+        (is (re-find #"unknown op frobnicate for edit — ops: change edit_comment" (call! sess "edit" {:op "frobnicate"})))
+        (is (re-find #"unknown argument :nom for change" (call! sess "edit" {:op "change" :nom "g" :prompt "p" :impl []})))
+        (is (re-find #"change needs :impl" (call! sess "edit" {:op "change" :prompt "p"}))))
+      (testing "the de-advertised aliases still dispatch by name (the --call door, old scripts)"
         (is (re-find #":ok true" (call! sess "edit_replace_form" {:ns "fam.core" :name "g" :prompt "direct"
-                                                                    :source "(defn ^:unused-ok g [x] (f (f x)))"}))))
+                                                                    :source "(defn ^:unused-ok g [x] (f (f x)))"})))
+        (is (re-find #":ok true" (call! sess "edit_group" {:prompt "alias group"
+                                                           :steps [{:action "replace" :ns "fam.core" :name "g"
+                                                                    :source "(defn ^:unused-ok g [x] (f x))"}]})))
+        (is (re-find #":ok true" (call! sess "edit_subform" {:ns "fam.core" :name "g" :prompt "alias subform"
+                                                             :match "(f x)" :source "(f (f x))"}))))
       (testing "help {topic op} is the op's full card"
-        (let [h (call! sess "help" {:topic "edit_subform"})]
-          (is (re-find #"edit_subform" h))
+        (let [h (call! sess "help" {:topic "change"})]
+          (is (re-find #"THE write door" h))
           (is (re-find #":required" h) h)))
       (finally (ops/close! sess)))))
 
@@ -3485,16 +3445,16 @@
   ;; Measured on every eval cell (s1–s6, both cohorts): not ONE assistant
   ;; message carried two tool_use blocks — "issue independent reads in one
   ;; turn" has been in the skill since step 1 and no model does it. So the
-  ;; batch lives inside the call: `read {op query_batch ops [...]}` runs
+  ;; batch lives inside the call: `read {op explore ops [...]}` runs
   ;; several READ ops and answers them as one result vector, each entry
   ;; through the same told!/ledger door as the single call. A write op in
   ;; the batch is refused by name — reads compose, writes have their own
-  ;; grain (edit_group).
+  ;; grain (change).
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "qb.core" :source "(ns qb.core)\n(defn f \"F.\" [x] x)\n(defn g \"G.\" [x] (f x))\n"})
       (testing "several reads, one call, one result per op"
-        (let [r (call! sess "read" {:op "query_batch"
+        (let [r (call! sess "read" {:op "explore"
                                     :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}
                                           {"op" "query_search" "pattern" "G\\."}
                                           {"op" "query_depends" "on" "qb.core/f"}]})]
@@ -3503,11 +3463,11 @@
           (is (re-find #":op \"query_depends\", :result" r) "the depends answer rode along")
           (is (not (re-find #"unknown (op|argument)" r)) r)))
       (testing "the ledger reaches inside the batch: a source the ask holds is a reference"
-        (let [r (call! sess "read" {:op "query_batch"
+        (let [r (call! sess "read" {:op "explore"
                                     :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}]})]
           (is (re-find #":source-already-sent true" r) r)))
       (testing "a write op is refused by name; nothing runs"
-        (let [r (call! sess "read" {:op "query_batch"
+        (let [r (call! sess "read" {:op "explore"
                                     :ops [{"op" "query_source" "targets" [{"ns" "qb.core" "name" "f"}]}
                                           {"op" "edit_delete_form" "ns" "qb.core" "name" "f"}]})]
           (is (re-find #"edit_delete_form is a write" r) r)
@@ -3685,42 +3645,93 @@
           "resend true bypasses the ledger: the full text comes back")
       (finally (ops/close! sess)))))
 
-(deftest ^:external an-ask-lands-as-one-intent
-  ;; s10 wave 2: every axis — wall, tokens, cost — reduced to request count
-  ;; and output volume (eval11 decomposition). The intent op collapses the
-  ;; loop's request-per-gesture floor: tests land first and are WATCHED
-  ;; going red, impl lands (patch steps: deltas, not whole-form retypes),
-  ;; accepts finish, verification and done run — ONE call, one result. The
-  ;; loop remains the red path's fallback.
-  ;;
-  ;; The hold case must BREAK AN EXISTING covered form: a red made only of
-  ;; freshly-added spec tests LANDS by design (red-first — the red IS the
-  ;; spec); a red in code the episode touched is the one the thread holds.
+(deftest ^:external a-change-is-one-call
+  ;; s11: two verbs. `change` = the s10 intent pipeline MINUS the done —
+  ;; tests land first and are WATCHED going red, impl lands, one
+  ;; verification, ONE result — and done stays the agent's SEPARATE move
+  ;; when the unit of work is finished: a unit may span change -> explore
+  ;; -> change, and the Stop hook is the landing floor. The red path needs
+  ;; no special case any more: nothing was landing per call anyway.
   (let [sess (external/open!)]
     (try
-      (call! sess "ns_create" {:ns "it.core" :source "(ns it.core (:require [clojure.test :refer [deftest is]]))\n(defn rate [x] (* 2 x))\n(defn ^:unused-ok use-rate [x] (rate x))\n"})
-      (testing "the whole ask is ONE call: tests red-first, impl, verify, done"
-        (let [r (call! sess "intent"
+      (call! sess "ns_create" {:ns "ch.core" :source "(ns ch.core (:require [clojure.test :refer [deftest is]]))\n(defn rate [x] (* 2 x))\n"})
+      (testing "one call: tests red-first, impl, verify — and NO done inside"
+        (let [r (call! sess "change"
                        {:prompt "rate doubles then adds a fixed fee of 7"
-                        :tests [{:action "add" :ns "it.core"
+                        :tests [{:action "add" :ns "ch.core"
                                  :source "(deftest rate-fee-t (is (= 27 (rate 10))))"}]
-                        :impl  [{:action "patch" :ns "it.core" :name "rate"
+                        :impl  [{:action "patch" :ns "ch.core" :name "rate"
                                  :replace [{:match "(* 2 x)" :source "(+ (* 2 x) 7)"}]}]})
               m (edn/read-string r)]
-          (is (re-find #":went-red \[it.core/rate-fee-t\]" r)
-              (str "the spec was watched failing: " r))
+          (is (re-find #":went-red \[ch.core/rate-fee-t\]" r) r)
           (is (= :green (:status m)) (pr-str (select-keys m [:status :test])))
-          (is (re-find #":done \"d" r) r)))
-      (testing "a red in touched code reports, carries :test-src, and HOLDS"
-        (let [r (call! sess "intent"
+          (is (nil? (:done m)) "done is the agent's move, not the call's")
+          (is (nil? (:land m)) (pr-str (select-keys m [:land :done])))))
+      (testing "… and done, called separately, closes and lands the unit"
+        (is (re-find #":landed \"main\"" (call! sess "done" {:label "fee unit"}))))
+      (testing "a red change reports, carries :test-src, and lands nothing"
+        (let [r (call! sess "change"
                        {:prompt "the fee becomes 9 — but this impl gets it wrong"
-                        :impl  [{:action "patch" :ns "it.core" :name "rate"
+                        :impl  [{:action "patch" :ns "ch.core" :name "rate"
                                  :replace [{:match "(+ (* 2 x) 7)" :source "(+ (* 2 x) 8)"}]}]})
               m (edn/read-string r)]
-          (is (re-find #":test-src" r)
-              (str "the failing test's source rides the red: " r))
-          (is (= :red (:status m)) (pr-str (select-keys m [:status :findings])))
-          (is (nil? (:land m))
-              (str "a red in touched code lands nothing — the thread keeps"
-                   " the work: " (pr-str (select-keys m [:land :status :done :findings]))))))
+          (is (re-find #":test-src" r) r)
+          (is (= :red (:status m)) (pr-str (select-keys m [:status])))
+          (is (nil? (:land m)) (pr-str (select-keys m [:land :status])))))
+      (testing "intent — the announced name — still dispatches as an alias"
+        (let [r (call! sess "intent"
+                       {:prompt "put the fee back to 7"
+                        :impl  [{:action "patch" :ns "ch.core" :name "rate"
+                                 :replace [{:match "(+ (* 2 x) 8)" :source "(+ (* 2 x) 7)"}]}]})]
+          (is (re-find #":ok true" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external explore-answers-questions-without-writing
+  ;; s11: the question-side verb. Many ops, one call, server does the work
+  ;; — the promoted query_batch (the only new op ever adopted unforced) —
+  ;; plus `check`: assertion code run in the image with clojure.test's
+  ;; reporting CAPTURED, nothing written. The diagnostic red becomes an
+  ;; ANSWER (slopp-ui's find-region case): no landed test to clean up, no
+  ;; temptation to fix working code against a wrong assertion.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ex.core" :source "(ns ex.core)\n(defn ^:unused-ok f \"F.\" [x] (* 2 x))\n"})
+      (let [before (count (ops/journal sess))]
+        (testing "check answers a WRONG assertion with the red, as data"
+          (let [r (call! sess "check" {:code "(clojure.test/is (= 5 (ex.core/f 2)))"})]
+            (is (re-find #":fail 1" r) r)
+            (is (re-find #":actual" r) "the red carries expected/actual — it is the answer")))
+        (testing "and a RIGHT one with the green"
+          (is (re-find #":pass 1" (call! sess "check" {:code "(clojure.test/is (= 4 (ex.core/f 2)))"}))))
+        (testing "explore carries several questions — a check and a read — in ONE call"
+          (let [r (call! sess "explore"
+                         {:ops [{:op "check" :code "(clojure.test/is (= 5 (ex.core/f 2)))"}
+                                {:op "query_source" :targets ["ex.core/f"]}]})]
+            (is (re-find #":fail 1" r) r)
+            (is (re-find #"defn .:unused-ok f" r) r)))
+        (testing "nothing was written — the journal is untouched"
+          (is (= before (count (ops/journal sess))))))
+      (testing "query_batch — the adopted name — still dispatches as an alias"
+        (is (re-find #"ex\.core" (call! sess "query_batch"
+                                        {:ops [{:op "query_search" :pattern "unused-ok f"}]}))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-step-without-an-action-is-inferred-not-refused
+  ;; The s11 canary watched sonnet send {ns name source} steps with no
+  ;; action — the only readings the payload admits are :replace (form
+  ;; exists) and :add (it does not) — eat \"unknown action:\", and fragment
+  ;; ONE write into three groups, a manual module_dep and a second
+  ;; full_check. The server does the mechanical work: infer it.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ia.core" :source "(ns ia.core)\n(defn f \"F.\" [x] x)\n"})
+      (let [r (call! sess "edit_group"
+                     {:prompt "replace f and add g — no actions stated"
+                      :steps [{:ns "ia.core" :name "f"
+                               :source "(defn f \"F.\" [x] (inc x))"}
+                              {:ns "ia.core"
+                               :source "(defn ^:unused-ok g \"G.\" [x] (f x))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":action :replace" r) (str "f existed — inferred replace: " r))
+        (is (re-find #":action :add" r) (str "g did not — inferred add: " r)))
       (finally (ops/close! sess)))))

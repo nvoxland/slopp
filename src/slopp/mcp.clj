@@ -1692,80 +1692,98 @@
                              f)))
                        fs)))))
 
-(def ^:private intent-handlers!
-  "The changeset program (s10): a whole ask as ONE call. `intent` lands the
-  tests group first and reports which went RED (red-first, watched), lands
-  the impl group, runs the finisher for `accept`, and closes with done —
-  one result carrying the verdict, the finisher's work, and `:test-src` on
-  any residual red. A red done does not land: the thread keeps the work,
-  and the ordinary loop continues from this result — the red path is a
-  continuation, not a separate mode. Step vocabulary is edit_group's plus
-  :patch (expanded by `wire-steps`): the model emits deltas, never retypes."
-  {"intent"
-   (fn [session a _sym]
-     (let [tests (wire-steps (or (:tests a) []))
-           impl  (wire-steps (or (:impl a) []))
-           label (let [p (str (or (:prompt a) "intent"))]
-                   (subs p 0 (min 60 (count p))))]
-       (if (empty? impl)
-         (text! {:error "intent needs :impl steps — tests alone are edit_group {steps …}"})
-         (let [rt (when (seq tests)
-                    (ops/edit-group! session tests
-                                     :prompt (str (:prompt a) " [tests first — expected red]")
-                                     :agent (:agent a)))]
-           (if (and rt (:error rt))
-             (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
-             (let [went-red (vec (:failed-tests (:test rt)))
-                   ri (ops/edit-group! session impl
-                                       :prompt (:prompt a) :agent (:agent a))]
-               (if (:error ri)
-                 (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
-                                       :phase :impl)
-                          (seq tests) (assoc :tests {:landed (count tests)
-                                                     :went-red went-red})))
-                 (let [ri (-> ri
-                              (held-after-write! session "edit_group" a)
-                              (finish-accepted! session a)
-                              (attach-red-context! session))
-                       dn (when-not (red? (:test ri))
-                         ;; a red intent is not a CLOSED unit of work: no
-                         ;; done, no land — the thread keeps the work and
-                         ;; the ordinary loop continues from this result
-                         (external/done! session :label label))]
-                   (text!
-                    (cond->
-                     {:ok true
-                      :impl (select-keys ri [:group :steps :warnings :drift
-                                             :red-first :note])
-                      :test (:test ri)
-                      :done (:done dn)
-                      :status (cond (red? (:test ri)) :red
-                                    (= :red (get-in dn [:findings :test-status])) :red
-                                    :else :green)}
-                      (seq tests)
-                      (assoc :tests
-                             (cond-> {:landed (count tests) :went-red went-red}
-                               (empty? went-red)
-                               (assoc :note (str "the tests landed GREEN — the spec"
-                                                 " was never watched failing; a green"
-                                                 " you did not watch fail proves"
-                                                 " nothing"))))
-                      (:finisher ri)      (assoc :finisher (:finisher ri))
-                      (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
-                      (:landed dn)        (assoc :landed (:landed dn))
-                      (:land dn)          (assoc :land (:land dn))
-                      (:external dn)      (assoc :external (:external dn))
-                      (:findings dn)      (assoc :findings (:findings dn))
-                      (red? (:test ri))
-                      (assoc :note (str "red — nothing LANDED, and nothing is"
-                                        " LOST: the tests and impl are on your"
-                                        " thread, unlanded. Fix forward from"
-                                        " :test-src; your next green intent or"
-                                        " done lands it all."))))))))))))})
+(def ^:private change-handlers!
+  "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
+  unit of work as one call — tests land first and the result reports which
+  went RED (watched, red-first honored), impl lands, accepted shifts
+  finish, ONE verification, one result — and NO done inside: done is the
+  agent's separate this-unit-is-finished move (a unit may span change ->
+  explore -> change; the Stop hook is the landing floor), which also
+  removes any red special case — a red change is a red result with
+  :test-src, nothing landed, nothing lost. `check`: assertion code run in
+  the image with clojure.test reporting CAPTURED — nothing written; the
+  diagnostic red as an ANSWER. (`explore` dispatches as a case label on
+  the batch branch — an entry here would close the load cycle
+  call-op! -> tail-handlers! -> this map -> call-op!.)"
+  (let [change-fn
+        (fn [session a _sym]
+          (let [tests (wire-steps (or (:tests a) []))
+                impl  (wire-steps (or (:impl a) []))]
+            (if (empty? impl)
+              (text! {:error (str "change needs :impl steps — a question is explore;"
+                                  " a test you are writing to FIND something out is"
+                                  " explore {ops [{op check code …}]}")})
+              (let [rt (when (seq tests)
+                         (ops/edit-group! session tests
+                                          :prompt (str (:prompt a) " [tests first — expected red]")
+                                          :agent (:agent a)))]
+                (if (and rt (:error rt))
+                  (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
+                  (let [went-red (vec (:failed-tests (:test rt)))
+                        _ (when rt (ledger-written! session "edit_group" {:steps tests}))
+                        ri (ops/edit-group! session impl
+                                            :prompt (:prompt a) :agent (:agent a))]
+                    (if (:error ri)
+                      (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
+                                            :phase :impl)
+                               (seq tests) (assoc :tests {:landed (count tests)
+                                                          :went-red went-red})))
+                      (let [ri (-> ri
+                                   (held-after-write! session "edit_group" {:steps impl})
+                                   (finish-accepted! session a)
+                                   (attach-red-context! session))]
+                        (text!
+                         (cond->
+                          {:ok true
+                           :impl (select-keys ri [:group :steps :warnings :drift
+                                                  :red-first :note])
+                           :test (:test ri)
+                           :status (if (red? (:test ri)) :red :green)}
+                           (seq tests)
+                           (assoc :tests
+                                  (cond-> {:landed (count tests) :went-red went-red}
+                                    (empty? went-red)
+                                    (assoc :note (str "the tests landed GREEN — the"
+                                                      " spec was never watched failing;"
+                                                      " a green you did not watch fail"
+                                                      " proves nothing"))))
+                           (:finisher ri)      (assoc :finisher (:finisher ri))
+                           (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
+                           (red? (:test ri))
+                           (assoc :note (str "red — nothing landed, and nothing is"
+                                             " LOST: the tests and impl are on your"
+                                             " thread. Fix forward from :test-src;"
+                                             " done is YOUR move when the unit is"
+                                             " finished."))))))))))))]
+    {"change" change-fn
+     "intent" change-fn
+     "check"
+     (fn [session a _sym]
+       (let [wrapped (str "(do (require (quote clojure.test))"
+                          " (let [slopp-check-reports (atom [])]"
+                          "  (binding [clojure.test/report"
+                          "            (fn [m] (swap! slopp-check-reports conj"
+                          "                      (select-keys m [:type :expected :actual :message])))]"
+                          "   (let [slopp-check-value (do " (:code a) ")]"
+                          "    {:value slopp-check-value"
+                          "     :assertions (deref slopp-check-reports)}))))")
+             r (ops/query-eval session wrapped)]
+         (text!
+          (if (map? r)
+            r
+            (let [{:keys [value assertions]} (first r)
+                  types (frequencies (map :type assertions))]
+              {:value value
+               :pass (:pass types 0) :fail (:fail types 0)
+               :errors (:error types 0)
+               :assertions (vec assertions)
+               :note (str "nothing was written — this red is an ANSWER; land"
+                          " it as a test (change {tests […]}) only once it"
+                          " says what you mean")})))))}))
 
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
-  (merge env-handlers! file-handlers! sync-handlers! intent-handlers!))
+  (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -1914,8 +1932,9 @@
                                                           :detail (:detail a))))
       "query_search" (text! (query/query-search session (:pattern a)
                                                   :limit (or (:limit a) 30)))
-      "query_batch"
-      ;; several READ questions, one call. Measured on every eval cell of
+      ("query_batch" "explore")
+      ;; several READ questions, one call — THE question verb (explore;
+      ;; query_batch is its compat alias). Measured on every eval cell of
       ;; both cohorts: no model ever emitted two tool_use blocks in one
       ;; message, so the batch lives INSIDE the call. Each entry recurses
       ;; through call-op! — validation, told!, the form ledger and the
@@ -1925,16 +1944,16 @@
             bad (some (fn [o]
                         (let [nm (some-> (:op o) clojure.core/name)]
                           (cond
-                            (nil? nm) {:error "every batch entry needs :op — a read op name"}
+                            (nil? nm) {:error "every explore entry needs :op — a read op name"}
                             (not (contains? tools/read-only-tools nm))
-                            {:error (str nm " is a write — a batch is READ questions only;"
-                                         " writes have their own grain (edit_group)")}
+                            {:error (str nm " is a write — explore is READ questions only;"
+                                         " writes have their own grain (change)")}
                             :else nil)))
                       ops)]
         (cond
-          (empty? ops)         (text! {:error "query_batch needs ops — [{op …args} …]"})
+          (empty? ops)         (text! {:error "explore needs ops — [{op …args} …]"})
           bad                  (text! bad)
-          (< 6 (count ops))    (text! {:error (str (count ops) " entries — a batch is at most 6;"
+          (< 6 (count ops))    (text! {:error (str (count ops) " entries — explore is at most 6;"
                                                    " past that the answer outgrows the reader")})
           :else
           (text! {:results (mapv (fn [o]

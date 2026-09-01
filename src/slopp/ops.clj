@@ -553,7 +553,19 @@
                      (cond-> {:store st' :delta d :hot [:unmap ns name]}
                        post (assoc :post-eval post))
                      (edit/missing-form-error st ns name))))
-    {:error (str "unknown action: " action)}))
+    (if (and (nil? action) (:source step))
+      ;; a step with no action admits exactly one reading: :replace when
+      ;; the named form exists, :add when it does not. The s11 canary
+      ;; watched a model send {ns name source} steps and a refusal
+      ;; fragment ONE write into a six-turn recovery cascade — the same
+      ;; self-repair family as auto-require: the server does the
+      ;; mechanical work.
+      (apply-group-step st gid prompt agent
+                        (assoc step :action
+                               (if (and name (store/form-named st ns name))
+                                 :replace
+                                 :add)))
+      {:error (str "unknown action: " action)})))
 
 (defn forms-changed-since
   "Ids of forms touched by deltas after `since-id` (nil = since the beginning
@@ -4213,7 +4225,7 @@
                              ;; after a group visibly redundant
                              :steps    (vec (map-indexed
                                              (fn [i [[_ ns nm :as x] d]]
-                                               (cond-> {:step i :action (:action (nth steps i))}
+                                               (cond-> {:step i :action (or (:action (nth steps i)) (:op d))}
                                                  x    (assoc :form (symbol (str ns) (str nm)))
                                                  true (assoc :delta (:id d))))
                                              (map vector step-nms deltas)))
