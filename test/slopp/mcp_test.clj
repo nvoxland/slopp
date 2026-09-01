@@ -228,13 +228,17 @@
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "sp.core" :source "(ns sp.core)\n(defn f [] 1)\n"})
-      (testing "a response over the size gate is trimmed and retrievable"
+      (testing "a response over the size gate is trimmed, and retrieval completes
+                it WITHOUT re-buying the head (the remainder diet, s15: re-buys
+                averaged 18.8k chars across the s14 grid)"
         (let [r  (call! sess "query_eval" {:code "(apply str (repeat 9000 \"x\"))"})
               id (second (re-find #"query_detail \{:id \"(r\d+)\"\}" r))]
           (is (some? id) r)
-          (let [full (call! sess "query_detail" {:id id})]
-            (is (>= (count full) 8000))
-            (is (not (re-find #"query_detail \{:id" full))))))
+          (let [rest* (call! sess "query_detail" {:id id})]
+            (is (re-find #"REMAINDER" rest*) (subs rest* 0 (min 120 (count rest*))))
+            (is (< (count rest*) 8000) "the spooled half is smaller than the whole")
+            (is (re-find #"x{500}" rest*) "the withheld tail is all there")
+            (is (not (re-find #"query_detail \{:id" rest*))))))
       (testing "giant failure strings never reach the agent whole
                 (upstream capture truncates actuals; the text! heuristic
                 covers the other fields)"
@@ -4114,3 +4118,93 @@
           (is (re-find #"op cards" txt) txt)
           (is (re-find #"change \{impl, prompt" txt))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external an-aliased-require-upgrades-a-bare-one
+  ;; s14 sonnet-XL, measured: a scaffold with BARE requires + a form using
+  ;; the alias = \"No such namespace\", and every repair path refused with
+  ;; \"already required\" — 18 remove/add calls to rebuild the ns form.
+  ;; Adding an alias to a bare clause is an UPGRADE in place.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "upq.core" :source "(ns upq.core)\n(defn g \"G.\" [x] x)\n"})
+      (call! sess "ns_create" {:ns "upq.user" :requires ["upq.core"]
+                               :prompt "a consumer scaffolded with a BARE require"})
+      (testing "the aliased spec upgrades the bare clause — no remove, no staircase"
+        (let [r (call! sess "ns_add_require" {:ns "upq.user" :require "[upq.core :as core]"
+                                              :prompt "the upgrade"})]
+          (is (re-find #":ok true" r) r))
+        (let [src (call! sess "query_source" {:ns "upq.user"})]
+          (is (re-find #"\[upq\.core :as core\]" src) src)
+          (is (not (re-find #"upq\.core\)?\s+upq\.core" src)) "one clause, not two")))
+      (testing "an identical spec keeps the honest refusal"
+        (is (re-find #"already required"
+                     (call! sess "ns_add_require" {:ns "upq.user" :require "[upq.core :as core]"
+                                                   :prompt "again"}))))
+      (testing "a DIFFERENT alias refuses and names both spellings"
+        (let [r (call! sess "ns_add_require" {:ns "upq.user" :require "[upq.core :as c2]"
+                                              :prompt "conflict"})]
+          (is (re-find #":as core" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-group-door-self-repairs-a-bare-require-into-its-alias
+  ;; the s14 loop, end to end: scaffold with a bare require, a change whose
+  ;; form speaks the alias — auto-require now UPGRADES the clause and the
+  ;; group lands stamped :auto-require, instead of an 18-call rebuild.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "fixq.core" :source "(ns fixq.core)\n(defn quote-cents \"Q.\" [x] (* 100 x))\n"})
+      (call! sess "ns_create" {:ns "fixq.ship" :requires ["fixq.core"]
+                               :prompt "scaffolded bare, like the real cell"})
+      (let [r (call! sess "change"
+                     {:prompt "a form that speaks the alias the scaffold never declared"
+                      :impl [{:ns "fixq.ship"
+                              :source "(defn ^:unused-ok total \"T.\" [x] (core/quote-cents x))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":auto-require" r) r)
+        (is (re-find #"\[fixq\.core :as core\]"
+                     (call! sess "query_source" {:ns "fixq.ship"}))
+            "the bare clause was upgraded in place"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external done-pre-empts-the-ritual-closing-full-check
+  ;; s14 opus census: full_check x5 per cell, one per step as a closing
+  ;; ritual after done — each a whole-store re-run plus a fat payload that
+  ;; compounds as rent. The two facts that make it redundant exist at done
+  ;; time; done now states them. Answer-shaped, never instructive — and
+  ;; only when a GREEN whole-store verdict exists to cite.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ws.core" :source "(ns ws.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (testing "no whole-store verdict yet — done claims nothing about one"
+        (is (not (re-find #":whole-store" (call! sess "done" {:label "first"})))))
+      (call! sess "full_check" {})
+      (call! sess "edit_replace_form" {:ns "ws.core" :name "f"
+                                       :source "(defn ^:unused-ok f \"F!\" [x] x)"
+                                       :prompt "a change after the whole-store check"})
+      (testing "after a green full_check, done carries the two facts"
+        (let [r (call! sess "done" {:label "second"})]
+          (is (re-find #":whole-store" r) r)
+          (is (re-find #"was green" r) r)))
+      (finally (ops/close! sess)))))
+
+^:unsafe (deftest the-spool-holds-the-remainder-not-a-second-copy
+  ;; s14 payload audit: query_detail retrievals averaged 18.8k chars — the
+  ;; model re-buying the half it already held. The spool entry for an
+  ;; item-trimmed response is the REMAINDER: dropped items only, headed by
+  ;; where they continue from. ^:unsafe: rebinds *spool-session* exactly as
+  ;; the wire layer does — that binding IS the seam under test.
+  (let [rows (mapv (fn [i] {:i i :pad (apply str (repeat 200 "x"))}) (range 80))
+        f    (#'mcp/fit-payload rows 7800 "rT")]
+    (is (some? (:dropped f)) (pr-str (keys f)))
+    (is (str/includes? (:dropped f) "REMAINDER"))
+    (is (not (str/includes? (:dropped f) ":i 0")) "the shown head is not re-spooled")
+    (is (str/includes? (:dropped f) ":i 79") "the tail is all there"))
+  (testing "and text! swaps the remainder into the spool"
+    (let [sess (atom {})
+          rows (mapv (fn [i] {:i i :pad (apply str (repeat 300 "y"))}) (range 60))]
+      (binding [mcp/*spool-session* sess]
+        (#'mcp/text! rows))
+      (let [entry (first (vals (get-in @sess [:slopp.mcp/spool :entries])))]
+        (is (string? entry))
+        (is (str/includes? entry "REMAINDER") (subs (str entry) 0 (min 120 (count (str entry)))))
+        (is (not (str/includes? entry ":i 0")))))))

@@ -5440,8 +5440,10 @@
       (if (:error ar)
         r
         (let [r2 (retry)]
-          (cond-> r2
-            (nil? (:error r2)) (assoc :auto-require {:added spec :ns ns-sym})))))
+          ;; the require LANDED whatever the retry then says — stamp it, so a
+          ;; group that next trips the module gate (and lands via THAT
+          ;; retry) still reports both repairs
+          (assoc r2 :auto-require {:added spec :ns ns-sym}))))
     r))
 
 (defn edit-group!
@@ -5479,5 +5481,10 @@
                        r
                        (distinct (map :ns steps)))]
         (if (:error r1)
-          (auto-module-dep-retry! session r1 once :agent agent)
+          (let [r3 (auto-module-dep-retry! session r1 once :agent agent)]
+            ;; the module retry's success is a FRESH result — re-carry the
+            ;; require repair that already landed on the way here
+            (cond-> r3
+              (and (nil? (:error r3)) (:auto-require r1))
+              (assoc :auto-require (:auto-require r1))))
           r1)))))

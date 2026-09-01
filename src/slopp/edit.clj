@@ -160,12 +160,38 @@
     (let [req  (n/sexpr (p/parse-string require-str))
           lib  (if (vector? req) (first req) req)
           spec (n/sexpr (p/parse-string ns-source))
-          libs (for [clause spec
-                     :when (and (seq? clause) (= :require (first clause)))
-                     r (rest clause)]
-                 (if (vector? r) (first r) r))]
-      (if (some #{lib} libs)
-        {:error (str "already required: " lib)}
+          ]
+      (if-let [existing (first (filter (fn [r] (= lib (if (vector? r) (first r) r)))
+                                       (for [clause spec
+                                             :when (and (seq? clause) (= :require (first clause)))
+                                             r (rest clause)]
+                                         r)))]
+        (cond
+          ;; the same spelling — the honest refusal stands
+          (= existing (if (vector? req) req existing))
+          {:error (str "already required: " lib)}
+
+          ;; a BARE clause + a richer spec is an UPGRADE in place, not a
+          ;; duplicate: refusing it forced an 18-call remove/add staircase
+          ;; when a scaffold's bare requires met forms speaking the alias
+          ;; (s14, measured) — and blocked auto-require's repair of the
+          ;; same miss
+          (and (symbol? existing) (vector? req))
+          (let [zloc (z/of-string ns-source)
+                tgt  (some-> (z/find-value zloc z/next :require) z/up
+                             (z/find z/next
+                                     (fn [loc]
+                                       (= existing (try (z/sexpr loc)
+                                                        (catch Exception _ ::none))))))]
+            (if tgt
+              {:src (-> tgt (z/replace req) z/root-string) :upgraded (str existing)}
+              {:error (str "already required: " lib)}))
+
+          :else
+          {:error (str "already required: " lib " as " (pr-str existing)
+                       " — a DIFFERENT spelling than " require-str
+                       ". Pick one: keep the existing alias, or restate the"
+                       " whole (ns …) form as a change step (one call).")})
         (let [zloc (z/of-string ns-source)
               rq   (z/find-value zloc z/next :require)]
           {:src (if rq

@@ -157,16 +157,29 @@
              reserve (+ 1 (count (pr-str (mark total))))
              kept    (fit x "[" "]" (- budget reserve))]
          (when (seq kept)
-           {:body (pr-str (if (= (count kept) total)
-                            (vec kept)
-                            (conj (vec kept) (mark (count kept)))))
-            :note (str (count kept) " of " total " shown")}))
+           (let [n (count kept)]
+             (cond-> {:body (pr-str (if (= n total)
+                                      (vec kept)
+                                      (conj (vec kept) (mark n))))
+                      :note (str n " of " total " shown")}
+               (< n total)
+               ;; the retrieval half of the diet: query_detail re-buying the
+               ;; whole payload averaged 18.8k chars (s14 audit) when the
+               ;; reader already held the head — the spool gets ONLY this
+               (assoc :dropped
+                      (str ";; the REMAINDER — items " (inc n) "–" total
+                           " (the first " n " rode the trimmed response)\n"
+                           (pr-str (vec (drop n x)))))))))
 
        (and (map? x) (seq x))
        (let [kept (fit (seq x) "{" "}" budget)]
          (when (seq kept)
-           {:body (pr-str (into {} kept))
-            :note (str (count kept) " of " (count x) " keys shown")}))
+           (cond-> {:body (pr-str (into {} kept))
+                    :note (str (count kept) " of " (count x) " keys shown")}
+             (< (count kept) (count x))
+             (assoc :dropped
+                    (str ";; the REMAINDER — the keys the trimmed response lacked\n"
+                         (pr-str (apply dissoc x (map first kept))))))))
 
        :else nil))))
 
@@ -653,18 +666,29 @@
                           fit (when (> (count slimmed) 8000)
                                 (fit-payload (trim-failure-strings x) 7800 id))]
                       (cond
-                        ;; slimming alone got it under the gate — send it whole
+                        ;; slimming alone got it under the gate — send it whole;
+                        ;; the spool keeps the FULL copy (what was withheld is
+                        ;; failure-string tails a remainder cannot reconstruct)
                         (<= (count slimmed) 8000)
                         (str slimmed (trimmed id))
 
-                        ;; drop whole ITEMS: the body stays parseable and usable,
-                        ;; so a follow-up can be narrow instead of a full re-fetch
+                        ;; drop whole ITEMS: the body stays parseable, and the
+                        ;; spool keeps only the REMAINDER — a retrieval was
+                        ;; measured re-buying the half already in hand (18.8k
+                        ;; chars average, s14 audit)
                         fit
-                        (str (:body fit) "\n[" (:note fit) (invite id) "]")
+                        (do (when (:dropped fit)
+                              (swap! sess assoc-in [::spool :entries id] (:dropped fit)))
+                            (str (:body fit) "\n[" (:note fit) (invite id) "]"))
 
-                        ;; nothing to drop (a single huge string/scalar)
+                        ;; nothing to drop (a single huge string/scalar): the
+                        ;; spool continues from where the shown text stopped
                         :else
-                        (str (subs slimmed 0 8000) (trimmed id))))
+                        (do (swap! sess assoc-in [::spool :entries id]
+                                   (str ";; the REMAINDER — continues from char 8000"
+                                        " of the shown response\n"
+                                        (subs slimmed 8000)))
+                            (str (subs slimmed 0 8000) (trimmed id)))))
                     (if (<= (count slimmed) 8000) slimmed full)))]
     {:content [{:type "text" :text out}]}))
 
@@ -1763,7 +1787,9 @@
                          (cond->
                           {:ok true
                            :impl (select-keys ri [:group :steps :warnings :drift
-                                                  :red-first :note])
+                                                  :red-first :note
+                                                  :auto-require :auto-module-dep
+                                                  :auto-module-deps])
                            :test (:test ri)
                            :status (if (red? (:test ri)) :red :green)}
                            (seq tests)
@@ -2339,9 +2365,27 @@
                    ;; the truth in the session for session_brief, which is what
                    ;; the note points at.
                    app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)]
-               (text! (terse-done (if-let [note (app-note-for app)]
-                                   (assoc r :app-note note)
-                                   r))))
+               ;; the ritual closing full_check, pre-empted: state the two facts
+               ;; it re-derives (s14 opus: x5 per cell, each a whole-store
+               ;; re-run + a fat payload riding as rent). Only a GREEN
+               ;; whole-store verdict is citable.
+               (if-let [whole (when (not= :red (:status r))
+                                (when-let [conn (:db @session)]
+                                  (when-let [line (:line @session)]
+                                    (when-let [fc (db/last-full-check conn line)]
+                                      (when (= :green (get-in fc [:result :status]))
+                                        (str "the last full_check (" (:id fc) ") was green"
+                                             " and this done re-verified everything your"
+                                             " episode touched — a full_check now re-runs"
+                                             " the WHOLE store, usually the milestone-time"
+                                             " call (commit_point runs the same gate)."))))))]
+                 (text! (assoc (terse-done (if-let [note (app-note-for app)]
+                                             (assoc r :app-note note)
+                                             r))
+                               :whole-store whole))
+                 (text! (terse-done (if-let [note (app-note-for app)]
+                                      (assoc r :app-note note)
+                                      r)))))
       "commit_point" (text! (let [r (external/commit-point! session (:label a)
                                                        :agent (:agent a)
                                                        :force (:force a)
