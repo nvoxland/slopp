@@ -426,14 +426,14 @@
   (let [ask      (str (:ask query-params))
         sid      (not-empty (str (or (:session-id query-params) "")))
         same?    (and sid (= sid (:intent-sid @session)))
-        handoff? (boolean (re-find #"(?i)(what(?:'s| has| have| was)? +(?:been +)?(?:changed|happened|done)|\bsummar|hand.?off|\brecap\b|catch +(?:me +)?up|since +(?:the +)?last|\bwhat did (?:you|we)\b)"
+        handoff? (boolean (re-find #"(?i)(what(?:'s| has| have| was)? +(?:been +)?(?:changed|happened|done)|\bsummar|hand.?off|\bhanding\b|\bhand (?:this|it|the|over)\b|\brundown\b|\brecap\b|catch +(?:me +)?up|since +(?:the +)?last|\bwhat did (?:you|we)\b|\b(?:has|have) changed\b|\bchanged here\b|walk (?:me|us) through the changes|\bhistory of (?:the )?(?:changes|project)\b)"
                                    ask))
         {:keys [text sent]} (orient/bundle session ask
                                            :tokens (cond same? 450 handoff? 500 :else 1100)
                                            :sources (if (or same? handoff?) 1 2))
         text     (if (and handoff? (not same?))
                    (str text
-                        "\n--- the composed report (this ask reads like a handoff — the story is already here) ---\n"
+                        "\n--- the composed report — the store's OWN records (the ids are the citations: :turn per ask, :deltas per change, :commit per milestone) ---\n"
                         (orient/snip (pr-str (ops/report session :limit 12)) 3800)
                         "\n(deeper: report {contains \"…\"}; one form's history: query_history {ns … name …})")
                    text)]

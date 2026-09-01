@@ -3810,6 +3810,13 @@
           (let [txt (str (ask! "summarize what changed since the last handoff"))]
             (is (re-find #"composed report" txt) txt)
             (is (re-find #"hd\.core" txt) "the change row reached the injected story")))
+        (testing "the phrasings real handoffs use — the first live one matched NOTHING"
+          ;; s12 grid, step5 verbatim shapes: "I'm handing this project to a
+          ;; teammate… a factual rundown of everything that has changed…"
+          (doseq [ask ["I'm handing this project to a teammate tomorrow — give me a factual rundown"
+                       "a rundown of everything that has changed here since the original seeded version"
+                       "walk me through the changes"]]
+            (is (re-find #"composed report" (str (ask! ask))) ask)))
         (testing "an ordinary ask pays no report rent"
           (let [txt (str (ask! "add a discount to quoting"))]
             (is (not (re-find #"composed report" txt)) txt))))

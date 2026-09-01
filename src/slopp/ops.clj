@@ -3826,6 +3826,7 @@
                     :turn-begin
                     {:asks (cond-> asks cur (conj cur))
                      :cur  (cond-> {:ask (orient/snip (:intent d) 200)}
+                             (:id d) (assoc :turn (:id d))
                              (:at d) (assoc :at (history/human-time (:at d))))}
 
                     (:add :replace :delete :rename)
@@ -3876,14 +3877,15 @@
                                  (for [fid (or (:form-ids d)
                                                (some-> (:form-id d) vector))]
                                    {:ns (:ns d) :fid fid :op (:op d)
-                                    :ask (:prompt d)})))
+                                    :ask (:prompt d) :delta (:id d)})))
                        (group-by (juxt :ns :fid))
                        (map (fn [[[nsx fid] es]]
                               {:ns nsx
                                :form (let [e (store/form-by-id st fid)]
                                        (or (:name e) fid))
                                :ops (vec (distinct (map :op es)))
-                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))}))
+                               :asks (vec (take 3 (distinct (map #(orient/snip % 140) (keep :ask es)))))
+                               :deltas (vec (take-last 2 (distinct (keep :delta es))))}))
                        (filter (fn [row]
                                  (or (nil? contains)
                                      (some #(str/includes? (str %) (str contains))
@@ -3966,7 +3968,11 @@
                                                                  (:status v) (assoc :status (:status v))))))}))
                                not-empty)))))]
     (orient/fit-report
-     (cond-> {:milestones ms
+     (cond-> {:records (str "every row cites the journal: :turn on an ask, :deltas on a"
+                           " change, :delta on a story version, :commit on a milestone"
+                           " — the ids ARE the citations a handoff can quote;"
+                           " query_history {ns … name …} expands any one form")
+             :milestones ms
              :changes changes
              :suite (when verify*
                       {:as-of (:id verify*)

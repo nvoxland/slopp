@@ -299,3 +299,32 @@
       (testing "a broad report carries no story — it is the narrow question's answer"
         (is (nil? (:story (ops/report sess)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external report-rows-carry-their-citations
+  ;; s12b measured the limit of pre-composition: the handoff ask instructs
+  ;; "use the records and say where each answer came from", and a report
+  ;; whose rows carry no journal ids cannot BE the record — models fell
+  ;; back to query_history per form, and one fed turn uuids in as :name,
+  ;; hunting for exactly these ids. So every grain cites: the ask row its
+  ;; turn delta, the change row its content deltas, the story its versions
+  ;; (already), the milestone its commit — and the result says the ids are
+  ;; the citations.
+  (let [sess (external/open!)]
+    (try
+      (ops/turn-begin! sess :intent "add the rebate floor the June contract needs")
+      (ops/ingest! sess 'ct.core "(ns ct.core)\n(defn ^:unused-ok floor-cents [] 40)\n")
+      (ops/edit-replace! sess 'ct.core 'floor-cents
+                         "(defn ^:unused-ok floor-cents [] 45)"
+                         :prompt "the rebate floor moved with the June contract")
+      (let [r     (ops/report sess)
+            ids   (into #{} (map :id) (ops/journal sess))
+            byask (first (filter #(re-find #"June contract" (str (:ask %))) (:by-ask r)))
+            row   (first (filter #(= "floor-cents" (str (:form %))) (:changes r)))]
+        (is (some? byask) (pr-str (:by-ask r)))
+        (is (contains? ids (:turn byask)) "the ask row cites its turn-begin delta")
+        (is (some? row) (pr-str (:changes r)))
+        (is (seq (:deltas row)) (pr-str row))
+        (is (every? ids (:deltas row)) "a change row cites real journal deltas")
+        (is (re-find #"(?i)citation" (str (:records r)))
+            "the result says the ids ARE the citations"))
+      (finally (ops/close! sess)))))
