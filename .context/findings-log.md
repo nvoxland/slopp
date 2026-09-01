@@ -1866,3 +1866,20 @@ from a fresh shell boots a JVM, loads the store, and runs the suite
 silently for minutes — a real friction a human teammate would hit too,
 filed as an s13 candidate (route --call through the live server via
 .slopp/ui-port, or emit progress).
+
+## 2026-09-01 — s13 grid (CLI carrier, 4 cells + 1 poisoned attempt)
+
+The transport thesis is dead, measured on its own pre-registered rule:
+CLI cells ran +8-30% turns and DOUBLED output tokens in all four cells
+(96-120k vs s12's 46-63k) while the schema-rent claim it was built on
+HELD (input/request dropped to ~36k) and was swamped. Refined law: an
+MCP schema is not only rent, it is the argument TEACHING — without it
+the model re-derives call shapes by --help and retypes whole heredocs
+on every refusal. One new failure class: a CLI cell shipped a feature
+that never landed (no done; work stranded on its thread) — the first
+functional failure since s7. Keeps: the routed /api/call fast path
+(169ms vs 5-15s JVM boots, token-guarded, heartbeat), SLOPP_CLI as an
+opt-in mode, and the harvest of deep fixes the probe surfaced (same-ns
+red-first through change, the inferred-step verification-scope hole,
+multi-form blobs, the ui-port clobber guard) — all retro-benefiting
+the MCP surface.
