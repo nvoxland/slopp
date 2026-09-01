@@ -1897,3 +1897,17 @@ by the fourteen-families test (advertised < 15k chars). The one
 regression (sonnet-XL) was an auto-require gap ("No such namespace"
 after a scaffold not caught on the group door) that cost an 18-call
 require rebuild — filed with two fixes named.
+
+## 2026-09-01 — s15 grid (standing pre-emption, require upgrade, spool remainder)
+
+The sweep: all four cells 11/11, three records, every pre-registered
+clause met. Sonnet-41 62t/$1.35 (0.73x plain's turns), sonnet-XL 71t
+(churn regression fully reversed — the bare-require upgrade fix),
+opus-41 65t/$3.34 (full_check 5->3, test_run 4->0 from the done-carried
+:whole-store line; cache-read halved), opus-XL 92t (within band).
+Cumulative: sonnet is now decisively faster than plain on both
+terrains with verification and provenance included; opus's 41ns gap is
+1.25x turns from 2.2x at s11. Levers that did it, in one sentence
+each: answer-shaped pre-emption works where instruction never did;
+repair paths must accept the inputs models actually produce (bare
+requires); and never make a reader re-buy what it already holds.
