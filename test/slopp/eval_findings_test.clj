@@ -17,9 +17,16 @@
           (is (re-find #"compile" (:error r)))
           (is (= n (n-deltas)))
           (is (not (re-find #"bad" (query/query-source sess 's1.core))))))
-      (testing "the sonnet case: a test referencing an undefined fn is a loud error, not {:ok :ran 0}"
+      (testing "the sonnet case: a test referencing an undefined fn is LOUD, never {:ok :ran 0}"
+        ;; what this guards against is SILENCE — landed, nothing ran, nothing
+        ;; said. A refusal was the only loud outcome when this was written;
+        ;; red-first's second source (s13) made a louder one: the spec lands
+        ;; as :red-first, the stub throws, and the test RUNS red.
         (let [r (ops/add-form! sess 's1.core "(deftest ghost-t (is (= 1 (ghost 1))))")]
-          (is (:error r))))
+          (is (or (:error r)
+                  (and (seq (:red-first r))
+                       (pos? (+ (:fail (:test r) 0) (:error (:test r) 0)))))
+              (pr-str (select-keys r [:error :red-first :test])))))
       (testing "a replace that doesn't compile leaves the old form intact everywhere"
         (let [r (ops/edit-replace! sess 's1.core 'f "(defn f [x] (nope x))")]
           (is (:error r))

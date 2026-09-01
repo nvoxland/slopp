@@ -3982,3 +3982,26 @@
             (is (re-find #"slopp tools" t) t)
             (is (not (re-find #"slopp add" t)) t))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-same-ns-red-first-spec-lands-and-is-watched-failing
+  ;; THE canonical red-first change — spec first, impl second, ONE call,
+  ;; both in the SAME namespace (how inline-test projects, both eval
+  ;; terrains, and the CLI heredoc envelope all write) — had no wire cover,
+  ;; and it did not work: the tests group failed to compile on the
+  ;; unqualified not-yet-written symbol. The reference graph cannot see an
+  ;; unqualified same-ns ref; only the load error names it, and the group
+  ;; path never consulted that second source (ingest! has, since eval10 s5).
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rs.core" :source "(ns rs.core (:require [clojure.test :refer [deftest is]]))\n"})
+      (let [r (call! sess "change"
+                     {:prompt "triple, spec watched red first"
+                      :tests [{:ns "rs.core"
+                               :source "(deftest triple-t (is (= 9 (triple 3))))"}]
+                      :impl  [{:ns "rs.core"
+                               :source "(defn triple \"T.\" [x] (* 3 x))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":went-red \[rs.core/triple-t\]" r)
+            (str "the spec was WATCHED failing — the whole point of red-first: " r))
+        (is (re-find #":status :green" r) r))
+      (finally (ops/close! sess)))))

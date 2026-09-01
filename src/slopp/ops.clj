@@ -4171,13 +4171,21 @@
                       (try (engine/fresh-image! session) nil
                            (catch Throwable t (ex-message t))))
                     ;; per-step names double as the D5.1 edited set
-                    step-nms (map (fn [{:keys [action ns name source]}]
-                                    (let [nm (case action
-                                               :add (some-> (edit/parse-form source)
-                                                            :node store/form-symbol)
-                                               name)]
-                                      (when nm [action ns nm])))
-                                  steps)
+                    step-nms (map (fn [{:keys [action ns name source]} d]
+                                    ;; the DELTA is the truth about what landed:
+                                    ;; an inferred step (nameless, actionless —
+                                    ;; action inference and the blob split both
+                                    ;; produce them) derived nil here and
+                                    ;; poisoned :affected to :unknown, so the
+                                    ;; verification fallback ran against nothing
+                                    ;; in inline-test projects (spec-run 0/0)
+                                    (let [nm  (or name
+                                                  (:name (store/form-by-id (:store @session) (:form-id d)))
+                                                  (some-> (edit/parse-form source)
+                                                          :node store/form-symbol))
+                                          act (or action (:op d))]
+                                      (when nm [act ns nm])))
+                                  steps deltas)
                     edited   (into #{}
                                    (keep (fn [x]
                                            (when-let [[_ ns nm] x]
@@ -4188,14 +4196,22 @@
                                     (if-let [[action ns nm] x]
                                       (let [a (engine/affected-tests session ns nm)]
                                         (cond
-                                          (some? a)       (set a)
                                           ;; a NEW deftest has no trace yet and
-                                          ;; is its own covering test — a group
-                                          ;; that adds the fn and its test ran
-                                          ;; everything but the test
+                                          ;; is its own covering test — and this
+                                          ;; outranks the trace, which answers a
+                                          ;; non-nil EMPTY set for a form it has
+                                          ;; never seen (spec-run 0/0, s13). The
+                                          ;; form's own head decides, not the
+                                          ;; namespace suffix: inline-test
+                                          ;; projects keep specs beside code.
                                           (and (= action :add)
-                                               (str/ends-with? (str ns) "-test"))
+                                               (or (str/ends-with? (str ns) "-test")
+                                                   (= 'deftest
+                                                      (try (some-> (store/form-named (:store @session) ns nm)
+                                                                   :node n/sexpr first)
+                                                           (catch Exception _ nil)))))
                                           #{(symbol (str ns) (str nm))}
+                                          (some? a)       (set a)
                                           (= action :add) #{}
                                           :else           :unknown))
                                       :unknown))

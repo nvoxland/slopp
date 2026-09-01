@@ -1279,226 +1279,6 @@
       ;; whole store as never-loaded.
       (image.currency/arm! image))))
 
-(defn hot-load-all!
-  "Checked-load `form-ids` from a CANDIDATE store value into the image (S1).
-  nil on success; {:healed true} when a STALE IMAGE had to be refreshed to
-  make the load succeed (D5.1); {:stubbed [qsyms]} when red-first stubs made
-  a -test namespace compile (the generic red-first seam — the spec runs and
-  fails honestly); {:err msg} when the forms genuinely don't compile (image
-  restored either way; :first-err carries the pre-heal error when it
-  differs). Keys compose.
-  The heal boots from the COMMITTED store, so the candidate's touched nses
-  are replayed from the CANDIDATE (dependency order, full load-ns! so new
-  namespaces exist and are *loaded-libs*-stamped) before the retry —
-  without that, a candidate that CREATES a namespace (extract_ns) dies
-  with FileNotFound when a survivor requires it.
-  A touched namespace sitting in the session's `:image-load-failures` (it
-  failed the last boot) is RECONCILED on success: the candidate namespace is
-  loaded WHOLE, and when it loads it leaves the failure set — so the write
-  that fixes a boot-broken namespace verifies against the POST-edit state,
-  which is the promise the boot note makes and the sequencing used to break
-  (a real consumer's wedge, 2026-08-06)."
-  [session candidate form-ids]
-  (let [nses    (vec (distinct (keep #(store/ns-of-form-id candidate %) form-ids)))
-        stub!   #(stub-missing-test-vars! (:image @session) candidate nses)
-        replay! #(let [committed (set (keys (:namespaces (:store @session))))
-                       ;; every namespace the CANDIDATE has that the COMMITTED
-                       ;; store lacks, not just this call's. fresh-image! boots
-                       ;; from the committed store, so those cannot survive it —
-                       ;; and a MERGE creates them in EARLIER hot-load-all!
-                       ;; calls whose form-ids are not ours. Replaying only
-                       ;; `nses` left them missing and the dependent's :require
-                       ;; died with FileNotFound: an error the heal itself
-                       ;; MANUFACTURED, naming a classpath problem that never
-                       ;; existed while burying the real first failure.
-                       want      (into (set nses)
-                                       (remove committed)
-                                       (keys (:namespaces candidate)))]
-                   (doseq [ns-sym (filter want (store/ns-dependency-order candidate))]
-                     (image/load-ns! (:image @session) candidate ns-sym)))
-        reconcile! #(when-let [failed (not-empty
-                                       (set/intersection
-                                        (set (map :ns (:image-load-failures @session)))
-                                        (set nses)))]
-                      (doseq [ns-sym failed]
-                        (when (nil? (image/load-ns! (:image @session) candidate ns-sym))
-                          (swap! session update :image-load-failures
-                                 (fn [fs] (not-empty
-                                           (vec (remove (comp #{ns-sym} :ns) fs))))))))]
-    (letfn [(load-all []
-              (loop [ids (seq form-ids)]
-                (when ids
-                  (or (when (store/jvm-loadable? candidate
-                                             (store/ns-of-form-id candidate (first ids)))
-                        ;; a :cljs form (js/*/DOM) is never JVM-loaded — skip it
-                        ;; here exactly as image/load-ns! skips a :cljs ns, so the
-                        ;; refactor ops (rename/move/extract/change-sig/…) work on
-                        ;; client forms (D-web-cljs). Per-form-id, so a multi-ns op
-                        ;; that mixes platforms loads the :jvm/:cljc ids and skips
-                        ;; the :cljs ones in the same pass. A skipped id is nil,
-                        ;; the same shape as an unresolved id, so the loop recurs.
-                        (hotload/hot-load-form! (:image @session) candidate (first ids)))
-                      (recur (next ids))))))]
-      (let [result
-            (when-let [err1 (load-all)]
-              (let [stubbed (stub!)]
-                (if (and (seq stubbed) (nil? (load-all)))
-                  {:stubbed stubbed}
-                  (do (fresh-image! session)             ; maybe the image was stale
-                      (replay!)                          ; candidate truth over the committed boot
-                      (let [stubbed (stub!)]             ; a fresh image loses stubs
-                        (if-let [err2 (load-all)]
-                          (do (fresh-image! session)
-                              (cond-> (merge {:err err2}
-                                             (edit/anchor-error candidate err2))
-                                (not= err1 err2) (assoc :first-err err1)))
-                          (cond-> {:healed true}
-                            (seq stubbed) (assoc :stubbed stubbed))))))))]
-        (when-not (:err result)
-          (reconcile!))
-        result))))
-
-(defn rebased-write!
-  "Run a single-form write with an atomic rebasing commit (item 4, the
-  granularity dodge). The pure `transform` (store → {:store :delta ...} |
-  {:error}) runs INSIDE swap!, so concurrent different-form writes rebase and
-  land without locks or starvation; if the TARGET form itself changed since
-  this op began (`target-node`: store → CST node), the commit aborts with
-  {:conflict ...} — C5's MV-register semantics, Phase-1 face.
-  The compile gate runs once, before commit: the form's CONTENT (what the
-  image compiles) is invariant across rebases. Red-first stubs surface as
-  :red-first; lint errors in OTHER forms (stale callers) surface as
-  :carried-errors — both ride the result, never block, and the done-point
-  re-checks. A genuine compile failure returns an ANCHORED error
-  (edit/compile-error — form + snippet, no file:line).
-  AUTO-AVOID-DECLARE: the pure transform is WRAPPED so a candidate with a
-  forward reference is reordered (defs moved above callers) before the
-  cold-load gate — the agent never writes (declare ...). The reorder rides
-  inside the swap! rerun too, so durable rebasing stays consistent; a genuine
-  cycle (mutual recursion) reorder can't fix falls through to the existing
-  refusal, which teaches the declare."
-  [session raw-transform target-node target-desc ns-sym
-   & {:keys [load?] :or {load? true}}]
-  (let [orig      (some-> (target-node (:store @session)) n/string)
-        conflict  {:conflict {:form target-desc
-                              :reason "form changed concurrently — re-read and retry"}}
-        transform (fn [base]
-                    (let [out (raw-transform base)]
-                      ;; NOT gated on `load?`. Ordering is a property of the SOURCE, and
-                      ;; ClojureScript has the same define-before-use rule (its
-                      ;; compiler warns). Skipping the reorder for :cljs let a
-                      ;; forward reference land SILENTLY — and since the move gate
-                      ;; still refused any move while a violation stood, no single
-                      ;; edit_move reached a legal state. Created without a word,
-                      ;; then unfixable by the tool the error message recommends.
-                      (if (:error out)
-                        out
-                        (if-let [rz (edit/resolve-cold-load
-                                     (:store out) ns-sym
-                                     :prompt "auto-reorder: define before use")]
-                          (assoc out :store (:store rz))
-                          out))))]
-    (if (:db @session)
-      ;; durable: the JOURNAL arbitrates (m5a) — append-CAS, refresh, rebase
-      (loop [attempt 0, loaded? false, healed? false, stubbed nil, carried nil]
-        (if (> attempt 12)
-          {:error "commit contention: too many concurrent writes — retry"}
-          (let [base (:store @session)
-                cur  (some-> (target-node base) n/string)]
-            (if (and (pos? attempt) (not= orig cur))
-              ;; the loser's code is already hot-loaded, and each durable
-              ;; session has its OWN image — the winner's hot-load happened in
-              ;; another process. Reboot from the refreshed store so nothing
-              ;; verifies against code the journal rejected.
-              (do (when loaded? (fresh-image! session))
-                  conflict)
-              (let [out (transform base)]
-                (if (:error out)
-                  out
-                  (let [load-res (when (and load? (not loaded?))
-                                   (let [lr (lintgate/lint-refusals base (:store out) [ns-sym]
-                                                                [(:form-id (:delta out))])]
-                                     (if-let [gate (or (edit/cold-load-errors (:store out) [ns-sym])
-                                                       (:refuse lr))]
-                                       {:err gate}
-                                       (merge (hot-load-all! session (:store out)
-                                                    [(:form-id (:delta out))])
-                                     (select-keys lr [:carried :red-first-arity])))))]
-                    (if (:err load-res)
-                      (edit/compile-error (:store out) (:err load-res)
-                                          "form failed to compile: " ns-sym)
-                      (do (when *pre-commit-hook* (*pre-commit-hook*))
-                          (if (try-commit! session base (:store out) [ns-sym])
-                            (cond-> out
-                              (or healed? (:healed load-res))
-                              (assoc :image-healed true)
-
-                              (or stubbed (:stubbed load-res))
-                              (assoc :red-first (or stubbed (:stubbed load-res)))
-
-                              (or carried (:carried load-res))
-                              (assoc :carried-errors (or carried (:carried load-res)))
-
-                              ;; NOT threaded through the retry like `stubbed`
-                              ;; and `carried` are: those two decide whether the
-                              ;; write is honest, this one is a note explaining
-                              ;; a red the agent is about to see anyway. A
-                              ;; CONTENDED write (attempt > 0, where the gate no
-                              ;; longer runs) drops it, and the cost is a missing
-                              ;; sentence rather than a missing verdict.
-                              (:red-first-arity load-res)
-                              (assoc :red-first-arity (:red-first-arity load-res)))
-                            (do (refresh-cache! session)
-                                (recur (inc attempt) true
-                                       (or healed? (boolean (:healed load-res)))
-                                       (or stubbed (:stubbed load-res))
-                                       (or carried (:carried load-res))))))))))))))
-      ;; ephemeral: the pure transform reruns INSIDE swap! — starvation-free.
-      ;; No image heal on conflict here: ephemeral writers share ONE image, so
-      ;; the competitor's own hot-load already put the winner's code in it.
-      (let [base0 (:store @session)
-            out0  (transform base0)]
-        (if (:error out0)
-          out0
-          (let [load-res (when load?
-                           (let [lr (lintgate/lint-refusals base0 (:store out0) [ns-sym]
-                                                        [(:form-id (:delta out0))])]
-                             (if-let [gate (or (edit/cold-load-errors (:store out0) [ns-sym])
-                                               (:refuse lr))]
-                               {:err gate}
-                               (merge (hot-load-all! session (:store out0)
-                                             [(:form-id (:delta out0))])
-                                      (select-keys lr [:carried :red-first-arity])))))]
-            (if (:err load-res)
-              (edit/compile-error (:store out0) (:err load-res)
-                                  "form failed to compile: " ns-sym)
-              (do (when *pre-commit-hook* (*pre-commit-hook*))
-                  (let [res (volatile! nil)]
-                    (swap! session update :store
-                           (fn [base]
-                             (if (not= orig (some-> (target-node base) n/string))
-                               (do (vreset! res conflict) base)
-                               (let [out (transform base)]
-                                 (if (:error out)
-                                   (do (vreset! res out) base)
-                                   (do (vreset! res out) (:store out)))))))
-                    (cond-> @res
-                      (and (nil? (:error @res)) (nil? (:conflict @res))
-                           (:healed load-res))
-                      (assoc :image-healed true)
-
-                      (and (nil? (:error @res)) (nil? (:conflict @res))
-                           (:stubbed load-res))
-                      (assoc :red-first (:stubbed load-res))
-
-                      (and (nil? (:error @res)) (nil? (:conflict @res))
-                           (:carried load-res))
-                      (assoc :carried-errors (:carried load-res))
-
-                      (and (nil? (:error @res)) (nil? (:conflict @res))
-                           (:red-first-arity load-res))
-                      (assoc :red-first-arity (:red-first-arity load-res))))))))))))
-
 (defn diagnosed-run!
   "Run tests. Reds cross-check on a fresh image ONLY when staleness is
   plausible (D5.1: reload signatures, unexplained flips, missing provenance);
@@ -1928,3 +1708,245 @@
                       (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
                               ns-sym sym q q))
           [q])))))
+
+(defn hot-load-all!
+  "Checked-load `form-ids` from a CANDIDATE store value into the image (S1).
+  nil on success; {:healed true} when a STALE IMAGE had to be refreshed to
+  make the load succeed (D5.1); {:stubbed [qsyms]} when red-first stubs made
+  a -test namespace compile (the generic red-first seam — the spec runs and
+  fails honestly); {:err msg} when the forms genuinely don't compile (image
+  restored either way; :first-err carries the pre-heal error when it
+  differs). Keys compose.
+  The heal boots from the COMMITTED store, so the candidate's touched nses
+  are replayed from the CANDIDATE (dependency order, full load-ns! so new
+  namespaces exist and are *loaded-libs*-stamped) before the retry —
+  without that, a candidate that CREATES a namespace (extract_ns) dies
+  with FileNotFound when a survivor requires it.
+  A touched namespace sitting in the session's `:image-load-failures` (it
+  failed the last boot) is RECONCILED on success: the candidate namespace is
+  loaded WHOLE, and when it loads it leaves the failure set — so the write
+  that fixes a boot-broken namespace verifies against the POST-edit state,
+  which is the promise the boot note makes and the sequencing used to break
+  (a real consumer's wedge, 2026-08-06)."
+  [session candidate form-ids]
+  (let [nses    (vec (distinct (keep #(store/ns-of-form-id candidate %) form-ids)))
+        stub!   #(stub-missing-test-vars! (:image @session) candidate nses)
+        replay! #(let [committed (set (keys (:namespaces (:store @session))))
+                       ;; every namespace the CANDIDATE has that the COMMITTED
+                       ;; store lacks, not just this call's. fresh-image! boots
+                       ;; from the committed store, so those cannot survive it —
+                       ;; and a MERGE creates them in EARLIER hot-load-all!
+                       ;; calls whose form-ids are not ours. Replaying only
+                       ;; `nses` left them missing and the dependent's :require
+                       ;; died with FileNotFound: an error the heal itself
+                       ;; MANUFACTURED, naming a classpath problem that never
+                       ;; existed while burying the real first failure.
+                       want      (into (set nses)
+                                       (remove committed)
+                                       (keys (:namespaces candidate)))]
+                   (doseq [ns-sym (filter want (store/ns-dependency-order candidate))]
+                     (image/load-ns! (:image @session) candidate ns-sym)))
+        reconcile! #(when-let [failed (not-empty
+                                       (set/intersection
+                                        (set (map :ns (:image-load-failures @session)))
+                                        (set nses)))]
+                      (doseq [ns-sym failed]
+                        (when (nil? (image/load-ns! (:image @session) candidate ns-sym))
+                          (swap! session update :image-load-failures
+                                 (fn [fs] (not-empty
+                                           (vec (remove (comp #{ns-sym} :ns) fs))))))))]
+    (letfn [(load-all []
+              (loop [ids (seq form-ids)]
+                (when ids
+                  (or (when (store/jvm-loadable? candidate
+                                             (store/ns-of-form-id candidate (first ids)))
+                        ;; a :cljs form (js/*/DOM) is never JVM-loaded — skip it
+                        ;; here exactly as image/load-ns! skips a :cljs ns, so the
+                        ;; refactor ops (rename/move/extract/change-sig/…) work on
+                        ;; client forms (D-web-cljs). Per-form-id, so a multi-ns op
+                        ;; that mixes platforms loads the :jvm/:cljc ids and skips
+                        ;; the :cljs ones in the same pass. A skipped id is nil,
+                        ;; the same shape as an unresolved id, so the loop recurs.
+                        (hotload/hot-load-form! (:image @session) candidate (first ids)))
+                      (recur (next ids))))))
+            (stub-round []
+              ;; both red-first sources, stub-and-retry until the load is
+              ;; clean or nothing new was stubbed (ingest!'s loop, group
+              ;; face): the graph names qualified/referred missing vars at
+              ;; once; an UNQUALIFIED same-ns symbol a deftest names before
+              ;; it exists has no graph row, and only the load error names
+              ;; it — one at a time. Returns [err stubbed].
+              (if-let [err1 (load-all)]
+                (loop [err err1, acc [], n 0]
+                  (if (or (nil? err) (<= 12 n))
+                    [err (not-empty acc)]
+                    (let [s   (or (not-empty (stub!))
+                                  (some #(stub-unresolved-test-symbol!
+                                          (:image @session) candidate % err)
+                                        nses))
+                          new (seq (remove (set acc) s))]
+                      (if new
+                        (recur (load-all) (into acc new) (inc n))
+                        [err (not-empty acc)]))))
+                [nil nil]))]
+      (let [result
+            (let [[err1 stubbed] (stub-round)]
+              (cond
+                (and (nil? err1) (nil? stubbed)) nil
+                (nil? err1) {:stubbed stubbed}
+                :else
+                (do (fresh-image! session)               ; maybe the image was stale
+                    (replay!)                            ; candidate truth over the committed boot
+                    ;; a fresh image loses stubs — the round re-stubs from both sources
+                    (let [[err2 stubbed2] (stub-round)]
+                      (if err2
+                        (do (fresh-image! session)
+                            (cond-> (merge {:err err2}
+                                           (edit/anchor-error candidate err2))
+                              (not= err1 err2) (assoc :first-err err1)))
+                        (cond-> {:healed true}
+                          (seq stubbed2) (assoc :stubbed stubbed2)))))))]
+        (when-not (:err result)
+          (reconcile!))
+        result))))
+
+(defn rebased-write!
+  "Run a single-form write with an atomic rebasing commit (item 4, the
+  granularity dodge). The pure `transform` (store → {:store :delta ...} |
+  {:error}) runs INSIDE swap!, so concurrent different-form writes rebase and
+  land without locks or starvation; if the TARGET form itself changed since
+  this op began (`target-node`: store → CST node), the commit aborts with
+  {:conflict ...} — C5's MV-register semantics, Phase-1 face.
+  The compile gate runs once, before commit: the form's CONTENT (what the
+  image compiles) is invariant across rebases. Red-first stubs surface as
+  :red-first; lint errors in OTHER forms (stale callers) surface as
+  :carried-errors — both ride the result, never block, and the done-point
+  re-checks. A genuine compile failure returns an ANCHORED error
+  (edit/compile-error — form + snippet, no file:line).
+  AUTO-AVOID-DECLARE: the pure transform is WRAPPED so a candidate with a
+  forward reference is reordered (defs moved above callers) before the
+  cold-load gate — the agent never writes (declare ...). The reorder rides
+  inside the swap! rerun too, so durable rebasing stays consistent; a genuine
+  cycle (mutual recursion) reorder can't fix falls through to the existing
+  refusal, which teaches the declare."
+  [session raw-transform target-node target-desc ns-sym
+   & {:keys [load?] :or {load? true}}]
+  (let [orig      (some-> (target-node (:store @session)) n/string)
+        conflict  {:conflict {:form target-desc
+                              :reason "form changed concurrently — re-read and retry"}}
+        transform (fn [base]
+                    (let [out (raw-transform base)]
+                      ;; NOT gated on `load?`. Ordering is a property of the SOURCE, and
+                      ;; ClojureScript has the same define-before-use rule (its
+                      ;; compiler warns). Skipping the reorder for :cljs let a
+                      ;; forward reference land SILENTLY — and since the move gate
+                      ;; still refused any move while a violation stood, no single
+                      ;; edit_move reached a legal state. Created without a word,
+                      ;; then unfixable by the tool the error message recommends.
+                      (if (:error out)
+                        out
+                        (if-let [rz (edit/resolve-cold-load
+                                     (:store out) ns-sym
+                                     :prompt "auto-reorder: define before use")]
+                          (assoc out :store (:store rz))
+                          out))))]
+    (if (:db @session)
+      ;; durable: the JOURNAL arbitrates (m5a) — append-CAS, refresh, rebase
+      (loop [attempt 0, loaded? false, healed? false, stubbed nil, carried nil]
+        (if (> attempt 12)
+          {:error "commit contention: too many concurrent writes — retry"}
+          (let [base (:store @session)
+                cur  (some-> (target-node base) n/string)]
+            (if (and (pos? attempt) (not= orig cur))
+              ;; the loser's code is already hot-loaded, and each durable
+              ;; session has its OWN image — the winner's hot-load happened in
+              ;; another process. Reboot from the refreshed store so nothing
+              ;; verifies against code the journal rejected.
+              (do (when loaded? (fresh-image! session))
+                  conflict)
+              (let [out (transform base)]
+                (if (:error out)
+                  out
+                  (let [load-res (when (and load? (not loaded?))
+                                   (let [lr (lintgate/lint-refusals base (:store out) [ns-sym]
+                                                                [(:form-id (:delta out))])]
+                                     (if-let [gate (or (edit/cold-load-errors (:store out) [ns-sym])
+                                                       (:refuse lr))]
+                                       {:err gate}
+                                       (merge (hot-load-all! session (:store out)
+                                                    [(:form-id (:delta out))])
+                                     (select-keys lr [:carried :red-first-arity])))))]
+                    (if (:err load-res)
+                      (edit/compile-error (:store out) (:err load-res)
+                                          "form failed to compile: " ns-sym)
+                      (do (when *pre-commit-hook* (*pre-commit-hook*))
+                          (if (try-commit! session base (:store out) [ns-sym])
+                            (cond-> out
+                              (or healed? (:healed load-res))
+                              (assoc :image-healed true)
+
+                              (or stubbed (:stubbed load-res))
+                              (assoc :red-first (or stubbed (:stubbed load-res)))
+
+                              (or carried (:carried load-res))
+                              (assoc :carried-errors (or carried (:carried load-res)))
+
+                              ;; NOT threaded through the retry like `stubbed`
+                              ;; and `carried` are: those two decide whether the
+                              ;; write is honest, this one is a note explaining
+                              ;; a red the agent is about to see anyway. A
+                              ;; CONTENDED write (attempt > 0, where the gate no
+                              ;; longer runs) drops it, and the cost is a missing
+                              ;; sentence rather than a missing verdict.
+                              (:red-first-arity load-res)
+                              (assoc :red-first-arity (:red-first-arity load-res)))
+                            (do (refresh-cache! session)
+                                (recur (inc attempt) true
+                                       (or healed? (boolean (:healed load-res)))
+                                       (or stubbed (:stubbed load-res))
+                                       (or carried (:carried load-res))))))))))))))
+      ;; ephemeral: the pure transform reruns INSIDE swap! — starvation-free.
+      ;; No image heal on conflict here: ephemeral writers share ONE image, so
+      ;; the competitor's own hot-load already put the winner's code in it.
+      (let [base0 (:store @session)
+            out0  (transform base0)]
+        (if (:error out0)
+          out0
+          (let [load-res (when load?
+                           (let [lr (lintgate/lint-refusals base0 (:store out0) [ns-sym]
+                                                        [(:form-id (:delta out0))])]
+                             (if-let [gate (or (edit/cold-load-errors (:store out0) [ns-sym])
+                                               (:refuse lr))]
+                               {:err gate}
+                               (merge (hot-load-all! session (:store out0)
+                                             [(:form-id (:delta out0))])
+                                      (select-keys lr [:carried :red-first-arity])))))]
+            (if (:err load-res)
+              (edit/compile-error (:store out0) (:err load-res)
+                                  "form failed to compile: " ns-sym)
+              (do (when *pre-commit-hook* (*pre-commit-hook*))
+                  (let [res (volatile! nil)]
+                    (swap! session update :store
+                           (fn [base]
+                             (if (not= orig (some-> (target-node base) n/string))
+                               (do (vreset! res conflict) base)
+                               (let [out (transform base)]
+                                 (if (:error out)
+                                   (do (vreset! res out) base)
+                                   (do (vreset! res out) (:store out)))))))
+                    (cond-> @res
+                      (and (nil? (:error @res)) (nil? (:conflict @res))
+                           (:healed load-res))
+                      (assoc :image-healed true)
+
+                      (and (nil? (:error @res)) (nil? (:conflict @res))
+                           (:stubbed load-res))
+                      (assoc :red-first (:stubbed load-res))
+
+                      (and (nil? (:error @res)) (nil? (:conflict @res))
+                           (:carried load-res))
+                      (assoc :carried-errors (:carried load-res))
+
+                      (and (nil? (:error @res)) (nil? (:conflict @res))
+                           (:red-first-arity load-res))
+                      (assoc :red-first-arity (:red-first-arity load-res))))))))))))

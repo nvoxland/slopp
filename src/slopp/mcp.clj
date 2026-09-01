@@ -1754,7 +1754,12 @@
                                           :agent (:agent a)))]
                 (if (and rt (:error rt))
                   (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
-                  (let [went-red (vec (:failed-tests (:test rt)))
+                  (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
+                                                        ;; a red-first stub THROWS — the spec's
+                                                        ;; first run is an :error row, not a
+                                                        ;; :failed-tests entry, and it was watched
+                                                        ;; failing all the same
+                                                        (keep :test (:failures (:test rt))))))
                         _ (when rt (ledger-written! session "edit_group" {:steps tests}))
                         ri (ops/edit-group! session impl
                                             :prompt (:prompt a) :agent (:agent a))]
@@ -1776,7 +1781,10 @@
                            :status (if (red? (:test ri)) :red :green)}
                            (seq tests)
                            (assoc :tests
-                                  (cond-> {:landed (count tests) :went-red went-red}
+                                  (cond-> {:landed (count tests) :went-red went-red
+                                           :spec-run (select-keys (:test rt)
+                                                                  [:test :pass :fail :error
+                                                                   :failed-tests :status])}
                                     (empty? went-red)
                                     (assoc :note (str "the tests landed GREEN — the"
                                                       " spec was never watched failing;"
