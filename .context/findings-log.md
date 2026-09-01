@@ -1818,3 +1818,21 @@ cached after; slices 1.7 s (card assembly), writes 3–4 s (verification).
   + changed first-sight), not intent itself (x0 both takes). Lesson: a
   bundle change is an ORIENTATION change and moves every step's opening;
   measure bundle deltas with a single-cell canary before a full wave.
+
+## 2026-08-31 — s11 grid (two-verb surface, 4 cells, all 11/11)
+
+Fourth confirmation of the forcing law, now with its limit measured:
+de-advertising moved NAME adoption to 100% immediately (zero legacy
+write/read-batch calls in any cell; opus emitted the first :patch steps
+ever, x8, plus explore x8-14 and check x1-2 per cell) — and moved the
+GRAIN not at all. Turns: sonnet 41ns 117 (s9 71), sonnet XL 112 (xl 81),
+opus 41ns 113 (s10 91), opus XL 96 (BEST yet; xl 109, s10 103). Where
+the turns went: sonnet writes ~2 steps/change and reads one form per
+query_source call (16-28 singles vs 1-2 explores); step5 history asks
+cost 10-13 turns on both models (query_history :ns misses x4); opus
+output volume rose to 69k (retype tax intact despite patch existing).
+Conclusion recorded in ideas/product/half-the-time-half-the-tokens.md:
+surface shaping is exhausted as a turns lever; server-side levers
+(pre-compute, one-explore-cheapest-read, composed handoff answers) are
+next. Action inference (s11 wave A) carried 55-143 actionless steps per
+cell — the grid would have been a refusal storm without it.
