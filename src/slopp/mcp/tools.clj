@@ -660,7 +660,12 @@ FINISH:  done {label} when the UNIT is finished — a unit may span
          change -> explore -> change, and the Stop hook runs done if you
          forget. full_check (whole store) and commit_point {label} (a
          milestone) are the human's grain.
-SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)")
+SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
+CLI:     every op, from a shell, routed to THIS running server (fast):
+         slopp <op> '{…json…}' · whole-blob writes with RAW heredoc source:
+         slopp add <ns> <<'EOF' …forms… EOF · slopp replace <ns/name> <<'EOF'
+         slopp change --prompt '…' <<'EOF' with ;;;tests <ns> / ;;;impl <ns>
+         sections — forms split per top level, add/replace inferred")
 
 (def single-write-tools
   "The de-advertised write-and-batch ALIASES. None is described or

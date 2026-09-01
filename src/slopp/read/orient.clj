@@ -923,7 +923,7 @@
   ledger — the bundle, the write results and the reads share one ledger. A
   blank ask is the plain ranking, never an error — same stance as the
   search endpoint."
-  [session ask & {:keys [tokens sources] :or {tokens 1100 sources 2}}]
+  [session ask & {:keys [tokens sources cli?] :or {tokens 1100 sources 2}}]
   (let [st      (:store @session)
         m       (orient-map session :ask (str ask) :tokens tokens)
         withs   (vec (take sources (filter :source (:rows m))))
@@ -943,8 +943,15 @@
                            :when e]
                        [(:id e) (hash (:source r))]))]
     {:sent sent
-     :text (str "[slopp] " (count (:namespaces st)) " namespaces; live store — work"
-                " through the slopp tools (the store is the source, not the files)."
+     :text (str "[slopp] " (count (:namespaces st)) (if cli? " namespaces; live store — drive it" " namespaces; live store — work")
+                (if cli?
+                  (str " with the slopp CLI — fast, routed to this running server:"
+                       " slopp <op> '{…json…}' · slopp add <ns> <<'EOF' …forms… EOF ·"
+                       " slopp replace <ns/name> <<'EOF' · slopp change --prompt '…'"
+                       " <<'EOF' with ;;;tests <ns> / ;;;impl <ns> sections ·"
+                       " slopp done '{}' when a unit is finished. Every write"
+                       " verifies itself and reports.")
+                  " through the slopp tools (the store is the source, not the files).")
                 " The forms below are ranked for THIS ask; their sources, when"
                 " present, are current — no need to re-read them.\n"
                 (when (seq (:seeds m))

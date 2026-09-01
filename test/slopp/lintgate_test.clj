@@ -117,3 +117,24 @@
         (is (re-find #"in the form you are writing" (str (:refuse r))) (pr-str r))
         (is (re-find #"invalid-arity" (str (:refuse r))) (pr-str r))
         (is (nil? (:red-first-arity r)) (pr-str r))))))
+
+(deftest a-deftest-naming-an-unwritten-same-ns-var-defers-as-red-first
+  ;; kondo spells \"test names a var that does not exist yet\" two ways:
+  ;; :unresolved-var across namespaces (already released for red-first) and
+  ;; :unresolved-symbol within one — which is what INLINE-test projects hit,
+  ;; and both eval terrains are inline. The same statement defers the same
+  ;; way; a non-test form with the same finding keeps refusing.
+  (let [base (store/ingest (store/empty-store) 'rf.core
+                           "(ns rf.core (:require [clojure.test :refer [deftest is]]))\n")
+        ]
+    (testing "a deftest calling the unwritten fn defers — reported, never refused"
+      (let [[cand d] (store/append-form base 'rf.core
+                                        (:node (edit/parse-form "(deftest go-t (is (= 1 (go 1))))")))
+            r (lintgate/lint-refusals base cand '[rf.core] [(:form-id d)])]
+        (is (nil? (:refuse r)) (pr-str r))
+        (is (seq (:red-first-refs r)) (pr-str r))))
+    (testing "a NON-test form with the same unresolved symbol still refuses"
+      (let [[cand d] (store/append-form base 'rf.core
+                                        (:node (edit/parse-form "(defn caller \"C.\" [x] (go x))")))
+            r (lintgate/lint-refusals base cand '[rf.core] [(:form-id d)])]
+        (is (some? (:refuse r)) (pr-str r))))))

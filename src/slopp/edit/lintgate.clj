@@ -26,7 +26,7 @@
   (:require [clojure.string :as str]
             [slopp.edit :as edit]
             [slopp.index :as index]
-            [slopp.store.render :as store.render] [slopp.store :as store]))
+            [slopp.store.render :as store.render] [slopp.store :as store] [rewrite-clj.node :as n]))
 
 (defn ^:export lint-refusals
   "NEW error-level kondo findings a candidate store would introduce over
@@ -77,8 +77,21 @@
         ;; fails, as an ArityException at run time, which IS the red the test
         ;; was written to see. Production keeps refusing, because there the
         ;; same finding is a real ArityException in shipped code.
+        deftest? (fn [f]
+                   (= 'deftest
+                      (try (some-> (store/form-by-id cand (:form-id f))
+                                   :node n/sexpr first)
+                           (catch Exception _ nil))))
+        ;; :unresolved-symbol on a deftest is the SAME statement
+        ;; :unresolved-var already left this set for — kondo merely spells
+        ;; the same-namespace case differently, and inline-test projects
+        ;; only ever produce this spelling. Deferred, never silent: the
+        ;; load path stubs the unwritten var as a failing red-first stub,
+        ;; which IS the red the test was written to see.
         [defer own] ((juxt filter remove)
-                     #(and (= :invalid-arity (:type %)) (store.render/test-ns? (:ns %)))
+                     #(or (and (= :invalid-arity (:type %))
+                               (store.render/test-ns? (:ns %)))
+                          (and (= :unresolved-symbol (:type %)) (deftest? %)))
                      own)]
     (cond
       (seq own)
@@ -107,8 +120,15 @@
       ;; ArityException the test then throws as a BUG rather than as the red
       ;; it asked for, which is the failure this defer would otherwise create
       (seq defer)
-      (cond-> {:red-first-arity (vec (for [f defer]
-                                       {:form (:form f) :message (:message f)}))}
+      (cond-> (let [{arity true refs false}
+                    (group-by #(= :invalid-arity (:type %)) defer)]
+                (cond-> {}
+                  (seq arity) (assoc :red-first-arity
+                                     (vec (for [f arity]
+                                            {:form (:form f) :message (:message f)})))
+                  (seq refs)  (assoc :red-first-refs
+                                     (vec (for [f refs]
+                                            {:form (:form f) :message (:message f)})))))
         (seq carried)
         (assoc :carried (vec (for [f carried]
                                {:form (:form f) :type (:type f) :message (:message f)}))))

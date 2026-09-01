@@ -560,11 +560,12 @@
       ;; fragment ONE write into a six-turn recovery cascade — the same
       ;; self-repair family as auto-require: the server does the
       ;; mechanical work.
-      (apply-group-step st gid prompt agent
-                        (assoc step :action
-                               (if (and name (store/form-named st ns name))
-                                 :replace
-                                 :add)))
+      (let [nm (or name
+                   (some-> (edit/parse-form source) :node store/form-symbol))]
+        (apply-group-step st gid prompt agent
+                          (if (and nm (store/form-named st ns nm))
+                            (assoc step :action :replace :name nm)
+                            (assoc step :action :add))))
       (cond
         (and (nil? action) (:code step))
         {:error (str "step has :code but no :source — a write step's text goes"

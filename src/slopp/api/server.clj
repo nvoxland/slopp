@@ -169,12 +169,16 @@
   stack trace where an instruction belongs.
 
   `port` 0 binds an ephemeral port; the BOUND port is what comes back."
-  [session port]
+  [session port & {:keys [routes]}]
   (stop!)
   (try
-    (let [srv (slopp.http/serve! (assoc (serving-opts session)
-                                    :http/host "127.0.0.1"
-                                    :http/port port))
+    (let [srv (slopp.http/serve! (-> (serving-opts session)
+                                     ;; caller rows ride as DATA (a var per
+                                     ;; handler, like the otel row) so a layer
+                                     ;; above api can mount without an edge
+                                     (update :http/routes into (or routes []))
+                                     (assoc :http/host "127.0.0.1"
+                                            :http/port port)))
           p   (:port srv)
           url (str "http://127.0.0.1:" p "/")
           ;; the route table and both performer vocabularies were just derived

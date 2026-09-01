@@ -3821,3 +3821,164 @@
           (let [txt (str (ask! "add a discount to quoting"))]
             (is (not (re-find #"composed report" txt)) txt))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-cli-door-routes-to-the-running-server
+  ;; s12c: opus reached for `slopp --call` unprompted and found the cold
+  ;; path — JVM boot + whole-store load + silent minutes — and spent 8
+  ;; turns babysitting it. The daemon was right there: the ui listener
+  ;; serves the LIVE session. POST /api/call is the routed door: same
+  ;; call-op!, same result text (anticipation rows included), token-guarded.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "cd.b" :source "(ns cd.b)\n(defn b \"B.\" [x] x)\n"})
+      (call! sess "ns_create" {:ns "cd.a" :source "(ns cd.a (:require [cd.b :as b]))\n(defn a \"A.\" [x] (b/b x))\n"})
+      (swap! sess assoc :call-token "tok-1")
+      (let [post! (fn [body]
+                    (#'mcp/http-call! {:body body :http/deps {:session sess}}))]
+        (testing "a wrong or missing token is refused, and runs nothing"
+          (is (= 403 (:status (post! {:tool "query_source"
+                                      :arguments {:ns "cd.a"}}))))
+          (is (= 403 (:status (post! {:tool "query_source" :token "nope"
+                                      :arguments {:ns "cd.a"}})))))
+        (testing "a routed read answers exactly what MCP answers — anticipation included"
+          (let [r (post! {:tool "query_source" :token "tok-1"
+                          :arguments {:ns "cd.a"}})
+                t (str (:body r))]
+            (is (= 200 (:status r)))
+            (is (re-find #"defn a" t) t)
+            (is (re-find #"anticipated" t) "cd.b rode along, same door as MCP")))
+        (testing "a routed WRITE lands with provenance — the prompt opens its turn"
+          (let [r (post! {:tool "edit_replace_form" :token "tok-1"
+                          :arguments {:ns "cd.b" :name "b"
+                                      :source "(defn b \"B!\" [x] x)"
+                                      :prompt "via the routed door"}})]
+            (is (= 200 (:status r)))
+            (is (re-find #":ok true" (str (:body r))) (str (:body r)))))
+        (testing "a refusal crosses as isError text, never a stack trace"
+          (let [r (post! {:tool "frobnicate" :token "tok-1" :arguments {}})
+                t (str (:body r))]
+            (is (= 200 (:status r)))
+            (is (re-find #"\"isError\":true" t) t)
+            (is (re-find #"unknown tool" t) t))))
+      (finally (ops/close! sess)))))
+
+(deftest ^{:external true
+           :adapter "http — stands in for the shim's python urllib: the proof is that a FOREIGN client opens the door with nothing but .slopp/ui-port and raw HTTP, no slopp facade in the loop"}
+  the-cli-door-is-mounted-with-its-token
+  ;; the mount half of the routed door: start-ui! passes the /api/call row
+  ;; down as data, mints the per-boot token, and writes it into
+  ;; .slopp/ui-port beside the address — the file the shim (and the prompt
+  ;; hook before it) already trusts. A real POST through the bound port
+  ;; answers a routed op from the WARM image — the s12c cold path took
+  ;; silent minutes; this asserts the routed one is interactive.
+  (let [sess (external/open!)]
+    (try
+      (let [r (mcp/start-ui! sess 0)]
+        (is (:url r) (pr-str r))
+        (let [pf    (slurp (str (:dir @sess) "/.slopp/ui-port"))
+              token (second (re-find #"\"token\":\"([^\"]+)\"" pf))
+              url   (second (re-find #"\"url\":\"([^\"]+)\"" pf))]
+          (is (some? token) pf)
+          (let [client (java.net.http.HttpClient/newHttpClient)
+                post!  (fn [body]
+                         (.send client
+                                (-> (java.net.http.HttpRequest/newBuilder
+                                     (java.net.URI/create (str url "api/call")))
+                                    (.header "Content-Type" "application/json")
+                                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString body))
+                                    (.build))
+                                (java.net.http.HttpResponse$BodyHandlers/ofString)))
+                t0     (System/nanoTime)
+                resp   (post! (str "{\"tool\":\"query_project\",\"arguments\":{},\"token\":\"" token "\"}"))
+                ms     (quot (- (System/nanoTime) t0) 1000000)]
+            (is (= 200 (.statusCode resp)))
+            (is (re-find #"\"isError\":false" (.body resp)) (.body resp))
+            (is (< ms 2000) (str "routed call took " ms "ms — the warm image must answer interactively"))
+            (testing "and the token in the file is the ONLY key that opens it"
+              (is (= 403 (.statusCode (post! "{\"tool\":\"query_project\",\"arguments\":{},\"token\":\"wrong\"}"))))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-step-carrying-several-forms-splits-and-infers
+  ;; opus's native write grain is the whole blob — 8 heredoc FILES per plain
+  ;; lifetime — and the one-form-per-step rule fragmented that into 22
+  ;; calls. A nameless, actionless step whose source parses to several
+  ;; top-level forms now splits into per-form inferred steps: new names
+  ;; add, existing names replace, one atomic group, one verification.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "blob.core" :source "(ns blob.core)\n(defn keep-me \"K.\" [x] x)\n"})
+      (testing "a multi-form blob lands as per-form steps, add and replace inferred"
+        (let [r (call! sess "edit" {:op "change" :prompt "the whole feature as one blob"
+                                    :impl [{:ns "blob.core"
+                                            :source "(defn keep-me \"K!\" [x] x)\n\n(defn ^:unused-ok fresh \"F.\" [x] (keep-me x))\n\n(defn ^:unused-ok also \"A.\" [x] (fresh x))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":replace" r) "keep-me existed — replaced")
+          (is (re-find #":add" r) "fresh/also are new — added")))
+      (testing "the landed store agrees"
+        (let [r (call! sess "query_source" {:ns "blob.core"})]
+          (is (re-find #"K!" r) r)
+          (is (re-find #"defn \^:unused-ok also" r) r)))
+      (testing "a blob whose text does not parse refuses whole, nothing lands"
+        (let [r (call! sess "edit" {:op "change" :prompt "p"
+                                    :impl [{:ns "blob.core" :source "(defn broken \"B.\" [x"}]})]
+          (is (re-find #"error" r) r)
+          (is (not (re-find #"broken" (call! sess "query_source" {:ns "blob.core"}))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external cli-mode-advertises-no-tools
+  ;; SLOPP_CLI cells: the surface is the CLI door; the MCP connection stays
+  ;; (hooks, lifecycle, the routed /api/call) but advertises NOTHING — the
+  ;; ~8k tokens of family schema stop riding every request. De-advertised is
+  ;; not closed: dispatch still answers by name, exactly the s8 alias stance.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :cli-mode? true)
+      (is (= [] (get-in (mcp/handle! sess {:id 2 :method "tools/list"})
+                        [:result :tools])))
+      (testing "dispatch stays open — the Stop hook's done and the routed door ride it"
+        (is (re-find #"namespaces" (call! sess "query_project" {}))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-blob-leading-with-its-ns-form-creates-the-namespace
+  ;; the whole-file gesture: every model writes a NEW file as one blob that
+  ;; starts with (ns …). Probed live (s13 wave B): that heredoc refused with
+  ;; "no namespace — ingest it first". A change step that IS an ns form for
+  ;; an absent namespace now creates it (create-ns! under the hood) before
+  ;; the group lands the rest.
+  (let [sess (external/open!)]
+    (try
+      (testing "one blob, new namespace: created, split, verified"
+        (let [r (call! sess "edit" {:op "change" :prompt "a new namespace as one heredoc"
+                                    :impl [{:ns "nsx.core"
+                                            :source "(ns nsx.core (:require [clojure.test :refer [deftest is]]))\n\n(defn triple \"T.\" [x] (* 3 x))\n\n(deftest triple-t (is (= 9 (triple 3))))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"triple" (call! sess "query_source" {:ns "nsx.core"})))))
+      (testing "the same gesture on an EXISTING namespace replaces through the group"
+        (let [r (call! sess "edit" {:op "change" :prompt "the same file, edited whole"
+                                    :impl [{:ns "nsx.core"
+                                            :source "(ns nsx.core (:require [clojure.test :refer [deftest is]]))\n\n(defn triple \"T!\" [x] (* 3 x))\n\n(deftest triple-t (is (= 9 (triple 3))))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"T!" (call! sess "query_source" {:ns "nsx.core"})))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-cli-cells-bundle-speaks-the-cli-loop
+  ;; SLOPP_CLI cells advertise no MCP tools, so a bundle telling the reader
+  ;; to \"work through the slopp tools\" points at doors that are not there.
+  ;; ?cli=1 respells the PREAMBLE only — the ranked map is the same map.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "cv.core" :source "(ns cv.core)\n(defn f \"F.\" [x] x)\n"})
+      (let [ctx (server/context sess)
+            get! (fn [qs] (str (:body (slopp.http/handle!
+                                       ctx {:request-method :get :uri "/api/bundle"
+                                            :query-string qs}))))]
+        (testing "cli voice: the preamble teaches the CLI verbs"
+          (let [t (get! "ask=extend+f&cli=1")]
+            (is (re-find #"slopp add" t) t)
+            (is (re-find #"slopp change" t) t)
+            (is (re-find #"cv\.core" t) "the ranked map is still the map")))
+        (testing "without the flag, the MCP voice is unchanged"
+          (let [t (get! "ask=extend+f")]
+            (is (re-find #"slopp tools" t) t)
+            (is (not (re-find #"slopp add" t)) t))))
+      (finally (ops/close! sess)))))

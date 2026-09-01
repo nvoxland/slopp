@@ -309,65 +309,6 @@
                                         (.getMessage t)))
       nil)))
 
-^:unsafe (defn start-ui!
-  "Bring this project's UI listener up beside the MCP server and start its
-  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
-  `{:error …}` — and NEVER throws.
-
-  The listener still serves the LIVE session and still dies with the server.
-  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
-  not blank — it is STALE, showing the warranty as of the last verified run
-  rather than the one being changed, and it would boot a second image to show
-  it. That accuracy is what forces the whole hub design (D-hub): a hub
-  cannot answer for a store, so every project answers for itself and the hub
-  proxies.
-
-  What changed is the ADDRESS. The port is derived from the store dir instead
-  of defaulting to a fixed 7359, so projects on one machine never collide, and
-  a taken port falls back to an ephemeral one — the registered url carries
-  whatever was actually bound. Nobody needs to know this number; the address a
-  human remembers is the hub's.
-
-  The stance every optional listener here takes: the UI is OPTIONAL and MCP
-  is not. A busy port, a missing hub, anything at all — it
-  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
-  carries on. Nothing about a browser page should be able to stop the thing the
-  editor is talking to."
-  ([session] (start-ui! session nil))
-  ([session explicit-port]
-   (let [dir  (:dir @session)
-         want (server/preferred-port dir explicit-port)
-         try! (fn [p] (try (server/serve! session p)
-                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
-         r0   (try! want)
-         ;; a derived port is a PREFERENCE: something else already holding it
-         ;; must not cost this project its UI, so fall back to whatever is free.
-         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
-     ;; ON THE SESSION, so a reader can find it. The stderr
-     ;; banner below goes to the MCP server's log, which most clients never
-     ;; show a human — so autostart without this is a feature nobody can find.
-     ;; session_brief surfaces it, which is where an agent looks and how the
-     ;; human gets told.
-     (when (:url r) (swap! session assoc :ui-url (:url r)))
-     ;; …and on DISK, for a process that is not this one: the prompt hook
-     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
-     ;; from a file instead of asking the hub. pid + started let it tell a
-     ;; live listener from a dead session's leftover. Best-effort, silent —
-     ;; nothing about the optional UI may cost the MCP loop anything.
-     (when (:url r)
-       (try (let [ph (java.lang.ProcessHandle/current)]
-              (spit (str (:dir @session) "/.slopp/ui-port")
-                    (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d}"
-                            (long (:port r)) (:url r) (.pid ph)
-                            (System/currentTimeMillis))))
-            (catch Throwable _ nil)))
-     (.println System/err
-               ^String (if (:url r)
-                         (str "slopp UI: " (:url r))
-                         (str "slopp UI unavailable: " (:error r))))
-     (when (:url r) (start-heartbeat! session dir (:url r)))
-     r)))
-
 (def terse-elided
   "The only routed keys the TERSE path drops, and the reason each is not a
   finding.
@@ -1165,7 +1106,18 @@
                           (one (assoc (kw e)
                                       :action :subform
                                       :ns (:ns s) :name (:name s))))
-                        [(one s)]))))
+                        (if (and (nil? (:action s)) (nil? (:name s))
+                                 (string? (:source s)))
+                          ;; the whole-blob gesture (opus's native grain:
+                          ;; whole heredoc files, fragmented 3x by the
+                          ;; one-form rule): several top-level forms in one
+                          ;; nameless step become per-form inferred steps
+                          (let [nodes (:nodes (try (edit/parse-forms (:source s))
+                                                   (catch Exception _ nil)))]
+                            (if (< (count nodes) 2)
+                              [(one s)]
+                              (mapv #(one (assoc s :source (n/string %))) nodes)))
+                          [(one s)])))))
           steps)))
 
 (defn- terse-full-check
@@ -1692,6 +1644,73 @@
                              f)))
                        fs)))))
 
+(defn- anticipated!
+  "Append the require expansion to a read's answer: for each namespace in
+  `nses` (just read whole), attach the sources of its direct requires the
+  session has not been handed yet — `anticipate/expansion`, ~2k token
+  budget — as rows marked `:anticipated true`, and remember what was
+  attached so nothing rides twice. Returns the (possibly vectorized)
+  answer; the attachment lives in the SAME vector `dedupe-sources!` walks.
+
+  Why rows and not prose: the next read the model would have made is now
+  already in context, and the ledger record (models do not re-ask for
+  sources they hold — `:source-already-sent` measured this) is what turns
+  an attachment into a deleted turn. Session-scoped memory, not ask-scoped:
+  over-remembering only costs a skipped re-attachment, never a wrong one."
+  [res session nses]
+  (let [held (into (or (::anticipated @session) #{}) nses)
+        st   (:store @session)
+        rows (->> nses
+                  (mapcat #(anticipate/expansion st % held 2000))
+                  (map #(assoc % :whole true :anticipated true))
+                  (reduce (fn [{:keys [seen out left]} r]
+                            (if (or (seen (:ns r)) (< left (:tokens r)))
+                              {:seen seen :out out :left left}
+                              {:seen (conj seen (:ns r))
+                               :out (conj out r)
+                               :left (- left (:tokens r))}))
+                          {:seen #{} :out [] :left 2000})
+                  :out)]
+    (swap! session update ::anticipated (fnil into #{})
+           (into (set nses) (map :ns rows)))
+    (if (empty? rows)
+      res
+      (let [rows (conj rows {:anticipation-note
+                             (str "attached: what these require — already in"
+                                  " hand, no need to read them")})]
+        (if (vector? res) (into res rows) (into [res] rows))))))
+
+(defn- create-leading-ns!
+  "Steps whose source IS an `(ns …)` form for a namespace the store does not
+  have yet: create each namespace (the same `create-ns!` a scaffold uses)
+  and return `{:steps <the rest> :created [create-results]}` — or
+  `{:error …}` when a create refuses. The whole-file heredoc gesture — how
+  every model writes a NEW file — leads with its ns form; without this the
+  blob refused with \"no namespace — ingest it first\" (probed live, s13).
+  An ns form for an EXISTING namespace is not a create: it stays in the
+  group and replaces — a require edit arriving by blob."
+  [session steps a]
+  (let [st       (:store @session)
+        ns-step? (fn [s]
+                   (and (nil? (:action s)) (string? (:source s)) (:ns s)
+                        (nil? (get-in st [:namespaces (symbol (str (:ns s)))]))
+                        (let [sx (some-> (edit/parse-form (:source s)) :node
+                                         (as-> nd (try (n/sexpr nd)
+                                                       (catch Exception _ nil))))]
+                          (and (seq? sx) (= 'ns (first sx))
+                               (= (symbol (str (:ns s))) (second sx))))))
+        creates  (filter ns-step? steps)
+        results  (reduce (fn [acc s]
+                           (let [r (ops/create-ns! session (symbol (str (:ns s)))
+                                                   :source (:source s)
+                                                   :prompt (:prompt a)
+                                                   :agent (:agent a))]
+                             (if (:error r) (reduced r) (conj acc r))))
+                         [] creates)]
+    (if (map? results)
+      {:error (:error results)}
+      {:steps (vec (remove ns-step? steps)) :created results})))
+
 (def ^:private change-handlers!
   "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
   unit of work as one call — tests land first and the result reports which
@@ -1707,12 +1726,28 @@
   call-op! -> tail-handlers! -> this map -> call-op!.)"
   (let [change-fn
         (fn [session a _sym]
-          (let [tests (wire-steps (or (:tests a) []))
-                impl  (wire-steps (or (:impl a) []))]
-            (if (empty? impl)
-              (text! {:error (str "change needs :impl steps — a question is explore;"
-                                  " a test you are writing to FIND something out is"
-                                  " explore {ops [{op check code …}]}")})
+          (let [tests0 (wire-steps (or (:tests a) []))
+                impl0  (wire-steps (or (:impl a) []))
+                born   (create-leading-ns! session (into tests0 impl0) a)
+                keep?  (if (:error born) (constantly true) (set (:steps born)))
+                tests  (vec (filter keep? tests0))
+                impl   (vec (filter keep? impl0))]
+            (if (or (:error born) (empty? impl))
+              (cond
+                (:error born)
+                (text! {:error (:error born) :phase :create})
+
+                (seq (:created born))
+                ;; the blob WAS a namespace creation — create-ns! landed and
+                ;; verified it; nothing is left for the group
+                (text! {:ok true :status :green
+                        :created (mapv #(select-keys % [:ns :forms :test :warnings])
+                                       (:created born))})
+
+                :else
+                (text! {:error (str "change needs :impl steps — a question is explore;"
+                                    " a test you are writing to FIND something out is"
+                                    " explore {ops [{op check code …}]}")}))
               (let [rt (when (seq tests)
                          (ops/edit-group! session tests
                                           :prompt (str (:prompt a) " [tests first — expected red]")
@@ -1784,42 +1819,6 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
-
-(defn- anticipated!
-  "Append the require expansion to a read's answer: for each namespace in
-  `nses` (just read whole), attach the sources of its direct requires the
-  session has not been handed yet — `anticipate/expansion`, ~2k token
-  budget — as rows marked `:anticipated true`, and remember what was
-  attached so nothing rides twice. Returns the (possibly vectorized)
-  answer; the attachment lives in the SAME vector `dedupe-sources!` walks.
-
-  Why rows and not prose: the next read the model would have made is now
-  already in context, and the ledger record (models do not re-ask for
-  sources they hold — `:source-already-sent` measured this) is what turns
-  an attachment into a deleted turn. Session-scoped memory, not ask-scoped:
-  over-remembering only costs a skipped re-attachment, never a wrong one."
-  [res session nses]
-  (let [held (into (or (::anticipated @session) #{}) nses)
-        st   (:store @session)
-        rows (->> nses
-                  (mapcat #(anticipate/expansion st % held 2000))
-                  (map #(assoc % :whole true :anticipated true))
-                  (reduce (fn [{:keys [seen out left]} r]
-                            (if (or (seen (:ns r)) (< left (:tokens r)))
-                              {:seen seen :out out :left left}
-                              {:seen (conj seen (:ns r))
-                               :out (conj out r)
-                               :left (- left (:tokens r))}))
-                          {:seen #{} :out [] :left 2000})
-                  :out)]
-    (swap! session update ::anticipated (fnil into #{})
-           (into (set nses) (map :ns rows)))
-    (if (empty? rows)
-      res
-      (let [rows (conj rows {:anticipation-note
-                             (str "attached: what these require — already in"
-                                  " hand, no need to read them")})]
-        (if (vector? res) (into res rows) (into [res] rows))))))
 
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
@@ -2513,8 +2512,15 @@
                            :capabilities {:tools {:listChanged true}}
                            :serverInfo {:name "slopp" :version "0.1.0"}}}
     "notifications/initialized" nil
-    "tools/list" (do (swap! session assoc :slopp.mcp/tools-hash (hash tools/tools))
-                     {:jsonrpc "2.0" :id id :result {:tools tools/tools}})
+    "tools/list" (let [advertised (if (or (:cli-mode? @session)
+                                          (some? (System/getenv "SLOPP_CLI")))
+                                      ;; the CLI door is the surface; the MCP
+                                      ;; connection stays for hooks/lifecycle
+                                      ;; but pays no schema rent
+                                      []
+                                      tools/tools)]
+                   (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
+                   {:jsonrpc "2.0" :id id :result {:tools advertised}})
     "tools/call"
     ;; BOTH edges of the call, recorded here because this is the only layer
     ;; that sees them. The gap between one answer and the next call is time
@@ -2598,6 +2604,191 @@
       (.write out-writer (str (json/generate-string note) "\n"))
       (.flush out-writer)))
   nil)
+
+(defn call!
+  "One-shot tool invocation against the store at `dir` — the --call CLI's
+  engine and the fallback when no MCP connection exists. Opens a durable
+  session, dispatches ONE tool call, closes. Returns the wire result map
+  ({:content [{:text …}]}; :isError true on tool errors), same as the
+  server would send.
+
+  Writes stay TURN-GATED here, deliberately: provenance is not optional just
+  because the caller is a script. Turns are DURABLE across one-shot processes,
+  so the scripted shape is `--call turn_begin` once, then the writes, then
+  `--call turn_end` — not a turn per call. Reads need nothing.
+
+  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
+  everything here flows through `text!`, whose boundary-leak guard refuses a
+  file:line coordinate, so emitting frames replaced the real diagnostic with a
+  guard exception."
+  [dir tool arguments]
+  (let [session (external/open!
+                 (cond-> {:slopp.ops/dir (str dir)}
+                   ;; a one-shot names its agent in the call, and that name is
+                   ;; the SESSION's identity, not merely the delta's. Turns are
+                   ;; durable across processes and so is the LINE one was opened
+                   ;; on — a fresh identity per process would open a fresh
+                   ;; thread per call, and the turn would be unfindable by the
+                   ;; very write it was opened for.
+                   (:agent arguments)
+                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
+    (swap! session assoc :require-turns? true)
+    (try
+      (let [r (try (call-tool! session {:name tool :arguments arguments})
+                   (catch Exception e
+                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                           msgs  (into [] (comp (take-while some?)
+                                                (map #(str (.getSimpleName (class %))
+                                                           ": " (ex-message %))))
+                                       chain)]
+                       (assoc (text! (str "error: " (str/join " <- " msgs)))
+                              :isError true))))]
+        ;; ...and say what this process could not see. See
+        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+        ;; somebody's thread holds un-landed work that is a different store from
+        ;; the one an MCP session answers from.
+        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+          (update r :content (fnil conj []) {:type "text" :text note})
+          r))
+      (finally (ops/close! session)))))
+
+^:unsafe
+(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
+  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
+  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
+  tool error. args is JSON, EDN, or @file (parse-call-args)."
+  [& [dir tool args-str]]
+  (when (str/blank? tool)
+    (binding [*out* *err*]
+      (println "usage: --call <tool> [<json/edn args or @file>]"))
+    (System/exit 2))
+  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
+    (println (clojure.string/join "\n" (map :text (:content r))))
+    (flush)
+    (System/exit (if (:isError r) 1 0))))
+
+(defn- http-call!
+  "`POST /api/call` — the CLI door onto the RUNNING server. Body:
+  `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<from .slopp/ui-port>\"}`.
+  Invokes [[call-op!]] on the live session — the same dispatch, turn gating,
+  ledger and anticipation MCP calls get — and answers
+  `{\"isError\" bool \"text\" \"…\"}` with the joined content text, the shape
+  `--call` already prints. A thrown refusal crosses as isError text, never a
+  stack trace: the caller is a terminal.
+
+  The token is a per-boot secret written into `.slopp/ui-port` beside the
+  address (the file is already the trust anchor the prompt hook reads).
+  Loopback binding alone must not grant every local process write access to
+  the store — 403 without it, and nothing runs. Why this exists (s12c,
+  measured): the one-shot `--call` path boots a JVM and loads the whole
+  store in silence; an agent reached for it unprompted, waited on the cold
+  path for minutes, and spent eight turns babysitting the process — while
+  this process held the warm image the whole time.
+
+  FOR ANYONE PROXYING A SLOPP LISTENER: this write door shares the listener
+  with the read endpoints — it differs by path and method, not by port. A
+  reverse proxy MUST NOT forward POST /api/call unless it means to hand the
+  store's editing surface to everything that can reach the proxy
+  (slopp-ui's hub verified its GET-only stance at the wire, 2026-09-01)."
+  [req]
+  (let [session (:session (:http/deps req))
+        body    (:body req)
+        b       (cond
+                  (map? body)    body
+                  (nil? body)    {}
+                  (string? body) (try (json/parse-string body true)
+                                      (catch Exception _ {}))
+                  :else          (try (json/parse-string (slurp body) true)
+                                      (catch Exception _ {})))
+        raw     (fn [status m]
+                  {:status status :http/raw true
+                   :headers {"Content-Type" "application/json"}
+                   :body (json/generate-string m)})
+        want    (some-> session deref :call-token)]
+    (cond
+      (nil? session)
+      (raw 503 {:error "no live session behind this listener"})
+
+      (or (nil? want) (not= (str (:token b)) (str want)))
+      (raw 403 {:error "bad or missing token — read it from .slopp/ui-port"})
+
+      (not (string? (:tool b)))
+      (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
+
+      :else
+      (let [args (cond-> (or (:arguments b) {})
+                   (:agent b) (assoc :agent (:agent b)))
+            r    (try (call-op! session {:name (:tool b) :arguments args})
+                      (catch Exception e
+                        {:isError true
+                         :content [{:type "text"
+                                    :text (or (ex-message e) (str e))}]}))]
+        (raw 200 {:isError (boolean (:isError r))
+                  :text (apply str (map :text (:content r)))})))))
+
+^:unsafe (defn start-ui!
+  "Bring this project's UI listener up beside the MCP server and start its
+  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
+  `{:error …}` — and NEVER throws.
+
+  The listener still serves the LIVE session and still dies with the server.
+  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
+  not blank — it is STALE, showing the warranty as of the last verified run
+  rather than the one being changed, and it would boot a second image to show
+  it. That accuracy is what forces the whole hub design (D-hub): a hub
+  cannot answer for a store, so every project answers for itself and the hub
+  proxies.
+
+  What changed is the ADDRESS. The port is derived from the store dir instead
+  of defaulting to a fixed 7359, so projects on one machine never collide, and
+  a taken port falls back to an ephemeral one — the registered url carries
+  whatever was actually bound. Nobody needs to know this number; the address a
+  human remembers is the hub's.
+
+  The stance every optional listener here takes: the UI is OPTIONAL and MCP
+  is not. A busy port, a missing hub, anything at all — it
+  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
+  carries on. Nothing about a browser page should be able to stop the thing the
+  editor is talking to."
+  ([session] (start-ui! session nil))
+  ([session explicit-port]
+   (let [dir  (:dir @session)
+         ;; the CLI door's per-boot secret: written into ui-port below,
+         ;; required by /api/call — loopback alone is not authorization
+         token (str (java.util.UUID/randomUUID))
+         want (server/preferred-port dir explicit-port)
+         try! (fn [p] (try (server/serve! session p
+                                          :routes [{:method :post :path "/api/call"
+                                                    :auth :public :handler #'http-call!}])
+                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
+         r0   (try! want)
+         ;; a derived port is a PREFERENCE: something else already holding it
+         ;; must not cost this project its UI, so fall back to whatever is free.
+         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
+     ;; ON THE SESSION, so a reader can find it. The stderr
+     ;; banner below goes to the MCP server's log, which most clients never
+     ;; show a human — so autostart without this is a feature nobody can find.
+     ;; session_brief surfaces it, which is where an agent looks and how the
+     ;; human gets told.
+     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token))
+     ;; …and on DISK, for a process that is not this one: the prompt hook
+     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
+     ;; from a file instead of asking the hub. pid + started let it tell a
+     ;; live listener from a dead session's leftover. Best-effort, silent —
+     ;; nothing about the optional UI may cost the MCP loop anything.
+     (when (:url r)
+       (try (let [ph (java.lang.ProcessHandle/current)]
+              (spit (str (:dir @session) "/.slopp/ui-port")
+                    (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
+                            (long (:port r)) (:url r) (.pid ph)
+                            (System/currentTimeMillis) token)))
+            (catch Throwable _ nil)))
+     (.println System/err
+               ^String (if (:url r)
+                         (str "slopp UI: " (:url r))
+                         (str "slopp UI unavailable: " (:error r))))
+     (when (:url r) (start-heartbeat! session dir (:url r)))
+     r)))
 
 ^:unsafe
 (defn -main
@@ -2703,65 +2894,3 @@
         ;; A minute of a process that has announced a url, withdrawn it, and
         ;; still answers `ps` is exactly the state nobody could interpret.
         (shutdown-agents)))))
-
-(defn call!
-  "One-shot tool invocation against the store at `dir` — the --call CLI's
-  engine and the fallback when no MCP connection exists. Opens a durable
-  session, dispatches ONE tool call, closes. Returns the wire result map
-  ({:content [{:text …}]}; :isError true on tool errors), same as the
-  server would send.
-
-  Writes stay TURN-GATED here, deliberately: provenance is not optional just
-  because the caller is a script. Turns are DURABLE across one-shot processes,
-  so the scripted shape is `--call turn_begin` once, then the writes, then
-  `--call turn_end` — not a turn per call. Reads need nothing.
-
-  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
-  everything here flows through `text!`, whose boundary-leak guard refuses a
-  file:line coordinate, so emitting frames replaced the real diagnostic with a
-  guard exception."
-  [dir tool arguments]
-  (let [session (external/open!
-                 (cond-> {:slopp.ops/dir (str dir)}
-                   ;; a one-shot names its agent in the call, and that name is
-                   ;; the SESSION's identity, not merely the delta's. Turns are
-                   ;; durable across processes and so is the LINE one was opened
-                   ;; on — a fresh identity per process would open a fresh
-                   ;; thread per call, and the turn would be unfindable by the
-                   ;; very write it was opened for.
-                   (:agent arguments)
-                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
-    (swap! session assoc :require-turns? true)
-    (try
-      (let [r (try (call-tool! session {:name tool :arguments arguments})
-                   (catch Exception e
-                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                           msgs  (into [] (comp (take-while some?)
-                                                (map #(str (.getSimpleName (class %))
-                                                           ": " (ex-message %))))
-                                       chain)]
-                       (assoc (text! (str "error: " (str/join " <- " msgs)))
-                              :isError true))))]
-        ;; ...and say what this process could not see. See
-        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-        ;; somebody's thread holds un-landed work that is a different store from
-        ;; the one an MCP session answers from.
-        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-          (update r :content (fnil conj []) {:type "text" :text note})
-          r))
-      (finally (ops/close! session)))))
-
-^:unsafe
-(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
-  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
-  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
-  tool error. args is JSON, EDN, or @file (parse-call-args)."
-  [& [dir tool args-str]]
-  (when (str/blank? tool)
-    (binding [*out* *err*]
-      (println "usage: --call <tool> [<json/edn args or @file>]"))
-    (System/exit 2))
-  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
-    (println (clojure.string/join "\n" (map :text (:content r))))
-    (flush)
-    (System/exit (if (:isError r) 1 0))))

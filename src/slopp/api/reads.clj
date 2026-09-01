@@ -429,6 +429,7 @@
         handoff? (boolean (re-find #"(?i)(what(?:'s| has| have| was)? +(?:been +)?(?:changed|happened|done)|\bsummar|hand.?off|\bhanding\b|\bhand (?:this|it|the|over)\b|\brundown\b|\brecap\b|catch +(?:me +)?up|since +(?:the +)?last|\bwhat did (?:you|we)\b|\b(?:has|have) changed\b|\bchanged here\b|walk (?:me|us) through the changes|\bhistory of (?:the )?(?:changes|project)\b)"
                                    ask))
         {:keys [text sent]} (orient/bundle session ask
+                                           :cli? (= "1" (str (:cli query-params)))
                                            :tokens (cond same? 450 handoff? 500 :else 1100)
                                            :sources (if (or same? handoff?) 1 2))
         text     (if (and handoff? (not same?))
