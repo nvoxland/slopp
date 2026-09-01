@@ -934,3 +934,48 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   validation and dispatch surface: an op called by its own name still
   dispatches (the `--call` door, the hooks), it is just not advertised."
   (mapv family-descriptor families))
+
+(def card-ops
+  "The ops whose argument cards ride the bundle under the schema diet — the
+  ten that covered ~95% of every call the s11-s13 eval cells made (census
+  over 12 cells, both models, both terrains). Not a capability list: every
+  other op still dispatches and `help {topic op}` still teaches it; these
+  are the calls worth PREPAYING."
+  ["change" "query_source" "explore" "done" "ns_create"
+   "rename_sweep" "test_run" "report" "full_check" "query_search"])
+
+(def op-cards
+  "The argument-teaching block the bundle carries under the schema diet:
+  one line per [[card-ops]] op — `name {required, [optional…]} — first
+  sentence` — derived from [[registry]] so a card can never drift from what
+  validates. ~0.7k tokens standing in for the ~4k of family prose the diet
+  sheds: the s13 law made the trade explicit — a schema is prepaid argument
+  TEACHING, and teaching can ride the cheaper channel."
+  (str/join
+   "\n"
+   (for [op card-ops
+         :let [d (some #(when (= op (:name %)) %) registry)]
+         :when d]
+     (let [req  (set (get-in d [:inputSchema :required]))
+           prop (map clojure.core/name (keys (get-in d [:inputSchema :properties])))
+           args (str/join ", " (concat (sort (filter req prop))
+                                       (map #(str "[" % "]")
+                                            (sort (remove req prop)))))
+           sent (first (str/split (str (:description d)) #"(?<=\.) " 2))]
+       (str op " {" args "} — " (subs (str sent) 0 (min 240 (count (str sent)))))))))
+
+(def dieted-tools
+  "[[tools]] with the op-index PROSE relocated: each multi-op family keeps
+  its name, every schema and op enum (the structural half, which clients
+  validate against), and a one-line description pointing at the bundle's
+  op cards and `help {topic op}`. Measured before the diet: 24.4k advertised
+  chars, 15.6k of them description prose — rent on every request of every
+  session, teaching that the bundle can carry for a fraction."
+  (mapv (fn [t]
+          (if-let [ops (get-in t [:inputSchema :properties :op :enum])]
+            (assoc t :description
+                   (str "ops: " (str/join " " ops)
+                        " — argument cards ride the [slopp] block on your ask;"
+                        " help {topic <op>} is one op's full card."))
+            t))
+        tools))

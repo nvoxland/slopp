@@ -4005,3 +4005,110 @@
             (str "the spec was WATCHED failing — the whole point of red-first: " r))
         (is (re-find #":status :green" r) r))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-live-listeners-address-is-never-clobbered
+  ;; s13 cell autopsy: `slopp --help` fell through to serve mode, whose
+  ;; start-ui! overwrote the REAL server's .slopp/ui-port with its own pid,
+  ;; then died on stdin EOF — 31 dead-pid fallbacks followed, each a silent
+  ;; JVM boot. A live listener's file belongs to the process that is alive.
+  (let [sess (external/open!)
+        pf   (str (:dir @sess) "/.slopp/ui-port")]
+    (try
+      (clojure.java.io/make-parents pf)
+      (testing "a file naming a LIVE pid survives a second server's start-ui!"
+        (spit pf "{\"port\":1,\"url\":\"http://127.0.0.1:1/\",\"pid\":1,\"started\":1,\"token\":\"keep-me\"}")
+        (mcp/start-ui! sess 0)
+        (is (re-find #"keep-me" (slurp pf))
+            "the live owner's address stayed; the newcomer must not clobber"))
+      (testing "a file naming a DEAD pid is stale and is replaced"
+        (spit pf "{\"port\":1,\"url\":\"http://127.0.0.1:1/\",\"pid\":999999999,\"started\":1,\"token\":\"stale\"}")
+        (mcp/start-ui! sess 0)
+        (is (not (re-find #"stale" (slurp pf))) (slurp pf)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-cli-door-speaks-both-vocabularies
+  ;; the skill teaches families (read {op …}), the CLI preamble teaches bare
+  ;; ops, and the first cell used BOTH — `slopp read '{…}'` answered
+  ;; \"unknown tool\". A door that refuses a vocabulary the store elsewhere
+  ;; teaches manufactures errors; /api/call resolves ops first, families too.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :call-token "t2")
+      (let [post! (fn [body] (#'mcp/http-call! {:body body :http/deps {:session sess}}))]
+        (testing "a FAMILY call with {op} routes exactly like the wire"
+          (let [r (post! {:tool "read" :token "t2"
+                          :arguments {:op "query_project"}})]
+            (is (= 200 (:status r)))
+            (is (re-find #"\"isError\":false" (str (:body r))) (str (:body r)))))
+        (testing "an op call keeps working as before"
+          (let [r (post! {:tool "query_project" :token "t2" :arguments {}})]
+            (is (re-find #"\"isError\":false" (str (:body r)))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-cli-door-carries-the-wire-s-hints
+  ;; s13 autopsy: a CLI cell's step4 work never landed — 13 writes stranded
+  ;; on the thread with nothing saying so, because /api/call invoked
+  ;; call-op! without the wire's bindings and every routed result was
+  ;; hint-blind. The thread reminder speaks ONCE per session (anti-noise),
+  ;; so the routed write here is the session's FIRST private-making change.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :call-token "t3")
+      (let [post! (fn [body] (#'mcp/http-call! {:body body :http/deps {:session sess}}))
+            r1 (post! {:tool "ns_create" :token "t3"
+                       :arguments {:ns "ht.core"
+                                   :source "(ns ht.core)\n(defn f \"F.\" [x] x)\n"
+                                   :prompt "the private-making write"}})
+            r2 (post! {:tool "edit_replace_form" :token "t3"
+                       :arguments {:ns "ht.core" :name "f"
+                                   :source "(defn f \"F!\" [x] x)"
+                                   :prompt "a second change on the same thread"}})]
+        (is (= 200 (:status r2)))
+        (is (some #(re-find #"on your thread" (str (:body %))) [r1 r2])
+            (str "a routed write must carry the thread reminder: "
+                 (pr-str [(:body r1) (:body r2)]))))
+      (finally (ops/close! sess)))))
+
+(deftest op-cards-carry-the-argument-teaching
+  ;; s13's law: a schema is prepaid argument TEACHING. The cards are that
+  ;; teaching at a fraction of the rent — ten ops covering ~95% of measured
+  ;; calls, exact argument names, required marked, derived from the
+  ;; registry so they cannot drift from what validates.
+  (let [cards tools/op-cards]
+    (testing "every census op has a card"
+      (doseq [op ["change" "query_source" "explore" "done" "ns_create"
+                  "rename_sweep" "test_run" "report" "full_check" "query_search"]]
+        (is (or (str/starts-with? cards (str op " {"))
+                (str/includes? cards (str "\n" op " {")))
+            op)))
+    (testing "a card teaches the REQUIRED arguments by name"
+      (is (re-find #"change \{impl, prompt" cards) cards))
+    (testing "the whole block stays bundle-sized"
+      (is (< (count cards) 4500) (str (count cards) " chars")))))
+
+(deftest ^:external a-dieted-surface-sheds-prose-and-keeps-every-door
+  ;; SLOPP_DIET relocates the op indexes to bundle cards: the advertised
+  ;; surface keeps all fourteen families, every op enum, and every schema —
+  ;; only the description PROSE shrinks. Dispatch is untouched.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :diet-mode? true)
+      (let [ts (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])]
+        (testing "all fourteen families, op enums intact"
+          (is (= 14 (count ts)))
+          (is (some #{"change"} (some #(when (= "edit" (:name %))
+                                         (get-in % [:inputSchema :properties :op :enum])) ts))))
+        (testing "the prose is gone; the pointer to the cards replaces it"
+          (is (< (count (pr-str ts)) 15000) (str (count (pr-str ts))))
+          (is (re-find #"\[slopp\] block|help \{topic" (str (:description (first ts)))))))
+      (testing "dispatch is untouched"
+        (is (re-find #"namespaces" (call! sess "query_project" {}))))
+      (testing "the bundle carries the cards when the hook asks with diet=1"
+        (swap! sess assoc :op-cards tools/op-cards)
+        (let [ctx (server/context sess)
+              txt (str (:body (slopp.http/handle!
+                               ctx {:request-method :get :uri "/api/bundle"
+                                    :query-string "ask=extend+the+quote&diet=1"})))]
+          (is (re-find #"op cards" txt) txt)
+          (is (re-find #"change \{impl, prompt" txt))))
+      (finally (ops/close! sess)))))

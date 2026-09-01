@@ -949,7 +949,9 @@
                        " slopp <op> '{…json…}' · slopp add <ns> <<'EOF' …forms… EOF ·"
                        " slopp replace <ns/name> <<'EOF' · slopp change --prompt '…'"
                        " <<'EOF' with ;;;tests <ns> / ;;;impl <ns> sections ·"
-                       " slopp done '{}' when a unit is finished. Every write"
+                       " slopp done '{}' when a unit is finished. There are NO MCP tools"
+                       " for this store — the shell IS the interface, so never"
+                       " search for tools. Every write"
                        " verifies itself and reports.")
                   " through the slopp tools (the store is the source, not the files).")
                 " The forms below are ranked for THIS ask; their sources, when"

@@ -2520,13 +2520,22 @@
                            :capabilities {:tools {:listChanged true}}
                            :serverInfo {:name "slopp" :version "0.1.0"}}}
     "notifications/initialized" nil
-    "tools/list" (let [advertised (if (or (:cli-mode? @session)
+    "tools/list" (let [advertised (cond
+                                      (or (:cli-mode? @session)
                                           (some? (System/getenv "SLOPP_CLI")))
                                       ;; the CLI door is the surface; the MCP
                                       ;; connection stays for hooks/lifecycle
                                       ;; but pays no schema rent
                                       []
-                                      tools/tools)]
+
+                                      (or (:diet-mode? @session)
+                                          (some? (System/getenv "SLOPP_DIET")))
+                                      ;; the schema diet: op-index prose
+                                      ;; relocated to the bundle's cards;
+                                      ;; schemas, enums, dispatch untouched
+                                      tools/dieted-tools
+
+                                      :else tools/tools)]
                    (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
                    {:jsonrpc "2.0" :id id :result {:tools advertised}})
     "tools/call"
@@ -2675,7 +2684,7 @@
     (flush)
     (System/exit (if (:isError r) 1 0))))
 
-(defn- http-call!
+^:unsafe (defn- http-call!
   "`POST /api/call` — the CLI door onto the RUNNING server. Body:
   `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<from .slopp/ui-port>\"}`.
   Invokes [[call-op!]] on the live session — the same dispatch, turn gating,
@@ -2726,11 +2735,30 @@
       :else
       (let [args (cond-> (or (:arguments b) {})
                    (:agent b) (assoc :agent (:agent b)))
-            r    (try (call-op! session {:name (:tool b) :arguments args})
-                      (catch Exception e
-                        {:isError true
-                         :content [{:type "text"
-                                    :text (or (ex-message e) (str e))}]}))]
+            ;; the SAME bindings the MCP wire gives every call: the hint
+            ;; machinery (the thread reminder that would have saved the
+            ;; stranded s13 cell), the spool for trimmed payloads, the
+            ;; response-facts sink. Without these every routed result was
+            ;; hint-blind — for scripts and humans, not only eval cells.
+            r    (binding [*hint* (or (smells/track-hint! session (:tool b) args)
+                                      (delay (thread-hint! session (:tool b))))
+                           *spool-session* session
+                           *response-facts* (atom {})]
+                   (try (call-op! session {:name (:tool b) :arguments args})
+                        (catch Exception e
+                          ;; the skill teaches FAMILIES (read {op …}), the CLI
+                          ;; preamble teaches bare ops, and real cells use both
+                          ;; — resolve the family spelling before refusing
+                          (or (when (re-find #"unknown tool" (str (ex-message e)))
+                                (try (call-tool! session {:name (:tool b)
+                                                          :arguments args})
+                                     (catch Exception e2
+                                       {:isError true
+                                        :content [{:type "text"
+                                                   :text (or (ex-message e2) (str e2))}]})))
+                              {:isError true
+                               :content [{:type "text"
+                                          :text (or (ex-message e) (str e))}]}))))]
         (raw 200 {:isError (boolean (:isError r))
                   :text (apply str (map :text (:content r)))})))))
 
@@ -2778,18 +2806,36 @@
      ;; show a human — so autostart without this is a feature nobody can find.
      ;; session_brief surfaces it, which is where an agent looks and how the
      ;; human gets told.
-     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token))
+     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token
+                          ;; the bundle's argument-teaching block, handed DOWN
+                          ;; as session data (no api->mcp edge — the route-row
+                          ;; trick); bundle-read! serves it under ?diet=1
+                          :op-cards tools/op-cards))
      ;; …and on DISK, for a process that is not this one: the prompt hook
      ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
      ;; from a file instead of asking the hub. pid + started let it tell a
      ;; live listener from a dead session's leftover. Best-effort, silent —
      ;; nothing about the optional UI may cost the MCP loop anything.
      (when (:url r)
-       (try (let [ph (java.lang.ProcessHandle/current)]
-              (spit (str (:dir @session) "/.slopp/ui-port")
-                    (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
-                            (long (:port r)) (:url r) (.pid ph)
-                            (System/currentTimeMillis) token)))
+       (try (let [ph (java.lang.ProcessHandle/current)
+                  pf (str (:dir @session) "/.slopp/ui-port")
+                  ;; NEVER clobber a LIVE listener's file: a stray serve-mode
+                  ;; launch in this dir (a --help that fell through, measured
+                  ;; s13) overwrote the real address with its own transient
+                  ;; pid and poisoned every routed call that followed. The
+                  ;; file belongs to whoever is alive; a dead pid is stale.
+                  live? (try (let [txt (slurp pf)
+                                   [_ p] (re-find #"\"pid\":(\d+)" txt)
+                                   pid (some-> p parse-long)]
+                               (and pid (not= pid (.pid ph))
+                                    (some-> (java.lang.ProcessHandle/of pid)
+                                            (.orElse nil) (.isAlive))))
+                             (catch Throwable _ false))]
+              (when-not live?
+                (spit pf
+                      (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
+                              (long (:port r)) (:url r) (.pid ph)
+                              (System/currentTimeMillis) token))))
             (catch Throwable _ nil)))
      (.println System/err
                ^String (if (:url r)

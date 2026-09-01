@@ -437,6 +437,17 @@
                         "\n--- the composed report — the store's OWN records (the ids are the citations: :turn per ask, :deltas per change, :commit per milestone) ---\n"
                         (orient/snip (pr-str (ops/report session :limit 12)) 3800)
                         "\n(deeper: report {contains \"…\"}; one form's history: query_history {ns … name …})")
+                   text)
+        ;; the schema diet's other half: the op-index prose the advertised
+        ;; surface shed rides HERE as compact cards — once per ask, not per
+        ;; family per request. Only when the hook says the session is dieted
+        ;; (?diet=1) and only on the FULL bundle: the delta bundle's reader
+        ;; already holds its cards in context.
+        text     (if (and (= "1" (str (:diet query-params))) (not same?)
+                          (string? (:op-cards @session)))
+                   (str text
+                        "\n--- op cards — the calls you will make ({required, [optional]}; help {topic <op>} for more) ---\n"
+                        (:op-cards @session))
                    text)]
     (when (seq sent)
       (swap! session assoc :pending-bundle-held {:sid sid :versions sent}))
