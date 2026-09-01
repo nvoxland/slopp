@@ -1853,3 +1853,16 @@ unfelt needs; it does not override explicit gather-it-yourself
 instructions. Full detail: projects/eval12-anticipation/WAVE-A.md and
 the RUNS rows; running narrative in
 ideas/product/half-the-time-half-the-tokens.md.
+
+## 2026-09-01 — s12c (citable report, step5 isolations x3 jars)
+
+Report rows now cite their journal ids at every grain, and the result
+names them as citations. Sonnet's handoff turns improved monotonically
+across the three jars (13->10->9 and 16->15->12) with the XL answer
+quoting ids — cited pre-composition satisfies an instructed-archaeology
+ask for sonnet. Opus stayed in its variance band; its one outlier
+(26t/813s) was self-inflicted CLI verification: `slopp --call test_run`
+from a fresh shell boots a JVM, loads the store, and runs the suite
+silently for minutes — a real friction a human teammate would hit too,
+filed as an s13 candidate (route --call through the live server via
+.slopp/ui-port, or emit progress).
