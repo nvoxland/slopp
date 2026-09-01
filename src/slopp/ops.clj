@@ -565,7 +565,14 @@
                                (if (and name (store/form-named st ns name))
                                  :replace
                                  :add)))
-      {:error (str "unknown action: " action)})))
+      (cond
+        (and (nil? action) (:code step))
+        {:error (str "step has :code but no :source — a write step's text goes"
+                     " in :source (:code is check's argument, over in explore);"
+                     " rename the key")}
+        (nil? action)
+        {:error "step has no :action and no :source — a step is {action?, ns, name, source, …}"}
+        :else {:error (str "unknown action: " action)}))))
 
 (defn forms-changed-since
   "Ids of forms touched by deltas after `since-id` (nil = since the beginning

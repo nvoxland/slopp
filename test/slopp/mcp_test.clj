@@ -3735,3 +3735,82 @@
         (is (re-find #":action :replace" r) (str "f existed — inferred replace: " r))
         (is (re-find #":action :add" r) (str "g did not — inferred add: " r)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-refusal-teaches-the-code-vs-source-confusion
+  ;; s11 grid, sonnet 41ns step4: a change whose test steps carried :code
+  ;; (check's argument) was refused with "unknown action: " — a message that
+  ;; named nothing the model had actually done; it self-corrected a turn
+  ;; later by luck. The refusal must name the mistake and the key.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "teach.core" :source "(ns teach.core)\n(defn f \"F.\" [x] x)\n"})
+      (let [r (call! sess "edit" {:op "change" :prompt "p"
+                                  :impl [{:ns "teach.core" :name "g"
+                                          :code "(defn g [x] x)"}]})]
+        (is (re-find #":code" r) r)
+        (is (re-find #":source" r) r)
+        (is (re-find #"check" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-store-wide-history-ask-is-pointed-at-report
+  ;; s11 grid, both models, step5: 10-13 turns of history spelunking, with
+  ;; query_history {} retried up to FOUR times against "missing required
+  ;; argument :ns" — a refusal that names the gap but not the door. The
+  ;; store-wide ask HAS doors (report {since}, query_commits); say so. The
+  ;; throwing shape is {name x} with no :ns — the grid models fed turn ids
+  ;; as :name; a bare {} answers [] and never reaches the throw.
+  (let [sess (external/open!)]
+    (try
+      (let [r (call! sess "query_history" {:name "fuel-t"})]
+        (is (re-find #"missing required argument :ns" r) r)
+        (is (re-find #"report" r) r)
+        (is (re-find #"query_commits" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-read-carries-what-it-requires-so-the-next-read-is-never-asked
+  ;; eval12 wave A: replayed against six real transcripts, models read WHOLE
+  ;; namespaces and then read their REQUIRES, one edge per turn — 46-61% of
+  ;; sonnet's read calls were answerable from the previous read's require
+  ;; set at ~3k tokens per lifetime. So the answer to a whole-ns read
+  ;; carries those sources up front, marked, and never twice.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ant.b" :source "(ns ant.b)\n(defn b \"B.\" [x] x)\n"})
+      (call! sess "ns_create" {:ns "ant.a" :source "(ns ant.a (:require [ant.b :as b]))\n(defn a \"A.\" [x] (b/b x))\n"})
+      (call! sess "ns_create" {:ns "ant.c" :source "(ns ant.c (:require [ant.b :as b]))\n(defn c \"C.\" [x] (b/b x))\n"})
+      (testing "a whole-ns read attaches its direct requires' sources, marked"
+        (let [r (call! sess "query_source" {:ns "ant.a"})]
+          (is (re-find #"defn a" r) r)
+          (is (re-find #"defn b" r) "ant.b rode along")
+          (is (re-find #":anticipated true" r) r)))
+      (testing "what one read attached, a later read does not attach again"
+        (let [r (call! sess "query_source" {:ns "ant.c"})]
+          (is (re-find #"defn c" r) r)
+          (is (not (re-find #":anticipated true" r))
+              (str "ant.b is already in the reader's hands: " r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-handoff-shaped-ask-arrives-with-the-report-composed
+  ;; eval12: step5-shaped asks ("summarize what changed…") cost 10-13 turns
+  ;; of query_history spelunking per cell — with 4 retries against a missing
+  ;; :ns in one — while ops/report held the composed answer one call away.
+  ;; The bundle is where pre-emption WORKS (the one measured success), so
+  ;; the report rides the bundle when the ask reads like a handoff. Through
+  ;; the REAL dispatcher: this endpoint is what the prompt hook calls.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "hd.core" :source "(ns hd.core)\n(defn f \"F.\" [x] x)\n"
+                               :prompt "the feature the handoff will describe"})
+      (let [ctx  (server/context sess)
+            ask! (fn [ask]
+                   (:body (slopp.http/handle!
+                           ctx {:request-method :get :uri "/api/bundle"
+                                :query-string (str "ask=" (java.net.URLEncoder/encode (str ask) "UTF-8"))})))]
+        (testing "a handoff-shaped ask carries the composed report, marked"
+          (let [txt (str (ask! "summarize what changed since the last handoff"))]
+            (is (re-find #"composed report" txt) txt)
+            (is (re-find #"hd\.core" txt) "the change row reached the injected story")))
+        (testing "an ordinary ask pays no report rent"
+          (let [txt (str (ask! "add a discount to quoting"))]
+            (is (not (re-find #"composed report" txt)) txt))))
+      (finally (ops/close! sess)))))

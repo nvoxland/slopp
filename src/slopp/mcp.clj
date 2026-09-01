@@ -9,7 +9,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate]))
 
 (def ^:private protocol-version "2024-11-05")
 
@@ -1785,6 +1785,42 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
+(defn- anticipated!
+  "Append the require expansion to a read's answer: for each namespace in
+  `nses` (just read whole), attach the sources of its direct requires the
+  session has not been handed yet — `anticipate/expansion`, ~2k token
+  budget — as rows marked `:anticipated true`, and remember what was
+  attached so nothing rides twice. Returns the (possibly vectorized)
+  answer; the attachment lives in the SAME vector `dedupe-sources!` walks.
+
+  Why rows and not prose: the next read the model would have made is now
+  already in context, and the ledger record (models do not re-ask for
+  sources they hold — `:source-already-sent` measured this) is what turns
+  an attachment into a deleted turn. Session-scoped memory, not ask-scoped:
+  over-remembering only costs a skipped re-attachment, never a wrong one."
+  [res session nses]
+  (let [held (into (or (::anticipated @session) #{}) nses)
+        st   (:store @session)
+        rows (->> nses
+                  (mapcat #(anticipate/expansion st % held 2000))
+                  (map #(assoc % :whole true :anticipated true))
+                  (reduce (fn [{:keys [seen out left]} r]
+                            (if (or (seen (:ns r)) (< left (:tokens r)))
+                              {:seen seen :out out :left left}
+                              {:seen (conj seen (:ns r))
+                               :out (conj out r)
+                               :left (- left (:tokens r))}))
+                          {:seen #{} :out [] :left 2000})
+                  :out)]
+    (swap! session update ::anticipated (fnil into #{})
+           (into (set nses) (map :ns rows)))
+    (if (empty? rows)
+      res
+      (let [rows (conj rows {:anticipation-note
+                             (str "attached: what these require — already in"
+                                  " hand, no need to read them")})]
+        (if (vector? res) (into res rows) (into [res] rows))))))
+
 (defn- call-op! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
   ;; but the image may still be warming on a background thread. Oracle and
@@ -1889,7 +1925,12 @@
               (if-let [v (get a k)]
                 (symbol v)
                 (throw (ex-info (str "missing required argument :"
-                                     (clojure.core/name k) " for " name)
+                                     (clojure.core/name k) " for " name
+                                     (get {["query_history" :ns]
+                                           (str " — asking store-wide? report {since}"
+                                                " composes the whole story;"
+                                                " query_commits lists milestones")}
+                                          [name k] ""))
                                 {}))))
         ;; source args are passed raw (not through `sym`), so a misnamed key
         ;; (`new_source` for `source`) silently became nil and fell through to a
@@ -1986,15 +2027,23 @@
                                                                         " chars; name the forms you need"
                                                                         " (targets [{ns name}]) or pass"
                                                                         " full: true for it all")})))]
-                                          (if-let [ts (some-> (:targets a) normalize-targets seq)]
-                                            (mapv (fn [t]
-                                                    (if (or full? (:name t))
-                                                      (first (query/query-sources session [t]))
-                                                      (gate (:ns t))))
-                                                  ts)
-                                            (if full?
-                                              (query/query-source session (sym :ns))
-                                              (gate (sym :ns)))))))
+                                          ;; whole-ns reads walk the require graph one edge
+                                          ;; per turn (eval12 wave A) — hand the next
+                                          ;; edge over with this one
+                                          (anticipated!
+                                           (if-let [ts (some-> (:targets a) normalize-targets seq)]
+                                             (mapv (fn [t]
+                                                     (if (or full? (:name t))
+                                                       (first (query/query-sources session [t]))
+                                                       (gate (:ns t))))
+                                                   ts)
+                                             (if full?
+                                               (query/query-source session (sym :ns))
+                                               (gate (sym :ns))))
+                                           session
+                                           (if-let [ts (some-> (:targets a) normalize-targets seq)]
+                                             (set (keep :ns ts))
+                                             #{(sym :ns)})))))
       "query_detail" (do
                            ;; WHAT it went back for, recorded whether or not the
                            ;; spool still has it: a retrieval is the evidence a

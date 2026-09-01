@@ -412,14 +412,31 @@
   rent, and a second full map pays it twice. What was emitted is stashed on
   the session as `:pending-bundle-held {:sid :versions}`; absorbing the ask
   the bundle rode in with drains it into the form ledger, so a read of a
-  bundle-carried form is a reference rather than a second copy."
+  bundle-carried form is a reference rather than a second copy.
+
+  A HANDOFF-SHAPED ask (summarize / what changed / recap / since-last)
+  arrives with `ops/report` already composed under a marked section —
+  measured (eval12): that ask shape cost 10-13 turns of history spelunking
+  while the composed answer sat one call away. The injection PAYS for
+  itself by shrinking the card budget (never appending past it — the s10
+  bundle-growth regression is the standing lesson), and a same-session
+  delta bundle skips it: an already-mapped session can ask `report` by
+  name."
   [{:keys [session]} {:keys [query-params]}]
-  (let [ask   (str (:ask query-params))
-        sid   (not-empty (str (or (:session-id query-params) "")))
-        same? (and sid (= sid (:intent-sid @session)))
-        {:keys [text sent]} (if same?
-                              (orient/bundle session ask :tokens 450 :sources 1)
-                              (orient/bundle session ask))]
+  (let [ask      (str (:ask query-params))
+        sid      (not-empty (str (or (:session-id query-params) "")))
+        same?    (and sid (= sid (:intent-sid @session)))
+        handoff? (boolean (re-find #"(?i)(what(?:'s| has| have| was)? +(?:been +)?(?:changed|happened|done)|\bsummar|hand.?off|\brecap\b|catch +(?:me +)?up|since +(?:the +)?last|\bwhat did (?:you|we)\b)"
+                                   ask))
+        {:keys [text sent]} (orient/bundle session ask
+                                           :tokens (cond same? 450 handoff? 500 :else 1100)
+                                           :sources (if (or same? handoff?) 1 2))
+        text     (if (and handoff? (not same?))
+                   (str text
+                        "\n--- the composed report (this ask reads like a handoff — the story is already here) ---\n"
+                        (orient/snip (pr-str (ops/report session :limit 12)) 3800)
+                        "\n(deeper: report {contains \"…\"}; one form's history: query_history {ns … name …})")
+                   text)]
     (when (seq sent)
       (swap! session assoc :pending-bundle-held {:sid sid :versions sent}))
     text))
