@@ -1,38 +1,69 @@
-## `edit_group` — one intent as one write (added 2026-08-30)
+## `change` — the write verb (s11, 2026-08-31)
 
-`edit_group {steps [...] prompt}` applies several related steps as ONE atomic
-write: `{action: add|replace|subform|delete|require, ns, name, source, match,
-text, where, require}` per step — the same keys the single-form tools take.
-Every per-step gate runs (dialect, isolation, module, ambiguity, rename
-collision); the group is checked to load, hot-loaded, and verified ONCE; the
-result carries `:group`, `:steps [{:step :action :form :delta}]`, `:affected`
-(the covering tests by name when few), `:test`. All-or-nothing: a refused
-step returns `{:error "step i: …" :step i}` and nothing lands. A missing
-alias exactly one namespace can supply is required for you (`:auto-require`).
-A newly added `deftest` is its own covering test and runs. A first call
-across a module boundary declares the edge for you (`:auto-module-dep`);
-only a call that would close a cycle is refused, and the refusal says which
-cycle. A delete step whose form something OUTSIDE the group still calls is
-refused by step and caller name; a caller inside the group is fine in any
-order.
+`change {prompt tests? impl accept?}` is THE write: `tests` steps land
+first and the result reports which went RED (watched failing — red-first
+honored); `impl` steps land; accepted expectation shifts finish; ONE
+verification; one result. `{prompt impl}` alone is the ordinary write — a
+docstring, a comment, a one-form fix. There is NO done inside: `done` is
+your separate this-unit-is-finished move, and a unit may span
+change → explore → change. A red change lands NOTHING and loses nothing —
+the tests and impl sit on your thread, `:test-src` carries the failing
+test's source; fix forward from the result. A change past ~10 steps is two
+changes.
+
+Steps: `{action: add|replace|patch|delete|require, ns, name, source,
+match, text, where, require}`. A step with `{ns name source}` and no
+`action` is inferred — `:replace` when the form exists, `:add` when it
+does not; the report states what landed. `patch` is the
+small-change-inside-a-big-form action: `{action patch, ns, name, replace
+[{match, source, text?, where?} …]}` — several exact-subform swaps as
+deltas, never a whole-form retype (measured: whole-form retyping ran 2.1×
+plain's output volume).
+
+The impl (and tests) group is atomic: every per-step gate runs (dialect,
+isolation, module, ambiguity, rename collision); the group is checked to
+load, hot-loaded, and verified ONCE; the result carries `:steps
+[{:step :action :form :delta}]`, `:affected` (the covering tests by name
+when few), `:test`. All-or-nothing: a refused step returns
+`{:error "step i: …" :step i}` and nothing lands. A missing alias exactly
+one namespace can supply is required for you (`:auto-require`). A newly
+added `deftest` is its own covering test and runs. A first call across a
+module boundary declares the edge for you (`:auto-module-dep`); only a
+call that would close a cycle is refused, and the refusal says which
+cycle. A delete step whose form something OUTSIDE the change still calls
+is refused by step and caller name; a caller inside the change is fine in
+any order.
+
+**When the test is a question, don't bundle it.** `change` is for when you
+can state the test and the implementation with equal confidence. A test
+you are writing to FIND something out is `explore {ops [{op check code
+…}]}` — the red comes back as an ANSWER (`{:pass :fail :assertions}`)
+with nothing written, and you land it as a real test only once it says
+what you mean.
+
+(`edit_group`, `edit_subform`, `edit_replace_form`, `edit_add_form`,
+`edit_delete_form` and `intent` remain dispatchable by name — de-advertised
+aliases for old scripts and the `--call` door; `change {impl […]}` is the
+same atomic group write.)
 
 **`accept` — declare the expectation shifts (added 2026-08-30).** A change
 that deliberately moves behaviour breaks the tests that pinned the old
 behaviour, and you know WHICH at write time. `accept ["ns/test" …]` on
-`edit_group` says so: when an
+`change` says so: when an
 accepted test fails with a literal→literal delta, its `:proposed` update
 is applied as its own delta and re-verified in the same call — the result
 carries `:finisher {:applied […] :status …}`. An acceptance that never
 fired is `:accept-unused`. A red you did NOT accept rides untouched:
 tests keep guarding everything you didn't declare.
 
-Why it is the grain: the agent thinks in intents — the fn, its test, the
-caller, the require. One form per call on that grain was measured (eval10) as
-a model request per form with reads between them. A group is not a shopping
-list: a whole feature in one call meets the same gates a whole feature in one
-form does, and `done` remains the completeness judgement.
+Why it is the grain: the agent thinks in whole asks — the fn, its test,
+the caller, the require. One form per call on that grain was measured
+(eval10) as a model request per form with reads between them. A change is
+not a shopping list: a whole feature in one call meets the same gates a
+whole feature in one form does, and `done` remains the completeness
+judgement.
 
-<!-- reference topic `writing` — served whole by `help {topic "writing"}`; the one-page SKILL.md points here. Written against d077b2e3837dc. -->
+<!-- reference topic `writing` — served whole by `help {topic "writing"}`; the one-page SKILL.md points here. Written against dc66cb7a963c5. -->
 
 ## Choosing the write tool
 
@@ -41,13 +72,13 @@ form does, and `done` remains the completeness judgement.
 | New namespace (grow with TDD) | `ns_create {ns, requires}` — create dependency nses first |
 | New namespace, source ready | `ns_create {ns, source}` — whole text, one verified call |
 | Require add/remove | `ns_add_require` / `ns_remove_require` |
-| New form — or SEVERAL | `edit_group` — one `:add` step per form: one atomic write, verified once, reported per step in `:steps` |
-| Change a whole form | `edit_group` — a one-step `:replace` |
-| Small change INSIDE a big form | `edit_subform {ns name match source}` — match ONE subform or ONE pair; a missed match returns `:source-now` (correct + resend); `text: true` for strings/docstrings; `where: {key value}` addresses the unique MAP containing those entries (registry rows — no exact text needed) |
-| Edit ONE ROW of a registry | `edit_subform {where: {key value}}` — **`where` ADDRESSES a row, it does not assert a value.** Both sides match on the spelling they answer to, so `{"key": "stored-name"}`, `":stored-name"` and `:stored-name` all reach a row stored as `{:key :stored-name …}`, and a string-keyed map is reachable too. This matters because registry rows are keyed by KEYWORDS and JSON has none — before it, the single most common thing `where` exists for was the one thing a caller could not express. A miss names the values that key DOES take (`:key takes :schema-drift, :key-typos, …`), so a wrong value says so instead of reading as a missing row |
-| Put existing code INSIDE something new (a `let`, a `when`, a `try`) | `edit_subform {match <a COMPLETE form>, wrap: true, source "(let [n 1] $1)"}` — `$1` is the matched form, so what was there NESTS inside your template. Without it the only expressible edit is restating the whole enclosing form, since a match that opens a delimiter it doesn't close is refused. Same `$n` templating `change_signature` uses; a template with no `$1` is refused rather than deleting the match |
-| Change a form's NAME METADATA (`^:export`, `^{:malli/schema …}`) | `edit_subform {text: true}` matching the `defn` head — `"^:live-handle open!"` → the new metadata. Structural matching can't address the head on its own, so without this you resend the whole form to change one marker |
-| Edit a form that has NO NAME (`defmethod`, `use-fixtures`) | `edit_subform {form "<form-id>"}` — **the id addresses a form wherever the name does**, and some forms genuinely have no name: a `defmethod` has a dispatch value, `use-fixtures` defines nothing. Ids come from `query_search` hits (`:form` is the id when there is no name) and from any finding that names one. a `:replace` step takes a name, so the id route is `edit_subform` |
+| New form — or SEVERAL | `change` — one `:add` step per form: one atomic write, verified once, reported per step in `:steps` |
+| Change a whole form | `change` — a one-step `:replace` (or `{ns name source}` with no action — inferred) |
+| Small change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry matches ONE subform or ONE pair; a missed match returns `:source-now` (correct + resend); `text: true` for strings/docstrings; `where: {key value}` addresses the unique MAP containing those entries (registry rows — no exact text needed) |
+| Edit ONE ROW of a registry | a `:patch` entry with `{where: {key value}}` — **`where` ADDRESSES a row, it does not assert a value.** Both sides match on the spelling they answer to, so `{"key": "stored-name"}`, `":stored-name"` and `:stored-name` all reach a row stored as `{:key :stored-name …}`, and a string-keyed map is reachable too. This matters because registry rows are keyed by KEYWORDS and JSON has none — before it, the single most common thing `where` exists for was the one thing a caller could not express. A miss names the values that key DOES take (`:key takes :schema-drift, :key-typos, …`), so a wrong value says so instead of reading as a missing row |
+| Put existing code INSIDE something new (a `let`, a `when`, a `try`) | the `edit_subform` alias — `{match <a COMPLETE form>, wrap: true, source "(let [n 1] $1)"}` — `$1` is the matched form, so what was there NESTS inside your template. Without it the only expressible edit is restating the whole enclosing form, since a match that opens a delimiter it doesn't close is refused. Same `$n` templating `change_signature` uses; a template with no `$1` is refused rather than deleting the match |
+| Change a form's NAME METADATA (`^:export`, `^{:malli/schema …}`) | a `:patch` entry with `text: true` matching the `defn` head — `"^:live-handle open!"` → the new metadata. Structural matching can't address the head on its own, so without this you resend the whole form to change one marker |
+| Edit a form that has NO NAME (`defmethod`, `use-fixtures`) | the `edit_subform` alias — `{form "<form-id>"}` — **the id addresses a form wherever the name does**, and some forms genuinely have no name: a `defmethod` has a dispatch value, `use-fixtures` defines nothing. Ids come from `query_search` hits (`:form` is the id when there is no name) and from any finding that names one. a `:replace` step takes a name, so the id route is the alias |
 | A write names an alias the ns form lacks | **When exactly ONE namespace can supply it, the pipeline adds the require for you** (a `:system` write with its own prompt) and the write lands — the result carries `:auto-require {:added "[clojure.string :as str]"}`; nothing to resend. slopp resolves the alias against the store (a namespace whose last segment is the alias) and the common `clojure.*` ones. When SEVERAL could, the refusal names each `ns_add_require` call — pick one, then resend the form UNCHANGED. An alias nothing can supply gets no suggestion rather than a wrong one |
 | A write refusal says `ALSO PENDING:` | **Fix every line before resending.** A refusal carries EVERY gate the candidate tripped, not just the first — they were all knowable from the same form, so satisfying them one per round-trip is pure waste |
 | A subform edit refused with `unresolved-symbol`/`invalid-arity` | **Widen the match.** The change spans more of the form than you matched — a binding and its use, a loop and its `recur`, an arglist and its body. Match the enclosing form, or `:replace` the whole thing. **Two edits to ONE form is ONE edit**; this is NOT cross-form atomicity and there is no batch tool for it (the refusal says so too) |

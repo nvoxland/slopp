@@ -1778,3 +1778,43 @@ cached after; slices 1.7 s (card assembly), writes 3–4 s (verification).
   across -p sessions in one cwd; one slow first-boot import de-tooled
   three consecutive eval steps (the cell still went 11/11 via slopp --call
   and file edits — the CLI door is a real resilience layer).
+
+- eval11-scale (150-ns terrain, all cells 11/11): the slopp:plain ratio
+  IMPROVES with size on turns and tokens for both models (slopp grew
+  +11-14% turns vs plain's +19%; +28-32% tokens vs +33-45%), sonnet cost
+  crossed UNDER plain (0.82x), but WALL is the weak axis (slopp-opus
+  2.2x plain — the verification bill). Bundle precision on fresh-import
+  stores: implementation forms rank, their TESTS don't — no coverage
+  edges exist until tests run; seeding static test->subject edges at
+  import is the fix. Prewarm import: 8-12s at 150 ns, sub-linear.
+  Caveat recorded: templated padding is kind to grep+sed, so plain's
+  measured growth is a lower bound on real-world plain.
+
+- CORRECTION to the eval11 entry above (same day, after the wall
+  decomposition): the wall gap is NOT the verification bill. Tools took
+  217s of slopp-opus's 1002s wall (edit_group ~3s/write); per-turn model
+  time matches plain (~7s vs ~6.4s). The gap is request count x model
+  time, inflated by OUTPUT volume: slopp-opus emitted 67.5k output
+  tokens vs plain-opus 32.5k (2.1x) — the whole-form retype tax
+  (:replace retypes a form to change two lines). Sonnet, at output
+  parity (33.8k vs 34.9k), has a wall ratio of just 1.28x. Wall and
+  token levers are therefore the SAME: fewer requests + delta-grained
+  emission. Async verification would buy at most ~15% and is deprioritized.
+
+- s10 grid (intent/:patch/seed-tests, both terrains, all 11/11): intent
+  used 5x and :patch 0x across four cells — wire-correct and unadopted;
+  net effect noise-to-slight-regression (sonnet-41 71->96 turns is the
+  outlier, attribution unresolved at n=1). Third confirmation that
+  advertising an op beside a familiar sibling does not change behavior;
+  only surface forcing has (s8). Output tokens unchanged (~53k opus) —
+  the retype tax stands while patch goes unused. Also: one real network
+  outage invalidated two cells (rerun clean), and the opus step-2 parse
+  flake survived to 3-attempt depth once; the malformed emission is
+  structurally unloggable (it never parses).
+
+- s10 sonnet-41 regression confirmed by clean rerun (90 vs 96 vs s9's
+  71): real, ~+20 turns, step1 doubled (8->16) — prime suspect the
+  wave-1 seed-tests-in-bundle change (appended past budget = added rent
+  + changed first-sight), not intent itself (x0 both takes). Lesson: a
+  bundle change is an ORIENTATION change and moves every step's opening;
+  measure bundle deltas with a single-cell canary before a full wave.

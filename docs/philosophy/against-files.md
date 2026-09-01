@@ -45,7 +45,7 @@ appears, and it runs in the test suite -- a tool that leaks a coordinate fails
 CI.
 
 Diagnostics say anchors instead: the owning form's qualified symbol, plus a
-match-ready snippet that pastes straight into `edit_subform` or `query_slice`.
+match-ready snippet that pastes straight into a patch entry or `query_slice`.
 Compile errors translate once, at the hot-load chokepoint, so every "failed to
 compile" surface returns the same shape. Coordinates still exist internally,
 where the code that owns a form uses them to rewrite inside it. They just do

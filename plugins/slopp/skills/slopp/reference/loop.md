@@ -42,7 +42,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    warranty) for everything it reaches. TRUST the cards — you don't need
    a callee's body to call it; if an assumption is wrong, the write turns
    red with `:implicated` (the covering tests re-run on every edit).
-   Writes are OPTIMISTIC: compose `edit_subform` matches from the
+   Writes are OPTIMISTIC: compose patch matches from the
    brief/slice; a missed or ambiguous match returns the form's CURRENT
    source in `:source-now` — correct from the error and resend. Batched
    named reads: `query_source {targets: [{ns name}…]}`; whole-namespace
@@ -186,7 +186,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    `:slopp-share` is taken against ACTIVE time so a pause never reads as slopp
    being slow.
    **`:refused` is the one to act on.** It counts the calls that bounced — a
-   malformed `edit_subform` match, a lint error in the form you were writing,
+   malformed patch match, a lint error in the form you were writing,
    an arity break — as a rate with the tools named, plus `:samples`, the
    verbatim messages the bounced calls answered with. Each is a whole round
    trip that produced nothing, and they land in the half of the clock nothing

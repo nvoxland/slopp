@@ -6426,3 +6426,56 @@ emissions enter the form ledger via a stash (`:pending-bundle-held`) that
 `absorb-pending-intent!` drains — one ledger behind bundle, writes, reads.
 Also: `bin/extract-projection.sh` fixed for the family door
 (`--call build` needs `{"op":"build", …}` since D-families).
+
+## D-changeset (2026-08-31, s10 wave 2)
+
+`intent` — a whole ask as ONE call: tests land first and the result says
+which went RED (watched failing, red-first honored); impl lands; accepted
+expectation shifts finish; one verification; done closes the episode and
+lands the thread. One result. Why: eval11's wall decomposition reduced
+every axis (wall, tokens, cost) to REQUEST COUNT x OUTPUT VOLUME —
+per-turn model time matches plain (~7s), tools are 22% of wall, and
+slopp-opus emitted 2.1x plain's output tokens. `:patch` steps (several
+{match source} replacements inside one form, expanded by wire-steps into
+:subform steps — the ops layer never sees :patch) attack the output half:
+the model emits deltas, never retypes; the form stays the unit of
+storage/verification while the DELTA becomes the unit of emission.
+Dispatched via tail-handlers! (no call-op! change). Semantics pinned by
+test: a red made only of freshly-added spec tests LANDS (red-first — the
+red IS the spec); a red in touched code holds, implemented by SKIPPING
+done on a red intent (an unclosed unit of work gets no marker; the loop
+continues from the result). The done/full_check split is unchanged and
+deliberate (confirmed with Nathan): done = land units of work as you go,
+each land rebasing onto concurrent work; full_check + commit_point = the
+whole-store final gate. Open finding filed: done! immediately after an
+in-call group verification judged nothing (failures 0, ms 2) and would
+have landed a red.
+
+## D-two-verbs (2026-08-31, s11 — supersedes D-changeset's shape, keeps its pipeline)
+
+The advertised surface is TWO VERBS. **`change`** (rename of `intent`;
+`intent`, `edit_group`, `edit_subform`, `edit_delete_form` join
+edit_replace_form/edit_add_form as de-advertised dispatchable aliases):
+tests land first and the result reports which went RED (watched), impl
+lands, accepted shifts finish, ONE verification, one result — and **NO
+done inside** (Nathan's design): `done` is the agent's separate
+this-unit-is-finished move, a unit may span change → explore → change, and
+the Stop-hook done is the free landing floor. De-bundling done also
+deletes the red special case D-changeset needed (skip-done-on-red): a red
+change is a red result with `:test-src`, nothing landed, nothing lost.
+**`explore`** (promotion of `query_batch`, which stays a dispatchable
+alias — the only op ever adopted unforced): the question verb — up to 6
+read ops, one call — plus the new **`check {code}`** read op: assertion
+code evaluated in the image with `clojure.test/report` captured, nothing
+written — the find-something-out red as an ANSWER (slopp-ui's
+diagnostic-red caveat, now a surface instead of a warning sentence).
+Why forcing: three independent measurements agree only SURFACE FORCING
+moves behavior (s7 prose, s8 de-advertising worked, s10
+advertisement-beside-a-familiar-sibling failed — intent 5 uses, 0 patches,
+four cells). Mechanics: `explore` dispatches as a second case label on the
+batch branch (a handler-map entry would close the load cycle
+call-op! → tail-handlers! → change-handlers! → call-op!); a change's
+landed sources enter the ask's form ledger exactly as edit_group's do
+(tests on their group landing, impl on land); tests are OPTIONAL —
+`{prompt impl}` is the ordinary write, so a lone micro-fix costs one
+verification, which is what let edit_subform leave the advertised surface.

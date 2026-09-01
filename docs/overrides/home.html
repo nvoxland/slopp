@@ -37,11 +37,10 @@
       <div class="sl-wire">
         <div class="sl-wire__bar"><span class="sl-wire__dot"></span> one write, over MCP</div>
 <pre class="sl-wire__body"><span class="c">;; the agent addresses code by name -- no path, no line numbers</span>
-edit_subform <span class="v">{</span><span class="k">ns</span>    <span class="s">"invoice.total"</span>
-              <span class="k">form</span>  <span class="s">"line-total"</span>
-              <span class="k">match</span> <span class="s">"(* qty price)"</span>
-              <span class="k">source</span> <span class="s">"(* qty price (- 1 discount))"</span>
-              <span class="k">prompt</span> <span class="s">"apply the line discount"</span><span class="v">}</span>
+change <span class="v">{</span><span class="k">prompt</span> <span class="s">"apply the line discount"</span>
+        <span class="k">impl</span> <span class="v">[{</span><span class="k">action</span> <span class="s">"patch"</span> <span class="k">ns</span> <span class="s">"invoice.total"</span> <span class="k">name</span> <span class="s">"line-total"</span>
+               <span class="k">replace</span> <span class="v">[{</span><span class="k">match</span> <span class="s">"(* qty price)"</span>
+                         <span class="k">source</span> <span class="s">"(* qty price (- 1 discount))"</span><span class="v">}]}]}</span>
 
 <span class="c">;; back: it compiled, hot-loaded, and the tests that</span>
 <span class="c">;; actually exercise this form re-ran</span>

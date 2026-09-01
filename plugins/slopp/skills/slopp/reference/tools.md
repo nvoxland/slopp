@@ -1,4 +1,4 @@
-<!-- reference topic `tools` — served whole by `help {topic "tools"}`; the one-page SKILL.md points here. Written against dd53072e24573. -->
+<!-- reference topic `tools` — served whole by `help {topic "tools"}`; the one-page SKILL.md points here. Written against dc66cb7a963c5. -->
 
 ## The tool surface: fourteen families, every op by its own name
 
@@ -8,7 +8,7 @@ does`. An operation keeps its own name and is called through its family
 with `op`:
 
 ```
-edit {op "edit_group", steps [{action "add", ns "app.core", source "(defn f [x] x)"}], prompt "why"}
+edit {op "change", prompt "why", impl [{action "add", ns "app.core", source "(defn f [x] x)"}]}
 read {op "query_slice", ns "app.core", name "f"}
 ```
 
@@ -20,11 +20,11 @@ own tools and take no `op`.
 | family | ops |
 |---|---|
 | `orient` | orient, session_brief |
-| `read` | query_slice, query_source, query_brief, query_detail, query_search, query_project, query_batch |
+| `read` | explore, check, query_slice, query_source, query_brief, query_detail, query_search, query_project |
 | `depends` | query_depends, query_call, query_macroexpand |
 | `history` | query_history, query_changes, query_commits, query_git, query_branches, report, file_history |
 | `eval` | query_eval, query_observe, query_store |
-| `edit` | edit_group, edit_subform, edit_delete_form, edit_comment, edit_revert, undo, episode_revert — the single-form write ops are de-advertised aliases: a one-step edit_group is the single-form write |
+| `edit` | change, edit_comment, edit_revert, undo, episode_revert — the former write ops (edit_group, edit_subform, edit_delete_form, edit_add_form, edit_replace_form, intent) and query_batch are de-advertised dispatchable aliases: `change {impl […]}` is the group write, `explore {ops […]}` is the batch read |
 | `refactor` | rename_sweep, edit_rename, edit_extract, edit_requalify, change_signature, edit_move_forms, module_extract, ns_rename, ns_realias, cleanup |
 | `declare` | ns_create, ns_delete, ns_add_require, ns_remove_require, module_dep, module_purity, module_role, module_platform, deps_add, deps_remove, deps_list, deps_pure, js_dep |
 | `verify` | test_run, full_check, restart, review_scan, draft_test, screen |
@@ -35,9 +35,8 @@ own tools and take no `op`.
 | `commit_point` | — |
 
 Refusals: `edit needs :op — ops: …`; `unknown op X for edit — ops: …`;
-`unknown argument :nom for edit_subform — … accepted: …`; `edit_subform
-needs :name and :source — required for this op`. A refusal is the index for
-the thing you got wrong.
+`unknown argument :nom for change — … accepted: …`; `change needs :impl —
+required for this op`. A refusal is the index for the thing you got wrong.
 
 Why families: with 96 tools advertised the client deferred every one of
 them, and finding a tool cost a search turn each time (19–22 per task in

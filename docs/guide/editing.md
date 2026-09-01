@@ -9,26 +9,26 @@ brief.
 
 | Situation | Tool |
 |---|---|
-| One intent, several related steps (the fn, its test, the caller) | `edit_group {steps prompt accept?}` -- one atomic write, every gate per step, verified once, reported per step; `accept` names tests whose literal expectations the change should move, and the finisher applies their proposed updates in the same call |
+| Any change -- one form or a feature (the fn, its test, the caller) | `change {prompt tests? impl accept?}` -- tests land first and the result says which went red; impl lands as one atomic group, every gate per step, verified once, reported per step; `accept` names tests whose literal expectations the change should move, and the finisher applies their proposed updates in the same call. No done inside: `done` is the separate unit-finished move |
 | New namespace, grown with TDD | `ns_create {ns requires}` |
 | New namespace, source already written | `ns_create {ns source}` |
 | Add or drop a require | `ns_add_require` / `ns_remove_require` |
-| New form(s) | `edit_group` -- one `:add` step per form; placement is derived (definitions before callers) |
-| Replace a whole form | `edit_group` -- a one-step `:replace` |
-| Small change inside a big form | `edit_subform` |
+| New form(s) | `change` -- one `:add` step per form; placement is derived (definitions before callers) |
+| Replace a whole form | `change` -- a one-step `:replace` (a step with no action is inferred) |
+| Small change inside a big form | a `:patch` step -- deltas, never a whole-form retype |
 | Change a function's signature | `change_signature` |
 | Rename one form | `edit_rename` |
 | Rename a namespace's require alias | `ns_realias` |
 | Rename a concept everywhere | `rename_sweep` |
 | Pull a helper out | `edit_extract` |
 | Move forms to another namespace | `edit_move_forms` |
-| Delete, revert | `edit_delete_form` / `edit_revert` — there is no reorder; a form's place is derived from what it references |
+| Delete, revert | a `:delete` step / `edit_revert` — there is no reorder; a form's place is derived from what it references |
 | Comment on a form | `edit_comment` |
-| Change a form's name metadata | `edit_subform {text: true}` on the `defn` head |
+| Change a form's name metadata | a `:patch` entry with `text: true` on the `defn` head |
 
 Never rename by editing call sites, and never hand-edit an `ns` form.
 
-**A delete that would break a caller is refused.** `edit_delete_form` consults
+**A delete that would break a caller is refused.** A `:delete` step consults
 the reference graph first and names every caller, the same way `ns_delete`
 refuses to retire a namespace something still requires. Only references that
 must resolve at compile time count, so a quoted symbol or a `^{:covers}` marker
@@ -39,22 +39,25 @@ the callers first, the callee last, one call each. Every step verifies, and
 every intermediate state is a program that loads.
 
 Two forms that call *each other* have no valid order. Break the cycle first --
-replace one of them (a one-step `edit_group`) to drop the call -- then delete both.
+replace one of them (a one-step `change`) to drop the call -- then delete both.
 
 `query_depends {on "some.ns/name"}` answers the same question *before* you
 write, which is what you want when you are planning a removal rather than
 learning its size from a refusal.
 
-## edit_subform
+## Patching inside a form
 
-The workhorse for changes inside a large form:
+The workhorse for changes inside a large form is a `:patch` step:
 
 ```clj
-edit_subform {ns "invoice.total" form "line-total"
-              match "(or discount 0)"
-              source "(max 0 (or discount 0))"
-              prompt "clamp negative discounts"}
+change {prompt "clamp negative discounts"
+        impl [{action "patch" ns "invoice.total" name "line-total"
+               replace [{match "(or discount 0)"
+                         source "(max 0 (or discount 0))"}]}]}
 ```
+
+Several `{match source}` entries patch several places in the same form --
+the model emits deltas, never a whole-form retype.
 
 Matching is structural, so it is whitespace-insensitive and cannot half-apply.
 Three modes:
@@ -97,7 +100,7 @@ change_signature {ns "invoice.total" name "line-total"
 The new `defn` plus every call site as one atomic intent. `$1..$9` are the
 old call's arguments, kept as written. References it could not rewrite --
 higher-order uses, mostly -- come back in `:manual` for you to handle with
-`edit_subform`.
+a `:patch` step.
 
 ## Renaming a concept
 

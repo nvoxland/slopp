@@ -2,7 +2,7 @@
 
 A failure whose assertion is `(= literal expr)` (either order) and whose
 actual is a scalar literal carries `:proposed {:match :source :note}` — the
-exact `edit_subform {ns name match source text true}` that accepts the new
+exact patch entry (`{match source text true}`) that accepts the new
 behaviour. It is a proposal: if the change was deliberate, accept it in one
 call; if the test was right, the code is wrong and the proposal is the
 thing to ignore. Computed expecteds, errors, non-equality assertions and
@@ -78,7 +78,7 @@ full map.
 - `:drift` — a finding surfaced on the WRITE precisely so you see it before
   calling `done`.
 - `:manual` (change_signature) — references it could NOT rewrite (higher-order
-  uses); handle those with `edit_subform`.
+  uses); handle those with a `:patch` step.
 - `:dry-run` (rename_sweep) — `:in-code` / `:in-strings`, nothing written.
 - `:left-behind` (ns_rename, rename_sweep, ns_realias) — occurrences no rewrite
   reaches, grouped by how each was found. Under `ns_rename` the `:alias` rows

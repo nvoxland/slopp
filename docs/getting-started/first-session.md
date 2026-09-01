@@ -37,7 +37,7 @@ failing to load — which is a refusal, not a failing test. Only requires sharin
 your own root are invented this way; a library is never conjured over.
 
 ```clj
-edit_group {steps [{action "add"
+change {prompt "…", impl [{action "add"
                     ns "invoice.total-test"
                     source "(deftest line-total-applies-discount
                               (is (= 90.0 (total/line-total {:qty 1 :price 100.0 :discount 0.1}))))"}]
@@ -57,7 +57,7 @@ The response comes back red, with `:red-first` naming the vars it stubbed:
 The namespace is already there, empty, waiting for its first form.
 
 ```clj
-edit_group {steps [{action "add"
+change {prompt "…", impl [{action "add"
                     ns "invoice.total"
                     source "(defn line-total
                               \"Extended price for one line, after its discount.\"
@@ -87,13 +87,13 @@ Work like a REPL. Mid-episode reds are normal state, not a failure to clean
 up: change a signature and the stale callers ride back as `:carried-errors`
 until you catch them up in the next writes.
 
-To change something inside a large form without resending it:
+To change something inside a large form without resending it, patch it:
 
 ```clj
-edit_subform {ns "invoice.total" form "line-total"
-              match "(or discount 0)"
-              source "(max 0 (or discount 0))"
-              prompt "clamp negative discounts"}
+change {prompt "clamp negative discounts"
+        impl [{action "patch" ns "invoice.total" name "line-total"
+               replace [{match "(or discount 0)"
+                         source "(max 0 (or discount 0))"}]}]}
 ```
 
 A missed or ambiguous match is not a silent no-op. It returns the form's

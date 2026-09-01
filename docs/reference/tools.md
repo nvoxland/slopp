@@ -12,7 +12,7 @@ operations it holds, one line per operation, and an operation is called
 through its family with `op`:
 
 ```
-edit {op "edit_group", steps [{action "add", ns "app.core", source "(defn f [x] x)"}], prompt "why"}
+edit {op "change", prompt "why", impl [{action "add", ns "app.core", source "(defn f [x] x)"}]}
 read {op "query_slice", ns "app.core", name "f"}
 ```
 
@@ -29,7 +29,8 @@ were deferred by the client and cost a search turn each to find.
 | `session_brief` | Start here, once. Namespaces with form names, recent milestones and their asks, git alignment, the loop. |
 | `query_project` | Every namespace's outline -- names, arities, `!`-status, test-ness -- in one response. `since` returns a one-liner when nothing changed. |
 | `query_search {pattern}` | Regex across all store source; one hit per matching form, the hit is the form's card. |
-| `query_batch {ops}` | Several READ questions, one call: `ops = [{op ...} ...]`, answered one result per op. |
+| `explore {ops}` | Several READ questions, one call: `ops = [{op ...} ...]`, answered one result per op (`query_batch` is its de-advertised alias). |
+| `check {code}` | Run assertion code in the image with `clojure.test` reporting captured — `{:value :pass :fail :assertions}`, nothing written. The find-something-out red as an answer. |
 | `query_source {targets}` | Source of several named forms in one call. `{ns}` alone returns the outline; `full: true` dumps the namespace. |
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards (signature, doc line, test warranty) for everything it reaches. `match` + `window` narrows a giant form; `verbose` adds each card's recorded why. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
@@ -259,9 +260,10 @@ Three things worth knowing:
 | `ns_rename {from to}` | Rename a whole namespace everywhere. Returns `:left-behind` (what no rewrite reaches — strings, qualified keywords, the `-test` sibling, regex literals spelling the old name, strings carrying source that DECLARES it, and under `:alias` the callers whose `:as` still spells the old name, each with the `:suggest` to hand `ns_realias`) and `:module-debt` (edges to declare, cycles `module_dep` will refuse) — a relocation runs no write gates, so the result is the only notice. |
 | `ns_delete {ns}` | Retire an empty namespace. Refuses while any form remains or anything still requires it. |
 | `ns_add_require` / `ns_remove_require` | One require clause. Never hand-edit an `ns` form. |
-| *(de-advertised)* `edit_add_form` / `edit_replace_form` | Wire-compat aliases only — each is the one-step `edit_group` (`:add` / `:replace`) spelled the old way. They still dispatch for `--call` scripts and hooks, but no enum advertises them. |
-| `edit_subform {ns name source}` | A change inside a big form, by `match`, `text: true`, or `where: {key value}`. `where` addresses a row by the spelling each side answers to, so `"stored-name"` reaches `:stored-name`; a miss names the values that key does take. |
-| `edit_delete_form {ns name}` | Delete a form (with `ns-unmap`). Refuses while anything still calls it, naming the callers; to remove a caller and its callee together, delete in reverse dependency order — callers first, callee last. |
+| `change {prompt tests? impl accept?}` | THE write: tests land first (the result says which went red), impl lands, accepted shifts finish, one verification, one result — and no done inside; `done` is the separate unit-finished move. Steps take add/replace/patch/delete/require; a step with no action is inferred. |
+| *(de-advertised)* `edit_group` / `edit_subform` / `edit_delete_form` / `edit_add_form` / `edit_replace_form` / `intent` | Wire-compat aliases only — `change {impl […]}` is the group write spelled the new way. They still dispatch for `--call` scripts and hooks, but no enum advertises them. |
+| a `:patch` step | A change inside a big form: `{action patch, ns, name, replace [{match source} …]}` — each entry swaps one exact subform; `text: true` for strings/docstrings, `where: {key value}` for a registry row. `where` addresses a row by the spelling each side answers to, so `"stored-name"` reaches `:stored-name`; a miss names the values that key does take. |
+| a `:delete` step | Delete a form (with `ns-unmap`). Refuses while anything still calls it, naming the callers; to remove a caller and its callee together, delete in reverse dependency order — callers first, callee last. |
 | `edit_comment {ns name text}` | Set (or clear) the comment block rendered above a form. The comment is owned by the form, so it travels with it. |
 | `edit_revert {ns name to?}` | Revert one form to an earlier version. |
 | `change_signature {ns name source calls}` | New `defn` plus a `$1..$9` call-site template, as one intent. |
