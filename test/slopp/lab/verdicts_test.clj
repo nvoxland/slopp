@@ -97,3 +97,29 @@
             r  (rate st)]
         (is (= 4 (:namespace-runs r)) (pr-str r))
         (is (= 1 (:already-green r)) (pr-str r))))))
+
+(deftest the-replay-says-which-record-it-read
+  ;; s19: the gate the verdict cache waits on returned zeros BY
+  ;; CONSTRUCTION. reuse-rate folded (:deltas store) — and a durable
+  ;; store's value carries no deltas at all (the journal is in SQLite;
+  ;; standing-run reads :recent). So the recorded reading \"108
+  ;; namespace-runs, every one a first sighting, :fraction nil — not
+  ;; measurable yet\" was the instrument describing an empty list, and the
+  ;; decision stayed deferred on a number that could not move. A
+  ;; measurement that authorizes skipping verification must say what it
+  ;; read.
+  (let [obs (fn [id st scope closure]
+              {:id id :op :observe :scope scope :closure closure :result {:status st}})
+        ds  [(obs "d1" :green '[a.core] {'a.core "H1"})
+             (obs "d2" :green '[a.core] {'a.core "H1"})]]
+    (testing "a hydrated value is the journal, and a repeat at the same hash is a hit"
+      (let [r (verdicts/reuse-rate {:deltas ds})]
+        (is (= :journal (:source r)) (pr-str r))
+        (is (= 2 (:namespace-runs r)) (pr-str r))
+        (is (= 1 (:already-green r)) (pr-str r))))
+    (testing "a value carrying only the bounded WINDOW says so, rather than reporting its rate as the store's"
+      (let [r (verdicts/reuse-rate {:recent ds})]
+        (is (= :recent-window (:source r)) (pr-str r))
+        (is (re-find #"whole journal" (str (:note r))) (pr-str r))))
+    (testing "nothing to read is no rate, not a rate of none"
+      (is (nil? (:fraction (verdicts/reuse-rate {})))))))

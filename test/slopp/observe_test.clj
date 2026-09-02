@@ -77,3 +77,35 @@
       (is (= :green (:status o)))
       (is (= 3 (:ran o)))
       (is (= [] (:failures o))))))
+
+(deftest an-observation-says-WHICH-namespaces-were-green-not-only-the-run
+  ;; s19: the verdict cache's gate cleared — 44.6% of 28,639 namespace-runs
+  ;; re-verified content already green at exactly that content. But the
+  ;; record could not authorize a single skip: `:status` was the whole
+  ;; RUN's, so one red namespace made the other fifty unusable, while the
+  ;; `:closure` hash beside it was already per namespace. A verdict keyed by
+  ;; content has to be recorded at the grain the content is keyed at.
+  ;;
+  ;; A bare map stands in for the store: observation-of reads it only to
+  ;; qualify BARE failure names.
+  (testing "a green run clears every namespace it measured"
+    (is (= '{a.core-test :green b.core-test :green}
+           (:ns-status (external/observation-of
+                        {} {:status :green :ran 3
+                            :ns-ms '{a.core-test 1200 b.core-test 300}})))))
+  (testing "a red run clears the namespaces that passed and names the one that did not"
+    (is (= '{a.core-test :red b.core-test :green}
+           (:ns-status (external/observation-of
+                        {} {:status :red :ran 3
+                            :ns-ms '{a.core-test 1200 b.core-test 300}
+                            :failing [{:test 'a.core-test/boom}]})))))
+  (testing "a failure nothing can be attributed to clears NOBODY — an unplaced red could be any of them"
+    ;; the soundness bar: a cache HIT runs nothing, so a green recorded here
+    ;; on a guess persists as a false green until the content changes
+    (let [o (external/observation-of {} {:status :red :ran 3
+                                         :ns-ms '{a.core-test 1200 b.core-test 300}
+                                         :failing [{:test 'mystery}]})]
+      (is (empty? (filter #{:green} (vals (:ns-status o)))) (pr-str (:ns-status o)))))
+  (testing "a run that measured nothing says nothing — absent, never empty"
+    (is (not (contains? (external/observation-of {} {:status :green :ran 3})
+                        :ns-status)))))

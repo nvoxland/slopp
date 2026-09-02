@@ -309,98 +309,6 @@
             (recur (conj acc [(.start mt) (.end mt)]))
             acc))))))
 
-(defn- find-unique-subform
-  "The unique position-tracked zloc in `form-src` matching `match-src`
-  (shared by extract and subform edits). A node matches when its sexpr
-  structurally equals the match's OR its whitespace-normalized text does —
-  the text fallback covers fn literals (gensym'd args never sexpr-compare
-  equal) and regexes (Patterns don't =). `match-src` is ONE form — except
-  that a TWO-form match landing on a pair boundary of a paired container
-  (map literal, binding vector, case/cond clauses) addresses the pair as a
-  unit (P1); any other multi-form match is refused (silently matching a
-  multi-form string's first form misaligns paired structures like case).
-  A match that doesn't parse on its own (mid-expression fragment) is refused
-  with the rule named — the error is the only teaching that arrives at the
-  moment it's needed (Q5).
-  Returns {:zloc l} — plus :end-zloc (the pair's second node) for pair
-  matches — or {:error msg}."
-  [form-src match-src what]
-  (let [parsed (try {:nodes (filter n/sexpr-able?
-                                    (n/children (p/parse-string-all match-src)))}
-                    (catch Exception e {:parse-error (ex-message e)}))]
-    (if-let [pe (:parse-error parsed)]
-      ;; when the fragment APPEARS once in the form, hand back the smallest
-      ;; complete form containing it — the retry needs no re-read
-      (let [cand (when (= 1 (count (fuzzy-spans form-src match-src)))
-                   (->> (iterate z/next (z/of-string form-src))
-                        (take-while (complement z/end?))
-                        (map z/node)
-                        (filter n/sexpr-able?)
-                        (map n/string)
-                        (filter #(seq (fuzzy-spans % match-src)))
-                        (sort-by count)
-                        first))]
-        (cond-> {:error (str "the match isn't well-formed Clojure on its own ("
-                             pe ") — match COMPLETE forms: a whole expression,"
-                             " clause, or binding pair, never a fragment that"
-                             " opens a delimiter it doesn't close."
-                             (if cand
-                               (str " :suggestion is the smallest complete form"
-                                    " containing your fragment — match THAT and"
-                                    " restate it in the replacement")
-                               (str " Often the fix is matching the ENCLOSING"
-                                    " form and restating it in the replacement")))}
-          cand (assoc :suggestion cand)))
-      (let [mnodes  (:nodes parsed)
-            pair?   (= 2 (count mnodes))
-            matcher (fn [mnode]
-                      (let [msexpr (try (n/sexpr mnode) (catch Exception _ ::none))
-                            mnorm  (norm-src (n/string mnode))]
-                        (fn [zl]
-                          (or (and (not= ::none msexpr)
-                                   (try (= msexpr (z/sexpr zl))
-                                        (catch Exception _ false)))
-                              (= mnorm (norm-src (n/string (z/node zl))))))))]
-        (if-not (or (= 1 (count mnodes)) pair?)
-          {:error (str "match parses to " (count mnodes) " forms — give exactly "
-                       "ONE subform as the match, or ONE key/value-style PAIR "
-                       "inside a map, binding vector, or case/cond (the "
-                       "REPLACEMENT may be several forms)")}
-          (let [match1? (matcher (first mnodes))
-                match2? (when pair? (matcher (second mnodes)))
-                hit?    (fn [zl]
-                          (and (match1? zl)
-                               (or (not pair?)
-                                   (boolean (some-> (z/right zl) match2?)))))
-                matches (->> (iterate z/next (z/of-string form-src {:track-position? true}))
-                             (take-while (complement z/end?))
-                             (filter hit?)
-                             vec)
-                usable  (if pair? (filterv pair-slot? matches) matches)]
-            (cond
-              (and pair? (empty? usable) (seq matches))
-              {:error (str "a two-form match must land on a pair boundary of a "
-                           "map, binding vector, or case/cond/cond-> clause — this span "
-                           "crosses one in " what "; match the single value form "
-                           "instead")}
-
-              (empty? usable)
-              {:error (str "subform not found in " what
-                           " — :source-now is its CURRENT text; correct the"
-                           " match against it and resend, no read needed")
-               :source-now form-src}
-
-              (< 1 (count usable))
-              {:error (str "subform occurs " (count usable) " times in " what
-                           " — ambiguous; give a larger enclosing subform"
-                           " (its current text is in :source-now)")
-               :source-now form-src}
-
-              pair?
-              {:zloc (first usable) :end-zloc (z/right (first usable))}
-
-              :else {:zloc (first usable)})))))))
-
 (defn ^:export text-replace-plan
   "Plan a RAW-TEXT replace inside form `form-name`: `match-text` must occur
   exactly ONCE in the form's source — exactly, or failing that under
@@ -536,58 +444,6 @@
         {:src cand}
         {:error (str "no complete form in " what " contains that anchor")
          :source-now form-src}))))
-
-(defn ^:export extract-plan
-  "Plan extracting the unique occurrence of `subform-src` inside `from-name`
-  into a new fn `new-name`: params = the free locals (bound outside the
-  subform, used inside), in first-use order. Pair matches (P1) are refused —
-  a pair is not an expression. Returns
-  {:new-defn-src :new-from-src :params} or {:error msg}."
-  [store ns-sym from-name subform-src new-name & {:keys [at]}]
-  (try
-    (if-let [e (store/form-named store ns-sym from-name)]
-      (let [form-src (n/string (:node e))
-            resolved (when at (anchor-subform-src form-src at from-name))
-            target   (if at (:src resolved) subform-src)
-            found    (if (and at (:error resolved))
-                       resolved
-                       (find-unique-subform form-src target from-name))]
-        (cond
-          (:error found)    found
-          (:end-zloc found) {:error (str "cannot extract a pair — extract "
-                                         "needs ONE expression (usually the "
-                                         "pair's value form)")}
-          :else
-          (let [m        (:zloc found)
-                [r c]    (z/position m)
-                sub-str  (n/string (z/node m))
-                [er ec]  (node-span [r c] sub-str)
-                elems    (store/elements store ns-sym)
-                idx      (first (keep-indexed
-                                 (fn [i el] (when (= (:id e) (:id el)) i)) elems))
-                [fr fc]  (nth (store.render/element-offsets store ns-sym) idx)
-                abs      (fn [[rr cc]] [(+ fr rr -1) (if (= rr 1) (+ fc cc -1) cc)])
-                a-start  (abs [r c])
-                a-end    (abs [er ec])
-                an       (analyze/analyze-with-locals (store.render/render-ns store ns-sym))
-                defs     (into {} (map (juxt :id identity)) (:locals an))
-                params   (->> (:local-usages an)
-                              (filter #(inside? a-start a-end [(:row %) (:col %)]))
-                              (remove #(when-let [d (defs (:id %))]
-                                         (inside? a-start a-end [(:row d) (:col d)])))
-                              (sort-by (juxt :row :col))
-                              (map :name)
-                              distinct
-                              vec)
-                call-src (str "(" new-name
-                              (apply str (map #(str " " %) params)) ")")]
-            {:new-defn-src (str "(defn " new-name " ["
-                                (clojure.string/join " " params) "]\n  " sub-str ")")
-             :new-from-src (replace-span form-src [r c] [er ec] call-src)
-             :params       params})))
-      {:error (str "no form named " from-name " in " ns-sym)})
-    (catch Exception ex
-      {:error (str "extract failed: " (ex-message ex))})))
 
 (defn ^:export match-in-strings?
   "True when `pat` matches inside a STRING LITERAL of `src` — as opposed to
@@ -766,53 +622,6 @@
                (fn [[whole d]]
                  (let [i (dec (parse-long d))]
                    (if (< -1 i (count args)) (nth args i) whole)))))
-
-(defn ^:export subform-replace-plan
-  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
-  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
-  addressed: siblings are never re-transcribed). A pair match (P1) replaces
-  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
-
-  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
-  match actually found — so the matched form ends up NESTED inside it. That is
-  the third transformation shape: the verbs expressed replace-in-place and
-  insert-beside, and introducing `(let [x …] <the thing that was there>)`
-  around existing code was neither. Matching a fragment that opens a delimiter
-  it does not close is correctly refused, so the only way to express it was to
-  restate the whole enclosing form — measured at ~40 lines a time.
-
-  `$1` is filled from the FOUND text, not from `match-src`: matching is
-  whitespace-insensitive, so the two can differ and the source is what should
-  survive. A template with no `$1` is refused rather than treated as a plain
-  replace, because that would DELETE the matched form — a different operation
-  than the one asked for."
-  ([store ns-sym form-name match-src new-src]
-   (subform-replace-plan store ns-sym form-name match-src new-src false))
-  ([store ns-sym form-name match-src new-src wrap?]
-   (try
-     (if (and wrap? (not (re-find #"\$1" (str new-src))))
-       {:error (str "a wrap template must contain $1 — the place the matched form"
-                    " goes. Without it the match would be DELETED, which is"
-                    " edit_subform without wrap")}
-       (if-let [e (store/form-named store ns-sym form-name)]
-         (let [form-src (n/string (:node e))
-               found    (find-unique-subform form-src match-src form-name)]
-           (if (:error found)
-             found
-             (let [m       (:zloc found)
-                   e2      (or (:end-zloc found) m)
-                   [r c]   (z/position m)
-                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
-                   ;; the source the match actually FOUND, not what the caller
-                   ;; typed: matching is whitespace-insensitive, so the two can
-                   ;; differ and it is the source that should survive the wrap
-                   src     (if wrap?
-                             (fill-template new-src [(n/string (z/node m))])
-                             new-src)]
-               {:new-form-src (replace-span form-src [r c] [er ec] src)})))
-         {:error (str "no form named " form-name " in " ns-sym)}))
-     (catch Exception ex
-       {:error (str "subform edit failed: " (ex-message ex))}))))
 
 (defn- rewrite-call-sites
   "Fold one element's usage sites (element-local [r c]) into the plan `acc`:
@@ -2153,3 +1962,237 @@
                                    {:ns ns-sym :name (:name e) :text s}))})))))
     (catch Exception ex
       {:error (str "realias plan failed: " (ex-message ex))})))
+
+(defn- paired-container?
+  "Is `zl`'s parent a container whose children are PAIRS — a map literal, a
+  binding vector, or a `case`/`cond`/`cond->`/`cond->>` clause list? Inside
+  one, a span that covers half a pair misaligns everything after it; outside
+  one, a contiguous run of siblings is just a run. The distinction
+  [[pair-slot?]] used to carry implicitly, named so a span of any length can
+  ask it."
+  [zl]
+  (let [parent (z/up zl)]
+    (boolean
+     (when parent
+       (case (z/tag parent)
+         :map    true
+         :vector (when-let [gp (z/up parent)]
+                   (and (= :list (z/tag gp))
+                        (contains? pair-binding-heads (some-> gp z/down safe-sexpr))
+                        (= 1 (sexpr-index parent))))
+         :list   (contains? '#{case cond cond-> cond->>}
+                            (some-> parent z/down safe-sexpr))
+         false)))))
+
+(defn- find-unique-subform
+  "The unique position-tracked zloc in `form-src` matching `match-src`
+  (shared by extract and subform edits). A node matches when its sexpr
+  structurally equals the match's OR its whitespace-normalized text does —
+  the text fallback covers fn literals (gensym'd args never sexpr-compare
+  equal) and regexes (Patterns don't =).
+
+  `match-src` may be ONE form or a CONTIGUOUS RUN of siblings, which is the
+  unit an edit actually has: two consecutive body forms, three clauses, a
+  whole pair. Inside a PAIRED container ([[paired-container?]]) the run must
+  cover whole pairs and start on a boundary — a span covering half a pair
+  misaligns everything after it, which is why `case` was the founding
+  example; anywhere else any contiguous run is a unit. Measured (s19): the
+  old rule — one form, or exactly two on a pair boundary — was the single
+  largest write-refusal class on real sessions, mostly for spans in ordinary
+  fn bodies where nothing could misalign.
+
+  AMBIGUITY is judged over every position the run matches, BEFORE the
+  alignment filter. Allowing spans widened the match surface, and asking
+  after filtering silently retargeted an edit: `m a?` matches both the
+  arglist of `(defn h [m a?] (cond-> m a? …))` and the cond-> clause, and
+  dropping the misaligned one left exactly one \"unique\" hit in the wrong
+  place.
+
+  A match that doesn't parse on its own (mid-expression fragment) is refused
+  with the rule named — the error is the only teaching that arrives at the
+  moment it's needed (Q5).
+  Returns {:zloc l} — plus :end-zloc (the run's LAST node) for a span —
+  or {:error msg}."
+  [form-src match-src what]
+  (let [parsed (try {:nodes (filter n/sexpr-able?
+                                    (n/children (p/parse-string-all match-src)))}
+                    (catch Exception e {:parse-error (ex-message e)}))]
+    (if-let [pe (:parse-error parsed)]
+      ;; when the fragment APPEARS once in the form, hand back the smallest
+      ;; complete form containing it — the retry needs no re-read
+      (let [cand (when (= 1 (count (fuzzy-spans form-src match-src)))
+                   (->> (iterate z/next (z/of-string form-src))
+                        (take-while (complement z/end?))
+                        (map z/node)
+                        (filter n/sexpr-able?)
+                        (map n/string)
+                        (filter #(seq (fuzzy-spans % match-src)))
+                        (sort-by count)
+                        first))]
+        (cond-> {:error (str "the match isn't well-formed Clojure on its own ("
+                             pe ") — match COMPLETE forms: a whole expression,"
+                             " clause, or binding pair, never a fragment that"
+                             " opens a delimiter it doesn't close."
+                             (if cand
+                               (str " :suggestion is the smallest complete form"
+                                    " containing your fragment — match THAT and"
+                                    " restate it in the replacement")
+                               (str " Often the fix is matching the ENCLOSING"
+                                    " form and restating it in the replacement")))}
+          cand (assoc :suggestion cand)))
+      (let [mnodes  (:nodes parsed)
+            cnt     (count mnodes)
+            span?   (< 1 cnt)
+            matcher (fn [mnode]
+                      (let [msexpr (try (n/sexpr mnode) (catch Exception _ ::none))
+                            mnorm  (norm-src (n/string mnode))]
+                        (fn [zl]
+                          (or (and (not= ::none msexpr)
+                                   (try (= msexpr (z/sexpr zl))
+                                        (catch Exception _ false)))
+                              (= mnorm (norm-src (n/string (z/node zl))))))))]
+        (if (zero? cnt)
+          {:error "the match is empty — give the subform to replace"}
+          (let [ms      (mapv matcher mnodes)
+                ;; the run matches when each node matches the next SIBLING in
+                ;; turn; a run that runs off the end of the container does not
+                hit?    (fn [zl]
+                          (loop [zs zl, [m & more] ms]
+                            (cond (nil? m)  true
+                                  (nil? zs) false
+                                  (m zs)    (recur (z/right zs) more)
+                                  :else     false)))
+                end-of  (fn [zl] (nth (iterate z/right zl) (dec cnt)))
+                matches (->> (iterate z/next (z/of-string form-src {:track-position? true}))
+                             (take-while (complement z/end?))
+                             (filter hit?)
+                             vec)
+                ;; the alignment rule is the PAIRED container's, not the span's
+                usable  (if span?
+                          (filterv #(or (not (paired-container? %))
+                                        (and (even? cnt) (pair-slot? %)))
+                                   matches)
+                          matches)]
+            (cond
+              (< 1 (count matches))
+              {:error (str "subform occurs " (count matches) " times in " what
+                           " — ambiguous; give a larger enclosing subform"
+                           " (its current text is in :source-now)")
+               :source-now form-src}
+
+              (and span? (empty? usable) (seq matches))
+              {:error (str "a " cnt "-form match inside a map, binding vector or "
+                           "case/cond clause must cover WHOLE pairs and start on a "
+                           "pair boundary — this span covers half a pair in " what
+                           "; match the single value form, the whole pair, or the "
+                           "enclosing form instead")}
+
+              (empty? usable)
+              {:error (str "subform not found in " what
+                           " — :source-now is its CURRENT text; correct the"
+                           " match against it and resend, no read needed")
+               :source-now form-src}
+
+              span?
+              {:zloc (first usable) :end-zloc (end-of (first usable))}
+
+              :else {:zloc (first usable)})))))))
+
+(defn ^:export subform-replace-plan
+  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
+  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
+  addressed: siblings are never re-transcribed). A pair match (P1) replaces
+  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
+
+  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
+  match actually found — so the matched form ends up NESTED inside it. That is
+  the third transformation shape: the verbs expressed replace-in-place and
+  insert-beside, and introducing `(let [x …] <the thing that was there>)`
+  around existing code was neither. Matching a fragment that opens a delimiter
+  it does not close is correctly refused, so the only way to express it was to
+  restate the whole enclosing form — measured at ~40 lines a time.
+
+  `$1` is filled from the FOUND text, not from `match-src`: matching is
+  whitespace-insensitive, so the two can differ and the source is what should
+  survive. A template with no `$1` is refused rather than treated as a plain
+  replace, because that would DELETE the matched form — a different operation
+  than the one asked for."
+  ([store ns-sym form-name match-src new-src]
+   (subform-replace-plan store ns-sym form-name match-src new-src false))
+  ([store ns-sym form-name match-src new-src wrap?]
+   (try
+     (if (and wrap? (not (re-find #"\$1" (str new-src))))
+       {:error (str "a wrap template must contain $1 — the place the matched form"
+                    " goes. Without it the match would be DELETED, which is"
+                    " edit_subform without wrap")}
+       (if-let [e (store/form-named store ns-sym form-name)]
+         (let [form-src (n/string (:node e))
+               found    (find-unique-subform form-src match-src form-name)]
+           (if (:error found)
+             found
+             (let [m       (:zloc found)
+                   e2      (or (:end-zloc found) m)
+                   [r c]   (z/position m)
+                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
+                   ;; the source the match actually FOUND, not what the caller
+                   ;; typed: matching is whitespace-insensitive, so the two can
+                   ;; differ and it is the source that should survive the wrap
+                   src     (if wrap?
+                             (fill-template new-src [(n/string (z/node m))])
+                             new-src)]
+               {:new-form-src (replace-span form-src [r c] [er ec] src)})))
+         {:error (str "no form named " form-name " in " ns-sym)}))
+     (catch Exception ex
+       {:error (str "subform edit failed: " (ex-message ex))}))))
+
+(defn ^:export extract-plan
+  "Plan extracting the unique occurrence of `subform-src` inside `from-name`
+  into a new fn `new-name`: params = the free locals (bound outside the
+  subform, used inside), in first-use order. Pair matches (P1) are refused —
+  a pair is not an expression. Returns
+  {:new-defn-src :new-from-src :params} or {:error msg}."
+  [store ns-sym from-name subform-src new-name & {:keys [at]}]
+  (try
+    (if-let [e (store/form-named store ns-sym from-name)]
+      (let [form-src (n/string (:node e))
+            resolved (when at (anchor-subform-src form-src at from-name))
+            target   (if at (:src resolved) subform-src)
+            found    (if (and at (:error resolved))
+                       resolved
+                       (find-unique-subform form-src target from-name))]
+        (cond
+          (:error found)    found
+          (:end-zloc found) {:error (str "cannot extract a pair — extract "
+                                         "needs ONE expression (usually the "
+                                         "pair's value form)")}
+          :else
+          (let [m        (:zloc found)
+                [r c]    (z/position m)
+                sub-str  (n/string (z/node m))
+                [er ec]  (node-span [r c] sub-str)
+                elems    (store/elements store ns-sym)
+                idx      (first (keep-indexed
+                                 (fn [i el] (when (= (:id e) (:id el)) i)) elems))
+                [fr fc]  (nth (store.render/element-offsets store ns-sym) idx)
+                abs      (fn [[rr cc]] [(+ fr rr -1) (if (= rr 1) (+ fc cc -1) cc)])
+                a-start  (abs [r c])
+                a-end    (abs [er ec])
+                an       (analyze/analyze-with-locals (store.render/render-ns store ns-sym))
+                defs     (into {} (map (juxt :id identity)) (:locals an))
+                params   (->> (:local-usages an)
+                              (filter #(inside? a-start a-end [(:row %) (:col %)]))
+                              (remove #(when-let [d (defs (:id %))]
+                                         (inside? a-start a-end [(:row d) (:col d)])))
+                              (sort-by (juxt :row :col))
+                              (map :name)
+                              distinct
+                              vec)
+                call-src (str "(" new-name
+                              (apply str (map #(str " " %) params)) ")")]
+            {:new-defn-src (str "(defn " new-name " ["
+                                (clojure.string/join " " params) "]\n  " sub-str ")")
+             :new-from-src (replace-span form-src [r c] [er ec] call-src)
+             :params       params})))
+      {:error (str "no form named " from-name " in " ns-sym)})
+    (catch Exception ex
+      {:error (str "extract failed: " (ex-message ex))})))

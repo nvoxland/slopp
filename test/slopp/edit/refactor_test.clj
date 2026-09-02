@@ -825,3 +825,35 @@
         (str "the CALL is qualified back to the old home: " src))
     (is (re-find #"\(list 'stayer\)" src)
         (str "and the quoted symbol is left exactly as written: " src))))
+
+(deftest a-contiguous-run-of-sibling-forms-is-one-span
+  ;; s19, measured over a real dev session: 48 write refusals were this
+  ;; matcher — "match parses to 3 forms", "a two-form match must land on a
+  ;; pair boundary", "isn't well-formed Clojure on its own". Two consecutive
+  ;; body forms are a perfectly good unit to replace; the pair-boundary rule
+  ;; exists for PAIRED containers, where a span that covers half a pair
+  ;; misaligns the rest, and it had been applied to every span everywhere.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'sp.core
+                              (str "(ns sp.core)\n"
+                                   "(defn f [x]\n  (println :a)\n  (println :b)\n  (println :c)\n  x)\n"
+                                   "(def m {:a 1 :b 2 :c 3})\n")))
+        plan (fn [nm match src] (refactor/subform-replace-plan st 'sp.core nm match src))]
+    (testing "TWO consecutive body forms replace as one span"
+      (let [r (plan 'f "(println :a)\n  (println :b)" "(println :ab)")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (re-find #"\(println :ab\)" (:new-form-src r)))
+        (is (not (re-find #"println :a\)" (:new-form-src r))) (:new-form-src r))
+        (is (re-find #"\(println :c\)" (:new-form-src r)) "the sibling after the span survives")))
+    (testing "THREE consecutive body forms too — an odd count is only a problem inside a pair"
+      (let [r (plan 'f "(println :a) (println :b) (println :c)" "(println :abc)")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (re-find #"\(println :abc\)" (:new-form-src r)))))
+    (testing "a whole PAIR inside a map still replaces as a unit"
+      (let [r (plan 'm ":a 1" ":a 9")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (re-find #":a 9" (:new-form-src r)))))
+    (testing "but a span that would cover HALF a pair is still refused, naming the rule"
+      (let [r (plan 'm "1 :b" "9 :b")]
+        (is (:error r) (pr-str r))
+        (is (re-find #"pair" (str (:error r))) (str (:error r)))))))

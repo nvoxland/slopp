@@ -817,3 +817,50 @@
           (is (nil? (:error r)) (pr-str r))
           (is (nil? (:image-reloaded r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-stores-own-requires-teach-what-an-alias-means
+  ;; s19, from a census of my own dev sessions: 59 write refusals were
+  ;; "No such namespace: X" with NO repair — `n` (rewrite-clj.node), `str`,
+  ;; `html`, `db`, `io`. Every one of them is an alias this store's own
+  ;; namespaces require, in dozens of places, under exactly that spelling.
+  ;; alias-candidates knew only namespaces whose LAST SEGMENT matched, plus
+  ;; a hardcoded well-known map — so an external lib's conventional alias
+  ;; had no candidate at all, and an ambiguous last segment refused rather
+  ;; than asking what the code around it already does.
+  ;;
+  ;; The fixtures are asserted, not assumed: written across modules, the
+  ;; teaching namespaces were REFUSED by the module gate and this test
+  ;; measured a store with no conventions in it — passing for the wrong
+  ;; reason is the failure mode a convention test has.
+  (let [sess (external/open!)
+        landed! (fn [ns-sym src]
+                  (let [r (ops/ingest! sess ns-sym src)]
+                    (is (nil? (:error r))
+                        (str ns-sym " must land, or there is no convention to learn from: "
+                             (pr-str (:error r))))))]
+    (try
+      (landed! 'cv.core.db "(ns cv.core.db)\n(defn fetch \"F.\" [] 1)\n")
+      ;; a SECOND namespace whose last segment is also `db` — ambiguous by name
+      (landed! 'cv.other.db "(ns cv.other.db)\n(defn fetch \"F.\" [] 2)\n")
+      ;; …and the store's own convention, inside one module: both consumers
+      ;; mean cv.core.db by `db`, and both use `sets` for a lib no namespace
+      ;; here is named after
+      (doseq [n '[cv.core.a cv.core.b]]
+        (landed! n (str "(ns " n "\n  (:require [cv.core.db :as db]\n"
+                        "            [clojure.set :as sets]))\n"
+                        "(defn twice \"T.\" []\n"
+                        "  (+ (db/fetch) (count (sets/union #{1} #{2}))))\n")))
+      (landed! 'cv.core.new "(ns cv.core.new)\n(defn seed \"S.\" [] 0)\n")
+      (testing "an AMBIGUOUS last segment is resolved by what the store's own code means"
+        (let [r (ops/add-form! sess 'cv.core.new "(defn db-reads \"R.\" [] (db/fetch))"
+                               :prompt "use the db")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:added "[cv.core.db :as db]" :ns 'cv.core.new} (:auto-require r))
+              (pr-str (:auto-require r)))))
+      (testing "an EXTERNAL lib no namespace is named after is repaired too"
+        (let [r (ops/add-form! sess 'cv.core.new "(defn both \"B.\" [] (sets/union #{1} #{2}))"
+                               :prompt "use the set lib")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:added "[clojure.set :as sets]" :ns 'cv.core.new} (:auto-require r))
+              (pr-str (:auto-require r)))))
+      (finally (ops/close! sess)))))

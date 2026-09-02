@@ -1052,89 +1052,6 @@
                    " edit_delete_form each, callers first. If two forms call"
                    " EACH OTHER, a group deleting both is the valid order.")})))
 
-(defn- alias-candidates
-  "For a `No such namespace: X` compile failure, `[alias [ns …]]` — the
-  namespaces that could supply the alias, or nil when the error is not that
-  shape or nothing can. Two sources, in order: a STORE namespace whose last
-  segment is the alias (`parcel` → `logi.parcel`), which is how the
-  convention actually works, and the handful of clojure.* aliases everyone
-  uses. Shared by the refusal that names them and the pipeline that adds
-  the one there is."
-  [store err]
-  (when-let [alias (second (re-find #"No such namespace:\s+([\w.$-]+)" (str err)))]
-    (let [well-known {"str" 'clojure.string  "set"  'clojure.set
-                      "edn" 'clojure.edn     "io"   'clojure.java.io
-                      "walk" 'clojure.walk   "pp"   'clojure.pprint
-                      "async" 'clojure.core.async}
-          from-store (filter #(= alias (last (str/split (str %) #"\.")))
-                             (keys (:namespaces store)))
-          cands      (or (seq (sort-by str from-store))
-                         (some-> (well-known alias) vector))]
-      (when (seq cands)
-        [alias (vec cands)]))))
-
-(defn- missing-alias-hint
-  "For a `No such namespace: X` compile failure, the `ns_add_require` call that
-  would supply `X` — or nil when nothing can, because a wrong suggestion costs
-  more than none.
-
-  The commonest mechanical friction measured on real sessions: a write naming
-  an alias the ns form does not have yet was refused with the compiler's own
-  sentence, and the recovery was always the same two-step — add the require,
-  resend the byte-identical form. When ONE namespace can supply the alias the
-  pipeline now takes that step itself (`missing-alias-require`), so this
-  message is reached only when several could — and then it names every
-  candidate rather than picking: the point is to save the lookup, not to
-  guess."
-  [store err ns-sym]
-  (when-let [[alias cands] (alias-candidates store err)]
-    (str "add the require first — "
-         (str/join " or "
-                   (for [c cands]
-                     (str "ns_add_require {ns \"" ns-sym "\", require \"["
-                          c " :as " alias "]\"}")))
-         (when (next cands) " (several namespaces could supply it)")
-         ", then resend this form unchanged")))
-
-(defn compile-error
-  "The standard compile-failure result every 'failed to compile' surface
-  returns: `{:error <prefix + clean message> :form qsym :at snippet}` when
-  the error's VFS coordinate resolves against `store`, else just
-  `{:error <prefix + clean message>}`. The `(file.clj:line:col)` coordinate
-  is ALWAYS stripped from the message — row/col never reaches an agent, even
-  as a fallback (a coordinate no tool consumes is noise, not a clue).
-  `prefix` is the op label ('rename failed to compile: ').
-
-  Given the namespace being written, an unresolvable ALIAS gets the
-  `ns_add_require` call appended TO THE MESSAGE. Two reasons it goes there
-  rather than into a `:fix` key, and the second is the load-bearing one:
-  every other structural refusal in slopp teaches in its message, and each
-  edit tool maintains its OWN result-key allowlist — a new key reaches
-  nobody until ten of them are updated, which has silently happened to three
-  keys already. `:error` is in all of them."
-  ([store err prefix] (compile-error store err prefix nil))
-  ([store err prefix ns-sym]
-   (let [clean (str prefix
-                    (str/trim (str/replace (str err)
-                                           #"\s*(?:at\s+)?\([\w/._-]+\.clj:\d+(?::\d+)?\)\.?"
-                                           "")))
-         hint  (when ns-sym (missing-alias-hint store err ns-sym))
-         msg   (if hint (str clean " — " hint) clean)]
-     (if-let [a (anchor-error store err)]
-       (assoc a :error msg)
-       {:error msg}))))
-
-(defn ^:export missing-alias-require
-  "The ONE require spec — `\"[clojure.string :as str]\"` — that would supply
-  the alias a `No such namespace: X` failure names, or nil when the failure
-  is not that shape, nothing can supply it, or SEVERAL namespaces could
-  (`missing-alias-hint` names those; a guess costs more than a question).
-  The write path adds this as a `:system` require and retries the write."
-  [store err]
-  (when-let [[alias cands] (alias-candidates store err)]
-    (when (= 1 (count cands))
-      (str "[" (first cands) " :as " alias "]"))))
-
 (defn parse-forms
   "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
   face of `parse-form`, for a write that lands several new forms at once.
@@ -1209,3 +1126,120 @@
   [code]
   (gate-with code check-banned
              "check runs in a scratch namespace and may not reach outside it"))
+
+(defn- alias-conventions
+  "{alias {lib n}} over every namespace's `:require` clauses — what THIS
+  store's own code means by an alias, and how many namespaces agree. An
+  identity entry (a lib required under its own full name) is not a
+  convention and is skipped.
+
+  Read on a compile FAILURE only, so parsing every ns form is affordable;
+  it is the difference between repairing a missing require and refusing
+  one, for every alias whose meaning is a project convention rather than a
+  name match (s19: `n` → rewrite-clj.node, `sets` → clojure.set)."
+  [store]
+  (reduce (fn [acc ns-sym]
+            (reduce (fn [acc [a lib]]
+                      (if (= a lib) acc (update-in acc [(str a) lib] (fnil inc 0))))
+                    acc
+                    (require-aliases store ns-sym)))
+          {}
+          (keys (:namespaces store))))
+
+(defn- alias-candidates
+  "For a `No such namespace: X` compile failure, `[alias [ns …]]` — the
+  namespaces that could supply the alias, or nil when the error is not that
+  shape or nothing can. Three sources, in order of authority:
+
+  1. **What the store's own code means by that alias** ([[alias-conventions]]):
+     unanimous, or dominant (twice the runner-up). This is first because it
+     is evidence rather than inference — it resolves an ambiguous last
+     segment the way the surrounding code already resolved it, and it is the
+     only source that can name an EXTERNAL lib (`n` → rewrite-clj.node).
+  2. a STORE namespace whose last segment is the alias (`parcel` →
+     `logi.parcel`), which is how the convention usually starts;
+  3. the handful of clojure.* aliases everyone uses.
+
+  A tie among conventions falls through to the name match, and finally to
+  every convention candidate — several means the refusal NAMES them
+  (`missing-alias-hint`) rather than guessing. Shared by the refusal that
+  names them and the pipeline that adds the one there is."
+  [store err]
+  (when-let [alias (second (re-find #"No such namespace:\s+([\w.$-]+)" (str err)))]
+    (let [well-known {"str" 'clojure.string  "set"  'clojure.set
+                      "edn" 'clojure.edn     "io"   'clojure.java.io
+                      "walk" 'clojure.walk   "pp"   'clojure.pprint
+                      "async" 'clojure.core.async}
+          conv       (sort-by (comp - val) (get (alias-conventions store) alias))
+          [[l1 n1] [_ n2]] conv
+          dominant   (when (and l1 (or (nil? n2) (<= (* 2 n2) n1))) [l1])
+          from-store (filter #(= alias (last (str/split (str %) #"\.")))
+                             (keys (:namespaces store)))
+          cands      (or (seq dominant)
+                         (seq (sort-by str from-store))
+                         (some-> (well-known alias) vector)
+                         (seq (mapv key conv)))]
+      (when (seq cands)
+        [alias (vec cands)]))))
+
+(defn- missing-alias-hint
+  "For a `No such namespace: X` compile failure, the `ns_add_require` call that
+  would supply `X` — or nil when nothing can, because a wrong suggestion costs
+  more than none.
+
+  The commonest mechanical friction measured on real sessions: a write naming
+  an alias the ns form does not have yet was refused with the compiler's own
+  sentence, and the recovery was always the same two-step — add the require,
+  resend the byte-identical form. When ONE namespace can supply the alias the
+  pipeline now takes that step itself (`missing-alias-require`), so this
+  message is reached only when several could — and then it names every
+  candidate rather than picking: the point is to save the lookup, not to
+  guess."
+  [store err ns-sym]
+  (when-let [[alias cands] (alias-candidates store err)]
+    (str "add the require first — "
+         (str/join " or "
+                   (for [c cands]
+                     (str "ns_add_require {ns \"" ns-sym "\", require \"["
+                          c " :as " alias "]\"}")))
+         (when (next cands) " (several namespaces could supply it)")
+         ", then resend this form unchanged")))
+
+(defn compile-error
+  "The standard compile-failure result every 'failed to compile' surface
+  returns: `{:error <prefix + clean message> :form qsym :at snippet}` when
+  the error's VFS coordinate resolves against `store`, else just
+  `{:error <prefix + clean message>}`. The `(file.clj:line:col)` coordinate
+  is ALWAYS stripped from the message — row/col never reaches an agent, even
+  as a fallback (a coordinate no tool consumes is noise, not a clue).
+  `prefix` is the op label ('rename failed to compile: ').
+
+  Given the namespace being written, an unresolvable ALIAS gets the
+  `ns_add_require` call appended TO THE MESSAGE. Two reasons it goes there
+  rather than into a `:fix` key, and the second is the load-bearing one:
+  every other structural refusal in slopp teaches in its message, and each
+  edit tool maintains its OWN result-key allowlist — a new key reaches
+  nobody until ten of them are updated, which has silently happened to three
+  keys already. `:error` is in all of them."
+  ([store err prefix] (compile-error store err prefix nil))
+  ([store err prefix ns-sym]
+   (let [clean (str prefix
+                    (str/trim (str/replace (str err)
+                                           #"\s*(?:at\s+)?\([\w/._-]+\.clj:\d+(?::\d+)?\)\.?"
+                                           "")))
+         hint  (when ns-sym (missing-alias-hint store err ns-sym))
+         msg   (if hint (str clean " — " hint) clean)]
+     (if-let [a (anchor-error store err)]
+       (assoc a :error msg)
+       {:error msg}))))
+
+(defn ^:export missing-alias-require
+  "The ONE require spec — `\"[clojure.string :as str]\"` — that would supply
+  the alias a `No such namespace: X` failure names, or nil when the failure
+  is not that shape, nothing can supply it, or SEVERAL namespaces could
+  (`missing-alias-hint` names those; a guess costs more than a question).
+  The write path adds this as a `:system` require and retries the write."
+  [store err]
+  (when-let [[alias cands] (alias-candidates store err)]
+    (when (= 1 (count cands))
+      (str "[" (first cands) " :as " alias "]"))))

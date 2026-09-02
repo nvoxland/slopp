@@ -31,19 +31,25 @@
               'sp.core 'h "(when x\n(inc x))" "(when x (dec x))")]
     (is (nil? (:error plan)) (pr-str plan))))
 
-(deftest multi-form-match-is-a-hard-error
-  (testing "3+ forms are always refused"
+(deftest a-span-is-legal-outside-a-pair-and-must-cover-whole-pairs-inside-one
+  ;; RENAMED from multi-form-match-is-a-hard-error, and the rename IS the
+  ;; decision (s19): a contiguous run of siblings is the unit an edit
+  ;; actually has — two consecutive body forms, three clauses — and refusing
+  ;; every one of them was the largest write-refusal class measured on real
+  ;; sessions (48). The alignment rule was never about spans; it is about
+  ;; PAIRED containers, where covering half a pair misaligns the rest.
+  (testing "3+ forms inside a case are still refused — that span covers half a pair"
     (let [plan (refactor/subform-replace-plan
                 (st "(ns sp.core)\n(defn f [x] (case x :a 1 :b 2))\n")
                 'sp.core 'f ":a 1 :b" ":a 9 :b")]
       (is (:error plan))
-      (is (re-find #"ONE" (str (:error plan))))))
-  (testing "two forms OUTSIDE a paired context are refused"
+      (is (re-find #"WHOLE pairs" (str (:error plan))) (pr-str plan))))
+  (testing "two forms outside a paired context are a SPAN, and land"
     (let [plan (refactor/subform-replace-plan
                 (st "(ns sp.core)\n(defn g [x] (do (prn x) (inc x)))\n")
                 'sp.core 'g "(prn x) (inc x)" "(inc x)")]
-      (is (:error plan))
-      (is (re-find #"pair" (str (:error plan))))))
+      (is (nil? (:error plan)) (pr-str plan))
+      (is (re-find #"\(do \(inc x\)\)" (:new-form-src plan)) (:new-form-src plan))))
   (testing "a two-form span CROSSING a pair boundary is refused"
     (let [plan (refactor/subform-replace-plan
                 (st "(ns sp.core)\n(def m {:a 1 :b 2})\n")
@@ -134,7 +140,7 @@
                 (st "(ns sp.core)\n(defn g [x] (case x :a 1 :b 2))\n")
                 'sp.core 'g ":a 1 :b" ":a 9 :b")]
       (is (:error plan))
-      (is (re-find #"ONE subform|COMPLETE forms|PAIR" (str (:error plan)))
+      (is (re-find #"WHOLE pairs|COMPLETE forms" (str (:error plan)))
           (pr-str plan)))))
 
 (deftest missed-matches-return-the-current-source
@@ -202,9 +208,12 @@
                 'sp.core 'h "a? (map inc)" "a? (map dec)")]
       (is (nil? (:error plan)) (pr-str plan))))
   (testing "but the THREADED value slot is still not a pair boundary"
+    ;; the subject is a form that appears ONLY in the cond->: with `m` the
+    ;; span also matched the arglist `[m a?]`, so what this refused was
+    ;; really ambiguity (s19 — spans made that collision reachable)
     (let [plan (refactor/subform-replace-plan
-                (st "(ns sp.core)\n(defn h [m a?] (cond-> m a? (assoc :a 1)))\n")
-                'sp.core 'h "m a?" "m (not a?)")]
+                (st "(ns sp.core)\n(defn h [m a?] (cond-> (assoc m :z 1) a? (assoc :a 1)))\n")
+                'sp.core 'h "(assoc m :z 1) a?" "(assoc m :z 2) a?")]
       (is (:error plan) (pr-str plan))
       (is (re-find #"pair" (str (:error plan)))))))
 
