@@ -314,30 +314,6 @@
                     [])
   {:turn :open :agent agent :intent intent})
 
-^:reads (defn query-eval
-  "Observe-only eval against the live image (the oracle): call anything —
-  including effectful fns — but (re)defining code is rejected (T5); writes go
-  through the edit tools so provenance stays airtight. `:gate` swaps the
-  scanner for a caller that has already gated the untrusted part of `code`
-  itself (`check` gates the question, then wraps it in trusted scaffolding).
-
-  Returns the values, or `{:error msg}` when the eval actually FAILED — nREPL's
-  `eval-error` status, not merely something reaching stderr. A library that
-  prints at load (`WARNING: abs already refers to …`) is output, not failure:
-  its warning is dropped here, as in any REPL, and the values come back. It used
-  to come back as `{:error …}` with the values discarded, and since a second
-  eval finds the namespace loaded and prints nothing, the failure vanished on
-  retry."
-  [session code & {:keys [gate]}]
-  (if-let [err ((or gate edit/observe-gate) code)]
-    {:error err}
-    ;; strip :reload in the owned image — no source files exist to reload, so it
-    ;; would only throw FileNotFoundException (store ns) or waste a jar re-read
-    (let [r (repl/eval-checked! (:image @session) (edit/strip-image-reload code))]
-      (if (:err r)                                  ; F-3c2: never a silent []
-        {:error (:err r)}
-        (:values r)))))
-
 ^:reads (defn query-observe
   "Run `driver-code` (observe-gated) while capturing the args and return value
   of up to `:limit` calls to `ns-sym/nm` — the oracle's direct answer to 'what
@@ -1618,18 +1594,6 @@
                                      (first (n/children (p/parse-string-all (:src r))))
                                      :prompt prompt :group group :agent agent))
           st))))
-
-^:reads (defn query-call
-  "Observe-only INVOKE of one var in the live image: `(query-call session
-  'app.core/f 1 2)` — the structured face of the common query-eval case.
-  The var reference is CARRIED (a quoted symbol in a designated position —
-  renames, moves, and the unused gate all see it) instead of hidden in an
-  eval string; args must be printable data (they cross the nREPL boundary
-  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
-  expressions."
-  [session qsym & args]
-  (query-eval session
-              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
 
 ;; --- query.* (read) ---
 
@@ -4932,6 +4896,71 @@
                        (let [e (store/form-by-id st (:form-id d))]
                          (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
                      (:deltas r)))))))
+
+(defn ^:export session-var-hint
+  "The line a `query_eval` failure owes a caller who reached for a SESSION —
+  or nil for any other error.
+
+  Measured (s19): 121 refusals on one store named a `*session*` var (written
+  unqualified deliberately — spelled with a namespace it reads as prose
+  naming a form that exists, which is the one thing this is about), an
+  agent trying to call session-taking fns from the oracle. There is no such var and there should not be one: a live session
+  in eval would let a write bypass the delta pipeline, which is exactly what
+  the observe gate refuses (T5). So unlike an argument SHAPE this cannot be
+  repaired — the intent is real, the capability is deliberately absent — and
+  the honest answer is to name the doors that do exist."
+  [err]
+  (when (re-find #"\*session\*" (str err))
+    (str "there is no session var in the oracle, deliberately: eval observes,"
+         " it never writes (a session here would let a write bypass the delta"
+         " pipeline). The three doors that answer what you were asking:"
+         " query_store {code \"(fn [store] …)\"} for anything about the STORE"
+         " VALUE; the tools themselves for anything a session does (they hold"
+         " it for you); explore {ops [{op check code …}]} to run assertions in"
+         " the image. For a pure fn, call it directly — query_eval already has"
+         " every namespace loaded.")))
+
+^:reads (defn query-eval
+  "Observe-only eval against the live image (the oracle): call anything —
+  including effectful fns — but (re)defining code is rejected (T5); writes go
+  through the edit tools so provenance stays airtight. `:gate` swaps the
+  scanner for a caller that has already gated the untrusted part of `code`
+  itself (`check` gates the question, then wraps it in trusted scaffolding).
+
+  Returns the values, or `{:error msg}` when the eval actually FAILED — nREPL's
+  `eval-error` status, not merely something reaching stderr. A library that
+  prints at load (`WARNING: abs already refers to …`) is output, not failure:
+  its warning is dropped here, as in any REPL, and the values come back. It used
+  to come back as `{:error …}` with the values discarded, and since a second
+  eval finds the namespace loaded and prints nothing, the failure vanished on
+  retry.
+
+  A failure that reached for a SESSION carries [[session-var-hint]]: that
+  miss was the commonest eval refusal measured on a real store, and it is
+  one the pipeline cannot repair — the capability is absent on purpose."
+  [session code & {:keys [gate]}]
+  (if-let [err ((or gate edit/observe-gate) code)]
+    {:error err}
+    ;; strip :reload in the owned image — no source files exist to reload, so it
+    ;; would only throw FileNotFoundException (store ns) or waste a jar re-read
+    (let [r (repl/eval-checked! (:image @session) (edit/strip-image-reload code))]
+      (if (:err r)                                  ; F-3c2: never a silent []
+        {:error (if-let [h (session-var-hint (:err r))]
+                  (str (:err r) " — " h)
+                  (:err r))}
+        (:values r)))))
+
+^:reads (defn query-call
+  "Observe-only INVOKE of one var in the live image: `(query-call session
+  'app.core/f 1 2)` — the structured face of the common query-eval case.
+  The var reference is CARRIED (a quoted symbol in a designated position —
+  renames, moves, and the unused gate all see it) instead of hidden in an
+  eval string; args must be printable data (they cross the nREPL boundary
+  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
+  expressions."
+  [session qsym & args]
+  (query-eval session
+              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):

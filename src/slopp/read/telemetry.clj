@@ -12,7 +12,7 @@
   zero\" with \"never measured\". So folds return nil rather than a zeroed
   record, and a clean result still carries its empty buckets."
   (:require [rewrite-clj.node :as n]
-            [slopp.rules.catalog :as catalog]))
+            [slopp.rules.catalog :as catalog] [clojure.string :as str]))
 
 (defn- escape-markers
   "Store-wide counts of the discharge markers agents add to opt OUT of the
@@ -100,88 +100,6 @@
   leading sentence is the part that says WHY, and the rest is the recovery
   payload the agent already consumed."
   200)
-
-(defn ^:export call-timing
-  "A turn's wall clock split into the part slopp spent working, the part it
-  did not, and the part nobody was there for — the pure fold over `calls`,
-  each `{:tool :start :end}` in epoch ms as the wire recorded them.
-
-  Returns `{:calls :slopp-ms :outside-ms :idle-ms :elapsed-ms :slopp-share
-  :top :refused}`, or NIL when nothing was called: a zeroed record would read
-  as \"measured, and the answer was nothing\", which is the conflation
-  D-surface-honesty forbids.
-
-  **`:outside-ms` is not \"thinking time\".** It is the gap between one answer
-  going out and the next call arriving: agent reasoning, every non-slopp tool
-  (file reads, shell, subagents), and the harness, none of which the server
-  can tell apart. Naming it for what it MEASURES rather than what we suspect
-  it contains is the point — and it is the number that was missing. Measured
-  over one real session before this existed: 1,703s elapsed against 390s of
-  recorded verification, so 78% of the wall clock had no producer at all.
-  P7's standing complaint is exactly this: the cost of leaving slopp lands
-  where no slopp metric sees it.
-
-  **`:idle-ms` is the session nobody was in.** A turn rotates on the
-  WRITE-tool gate, so a read-only ask folds into the next writing one and a
-  turn can straddle a human going to bed. Reading the first nine real records
-  found exactly that: 46 calls, 224s of work, 45,501s elapsed, `:slopp-share
-  \"0%\"` — a true division and a false statement, since slopp was most of the
-  time anyone was actually working. Gaps of `idle-gap-ms` or more are counted
-  here instead, and `:slopp-share` is taken against ACTIVE elapsed
-  (`:elapsed-ms` minus `:idle-ms`). The three-way split stays exhaustive; what
-  changes is that the two kinds of not-working are no longer one number.
-
-  `:top` is by total cost, largest first, aggregated per tool — the tool that
-  cost the most may be the one called a hundred times cheaply, and a per-call
-  median hides that."
-  [calls]
-  (when (seq calls)
-    (let [in    (reduce + 0 (map #(- (:end %) (:start %)) calls))
-          span  (- (:end (last calls)) (:start (first calls)))
-          idle  (->> (map (fn [a b] (- (:start b) (:end a))) calls (rest calls))
-                     (filter #(>= % idle-gap-ms))
-                     (reduce + 0))
-          live  (max 1 (- span idle))
-          
-          by    (->> (group-by :tool calls)
-                     (map (fn [[t cs]] {:tool t :n (count cs)
-                                        :ms (reduce + 0 (map #(- (:end %) (:start %)) cs))}))
-                     (sort-by (juxt (comp - :ms) :tool))
-                     vec)]
-      {:calls      (count calls)
-       :slopp-ms   in
-       :outside-ms (- span in idle)
-       :idle-ms    idle
-       :elapsed-ms span
-       :slopp-share (str (int (* 100 (/ in (double live)))) "%")
-       :top        (vec (take 5 by))
-       ;; REFUSED calls — a malformed match, a lint error in the form being
-       ;; written, an arity break. Each is a whole round trip that produced
-       ;; nothing, and they live in the 78% of wall clock spent outside slopp,
-       ;; where nothing had ever counted them. Always present, zero when
-       ;; clean: an absent key would read as unmeasured.
-       ;;
-       ;; `:samples` carries what they SAID. The count alone can only ever
-       ;; support "read that tool's contract"; a classification table written
-       ;; before seeing real messages would be invented rather than derived,
-       ;; and the withdrawn :positional-form-access advisory is what that
-       ;; costs. Bounded and truncated, because a refusal can hand back a
-       ;; whole form and this rides on a delta forever.
-       :refused    (let [r (filter :refused? calls)]
-                     {:count (count r)
-                      :pct   (int (* 100 (/ (count r) (double (count calls)))))
-                      :by-tool (vec (sort-by (juxt (comp - :n) :tool)
-                                             (map (fn [[t cs]] {:tool t :n (count cs)})
-                                                  (group-by :tool r))))
-                      :samples (->> r
-                                    (keep (fn [{:keys [tool error]}]
-                                            (when error
-                                              (let [s (str error)]
-                                                {:tool  tool
-                                                 :error (subs s 0 (min (count s)
-                                                                       refusal-sample-chars))}))))
-                                    (take refusal-samples)
-                                    vec)})})))
 
 (defn ^:export read-cost
   "What a turn's answers COST to send, and whether withholding one saved
@@ -390,11 +308,21 @@
                  census? (assoc :chars (reduce + 0 (keep :chars tool-calls))))
       :refused {:count   refused
                 :pct     (int (* 100 (/ refused (double (max 1 calls)))))
+                ;; a refusal answered by calling the same tool again — the
+                ;; retry, not the refusal, is what a fix has to delete
+                :retried (sum (comp :retried :refused))
                 :by-tool (->> (mapcat (comp :by-tool :refused) ts)
                               (#(tally % :tool :n))
                               (map (fn [[t n]] {:tool t :n n}))
                               (sort-by (juxt (comp - :n) :tool))
-                              vec)}
+                              vec)
+                ;; BY WHAT THEY SAID: a tool is not a class, and grouping by
+                ;; tool produced two wrong levers in one session (s19)
+                :by-shape (->> (mapcat (comp :by-shape :refused) ts)
+                               (#(tally % :shape :n))
+                               (map (fn [[s n]] {:shape s :n n}))
+                               (sort-by (juxt (comp - :n) :shape))
+                               vec)}
       :tools   (if census?
                  (let [ms (tally tool-calls :tool #(or (:ms %) 0))
                        n  (tally tool-calls :tool (constantly 1))
@@ -434,3 +362,142 @@
                       (sort-by (juxt (comp - :extra-ms) :tool))
                       vec))}
       (seq model) (assoc :model (model-summary model)))))
+
+(defn ^:export refusal-shape
+  "A refusal message reduced to its CLASS: the particulars collapsed, the
+  sentence that identifies it kept. nil for an empty message.
+
+  A NORMALIZATION, deliberately, not a taxonomy — quoted text, qualified
+  names, keywords, numbers and trailing bare names become an ellipsis, and a
+  compiler failure is keyed on its REASON line rather than the `failed to
+  compile` preamble every one of them shares. A hand-written category table
+  would be invented rather than derived and would only ever fit this store;
+  this fits any store's refusals, including ones nobody has seen yet.
+
+  Why it exists (s19): refusals were counted by TOOL, and a tool is not a
+  class. Two performance 'levers' were read off that grouping in one session
+  and both were wrong — one was a since-fixed classifier's artefact, the
+  other was every refusal of a tool attributed to the single message that
+  happened to be sampled."
+  [error]
+  (let [s (str/trim (str error))]
+    (when (seq s)
+      (let [lines (remove str/blank? (str/split s #"\n"))
+            ;; a compiler failure's first line is boilerplate; its second is
+            ;; the reason, which is the thing that differs between classes
+            head  (if (and (re-find #"compil" (str (first lines))) (second lines))
+                    (second lines)
+                    (first lines))
+            ;; cut to the head BEFORE collapsing particulars — the rules below
+            ;; anchor at the end, and a trailing explanation moves that end
+            head  (first (str/split (str head) #" — "))
+            norm  (-> head
+                      (str/replace #"^\{:error\s+\"" "")
+                      (str/replace #"^error:\s*" "")
+                      ;; the EDN wrapper's tail, when the reason IS the last line
+                      (str/replace #"\"\s*\}?\s*$" "")
+                      (str/replace #"\"[^\"]*\"" "…")
+                      (str/replace #"\{[^}]*\}" "{…}")
+                      (str/replace #"\b[\w.-]+/[\w.?!*<>=+$-]+" "…")
+                      (str/replace #":[\w?!*<>=+-]+" ":…")
+                      (str/replace #"\d+" "N")
+                      ;; a trailing bare name is a particular too
+                      (str/replace #":\s+[\w.$?!*-]+\s*$" ": …")
+                      (str/replace #"\bin\s+[\w.$?!*<>=+-]+\s*$" "in …")
+                      str/trim)]
+        (not-empty (subs norm 0 (min (count norm) 60)))))))
+
+(defn ^:export call-timing
+  "A turn's wall clock split into the part slopp spent working, the part it
+  did not, and the part nobody was there for — the pure fold over `calls`,
+  each `{:tool :start :end}` in epoch ms as the wire recorded them.
+
+  Returns `{:calls :slopp-ms :outside-ms :idle-ms :elapsed-ms :slopp-share
+  :top :refused}`, or NIL when nothing was called: a zeroed record would read
+  as \"measured, and the answer was nothing\", which is the conflation
+  D-surface-honesty forbids.
+
+  **`:outside-ms` is not \"thinking time\".** It is the gap between one answer
+  going out and the next call arriving: agent reasoning, every non-slopp tool
+  (file reads, shell, subagents), and the harness, none of which the server
+  can tell apart. Naming it for what it MEASURES rather than what we suspect
+  it contains is the point — and it is the number that was missing. Measured
+  over one real session before this existed: 1,703s elapsed against 390s of
+  recorded verification, so 78% of the wall clock had no producer at all.
+  P7's standing complaint is exactly this: the cost of leaving slopp lands
+  where no slopp metric sees it.
+
+  **`:idle-ms` is the session nobody was in.** A turn rotates on the
+  WRITE-tool gate, so a read-only ask folds into the next writing one and a
+  turn can straddle a human going to bed. Reading the first nine real records
+  found exactly that: 46 calls, 224s of work, 45,501s elapsed, `:slopp-share
+  \"0%\"` — a true division and a false statement, since slopp was most of the
+  time anyone was actually working. Gaps of `idle-gap-ms` or more are counted
+  here instead, and `:slopp-share` is taken against ACTIVE elapsed
+  (`:elapsed-ms` minus `:idle-ms`). The three-way split stays exhaustive; what
+  changes is that the two kinds of not-working are no longer one number.
+
+  `:top` is by total cost, largest first, aggregated per tool — the tool that
+  cost the most may be the one called a hundred times cheaply, and a per-call
+  median hides that."
+  [calls]
+  (when (seq calls)
+    (let [in    (reduce + 0 (map #(- (:end %) (:start %)) calls))
+          span  (- (:end (last calls)) (:start (first calls)))
+          idle  (->> (map (fn [a b] (- (:start b) (:end a))) calls (rest calls))
+                     (filter #(>= % idle-gap-ms))
+                     (reduce + 0))
+          live  (max 1 (- span idle))
+
+          by    (->> (group-by :tool calls)
+                     (map (fn [[t cs]] {:tool t :n (count cs)
+                                        :ms (reduce + 0 (map #(- (:end %) (:start %)) cs))}))
+                     (sort-by (juxt (comp - :ms) :tool))
+                     vec)]
+      {:calls      (count calls)
+       :slopp-ms   in
+       :outside-ms (- span in idle)
+       :idle-ms    idle
+       :elapsed-ms span
+       :slopp-share (str (int (* 100 (/ in (double live)))) "%")
+       :top        (vec (take 5 by))
+       ;; REFUSED calls — a malformed match, a lint error in the form being
+       ;; written, an arity break. Each is a whole round trip that produced
+       ;; nothing, and they live in the 78% of wall clock spent outside slopp,
+       ;; where nothing had ever counted them. Always present, zero when
+       ;; clean: an absent key would read as unmeasured.
+       ;;
+       ;; `:samples` carries what they SAID, bounded and truncated because a
+       ;; refusal can hand back a whole form and this rides on a delta
+       ;; forever. `:by-shape` is the classification those samples could only
+       ;; hint at, done MECHANICALLY ([[refusal-shape]] normalizes rather
+       ;; than categorizes) — because a TOOL is not a class, and reading
+       ;; these by tool produced two wrong performance levers in one session
+       ;; (s19). `:retried` counts the refusals the agent answered by calling
+       ;; the same tool again: the retry, not the refusal, is what a fix
+       ;; deletes.
+       :refused    (let [r (filter :refused? calls)
+                         retried (count (filter (fn [[a b]] (and (:refused? a)
+                                                                (= (:tool a) (:tool b))))
+                                                (map vector calls (rest calls))))]
+                     {:count (count r)
+                      :pct   (int (* 100 (/ (count r) (double (count calls)))))
+                      :retried retried
+                      :by-tool (vec (sort-by (juxt (comp - :n) :tool)
+                                             (map (fn [[t cs]] {:tool t :n (count cs)})
+                                                  (group-by :tool r))))
+                      :by-shape (->> r
+                                     (keep (comp refusal-shape :error))
+                                     frequencies
+                                     (map (fn [[s n]] {:shape s :n n}))
+                                     (sort-by (juxt (comp - :n) :shape))
+                                     vec)
+                      :samples (->> r
+                                    (keep (fn [{:keys [tool error]}]
+                                            (when error
+                                              (let [s (str error)]
+                                                {:tool  tool
+                                                 :error (subs s 0 (min (count s)
+                                                                       refusal-sample-chars))}))))
+                                    (take refusal-samples)
+                                    vec)})})))

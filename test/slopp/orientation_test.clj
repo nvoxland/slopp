@@ -634,3 +634,30 @@
         (swap! sess assoc-in [:store :modules] {})
         (is (nil? (:module-cycles (ops/session-brief sess)))))
       (finally (ops/close! sess)))))
+
+(deftest reaching-for-a-session-in-the-oracle-is-answered-with-the-doors-that-exist
+  ;; s19, from a census of my own sessions: 121 query_eval refusals named a
+  ;; `*session*` var. The intent is real — call something that takes a
+  ;; session — but the capability is deliberately absent: a live session in
+  ;; eval would let a write bypass the delta pipeline, which is the whole
+  ;; point of the observe gate (T5). Unrepairable by design, so the refusal
+  ;; has to name the doors that DO answer it.
+  ;;
+  ;; The qualified spellings are COMPOSED rather than written: spelled out,
+  ;; they read to the stale-reference rule as prose naming a form that does
+  ;; not exist — which is exactly what they are, and exactly what that rule
+  ;; is for. A pin that permanently trips a good rule teaches everyone to
+  ;; ignore it.
+  (let [var-name (str "*" "session" "*")]
+    (testing "a session-shaped miss names query_store, the tools, and check"
+      (let [h (ops/session-var-hint
+               (str "Syntax error compiling at (REPL:1:41).\nNo such var: slopp.ops/" var-name))]
+        (is (some? h))
+        (is (re-find #"query_store" h) h)
+        (is (re-find #"check" h) h)))
+    (testing "any spelling is caught, not just the one I happened to guess"
+      (is (some? (ops/session-var-hint (str "Unable to resolve symbol: " var-name " in this context"))))
+      (is (some? (ops/session-var-hint (str "No such var: slopp.ops.external/" var-name)))))
+    (testing "an ordinary error is left alone rather than decorated"
+      (is (nil? (ops/session-var-hint "Unable to resolve symbol: no-such-fn in this context")))
+      (is (nil? (ops/session-var-hint "Divide by zero"))))))

@@ -408,3 +408,41 @@
       (is (= :census (get-in t [:calls :basis])))))
   (testing "without the rows the fold is what it was — a lower bound, and it says so"
     (is (= :turn-top (get-in (telemetry/turn-cost (store/empty-store)) [:calls :basis])))))
+
+(deftest refusals-are-counted-by-what-they-SAY-and-by-whether-the-agent-retried
+  ;; s19: grouping refusals by TOOL produced two wrong levers in one
+  ;; session — a 462 that was a since-fixed classifier's artefact, and a 282
+  ;; that was every refusal of that tool rather than the message it was
+  ;; attributed to. The message is the class.
+  (let [call (fn [t s e & [err]]
+               (cond-> {:tool t :start s :end e}
+                 err (assoc :refused? true :error err)))]
+    (testing "the SHAPE collapses the particulars, so one class counts as one class"
+      (is (= "unknown argument :… for query_slice"
+             (telemetry/refusal-shape
+              "error: unknown argument :targets for query_slice — a mistyped or unsupported argument is refused")))
+      (is (= (telemetry/refusal-shape "error: unknown argument :full for query_slice — accepted: :ns")
+             (telemetry/refusal-shape "error: unknown argument :targets for query_slice — accepted: :ns"))
+          "same class, different particulars"))
+    (testing "a compile failure is keyed on its REASON, not its preamble"
+      (is (= "No such namespace: …"
+             (telemetry/refusal-shape
+              "{:error \"form failed to compile: Syntax error compiling\nNo such namespace: web\n class x\"}")))
+      (is (= (telemetry/refusal-shape "{:error \"form failed to compile: Syntax error compiling\nNo such namespace: web\"}")
+             (telemetry/refusal-shape "{:error \"form failed to compile: Syntax error compiling\nNo such namespace: db\"}"))))
+    (testing "an ordinary message keeps its head, and a blank one has no shape"
+      (is (= "subform not found in …" (telemetry/refusal-shape "subform not found in quote-breakdown — :source-now is")))
+      (is (nil? (telemetry/refusal-shape "")))
+      (is (nil? (telemetry/refusal-shape nil))))
+    (testing "the fold reports the shapes and the RETRIES — a refusal the agent answered with the same tool"
+      (let [t (telemetry/call-timing
+               [(call "edit" 0 10 "error: unknown argument :ns for change — accepted: :impl")
+                (call "edit" 20 30 "error: unknown argument :name for change — accepted: :impl")
+                (call "read" 40 50)
+                (call "edit" 60 70)])]
+        (is (= 2 (get-in t [:refused :count])) (pr-str (:refused t)))
+        (is (= [{:shape "unknown argument :… for change" :n 2}]
+               (get-in t [:refused :by-shape])) (pr-str (:refused t)))
+        (is (= 1 (get-in t [:refused :retried]))
+            (str "the first refusal was followed by the same tool; the second was not: "
+                 (pr-str (:refused t))))))))
