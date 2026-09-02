@@ -141,6 +141,18 @@ A refusal names the rule and the way out. Do what it says; never route
 around it (no Bash/`sqlite3` against the store, no hand-written `declare`,
 no file edits — the store is the code).
 
+## Other agents on this store
+
+Concurrent sessions on one store are safe and ordinary — your writes go
+to a PRIVATE thread; `done` lands them. If someone landed first, your
+land rebases onto their work and re-runs the whole suite before
+anything lands; independent work merges clean, and the parallel wall
+is the longest session, not the sum. When the rebase CONFLICTS, the
+done says so with each form's both sides under `:conflicts`: REWRITE
+each conflicted form to the version you intend (usually a merge of
+both), then call `done` again — your rewrite IS the resolution. Never
+`thread_drop` over a conflict; that discards your side.
+
 ## When you need more
 
 `help {topic}` — `tools` (the families and every op), `web` (pages, routes, client code), `rest` (typed APIs),

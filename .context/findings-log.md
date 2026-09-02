@@ -1911,3 +1911,34 @@ terrains with verification and provenance included; opus's 41ns gap is
 each: answer-shaped pre-emption works where instruction never did;
 repair paths must accept the inputs models actually produce (bare
 requires); and never make a reader re-buy what it already holds.
+
+## 2026-09-01 — s16 concurrency (eval16): the wall divider holds; three land-path bugs found by probes
+
+- Two concurrent `claude -p` sessions on ONE store: both land, suite
+  green, zero lost edits (probes + 3 measured pairs, sonnet+opus).
+- Pre-registered rule wall(par)<=0.65x wall(seq): opus 0.50x PASS;
+  sonnet 0.77x/0.39x (pooled 0.52x PASS). Par wall = max(sessions) and
+  was 139s in BOTH sonnet runs while seq (=sum) swung 180-352s:
+  parallelism stabilizes wall, not only divides it. Tokens: par
+  CHEAPER in 3/3 pairs (0.60-0.90x) — no orientation penalty.
+- Wave A probe bugs, all red-first pinned + landed (d865e49f8883f,
+  full_check green 1527 external):
+  1. terse-done rendered a REFUSED land as a bare green done (agent
+     told user "Done — green" with work unlanded). Pin:
+     mcp-test/a-refused-land-is-never-rendered-as-a-bare-green-done.
+  2. MV-conflict deadlock: the conflict recomputed from the fork point
+     on every land retry — "resolve, then call done again" could not
+     succeed; only thread_drop escaped (40 turns, $0.82). Fix:
+     merge-logs treats a conflict a prior merge SURFACED whose form
+     ours rewrote SINCE as resolved (record-merge already persisted
+     the fid-keyed conflicts). Pin:
+     thread-test/a-conflicted-land-is-resolvable-in-the-thread.
+     After: conflict -> one rewrite -> landed (8 calls, 48s).
+  3. Namespace births were promptless (ingest! never recorded the ask;
+     the merge replay compounded it): :prompt now rides store/ingest,
+     ops/ingest!, create-ns!, and merge-logs' :ingest arm. Pin:
+     merge-test/an-ingested-namespaces-prompt-survives-birth-and-replay.
+- Recorded limitation (not a fix): turn markers deliberately don't
+  cross a land (fields/markers), so a rebased session's ask is absent
+  from report{}'s :by-ask even though every content delta carries
+  prompt+agent. See D-concurrency.

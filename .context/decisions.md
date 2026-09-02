@@ -6479,3 +6479,36 @@ landed sources enter the ask's form ledger exactly as edit_group's do
 (tests on their group landing, impl on land); tests are OPTIONAL —
 `{prompt impl}` is the ordinary write, so a lone micro-fix costs one
 verification, which is what let edit_subform leave the advertised surface.
+
+## D-concurrency (2026-09-01, s16 — the wall divider; semantics pinned by probes)
+
+**Concurrent sessions on one store are SUPPORTED and teach nothing to
+the model** — the harness (a human, an orchestrator) runs independent
+asks as separate sessions; slopp's thread/land machinery makes it safe.
+Measured (eval16): wall(par) = max(sessions) vs wall(seq) = sum —
+opus 0.50x, sonnet pooled 0.52x, and par wall was IDENTICAL across
+sonnet runs while seq swung 2x (variance adds in a sum, not a max).
+Tokens: par cheaper in 3/3 pairs. Plain files have no safe counterpart
+on one checkout — this is the structural differentiator.
+
+The pinned semantics (all probe-found, red-first tested):
+1. **A refused land is never a bare green done** — the refusal (with
+   :conflicts, both sides' content, and the recovery sentence) rides
+   the full done report (terse-done exempts it from the one-liner).
+2. **A surfaced conflict is resolved by a rewrite**: merge-logs treats
+   a conflict a PRIOR merge from the same source surfaced, whose form
+   our line rewrote after the surfacing merge, as delivered-with-ours-
+   standing. "REWRITE each form under :conflicts, then call done
+   again" is therefore literally followable — the deadlock where the
+   conflict recomputed from the fork point forever (only escape:
+   thread_drop) is closed and pinned by
+   thread-test/a-conflicted-land-is-resolvable-in-the-thread.
+3. **A namespace birth carries its ask**: :prompt rides store/ingest →
+   ops/ingest! → create-ns! and merge-logs' :ingest replay arm.
+
+**Recorded limitation, deliberate**: turn markers do not cross a land
+(fields/markers — "line-scoped bookkeeping does not travel"), and
+report{}'s :by-ask attributes positionally, so the REBASED side's ask
+is absent from :by-ask on main even though its content deltas carry
+prompt+agent (+ :merged-from). Reversing the marker-travel policy is
+an open question filed with frictions, not smuggled in here.
