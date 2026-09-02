@@ -96,6 +96,82 @@
                  (+ firsts (count (remove (fn [[n _]] (contains? green n)) pairs)))
                  (cond-> blind (empty? cl) inc)))))))
 
+(defn ^:export reuse-by-grain
+  "What the verdict cache would have skipped, replayed from the journal and
+  split by GRAIN: `{:narrowed {…} :whole-suite {…}}`.
+
+  [[reuse-rate]] answers the question the gate was written against and mixes
+  grains doing it. This answers the one the BUILD needs: the cache exists at
+  done grain (narrowed `:only` runs) and full_check is deliberately
+  uncached, so a fraction that includes whole-suite runs cannot say whether
+  what was built pays.
+
+  Per grain: `:runs`, the population `:tests` (or namespaces) that carried a
+  closure hash, `:already-green`, `:fraction` — and `:runs-fully-avoidable`,
+  which is the number that actually maps to wall time. The external tier's
+  cost floor is a JVM BOOT, not a test: skipping some of a run's tests saves
+  nothing, and only a run whose every test was already green at exactly this
+  content is a run that need not have happened.
+
+  The evidence rules are the ones any such cache has to use (they lived in
+  `reusable-verdicts`, deleted with the cache when this measurement refused
+  it — the seam in `done!` carries the numbers): a green narrowed run clears the tests it named, a green whole-suite
+  run clears the namespaces in its scope, red clears nothing, and everything
+  is keyed by the closure hash recorded with it. Observations that predate
+  the per-namespace verdict are read the same way it would record them — a
+  green run with no `:only` covered its whole scope."
+  [store]
+  (let [ns-of (fn [t] (some-> t str symbol namespace symbol))
+        obs   (filter #(= :observe (:op %))
+                      (or (seq (:deltas store)) (:recent store)))]
+    (loop [[o & more] obs
+           green-t {} green-n {}
+           nar {:runs 0 :tests 0 :already-green 0 :runs-fully-avoidable 0}
+           who {:runs 0 :namespaces 0 :already-green 0 :runs-fully-avoidable 0}]
+      (if-not o
+        {:narrowed   (assoc nar :fraction (when (pos? (:tests nar))
+                                            (double (/ (:already-green nar) (:tests nar)))))
+         :whole-suite (assoc who :fraction (when (pos? (:namespaces who))
+                                             (double (/ (:already-green who) (:namespaces who)))))}
+        (let [r      (:result o)
+              cl     (:closure o)
+              green? (= :green (:status r))
+              only   (seq (:only r))]
+          (if only
+            ;; DONE GRAIN: the tests this run named
+            (let [pairs (for [t only :let [n (ns-of t) h (when n (get cl n))] :when h] [t n h])
+                  hits  (count (filter (fn [[t n h]] (or (contains? (get green-t (symbol (str t))) h)
+                                                         (contains? (get green-n n) h)))
+                                       pairs))]
+              (recur more
+                     (if green?
+                       (reduce (fn [m [t _ h]] (update m (symbol (str t)) (fnil conj #{}) h))
+                               green-t pairs)
+                       green-t)
+                     green-n
+                     (-> nar
+                         (update :runs inc)
+                         (update :tests + (count pairs))
+                         (update :already-green + hits)
+                         (update :runs-fully-avoidable
+                                 + (if (and (seq pairs) (= hits (count pairs))) 1 0)))
+                     who))
+            ;; WHOLE SUITE: the namespaces in its scope
+            (let [pairs (for [n (:scope o) :let [h (get cl n)] :when h] [n h])
+                  hits  (count (filter (fn [[n h]] (contains? (get green-n n) h)) pairs))]
+              (recur more
+                     green-t
+                     (if green?
+                       (reduce (fn [m [n h]] (update m n (fnil conj #{}) h)) green-n pairs)
+                       green-n)
+                     nar
+                     (-> who
+                         (update :runs inc)
+                         (update :namespaces + (count pairs))
+                         (update :already-green + hits)
+                         (update :runs-fully-avoidable
+                                 + (if (and (seq pairs) (= hits (count pairs))) 1 0)))))))))))
+
 ^{:entry-point "resolved by NAME from the command line — --main slopp.lab.verdicts/-main; nothing inside the store refers to it"}
 (defn ^:export -main
   "CLI: the reuse replay over a store's WHOLE journal — the gate the verdict
@@ -104,10 +180,14 @@
 
     clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.verdicts/-main
 
-  Prints the [[reuse-rate]] map (`:source :journal`). Read it against the
-  threshold in the idea file; the number is allowed to say no."
+  Prints [[reuse-rate]] (`:source :journal`) and then [[reuse-by-grain]] —
+  the first is the gate's own question, the second is the one the built
+  cache is answerable to. Read them against the threshold in the idea file;
+  the numbers are allowed to say no."
   [& [dir]]
   (let [session (external/open! {:slopp.ops/dir (or dir ".")})]
     (try
-      (println (pr-str (reuse-rate (:store @(ops/with-history session)))))
+      (let [st (:store @(ops/with-history session))]
+        (println (pr-str (reuse-rate st)))
+        (println (pr-str (reuse-by-grain st))))
       (finally (ops/close! session)))))

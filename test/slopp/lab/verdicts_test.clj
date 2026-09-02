@@ -123,3 +123,46 @@
         (is (re-find #"whole journal" (str (:note r))) (pr-str r))))
     (testing "nothing to read is no rate, not a rate of none"
       (is (nil? (:fraction (verdicts/reuse-rate {})))))))
+
+(deftest the-done-grain-hit-rate-counts-RUNS-not-only-tests
+  ;; The gate cleared at 44.6% over all observations, which mixes grains and
+  ;; cannot say whether the thing built at done grain pays. Two numbers,
+  ;; and the difference is the whole point: skipping SOME tests of a run
+  ;; saves nothing — the tier's cost floor is a JVM boot — while skipping
+  ;; ALL of them means the run does not happen.
+  (let [obs (fn [only status closure]
+              ;; :scope is where a run records the namespaces it covered — a
+              ;; whole-suite observation is read through it
+              {:op :observe :closure closure :scope (vec (keys closure))
+               :result (cond-> {:status status} only (assoc :only only))})
+        H   {'a.core-test "H1" 'b.core-test "H2"}]
+    (testing "a narrowed run whose every test a prior green covered is a run that need not have happened"
+      (let [r (verdicts/reuse-by-grain
+               {:deltas [(obs '[a.core-test/one] :green H)
+                         (obs '[a.core-test/one] :green H)]})
+            n (:narrowed r)]
+        (is (= 2 (:runs n)) (pr-str n))
+        (is (= 1 (:already-green n)) (pr-str n))
+        (is (= 1 (:runs-fully-avoidable n)) (pr-str n))))
+    (testing "a run where only SOME tests were covered still had to happen"
+      (let [r (verdicts/reuse-by-grain
+               {:deltas [(obs '[a.core-test/one] :green H)
+                         (obs '[a.core-test/one a.core-test/two] :green H)]})
+            n (:narrowed r)]
+        (is (= 1 (:already-green n)) "one of the second run's two tests")
+        (is (= 0 (:runs-fully-avoidable n)) (pr-str n))))
+    (testing "content that CHANGED clears nothing, and a red clears nothing"
+      (let [changed (verdicts/reuse-by-grain
+                     {:deltas [(obs '[a.core-test/one] :green H)
+                               (obs '[a.core-test/one] :green {'a.core-test "H9"})]})
+            red     (verdicts/reuse-by-grain
+                     {:deltas [(obs '[a.core-test/one] :red H)
+                               (obs '[a.core-test/one] :green H)]})]
+        (is (= 0 (:already-green (:narrowed changed))) (pr-str (:narrowed changed)))
+        (is (= 0 (:already-green (:narrowed red))) (pr-str (:narrowed red)))))
+    (testing "whole-suite runs are counted APART — caching them is deliberately not done"
+      (let [r (verdicts/reuse-by-grain
+               {:deltas [(obs nil :green H) (obs nil :green H)]})]
+        (is (= 0 (:runs (:narrowed r))) (pr-str r))
+        (is (= 2 (:runs (:whole-suite r))) (pr-str r))
+        (is (= 2 (:already-green (:whole-suite r))) "both namespaces, second time round")))))

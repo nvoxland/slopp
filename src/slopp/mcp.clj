@@ -913,7 +913,7 @@
             info-only? (every? #(= :info (:severity %)) (:http-dangling-route-refs f))]
         (cond-> {:done (:done r) :status :green}
           (:landed (:land r))            (assoc :landed (:landed (:land r)))
-          (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures :reused]))
+          (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
           (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
           (pos? (get-in f [:host-stale :oracle-drift-count] 0))
           (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :note]))
