@@ -2086,3 +2086,21 @@ requires); and never make a reader re-buy what it already holds.
   stale-reference rule, correctly. Fixed by composing the qualified spelling
   rather than writing it — a pin that permanently trips a good rule teaches
   everyone to ignore the rule.
+
+## 2026-09-02 — s19d: tracking items 1 and 2, and the population bugs they exposed
+
+- Context rent (`call-timing :rent`): an answer's size times how long it
+  rides. A within-turn lower bound, said so. `query_cost {by "milestone"}`
+  gives the series.
+- `query-turn-cost` had been dropping the per-call census the wire passed
+  (destructured `[since otel]`), so every tool reading came from the
+  turn-top lower bound. Connected: reads are ~72% of chars on the wire, and
+  query_detail costs ~16k chars a call — the trim-then-re-buy pattern.
+- Connecting it introduced a mixed-population rate (turn-derived refusals
+  over census calls: 57% where the rate is 9%). Fixed; each half names its
+  :basis. Both are the same class of error as the test_run artefact: every
+  number true, the ratio meaningless.
+- The milestone series independently confirms s18's root cause: every
+  segment from s10/s11 on reports zero turns, because turn rotation fires on
+  write tools and `change` was not one. The wall numbers in the usage
+  analysis describe a window ending at s11; corrected there.
