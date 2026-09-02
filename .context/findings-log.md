@@ -2019,3 +2019,28 @@ requires); and never make a reader re-buy what it already holds.
   fixed).
 - Usage analysis (long sessions: context rent + verification wall):
   ideas/product/real-usage-vs-the-benchmark.md.
+
+## 2026-09-02 — s19: the verdict-cache gate was broken, and it says BUILD (44.6%)
+
+- `slopp.lab.verdicts/reuse-rate` folded `(:deltas store)` — empty on a
+  durable store (journal in SQLite; `standing-run` reads `:recent`). Its
+  recorded 2026-08-08 reading ("not measurable yet") was the instrument
+  describing an empty list, and it parked the verdict cache for six weeks.
+  Fixed (`:source :journal|:recent-window` + a one-shot `-main`), then
+  measured over the whole journal: 1114 observations, 28,639 namespace-runs,
+  12,786 already green at exactly that content = **44.6%**, against a
+  pre-registered threshold of >40%. Recorded in the idea file.
+- Prerequisite landed: `observation-of` now records `:ns-status`
+  (per-namespace green/red), so one red namespace no longer spoils the fifty
+  that passed beside it. Conservative by design — a failure that cannot be
+  attributed clears NOBODY, because a cache hit runs nothing.
+- Alias resolution: the store's OWN requires now decide what an alias means
+  (unanimous/dominant), then the name match, then well-known. Fixes the 59
+  unrepairable "No such namespace" refusals measured on dev sessions
+  (`n` → rewrite-clj.node had no candidate at all).
+- TWO CORRECTIONS to the 2026-09-02 usage analysis, both from grouping
+  refusals by TOOL instead of by MESSAGE: the "test_run ×462" lever is
+  frozen rows from a since-fixed `refusal-text` predicate (a green external
+  run matched `"{:error"` without the trailing space), and the "×282
+  single-form alias hole" was all-kinds, not that message. Group by message;
+  window `query_cost :refused` past the predicate fix.
