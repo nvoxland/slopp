@@ -306,23 +306,56 @@
                 :slopp-share (str (int (* 100 (/ in (double (max 1 active))))) "%")}
       :calls   (cond-> {:total calls :basis (if census? :census :turn-top)}
                  census? (assoc :chars (reduce + 0 (keep :chars tool-calls))))
-      :refused {:count   refused
-                :pct     (int (* 100 (/ refused (double (max 1 calls)))))
-                ;; a refusal answered by calling the same tool again — the
-                ;; retry, not the refusal, is what a fix has to delete
-                :retried (sum (comp :retried :refused))
-                :by-tool (->> (mapcat (comp :by-tool :refused) ts)
-                              (#(tally % :tool :n))
-                              (map (fn [[t n]] {:tool t :n n}))
-                              (sort-by (juxt (comp - :n) :tool))
-                              vec)
-                ;; BY WHAT THEY SAID: a tool is not a class, and grouping by
-                ;; tool produced two wrong levers in one session (s19)
-                :by-shape (->> (mapcat (comp :by-shape :refused) ts)
-                               (#(tally % :shape :n))
-                               (map (fn [[s n]] {:shape s :n n}))
-                               (sort-by (juxt (comp - :n) :shape))
-                               vec)}
+      :refused (let [classified? (some #(contains? (:refused %) :by-shape) ts)
+                     ;; AGAINST THE TURNS' OWN CALLS. The census counts every
+                     ;; call ever recorded while these refusals come from turn
+                     ;; timings — dividing one by the other reported 57% on a
+                     ;; store whose rate is 9% (s19). A rate belongs to the
+                     ;; population its numerator came from.
+                     turn-calls (sum :calls)]
+                 (cond-> {:count   refused
+                          :basis   :turn-timings
+                          :pct     (int (* 100 (/ refused (double (max 1 turn-calls)))))
+                          :by-tool (->> (mapcat (comp :by-tool :refused) ts)
+                                        (#(tally % :tool :n))
+                                        (map (fn [[t n]] {:tool t :n n}))
+                                        (sort-by (juxt (comp - :n) :tool))
+                                        vec)}
+                   ;; BY WHAT THEY SAID: a tool is not a class, and grouping
+                   ;; by tool produced two wrong levers in one session (s19).
+                   ;; Present only when some turn in the window RECORDED it —
+                   ;; an empty list would read as \"classified, and there were
+                   ;; no classes\", which is how frozen rows from a since-fixed
+                   ;; classifier became a lever in the first place.
+                   classified?
+                   (assoc :retried  (sum (comp :retried :refused))
+                          :by-shape (->> (mapcat (comp :by-shape :refused) ts)
+                                         (#(tally % :shape :n))
+                                         (map (fn [[s n]] {:shape s :n n}))
+                                         (sort-by (juxt (comp - :n) :shape))
+                                         vec))
+
+                   (not classified?)
+                   (assoc :note (str "unmeasured in this window, not zero: refusal"
+                                     " shapes and retries are recorded on turns"
+                                     " closed after they shipped. Window with"
+                                     " {since <a later delta>} to read them."))))
+      ;; CONTEXT RENT, the half wall time cannot see: what earlier answers
+      ;; keep costing every request after them. A within-turn lower bound
+      ;; (see call-timing) — and on this store the model side reads 1.93B
+      ;; cached tokens against 4.2M written, so this is where a long
+      ;; session's bill actually is.
+      :rent    (if (some #(contains? % :rent) ts)
+                 {:carried-chars (sum (comp :carried-chars :rent))
+                  :by-tool (->> (mapcat (comp :by-tool :rent) ts)
+                                (#(tally % :tool :carried))
+                                (map (fn [[t v]] {:tool t :carried v}))
+                                (sort-by (juxt (comp - :carried) :tool))
+                                (take 8)
+                                vec)}
+                 {:note (str "unmeasured in this window, not zero: context rent"
+                             " is recorded on turns closed after it shipped."
+                             " Window with {since <a later delta>} to read it.")})
       :tools   (if census?
                  (let [ms (tally tool-calls :tool #(or (:ms %) 0))
                        n  (tally tool-calls :tool (constantly 1))
@@ -461,6 +494,30 @@
        :elapsed-ms span
        :slopp-share (str (int (* 100 (/ in (double live)))) "%")
        :top        (vec (take 5 by))
+       ;; CONTEXT RENT: what an answer COSTS rather than what it spent — its
+       ;; size times the number of calls that follow it, because every one of
+       ;; those re-reads it. The ring has carried :chars since reads were
+       ;; measured at 52% of the bill; nothing folded it, so the most
+       ;; expensive event in a session was invisible to every metric here (a
+       ;; 47k read early in a long turn outweighs a hundred small ones).
+       ;;
+       ;; A within-turn LOWER BOUND. The payload keeps riding after the turn
+       ;; ends, until a compaction the server never sees — so this undercounts
+       ;; by construction, which is the safe direction for a number that
+       ;; argues for making answers smaller.
+       :rent       (let [n    (count calls)
+                         rows (reduce (fn [m [t v]] (update m t (fnil + 0) v))
+                                      {}
+                                      (map-indexed
+                                       (fn [i c] [(:tool c) (* (long (or (:chars c) 0))
+                                                               (- n 1 i))])
+                                       calls))]
+                     {:carried-chars (reduce + 0 (vals rows))
+                      :by-tool (->> rows
+                                    (map (fn [[t v]] {:tool t :carried v}))
+                                    (sort-by (juxt (comp - :carried) :tool))
+                                    (take 5)
+                                    vec)})
        ;; REFUSED calls — a malformed match, a lint error in the form being
        ;; written, an arity break. Each is a whole round trip that produced
        ;; nothing, and they live in the 78% of wall clock spent outside slopp,
@@ -501,3 +558,52 @@
                                                                        refusal-sample-chars))}))))
                                     (take refusal-samples)
                                     vec)})})))
+
+(defn ^:export cost-by-milestone
+  "[[turn-cost]] per MILESTONE segment: one row for the work recorded after
+  each `:commit`, newest first. `{:by :milestone :rows […]}`.
+
+  The series the per-window fold cannot be. A single window answers \"where
+  did the clock go\", and the question a project actually asks is whether a
+  landed change MOVED it — which was being answered by hand, comparing rows
+  recorded in a file beside the store.
+
+  Rows carry only what a turn records: wall, calls, refusals, rent. The
+  model side (`:otel`) and the per-call census are deliberately NOT split
+  across segments — both are read from a table by timestamp, and attributing
+  them by delta position would be a guess dressed as a measurement."
+  [store & {:keys [limit] :or {limit 20}}]
+  (let [ds   (or (seq (:deltas store)) (:recent store))
+        segs (->> ds
+                  (reduce (fn [acc d]
+                            (cond
+                              (= :commit (:op d))
+                              (conj acc {:commit (:id d)
+                                         :description (:description d)
+                                         :at (:at d)
+                                         :deltas []})
+
+                              (seq acc)
+                              (update-in acc [(dec (count acc)) :deltas] conj d)
+
+                              ;; work before the first milestone belongs to no
+                              ;; segment; it is not dropped silently — the row
+                              ;; for it has no commit to name, so it is left out
+                              ;; and the caller can window with :since instead
+                              :else acc))
+                          [])
+                  reverse
+                  (take limit))]
+    {:by   :milestone
+     :rows (mapv (fn [{:keys [commit description at deltas]}]
+                   (let [c (turn-cost {:deltas deltas})
+                         d (str description)]
+                     {:commit      commit
+                      :description (subs d 0 (min 80 (count d)))
+                      :at          at
+                      :turns       (get-in c [:window :turns])
+                      :calls       (get-in c [:calls :total])
+                      :wall        (select-keys (:wall c) [:active-ms :slopp-ms :outside-ms :slopp-share])
+                      :refused     (select-keys (:refused c) [:count :pct :retried])
+                      :rent        (select-keys (:rent c) [:carried-chars])}))
+                 segs)}))

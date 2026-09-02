@@ -2793,6 +2793,7 @@
                                                ;; the fold walks the whole log —
                                                ;; hydrated for this call only
                                                (ops/with-history session) :since (:since a)
+                                               :by (:by a)
                                                :otel (ops/otel-measurements session)
                                                ;; the per-call rows make :tools a
                                                ;; census with chars-out, not the

@@ -9,7 +9,7 @@
   is lost is one nobody can tell is still worth taking."
   (:require [clojure.test :refer [deftest testing is]]
             [slopp.read.telemetry :as telemetry]
-            [slopp.store :as store]))
+            [slopp.store :as store] [slopp.read.query :as query]))
 
 (deftest rule-telemetry-fire-rate-and-persistence
   (let [[s1 _] (store/record-done (store/empty-store) "d1"
@@ -446,3 +446,117 @@
         (is (= 1 (get-in t [:refused :retried]))
             (str "the first refusal was followed by the same tool; the second was not: "
                  (pr-str (:refused t))))))))
+
+(deftest what-an-answer-COSTS-is-its-size-times-how-long-it-rides
+  ;; s19 tracking: a long session's bill is context rent — 1.93B cache-read
+  ;; tokens against 4.2M output on this store — and nothing folded it, though
+  ;; the ring has carried :chars per call since reads were found to be 52%
+  ;; of the bill. Size alone cannot rank: the same 47k answer is nearly free
+  ;; as a turn's last call and the most expensive thing in it as the first.
+  (let [call (fn [t s e chars] {:tool t :start s :end e :chars chars})]
+    (testing "an answer is charged for every call that follows it"
+      (let [r (:rent (telemetry/call-timing
+                      [(call "read" 0 10 100)     ; two calls follow → 200
+                       (call "edit" 20 30 10)     ; one follows        → 10
+                       (call "done" 40 50 1000)]))] ; none              → 0
+        (is (= 210 (:carried-chars r)) (pr-str r))
+        (is (= [{:tool "read" :carried 200} {:tool "edit" :carried 10}]
+               (remove #(zero? (:carried %)) (:by-tool r)))
+            (pr-str r))))
+    (testing "the LAST answer is free however large, and the first is not"
+      (let [late  (:carried-chars (:rent (telemetry/call-timing
+                                          [(call "a" 0 1 1) (call "big" 2 3 50000)])))
+            early (:carried-chars (:rent (telemetry/call-timing
+                                          [(call "big" 0 1 50000) (call "a" 2 3 1)])))]
+        (is (= 1 late) "the small first answer rode once")
+        (is (= 50000 early) "the big first answer rode once — and that is the whole ranking")))
+    (testing "a turn with one call has nothing riding, and says so rather than nothing"
+      (is (= 0 (:carried-chars (:rent (telemetry/call-timing [(call "read" 0 1 999)]))))))))
+
+(deftest a-window-that-predates-a-measurement-says-so-instead-of-reporting-zero
+  ;; s19: :retried, :by-shape and :rent land on turns closed after they
+  ;; shipped, so any window reaching back past that has turns without them.
+  ;; Reported as 0 and [] they read as "measured, and there was none" — the
+  ;; conflation D-surface-honesty forbids, and precisely how a since-fixed
+  ;; refusal classifier's frozen rows became a performance lever earlier
+  ;; today. Unmeasured has to look different from none.
+  (let [old   {:op :turn-end :at 1000
+               :timing {:calls 2 :slopp-ms 10 :outside-ms 5 :idle-ms 0
+                        :elapsed-ms 15 :top [{:tool "read" :n 2 :ms 10}]
+                        :refused {:count 0 :pct 0 :by-tool []}}}
+        fresh {:op :turn-end :at 2000
+               :timing {:calls 2 :slopp-ms 10 :outside-ms 5 :idle-ms 0
+                        :elapsed-ms 15 :top [{:tool "read" :n 2 :ms 10}]
+                        :refused {:count 1 :pct 50 :by-tool [{:tool "edit" :n 1}]
+                                  :retried 1 :by-shape [{:shape "unknown argument" :n 1}]}
+                        :rent {:carried-chars 400 :by-tool [{:tool "read" :carried 400}]}}}]
+    (testing "a window of turns that predate the measurement reports it as unmeasured"
+      (let [r (telemetry/turn-cost {:deltas [old]})]
+        (is (nil? (:carried-chars (:rent r))) (pr-str (:rent r)))
+        (is (re-find #"unmeasured|not recorded" (str (:note (:rent r)))) (pr-str (:rent r)))
+        (is (nil? (:by-shape (:refused r))) (pr-str (:refused r)))))
+    (testing "and once a turn carries them, the numbers are the answer"
+      (let [r (telemetry/turn-cost {:deltas [old fresh]})]
+        (is (= 400 (:carried-chars (:rent r))) (pr-str (:rent r)))
+        (is (= 1 (:retried (:refused r))) (pr-str (:refused r)))
+        (is (= [{:shape "unknown argument" :n 1}] (:by-shape (:refused r))) (pr-str (:refused r)))))))
+
+(deftest the-cost-door-forwards-the-census-and-can-split-by-milestone
+  ;; TWO findings in one pin. First: the wire passes :tool-calls (the
+  ;; per-call census, with the chars each answer put on the wire) and
+  ;; query-turn-cost destructured only [since otel] — so it was dropped, and
+  ;; every reading of this store's tools came from the turn-top path the
+  ;; descriptor itself calls a LOWER BOUND (five tools per turn). Second:
+  ;; costs keyed to milestones, so a wave's effect is a slope rather than a
+  ;; hand comparison across recorded rows.
+  (let [turn  (fn [at ms] {:op :turn-end :at at
+                           :timing {:calls 1 :slopp-ms ms :outside-ms 1 :idle-ms 0
+                                    :elapsed-ms (inc ms) :top [{:tool "read" :n 1 :ms ms}]
+                                    :refused {:count 0 :pct 0 :by-tool []}}})
+        sess  (atom {:store {:deltas [(turn 100 10)
+                                      {:op :commit :id "dM1" :description "first wave" :at "2026-09-01 10:00"}
+                                      (turn 200 20)
+                                      (turn 300 30)
+                                      {:op :commit :id "dM2" :description "second wave" :at "2026-09-02 10:00"}
+                                      (turn 400 40)]}})]
+    (testing "the per-call census reaches the fold when the caller passes it"
+      (let [r (query/query-turn-cost sess :tool-calls [{:tool "read" :ms 5 :chars 100}
+                                                       {:tool "edit" :ms 7 :chars 20}])]
+        (is (= :census (get-in r [:calls :basis])) (pr-str (:calls r)))
+        (is (= 2 (get-in r [:calls :total])) (pr-str (:calls r)))
+        (is (= 120 (get-in r [:calls :chars])) (pr-str (:calls r)))))
+    (testing "without it the fold still answers, and SAYS which basis it used"
+      (is (= :turn-top (get-in (query/query-turn-cost sess) [:calls :basis]))))
+    (testing "by milestone: one row per segment, newest first, each naming the milestone it follows"
+      (let [r (query/query-turn-cost sess :by "milestone")]
+        (is (= :milestone (:by r)) (pr-str r))
+        (is (= ["dM2" "dM1"] (mapv :commit (:rows r))) (pr-str (:rows r)))
+        (is (= [1 2] (mapv :turns (:rows r))) "the segment AFTER each milestone")
+        (is (= 40 (get-in (first (:rows r)) [:wall :slopp-ms])) (pr-str (:rows r)))))))
+
+(deftest a-rate-is-taken-against-the-population-it-came-FROM
+  ;; s19: connecting the per-call census made :calls :total the census count
+  ;; while :refused :count still came from turn timings — and the percentage
+  ;; divided one population by the other, reporting 57% where the real rate
+  ;; was 9%. Two populations in one map is exactly how a measurement lies
+  ;; while every number in it is individually true.
+  (let [turn (fn [calls refused]
+               {:op :turn-end :at 1
+                :timing {:calls calls :slopp-ms 1 :outside-ms 1 :idle-ms 0 :elapsed-ms 2
+                         :top [] :refused {:count refused :pct 0 :by-tool []}}})
+        ;; 100 calls seen by turns, 10 refused; the census saw 1000 calls
+        store {:deltas [(turn 100 10)]}
+        census (repeat 1000 {:tool "read" :ms 1 :chars 10})]
+    (testing "the refusal rate is against the turns' own calls, not the census total"
+      (let [r (telemetry/turn-cost store :tool-calls census)]
+        (is (= 1000 (get-in r [:calls :total])) "the census answers how many calls")
+        (is (= :census (get-in r [:calls :basis])))
+        (is (= 10 (get-in r [:refused :count])))
+        (is (= 10 (get-in r [:refused :pct]))
+            (str "10 of the 100 calls turns recorded — not 10 of 1000: "
+                 (pr-str (:refused r))))
+        (is (= :turn-timings (get-in r [:refused :basis])) (pr-str (:refused r)))))
+    (testing "and with no census the two populations are the same one"
+      (let [r (telemetry/turn-cost store)]
+        (is (= 100 (get-in r [:calls :total])))
+        (is (= 10 (get-in r [:refused :pct])))))))

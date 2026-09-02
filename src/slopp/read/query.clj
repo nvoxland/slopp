@@ -572,13 +572,23 @@
    (a refusal is a whole round trip that produced nothing), and `:repeats` —
    tools run more than once inside ONE ask, ranked by what the extra runs
    cost. Read-only analysis over the delta log; no instrumentation. `:since`
-   (a delta or commit-point id from `query_commits`) windows it.
+   (a delta or commit-point id from `query_commits`) windows it, and
+   `:by \"milestone\"` splits it per milestone instead — the series that says
+   whether a landed change moved the numbers.
 
    `:otel` is the model-side half — the harness telemetry batches, which live
    in the `measurements` table rather than the journal because a statistic
    must not move the head every writer races against. It is PASSED IN rather
    than read here: opening the journal is IO, and this namespace is the
    `query_*` front door, declared `:pure`. `slopp.ops/otel-measurements` is
-   the reader, beside the writer that put them there."
-  [session & {:keys [since otel]}]
-  (telemetry/turn-cost (:store @session) :since since :otel otel))
+   the reader, beside the writer that put them there.
+
+   `:tool-calls` is the per-call CENSUS — every call and the characters its
+   answer put on the wire — and it was destructured away here while the wire
+   passed it, so every reading came from the turn-top path the tool's own
+   description calls a lower bound (s19)."
+  [session & {:keys [since otel tool-calls by]}]
+  (if (= "milestone" (str by))
+    (telemetry/cost-by-milestone (:store @session))
+    (telemetry/turn-cost (:store @session)
+                         :since since :otel otel :tool-calls tool-calls)))
