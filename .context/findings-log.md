@@ -1980,3 +1980,26 @@ requires); and never make a reader re-buy what it already holds.
   removes the retry, but a REACHABLE verb (report as a tool) invites a
   drill-down the bundle already pre-empts — surface presence moves
   behaviour both ways.
+
+## 2026-09-02 — s18 forensics: three layers under the heavy handoff step
+
+- `change` was never in tools/write-tools (its alias `intent` was), so
+  the dispatcher skipped the turn gate/rotation/read-ring flush for
+  every `change` since s11: no eval since then recorded a turn for its
+  writes; by-ask was structurally empty. Found by a one-ask harness
+  repro (write, land, mailbox consumed, zero turn-begins) after the
+  in-process served-flow pin passed — the pin wrote through ns_create/
+  edit_add_form. Pinned: mcp-test/a-change-opens-the-asks-turn.
+- The intent mailbox was unowned: a pinned one-shot (the Stop hook's
+  `done`) consumed the next session's ask. Pinned:
+  a-pinned-session-never-eats-another-sessions-ask. Explains s16's
+  cross-attribution too.
+- The injected handoff was a 3800-char pr-str snip that cut before
+  :by-ask in every s17 run (report grew 3991->4898 chars after s16's
+  prompt carry), with a "(deeper: …)" tail teaching the drill-down.
+  Replaced by orient/handoff-text (asks first, whole rows, closing
+  "this IS the record").
+- Correction to earlier records: s15-XL's "1-turn" step 5 ran ~25 calls
+  inside an Agent subagent; num_turns counts none of them.
+- Usage analysis (cells vs long sessions; context rent and verification
+  wall dominate real use): ideas/product/real-usage-vs-the-benchmark.md.

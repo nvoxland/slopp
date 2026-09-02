@@ -6551,3 +6551,29 @@ fixture (defs land in a scratch namespace removed with the answer;
 reaching out of it — ns surgery, var mutation, loading — stays
 refused). Read-only one-shots open read-only sessions and adopt no
 thread.
+
+## D-turn-ownership (2026-09-02, s18 — the intent mailbox has an owner)
+
+**A pinned identity is a claim on the mailbox.** `absorb-pending-intent!`
+treats a session's claimed sid as its `:intent-sid` or, failing that,
+its pinned `:agent-id`; an intent naming another sid is left where it
+lies, and a claimed session prefers its scoped `pending-intent.<sid>`.
+Measured basis (s18 forensics on the s17 handoff cells): a five-ask
+lifetime reached main with ONE `turn-begin`, because the previous
+step's async Stop-hook `--call done {agent <sid>}` — pinned, but with
+nothing claimed — consumed the next session's ask; that session opened
+no turn and its writes belonged to no ask, so `report`'s `:by-ask` had
+one row for everything and the handoff step spent 12–22 turns
+reconstructing attribution by hand. The same unowned slot is how s16's
+concurrent sessions cross-attributed a write (the 2026-08-27 failure
+the docstring already named). This is not an eval artefact: the Stop
+hook runs at every pause, `done` takes 20–60 s, and a user who types the
+next ask inside that window used to lose its turn.
+
+Corollary for the handoff injection (same wave): the composed handoff
+is rendered as TEXT in the ask's order (asks oldest first with their
+`:turn` ids and forms, milestones, changes rolled up by namespace, the
+suite verdict and command), fitted by whole rows, closing "this IS the
+record — quote the ids" — never a mid-EDN `pr-str` snip, and never a
+"(deeper: …)" tail that teaches the drill-down the injection exists to
+pre-empt (s17 measured that tail's cost at 5 + 7 calls per handoff).
