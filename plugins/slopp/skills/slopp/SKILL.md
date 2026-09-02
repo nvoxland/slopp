@@ -88,7 +88,7 @@ turn; never call `turn_begin`.
 |---|---|
 | ANY change — one form or a feature | `change {prompt tests? impl? accept?}` — tests alone land the spec red and wait for the impl; steps carry `action` (add\|replace\|patch\|delete\|require) plus ns/name/source/match; a step with `{ns name source}` and no action is inferred (replace if the form exists, add if not). A change past ~10 steps is two changes |
 | new form(s) | `change` — one `:add` step per form (order never matters; definitions-before-callers is derived) |
-| a change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry swaps ONE exact subform; `text: true` for strings/docstrings; `where: {key value}` for a registry row. Deltas, never a whole-form retype |
+| a change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry swaps one exact subform — or a CONTIGUOUS RUN of siblings (two body forms, a whole pair, three clauses), which is usually the unit you mean; inside a map/binding vector/case/cond a run must cover whole pairs. The match must PARSE on its own: complete forms, never a fragment that opens a delimiter it doesn't close. `text: true` for strings/docstrings; `where: {key value}` for a registry row. Deltas, never a whole-form retype |
 | rename a var (callers follow) | `edit_rename {ns from to}` |
 | rename a concept store-wide (vars, keywords, prose) | `rename_sweep {from to dry_run true}` first, then without |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
