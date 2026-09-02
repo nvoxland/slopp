@@ -2104,3 +2104,19 @@ requires); and never make a reader re-buy what it already holds.
   segment from s10/s11 on reports zero turns, because turn rotation fires on
   write tools and `change` was not one. The wall numbers in the usage
   analysis describe a window ending at s11; corrected there.
+
+## 2026-09-02 — s19e: the verdict cache measured at its own grain, and removed
+
+- reuse-by-grain over the whole journal: narrowed (done-grain) 228 runs,
+  12.1% of tests already green, and 5 runs of 228 (2.2%) fully avoidable —
+  the only number that maps to wall time, since the tier's floor is a JVM
+  boot. Whole-suite: 44.8%, which is where the 44.6% headline came from and
+  the grain that stays uncached by choice.
+- Threshold was >40% at done grain. Measured 12%/2%. The cache is OUT,
+  one day after landing: reusable-verdicts and its done! wiring deleted,
+  the seam carries a comment with the numbers.
+- Kept: :ns-status, reuse-rate, reuse-by-grain — so the question is
+  re-measurable in one command on any store rather than folklore.
+- The lesson is about the MEASUREMENT, not the cache: a fraction that mixes
+  grains cannot say no. Split by the grain the mechanism runs at, and it
+  said no in one reading.
