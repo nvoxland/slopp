@@ -2003,3 +2003,19 @@ requires); and never make a reader re-buy what it already holds.
   inside an Agent subagent; num_turns counts none of them.
 - Usage analysis (cells vs long sessions; context rent and verification
   wall dominate real use): ideas/product/real-usage-vs-the-benchmark.md.
+
+## 2026-09-02 — s18 verdict: provenance fixed, handoff turns not moved
+
+- by-ask correct on every store built this wave (4/4 asks; probe 2/2)
+  — `change` in write-tools + mailbox ownership; the injection present
+  in all 17 step-5 sessions (verified per transcript).
+- Step-5 isolation: sonnet 10.0 -> 8.2 calls, opus 8.8 -> 9.5; costs
+  down 11-20%; zero journal-id citations in all 16 (the "quote the ids"
+  instruction moves nothing). Lifetime sonnet-41 n=1: 95 turns — miss.
+- The residue, measured: the require staircase on a rename ask (15 of
+  28 calls in step 4) and the suite ritual on the handoff (4-6 calls,
+  two invited by slopp's own text: a green result's "N of M keys shown"
+  marker and the standing note's `force true` sentence — the latter
+  fixed).
+- Usage analysis (long sessions: context rent + verification wall):
+  ideas/product/real-usage-vs-the-benchmark.md.
