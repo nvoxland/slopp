@@ -2044,3 +2044,26 @@ requires); and never make a reader re-buy what it already holds.
   run matched `"{:error"` without the trailing space), and the "×282
   single-form alias hole" was all-kinds, not that message. Group by message;
   window `query_cost :refused` past the predicate fix.
+
+## 2026-09-02 — s19b: the verdict cache, built at done grain (and one hole closed same-day)
+
+- `reusable-verdicts` + `done!` wiring: a test whose namespace closure hash
+  matches a prior GREEN observation covering it does not re-run. Whole-ns
+  greens clear a namespace; narrowed (`:only`) greens clear exactly the
+  tests they named; red or other-content evidence clears nothing. Reuse
+  count rides the result; terse done shows it; full_check untouched.
+- HOLE CLOSED, in code landed hours earlier the same day: `:ns-status` was
+  derived from the namespaces that RAN, so a NARROWED run — done's own
+  slice — would have marked its namespaces green and authorized skipping
+  tests that never executed. A narrowed run now records no `:ns-status`.
+  The lesson is the reason the pin exists: a cache HIT RUNS NOTHING, so
+  every rule has to be the conservative one.
+- Red-first across a namespace boundary needs the subject to exist: the
+  seam landed first as a conservative stub (reuse nothing), the pin was
+  watched failing against it, then the rules landed. That sequence is the
+  honest form of red-first when the callee is in another namespace.
+- Value caveat recorded in the idea file: the 44.6% mixes grains, and exact
+  repeats (already free via `standing-run`) and full_check (uncached by
+  choice) are not this build's to claim. Every done now reports `:reused`,
+  so the done-grain hit rate is measured continuously rather than replayed.
+  If it reads ~0 over a week, the build should come out.
