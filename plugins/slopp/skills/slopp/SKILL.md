@@ -139,7 +139,10 @@ part changes what you do next.
 
 A refusal names the rule and the way out. Do what it says; never route
 around it (no Bash/`sqlite3` against the store, no hand-written `declare`,
-no file edits — the store is the code).
+no file edits — the store is the code). A SPELLING is not a rule: an
+unambiguous argument-shape mistake is repaired and the result says so
+(`;; repaired {…}` on its first line) — read that line once and use the
+accepted shape next time.
 
 ## Other agents on this store
 

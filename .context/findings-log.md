@@ -1942,3 +1942,41 @@ requires); and never make a reader re-buy what it already holds.
   cross a land (fields/markers), so a rebased session's ask is absent
   from report{}'s :by-ask even though every content delta carries
   prompt+agent. See D-concurrency.
+
+## 2026-09-01 — s17 wave A: refusals were the residue; repair before refuse
+
+- Census (projects/eval17-repair/census17.py, 12 cells s14xl/s15/
+  s15xl/s16): refusals 24–38% of tool calls; the largest classes were
+  argument SHAPES whose refusal text named the fix, retried (18x in one
+  session — the s16 352s sequential outlier was refusal thrash, not
+  model variance). Teaching did not move them; accepting does (D-repair).
+- Group-compile seam, two bugs under "No such namespace: X" (19 XL
+  refusals, both models): the auto-require write was refused by the
+  module gate (the require IS the first crossing) and returned the group
+  untouched; and the two self-repairs ran in a fixed order where a new
+  module needs them alternated per namespace. Diagnosed only by making
+  the repair SAY when it could not happen (:auto-require-refused) and
+  stamping the loop's exit — five red iterations before the alternation
+  landed; the pins were red against the transcript's exact shape each
+  time.
+- Read-to-edit census: written/read source 0.33–0.63; source read per
+  cell 34–57k chars — a modest token lever, not taken (s12's turn risk).
+- Landed d83bdb922d9d7 + d370eeab252a7; full_check green (1533
+  external). Wave B pre-registered in eval17-repair/RUNS.md.
+
+## 2026-09-02 — s17 wave B verdict: mixed; opus-XL hit, sonnet turns up on the handoff step
+
+- opus-XL 92->67 turns, $5.02->$3.40, wall 887->583s (all pre-registered
+  clauses met); opus-41 flat. Refusals 24-38% -> 8%.
+- sonnet: cost down everywhere (41ns mean $1.23 vs 1.35; XL $1.40-1.49 vs
+  2.02) and the all-time best run (57t/$1.00/338s), but turn MEANS above
+  s15 (41ns 65.7 vs 62; XL 79-90 vs 71): every extra turn is step 5 —
+  the handoff — 12-22 turns vs s15's 6 and 1, with or without the report
+  verb tool (measured out mid-wave, pre-declared). Repairs were not
+  re-issued (0 redo after a `;; repaired` line). Open for s18: why the
+  handoff step got heavier (does the s12c injection still fire?), the XL
+  require staircase, the new-spelling tail.
+- Law confirmed a fourth time, from the other side: removing a refusal
+  removes the retry, but a REACHABLE verb (report as a tool) invites a
+  drill-down the bundle already pre-empts — surface presence moves
+  behaviour both ways.

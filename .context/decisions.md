@@ -6512,3 +6512,42 @@ report{}'s :by-ask attributes positionally, so the REBASED side's ask
 is absent from :by-ask on main even though its content deltas carry
 prompt+agent (+ :merged-from). Reversing the marker-travel policy is
 an open question filed with frictions, not smuggled in here.
+
+## D-repair (2026-09-01, s17 — repair before refuse; the corollary of the s7–s13 law)
+
+**An unambiguous argument-shape mistake is REPAIRED at the dispatch
+seam and reported on the result; it is never refused.** Refusals are
+for rules (a write that would corrupt, a gate, a cycle); a spelling is
+not a rule. Measured basis: a census over 12 eval cells found refusals
+at 24–38% of tool calls, dominated by shapes whose refusal text named
+the fix — and agents retried the same shape (18x in one session)
+because teaching does not move a trained habit (s7–s13, thrice). Where
+teaching fails, accept: `tools/remap-arguments` runs first in
+`call-op!` (the one seam every route crosses), and what it moved rides
+the result as a leading `;; repaired {…}` line, so the accepted shape is
+learned for free.
+
+Explicitly re-litigated, not smuggled:
+- `one-argument-one-spelling` ("a retired spelling is an unknown
+  argument") STANDS for retired names; the remap covers only measured,
+  unambiguous shape mistakes (change's top-level ns/name/source, a
+  step's :code, query_slice {targets}, query_changes {ns name} /
+  {since}, query_commits {limit}, ns_add_require {requires}). A shape
+  with two readings (top-level ns beside an :impl) is still refused, and
+  the refusal still names the accepted keys.
+- `the-advertised-surface-is-fourteen-families…` now counts three VERB
+  aliases (`explore`, `change`, `report`) beside the families: the verbs
+  the skill teaches are the names agents reach for (opus called
+  `explore` as a tool 13x), and dispatch by op name always worked — only
+  the advertised list was the refusal. ~1k chars against the diet.
+
+Same decision, applied to the pipeline's own repairs: a repair that
+could not happen SAYS so (`:auto-require-refused`), and the group's
+two self-repairs (missing alias, undeclared module edge) alternate
+until the error stops moving instead of running once each in a fixed
+order — a feature crossing into a new module meets the module gate
+first and only then names its missing alias. `check` accepts a
+fixture (defs land in a scratch namespace removed with the answer;
+reaching out of it — ns surgery, var mutation, loading — stays
+refused). Read-only one-shots open read-only sessions and adopt no
+thread.
