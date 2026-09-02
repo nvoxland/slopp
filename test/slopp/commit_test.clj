@@ -234,3 +234,17 @@
               (str "recorded :green for a milestone whose land was refused: "
                    (pr-str (select-keys r [:status :land :commit]))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-milestone-says-where-its-time-went
+  ;; s20: commit_point averaged 125s against done's 33s on this store, and
+  ;; nothing in the result or the delta said where the other ninety seconds
+  ;; went — a reader's estimate stood in for a fact. The milestone times
+  ;; its done and its land; the wire adds the app refresh and the publish.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ms.core "(ns ms.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (let [r (external/commit-point! sess "timed milestone" :agent "bob")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (number? (get-in r [:ms :done])) (pr-str (:ms r)))
+        (is (number? (get-in r [:ms :land])) (pr-str (:ms r))))
+      (finally (ops/close! sess)))))

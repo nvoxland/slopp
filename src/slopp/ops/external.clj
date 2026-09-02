@@ -2243,7 +2243,9 @@ client-deps (merge (:client-deps st) (:client provided))
                   ;; request to record a red state as a milestone, and a milestone
                   ;; naming work the branch does not contain is not honest, it is
                   ;; unreadable.
-                  (let [land (branch/land-thread! session)
+                  (let [t1   (System/currentTimeMillis)
+                        land (branch/land-thread! session)
+                        land-ms (- (System/currentTimeMillis) t1)
                         ;; A REFUSED land is the one case the milestone must not
                         ;; smooth over. The delta is recorded by now, but it was
                         ;; recorded onto the same thread the work is stranded on,
@@ -2276,7 +2278,7 @@ client-deps (merge (:client-deps st) (:client provided))
                                     :status (if refused? :unlanded status)
                                     :description description}
                                    result-extra)
-                      land      (assoc :land land)
+                      land      (-> (assoc :land land) (update :ms assoc :land land-ms))
                       jar-stale (assoc :jar-stale jar-stale)))))]
     (cond
       (str/blank? (str description))
@@ -2296,7 +2298,11 @@ client-deps (merge (:client-deps st) (:client provided))
                   :status (:status last-d)
                   :description (:description last-d)
                   :note "nothing changed since this milestone — returning it"})
-          (let [cp     (done! session :label description :agent agent)
+          (let [t0     (System/currentTimeMillis)
+                cp     (done! session :label description :agent agent)
+                ;; where the milestone's time goes, as a fact: done here, land
+                ;; in mark!, the publish on the wire (s20)
+                done-ms (- (System/currentTimeMillis) t0)
                 ;; done runs the impacted ^:external slice itself (:external?
                 ;; defaults true), so the milestone's done is a REAL done — not
                 ;; one weakened to skip the tier the in-image suite already
@@ -2353,7 +2359,7 @@ client-deps (merge (:client-deps st) (:client provided))
                            " true to record a red milestone honestly.")
                :status :red :done (:done cp) :test (:test cp)
                :findings verdict}
-              (mark! head status {:done (:done cp)}
+              (mark! head status {:done (:done cp) :ms {:done done-ms}}
                      (cond-> (or extra {})
                        (seq (:deps st))  (assoc :deps (:deps st))
                        (seq (:files st)) (assoc :files (:files st))

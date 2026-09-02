@@ -560,3 +560,56 @@
       (let [r (telemetry/turn-cost store)]
         (is (= 100 (get-in r [:calls :total])))
         (is (= 10 (get-in r [:refused :pct])))))))
+
+(deftest a-family-call-is-ranked-under-its-op-not-its-family
+  ;; s20: since the surface became fourteen families, the census recorded
+  ;; :tool "read"/"edit"/"verify" — 237/293/175 rows on this store with no
+  ;; op — so nothing in the store could rank query_source against
+  ;; query_slice for any call made since s11. Every lever in the s20 plan
+  ;; was ranked from a TRANSCRIPT; the store has to be able to do it.
+  (let [c (fn [t op s e chars & [m]]
+            (merge (cond-> {:tool t :start s :end e :chars chars} op (assoc :op op)) m))]
+    (testing "call-timing names the op"
+      (let [t (telemetry/call-timing [(c "read" "query_source" 0 30 100)
+                                      (c "read" "query_slice" 40 50 50)
+                                      (c "done" nil 60 65 10)])]
+        (is (= ["read/query_source" "read/query_slice" "done"] (mapv :tool (:top t)))
+            (pr-str (:top t)))))
+    (testing "read-cost charges a re-fetch to the OP that minted the id"
+      (let [r (telemetry/read-cost [(c "read" "query_source" 0 10 8000 {:trimmed? true :spooled "r1"})
+                                    (c "read" "query_detail" 20 30 16000 {:detail-asked "r1"})])]
+        (is (= 1 (:refetched r)) (pr-str r))
+        (is (= {:tool "read/query_source" :n 1 :chars 8000 :trimmed 1 :refetched 1}
+               (first (filter #(= "read/query_source" (:tool %)) (:by-tool r))))
+            (pr-str (:by-tool r)))))
+    (testing "the census carries the SEND side, per op"
+      (let [r (telemetry/turn-cost {:deltas []}
+                                   :tool-calls [{:tool "read" :op "query_source" :ms 5 :chars 100 :chars-in 40}
+                                                {:tool "read" :op "query_source" :ms 5 :chars 100 :chars-in 60}])]
+        (is (= [{:tool "read/query_source" :calls 2 :ms 10 :avg-ms 5 :chars 200 :chars-in 100}]
+               (:tools r))
+            (pr-str (:tools r)))))))
+
+(deftest the-re-buy-rate-per-op-is-one-query
+  ;; s20: read-cost has computed :trimmed and :refetched per call since it
+  ;; shipped, on :read-cost deltas nothing folded. This is the number that
+  ;; says whether a size gate is a saving or a tax — measured by hand off
+  ;; one transcript, query_source's was 69% re-bought — and it is the
+  ;; regression check for changing the gate.
+  (let [rc (fn [rows] {:op :read-cost
+                       :reads {:trimmed (reduce + (keep :trimmed rows))
+                               :refetched (reduce + (keep :refetched rows))
+                               :by-tool rows}})]
+    (testing "folded from the read records in the window, keyed by op"
+      (let [r (telemetry/turn-cost
+               {:deltas [(rc [{:tool "read/query_source" :n 10 :chars 1 :trimmed 10 :refetched 7}
+                              {:tool "read/query_search" :n 3 :chars 1 :trimmed 3 :refetched 0}])]})]
+        (is (= 13 (get-in r [:refetched :trimmed])) (pr-str (:refetched r)))
+        (is (= 7 (get-in r [:refetched :refetched])) (pr-str (:refetched r)))
+        (is (= {:op "read/query_source" :trimmed 10 :rebought 7 :rate 0.7}
+               (first (get-in r [:refetched :by-op])))
+            (pr-str (:refetched r)))))
+    (testing "a window with no read record says unmeasured, not zero"
+      (let [r (telemetry/turn-cost {:deltas []})]
+        (is (nil? (get-in r [:refetched :rate])))
+        (is (re-find #"unmeasured" (str (get-in r [:refetched :note]))) (pr-str (:refetched r)))))))

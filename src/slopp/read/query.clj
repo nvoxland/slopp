@@ -154,7 +154,26 @@
                                     :of (count lines)}})
                         {:form root :source src
                          :note (str "match not found in the form: " match)}))
-                    {:form root :source src})]
+                    (if (<= (count src) 16000)
+                      {:form root :source src}
+                      ;; a huge form and nothing to window on: the whole thing
+                      ;; rode every later request (47k chars for one slice, s20).
+                      ;; Cut at a line boundary under 16k and SAY so — :match
+                      ;; windows a clause, and the whole form is one
+                      ;; query_source away.
+                      (let [lines (vec (str/split-lines src))
+                            kept  (loop [i 0 used 0]
+                                    (if (and (< i (count lines))
+                                             (<= (+ used (count (lines i)) 1) 16000))
+                                      (recur (inc i) (+ used (count (lines i)) 1))
+                                      i))]
+                        {:form root
+                         :source (str/join "\n" (subvec lines 0 kept))
+                         :window {:lines [1 kept] :of (count lines)}
+                         :note (str "the form is " (count src) " chars — the first "
+                                    kept " of " (count lines) " lines ride here. Pass"
+                                    " match to window a clause, or query_source"
+                                    " {targets [\"" root "\"]} for it whole")})))]
       (cond-> {:target target
                :cards cards}
         (> (count reached) limit) (assoc :omitted (- (count reached) limit))))

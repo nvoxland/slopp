@@ -428,7 +428,12 @@
   [{:keys [session]} {:keys [query-params]}]
   (let [ask      (str (:ask query-params))
         sid      (not-empty (str (or (:session-id query-params) "")))
-        same?    (and sid (= sid (:intent-sid @session)))
+        same?    (and sid (or (= sid (:intent-sid @session))
+                              ;; …or this request already mapped it: delta
+                              ;; mode used to need a TOOL CALL to set the
+                              ;; sid, so a prompt-only turn paid for a
+                              ;; second full map (s20)
+                              (= sid (:bundled-sid @session))))
         handoff? (boolean (re-find #"(?i)(what(?:'s| has| have| was)? +(?:been +)?(?:changed|happened|done)|\bsummar|hand.?off|\bhanding\b|\bhand (?:this|it|the|over)\b|\brundown\b|\brecap\b|catch +(?:me +)?up|since +(?:the +)?last|\bwhat did (?:you|we)\b|\b(?:has|have) changed\b|\bchanged here\b|walk (?:me|us) through the changes|\bhistory of (?:the )?(?:changes|project)\b)"
                                    ask))
         {:keys [text sent]} (orient/bundle session ask
@@ -454,4 +459,8 @@
                    text)]
     (when (seq sent)
       (swap! session assoc :pending-bundle-held {:sid sid :versions sent}))
+    ;; remembered so the NEXT bundle for this sid is the delta, whether or
+    ;; not a tool call absorbs the intent in between (s20)
+    (when sid
+      (swap! session assoc :bundled-sid sid))
     text))

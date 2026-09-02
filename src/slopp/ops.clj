@@ -3109,27 +3109,33 @@
     []))
 
 (defn ^:export record-tool-call!
-  "Record one tool call as a MEASUREMENT beside the journal: `{:tool :ms
-  :chars :refused? :agent}`, one row per call. Returns nil.
+  "Record one tool call as a MEASUREMENT beside the journal: `{:tool :op :ms
+  :chars :chars-in :refused? :agent}`, one row per call. Returns nil.
 
   The session ring already sees every call, but `turn-end!` folds only a
   turn's five costliest tools onto its delta, so per-call cost was lossy and
   lived in the journal. This is the census — every call, its wall, and
   `:chars`, the characters it put on the wire, which is what every later
   request re-reads and so what a tool COSTS rather than what it spent.
+  `:op` is what a cost is ranked by since the surface became families (a row
+  that knew only `read` could not rank one read against another), and
+  `:chars-in` is the SEND side — the request's size, the output tokens that
+  are the wall-side cost (s20).
 
   A measurement and never a delta, for the reason the table exists: a read
   that moved the head could make a verdict lose its compare-and-swap. Silent
   when the session has no db — an ephemeral store keeps no measurements, and
   accounting is the last thing that should fail somebody's call."
-  [session {:keys [tool start end chars refused? agent]}]
+  [session {:keys [tool op start end chars chars-in refused? agent]}]
   (when-let [conn (:db @session)]
     (db/record-measurement! conn "tool-call" nil
-                            {:tool     tool
-                             :ms       (- (or end 0) (or start 0))
-                             :chars    (or chars 0)
-                             :refused? (boolean refused?)
-                             :agent    (or agent (:agent-id @session))}))
+                            (cond-> {:tool     tool
+                                     :ms       (- (or end 0) (or start 0))
+                                     :chars    (or chars 0)
+                                     :refused? (boolean refused?)
+                                     :agent    (or agent (:agent-id @session))}
+                              op       (assoc :op op)
+                              chars-in (assoc :chars-in chars-in))))
   nil)
 
 (defn ^:export tool-call-measurements
@@ -5385,21 +5391,38 @@
   used to say wrap was 'just a new subform containing the old', which was true
   and not cheap: expressing it meant retyping the matched form inside the
   replacement, so a two-line change to a large form became a large paste.
-  `$1` is the same template mechanism `change_signature` uses for call sites."
+  `$1` is the same template mechanism `change_signature` uses for call sites.
+
+  A match that is a FRAGMENT — it opens a delimiter it does not close — is
+  REPAIRED as a text replace when it appears exactly once in the form, and
+  the result says `:repaired {:text true}`. The refusal already computed
+  the fragment's one home; that is the unambiguous-intent condition a repair
+  needs, and a replacement that unbalances the form is refused by the parse
+  the way any text edit is. Measured (s20): 16 such refusals in one real
+  session, every one a round trip."
   [session ns-sym form-name match new-src & {:keys [prompt agent text where wrap]}]
-  (let [plan (cond
-               (seq where) (refactor/keyed-replace-plan (:store @session) ns-sym
-                                                        form-name where new-src)
-               text        (refactor/text-replace-plan (:store @session) ns-sym
-                                                       form-name match new-src)
-               :else       (refactor/subform-replace-plan (:store @session) ns-sym
-                                                          form-name match new-src
-                                                          (boolean wrap)))]
+  (let [store (:store @session)
+        plan  (cond
+                (seq where) (refactor/keyed-replace-plan store ns-sym form-name where new-src)
+                text        (refactor/text-replace-plan store ns-sym form-name match new-src)
+                :else       (refactor/subform-replace-plan store ns-sym form-name
+                                                           match new-src (boolean wrap)))
+        [plan repaired] (if (and (:error plan) (:suggestion plan)
+                                 (not text) (empty? where) (not wrap))
+                          (let [tp (refactor/text-replace-plan store ns-sym form-name match new-src)]
+                            (if (:error tp) [plan nil] [tp {:text true}]))
+                          [plan nil])]
     (if (:error plan)
       plan
-      (edit-replace! session ns-sym form-name (:new-form-src plan)
-                     :prompt (or prompt (str "subform edit in " form-name))
-                     :agent agent))))
+      (let [r (edit-replace! session ns-sym form-name (:new-form-src plan)
+                             :prompt (or prompt (str "subform edit in " form-name))
+                             :agent agent)]
+        (cond-> r
+          (and repaired (nil? (:error r)))
+          (assoc :repaired repaired
+                 :note (str "the match was a fragment (it opened a delimiter it did"
+                            " not close) with one home in " form-name " — landed as a"
+                            " TEXT replace; `text: true` says so up front next time")))))))
 
 (defn revert-form!
   "One-call rollback (item 4): replace `nm` with an earlier version of itself —

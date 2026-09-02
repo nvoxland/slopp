@@ -864,3 +864,47 @@
           (is (= {:added "[clojure.set :as sets]" :ns 'cv.core.new} (:auto-require r))
               (pr-str (:auto-require r)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-slice-of-a-huge-form-with-no-match-is-cut-and-says-so
+  ;; s20: query_slice is a budgeted read and bypasses the size gate by
+  ;; design — and one slice of a 700-line form came back at 47k chars,
+  ;; riding every later request. With no :match there is nothing to window
+  ;; on, so the cut is at a line boundary under 16k, named in :window, with
+  ;; the two ways to the rest in the note.
+  (let [sess (external/open!)
+        big  (apply str (repeat 20000 "a"))]
+    (try
+      (ops/ingest! sess 'hg.core (str "(ns hg.core)\n(defn f \"" big "\" [] 1)\n(defn g \"G.\" [] 2)\n"))
+      (testing "no match, huge form: cut under 16k with the window named"
+        (let [t (:target (query/query-slice sess 'hg.core 'f))]
+          (is (< (count (:source t)) 16500) (count (:source t)))
+          (is (= 1 (first (get-in t [:window :lines]))) (pr-str (:window t)))
+          (is (re-find #"query_source" (str (:note t))))))
+      (testing "a small form is untouched — no window, no note"
+        (let [t (:target (query/query-slice sess 'hg.core 'g))]
+          (is (nil? (:window t)))
+          (is (nil? (:note t)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-fragment-match-with-one-home-is-repaired-as-a-text-replace
+  ;; s20: 16 refusals in one real session were \"the match isn't well-formed
+  ;; on its own\" — a fragment that opens a delimiter it does not close. The
+  ;; refusal already computed :suggestion, and only when the fragment
+  ;; appears exactly ONCE: the intent is unambiguous, which is D-repair's
+  ;; condition. So it lands as a text replace and says so; a replacement
+  ;; that unbalances the form is refused by the parse, as any text edit is.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'fr.core "(ns fr.core)\n(defn f \"F.\" [x] (let [y 1] (+ x y)))\n")
+      (testing "a fragment appearing once lands as a text replace, and says so"
+        (let [r (ops/edit-subform! sess 'fr.core 'f "(let [y 1" "(let [y 2" :prompt "bump y")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= {:text true} (:repaired r)) (pr-str r))
+          (is (str/includes? (query/query-source sess 'fr.core) "[y 2]"))))
+      (testing "a fragment with TWO homes is still a question, refused"
+        (ops/edit-replace! sess 'fr.core 'f "(defn f \"F.\" [x] (+ (let [y 2] y) (let [y 3] y)))"
+                           :prompt "two lets")
+        (let [r (ops/edit-subform! sess 'fr.core 'f "(let [y" "(let [z" :prompt "ambiguous")]
+          (is (:error r) (pr-str r))
+          (is (nil? (:repaired r)))))
+      (finally (ops/close! sess)))))

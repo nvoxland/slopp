@@ -1354,3 +1354,21 @@
         (let [r (GET (mk) q)]
           (is (= 200 (:status r)) (pr-str q))
           (is (string? (:bundle (:body r)))))))))
+
+(deftest ^:external the-second-prompt-of-a-session-gets-the-delta-even-with-no-call-between
+  ;; s20: delta mode keyed on :intent-sid, which only a TOOL CALL sets — so
+  ;; a prompt-only turn (a question answered from context) left the next
+  ;; prompt paying for a second full 1100-token map plus the op cards. The
+  ;; bundle request itself carries the sid; it remembers it.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :op-cards "OP-CARDS-MARKER")
+      (let [read (fn [] (str (api.reads/bundle-read! {:session sess}
+                                                     {:query-params {:ask "the fuel rule"
+                                                                     :session-id "sid-1"}})))
+            one  (read)
+            two  (read)]
+        (is (re-find #"OP-CARDS-MARKER" one) "the first bundle is the full map, cards and all")
+        (is (not (re-find #"OP-CARDS-MARKER" two)) "the second is the delta — no tool call between")
+        (is (< (count two) (count one))))
+      (finally (ops/close! sess)))))

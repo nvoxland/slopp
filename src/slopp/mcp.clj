@@ -175,10 +175,15 @@
                            (pr-str (vec (drop n x)))))))))
 
        (and (map? x) (seq x))
-       (let [kept (fit (seq x) "{" "}" budget)]
+       (let [kept (fit (sort-by #(count (pr-str %)) (seq x)) "{" "}" budget)]
          (when (seq kept)
            (cond-> {:body (pr-str (into {} kept))
-                    :note (str (count kept) " of " (count x) " keys shown")}
+                    :note (str (count kept) " of " (count x) " keys shown")
+                    ;; the map itself and the count it lost, for a caller that
+                    ;; wants to say what was cut IN-BAND rather than in prose
+                    ;; (a green result: the fact without the invitation)
+                    :kept-map (into {} kept)
+                    :withheld {:keys (- (count x) (count kept)) :of (count x)}}
              (< (count kept) (count x))
              (assoc :dropped
                     (str ";; the REMAINDER — the keys the trimmed response lacked\n"
@@ -620,8 +625,19 @@
   `:truncated` marker says what was cut, and the trailing
   `query_detail … returns all` line — which agents followed on verdicts
   they already had, 77k chars per session — is reserved for a result whose
-  missing part could change what the agent does next."
-  [x & {:keys [budgeted?]}]
+  missing part could change what the agent does next.
+
+  `:ceiling` is the gate for THIS result, default 8000. An EXPLICIT read —
+  one whose caller named its targets — passes a higher one: measured on a
+  real session (s20), 69% of `query_source` trims were re-bought through
+  `query_detail`, and every re-buy is a whole model request at p50 485k
+  context, worth ~60 trimmed payloads. The gate was optimizing chars while
+  provoking round trips. Unbounded ops (search, reports, explore bundles)
+  keep the default. A green MAP over the gate is trimmed SILENTLY — the
+  \"N of M keys shown\" note on a 227-char green full_check provoked verbose
+  re-runs in every s18 handoff sample — and what it keeps is the most keys
+  that fit ([[fit-payload]]), never hash order."
+  [x & {:keys [budgeted? ceiling] :or {ceiling 8000}}]
   (when @strict-boundary?
     (when-let [leak (boundary-leak x)]
       (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
@@ -649,10 +665,12 @@
         invite  (fn [id] (if green? "" (str " — query_detail {:id \"" id "\"} returns all")))
         trimmed (fn [id] (if green? "" (str "\n[trimmed — query_detail {:id \"" id
                                             "\"} returns the full response]")))
+        ;; the fit budget reserves room for the trailing note
+        budget  (- ceiling 200)
         out     (cond
                   budgeted? full
 
-                  (and (= full slimmed) (<= (count full) 8000)) full
+                  (and (= full slimmed) (<= (count full) ceiling)) full
 
                   :else
                   (if-let [sess *spool-session*]
@@ -666,33 +684,39 @@
                           ;; actionable rather than only informative: a consumer that
                           ;; sees :truncated can fetch the rest without parsing the
                           ;; trailing line it was never going to read
-                          fit (when (> (count slimmed) 8000)
-                                (fit-payload (trim-failure-strings x) 7800 id))]
+                          fit (when (> (count slimmed) ceiling)
+                                (fit-payload (trim-failure-strings x) budget id))]
                       (cond
                         ;; slimming alone got it under the gate — send it whole;
                         ;; the spool keeps the FULL copy (what was withheld is
                         ;; failure-string tails a remainder cannot reconstruct)
-                        (<= (count slimmed) 8000)
+                        (<= (count slimmed) ceiling)
                         (str slimmed (trimmed id))
 
                         ;; drop whole ITEMS: the body stays parseable, and the
                         ;; spool keeps only the REMAINDER — a retrieval was
                         ;; measured re-buying the half already in hand (18.8k
-                        ;; chars average, s14 audit)
+                        ;; chars average, s14 audit). A GREEN map goes without
+                        ;; the note: the note was the invitation (s18).
                         fit
                         (do (when (:dropped fit)
                               (swap! sess assoc-in [::spool :entries id] (:dropped fit)))
-                            (str (:body fit) "\n[" (:note fit) (invite id) "]"))
+                            (if (and green? (map? x) (:kept-map fit))
+                              ;; the FACT in-band, as data, and no invitation:
+                              ;; what was cut is still named, and nothing here
+                              ;; is a command to run
+                              (pr-str (assoc (:kept-map fit) :withheld (:withheld fit)))
+                              (str (:body fit) "\n[" (:note fit) (invite id) "]")))
 
                         ;; nothing to drop (a single huge string/scalar): the
                         ;; spool continues from where the shown text stopped
                         :else
                         (do (swap! sess assoc-in [::spool :entries id]
-                                   (str ";; the REMAINDER — continues from char 8000"
+                                   (str ";; the REMAINDER — continues from char " ceiling
                                         " of the shown response\n"
-                                        (subs slimmed 8000)))
-                            (str (subs slimmed 0 8000) (trimmed id)))))
-                    (if (<= (count slimmed) 8000) slimmed full)))]
+                                        (subs slimmed ceiling)))
+                            (str (subs slimmed 0 ceiling) (trimmed id)))))
+                    (if (<= (count slimmed) ceiling) slimmed full)))]
     {:content [{:type "text" :text out}]}))
 
 (def ^:private file-handlers!
@@ -1997,7 +2021,14 @@
       ;; after the call, so a tool that reads the ring (turn_end) never sees
       ;; its own half-finished entry
       (let [entry (merge
-                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
+                   {:tool (:name params)
+                    ;; the OP, when the call came through a family: what a
+                    ;; cost is RANKED by (s20: the census knew only the family)
+                    :op   (some-> (get-in params [:arguments :op]) str)
+                    ;; WHAT IT WAS SENT: the request's size, the output tokens
+                    ;; that are the wall-side cost. Only a transcript census
+                    ;; could see this before.
+                    :chars-in (count (pr-str (:arguments params))) :start t0 :end (System/currentTimeMillis)
                     ;; A REFUSAL and the reason it gave, from ONE derivation — see
                     ;; `refusal-text` for the two shapes it arrives in and for the
                     ;; deliberate under-count. The message rides along because a
@@ -2643,7 +2674,12 @@
                                            session
                                            (if-let [ts (some-> (:targets a) normalize-targets seq)]
                                              (set (keep :ns ts))
-                                             #{(sym :ns)})))))
+                                             #{(sym :ns)}))))
+                                 ;; an EXPLICIT read: the caller named what it wanted, and
+                                 ;; trimming it was measured as a tax — 69% re-bought, each
+                                 ;; re-buy a whole model request (s20). 32k still walls a
+                                 ;; typo naming fifty namespaces.
+                                 :ceiling 32000)
       "query_detail" (do
                            ;; WHAT it went back for, recorded whether or not the
                            ;; spool still has it: a retrieval is the evidence a
@@ -3009,18 +3045,25 @@
                                     ;; without failing the milestone
                                     (if (and (:commit r) (not= :red (:status r))
                                              (:dir @session))
-                                      (if-let [p (try (sync/publish-local!
-                                                       (:dir @session)
-                                                       (:branch @session))
-                                                      (catch Exception e
-                                                        {:error (ex-message e)}))]
-                                        (assoc r :published
-                                               (select-keys p [:pushed :branch :error :status
-                                                               ;; the diagnosis, or a refusal here says
-                                                               ;; REJECTED_NONFASTFORWARD and stops —
-                                                               ;; which cost a full investigation once
-                                                               :divergence]))
-                                        r)
+                                      (let [tp (System/currentTimeMillis)
+                                            p  (try (sync/publish-local!
+                                                     (:dir @session)
+                                                     (:branch @session))
+                                                    (catch Exception e
+                                                      {:error (ex-message e)}))]
+                                        (if p
+                                          (-> r
+                                              (assoc :published
+                                                     (select-keys p [:pushed :branch :error :status
+                                                                     ;; the diagnosis, or a refusal here says
+                                                                     ;; REJECTED_NONFASTFORWARD and stops —
+                                                                     ;; which cost a full investigation once
+                                                                     :divergence]))
+                                              ;; the publish, timed: it re-folds every journal
+                                              ;; before the push and was the milestone's
+                                              ;; unmeasured ninety seconds (s20)
+                                              (update :ms assoc :publish (- (System/currentTimeMillis) tp)))
+                                          r))
                                       r)))
       "test_run" (text!
                        (cond

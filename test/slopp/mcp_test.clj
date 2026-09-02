@@ -2991,7 +2991,8 @@
                             (for [i (range 1200)]
                               [(keyword (str "k" i)) (str "a value long enough to need the gate " i)])))]
         (is (<= (count out) 8200))
-        (is (re-find #"keys shown" out) "what was cut is still named")
+        (is (re-find #":withheld \{:keys \d+, :of 1201\}" out)
+            "what was cut is still named — in-band, as data (s20: the prose note was the invitation)")
         (is (not (re-find #"query_detail" out)) "but nothing invites the re-fetch")))))
 
 (deftest ^:external the-thread-hint-counts-once-per-head-not-once-per-call
@@ -4553,3 +4554,46 @@
                      (call! sess "report" {}))))
       (finally (ops/close! sess)
                (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-call-through-a-family-records-its-op-and-what-it-was-sent
+  ;; s20: the measurement row recorded the FAMILY ("read") and nothing else
+  ;; since s11, and never the request's size at all. Both ride the row now:
+  ;; the op is what a cost ranks by, and :chars-in is the send side — the
+  ;; output tokens that are the wall-side cost, which only a transcript
+  ;; census could see before.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "op.core" :source "(ns op.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+      (call! sess "read" {:op "query_source" :targets ["op.core/f"]})
+      (let [row (last (filter #(= "read" (:tool %)) (ops/tool-call-measurements sess)))]
+        (is (= "query_source" (:op row)) (pr-str row))
+        (is (pos? (:chars-in row 0)) (pr-str row))
+        (is (pos? (:chars row 0)) (pr-str row)))
+      (finally (ops/close! sess)))))
+
+(deftest an-explicit-read-is-sent-whole-and-a-trimmed-map-keeps-what-fits-most
+  ;; s20: the size gate was measured as a TAX on explicit reads — 69% of
+  ;; query_source trims were re-bought, each re-buy a whole model request
+  ;; at p50 485k context. And what a trimmed map KEPT was hash-map
+  ;; iteration order, so the useful key was cut as often as not, which is
+  ;; why the re-buy was near-certain. A green result wearing the note
+  ;; provoked verbose re-runs (s18).
+  (with-bindings {#'mcp/*spool-session* (atom {})}
+    (let [big  (apply str (repeat 20000 "x"))
+          m    {:a 1 :b 2 :c 3 :d 4 :huge big}
+          text (fn [x & opts] (get-in (apply #'mcp/text! x opts) [:content 0 :text]))]
+      (testing "under the default gate a 20k map is trimmed"
+        (is (re-find #"keys shown" (text m))))
+      (testing "an explicit read's CEILING lets the same map through whole"
+        (is (not (re-find #"keys shown" (text m :ceiling 32000)))))
+      (testing "what a trim KEEPS is the most keys that fit, whatever the hash order"
+        (let [out (text m)]
+          (is (re-find #":a 1" out) out)
+          (is (re-find #":d 4" out) out)
+          (is (not (re-find #"xxxxx" out)) "the one big value is what went to the spool")
+          (is (re-find #"4 of 5 keys shown" out) out)))
+      (testing "a GREEN result never carries the note that invited a re-run"
+        (let [out (text (assoc m :status :green))]
+          (is (not (re-find #"keys shown" out)) out)
+          (is (re-find #":status :green" out) out)
+          (is (re-find #":withheld \{:keys 1, :of 6\}" out) "the fact rides in-band, without the invitation"))))))
