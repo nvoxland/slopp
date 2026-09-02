@@ -888,7 +888,16 @@
     (if-not (and (= :green (:episode-status f))
                  (= :green (:test-status f))
                  (zero? (:lint-errors f 0))
-                 (empty? (:unloadable-namespaces f)))
+                 (empty? (:unloadable-namespaces f))
+                 ;; a land that REFUSED (the branch moved and the rebase
+                 ;; conflicts, a lost thread) is the one fact the one-liner
+                 ;; cannot carry: the work is still UNLANDED, so the refusal
+                 ;; and its recovery path come back in full, exactly as a red
+                 ;; done keeps its findings. No :land at all is a done with
+                 ;; nothing to land — that stays terse; absence and refusal
+                 ;; are different facts.
+                 (let [land (:land r)]
+                   (or (nil? land) (boolean (:landed land)))))
       r
       (let [advisory (into {}
                            (remove (fn [[k v]]

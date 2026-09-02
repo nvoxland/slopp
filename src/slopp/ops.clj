@@ -118,11 +118,15 @@
   recorded like every write. Overwriting an existing namespace is NOT allowed
   — edit its forms instead. Returns {:ns :forms :test} or {:error msg}.
 
+  `:prompt` is the ask that created the namespace; it rides the :ingest
+  delta, because a batch-born form's history otherwise answers \"why does
+  this exist\" with silence.
+
   A :cljs (non-jvm-loadable) namespace is ingested the same way, but its code
   references js/* / the DOM and cannot load into the JVM oracle, so ingest
   SKIPS the hot-load and defers verification to the ClojureScript compiler
   (compile_client) — reporting `cljs-deferred-summary`. D-web-cljs."
-  [session ns-sym source & {:keys [agent]}]
+  [session ns-sym source & {:keys [agent prompt]}]
   (if-let [pre (or (when (get-in (:store @session) [:namespaces ns-sym])
                      (str ns-sym " already exists — edit its forms instead"
                           " (whole-namespace overwrite is not allowed)"))
@@ -134,7 +138,7 @@
             ;; arranged before it is loaded: a whole namespace pasted in any
             ;; order loads in its derived order (definitions before callers),
             ;; and a genuine cycle gets its marked declare here like any write
-            candidate (let [c (store/ingest base ns-sym source :agent agent)]
+            candidate (let [c (store/ingest base ns-sym source :agent agent :prompt prompt)]
                         (or (:store (edit/resolve-cold-load c ns-sym :agent agent)) c))
             load?     (store/jvm-loadable? base ns-sym)]
         (if-let [derr (or (edit/dialect-scan candidate ns-sym)
@@ -3761,7 +3765,9 @@
    land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
    holds the rule for which requires qualify and why a library never does.
 
-   Delegates to `ingest!` (the shared engine); overwrite is refused there."
+   Delegates to `ingest!` (the shared engine); overwrite is refused there.
+   `:prompt` — the ask — rides every ingest it delegates, so the namespace's
+   birth answers \"why does this exist\"."
   [session ns-sym & {:keys [requires source agent platform prompt]}]
   (if (and source (seq requires))
     {:error (str ":source and :requires are mutually exclusive — put requires "
@@ -3784,7 +3790,7 @@
               ;; them, or the spec's own load is the failure again
               sub-err (some (fn [n]
                               (:error (ingest! session n (str "(ns " n ")\n")
-                                               :agent agent)))
+                                               :agent agent :prompt prompt)))
                             also)
               r (if sub-err
                   {:error sub-err}
@@ -3792,14 +3798,14 @@
                     ;; a whole namespace is the write most likely to cross a
                     ;; boundary for the first time; declare its edges as a
                     ;; single form's write would
-                    (let [once #(ingest! session ns-sym source :agent agent)]
+                    (let [once #(ingest! session ns-sym source :agent agent :prompt prompt)]
                       (auto-module-dep-retry! session (once) once :agent agent))
                     (ingest! session ns-sym
                              (str "(ns " ns-sym
                                   (when (seq requires)
                                     (str "\n  (:require " (str/join "\n            " requires) ")"))
                                   ")\n")
-                             :agent agent)))]
+                             :agent agent :prompt prompt)))]
           (cond-> r
             (seq also) (assoc :also-created (vec also))
             (and shadow (not (:error r)))

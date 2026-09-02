@@ -1052,8 +1052,11 @@
 (defn ingest
   "Parse `source` into `ns-sym`'s ordered elements, assigning a fresh id and a
   creation rank (its position in the source) to each form, and append an
-  `:ingest` delta. Returns the new store."
-  [store ns-sym source & {:keys [agent]}]
+  `:ingest` delta. Returns the new store. `:prompt` is the ask that created
+  the namespace — recorded on the delta like any other write's, because a
+  batch-born form's history otherwise answers \"why does this exist\" with
+  silence (and a merge replay can only carry what birth recorded)."
+  [store ns-sym source & {:keys [agent prompt]}]
   (let [nodes (n/children (p/parse-string-all source))]
     (loop [store store, nodes nodes, elements []]
       (if-let [node (first nodes)]
@@ -1098,7 +1101,8 @@
                                                   [(:id e) (n/string (:node e))])))
                                         elements)}
                  (seq comments) (assoc :comments comments)
-                 agent (assoc :agent agent)))))))))
+                 agent (assoc :agent agent)
+                 prompt (assoc :prompt prompt)))))))))
 
 (defn replace-node
   "Replace the CST node of the form named `nm` in `ns-sym`, keeping its stable id

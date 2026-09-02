@@ -608,3 +608,23 @@
           "one piece of code, one form")
       (is (empty? (named m2 "old-name"))
           "the pre-rename name must not come back from a replay"))))
+
+(deftest an-ingested-namespaces-prompt-survives-birth-and-replay
+  ;; s16 indep probe: a namespace born in one batch write answered "why does
+  ;; this exist" with silence — the ask was never recorded at BIRTH (ingest
+  ;; carried only :agent), and the land's replay re-minted the namespace as
+  ;; :ingest with no prompt either, so the rebased side's whole feature
+  ;; showed one anonymous version in main's history. The ask is accepted at
+  ;; birth and carried across the replay.
+  (let [b      (base)
+        theirs (store/ingest b 'm.born "(ns m.born)\n(defn e [x] x)\n"
+                             :agent "agent-b" :prompt "the ask that created m.born")
+        all    (fn [s] (concat (:deltas s) (:pending s)))
+        birth  (first (filter #(and (= :ingest (:op %)) (= 'm.born (:ns %))) (all theirs)))
+        r      (merge/merge-logs b theirs)
+        replay (first (filter #(and (= :ingest (:op %)) (= 'm.born (:ns %))) (all (:store r))))]
+    (is (= "the ask that created m.born" (:prompt birth)) "recorded at birth")
+    (is (empty? (:conflicts r)))
+    (is (some? replay) "the namespace crossed the merge")
+    (is (= "the ask that created m.born" (:prompt replay)) "and the ask crossed with it")
+    (is (= "agent-b" (:agent replay)))))

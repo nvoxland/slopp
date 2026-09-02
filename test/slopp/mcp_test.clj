@@ -4208,3 +4208,31 @@
         (is (string? entry))
         (is (str/includes? entry "REMAINDER") (subs (str entry) 0 (min 120 (count (str entry)))))
         (is (not (str/includes? entry ":i 0")))))))
+
+(deftest a-refused-land-is-never-rendered-as-a-bare-green-done
+  ;; s16 overlap probe, measured: two sessions replaced the same form; the
+  ;; second session's land refused with conflicts — and the wire rendered
+  ;; the SAME bare green one-liner a landed done gets, minus only the
+  ;; :landed key. The agent read success, told its user "done and green",
+  ;; and the work sat unlanded on its thread. A refusal is findings, not
+  ;; decoration: the full report comes back, refusal and recovery path
+  ;; included, exactly as a red done keeps its findings. A done with no
+  ;; :land at all (nothing to land) still terses — absence and refusal are
+  ;; different facts.
+  (let [green   {:done "d1"
+                 :findings {:episode-status :green :test-status :green
+                            :lint-errors 0 :unloadable-namespaces []}}
+        refused (assoc green :land
+                       {:landed false
+                        :conflicts [{:form 'x.y/f}]
+                        :reason "main moved while you worked, and rebasing onto it conflicts — resolve, then call done again"})
+        out     (#'mcp/terse-done refused)]
+    (is (= false (get-in out [:land :landed]))
+        "the refusal reaches the agent")
+    (is (re-find #"call done again" (str (get-in out [:land :reason])))
+        "with its recovery path, not just a flag")
+    (is (some? (:findings out))
+        "a refused land keeps the full report, like a red done")
+    (let [ok (#'mcp/terse-done (assoc green :land {:landed "main" :head "dX"}))]
+      (is (= "main" (:landed ok)) "a landed green still terses")
+      (is (nil? (:findings ok)) "to the one-liner"))))

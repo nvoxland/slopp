@@ -489,3 +489,54 @@
                        " loss, and nothing reports it: " (pr-str (:modules main))))))
           (finally (ops/close! a) (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-conflicted-land-is-resolvable-in-the-thread
+  ;; s16 overlap probe, measured: two sessions replaced the same form; B's
+  ;; land refused with the MV conflict (right so far), B rewrote the form to
+  ;; incorporate both sides — the refusal's own instruction, "resolve, then
+  ;; call done again" — and the next land recomputed the IDENTICAL conflict
+  ;; from the fork point. And the next, and the next: four refusals citing
+  ;; the same theirs-delta while :ours already carried the resolution. The
+  ;; only exit an agent found was thread_drop and a manual replay. A refusal
+  ;; whose recovery path cannot succeed is a deadlock wearing a helpful
+  ;; sentence: once the agent writes a version that post-dates the refused
+  ;; merge, the conflict IS resolved, and the land must say so.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-mv-resolve-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'mv.core
+                       (str "(ns mv.core (:require [clojure.test :refer [deftest is]]))\n"
+                            "(defn f \"F.\" [x] {:base x})\n"
+                            "(deftest f-t (is (= {:base 1} (f 1))))\n")
+                       :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: seed reached main")
+          (finally (ops/close! setup))))
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (ops/edit-replace! a 'mv.core 'f "(defn f \"F.\" [x] {:base x :fees 1})"
+                             :prompt "a: add :fees" :agent "agent-a")
+          (ops/edit-replace! a 'mv.core 'f-t "(deftest f-t (is (= {:base 1 :fees 1} (f 1))))"
+                             :prompt "a: cover :fees" :agent "agent-a")
+          (is (= "main" (:landed (branch/land-thread! a))) "A lands first")
+          (ops/edit-replace! b 'mv.core 'f "(defn f \"F.\" [x] {:base x :grams 2})"
+                             :prompt "b: add :grams" :agent "agent-b")
+          (ops/edit-replace! b 'mv.core 'f-t "(deftest f-t (is (= {:base 1 :grams 2} (f 1))))"
+                             :prompt "b: cover :grams" :agent "agent-b")
+          (let [r1 (branch/land-thread! b)]
+            (is (false? (:landed r1)) "B's land refuses: same-form divergence")
+            (is (seq (:conflicts r1)) (pr-str (dissoc r1 :reason)))
+            (ops/edit-replace! b 'mv.core 'f "(defn f \"F.\" [x] {:base x :fees 1 :grams 2})"
+                               :prompt "b: resolve — both sides" :agent "agent-b")
+            (ops/edit-replace! b 'mv.core 'f-t "(deftest f-t (is (= {:base 1 :fees 1 :grams 2} (f 1))))"
+                               :prompt "b: cover both" :agent "agent-b")
+            (let [r2 (branch/land-thread! b)]
+              (is (= "main" (:landed r2))
+                  (str "the refusal's own instruction must be followable: " (pr-str (dissoc r2 :reason))))
+              (let [main-store (db/load-store (:db @b) (db/trunk-line-id! (:db @b)))
+                    src (store.render/render-ns main-store 'mv.core)]
+                (is (re-find #":fees 1" src) "A's side survives")
+                (is (re-find #":grams 2" src) "B's resolution is what landed"))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

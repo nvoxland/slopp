@@ -452,7 +452,10 @@
     the merged state. The thread's head then has the branch's head in its
     ancestry, so the second half is the fast-forward case. Conflicts or a red
     rebase land NOTHING and leave the thread open holding the merged state:
-    the agent resolves and calls done again.
+    the agent resolves and calls done again. Resolving is a REWRITE: each
+    form under :conflicts shows both sides, and a new version written after
+    the refusal is what the next land treats as the resolution (the merge
+    remembers what it surfaced — the same conflict does not recompute).
 
   The re-run is the whole suite and not the merge's own scope, and the
   difference is the point. The merge verifies the namespaces it CARRIED; the
@@ -520,8 +523,8 @@
                     ;; `deltas.id` is UNIQUE across the journal — so without this
                     ;; every rebase onto somebody else's work loses its own commit
                     ;; as a duplicate id, retries with the same stale counter, and
-                    ;; reports the bound as "the branch is being written
-                    ;; continuously". Refreshing raises the floor. It is the hazard
+                    ;; reports the bound as \"the branch is being written
+                    ;; continuously\". Refreshing raises the floor. It is the hazard
                     ;; per-line CAS created, arriving at the one path whose whole
                     ;; job is to cross lines.
                     _ (engine/refresh-cache! session)
@@ -537,7 +540,10 @@
                   (seq (:conflicts m))
                   {:landed false :conflicts (:conflicts m)
                    :reason (str branch-nm " moved while you worked, and rebasing onto"
-                                " it conflicts — resolve, then call done again")}
+                                " it conflicts. Each form under :conflicts shows"
+                                " BOTH sides — REWRITE it to the version you"
+                                " intend (usually a merge of both), then call"
+                                " done again; your rewrite IS the resolution.")}
 
                   ;; RE-EARN the verdict over the WHOLE suite, not just what the merge
                   ;; carried. The two are almost never the same set, and the

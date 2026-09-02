@@ -62,8 +62,13 @@
   - different-form work merges clean (the granularity dodge, across replicas)
   - identical changes converge silently
   - same-form divergence = MV conflict: ours kept, theirs surfaced
+  - a SURFACED conflict whose form our line rewrote AFTER the merge that
+    surfaced it is RESOLVED: ours stands, theirs is delivered — the rewrite
+    is the resolution the refusal asked for, so \"resolve, then call done
+    again\" terminates instead of recomputing the same conflict forever
   - add/add id collisions are remapped to fresh ids
-  - whole namespaces created on their side arrive intact (provenance kept)
+  - whole namespaces created on their side arrive intact (provenance kept,
+    the birth :prompt included)
   - a historical :move delta is marked applied and changes nothing: order
     is DERIVED from the forms, and the committer (merge-into-session!)
     arranges every namespace the merge touched before the cold-load gate
@@ -93,8 +98,32 @@
                            od)
         delivered  (into #{} (mapcat :applied) prior)
         idmap0     (into {} (mapcat :id-map) prior)
+        ;; conflicts a PRIOR merge from this source SURFACED, resolved since:
+        ;; the merge delta records each conflict's :fid (ours) and :delta
+        ;; (theirs), and a content delta of OURS that touches that fid AFTER
+        ;; the surfacing merge is the agent doing exactly what the refusal
+        ;; said — rewriting the form to the version they intend. Such a
+        ;; theirs-delta converges as delivered, ours standing. Without this
+        ;; the conflict recomputed from the fork point on every land (s16:
+        ;; four identical refusals while :ours already held the resolution;
+        ;; the only exit was thread_drop). :normalize is excluded — a
+        ;; machine rewrite is not an agent's decision.
+        od-pos     (into {} (map-indexed (fn [i d] [(:id d) i])) od)
+        resolved   (into #{}
+                         (for [m prior
+                               c (:conflicts m)
+                               :let [at (od-pos (:id m))]
+                               :when (and (:fid c) (:delta c) at
+                                          (some (fn [d]
+                                                  (and (> (od-pos (:id d) -1) at)
+                                                       (not (:merged-from d))
+                                                       (contains? #{:add :replace :delete :rename} (:op d))
+                                                       (or (= (:fid c) (:form-id d))
+                                                           (contains? (:sources d) (:fid c)))))
+                                                od))]
+                           (:delta c)))
         dropped    (filter #(delivered (:id %)) (drop common td))
-        ;; recreated-source guard: a "delivered" delta whose content doesn't
+        ;; recreated-source guard: a \"delivered\" delta whose content doesn't
         ;; match OUR replayed copy of it means the source was deleted and
         ;; recreated at the same path/name — its ids alias dead history, and
         ;; silently dropping its work would be corruption
@@ -116,8 +145,8 @@
         ;; #16 round-trip causality: a theirs-delta tagged :merged-from
         ;; with OUR OWN delta's id is our work COMING BACK (they merged
         ;; us earlier). Content-matched (the imposter rule's comparison),
-        ;; it converges silently instead of re-litigating as "theirs
-        ;; edited" — the poison that once dropped a wave's edit and
+        ;; it converges silently instead of re-litigating as \"theirs
+        ;; edited\" — the poison that once dropped a wave's edit and
         ;; noise-conflicted whole resyncs. A copy THEY EDITED after is a
         ;; separate, untagged delta and still replays.
         ours-by-id (into {} (map (juxt :id identity)) od)
@@ -131,7 +160,7 @@
         ;; #16 poisoned idmaps: ping-pong accumulates mappings whose target
         ;; died while the ORIGINAL id lives on — resolve to the first LIVE
         ;; candidate (mapped first, then the original) so a stale entry
-        ;; cannot silently drop an edit as "we deleted it"
+        ;; cannot silently drop an edit as \"we deleted it\"
         ;; their :merge deltas recorded {our-fid → their-copy-id}; INVERTED,
         ;; an edit they made to their COPY resolves back onto our ORIGINAL
         ;; (the id spaces bifurcate at the first remap and never re-join)
@@ -154,7 +183,7 @@
                           (take-while #(not= (:id %) (:id d)))
                           reverse
                           (some (fn [pd] (get (:sources pd) fid0)))))
-;; The content THEIR line ends up holding for `fid0`, from delta `d`
+        ;; The content THEIR line ends up holding for `fid0`, from delta `d`
         ;; onward — so an `:add` can ask what the form FINISHES as, not only
         ;; what it started as. The `:add` arm resolves by NAME (a replayed copy
         ;; arrives under a new id, so the name is all that survives), and a
@@ -194,8 +223,8 @@
       {:error (str "merge identity mismatch: delta " (:id imposter)
                    " looks like a recreated fork/branch at the same"
                    " path/name — use a fresh path (or a new branch)")
-       ;; the fork point rides the error so callers can tell "identity
-       ;; mismatch" from "no shared history" — one masked the other once
+       ;; the fork point rides the error so callers can tell \"identity
+       ;; mismatch\" from \"no shared history\" — one masked the other once
        :fork-point fork-point}
       (loop [st ours, dds (seq theirs-sfx), idmap idmap0, merged 0,
              conflicts [], notes [], changed [], new-nses [], applied []]
@@ -259,12 +288,6 @@
                                          :reason "same dependency pinned to incomparable coords"})
                             changed new-nses (conj applied (:id d)))))
 
-                  
-
-                  
-
-                  
-
                   :ingest
                   (let [ns-sym (:ns d)]
                     (if (get-in st [:namespaces ns-sym])
@@ -274,7 +297,9 @@
                             changed new-nses (conj applied (:id d)))
                       (let [src (apply str (map #(str (get (:sources d) %) "\n")
                                                 (:form-ids d)))
-                            st' (tag-merged (store/ingest st ns-sym src :agent (:agent d))
+                            st' (tag-merged (store/ingest st ns-sym src
+                                                          :agent (:agent d)
+                                                          :prompt (:prompt d))
                                             (:id d))
                             new-ids (into [] (keep :id) (store/elements st' ns-sym))]
                         (done st' (merge idmap (zipmap (:form-ids d) new-ids))
@@ -301,10 +326,17 @@
                       (done st (assoc idmap fid (:id cur)) merged conflicts notes
                             changed new-nses (conj applied (:id d)))
 
+                      ;; a prior merge SURFACED this clash and our line
+                      ;; rewrote the form since — ours is the resolution
+                      (and cur (resolved (:id d)))
+                      (done st (assoc idmap fid (:id cur)) merged conflicts notes
+                            changed new-nses (conj applied (:id d)))
+
                       cur                                      ; name clash
                       (done st idmap merged
                             (conj conflicts {:form (symbol (str ns-sym) (str nm))
                                              :ns ns-sym :delta (:id d)
+                                             :fid (:id cur)
                                              :ours (n/string (:node cur))
                                              :theirs src
                                              :reason "both sides added this name"})
@@ -320,8 +352,8 @@
                       ;; `ensure-id-block!` was found by its caller failing to
                       ;; compile rather than by anything here.
                       ;;
-                      ;; The twin of `:replace`'s "we deleted it; they edited
-                      ;; it", which has always conflicted. Ours is KEPT — the
+                      ;; The twin of `:replace`'s \"we deleted it; they edited
+                      ;; it\", which has always conflicted. Ours is KEPT — the
                       ;; deletion stands — and the disagreement is reported
                       ;; rather than resolved by whoever wrote last.
                       (deleted-here [ns-sym (str nm)])
@@ -342,7 +374,7 @@
                       ;; and lands the copy straight onto ours, and the
                       ;; duplicate postcondition then refuses the WHOLE merge,
                       ;; naming a collision neither line authored and an action
-                      ;; ("rename on one line first") that whoever reads it
+                      ;; (\"rename on one line first\") that whoever reads it
                       ;; cannot take.
                       (and fin-cur (= (n/string (:node fin-cur)) fin-src))
                       (done st (assoc idmap fid (:id fin-cur)) merged conflicts
@@ -358,6 +390,7 @@
                       (done st idmap merged
                             (conj conflicts {:form (symbol (str ns-sym) (str fin-nm))
                                              :ns ns-sym :delta (:id d)
+                                             :fid (:id fin-cur)
                                              :ours (n/string (:node fin-cur))
                                              :theirs fin-src
                                              :reason (str "both sides have " fin-nm
@@ -386,6 +419,13 @@
                         src    (get (:sources d) fid0)
                         cur    (store/form-by-id st fid)]
                     (cond
+                      ;; a prior merge from this source SURFACED this exact
+                      ;; divergence and our line rewrote the form since —
+                      ;; that rewrite is the resolution; ours stands
+                      (resolved (:id d))
+                      (done st idmap merged conflicts notes changed new-nses
+                            (conj applied (:id d)))
+
                       (nil? cur)                               ; deleted on our side
                       (done st idmap merged
                             (note-conflict conflicts
@@ -450,6 +490,14 @@
                         cur    (store/form-by-id st fid)]
                     (cond
                       (nil? cur)                               ; converged
+                      (done st idmap merged conflicts notes changed new-nses
+                            (conj applied (:id d)))
+
+                      ;; a prior merge SURFACED \"we edited it; they deleted
+                      ;; it\" and our line rewrote the form since — the
+                      ;; rewrite stands, their deletion is delivered-and-
+                      ;; declined
+                      (resolved (:id d))
                       (done st idmap merged conflicts notes changed new-nses
                             (conj applied (:id d)))
 
@@ -537,9 +585,6 @@
                   (let [st' (fields/fold st d)]
                     (done st' idmap (inc merged) conflicts notes
                           changed new-nses (conj applied (:id d))))
-
-                ;; unknown op: never guess with someone's code
-                  
 
                   ;; unknown op: never guess with someone's code
                   (cond
