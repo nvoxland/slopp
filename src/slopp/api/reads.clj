@@ -415,13 +415,16 @@
   bundle-carried form is a reference rather than a second copy.
 
   A HANDOFF-SHAPED ask (summarize / what changed / recap / since-last)
-  arrives with `ops/report` already composed under a marked section —
+  arrives with the handoff already composed under a marked section —
   measured (eval12): that ask shape cost 10-13 turns of history spelunking
-  while the composed answer sat one call away. The injection PAYS for
-  itself by shrinking the card budget (never appending past it — the s10
-  bundle-growth regression is the standing lesson), and a same-session
-  delta bundle skips it: an already-mapped session can ask `report` by
-  name."
+  while the composed answer sat one call away. It is `orient/handoff-text`
+  over the whole `ops/report` — the asks first, whole rows, fitted to its
+  budget — not a pr-str snip: the snip cut BEFORE :by-ask in every s17
+  handoff cell and its \"(deeper: …)\" tail taught the drill-down that
+  followed (s18). The injection PAYS for itself by shrinking the card budget
+  (never appending past it — the s10 bundle-growth regression is the
+  standing lesson), and a same-session delta bundle skips it: an
+  already-mapped session can ask `report` by name."
   [{:keys [session]} {:keys [query-params]}]
   (let [ask      (str (:ask query-params))
         sid      (not-empty (str (or (:session-id query-params) "")))
@@ -433,10 +436,7 @@
                                            :tokens (cond same? 450 handoff? 500 :else 1100)
                                            :sources (if (or same? handoff?) 1 2))
         text     (if (and handoff? (not same?))
-                   (str text
-                        "\n--- the composed report — the store's OWN records (the ids are the citations: :turn per ask, :deltas per change, :commit per milestone) ---\n"
-                        (orient/snip (pr-str (ops/report session :limit 12)) 3800)
-                        "\n(deeper: report {contains \"…\"}; one form's history: query_history {ns … name …})")
+                   (str text "\n" (orient/handoff-text (ops/report session :limit 50) 3800))
                    text)
         ;; the schema diet's other half: the op-index prose the advertised
         ;; surface shed rides HERE as compact cards — once per ask, not per

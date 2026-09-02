@@ -678,8 +678,13 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     "edit_delete_form" "intent" "query_batch"})
 
 (def write-tools
+  ;; `change` is THE write verb (s11) and was missing here while its alias
+  ;; `intent` was present — so the dispatcher skipped the turn gate, the
+  ;; rotation and the read-ring flush for every change, and no eval since
+  ;; s11 recorded a turn for its writes (s18 forensics). A write verb that
+  ;; is not a write tool is silent provenance loss.
   (into single-write-tools
-        ["edit_group" "edit_delete_form" "edit_rename" "edit_extract"
+        ["change" "edit_group" "edit_delete_form" "edit_rename" "edit_extract"
          "ns_add_require" "ns_remove_require" "ns_create"
          "ns_delete" "done" "commit_point" "deps_add" "deps_remove"
          "deps_pure" "change_signature" "ns_realias"]))

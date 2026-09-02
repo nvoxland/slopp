@@ -964,3 +964,61 @@
                   (str "--- the forms the ask names, in full ---\n"
                        (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
                                              withs)))))}))
+
+(defn ^:export handoff-text
+  "The handoff, rendered for INJECTION: `r` (an `ops/report` map) as plain
+  text in the order a handoff ask reads — the asks oldest first, each with
+  its :turn id and the forms it added/changed/deleted; milestones; the
+  changes rolled up by namespace with one recorded ask and a delta each;
+  the suite verdict with the command that re-runs it — fitted to `budget`
+  by dropping WHOLE rows (the rollup's tail first, then the oldest asks),
+  never cutting mid-row. Measured (s18): a pr-str snip put teaching prose
+  and twelve alphabetical per-form rows ahead of :by-ask and cut it off in
+  every s17 handoff cell, and the \"(deeper: …)\" tail taught the 5+7-call
+  drill-down that followed. The closing line says this IS the record."
+  [r budget]
+  (let [asks     (vec (reverse (:by-ask r)))
+        forms    (fn [k a] (when (seq (get a k))
+                             (str (name k) ": " (str/join " " (take 8 (get a k)))
+                                  (when (< 8 (count (get a k))) " …"))))
+        ask-line (fn [i a]
+                   (str (inc i) ". [turn " (:turn a) "] \"" (snip (:ask a) 160) "\""
+                        (when-let [ps (seq (keep #(forms % a) [:added :changed :deleted :renamed]))]
+                          (str " — " (str/join "; " ps)))))
+        ms-lines (mapv #(str "  " (:commit %) " " (snip (:description %) 90) " @" (:at %))
+                       (:milestones r))
+        rollup   (->> (:changes r)
+                      (group-by :ns)
+                      (sort-by (comp str key))
+                      (mapv (fn [[nsx rows]]
+                              (str "  " nsx ": " (count rows) " form(s) "
+                                   (pr-str (vec (distinct (mapcat :ops rows))))
+                                   (when-let [a (first (mapcat :asks rows))]
+                                     (str " — \"" (snip a 80) "\""))
+                                   " " (pr-str (vec (take 3 (distinct (mapcat :deltas rows)))))))))
+        suite    (str "suite: " (name (or (get-in r [:suite :status]) :unknown))
+                      (when-let [as-of (get-in r [:suite :as-of])] (str " as of " as-of))
+                      " — run it: slopp --call test_run '{\"external\":true}';"
+                      " milestones: slopp --call query_commits")
+        head     (str "--- the composed handoff — the store's OWN records; the ids ARE the"
+                      " citations (:turn per ask, :deltas per change, :commit per milestone) ---")
+        close    (str "This IS the record — quote the :turn and :deltas ids as your citations;"
+                      " the suite command above is the one to hand over.")
+        render   (fn [n-asks n-roll]
+                   (let [shown (vec (take-last n-asks asks))
+                         from  (- (count asks) (count shown))]
+                     (str/join "\n"
+                               (concat [head (str "asks, oldest first (" (count asks) "):")]
+                                       (when (pos? from)
+                                         [(str "  … " from " earlier ask(s) — report {} lists them")])
+                                       (map-indexed (fn [i a] (ask-line (+ from i) a)) shown)
+                                       (when (seq ms-lines) (cons "milestones:" ms-lines))
+                                       (when (pos? n-roll) (cons "changes by namespace:" (take n-roll rollup)))
+                                       [suite close]))))]
+    (loop [n-asks (count asks), n-roll (count rollup)]
+      (let [t (render n-asks n-roll)]
+        (cond
+          (<= (count t) budget) t
+          (pos? n-roll)         (recur n-asks (dec n-roll))
+          (< 1 n-asks)          (recur (dec n-asks) 0)
+          :else                 (subs t 0 budget))))))

@@ -3821,7 +3821,7 @@
                                 :query-string (str "ask=" (java.net.URLEncoder/encode (str ask) "UTF-8"))})))]
         (testing "a handoff-shaped ask carries the composed report, marked"
           (let [txt (str (ask! "summarize what changed since the last handoff"))]
-            (is (re-find #"composed report" txt) txt)
+            (is (re-find #"composed handoff" txt) txt)
             (is (re-find #"hd\.core" txt) "the change row reached the injected story")))
         (testing "the phrasings real handoffs use — the first live one matched NOTHING"
           ;; s12 grid, step5 verbatim shapes: "I'm handing this project to a
@@ -3829,10 +3829,10 @@
           (doseq [ask ["I'm handing this project to a teammate tomorrow — give me a factual rundown"
                        "a rundown of everything that has changed here since the original seeded version"
                        "walk me through the changes"]]
-            (is (re-find #"composed report" (str (ask! ask))) ask)))
+            (is (re-find #"composed handoff" (str (ask! ask))) ask)))
         (testing "an ordinary ask pays no report rent"
           (let [txt (str (ask! "add a discount to quoting"))]
-            (is (not (re-find #"composed report" txt)) txt))))
+            (is (not (re-find #"composed handoff" txt)) txt))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external the-cli-door-routes-to-the-running-server
@@ -4416,3 +4416,140 @@
         (is (re-find #":ok true" r) r)
         (is (re-find #":status :green" r) r))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-pinned-session-never-eats-another-sessions-ask
+  ;; s18 forensics: a five-ask lifetime landed on main with ONE turn-begin.
+  ;; The prompt hook writes the next session's ask into the shared slot,
+  ;; and the PREVIOUS session's Stop-hook `done` — a one-shot that opens
+  ;; with `:agent <its sid>` pinned, but with no claimed intent-sid — read
+  ;; it as its own: the file vanished, the next session opened no turn,
+  ;; and every form it wrote belonged to no ask. The same unowned slot is
+  ;; how s16's concurrent sessions cross-attributed a write. A pinned
+  ;; identity IS a claim.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-pinned-mailbox-" (System/nanoTime))
+        a    (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "sess-A"})
+        pi   (io/file dir ".slopp" "pending-intent")]
+    (try
+      (swap! a assoc :require-turns? true)
+      (ops/ingest! a 'pm.core "(ns pm.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :agent "sess-A")
+      (is (= "main" (:landed (branch/land-thread! a))) "fixture: the seed reached main")
+      ;; B's hook has just written B's ask; A's one-shot done runs meanwhile
+      (spit pi "{\"session-id\":\"sess-B\",\"prompt\":\"B's ask: add g\"}")
+      (spit (io/file dir ".slopp" "pending-intent.sess-B") "{\"session-id\":\"sess-B\",\"prompt\":\"B's ask: add g\"}")
+      (mcp/call! dir "done" {:agent "sess-A" :label "A pauses"})
+      (testing "A's one-shot left B's ask where it lay"
+        (is (true? (.exists pi)))
+        (is (re-find #"B's ask" (slurp pi))))
+      (testing "and A's own session, pinned, does not take it either"
+        (call! a "query_brief" {})
+        (is (true? (.exists pi)))
+        (is (not= "B's ask: add g" (:last-intent @a))))
+      (testing "B opens pinned, reads ITS mailbox, and its write carries its ask"
+        (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "sess-B"})]
+          (try
+            (swap! b assoc :require-turns? true)
+            (is (re-find #":ok true" (call! b "edit_add_form" {:ns "pm.core" :source "(defn ^:unused-ok g \"G.\" [] 1)"})))
+            (is (re-find #":turn-intent \"B's ask" (call! b "query_history" {:ns "pm.core" :name "g"})))
+            (finally (ops/close! b)))))
+      (finally (ops/close! a)
+               (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-handoff-arrives-with-every-ask-first-and-whole
+  ;; s18 forensics over the s15/s17 handoff cells: the injected report was
+  ;; a 3800-char snip of a pr-str whose key order put teaching prose and
+  ;; twelve alphabetical per-form rows before :by-ask — the section the
+  ;; ask (\"for each, why it was done; say where each answer came from\")
+  ;; needs — and in every s17 run the cut landed before it (mid-EDN), while
+  ;; the trailing \"(deeper: …)\" line taught exactly the drill-down that
+  ;; followed. The handoff arrives as text, asks first, whole rows only.
+  (let [sess  (external/open!)
+        me    (:agent-id @sess)
+        ask!  (fn [intent nsx src]
+                (ops/turn-begin! sess :agent me :intent intent)
+                (ops/add-form! sess nsx src :prompt intent :agent me)
+                (ops/turn-end! sess :agent me))]
+    (try
+      (call! sess "ns_create" {:ns "ho.core" :source "(ns ho.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"
+                               :prompt "the seed"})
+      (ask! "Add oversize handling to the quote" 'ho.core "(defn ^:unused-ok oversize? \"O.\" [p] (> (:g p) 25000))")
+      (ask! "Add an :eco carrier class" 'ho.core "(defn ^:unused-ok eco \"E.\" [] :eco)")
+      (ask! "Regional fees per destination" 'ho.core "(defn ^:unused-ok region-fee \"R.\" [z] (* 100 z))")
+      (ask! "Multi-parcel shipments" 'ho.core "(defn ^:unused-ok shipment \"S.\" [ps] (count ps))")
+      (let [ctx (server/context sess)
+            txt (str (:body (slopp.http/handle!
+                             ctx {:request-method :get :uri "/api/bundle"
+                                  :query-string (str "ask=" (java.net.URLEncoder/encode
+                                                               "I'm handing this project to a teammate tomorrow. Give me a factual rundown of everything that has changed here and why, from the records"
+                                                               "UTF-8"))})))
+            i   (str/index-of txt "composed handoff")
+            j   (str/index-of txt "--- op cards")
+            sec (subs txt i (or j (count txt)))]
+        (testing "the asks come first, oldest first, each with its :turn id and forms"
+          (is (re-find #"asks, oldest first \(4\)" sec) sec)
+          (is (< (str/index-of sec "oversize handling") (str/index-of sec "Multi-parcel")) "chronological")
+          (is (= 4 (count (re-seq #"\[turn d[0-9a-f]+\]" sec))) sec)
+          (is (re-find #"added: ho\.core/oversize\?" sec) sec))
+        (testing "whole rows, within budget, closing with the pre-emption — no drill-down invitation"
+          (is (< (count sec) 3900) (str (count sec)))
+          (is (re-find #"This IS the record" sec) sec)
+          (is (not (re-find #"deeper:" sec)) sec)
+          (is (re-find #"slopp --call test_run" sec) sec)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-pinned-served-session-opens-its-turn-from-the-hooks-mailbox
+  ;; s18 forensics (A2): on the eval stores a session's first write carried
+  ;; no :turn-intent and main held one turn-begin for five asks, even for
+  ;; the first step that nothing raced. This is the served flow with no
+  ;; harness in the way: -main opens PINNED to the harness id, the prompt
+  ;; hook writes both mailboxes for that id, the first write opens the turn.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-served-turn-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-1"})]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (io/make-parents (io/file dir ".slopp" "pending-intent"))
+      (spit (io/file dir ".slopp" "pending-intent")
+            "{\"session-id\":\"harness-1\",\"prompt\":\"We need oversize handling\"}")
+      (spit (io/file dir ".slopp" "pending-intent.harness-1")
+            "{\"session-id\":\"harness-1\",\"prompt\":\"We need oversize handling\"}")
+      (is (re-find #":ok true|:ns st.core"
+                   (call! sess "ns_create" {:ns "st.core" :source "(ns st.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})))
+      (is (re-find #":ok true" (call! sess "edit_add_form" {:ns "st.core" :source "(defn ^:unused-ok oversize? \"O.\" [p] p)"})))
+      (testing "the write is inside the ask's turn"
+        (is (re-find #":turn-intent \"We need oversize" (call! sess "query_history" {:ns "st.core" :name "oversize?"}))))
+      (testing "and the turn-begin is on the session's line"
+        (is (some #(= :turn-begin (:op %)) (ops/journal sess))))
+      (testing "and survives the land onto main"
+        (is (= "main" (:landed (branch/land-thread! sess))))
+        (is (re-find #":turn-intent \"We need oversize" (call! sess "query_history" {:ns "st.core" :name "oversize?"}))))
+      (finally (ops/close! sess)
+               (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-change-opens-the-asks-turn
+  ;; s18 root cause: a one-ask `claude -p` session wrote through `change`
+  ;; and landed, the mailbox was consumed, and main held NO turn-begin —
+  ;; before any Stop hook could interfere. `change` (the write verb since
+  ;; s11) was never in tools/write-tools; its alias `intent` was. So the
+  ;; dispatcher skipped the turn gate for every change: no eval since s11
+  ;; recorded a turn for its writes, and the handoff step paid 12–22 turns
+  ;; reconstructing what a turn would have recorded.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-change-turn-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-2"})]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (io/make-parents (io/file dir ".slopp" "pending-intent"))
+      (call! sess "ns_create" {:ns "ct.core" :source "(ns ct.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"
+                               :prompt "the seed"})
+      (call! sess "turn_end" {})
+      (spit (io/file dir ".slopp" "pending-intent.harness-2")
+            "{\"session-id\":\"harness-2\",\"prompt\":\"Add an :eco carrier class\"}")
+      (is (re-find #":ok true"
+                   (call! sess "change" {:prompt "the eco constant"
+                                        :impl [{:ns "ct.core" :source "(def ^:unused-ok eco \"E.\" :eco)"}]})))
+      (testing "the change is inside the ask's turn, under the ask's words"
+        (is (re-find #":turn-intent \"Add an :eco carrier class"
+                     (call! sess "query_history" {:ns "ct.core" :name "eco"}))))
+      (testing "and the ask is a by-ask row of the report"
+        (is (re-find #":by-ask \[\{:ask \"Add an :eco carrier class"
+                     (call! sess "report" {}))))
+      (finally (ops/close! sess)
+               (clojure.java.shell/sh "rm" "-rf" dir)))))

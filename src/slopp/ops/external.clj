@@ -2402,8 +2402,8 @@ client-deps (merge (:client-deps st) (:client provided))
                       " STANDS — no check was run. This is the whole-store"
                       " answer, "
                       (when-let [ms (:ms standing)] (str "earned in " ms "ms, "))
-                      "and it is current. `full_check {force true}` re-runs it"
-                      " anyway; a write of any kind retires it on its own."))
+                      "and it is current: a forced re-run cannot say more, so hand this"
+                      " verdict over as it stands. A write of any kind retires it on its own."))
     (run-full-check! session :affected affected)))
 
 (defn ^:export compact-store!

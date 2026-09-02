@@ -1215,6 +1215,13 @@
   observed live on 2026-08-27: seven writes by one session recorded under
   another's id, bracketed by turns carrying the other's verbatim asks.
 
+  **A PINNED identity is a claim too** (s18): a one-shot `--call done
+  {agent <sid>}` — the Stop hook — opens pinned but had claimed nothing, so
+  it read the NEXT session's ask as its own; that session then opened no
+  turn and every form it wrote belonged to no ask. Measured: a five-ask
+  lifetime reached main with one turn-begin. The claimed id is the
+  intent-sid or, failing that, the pinned agent-id.
+
   A claimed session prefers its OWN `pending-intent.<sid>` file, which is
   what a current hook writes alongside the legacy path; the unscoped file is
   still read so an older hook keeps working. An intent carrying no id at all
@@ -1228,7 +1235,8 @@
   into somebody else's context."
   [session]
   (when-let [dir (:dir @session)]
-    (let [claimed (:intent-sid @session)
+    (let [claimed (or (:intent-sid @session)
+                      (when (:pinned-agent? @session) (:agent-id @session)))
           scoped  (when claimed
                     (io/file dir ".slopp" (str "pending-intent." claimed)))
           legacy  (io/file dir ".slopp" "pending-intent")
