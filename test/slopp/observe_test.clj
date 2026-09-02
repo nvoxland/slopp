@@ -8,7 +8,7 @@
   namespace, and the pair belongs together: they are the store admitting the
   limits of reading."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.external :as external]))
+            [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store :as store] [slopp.ops.engine :as engine]))
 
 (deftest ^:external observe-captures-what-flows-through
   (let [sess (external/open!)]
@@ -109,3 +109,59 @@
   (testing "a run that measured nothing says nothing — absent, never empty"
     (is (not (contains? (external/observation-of {} {:status :green :ran 3})
                         :ns-status)))))
+
+(deftest a-NARROWED-run-clears-no-namespace
+  ;; the hole this closes was mine, landed the same day: :ns-status is
+  ;; derived from the namespaces that RAN, and a run narrowed by :only runs
+  ;; a handful of tests inside them — done's external slice is exactly such
+  ;; a run. Marking the namespace green there would authorize skipping
+  ;; tests that never executed, which is the one failure a content-keyed
+  ;; cache cannot detect: a hit runs nothing.
+  (testing "a whole-namespace run clears its namespaces"
+    (is (= '{a.core-test :green}
+           (:ns-status (external/observation-of
+                        {} {:status :green :ran 2 :ns-ms '{a.core-test 10}})))))
+  (testing "a run narrowed to named tests clears NONE of them — its evidence is the tests it named"
+    (let [o (external/observation-of
+             {} {:status :green :ran 1 :ns-ms '{a.core-test 10}
+                 :only '[a.core-test/one]})]
+      (is (not (contains? o :ns-status)) (pr-str o))
+      (is (= '[a.core-test/one] (:only o)) "and it still records WHICH tests it ran"))))
+
+(deftest a-test-green-at-exactly-this-content-does-not-run-again
+  ;; s19: the verdict-cache gate, measured over the whole journal, cleared
+  ;; at 44.6% (28,639 namespace-runs, 12,786 already green at exactly that
+  ;; content). This is the decision it authorized — done-grain only.
+  ;;
+  ;; A cache HIT RUNS NOTHING, so every rule here is the conservative one:
+  ;; the evidence must be GREEN, must be at THIS content, and a narrowed
+  ;; run clears only the tests it named.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 't.core "(ns t.core)\n(defn f [] 1)\n")
+                (store/ingest 't.core-test
+                              (str "(ns t.core-test\n  (:require [clojure.test :refer [deftest is]]\n"
+                                   "            [t.core :as c]))\n"
+                                   "(deftest one (is (= 1 (c/f))))\n(deftest two (is true))\n")))
+        h     (get (engine/closure-hashes st '[t.core-test]) 't.core-test)
+        obs   (fn [result] {:op :observe :closure {'t.core-test h} :result result})
+        tests '[t.core-test/one t.core-test/two]]
+    (testing "a narrowed green clears exactly the tests it named"
+      (let [r (external/reusable-verdicts st [(obs {:status :green :only '[t.core-test/one]})] tests)]
+        (is (= '[t.core-test/one] (:reused r)) (pr-str r))
+        (is (= '[t.core-test/two] (:run r)) (pr-str r))))
+    (testing "a whole-namespace green clears the namespace"
+      (let [r (external/reusable-verdicts st [(obs {:status :green :ns-status '{t.core-test :green}})] tests)]
+        (is (= tests (:reused r)) (pr-str r))
+        (is (empty? (:run r)) (pr-str r))))
+    (testing "the same green at DIFFERENT content clears nothing — that is the whole key"
+      (let [r (external/reusable-verdicts
+               st [{:op :observe :closure {'t.core-test "a-hash-from-before-the-edit"}
+                    :result {:status :green :ns-status '{t.core-test :green}}}]
+               tests)]
+        (is (empty? (:reused r)) (pr-str r))
+        (is (= tests (:run r)) (pr-str r))))
+    (testing "a RED run clears nothing, at any content"
+      (let [r (external/reusable-verdicts st [(obs {:status :red :ns-status '{t.core-test :red}})] tests)]
+        (is (empty? (:reused r)) (pr-str r))))
+    (testing "and with no evidence at all, everything runs"
+      (is (= tests (:run (external/reusable-verdicts st [] tests)))))))
