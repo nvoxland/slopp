@@ -2148,3 +2148,7 @@ requires); and never make a reader re-buy what it already holds.
   never run against the old code; the red was recovered by reverting the
   three impl forms, running, and re-applying. The group mechanics make
   "tests land first" true and "watched failing" not — worth a mechanism.
+- D1's first reading, milestone de67f1178adc4: `:ms {:done 3017 :land 262
+  :publish 189104}`. The publish — `ensure-projected!` re-folding every
+  journal before the push — is 98% of the milestone's wall. D2 is the
+  target, now as a fact.
