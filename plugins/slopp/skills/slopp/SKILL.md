@@ -122,8 +122,13 @@ you. `:hint` — one line slopp wants you to read. `:already-sent` — you
 already hold this payload in this ask; `:source-already-sent true` on a row —
 you hold that form's text at this version (a read you made, or your own
 write), so it was not resent. `:truncated {:shown :of}` — what a
-long answer cut; `query_detail {id}` fetches the rest ONLY when the missing
-part changes what you do next.
+long answer cut; `query_detail {id}` fetches the REMAINDER (never what you
+already hold) ONLY when the missing part changes what you do next — every
+re-fetch is a whole request re-reading your context. A read whose targets
+you NAMED arrives whole (to 32k); a green map that lost keys says
+`:withheld {:keys :of}` in-band and invites nothing. `:repaired {:text
+true}` — your patch match was a fragment with one home and landed as a
+text replace; say `text: true` next time.
 
 ## One question, one call
 

@@ -2120,3 +2120,31 @@ requires); and never make a reader re-buy what it already holds.
 - The lesson is about the MEASUREMENT, not the cache: a fraction that mixes
   grains cannot say no. Split by the grain the mechanism runs at, and it
   said no in one reading.
+
+## 2026-09-02 — s20: round trips are the unit of rent
+
+- The reframing: at p50 485k context one avoidable model request re-reads
+  ~485k cached tokens (~60 trimmed 8k payloads). The size gate optimized
+  chars while provoking round trips: query_source trims were re-bought 69%
+  of the time in a real session, and query_detail already returned only the
+  remainder — the chars were never the waste, the round trip was. The
+  sonnet-41 eval cell has zero query_detail: a real-usage-only lever.
+- The bundle injection measured at ~5% of slopp chars: NOT a rent source.
+- Landed: :op and :chars-in on every measurement row (the census had known
+  only the family since s11 — every s20 lever had to be ranked from a
+  transcript); re-buy rate per op in query_cost; explicit reads sent whole
+  to 32k; map trims keep the most keys that fit; a green map says
+  :withheld in-band with no invitation (an existing pin held the
+  "what was cut is still named" line and was right); a no-match slice of a
+  huge form cut under 16k; the second prompt of a session gets the delta
+  bundle without a tool call; a one-home fragment match lands as a text
+  replace (:repaired); a milestone reports :ms {:done :land :publish}.
+- refresh-app! was suspected as commit_point's 20s; it returns nil
+  immediately without a managed server. Measured: nothing to take. D2
+  (incremental git projection) waits on D1's numbers from real milestones.
+- Verdict basis (user's choice): real usage — query_cost {since <s20
+  milestone>} after >= 300 calls, rules in projects/eval20-rent/RUNS.md.
+- Process: three pins landed in a group whose impl failed and so were
+  never run against the old code; the red was recovered by reverting the
+  three impl forms, running, and re-applying. The group mechanics make
+  "tests land first" true and "watched failing" not — worth a mechanism.
