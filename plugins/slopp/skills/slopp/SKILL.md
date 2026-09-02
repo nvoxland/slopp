@@ -60,13 +60,15 @@ turn; never call `turn_begin`.
    runs assertion code in the image and answers `{:value :pass :fail
    :assertions}` with NOTHING written — when a test would be a QUESTION,
    ask it here and read the red before you write anything.
-2. **ONE `change` carries the write**: `change {prompt tests? impl
-   accept?}` — `tests` (optional) land first and the result says which
-   went RED (watched failing); `impl` lands; `accept ["ns/test" …]` names
-   the tests whose literal expectations your change is MEANT to move, and
+2. **ONE `change` carries the write**: `change {prompt tests? impl?
+   accept?}` — `tests` land first and the result says which went RED
+   (watched failing); `impl` lands; `accept ["ns/test" …]` names the
+   tests whose literal expectations your change is MEANT to move, and
    their shifts finish in the same call; one verification, one result.
    `{prompt impl}` alone is the ordinary write — a docstring, a comment, a
-   one-form fix. Say the WHY in `prompt`; it is the recorded intent forever.
+   one-form fix. `{prompt tests}` alone lands the spec red and waits: the
+   impl is the next change. Say the WHY in `prompt`; it is the recorded
+   intent forever.
 3. **The result is the verdict.** `:test {:ran :pass :status}` — the
    covering tests by name; `:finisher {:applied …}` — the expectation
    shifts you declared, already applied and re-verified; requires and
@@ -84,7 +86,7 @@ turn; never call `turn_begin`.
 
 | you want | call |
 |---|---|
-| ANY change — one form or a feature | `change {prompt tests? impl accept?}` — steps carry `action` (add\|replace\|patch\|delete\|require) plus ns/name/source/match; a step with `{ns name source}` and no action is inferred (replace if the form exists, add if not). A change past ~10 steps is two changes |
+| ANY change — one form or a feature | `change {prompt tests? impl? accept?}` — tests alone land the spec red and wait for the impl; steps carry `action` (add\|replace\|patch\|delete\|require) plus ns/name/source/match; a step with `{ns name source}` and no action is inferred (replace if the form exists, add if not). A change past ~10 steps is two changes |
 | new form(s) | `change` — one `:add` step per form (order never matters; definitions-before-callers is derived) |
 | a change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry swaps ONE exact subform; `text: true` for strings/docstrings; `where: {key value}` for a registry row. Deltas, never a whole-form retype |
 | rename a var (callers follow) | `edit_rename {ns from to}` |
