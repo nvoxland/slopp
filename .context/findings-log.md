@@ -2067,3 +2067,22 @@ requires); and never make a reader re-buy what it already holds.
   choice) are not this build's to claim. Every done now reports `:reused`,
   so the done-grain hit rate is measured continuously rather than replayed.
   If it reads ~0 over a week, the build should come out.
+
+## 2026-09-02 — s19c: the oracle's absent capability, and refusals classified by message
+
+- 121 query_eval refusals on this store reached for a session var. There is
+  none and there should not be — a session in eval lets a write bypass the
+  delta pipeline (T5) — so this is the case D-repair does NOT cover: the
+  intent is real, the capability is deliberately absent, and the refusal now
+  names the three doors that answer it (query_store, the tools, check).
+  Verified live against the exact failing call.
+- read.telemetry/refusal-shape + :by-shape/:retried in call-timing, folded
+  by turn-cost. A tool is not a class: grouping by tool produced two wrong
+  levers in one session. The shape is a mechanical normalization (not a
+  taxonomy) so it works on any store; :retried counts a refusal answered by
+  the same tool again, whatever that call's outcome.
+- Both recorded going FORWARD, like the classifier fix before them.
+- Also: a deliberate mention of a non-existent var tripped the
+  stale-reference rule, correctly. Fixed by composing the qualified spelling
+  rather than writing it — a pin that permanently trips a good rule teaches
+  everyone to ignore the rule.
