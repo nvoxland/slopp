@@ -11,6 +11,9 @@
             [slopp.ops :as ops]
             [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate]))
 
+^{:auto-declare "mutual recursion: -main, call!, call-main!, call-op!, call-op-1!, call-tool!, handle!, http-call!, serve!, start-ui!"}
+(declare -main call! call-main! call-op! call-op-1! call-tool! handle! http-call! serve! start-ui!)
+
 (def ^:private protocol-version "2024-11-05")
 
 (def ^:private ^:dynamic *hint*
@@ -1102,7 +1105,9 @@
   "`edit_group`'s step maps as `ops/edit-group!` takes them: keys keywordized
   whether the transport left them strings or keywords, `action` a keyword,
   `ns`/`name` symbols, a `where` map's keys keywordized the way a single
-  `edit_subform` sees them. Everything else rides through untouched.
+  `edit_subform` sees them, and a step's `:code` taken as its `:source`
+  (`code` is check's argument; models generalize it — 26 refusals in the s17
+  census, every one retried). Everything else rides through untouched.
 
   A `:patch` step — {action: patch, ns, name, replace: [{match, source,
   text?, where?} …]} — EXPANDS here into one :subform step per entry:
@@ -1112,6 +1117,9 @@
   mechanical work; the ops layer never sees :patch."
   [steps]
   (let [kw  (fn [m] (into {} (map (fn [[k v]] [(keyword (name k)) v])) m))
+        src (fn [s] (if (and (:code s) (nil? (:source s)))
+                      (dissoc (assoc s :source (:code s)) :code)
+                      s))
         one (fn [s]
               (cond-> s
                 (:action s) (update :action #(keyword (name %)))
@@ -1120,7 +1128,7 @@
                 (map? (:where s)) (update :where kw)))]
     (into []
           (mapcat (fn [s]
-                    (let [s (kw s)]
+                    (let [s (src (kw s))]
                       (if (and (:action s) (= "patch" (name (:action s))))
                         (for [e (:replace s)]
                           (one (assoc (kw e)
@@ -1765,9 +1773,34 @@
                                        (:created born))})
 
                 :else
-                (text! {:error (str "change needs :impl steps — a question is explore;"
-                                    " a test you are writing to FIND something out is"
-                                    " explore {ops [{op check code …}]}")}))
+                (if (seq tests)
+                  ;; TESTS ONLY: the red-first ritual's first half on its own
+                  ;; — land the spec, watch it fail, and say the impl is the
+                  ;; next change (s17 grid: the top residual refusal, five
+                  ;; times in one cell, was exactly this gesture)
+                  (let [rt (ops/edit-group! session tests
+                                            :prompt (str (:prompt a) " [tests first — expected red]")
+                                            :agent (:agent a))]
+                    (if (:error rt)
+                      (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
+                      (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
+                                                            (keep :test (:failures (:test rt))))))]
+                        (ledger-written! session "edit_group" {:steps tests})
+                        (text! {:ok true
+                                :status (if (seq went-red) :red :green)
+                                :tests {:landed (count tests) :went-red went-red
+                                        :spec-run (select-keys (:test rt)
+                                                               [:test :pass :fail :error
+                                                                :failed-tests :status])}
+                                :note (if (seq went-red)
+                                        (str "the tests landed RED and are watched — the"
+                                             " implementation is the next change {impl …}")
+                                        (str "the tests landed GREEN — the spec was never"
+                                             " watched failing; a green you did not watch"
+                                             " fail proves nothing"))}))))
+                  (text! {:error (str "change needs :impl steps — a question is explore;"
+                                      " a test you are writing to FIND something out is"
+                                      " explore {ops [{op check code …}]}")})))
               (let [rt (when (seq tests)
                          (ops/edit-group! session tests
                                           :prompt (str (:prompt a) " [tests first — expected red]")
@@ -1797,8 +1830,8 @@
                           {:ok true
                            :impl (select-keys ri [:group :steps :warnings :drift
                                                   :red-first :note
-                                                  :auto-require :auto-module-dep
-                                                  :auto-module-deps])
+                                                  :auto-require :auto-requires
+                                                  :auto-module-dep :auto-module-deps])
                            :test (:test ri)
                            :status (if (red? (:test ri)) :red :green)}
                            (seq tests)
@@ -1824,15 +1857,28 @@
      "intent" change-fn
      "check"
      (fn [session a _sym]
-       (let [wrapped (str "(do (require (quote clojure.test))"
-                          " (let [slopp-check-reports (atom [])]"
-                          "  (binding [clojure.test/report"
-                          "            (fn [m] (swap! slopp-check-reports conj"
-                          "                      (select-keys m [:type :expected :actual :message])))]"
-                          "   (let [slopp-check-value (do " (:code a) ")]"
-                          "    {:value slopp-check-value"
-                          "     :assertions (deref slopp-check-reports)}))))")
-             r (ops/query-eval session wrapped)]
+       ;; the QUESTION is gated (check-gate: fixtures allowed, reaching out
+       ;; refused), then evaluated in a scratch namespace — clojure.core and
+       ;; clojure.test referred, symbols resolved there via eval — that is
+       ;; removed with the answer. The scaffolding is ours and runs ungated.
+       (let [code    (str "(do " (:code a) ")")
+             wrapped (str "(do (require (quote clojure.test))"
+                          " (let [slopp-check-ns (symbol (str \"slopp.check.scratch\" (System/nanoTime)))"
+                          "       slopp-check-reports (atom [])]"
+                          "  (try"
+                          "   (binding [*ns* (create-ns slopp-check-ns)]"
+                          "    (clojure.core/refer (quote clojure.core))"
+                          "    (clojure.core/refer (quote clojure.test))"
+                          "    (binding [clojure.test/report"
+                          "              (fn [m] (swap! slopp-check-reports conj"
+                          "                        (select-keys m [:type :expected :actual :message])))]"
+                          "     (let [slopp-check-value (eval (read-string " (pr-str code) "))]"
+                          "      {:value slopp-check-value"
+                          "       :assertions (deref slopp-check-reports)})))"
+                          "   (finally (remove-ns slopp-check-ns)))))")
+             r (if-let [err (edit/check-gate (:code a))]
+                 {:error err}
+                 (ops/query-eval session wrapped :gate (constantly nil)))]
          (text!
           (if (map? r)
             r
@@ -1850,7 +1896,520 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
-(defn- call-op! [session {:keys [name arguments]}]
+(defn- advertised-tools
+  "What tools/list would advertise to THIS session right now — the one
+  selection both the list and the drift notifier read, so they can never
+  disagree: empty in CLI mode (the shell is the surface), else the dieted
+  fourteen (s14, adopted by measurement: prose rides the bundle as cards)."
+  [session]
+  (if (or (:cli-mode? @session) (some? (System/getenv "SLOPP_CLI")))
+    []
+    tools/dieted-tools))
+
+(defn- tools-note!
+  "The notifications/tools/list_changed message when the tool registry has
+  DRIFTED from what this session last advertised (a live reload renamed or
+  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
+  client could see it), else nil. Emitting updates the baseline, so each
+  drift notifies exactly once. No baseline (tools/list never served) → nil."
+  [session]
+  (let [h    (hash (advertised-tools session))
+        last (:slopp.mcp/tools-hash @session)]
+    (when (and last (not= last h))
+      (swap! session assoc :slopp.mcp/tools-hash h)
+      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
+
+(defn- call-op!
+  "THE dispatch seam every route crosses — family dispatch, the bare `--call`
+  door, and explore's recursive entries — so it is where a shape is
+  REPAIRED before `call-op-1!` validates and runs it (`tools/remap-arguments`;
+  s17: refusals on unambiguous argument shapes were 24–38% of eval calls,
+  each one re-sent and retried). `query_eval`/`check {ns code}` resolves
+  its symbols in that namespace: the RAW code is gated first, because the
+  wrapped form quotes it and quoted data is inert to the observe gate. What
+  was repaired rides the result as a leading `;; repaired …` line, so the
+  accepted shape is learned for free."
+  [session {:keys [name arguments] :as req}]
+  (let [{n' :name a' :arguments repaired :repaired} (tools/remap-arguments name arguments)
+        [a' repaired] (if (and (#{"query_eval" "check"} n') (:ns a') (string? (:code a'))
+                               (nil? (edit/observe-gate (:code a'))))
+                        [(assoc (dissoc a' :ns)
+                                :code (str "(binding [*ns* (the-ns '" (:ns a') ")]"
+                                           " (eval (read-string "
+                                           (pr-str (str "(do " (:code a') ")"))
+                                           ")))"))
+                         (assoc (or repaired {}) :ns-bound (str (:ns a')))]
+                        [a' repaired])
+        r (call-op-1! session (assoc req :name n' :arguments a'))]
+    (if (and (seq repaired) (get-in r [:content 0 :text]))
+      (update-in r [:content 0 :text] #(str ";; repaired " (pr-str repaired) "\n" %))
+      r)))
+
+^:unsafe (defn handle!
+  "Dispatch a JSON-RPC request map; return a response map, or nil for
+  notifications. Tool exceptions become an `isError` result (so the agent sees
+  the message); protocol errors become JSON-RPC errors."
+  [session {:keys [id method params]}]
+  (case method
+    "initialize" {:jsonrpc "2.0" :id id
+                  :result {:protocolVersion protocol-version
+                           :capabilities {:tools {:listChanged true}}
+                           :serverInfo {:name "slopp" :version "0.1.0"}}}
+    "notifications/initialized" nil
+    "tools/list" (let [advertised (advertised-tools session)]
+                   (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
+                   {:jsonrpc "2.0" :id id :result {:tools advertised}})
+    "tools/call"
+    ;; BOTH edges of the call, recorded here because this is the only layer
+    ;; that sees them. The gap between one answer and the next call is time
+    ;; slopp was NOT working — agent reasoning, non-slopp tools, the harness —
+    ;; and it had no producer at all: measured over one real session, 78% of
+    ;; the wall clock was invisible. turn_end folds the ring onto its delta.
+    (let [t0    (System/currentTimeMillis)
+          facts (atom {})
+          r     (binding [;; A smell is once-per-session and rarer, so it speaks first. The
+                          ;; thread reminder is DEFERRED rather than computed here: it
+                          ;; counts what the call is about to make un-landed, which does
+                          ;; not exist yet. `text!` forces it.
+                          *hint* (or (smells/track-hint! session
+                                                         (:name params)
+                                                         (:arguments params))
+                                     (delay (thread-hint! session (:name params))))
+                          *spool-session* session
+                          ;; what the ANSWER did — the trim, the withheld stub,
+                          ;; the id a retrieval went back for. Only the frames
+                          ;; that shape a response know those, and none of them
+                          ;; is on the path back to here.
+                          *response-facts* facts]
+                  (try (call-tool! session params)
+                       (catch Exception e
+                         (assoc (text! (str "error: " (ex-message e)))
+                                :isError true))))
+          why   (refusal-text r)]
+      ;; after the call, so a tool that reads the ring (turn_end) never sees
+      ;; its own half-finished entry
+      (let [entry (merge
+                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
+                    ;; A REFUSAL and the reason it gave, from ONE derivation — see
+                    ;; `refusal-text` for the two shapes it arrives in and for the
+                    ;; deliberate under-count. The message rides along because a
+                    ;; count with no cause can only ever support "read that tool's
+                    ;; contract", which is the guess rather than the finding;
+                    ;; `call-timing` bounds and truncates what reaches the delta.
+                    :refused? (some? why)
+                    :error    why
+                    ;; WHAT IT SENT, taken off the response itself rather than from
+                    ;; whoever built it — characters on the wire, which is the unit
+                    ;; the size gate and the payload fitter are both written in.
+                    ;; The ring had a call's edges and its refusal, so it could say
+                    ;; what slopp SPENT and never what it COST, and reads are 52%
+                    ;; of the bill.
+                    :chars    (count (get-in r [:content 0 :text] ""))}
+                   @facts)]
+        ;; TWO rings, one entry — shared structurally, so the second costs a
+        ;; pointer. They are separate because their LIFECYCLES are: the timing
+        ;; ring is cleared at every `turn-begin!` so an ask measures only its
+        ;; own clock, and the read rows must not inherit that. Turns rotate
+        ;; only when a user prompt arrived and a write followed, so a
+        ;; read-only ask and an event-driven session close none — which are
+        ;; the spans where reads dominate. `ops/flush-reads!` empties the
+        ;; second on its own schedule.
+        (swap! session #(-> %
+                            (update :slopp.read.telemetry/calls (fnil conj []) entry)
+                            (update :slopp.read.telemetry/reads (fnil conj []) entry)))
+        ;; and ONE ROW beside the journal, the census the rings cannot be:
+        ;; the timing ring keeps a turn's top five and the read ring flushes
+        ;; on its own schedule, so neither can answer "every call, and what
+        ;; each sent". A measurement, never a delta — a read must not be able
+        ;; to move the head a verdict is racing for.
+        (ops/record-tool-call! session (assoc entry :agent (:agent params))))
+      {:jsonrpc "2.0" :id id :result r})
+    "ping" {:jsonrpc "2.0" :id id :result {}}
+    (when id
+      {:jsonrpc "2.0" :id id
+       :error {:code -32601 :message (str "method not found: " method)}})))
+
+(defn serve!
+  "Newline-delimited-JSON stdio loop over `in-reader`/`out-writer`."
+  [session in-reader out-writer]
+  (doseq [line (line-seq in-reader) :when (not (str/blank? line))]
+    (when-let [resp (handle! session (json/parse-string line true))]
+      (.write out-writer (str (json/generate-string resp) "\n"))
+      (.flush out-writer))
+    ;; a live reload may have changed the tool registry — tell the client
+    ;; to re-list (ordered: same writer, right after the response)
+    (when-let [note (tools-note! session)]
+      (.write out-writer (str (json/generate-string note) "\n"))
+      (.flush out-writer)))
+  nil)
+
+^:unsafe
+(defn -main
+  "Start the stdio MCP server. An optional `dir` argument makes the session
+  durable (store at <dir>/.slopp/store.db); without it the session is
+  ephemeral. Serving a git checkout that carries a slopp BRANCH with an
+  absent/empty store AUTO-IMPORTS it first (zero-ceremony onboarding).
+
+  Serving a dir that is NOT slopp-managed writes NOTHING there: the server
+  is launched in whatever directory the editor has open, so adoption has to
+  be something you do, not something that happens to you. The store is
+  created by the first real write (`slopp.ops.engine/ensure-db!`).
+
+  Git is push/pull to a remote slopp does not own: `git_push` publishes the
+  projection, `git_clone` rebuilds a fileless store from one (slopp.sync).
+  Serving the store to a git client AS a remote was removed — it forced
+  exact-project handling for less than it cost."
+  [& [dir]]
+  (when dir
+    (when-let [r (sync/maybe-auto-import! dir)]
+      (binding [*out* *err*]
+        (println (str "slopp: auto-imported " (:namespaces r)
+                      " namespaces from the repo's slopp branch")))))
+  (let [session (external/open! (cond-> (merge {;; boot the image on a background thread
+                                      ;; so the MCP handshake completes as soon
+                                      ;; as the store loads — a slow/contended
+                                      ;; boot no longer races the connect timeout
+                                      :slopp.ops/async-image? true
+                                      ;; WHO is driving this server. Read here
+                                      ;; and nowhere deeper: a child JVM
+                                      ;; inherits the variable, so a session
+                                      ;; opened inside an image or a test
+                                      ;; runner would otherwise claim this
+                                      ;; conversation's thread. This process is
+                                      ;; the only one a harness actually
+                                      ;; spawned. nil when no known harness set
+                                      ;; one, and open! generates an id as before.
+                                      :slopp.ops/agent-id
+                                      (harness/conversation-id
+                                       #(System/getenv %))}
+                                     ;; how many IDLE image JVMs this server
+                                     ;; holds. The warm spare was hardcoded on
+                                     ;; here: the right default for a session
+                                     ;; alone on a box, the wrong one for eight
+                                     ;; of them, because it buys latency with a
+                                     ;; whole idle JVM per server. LAST, so the
+                                     ;; host's answer wins over the defaults.
+                                     (host-image-options #(System/getenv %)))
+                             dir (assoc :slopp.ops/dir dir)))]
+    (swap! session assoc :require-turns? true)   ; real servers enforce turns
+    ;; the reviewer UI comes up with the server, always. It serves the LIVE
+    ;; session and therefore dies with it — that is the trade that keeps its
+    ;; warranty numbers honest — so nothing ever brought it back, and a human
+    ;; who wanted it had to know to ask again after every restart.
+    ;; start-ui! never throws: MCP must serve even when the UI cannot.
+    (start-ui! session)
+    ;; the app server comes up beside the UI, for a store that asked for it.
+    ;; BACKGROUNDED: it boots a whole second JVM and loads the app's web
+    ;; surface into it, and nothing about that should sit between the editor
+    ;; and a completed MCP handshake — the same reason the oracle's own boot
+    ;; is async here.
+    (future (start-app! session))
+    (try
+      (serve! session (io/reader System/in) (io/writer System/out))
+      (finally
+        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
+        ;; belongs to the MCP session and must not outlive it — but boot
+        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
+        ;; working. Saying nothing is what made this expensive: a manual launch
+        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
+        ;; immediately, so the last thing a launcher reads is a url that is
+        ;; already dead, with a live process behind it. Three agents spent an
+        ;; evening diagnosing that, twice concluding the code was broken and
+        ;; once that a jar had not shipped.
+        ;;
+        ;; stderr, because stdout is the JSON-RPC channel.
+        (.println System/err
+                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
+                               " UI listener and exiting. The UI belongs to the"
+                               " MCP session and does not outlive it, so a url"
+                               " printed above has stopped working. To keep one"
+                               " alive, run slopp from an editor (which holds"
+                               " stdin open) rather than launching it manually."))
+        ;; deregister BEFORE the listener goes: the hub should learn we are
+        ;; leaving from us, not by ageing us out thirty seconds later.
+        (hub/stop! (:hub-heartbeat @session))
+        (server/stop!)
+        ;; the app image is a CHILD JVM. Its watchdog would reap it when we
+        ;; die anyway, but leaving that to a watchdog means the port stays
+        ;; bound for as long as the reap takes — and the next server to start
+        ;; here wants exactly that port.
+        (live/stop! (:app-server @session))
+        (ops/close! session)
+        ;; and GO. `(future (start-app! session))` above runs on Clojure's
+        ;; send-off pool, whose workers are NON-DAEMON with a 60-second
+        ;; keepalive — so `main` returns, `DestroyJavaVM` starts, and an IDLE
+        ;; pool thread holds the JVM open for a further minute with every
+        ;; listener already torn down. Caught by thread dump: DestroyJavaVM
+        ;; RUNNABLE, held by `clojure-agent-send-off-pool-0` parked in
+        ;; SynchronousQueue.poll — same stack and same cpu time twelve seconds
+        ;; apart, waiting for a task that was never coming.
+        ;;
+        ;; A minute of a process that has announced a url, withdrawn it, and
+        ;; still answers `ps` is exactly the state nobody could interpret.
+        (shutdown-agents)))))
+
+(defn call!
+  "One-shot tool invocation against the store at `dir` — the --call CLI's
+  engine and the fallback when no MCP connection exists. Opens a durable
+  session, dispatches ONE tool call, closes. Returns the wire result map
+  ({:content [{:text …}]}; :isError true on tool errors), same as the
+  server would send. A read-only tool opens a READ-ONLY session: it answers
+  from the branch and adopts no thread (s16 probes: every one-shot read
+  minted a line it would never write to).
+
+  Writes stay TURN-GATED here, deliberately: provenance is not optional just
+  because the caller is a script. Turns are DURABLE across one-shot processes,
+  so the scripted shape is `--call turn_begin` once, then the writes, then
+  `--call turn_end` — not a turn per call. Reads need nothing.
+
+  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
+  everything here flows through `text!`, whose boundary-leak guard refuses a
+  file:line coordinate, so emitting frames replaced the real diagnostic with a
+  guard exception."
+  [dir tool arguments]
+  (let [session (external/open!
+                 (cond-> {:slopp.ops/dir (str dir)}
+                   ;; a one-shot names its agent in the call, and that name is
+                   ;; the SESSION's identity, not merely the delta's. Turns are
+                   ;; durable across processes and so is the LINE one was opened
+                   ;; on — a fresh identity per process would open a fresh
+                   ;; thread per call, and the turn would be unfindable by the
+                   ;; very write it was opened for.
+                   (:agent arguments)
+                   (assoc :slopp.ops/agent-id (str (:agent arguments)))
+                   ;; a read-only one-shot answers from the branch and mints
+                   ;; no thread — decided before open! boots, which is when
+                   ;; the session line is first resolved
+                   (or (contains? tools/read-only-tools (str tool))
+                       (contains? tools/read-only-tools (str (:op arguments))))
+                   (assoc :slopp.ops/read-only? true)))]
+    (swap! session assoc :require-turns? true)
+    (try
+      (let [r (try (call-tool! session {:name tool :arguments arguments})
+                   (catch Exception e
+                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                           msgs  (into [] (comp (take-while some?)
+                                                (map #(str (.getSimpleName (class %))
+                                                           ": " (ex-message %))))
+                                       chain)]
+                       (assoc (text! (str "error: " (str/join " <- " msgs)))
+                              :isError true))))]
+        ;; ...and say what this process could not see. See
+        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+        ;; somebody's thread holds un-landed work that is a different store from
+        ;; the one an MCP session answers from.
+        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+          (update r :content (fnil conj []) {:type "text" :text note})
+          r))
+      (finally (ops/close! session)))))
+
+^:unsafe
+(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
+  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
+  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
+  tool error. args is JSON, EDN, or @file (parse-call-args)."
+  [& [dir tool args-str]]
+  (when (str/blank? tool)
+    (binding [*out* *err*]
+      (println "usage: --call <tool> [<json/edn args or @file>]"))
+    (System/exit 2))
+  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
+    (println (clojure.string/join "\n" (map :text (:content r))))
+    (flush)
+    (System/exit (if (:isError r) 1 0))))
+
+^:unsafe (defn start-ui!
+  "Bring this project's UI listener up beside the MCP server and start its
+  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
+  `{:error …}` — and NEVER throws.
+
+  The listener still serves the LIVE session and still dies with the server.
+  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
+  not blank — it is STALE, showing the warranty as of the last verified run
+  rather than the one being changed, and it would boot a second image to show
+  it. That accuracy is what forces the whole hub design (D-hub): a hub
+  cannot answer for a store, so every project answers for itself and the hub
+  proxies.
+
+  What changed is the ADDRESS. The port is derived from the store dir instead
+  of defaulting to a fixed 7359, so projects on one machine never collide, and
+  a taken port falls back to an ephemeral one — the registered url carries
+  whatever was actually bound. Nobody needs to know this number; the address a
+  human remembers is the hub's.
+
+  The stance every optional listener here takes: the UI is OPTIONAL and MCP
+  is not. A busy port, a missing hub, anything at all — it
+  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
+  carries on. Nothing about a browser page should be able to stop the thing the
+  editor is talking to."
+  ([session] (start-ui! session nil))
+  ([session explicit-port]
+   (let [dir  (:dir @session)
+         ;; the CLI door's per-boot secret: written into ui-port below,
+         ;; required by /api/call — loopback alone is not authorization
+         token (str (java.util.UUID/randomUUID))
+         want (server/preferred-port dir explicit-port)
+         try! (fn [p] (try (server/serve! session p
+                                          :routes [{:method :post :path "/api/call"
+                                                    :auth :public :handler #'http-call!}])
+                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
+         r0   (try! want)
+         ;; a derived port is a PREFERENCE: something else already holding it
+         ;; must not cost this project its UI, so fall back to whatever is free.
+         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
+     ;; ON THE SESSION, so a reader can find it. The stderr
+     ;; banner below goes to the MCP server's log, which most clients never
+     ;; show a human — so autostart without this is a feature nobody can find.
+     ;; session_brief surfaces it, which is where an agent looks and how the
+     ;; human gets told.
+     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token
+                          ;; the bundle's argument-teaching block, handed DOWN
+                          ;; as session data (no api->mcp edge — the route-row
+                          ;; trick); bundle-read! serves it under ?diet=1
+                          :op-cards tools/op-cards))
+     ;; …and on DISK, for a process that is not this one: the prompt hook
+     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
+     ;; from a file instead of asking the hub. pid + started let it tell a
+     ;; live listener from a dead session's leftover. Best-effort, silent —
+     ;; nothing about the optional UI may cost the MCP loop anything.
+     (when (:url r)
+       (try (let [ph (java.lang.ProcessHandle/current)
+                  pf (str (:dir @session) "/.slopp/ui-port")
+                  ;; NEVER clobber a LIVE listener's file: a stray serve-mode
+                  ;; launch in this dir (a --help that fell through, measured
+                  ;; s13) overwrote the real address with its own transient
+                  ;; pid and poisoned every routed call that followed. The
+                  ;; file belongs to whoever is alive; a dead pid is stale.
+                  live? (try (let [txt (slurp pf)
+                                   [_ p] (re-find #"\"pid\":(\d+)" txt)
+                                   pid (some-> p parse-long)]
+                               (and pid (not= pid (.pid ph))
+                                    (some-> (java.lang.ProcessHandle/of pid)
+                                            (.orElse nil) (.isAlive))))
+                             (catch Throwable _ false))]
+              (when-not live?
+                (spit pf
+                      (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
+                              (long (:port r)) (:url r) (.pid ph)
+                              (System/currentTimeMillis) token))))
+            (catch Throwable _ nil)))
+     (.println System/err
+               ^String (if (:url r)
+                         (str "slopp UI: " (:url r))
+                         (str "slopp UI unavailable: " (:error r))))
+     (when (:url r) (start-heartbeat! session dir (:url r)))
+     r)))
+
+(defn- call-tool!
+  "The wire entry. A FAMILY name (`tools/families`) with `op` resolves to the
+  op's registry name and dispatches through `call-op!`; a single-op family
+  needs no op; an op called by its own name dispatches directly (the
+  `--call` door, the hooks). An op that EXISTS but was asked of the wrong
+  family (`history {op query_search}`) dispatches too — the agent named a
+  real op, and which family it files under is our taxonomy, not a rule. An
+  unknown op is refused with the family's op list, so the refusal is the
+  index."
+  [session {:keys [name arguments] :as req}]
+  (if-let [fam (some #(when (= name (:name %)) %) tools/families)]
+    (let [ops (:ops fam)
+          op  (some-> (:op arguments) str)]
+      (cond
+        (= 1 (count ops))
+        (call-op! session (assoc req :name (first ops) :arguments (dissoc arguments :op)))
+
+        (nil? op)
+        (throw (ex-info (str name " needs :op — ops: " (str/join " " ops))
+                        {:tool name :ops ops}))
+
+        (and (not (some #{op} ops))
+             (not (tools/accepted-arg-keys op))
+             (not (#{"explore" "check" "change" "report"} op)))
+        (throw (ex-info (str "unknown op " op " for " name " — ops: " (str/join " " ops))
+                        {:tool name :op op :ops ops}))
+
+        :else
+        (call-op! session (assoc req :name op :arguments (dissoc arguments :op)))))
+    (call-op! session req)))
+
+^:unsafe (defn- http-call!
+  "`POST /api/call` — the CLI door onto the RUNNING server. Body:
+  `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<from .slopp/ui-port>\"}`.
+  Invokes [[call-op!]] on the live session — the same dispatch, turn gating,
+  ledger and anticipation MCP calls get — and answers
+  `{\"isError\" bool \"text\" \"…\"}` with the joined content text, the shape
+  `--call` already prints. A thrown refusal crosses as isError text, never a
+  stack trace: the caller is a terminal.
+
+  The token is a per-boot secret written into `.slopp/ui-port` beside the
+  address (the file is already the trust anchor the prompt hook reads).
+  Loopback binding alone must not grant every local process write access to
+  the store — 403 without it, and nothing runs. Why this exists (s12c,
+  measured): the one-shot `--call` path boots a JVM and loads the whole
+  store in silence; an agent reached for it unprompted, waited on the cold
+  path for minutes, and spent eight turns babysitting the process — while
+  this process held the warm image the whole time.
+
+  FOR ANYONE PROXYING A SLOPP LISTENER: this write door shares the listener
+  with the read endpoints — it differs by path and method, not by port. A
+  reverse proxy MUST NOT forward POST /api/call unless it means to hand the
+  store's editing surface to everything that can reach the proxy
+  (slopp-ui's hub verified its GET-only stance at the wire, 2026-09-01)."
+  [req]
+  (let [session (:session (:http/deps req))
+        body    (:body req)
+        b       (cond
+                  (map? body)    body
+                  (nil? body)    {}
+                  (string? body) (try (json/parse-string body true)
+                                      (catch Exception _ {}))
+                  :else          (try (json/parse-string (slurp body) true)
+                                      (catch Exception _ {})))
+        raw     (fn [status m]
+                  {:status status :http/raw true
+                   :headers {"Content-Type" "application/json"}
+                   :body (json/generate-string m)})
+        want    (some-> session deref :call-token)]
+    (cond
+      (nil? session)
+      (raw 503 {:error "no live session behind this listener"})
+
+      (or (nil? want) (not= (str (:token b)) (str want)))
+      (raw 403 {:error "bad or missing token — read it from .slopp/ui-port"})
+
+      (not (string? (:tool b)))
+      (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
+
+      :else
+      (let [args (cond-> (or (:arguments b) {})
+                   (:agent b) (assoc :agent (:agent b)))
+            ;; the SAME bindings the MCP wire gives every call: the hint
+            ;; machinery (the thread reminder that would have saved the
+            ;; stranded s13 cell), the spool for trimmed payloads, the
+            ;; response-facts sink. Without these every routed result was
+            ;; hint-blind — for scripts and humans, not only eval cells.
+            r    (binding [*hint* (or (smells/track-hint! session (:tool b) args)
+                                      (delay (thread-hint! session (:tool b))))
+                           *spool-session* session
+                           *response-facts* (atom {})]
+                   (try (call-op! session {:name (:tool b) :arguments args})
+                        (catch Exception e
+                          ;; the skill teaches FAMILIES (read {op …}), the CLI
+                          ;; preamble teaches bare ops, and real cells use both
+                          ;; — resolve the family spelling before refusing
+                          (or (when (re-find #"unknown tool" (str (ex-message e)))
+                                (try (call-tool! session {:name (:tool b)
+                                                          :arguments args})
+                                     (catch Exception e2
+                                       {:isError true
+                                        :content [{:type "text"
+                                                   :text (or (ex-message e2) (str e2))}]})))
+                              {:isError true
+                               :content [{:type "text"
+                                          :text (or (ex-message e) (str e))}]}))))]
+        (raw 200 {:isError (boolean (:isError r))
+                  :text (apply str (map :text (:content r)))})))))
+
+(defn- call-op-1! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),
   ;; but the image may still be warming on a background thread. Oracle and
   ;; write tools wait for it here; store-value reads serve immediately.
@@ -1874,7 +2433,7 @@
                     {:tool name :missing (vec missing)})))
   (when-not (contains? tools/image-free-tools name)
     (ops/await-image! session))
-  (ops/sync-with-journal! session)      ; m5b: absorb other servers' commits      ; m5b: absorb other servers' commits
+  (ops/sync-with-journal! session)      ; m5b: absorb other servers' commits
   (absorb-pending-intent! session)
   ;; A NEW ASK IS A NEW TURN. The gate used to open one only when none was
   ;; open, and nothing ever closed one, so a single turn spanned an entire
@@ -1917,8 +2476,8 @@
           ;; the turn opens itself (zero-ceremony turns)
           (do (swap! session dissoc :pending-intent)
               (ops/turn-begin! session :agent ag :intent intent))
-          ;; NAME THE CAUSE. "no open turn" alone reads as "the turn did not
-          ;; take", which sends you to look at turns; the usual real cause is
+          ;; NAME THE CAUSE. \"no open turn\" alone reads as \"the turn did not
+          ;; take\", which sends you to look at turns; the usual real cause is
           ;; that no ask ever arrived FOR THIS STORE. The plugin's prompt hook
           ;; writes the pending intent into the store at the session's CWD, so a
           ;; session driving a SECOND store (a cross-wired .mcp.json — allowed,
@@ -1963,7 +2522,7 @@
                                 {}))))
         ;; source args are passed raw (not through `sym`), so a misnamed key
         ;; (`new_source` for `source`) silently became nil and fell through to a
-        ;; confusing "got 0 forms" parse error. `src` validates a required source
+        ;; confusing \"got 0 forms\" parse error. `src` validates a required source
         ;; the way `sym` validates a symbol — and names the alias it caught.
         src (fn [k]
               (let [v (get a k)]
@@ -1992,11 +2551,13 @@
                                                 :platform (:platform a)
                                                 :prompt (:prompt a)
                                                 :agent (:agent a)))
-      "ns_add_require" (text! (-> (ops/add-require! session (sym :ns) (:require a)
-                                                      :prompt (:prompt a)
-                                                      :agent (:agent a))
-                                    (select-keys tools/wire-keys)
-                                    (summarize (:verbose a))))
+      "ns_add_require" (text! (let [r (ops/add-require! session (sym :ns) (:require a)
+                                                     :prompt (:prompt a)
+                                                     :agent (:agent a))]
+                                 ;; :already is the whole answer when the clause was
+                                 ;; there — it must survive the wire-key cut
+                                 (cond-> (-> r (select-keys tools/wire-keys) (summarize (:verbose a)))
+                                   (:already r) (assoc :already true))))
       "query_project" (text! (told! session name a
                                         (query/query-project session :since (:since a)
                                                           :detail (:detail a))))
@@ -2009,13 +2570,15 @@
       ;; message, so the batch lives INSIDE the call. Each entry recurses
       ;; through call-op! — validation, told!, the form ledger and the
       ;; per-entry size gate all apply — and a write op refuses before
-      ;; anything runs.
+      ;; anything runs. `test_run` is allowed in: it writes no code, and
+      ;; agents bundle it with their reads (s17 census).
       (let [ops (mapv deep-kw (:ops a))
             bad (some (fn [o]
                         (let [nm (some-> (:op o) clojure.core/name)]
                           (cond
                             (nil? nm) {:error "every explore entry needs :op — a read op name"}
-                            (not (contains? tools/read-only-tools nm))
+                            (and (not (contains? tools/read-only-tools nm))
+                                 (not= "test_run" nm))
                             {:error (str nm " is a write — explore is READ questions only;"
                                          " writes have their own grain (change)")}
                             :else nil)))
@@ -2023,7 +2586,7 @@
         (cond
           (empty? ops)         (text! {:error "explore needs ops — [{op …args} …]"})
           bad                  (text! bad)
-          (< 6 (count ops))    (text! {:error (str (count ops) " entries — explore is at most 6;"
+          (< 12 (count ops))   (text! {:error (str (count ops) " entries — explore is at most 12;"
                                                    " past that the answer outgrows the reader")})
           :else
           (text! {:results (mapv (fn [o]
@@ -2106,8 +2669,8 @@
                                                                      :detail (:detail a)
                                                                      :direction (if (= "dependencies" (:direction a))
                                                                                   :dependencies :dependents))
-                                              ;; the journal's own answer to "what usually
-                                              ;; breaks when this changes" — a var's blast
+                                              ;; the journal's own answer to \"what usually
+                                              ;; breaks when this changes\" — a var's blast
                                               ;; radius is callers AND the tests that went
                                               ;; red beside it. Absent when there is no
                                               ;; evidence: an empty list would read as safe.
@@ -2116,8 +2679,16 @@
                                           (cond-> r reds (assoc :red-after reds)))))
       "session_brief" ;; git alignment is a QUESTION (query_git), not orientation: it rode on
                        ;; every brief as ~500 chars an agent never acted on
-                       (text! (told! session name a (ops/session-brief session))
-                              :budgeted? true)
+                       (if (:db @session)
+                         (text! (told! session name a (ops/session-brief session))
+                                :budgeted? true)
+                         ;; an unadopted directory has no journal to brief from —
+                         ;; say so (it used to throw from a nil connection)
+                         (text! {:error (str "no slopp store at " (:dir @session)
+                                             " — serving here starts empty: the first write"
+                                             " creates .slopp/store.db, or import a slopp"
+                                             " branch first (slopp --main slopp.sync/-main"
+                                             " import .)")}))
       "review_scan" (text! (told! session name a
                                             (review/review-scan session
                                                              :ns (:ns a)
@@ -2348,7 +2919,7 @@
                                             :agent (:agent a))
                    ;; the app server catches up to the store at DONE grain. A
                    ;; red done still refreshes: done REPORTS rather than
-                   ;; refuses and a red one STANDS, so "finished" and "green"
+                   ;; refuses and a red one STANDS, so \"finished\" and \"green\"
                    ;; are different questions, and looking at the app is part
                    ;; of finding out you were not finished. refresh-app! never
                    ;; throws.
@@ -2364,10 +2935,10 @@
                    ;; It costs only a store that HAS a managed server —
                    ;; refresh-app! returns nil immediately for anything slopp
                    ;; does not run, which is most stores, and that is the same
-                   ;; test as "could this line ever be news". The deref bound
+                   ;; test as \"could this line ever be news\". The deref bound
                    ;; is a backstop, not a budget — and on expiry it now says
-                   ;; SO, rather than nil. nil was already the answer for "no
-                   ;; managed server" and for "re-served cleanly", so an
+                   ;; SO, rather than nil. nil was already the answer for \"no
+                   ;; managed server\" and for \"re-served cleanly\", so an
                    ;; expiring wait joined two silences that are both fine and
                    ;; became unreadable: a consumer served twenty minutes of
                    ;; old code with every surface clean. The future still lands
@@ -2451,7 +3022,7 @@
                                                  :parallel (some-> (:parallel a) str parse-long)
                                                  :only (some->> (:only a) (mapv symbol)))
                          ;; surgical spot-checks name a target; bare test_run is
-                         ;; almost always the redundant "confirm everything" the
+                         ;; almost always the redundant \"confirm everything\" the
                          ;; done-point already does — make ALL explicit, and teach
                          (or (:ns a) (seq (:only a)))
                          (external/spot-run! session
@@ -2472,14 +3043,13 @@
                                          " run tests before done — done runs the affected"
                                          " tests itself. Whole suite in-image: {all true};"
                                          " external merge gate: {external true}.")}))
-      
       "ns_delete" (text! (ops/delete-ns! session (sym :ns)
                                               :prompt (:prompt a)
                                               :agent (:agent a)))
       "ns_rename" (text! (ops/ns-rename! session (:from a) (:to a)
                                                 :prompt (:prompt a)
                                                 :agent (:agent a)))
-"module_extract" (text! (ops/module-extract!
+      "module_extract" (text! (ops/module-extract!
                                session
                                (mapv symbol (:namespaces a))
                                (symbol (str (:to a)))
@@ -2513,7 +3083,7 @@
                                                            :agent (:agent a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
-"ns_realias" (text! (-> (ops/realias! session (sym :ns)
+      "ns_realias" (text! (-> (ops/realias! session (sym :ns)
                                              (sym :from) (sym :to)
                                              :prompt (:prompt a)
                                              :agent (:agent a))
@@ -2522,477 +3092,3 @@
       (throw (ex-info (str "unknown tool: " name ". Available: "
                            (str/join ", " (map :name tools/registry)))
                       {}))))))
-
-(defn- call-tool!
-  "The wire entry. A FAMILY name (`tools/families`) with `op` resolves to the
-  op's registry name and dispatches through `call-op!`; a single-op family
-  needs no op; an op called by its own name dispatches directly (the
-  `--call` door, the hooks). An unknown or missing op is refused with the
-  family's op list, so the refusal is the index."
-  [session {:keys [name arguments] :as req}]
-  (if-let [fam (some #(when (= name (:name %)) %) tools/families)]
-    (let [ops (:ops fam)
-          op  (some-> (:op arguments) str)]
-      (cond
-        (= 1 (count ops))
-        (call-op! session (assoc req :name (first ops) :arguments (dissoc arguments :op)))
-
-        (nil? op)
-        (throw (ex-info (str name " needs :op — ops: " (str/join " " ops))
-                        {:tool name :ops ops}))
-
-        (not (some #{op} ops))
-        (throw (ex-info (str "unknown op " op " for " name " — ops: " (str/join " " ops))
-                        {:tool name :op op :ops ops}))
-
-        :else
-        (call-op! session (assoc req :name op :arguments (dissoc arguments :op)))))
-    (call-op! session req)))
-
-(defn call!
-  "One-shot tool invocation against the store at `dir` — the --call CLI's
-  engine and the fallback when no MCP connection exists. Opens a durable
-  session, dispatches ONE tool call, closes. Returns the wire result map
-  ({:content [{:text …}]}; :isError true on tool errors), same as the
-  server would send.
-
-  Writes stay TURN-GATED here, deliberately: provenance is not optional just
-  because the caller is a script. Turns are DURABLE across one-shot processes,
-  so the scripted shape is `--call turn_begin` once, then the writes, then
-  `--call turn_end` — not a turn per call. Reads need nothing.
-
-  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
-  everything here flows through `text!`, whose boundary-leak guard refuses a
-  file:line coordinate, so emitting frames replaced the real diagnostic with a
-  guard exception."
-  [dir tool arguments]
-  (let [session (external/open!
-                 (cond-> {:slopp.ops/dir (str dir)}
-                   ;; a one-shot names its agent in the call, and that name is
-                   ;; the SESSION's identity, not merely the delta's. Turns are
-                   ;; durable across processes and so is the LINE one was opened
-                   ;; on — a fresh identity per process would open a fresh
-                   ;; thread per call, and the turn would be unfindable by the
-                   ;; very write it was opened for.
-                   (:agent arguments)
-                   (assoc :slopp.ops/agent-id (str (:agent arguments)))))]
-    (swap! session assoc :require-turns? true)
-    (try
-      (let [r (try (call-tool! session {:name tool :arguments arguments})
-                   (catch Exception e
-                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                           msgs  (into [] (comp (take-while some?)
-                                                (map #(str (.getSimpleName (class %))
-                                                           ": " (ex-message %))))
-                                       chain)]
-                       (assoc (text! (str "error: " (str/join " <- " msgs)))
-                              :isError true))))]
-        ;; ...and say what this process could not see. See
-        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-        ;; somebody's thread holds un-landed work that is a different store from
-        ;; the one an MCP session answers from.
-        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-          (update r :content (fnil conj []) {:type "text" :text note})
-          r))
-      (finally (ops/close! session)))))
-
-^:unsafe
-(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
-  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
-  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
-  tool error. args is JSON, EDN, or @file (parse-call-args)."
-  [& [dir tool args-str]]
-  (when (str/blank? tool)
-    (binding [*out* *err*]
-      (println "usage: --call <tool> [<json/edn args or @file>]"))
-    (System/exit 2))
-  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
-    (println (clojure.string/join "\n" (map :text (:content r))))
-    (flush)
-    (System/exit (if (:isError r) 1 0))))
-
-^:unsafe (defn- http-call!
-  "`POST /api/call` — the CLI door onto the RUNNING server. Body:
-  `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<from .slopp/ui-port>\"}`.
-  Invokes [[call-op!]] on the live session — the same dispatch, turn gating,
-  ledger and anticipation MCP calls get — and answers
-  `{\"isError\" bool \"text\" \"…\"}` with the joined content text, the shape
-  `--call` already prints. A thrown refusal crosses as isError text, never a
-  stack trace: the caller is a terminal.
-
-  The token is a per-boot secret written into `.slopp/ui-port` beside the
-  address (the file is already the trust anchor the prompt hook reads).
-  Loopback binding alone must not grant every local process write access to
-  the store — 403 without it, and nothing runs. Why this exists (s12c,
-  measured): the one-shot `--call` path boots a JVM and loads the whole
-  store in silence; an agent reached for it unprompted, waited on the cold
-  path for minutes, and spent eight turns babysitting the process — while
-  this process held the warm image the whole time.
-
-  FOR ANYONE PROXYING A SLOPP LISTENER: this write door shares the listener
-  with the read endpoints — it differs by path and method, not by port. A
-  reverse proxy MUST NOT forward POST /api/call unless it means to hand the
-  store's editing surface to everything that can reach the proxy
-  (slopp-ui's hub verified its GET-only stance at the wire, 2026-09-01)."
-  [req]
-  (let [session (:session (:http/deps req))
-        body    (:body req)
-        b       (cond
-                  (map? body)    body
-                  (nil? body)    {}
-                  (string? body) (try (json/parse-string body true)
-                                      (catch Exception _ {}))
-                  :else          (try (json/parse-string (slurp body) true)
-                                      (catch Exception _ {})))
-        raw     (fn [status m]
-                  {:status status :http/raw true
-                   :headers {"Content-Type" "application/json"}
-                   :body (json/generate-string m)})
-        want    (some-> session deref :call-token)]
-    (cond
-      (nil? session)
-      (raw 503 {:error "no live session behind this listener"})
-
-      (or (nil? want) (not= (str (:token b)) (str want)))
-      (raw 403 {:error "bad or missing token — read it from .slopp/ui-port"})
-
-      (not (string? (:tool b)))
-      (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
-
-      :else
-      (let [args (cond-> (or (:arguments b) {})
-                   (:agent b) (assoc :agent (:agent b)))
-            ;; the SAME bindings the MCP wire gives every call: the hint
-            ;; machinery (the thread reminder that would have saved the
-            ;; stranded s13 cell), the spool for trimmed payloads, the
-            ;; response-facts sink. Without these every routed result was
-            ;; hint-blind — for scripts and humans, not only eval cells.
-            r    (binding [*hint* (or (smells/track-hint! session (:tool b) args)
-                                      (delay (thread-hint! session (:tool b))))
-                           *spool-session* session
-                           *response-facts* (atom {})]
-                   (try (call-op! session {:name (:tool b) :arguments args})
-                        (catch Exception e
-                          ;; the skill teaches FAMILIES (read {op …}), the CLI
-                          ;; preamble teaches bare ops, and real cells use both
-                          ;; — resolve the family spelling before refusing
-                          (or (when (re-find #"unknown tool" (str (ex-message e)))
-                                (try (call-tool! session {:name (:tool b)
-                                                          :arguments args})
-                                     (catch Exception e2
-                                       {:isError true
-                                        :content [{:type "text"
-                                                   :text (or (ex-message e2) (str e2))}]})))
-                              {:isError true
-                               :content [{:type "text"
-                                          :text (or (ex-message e) (str e))}]}))))]
-        (raw 200 {:isError (boolean (:isError r))
-                  :text (apply str (map :text (:content r)))})))))
-
-^:unsafe (defn start-ui!
-  "Bring this project's UI listener up beside the MCP server and start its
-  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
-  `{:error …}` — and NEVER throws.
-
-  The listener still serves the LIVE session and still dies with the server.
-  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
-  not blank — it is STALE, showing the warranty as of the last verified run
-  rather than the one being changed, and it would boot a second image to show
-  it. That accuracy is what forces the whole hub design (D-hub): a hub
-  cannot answer for a store, so every project answers for itself and the hub
-  proxies.
-
-  What changed is the ADDRESS. The port is derived from the store dir instead
-  of defaulting to a fixed 7359, so projects on one machine never collide, and
-  a taken port falls back to an ephemeral one — the registered url carries
-  whatever was actually bound. Nobody needs to know this number; the address a
-  human remembers is the hub's.
-
-  The stance every optional listener here takes: the UI is OPTIONAL and MCP
-  is not. A busy port, a missing hub, anything at all — it
-  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
-  carries on. Nothing about a browser page should be able to stop the thing the
-  editor is talking to."
-  ([session] (start-ui! session nil))
-  ([session explicit-port]
-   (let [dir  (:dir @session)
-         ;; the CLI door's per-boot secret: written into ui-port below,
-         ;; required by /api/call — loopback alone is not authorization
-         token (str (java.util.UUID/randomUUID))
-         want (server/preferred-port dir explicit-port)
-         try! (fn [p] (try (server/serve! session p
-                                          :routes [{:method :post :path "/api/call"
-                                                    :auth :public :handler #'http-call!}])
-                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
-         r0   (try! want)
-         ;; a derived port is a PREFERENCE: something else already holding it
-         ;; must not cost this project its UI, so fall back to whatever is free.
-         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
-     ;; ON THE SESSION, so a reader can find it. The stderr
-     ;; banner below goes to the MCP server's log, which most clients never
-     ;; show a human — so autostart without this is a feature nobody can find.
-     ;; session_brief surfaces it, which is where an agent looks and how the
-     ;; human gets told.
-     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token
-                          ;; the bundle's argument-teaching block, handed DOWN
-                          ;; as session data (no api->mcp edge — the route-row
-                          ;; trick); bundle-read! serves it under ?diet=1
-                          :op-cards tools/op-cards))
-     ;; …and on DISK, for a process that is not this one: the prompt hook
-     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
-     ;; from a file instead of asking the hub. pid + started let it tell a
-     ;; live listener from a dead session's leftover. Best-effort, silent —
-     ;; nothing about the optional UI may cost the MCP loop anything.
-     (when (:url r)
-       (try (let [ph (java.lang.ProcessHandle/current)
-                  pf (str (:dir @session) "/.slopp/ui-port")
-                  ;; NEVER clobber a LIVE listener's file: a stray serve-mode
-                  ;; launch in this dir (a --help that fell through, measured
-                  ;; s13) overwrote the real address with its own transient
-                  ;; pid and poisoned every routed call that followed. The
-                  ;; file belongs to whoever is alive; a dead pid is stale.
-                  live? (try (let [txt (slurp pf)
-                                   [_ p] (re-find #"\"pid\":(\d+)" txt)
-                                   pid (some-> p parse-long)]
-                               (and pid (not= pid (.pid ph))
-                                    (some-> (java.lang.ProcessHandle/of pid)
-                                            (.orElse nil) (.isAlive))))
-                             (catch Throwable _ false))]
-              (when-not live?
-                (spit pf
-                      (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
-                              (long (:port r)) (:url r) (.pid ph)
-                              (System/currentTimeMillis) token))))
-            (catch Throwable _ nil)))
-     (.println System/err
-               ^String (if (:url r)
-                         (str "slopp UI: " (:url r))
-                         (str "slopp UI unavailable: " (:error r))))
-     (when (:url r) (start-heartbeat! session dir (:url r)))
-     r)))
-
-(defn- advertised-tools
-  "What tools/list would advertise to THIS session right now — the one
-  selection both the list and the drift notifier read, so they can never
-  disagree: empty in CLI mode (the shell is the surface), else the dieted
-  fourteen (s14, adopted by measurement: prose rides the bundle as cards)."
-  [session]
-  (if (or (:cli-mode? @session) (some? (System/getenv "SLOPP_CLI")))
-    []
-    tools/dieted-tools))
-
-^:unsafe (defn handle!
-  "Dispatch a JSON-RPC request map; return a response map, or nil for
-  notifications. Tool exceptions become an `isError` result (so the agent sees
-  the message); protocol errors become JSON-RPC errors."
-  [session {:keys [id method params]}]
-  (case method
-    "initialize" {:jsonrpc "2.0" :id id
-                  :result {:protocolVersion protocol-version
-                           :capabilities {:tools {:listChanged true}}
-                           :serverInfo {:name "slopp" :version "0.1.0"}}}
-    "notifications/initialized" nil
-    "tools/list" (let [advertised (advertised-tools session)]
-                   (swap! session assoc :slopp.mcp/tools-hash (hash advertised))
-                   {:jsonrpc "2.0" :id id :result {:tools advertised}})
-    "tools/call"
-    ;; BOTH edges of the call, recorded here because this is the only layer
-    ;; that sees them. The gap between one answer and the next call is time
-    ;; slopp was NOT working — agent reasoning, non-slopp tools, the harness —
-    ;; and it had no producer at all: measured over one real session, 78% of
-    ;; the wall clock was invisible. turn_end folds the ring onto its delta.
-    (let [t0    (System/currentTimeMillis)
-          facts (atom {})
-          r     (binding [;; A smell is once-per-session and rarer, so it speaks first. The
-                          ;; thread reminder is DEFERRED rather than computed here: it
-                          ;; counts what the call is about to make un-landed, which does
-                          ;; not exist yet. `text!` forces it.
-                          *hint* (or (smells/track-hint! session
-                                                         (:name params)
-                                                         (:arguments params))
-                                     (delay (thread-hint! session (:name params))))
-                          *spool-session* session
-                          ;; what the ANSWER did — the trim, the withheld stub,
-                          ;; the id a retrieval went back for. Only the frames
-                          ;; that shape a response know those, and none of them
-                          ;; is on the path back to here.
-                          *response-facts* facts]
-                  (try (call-tool! session params)
-                       (catch Exception e
-                         (assoc (text! (str "error: " (ex-message e)))
-                                :isError true))))
-          why   (refusal-text r)]
-      ;; after the call, so a tool that reads the ring (turn_end) never sees
-      ;; its own half-finished entry
-      (let [entry (merge
-                   {:tool (:name params) :start t0 :end (System/currentTimeMillis)
-                    ;; A REFUSAL and the reason it gave, from ONE derivation — see
-                    ;; `refusal-text` for the two shapes it arrives in and for the
-                    ;; deliberate under-count. The message rides along because a
-                    ;; count with no cause can only ever support "read that tool's
-                    ;; contract", which is the guess rather than the finding;
-                    ;; `call-timing` bounds and truncates what reaches the delta.
-                    :refused? (some? why)
-                    :error    why
-                    ;; WHAT IT SENT, taken off the response itself rather than from
-                    ;; whoever built it — characters on the wire, which is the unit
-                    ;; the size gate and the payload fitter are both written in.
-                    ;; The ring had a call's edges and its refusal, so it could say
-                    ;; what slopp SPENT and never what it COST, and reads are 52%
-                    ;; of the bill.
-                    :chars    (count (get-in r [:content 0 :text] ""))}
-                   @facts)]
-        ;; TWO rings, one entry — shared structurally, so the second costs a
-        ;; pointer. They are separate because their LIFECYCLES are: the timing
-        ;; ring is cleared at every `turn-begin!` so an ask measures only its
-        ;; own clock, and the read rows must not inherit that. Turns rotate
-        ;; only when a user prompt arrived and a write followed, so a
-        ;; read-only ask and an event-driven session close none — which are
-        ;; the spans where reads dominate. `ops/flush-reads!` empties the
-        ;; second on its own schedule.
-        (swap! session #(-> %
-                            (update :slopp.read.telemetry/calls (fnil conj []) entry)
-                            (update :slopp.read.telemetry/reads (fnil conj []) entry)))
-        ;; and ONE ROW beside the journal, the census the rings cannot be:
-        ;; the timing ring keeps a turn's top five and the read ring flushes
-        ;; on its own schedule, so neither can answer "every call, and what
-        ;; each sent". A measurement, never a delta — a read must not be able
-        ;; to move the head a verdict is racing for.
-        (ops/record-tool-call! session (assoc entry :agent (:agent params))))
-      {:jsonrpc "2.0" :id id :result r})
-    "ping" {:jsonrpc "2.0" :id id :result {}}
-    (when id
-      {:jsonrpc "2.0" :id id
-       :error {:code -32601 :message (str "method not found: " method)}})))
-
-(defn- tools-note!
-  "The notifications/tools/list_changed message when the tool registry has
-  DRIFTED from what this session last advertised (a live reload renamed or
-  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
-  client could see it), else nil. Emitting updates the baseline, so each
-  drift notifies exactly once. No baseline (tools/list never served) → nil."
-  [session]
-  (let [h    (hash (advertised-tools session))
-        last (:slopp.mcp/tools-hash @session)]
-    (when (and last (not= last h))
-      (swap! session assoc :slopp.mcp/tools-hash h)
-      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
-
-(defn serve!
-  "Newline-delimited-JSON stdio loop over `in-reader`/`out-writer`."
-  [session in-reader out-writer]
-  (doseq [line (line-seq in-reader) :when (not (str/blank? line))]
-    (when-let [resp (handle! session (json/parse-string line true))]
-      (.write out-writer (str (json/generate-string resp) "\n"))
-      (.flush out-writer))
-    ;; a live reload may have changed the tool registry — tell the client
-    ;; to re-list (ordered: same writer, right after the response)
-    (when-let [note (tools-note! session)]
-      (.write out-writer (str (json/generate-string note) "\n"))
-      (.flush out-writer)))
-  nil)
-
-^:unsafe
-(defn -main
-  "Start the stdio MCP server. An optional `dir` argument makes the session
-  durable (store at <dir>/.slopp/store.db); without it the session is
-  ephemeral. Serving a git checkout that carries a slopp BRANCH with an
-  absent/empty store AUTO-IMPORTS it first (zero-ceremony onboarding).
-
-  Serving a dir that is NOT slopp-managed writes NOTHING there: the server
-  is launched in whatever directory the editor has open, so adoption has to
-  be something you do, not something that happens to you. The store is
-  created by the first real write (`slopp.ops.engine/ensure-db!`).
-
-  Git is push/pull to a remote slopp does not own: `git_push` publishes the
-  projection, `git_clone` rebuilds a fileless store from one (slopp.sync).
-  Serving the store to a git client AS a remote was removed — it forced
-  exact-project handling for less than it cost."
-  [& [dir]]
-  (when dir
-    (when-let [r (sync/maybe-auto-import! dir)]
-      (binding [*out* *err*]
-        (println (str "slopp: auto-imported " (:namespaces r)
-                      " namespaces from the repo's slopp branch")))))
-  (let [session (external/open! (cond-> (merge {;; boot the image on a background thread
-                                      ;; so the MCP handshake completes as soon
-                                      ;; as the store loads — a slow/contended
-                                      ;; boot no longer races the connect timeout
-                                      :slopp.ops/async-image? true
-                                      ;; WHO is driving this server. Read here
-                                      ;; and nowhere deeper: a child JVM
-                                      ;; inherits the variable, so a session
-                                      ;; opened inside an image or a test
-                                      ;; runner would otherwise claim this
-                                      ;; conversation's thread. This process is
-                                      ;; the only one a harness actually
-                                      ;; spawned. nil when no known harness set
-                                      ;; one, and open! generates an id as before.
-                                      :slopp.ops/agent-id
-                                      (harness/conversation-id
-                                       #(System/getenv %))}
-                                     ;; how many IDLE image JVMs this server
-                                     ;; holds. The warm spare was hardcoded on
-                                     ;; here: the right default for a session
-                                     ;; alone on a box, the wrong one for eight
-                                     ;; of them, because it buys latency with a
-                                     ;; whole idle JVM per server. LAST, so the
-                                     ;; host's answer wins over the defaults.
-                                     (host-image-options #(System/getenv %)))
-                             dir (assoc :slopp.ops/dir dir)))]
-    (swap! session assoc :require-turns? true)   ; real servers enforce turns
-    ;; the reviewer UI comes up with the server, always. It serves the LIVE
-    ;; session and therefore dies with it — that is the trade that keeps its
-    ;; warranty numbers honest — so nothing ever brought it back, and a human
-    ;; who wanted it had to know to ask again after every restart.
-    ;; start-ui! never throws: MCP must serve even when the UI cannot.
-    (start-ui! session)
-    ;; the app server comes up beside the UI, for a store that asked for it.
-    ;; BACKGROUNDED: it boots a whole second JVM and loads the app's web
-    ;; surface into it, and nothing about that should sit between the editor
-    ;; and a completed MCP handshake — the same reason the oracle's own boot
-    ;; is async here.
-    (future (start-app! session))
-    (try
-      (serve! session (io/reader System/in) (io/writer System/out))
-      (finally
-        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
-        ;; belongs to the MCP session and must not outlive it — but boot
-        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
-        ;; working. Saying nothing is what made this expensive: a manual launch
-        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
-        ;; immediately, so the last thing a launcher reads is a url that is
-        ;; already dead, with a live process behind it. Three agents spent an
-        ;; evening diagnosing that, twice concluding the code was broken and
-        ;; once that a jar had not shipped.
-        ;;
-        ;; stderr, because stdout is the JSON-RPC channel.
-        (.println System/err
-                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
-                               " UI listener and exiting. The UI belongs to the"
-                               " MCP session and does not outlive it, so a url"
-                               " printed above has stopped working. To keep one"
-                               " alive, run slopp from an editor (which holds"
-                               " stdin open) rather than launching it manually."))
-        ;; deregister BEFORE the listener goes: the hub should learn we are
-        ;; leaving from us, not by ageing us out thirty seconds later.
-        (hub/stop! (:hub-heartbeat @session))
-        (server/stop!)
-        ;; the app image is a CHILD JVM. Its watchdog would reap it when we
-        ;; die anyway, but leaving that to a watchdog means the port stays
-        ;; bound for as long as the reap takes — and the next server to start
-        ;; here wants exactly that port.
-        (live/stop! (:app-server @session))
-        (ops/close! session)
-        ;; and GO. `(future (start-app! session))` above runs on Clojure's
-        ;; send-off pool, whose workers are NON-DAEMON with a 60-second
-        ;; keepalive — so `main` returns, `DestroyJavaVM` starts, and an IDLE
-        ;; pool thread holds the JVM open for a further minute with every
-        ;; listener already torn down. Caught by thread dump: DestroyJavaVM
-        ;; RUNNABLE, held by `clojure-agent-send-off-pool-0` parked in
-        ;; SynchronousQueue.poll — same stack and same cpu time twelve seconds
-        ;; apart, waiting for a task that was never coming.
-        ;;
-        ;; A minute of a process that has announced a url, withdrawn it, and
-        ;; still answers `ps` is exactly the state nobody could interpret.
-        (shutdown-agents)))))

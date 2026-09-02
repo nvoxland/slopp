@@ -1853,7 +1853,8 @@ client-deps (merge (:client-deps st) (:client provided))
                     [:slopp.ops/warm-spare? {:optional true} [:maybe :boolean]]
                     [:slopp.ops/async-image? {:optional true} [:maybe :boolean]]
                     [:slopp.ops/branch-image-ttl-ms {:optional true} [:maybe :int]]
-                    [:slopp.ops/agent-id {:optional true} [:maybe :string]]]]]
+                    [:slopp.ops/agent-id {:optional true} [:maybe :string]]
+                    [:slopp.ops/read-only? {:optional true} [:maybe :boolean]]]]]
          :any]}
   open!
   "Start a session: the owned image + the store — loaded from `<dir>/.slopp/`
@@ -1894,7 +1895,7 @@ client-deps (merge (:client-deps st) (:client provided))
   the warming spare, the reaper timer, and the SQLite connection: the atom
   never reached the caller, so nothing could ever release them."
   ([] (open! {}))
-  ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image?]}]
+  ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image? read-only?]}]
    (let [;; EVERY session has a journal. A named dir is served as a question
          ;; (no store → nil, never an adoption); a dirless open gets a PRIVATE
          ;; one in a temp dir that `close!` removes. History is a db read now,
@@ -1921,7 +1922,11 @@ client-deps (merge (:client-deps st) (:client provided))
          ;; a rebuilt image when the thread turns out to hold work.
          stable? (boolean agent-id)
          session (atom {:db conn :dir dir :branch "main" :lines {}
-                        :ephemeral-dir? (some? ephemeral)})]
+                        :ephemeral-dir? (some? ephemeral)
+                        ;; a session that only READS answers from the branch
+                        ;; and never adopts a thread — decided HERE, before the
+                        ;; boot below resolves the session line for the first time
+                        :read-only-line? (boolean read-only?)})]
      (try
        (let [line  (when (and conn stable?)
                      (db/adopt-thread! conn (db/trunk-line-id! conn) me))

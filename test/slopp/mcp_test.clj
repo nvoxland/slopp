@@ -1912,7 +1912,7 @@
   ;; (`tools/wire-keys`) and never from a literal list. A literal list is a
   ;; fifteenth chance to disagree about what reaches an agent.
   (let [st  (external/built-store)
-        src (n/string (:node (store/form-named st 'slopp.mcp 'call-op!)))
+        src (n/string (:node (store/form-named st 'slopp.mcp 'call-op-1!)))
         literal-lists (re-seq #"select-keys \[[^\]]+\]" src)]
     (testing "there is a population — this reads the real dispatch"
       (is (< 1000 (count src)) "call-op! source not found")
@@ -3170,11 +3170,16 @@
     (try
       (let [advertised (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])
             names      (into #{} (map :name) advertised)]
-        (testing "fourteen families, and done/commit_point keep their own names"
+        (testing "fourteen families, done/commit_point keep their own names, and the
+                  three VERB aliases stand beside them (s17: opus called `explore`
+                  as a tool name thirteen times and was told no such tool)"
           (is (= #{"orient" "read" "depends" "history" "eval" "edit" "refactor" "declare"
-                   "verify" "build" "store" "slopp" "done" "commit_point"}
+                   "verify" "build" "store" "slopp" "done" "commit_point"
+                   "explore" "change"}
                  names)
               (pr-str (sort names))))
+        (testing "a verb alias IS the op call"
+          (is (re-find #":results" (call! sess "explore" {:ops [{:op "query_project"}]}))))
         (testing "every op lives in exactly one family, and the families cover the registry"
           (let [placed (frequencies (mapcat :ops tools/families))]
             (is (every? #(= 1 %) (vals placed)) (pr-str (filter #(not= 1 (val %)) placed)))
@@ -3744,18 +3749,20 @@
 
 (deftest ^:external a-refusal-teaches-the-code-vs-source-confusion
   ;; s11 grid, sonnet 41ns step4: a change whose test steps carried :code
-  ;; (check's argument) was refused with "unknown action: " — a message that
+  ;; (check's argument) was refused with \"unknown action: \" — a message that
   ;; named nothing the model had actually done; it self-corrected a turn
-  ;; later by luck. The refusal must name the mistake and the key.
+  ;; later by luck. The refusal then learned to name the mistake and the
+  ;; key — and the s17 census counted 26 of those refusals, every one
+  ;; retried: teaching did not move the habit. Now the shape is REPAIRED
+  ;; (D-repair): :code lands as :source and the write succeeds.
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "teach.core" :source "(ns teach.core)\n(defn f \"F.\" [x] x)\n"})
       (let [r (call! sess "edit" {:op "change" :prompt "p"
                                   :impl [{:ns "teach.core" :name "g"
-                                          :code "(defn g [x] x)"}]})]
-        (is (re-find #":code" r) r)
-        (is (re-find #":source" r) r)
-        (is (re-find #"check" r) r))
+                                          :code "(defn ^:unused-ok g \"G.\" [x] x)"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #"teach.core/g" r) r))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-store-wide-history-ask-is-pointed-at-report
@@ -4088,7 +4095,7 @@
                 (str/includes? cards (str "\n" op " {")))
             op)))
     (testing "a card teaches the REQUIRED arguments by name"
-      (is (re-find #"change \{impl, prompt" cards) cards))
+      (is (re-find #"change \{prompt, \[accept\], \[impl\], \[tests\]" cards) cards))
     (testing "the whole block stays bundle-sized"
       (is (< (count cards) 4500) (str (count cards) " chars")))))
 
@@ -4101,7 +4108,7 @@
       
       (let [ts (get-in (mcp/handle! sess {:id 2 :method "tools/list"}) [:result :tools])]
         (testing "all fourteen families, op enums intact"
-          (is (= 14 (count ts)))
+          (is (= 16 (count ts)) "fourteen families + the explore/change verb aliases (s17; report measured out)")
           (is (some #{"change"} (some #(when (= "edit" (:name %))
                                          (get-in % [:inputSchema :properties :op :enum])) ts))))
         (testing "the prose is gone; the pointer to the cards replaces it"
@@ -4116,7 +4123,7 @@
                                ctx {:request-method :get :uri "/api/bundle"
                                     :query-string "ask=extend+the+quote"})))]
           (is (re-find #"op cards" txt) txt)
-          (is (re-find #"change \{impl, prompt" txt))))
+          (is (re-find #"change \{prompt, \[accept\], \[impl\]" txt))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external an-aliased-require-upgrades-a-bare-one
@@ -4136,8 +4143,8 @@
         (let [src (call! sess "query_source" {:ns "upq.user"})]
           (is (re-find #"\[upq\.core :as core\]" src) src)
           (is (not (re-find #"upq\.core\)?\s+upq\.core" src)) "one clause, not two")))
-      (testing "an identical spec keeps the honest refusal"
-        (is (re-find #"already required"
+      (testing "an identical spec is the state asked for, already holding (s17: a success, nothing written)"
+        (is (re-find #":already true"
                      (call! sess "ns_add_require" {:ns "upq.user" :require "[upq.core :as core]"
                                                    :prompt "again"}))))
       (testing "a DIFFERENT alias refuses and names both spellings"
@@ -4236,3 +4243,176 @@
     (let [ok (#'mcp/terse-done (assoc green :land {:landed "main" :head "dX"}))]
       (is (= "main" (:landed ok)) "a landed green still terses")
       (is (nil? (:findings ok)) "to the one-liner"))))
+
+(deftest ^:external a-shape-mistake-is-repaired-not-refused
+  ;; s17 census over 12 eval cells (s14xl, s15, s15xl, s16): 38% of sonnet's
+  ;; tool calls and 24% of opus-XL's were REFUSALS, most of them argument
+  ;; SHAPES the refusal text named the fix for — and the agent retried the
+  ;; same shape (18x in one session, the 352s outlier). Teaching does not
+  ;; move a trained habit (s7–s13, measured thrice); accepting the
+  ;; unambiguous shape does. Every replay below is a shape measured in a
+  ;; transcript; each repair rides the result, so the accepted form is
+  ;; learned for free. Refusals stay for RULES; a spelling is not a rule.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rp.core"
+                               :source "(ns rp.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] (inc x))\n(deftest f-t (is (= 2 (f 1))))\n"})
+      (testing "change with ns/name/source at the top level is ONE impl step (28 refusals)"
+        (let [r (call! sess "change" {:prompt "top-level step" :ns "rp.core" :name "f"
+                                     :source "(defn f \"F.\" [x] (+ x 1))"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"repaired .*moved-into-impl" r) r)))
+      (testing "a step carrying :code lands as :source (26 refusals)"
+        (is (re-find #":ok true"
+                     (call! sess "change" {:prompt "code key"
+                                          :impl [{:ns "rp.core" :name "f"
+                                                  :code "(defn f \"F.\" [x] (+ 1 x))"}]}))))
+      (testing "query_slice {targets} is a query_source (9 refusals)"
+        (let [r (call! sess "query_slice" {:targets ["rp.core/f"] :resend true})]
+          (is (re-find #"defn f" r) r)
+          (is (re-find #"routed \"query_source\"" r) r)))
+      (testing "query_changes {ns name} is the form's history"
+        (is (re-find #":form-history" (call! sess "query_changes" {:ns "rp.core" :name "f"}))))
+      (testing "query_commits {limit} is not a refusal"
+        (is (not (re-find #"unknown argument" (call! sess "query_commits" {:limit 5})))))
+      (testing "ns_add_require {requires} is a require"
+        (is (re-find #":ok true" (call! sess "ns_add_require" {:ns "rp.core" :prompt "req"
+                                                               :requires "[clojure.string :as str]"}))))
+      (testing "an op called through the wrong family still answers"
+        (is (re-find #"rp\.core" (call! sess "history" {:op "query_search" :pattern "defn f"}))))
+      (testing "explore takes up to twelve entries, test_run among them"
+        (let [r (call! sess "explore" {:ops (into [{:op "test_run" :all true}]
+                                                  (repeat 7 {:op "query_search" :pattern "defn f"}))})]
+          (is (re-find #":results" r) r)
+          (is (not (re-find #"is a write" r)) r)))
+      (testing "query_eval {ns code} resolves symbols in that namespace"
+        (is (re-find #"\b3\b" (call! sess "query_eval" {:ns "rp.core" :code "(f 2)"}))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-needing-one-alias-in-several-namespaces-gets-them-all
+  ;; s17 census: 19 refusals "group failed to compile: No such namespace:
+  ;; eco" across the XL cells, both models — a feature whose NEW namespace
+  ;; is called from three existing ones in one change. auto-require repaired
+  ;; one namespace per group and stopped ("the require landed, the group
+  ;; still failed: say why") while the next namespace failed on the SAME
+  ;; alias; the agent re-sent the whole group, up to six times. Every
+  ;; touched namespace that lacks the alias gets it, in one write.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ga.eco" :source "(ns ga.eco)\n(defn rate \"R.\" [] 3)\n"})
+      (call! sess "ns_create" {:ns "ga.fuel" :source "(ns ga.fuel)\n(defn fuel \"F.\" [] 1)\n"})
+      (call! sess "ns_create" {:ns "ga.quote" :source "(ns ga.quote)\n(defn quote-it \"Q.\" [] 2)\n"})
+      (let [r (call! sess "change" {:prompt "eco reaches fuel and quote"
+                                   :impl [{:ns "ga.fuel" :name "fuel"
+                                           :source "(defn fuel \"F.\" [] (+ 1 (eco/rate)))"}
+                                          {:ns "ga.quote" :name "quote-it"
+                                           :source "(defn quote-it \"Q.\" [] (+ 2 (eco/rate)))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":auto-requires" r) r)
+        (is (<= 2 (count (re-seq #"ga\.eco :as eco" r))) "both namespaces got the require"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-alias-repair-reaches-every-touched-namespace
+  ;; the ops-grain twin of a-group-needing-one-alias-in-several-namespaces-
+  ;; gets-them-all, reading edit-group!'s whole map: the feature's namespace
+  ;; is a NEW module, so each touched namespace needs an edge AND a require,
+  ;; and the group compiles only once both repairs have alternated across
+  ;; every namespace. What landed is stamped; what could not land says why.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-alias-loop-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "t"})]
+    (try
+      (ops/ingest! sess 'gb.eco "(ns gb.eco)\n(defn rate \"R.\" [] 3)\n" :agent "t")
+      (ops/ingest! sess 'gb.fuel "(ns gb.fuel)\n(defn fuel \"F.\" [] 1)\n" :agent "t")
+      (ops/ingest! sess 'gb.quote "(ns gb.quote)\n(defn quote-it \"Q.\" [] 2)\n" :agent "t")
+      (let [r (ops/edit-group! sess [{:action :replace :ns 'gb.fuel :name 'fuel
+                                      :source "(defn fuel \"F.\" [] (+ 1 (eco/rate)))"}
+                                     {:action :replace :ns 'gb.quote :name 'quote-it
+                                      :source "(defn quote-it \"Q.\" [] (+ 2 (eco/rate)))"}]
+                                :prompt "eco reaches fuel and quote" :agent "t")]
+        (is (nil? (:error r))
+            (pr-str (select-keys r [:error :auto-require :auto-requires :auto-require-refused :auto-module-dep :auto-module-deps :step])))
+        (is (= 2 (count (:auto-requires r))) (pr-str (:auto-requires r)))
+        (is (some? (:auto-module-dep r)) "the edges into the new module were declared too"))
+      (finally (ops/close! sess)
+               (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external an-ns-form-for-an-existing-namespace-is-a-replace-and-a-present-require-is-a-success
+  ;; s17 census: four \"logi.discount already exists in logi.discount\" refusals
+  ;; (opus) — the ns form of a namespace ns_create had just made, re-sent as
+  ;; an explicit add step; and four \"already required: clojure.test\"
+  ;; refusals (sonnet) on a require that was already there. Neither names a
+  ;; rule: the first is a replace of the ns form, the second is the state
+  ;; the agent asked for, already holding.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ex.core" :source "(ns ex.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n"})
+      (testing "an explicit add of the ns form replaces it"
+        (let [r (call! sess "change" {:prompt "re-send the ns form"
+                                     :impl [{:action "add" :ns "ex.core"
+                                             :source "(ns ex.core (:require [clojure.test :refer [deftest is]] [clojure.string :as str]))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"clojure.string" (call! sess "query_source" {:targets ["ex.core/ex.core"] :resend true})))))
+      (testing "a require already present is a success, not a refusal"
+        (let [r (call! sess "ns_add_require" {:ns "ex.core" :prompt "again" :require "[clojure.string :as str]"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":already true" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-question-may-carry-its-fixture
+  ;; s17 census: opus used `check` with a `defn` helper five times in one
+  ;; XL cell and was refused each time (\"query-eval is observe-only; def
+  ;; (re)defines code\"). A fixture is part of a question. The definitions
+  ;; land in a scratch namespace that is gone once the answer is in —
+  ;; nothing reaches the store or a real namespace — while ns surgery, var
+  ;; mutation and loading stay refused.
+  (let [sess (external/open!)]
+    (try
+      (let [r (call! sess "check" {:code "(defn twice [x] (* 2 x)) (is (= 4 (twice 2))) (is (= 6 (twice 3)))"})]
+        (is (re-find #":pass 2" r) r)
+        (is (not (re-find #"observe-only" r)) r))
+      (is (re-find #"observe-only|refused" (call! sess "check" {:code "(alter-var-root #'clojure.core/inc (constantly dec))"}))
+          "var mutation is still refused")
+      (is (re-find #":value (0|1)\b" (call! sess "check" {:code "(count (filter #(re-find #\"slopp.check.scratch\" (str (ns-name %))) (all-ns)))"}))
+          "no scratch namespace lingers past its answer")
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-read-only-one-shot-mints-no-thread
+  ;; s16 probes: thread_list after one probe showed seven lines — two agents
+  ;; and FIVE read-only one-shots (query_history, report, query_source …),
+  ;; each adopting a thread it would never write to. A one-shot read answers
+  ;; from the branch; only a write needs a line of its own.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-ro-oneshot-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "seed"})]
+    (try
+      (ops/ingest! sess 'ro.core "(ns ro.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :agent "seed")
+      (is (= "main" (:landed (branch/land-thread! sess))) "fixture: the seed reached main")
+      (let [conn   (:db @sess)
+            before (count (db/lines conn))]
+        (is (re-find #"ro.core" (get-in (mcp/call! dir "query_project" {}) [:content 0 :text])))
+        (is (re-find #"defn" (get-in (mcp/call! dir "read" {:op "query_search" :pattern "defn"}) [:content 0 :text])))
+        (is (= before (count (db/lines conn)))
+            (str "two reads, no new line: " (pr-str (mapv (juxt :kind :agent :status) (db/lines conn)))))
+        (mcp/call! dir "ns_add_require" {:ns "ro.core" :require "[clojure.string :as str]" :prompt "a write" :agent "w"})
+        (is (< before (count (db/lines conn))) "a one-shot write still gets its own thread"))
+      (finally (ops/close! sess)
+               (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-tests-only-change-lands-the-red-and-waits-for-the-impl
+  ;; s17 grid: \"change needs :impl steps\" was the top residual refusal (5
+  ;; in one cell) — an agent landing its failing tests BEFORE writing the
+  ;; implementation, which is the red-first ritual itself, not a question
+  ;; for explore. The tests land, go red under watch, and the result says
+  ;; the impl is the next change.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "to.core" :source "(ns to.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n"})
+      (let [r (call! sess "change" {:prompt "the spec first"
+                                   :tests [{:ns "to.core" :source "(deftest g-t (is (= 3 (g 1))))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":went-red \[to.core/g-t\]" r) r)
+        (is (re-find #"next change" r) r))
+      (let [r (call! sess "change" {:prompt "then the impl"
+                                   :impl [{:ns "to.core" :source "(defn g \"G.\" [x] (+ x 2))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":status :green" r) r))
+      (finally (ops/close! sess)))))

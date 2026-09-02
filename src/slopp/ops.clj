@@ -317,7 +317,9 @@
 ^:reads (defn query-eval
   "Observe-only eval against the live image (the oracle): call anything —
   including effectful fns — but (re)defining code is rejected (T5); writes go
-  through the edit tools so provenance stays airtight.
+  through the edit tools so provenance stays airtight. `:gate` swaps the
+  scanner for a caller that has already gated the untrusted part of `code`
+  itself (`check` gates the question, then wraps it in trusted scaffolding).
 
   Returns the values, or `{:error msg}` when the eval actually FAILED — nREPL's
   `eval-error` status, not merely something reaching stderr. A library that
@@ -326,8 +328,8 @@
   to come back as `{:error …}` with the values discarded, and since a second
   eval finds the namespace loaded and prints nothing, the failure vanished on
   retry."
-  [session code]
-  (if-let [err (edit/observe-gate code)]
+  [session code & {:keys [gate]}]
+  (if-let [err ((or gate edit/observe-gate) code)]
     {:error err}
     ;; strip :reload in the owned image — no source files exist to reload, so it
     ;; would only throw FileNotFoundException (store ns) or waste a jar re-read
@@ -515,6 +517,12 @@
                (cond
                  error {:error error}
                  iso   {:error iso}
+                 (and nm (= nm ns) (store/form-named st ns nm))
+                 ;; the ns form of a namespace that already exists, sent as an
+                 ;; add (the blob re-sent right after ns_create — s17 census):
+                 ;; it is the replace of that one form
+                 (apply-group-step st gid prompt agent
+                                   (assoc step :action :replace :name nm))
                  (and nm (store/form-named st ns nm))
                  {:error (str nm " already exists in " ns)}
                  :else
@@ -5267,7 +5275,9 @@
 
 (defn add-require!
   "F5: add one require clause to `ns-sym`'s ns form — structural edit through
-  the normal replace pipeline (delta, hot-reload, verification).
+  the normal replace pipeline (delta, hot-reload, verification). A clause
+  already present in the same spelling is a SUCCESS with nothing written
+  (`{:ok true :already true}`): the state asked for holds.
 
   Forwards `:agent` (#132): without it the delta landed agent-nil and the edit
   never entered ANY agent's episode — `done` never linted, normalized, or
@@ -5283,8 +5293,10 @@
   [session ns-sym require-str & {:keys [prompt agent system]}]
   (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
     (let [r (edit/add-require-source (n/string (:node f)) require-str)]
-      (if (:error r)
-        r
+      (cond
+        (:error r)   r
+        (:already r) {:ok true :already true :ns ns-sym :require require-str}
+        :else
         (let [res (edit-replace! session ns-sym ns-sym (:src r)
                                  :prompt (or prompt (str "add require " require-str))
                                  :agent agent
@@ -5434,35 +5446,58 @@
   namespace can supply it (`edit/missing-alias-require`). Add that require
   as a `:system` write with the pipeline's own prompt, then run `retry` —
   the same write once more — and stamp what happened on its result as
-  `:auto-require {:added spec :ns ns-sym}`. Any other refusal, an ambiguous
-  alias (`missing-alias-hint` names the candidates in the message), or a
-  require that itself fails to land, returns `r` untouched. The caller
-  passes `:no-auto-require true` on the retry so this runs once."
-  [session ns-sym r retry]
+  `:auto-require {:added spec :ns ns-sym}`. The require itself is often the
+  namespace's FIRST crossing into an undeclared module, so the module gate
+  refuses the require write and nothing repaired the group at all (s17: the
+  \"No such namespace\" class that survived s15, nineteen refusals in the XL
+  cells) — that refusal names the edge, so it is declared and the require
+  added again, stamped `:auto-module-dep` beside. Any other refusal, an
+  ambiguous alias (`missing-alias-hint` names the candidates in the
+  message), or a require that still fails to land, returns `r` with
+  `:auto-require-refused {:ns :spec :error}` — a repair that could not
+  happen says so rather than vanishing. The caller passes
+  `:no-auto-require true` on the retry so this runs once."
+  [session ns-sym r retry & {:keys [agent]}]
   (if-let [spec (and (:error r)
                      (edit/missing-alias-require (:store @session) (:error r)))]
-    (let [ar (add-require! session ns-sym spec
-                           :prompt fields/auto-require-prompt :system true)]
+    (let [add (fn [] (add-require! session ns-sym spec
+                                   :prompt fields/auto-require-prompt :system true
+                                   :agent agent))
+          ar  (add)
+          ar  (cond
+                (:error ar)   (auto-module-dep-retry! session ar add :agent agent)
+                ;; already there — this namespace is not the one the alias is
+                ;; missing from; reported as a refusal so the caller moves on
+                (:already ar) (assoc ar :error "already required")
+                :else         ar)]
       (if (:error ar)
-        r
+        (assoc r :auto-require-refused {:ns ns-sym :spec spec :error (:error ar)})
         (let [r2 (retry)]
           ;; the require LANDED whatever the retry then says — stamp it, so a
           ;; group that next trips the module gate (and lands via THAT
           ;; retry) still reports both repairs
-          (assoc r2 :auto-require {:added spec :ns ns-sym}))))
+          (cond-> (assoc r2 :auto-require {:added spec :ns ns-sym})
+            (:auto-module-dep ar) (assoc :auto-module-dep (:auto-module-dep ar))))))
     r))
 
 (defn edit-group!
   "One INTENT as one atomic write — `edit-group-once!` with the write path's
-  two self-repairs. Auto-require: when the group fails to compile because a
-  step named an alias its namespace lacks and exactly one namespace can
-  supply it, the require is added (a `:system` write, as for a single form)
-  and the group runs once more, stamped `:auto-require`; tried against each
-  touched namespace in turn, since the compile error names the alias but not
-  the namespace, and one that already has the alias refuses the require and
-  is skipped. Auto-module-dep: a step refused for its first call across a
-  module boundary gets the edge declared and the group rerun, stamped
-  `:auto-module-dep`; a cycle stays a refusal.
+  two self-repairs, ALTERNATING until the group lands or the error stops
+  changing. Auto-require: when the group fails to compile because a step
+  named an alias its namespace lacks and exactly one namespace can supply
+  it, the require is added (a `:system` write, as for a single form) and
+  the group runs once more — for every touched namespace the alias is
+  missing from, since one feature reaching three namespaces needs the same
+  require three times. Auto-module-dep: a step refused for its first call
+  across a module boundary gets the edge declared and the group rerun.
+  The order is not fixed: a feature crossing into a NEW module meets the
+  module gate first, and the compile names the missing alias only after
+  the edge exists (s17: nineteen \"No such namespace\" refusals in the XL
+  cells, each a whole group re-sent, because the require repair had already
+  run and nothing ran it again). Bounded; every require that landed is
+  stamped (`:auto-require` the first, `:auto-requires` all), a require that
+  could not land rides as `:auto-require-refused`, and edges as
+  `:auto-module-dep(s)`; a cycle stays a refusal.
 
   On the wire as `edit_group` since 2026-08-30 — the reversal of a position
   this function used to argue in its docstring. The grain an agent thinks in
@@ -5474,23 +5509,47 @@
   whole feature in one call meets the same gates a whole feature in one form
   does."
   [session steps & {:keys [prompt agent no-auto-require]}]
-  (let [once (fn [] (edit-group-once! session steps :prompt prompt :agent agent))
-        r    (once)]
+  (let [once   (fn [] (edit-group-once! session steps :prompt prompt :agent agent))
+        r      (once)
+        nses   (vec (distinct (map :ns steps)))
+        stamps [:auto-require :auto-requires :auto-require-refused
+                :auto-module-dep :auto-module-deps]
+        carry  (fn [from to] (merge (select-keys from stamps) to))
+        ;; the require repair, over every touched namespace the alias is
+        ;; missing from; `tried` keeps a namespace from being asked twice for
+        ;; one alias across the outer alternation
+        requires!
+        (fn [r tried]
+          (loop [r r, tried tried, n 0]
+            (let [added  (vec (:auto-requires r))
+                  spec   (when (:error r)
+                           (edit/missing-alias-require (:store @session) (:error r)))
+                  ns-sym (when spec (first (remove #(tried [% spec]) nses)))]
+              (if (or (nil? spec) (nil? ns-sym) (< (* 4 (count nses)) n))
+                [r tried]
+                (let [r2    (auto-require-retry session ns-sym r once :agent agent)
+                      tried (conj tried [ns-sym spec])
+                      r2    (if-let [a (:auto-require r2)]
+                              (let [added (conj added a)]
+                                (assoc r2 :auto-require (first added) :auto-requires added))
+                              (carry r r2))]
+                  (if (nil? (:error r2))
+                    [r2 tried]
+                    (recur r2 tried (inc n))))))))]
     (if (or no-auto-require (nil? (:error r)))
       r
-      (let [r1 (reduce (fn [r ns-sym]
-                         (let [r2 (auto-require-retry session ns-sym r once)]
-                           (cond
-                             (nil? (:error r2))  (reduced r2)   ; the require landed and the group with it
-                             (identical? r2 r)   r              ; nothing to add here; try the next namespace
-                             :else               (reduced r2)))) ; the require landed, the group still failed: say why
-                       r
-                       (distinct (map :ns steps)))]
-        (if (:error r1)
-          (let [r3 (auto-module-dep-retry! session r1 once :agent agent)]
-            ;; the module retry's success is a FRESH result — re-carry the
-            ;; require repair that already landed on the way here
-            (cond-> r3
-              (and (nil? (:error r3)) (:auto-require r1))
-              (assoc :auto-require (:auto-require r1))))
-          r1)))))
+      (loop [r r, tried #{}, n 0]
+        (let [[ra tried] (requires! r tried)
+              rb         (if (:error ra)
+                           (carry ra (auto-module-dep-retry! session ra once :agent agent))
+                           ra)]
+          (if (or (nil? (:error rb))
+                  ;; no progress: no require landed this pass and the module
+                  ;; retry left the error as it was. The error TEXT recurring is
+                  ;; not the test — the next namespace fails with the identical
+                  ;; \"No such namespace\" sentence once the previous one is repaired
+                  (and (= (count (:auto-requires ra)) (count (:auto-requires r)))
+                       (= (:error rb) (:error ra)))
+                  (< 8 n))
+            rb
+            (recur rb tried (inc n))))))))

@@ -226,7 +226,7 @@
                                :accept {:type "array" :items {:type "string"}
                                         :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}
                                :verbose {:type "boolean"}}
-                  :required ["impl" "prompt"]}}
+                  :required ["prompt"]}}
    {:name "edit_revert"
     :description "Revert a form to an earlier version (default previous, or a delta id)."
     :inputSchema {:type "object"
@@ -964,18 +964,103 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
            sent (first (str/split (str (:description d)) #"(?<=\.) " 2))]
        (str op " {" args "} — " (subs (str sent) 0 (min 240 (count (str sent)))))))))
 
+(defn remap-arguments
+  "REPAIR before REFUSE. The unambiguous argument SHAPES the s17 census
+  measured agents sending — and retrying after the refusal named the fix —
+  rewritten to the shape they meant: `change {ns name source}` with no
+  `:impl` is that one impl step; `query_slice {targets}` is a
+  `query_source`; `query_changes {ns name}` is the form's history;
+  `query_changes {since}` is `:from`; `query_commits {limit}` drops the
+  key; `ns_add_require {requires}` is `:require`. Returns
+  {:name :arguments :repaired} — :repaired nil when nothing moved, else a
+  small map the result carries so the accepted shape is learned for free.
+  A shape with TWO readings (top-level ns beside an :impl) is left for the
+  refusal, which still names the accepted keys: refusals are for rules,
+  spellings are repaired."
+  [name arguments]
+  (let [a          (or arguments {})
+        write-keys [:ns :name :source :action :code :match :text :where :require]
+        top        (select-keys a write-keys)]
+    (cond
+      (and (#{"change" "intent"} name) (seq top) (nil? (:impl a)))
+      {:name name
+       :arguments (assoc (apply dissoc a write-keys) :impl [top])
+       :repaired {:moved-into-impl (vec (keys top))}}
+
+      (and (= "query_slice" name) (:targets a))
+      (let [keep    (select-keys a [:targets :full :resend :prompt :agent :verbose])
+            dropped (vec (remove (set (keys keep)) (keys a)))]
+        {:name "query_source" :arguments keep
+         :repaired (cond-> {:routed "query_source"}
+                     (seq dropped) (assoc :dropped dropped))})
+
+      (and (= "query_changes" name) (or (:ns a) (:name a)))
+      {:name "query_history"
+       :arguments (select-keys a [:ns :name :at :format :limit :agent :prompt :verbose])
+       :repaired {:routed "query_history"}}
+
+      (and (= "query_changes" name) (:since a))
+      {:name name :arguments (assoc (dissoc a :since) :from (:since a))
+       :repaired {:renamed {:since :from}}}
+
+      (and (= "query_commits" name) (contains? a :limit))
+      {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
+
+      (and (= "ns_add_require" name) (:requires a) (nil? (:require a)))
+      (let [r   (:requires a)
+            one (if (and (sequential? r) (= 1 (count r))) (first r) r)]
+        (if (string? one)
+          {:name name :arguments (assoc (dissoc a :requires) :require one)
+           :repaired {:renamed {:requires :require}}}
+          {:name name :arguments a}))
+
+      :else {:name name :arguments a})))
+
+(def verb-aliases
+  "The two verbs the skill teaches — `explore`, `change` — as TOOL NAMES
+  beside the families. Dispatch by op name always worked (`call-tool!`
+  falls through to the op); what refused was the harness: opus called
+  `mcp__…__explore` thirteen times across the s17 census cells and got
+  \"No such tool available\" back each time, because the verb it was taught
+  to reach for was filed under `read`. Thin schemas on purpose (the op
+  cards on the bundle carry the argument teaching): under 1k chars against
+  the dieted surface, measured, so the advertised list stays undeferrable.
+
+  NOT `report`. It was advertised here for one grid (s17) and cost sonnet
+  twelve and thirteen extra turns on the handoff step — `report {contains
+  X}` per feature, then a `query_history` per form — where the bundle's
+  injected handoff had answered in six. A reachable verb invites the
+  drill-down the injection exists to pre-empt; `history {op report}` stays
+  one hop away, which is the right distance."
+  [{:name "explore"
+    :description "= read {op explore}: several READ questions, one call — ops [{op …args} …]; help {topic explore} is the full card."
+    :inputSchema {:type "object"
+                  :properties {:ops {:type "array" :items {:type "object"}}}
+                  :required ["ops"]}
+    :annotations {:readOnlyHint true}}
+   {:name "change"
+    :description "= edit {op change}: tests land first (watched red), impl lands, ONE verification — {prompt tests? impl accept?}; argument cards ride the [slopp] block on your ask."
+    :inputSchema {:type "object"
+                  :properties {:prompt {:type "string"}
+                               :tests {:type "array" :items {:type "object"}}
+                               :impl {:type "array" :items {:type "object"}}
+                               :accept {:type "array" :items {:type "string"}}}
+                  :required ["prompt"]}}])
+
 (def dieted-tools
   "[[tools]] with the op-index PROSE relocated: each multi-op family keeps
   its name, every schema and op enum (the structural half, which clients
   validate against), and a one-line description pointing at the bundle's
   op cards and `help {topic op}`. Measured before the diet: 24.4k advertised
   chars, 15.6k of them description prose — rent on every request of every
-  session, teaching that the bundle can carry for a fraction."
-  (mapv (fn [t]
-          (if-let [ops (get-in t [:inputSchema :properties :op :enum])]
-            (assoc t :description
-                   (str "ops: " (str/join " " ops)
-                        " — argument cards ride the [slopp] block on your ask;"
-                        " help {topic <op>} is one op's full card."))
-            t))
-        tools))
+  session, teaching that the bundle can carry for a fraction. Plus the
+  three [[verb-aliases]] — the names agents reach for unprompted."
+  (into (mapv (fn [t]
+                (if-let [ops (get-in t [:inputSchema :properties :op :enum])]
+                  (assoc t :description
+                         (str "ops: " (str/join " " ops)
+                              " — argument cards ride the [slopp] block on your ask;"
+                              " help {topic <op>} is one op's full card."))
+                  t))
+              tools)
+        verb-aliases))

@@ -777,6 +777,12 @@
 
         ;; SETTLED under us — the Stop hook case. Move to a fresh line so the
         ;; next write goes somewhere that can land.
+        ;; a session that only READS (a one-shot `--call query_…`) answers from
+        ;; the branch and adopts nothing — every such call used to mint a
+        ;; thread it would never write to (s16 probes: five per probe)
+        (:read-only-line? @session)
+        (session-branch-line session)
+
         :else
         (let [id (db/adopt-thread! conn (session-branch-line session)
                                    (:agent-id @session))]

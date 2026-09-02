@@ -100,31 +100,6 @@
      defmethod in-ns ns ns-unmap ns-unalias alter-var-root intern remove-ns
      create-ns load-file load-string})
 
-(defn observe-gate
-  "nil if `code` is observation-only; an error string if it (re)defines
-  code or doesn't parse. POSITION-aware: banned symbols count anywhere
-  they could act (operator or value position — `apply` smuggling included),
-  but QUOTED data is inert, so a read-only census like `'#{defn defmacro}`
-  passes."
-  [code]
-  (try
-    (letfn [(scan [form]
-              (cond
-                (and (seq? form) (= 'quote (first form))) nil
-                (symbol? form) (when (observe-banned form) form)
-                (map? form)    (some scan (mapcat identity form))
-                (coll? form)   (some scan form)
-                :else nil))]
-      (let [forms (keep #(try (n/sexpr %) (catch Exception _ nil))
-                        (filter n/sexpr-able?
-                                (n/children (p/parse-string-all code))))]
-        (when-let [bad (some scan forms)]
-          (str "query-eval is observe-only; `" bad
-               "` (re)defines code — use the edit tools (quoted `" bad
-               "` as data is fine)"))))
-    (catch Exception e
-      (str "unparseable code: " (ex-message e)))))
-
 (defn strip-image-reload
   "Remove `:reload`/`:reload-all` flags from every `require`/`use`/`require-macros`
   form in `code`. The owned image has NO source files — store namespaces are
@@ -169,7 +144,10 @@
         (cond
           ;; the same spelling — the honest refusal stands
           (= existing (if (vector? req) req existing))
-          {:error (str "already required: " lib)}
+          ;; the clause is already there in this spelling: the state asked
+          ;; for holds, so this is a success with nothing to write (s17: four
+          ;; refusals, each retried)
+          {:src ns-source :already true}
 
           ;; a BARE clause + a richer spec is an UPGRADE in place, not a
           ;; duplicate: refusing it forced an 18-call remove/add staircase
@@ -1185,3 +1163,49 @@
               {:nodes nodes})))
       (catch Exception e
         {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
+
+(defn- gate-with
+  "nil if `code` uses none of `banned` where it could act; else the refusal
+  sentence. POSITION-aware: banned symbols count anywhere they could act
+  (operator or value position — `apply` smuggling included), but QUOTED
+  data is inert, so a read-only census like `'#{defn defmacro}` passes.
+  The one scanner behind [[observe-gate]] and [[check-gate]]."
+  [code banned what]
+  (try
+    (letfn [(scan [form]
+              (cond
+                (and (seq? form) (= 'quote (first form))) nil
+                (symbol? form) (when (banned form) form)
+                (map? form)    (some scan (mapcat identity form))
+                (coll? form)   (some scan form)
+                :else nil))]
+      (let [forms (keep #(try (n/sexpr %) (catch Exception _ nil))
+                        (filter n/sexpr-able?
+                                (n/children (p/parse-string-all code))))]
+        (when-let [bad (some scan forms)]
+          (str what "; `" bad "` is refused here (quoted `" bad
+               "` as data is fine)"))))
+    (catch Exception e
+      (str "unparseable code: " (ex-message e)))))
+
+(defn observe-gate
+  "nil if `code` is observation-only; an error string if it (re)defines
+  code or doesn't parse. The scan is [[gate-with]]'s."
+  [code]
+  (gate-with code observe-banned
+             "query-eval is observe-only — (re)defining code bypasses the edit tools"))
+
+^:unsafe (def ^:private check-banned
+  "What a `check` may not do even in its scratch namespace: definitions are
+  allowed there (a fixture is part of a question; the namespace is removed
+  with the answer), but reaching OUT of it — ns surgery, var mutation,
+  loading files — is not."
+  (disj observe-banned 'def 'defn 'defn- 'defonce 'defmacro 'defmulti 'defmethod))
+
+(defn check-gate
+  "nil if `code` is a legitimate QUESTION for `check` — assertions and the
+  fixtures they need; an error string if it reaches outside its scratch
+  namespace (see [[check-banned]]) or doesn't parse."
+  [code]
+  (gate-with code check-banned
+             "check runs in a scratch namespace and may not reach outside it"))
