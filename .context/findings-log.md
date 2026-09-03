@@ -2246,3 +2246,9 @@ Review of the remaining commit logic, with numbers on this store's main line:
 - GUARD CELL on the D2b jar (sonnet-41 lifetime): 54 turns, 11/11, $1.53,
   537s — best on record (s15 62, s17 57, s18 95). Refusals 10%: store-wide
   `query_history {}` ×4 is the standing residue.
+- The s20 verdict's first honest window (census now windowed): re-buy 0/4
+  (from 69%); `edit/change` sends 4x the chars it receives (77.6k in vs
+  18.4k out over 23 calls) — the first send-side number the store has
+  produced; model p50 context 668k, ~656k cached tokens per request; commit
+  point publish 821 ms. Rent, refusal shapes and retries accumulate from
+  the bracket fix onward.
