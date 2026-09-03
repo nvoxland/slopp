@@ -42,7 +42,7 @@ Which tests exercise which forms, measured by instrumenting a test run rather
 than inferred from requires. It is what lets a write re-run three tests instead
 of four hundred, and what makes `:untested` a fact rather than a guess.
 
-## Turn, episode, milestone
+## Turn, episode, commit point
 
 The provenance stack, coarsest last:
 
@@ -51,7 +51,7 @@ The provenance stack, coarsest last:
   the grouping.
 - **Turn** -- one user ask, verbatim. `turn_begin` / `turn_end`; the Claude Code
   hooks do it for you.
-- **Milestone** -- `commit_point`. Named, green-gated, carries a byte-exact
+- **Commit point** -- `commit_point`. Named, green-gated, carries a byte-exact
   rendered tree, and becomes a git commit.
 
 ## Done point
@@ -118,7 +118,7 @@ your version still live.
 
 ## Projection
 
-The git face of the store. At each milestone slopp renders the store as
+The git face of the store. At each commit point slopp renders the store as
 ordinary `.clj` files and deterministically mints a commit. It owns exactly one
 branch (`git-branch`, default `slopp`); humans own `main` and everything else
 with regular git.

@@ -143,7 +143,7 @@ the change here (same commit).
 
 ## P4 — Phase 4 (multi-agent) — MOVED
 
-See `.context/roadmap.md` § Phase 4. The `P4-m*` / `P4-deps` milestone
+See `.context/roadmap.md` § Phase 4. The `P4-m*` / `P4-deps` commit point
 names other docs cite still resolve there.
 ## H — host
 
@@ -189,7 +189,7 @@ G1 ✅ **The shared repo holds FILES; the local dir holds FORMS.** A normal
 git remote (GitHub etc.) carries real `.clj` files + a generated `deps.edn`
 — browsable, PR-able, useful to non-slopp users; the local working dir holds
 `.slopp/store.db` and NO project source (nothing for an agent to hand-edit,
-nothing to drift). `git_push` publishes the milestone projection;
+nothing to drift). `git_push` publishes the commit point projection;
 `git_clone`/`slopp.sync/clone!` rebuilds a fileless store from a remote
 (verified dependency-ordered `ingest!`; manifest restored from the remote
 deps.edn). Cross-person merges are GIT-NATIVE (file-level, PR flow) — the
@@ -200,9 +200,9 @@ off-log quarantine table (raw file kept for reference, never in the journal).
 
 G2 ✅ **The graft: clones chain onto the remote's real history.** `clone!`
 records `git-remote` + `git-base-sha` meta; `project-journal!` seeds its
-parent chain with the base, so a clone's first local milestone parents onto
+parent chain with the base, so a clone's first local commit point parents onto
 the remote commit it was cloned at and `push!` is a plain fast-forward
-(verified: push → clone → edit → milestone → push; the new tip's parent IS
+(verified: push → clone → edit → commit point → push; the new tip's parent IS
 the pre-clone tip). Without this, every clone would mint unrelated history
 and could never push back. Push is fast-forward ONLY — a diverged remote is
 an honest error, never a force. `push-to-remote!` fetches the remote's
@@ -214,8 +214,8 @@ JGit `Transport` push/fetch runs against the same `InMemoryRepository` as the
 local read-only listener (built with `FS/DETECTED` — TransportLocal NPEs on
 an FS-less DFS repo; scheme-less remote urls are absolutized). `slopp.git`
 stays byte-moving (no `slopp.api` dep); `slopp.sync` owns the store side
-(ingest/deps/session). Only MILESTONES cross the wire — a clone reproduces
-the last commit_point, not un-milestone'd live state. Auth: token param or
+(ingest/deps/session). Only COMMIT POINTS cross the wire — a clone reproduces
+the last commit_point, not un-commit point'd live state. Auth: token param or
 SLOPP_GIT_TOKEN/GIT_TOKEN env. Verified end-to-end by slopp itself: push →
 plain `git clone` (normal 6-commit repo) → `slopp.sync` clone (30 nses,
 zero `.clj` files) → `slopp.kernel.boot` boots and serves it.
@@ -235,10 +235,10 @@ Comment/whitespace-only remote changes are surfaced as notes, not applied
 (trivia isn't form-addressable). Each pull ends with a `:git-sha` chain
 marker (`commit-point!` `:target` head + `:extra`): `project-journal!`
 ADOPTS that remote commit as the chain node (never mints), so the next
-local milestone parents on the remote tip and pushes stay fast-forward —
+local commit point parents on the remote tip and pushes stay fast-forward —
 verified bidirectionally (A→B→A round-trip, byte-exact convergence).
-Un-milestone'd local work rides through a pull untouched; unpushed local
-MILESTONES fold into the next post-pull milestone (documented squash).
+Un-commit point'd local work rides through a pull untouched; unpushed local
+COMMIT POINTS fold into the next post-pull commit point (documented squash).
 
 ## T — the fileless flip (this repo eats its own dogfood completely)
 
@@ -410,7 +410,7 @@ zero project source files; slopp running itself is just the self-host
 instance. In THIS repo the on-disk kernel is `src/slopp/boot.clj` +
 `src/slopp/rt.clj` + `deps.edn`; the rest of `src/` is no longer needed to
 RUN (still needed to run the file-based system-test suite — separate concern).
-`--at <commit>` (boot a past milestone) is a noted future refinement.
+`--at <commit>` (boot a past commit point) is a noted future refinement.
 
 ## E — edit-surface ergonomics (friction-log fixes)
 
@@ -451,7 +451,7 @@ near-miss alias (`new_source`, `new-source`, `src`, …) in the args, names it
 
 G6 ✅ **Non-code files ride the store.** `:files` {path → text} manifest
 (state-carrying `:file-put`/`:file-remove` deltas, meta row, replay — the
-deps-manifest pattern), snapshotted onto milestone markers so the projection
+deps-manifest pattern), snapshotted onto commit point markers so the projection
 stays a pure fn of the marker. `commit-paths` merges them into EVERY
 projected tree — a slopp push never deletes the remote's README/workflows.
 clone captures remote extras; pull 3-ways them (remote wins where we're
@@ -869,7 +869,7 @@ pure-Clojure Damerau-1 suffices. Full reasoning:
 **Decision.** All nine rules in the registry are now REQUIRED: 4 write gates at
 `:refuse` (module, tier, schema, namespaced-keys) and 5 done-time checks at
 `:error` (schema-drift, key-typos, breaking-changes, ambient-state, bare-throw).
-No rule sits at `:advisory`. Milestone d7763.
+No rule sits at `:advisory`. Commit point d7763.
 
 **Why, and the rule it establishes:** an advisory an agent can scroll past is
 not a rule — it is documentation with a nag. But a rule cannot be made blocking
@@ -921,10 +921,10 @@ them honest is a discipline, not a guarantee.
 
 **Superseded design (recorded because it was wrong in an instructive way):** an
 earlier version of this decision described THREE checking grains — write, done,
-and milestone — and moved warning-level lint to the milestone. That was wrong,
+and commit point — and moved warning-level lint to the commit point. That was wrong,
 and the evidence arrived within one session: with two enforcement points, five
 `:error` advisories were blocking at `done` and completely invisible at the
-milestone, because `commit-point!` recomputed status from raw test counts and
+commit point, because `commit-point!` recomputed status from raw test counts and
 never read `:findings`. **Two bars drift. They drifted here in hours.**
 
 ### The design
@@ -956,7 +956,7 @@ not deadlocked: the boundary is still recorded, red, in history. The real
 block is `commit_point`, which refuses to PUBLISH a red done. You may record
 where you got to; you may not ship it.
 
-### The milestone is not a grain
+### The commit point is not a grain
 
 `commit_point` has **no checks of its own**. It runs `done!`, adds the one
 thing done deliberately skips (the full isolated tier, which spawns JVMs), and
@@ -1188,7 +1188,7 @@ Both consumers simply read `:level` — `edit/lint-refusals` gates writes on
 introduced a separate `write-blocking-lint` TYPE set alongside the levels;
 it was deleted, because a second declaration of "what blocks" is a second
 place for the two to disagree — the exact failure mode that hid five
-`:error` advisories from the milestone.
+`:error` advisories from the commit point.
 
 **The tiering was chosen by the SUITE, not by taste.** Promoting every linter
 to `:error` broke 13 assertions across 7 tests, in three distinct ways, and
@@ -1259,17 +1259,17 @@ thinks it does.
 
 Nothing automatically verifies the whole store before publishing. A red
 `^:external` test the episode never TOUCHED will not stop a
-milestone, and `commit-test/the-milestone-forces-no-whole-store-check` PINS
+commit point, and `commit-test/the-commit point-forces-no-whole-store-check` PINS
 that, so it is a test someone must consciously change rather than a silent gap.
 
 The word **touched** is load-bearing. "Gates on done's verdict" means the
-milestone's `done!` is a *real* done — `:external? true`, so it runs the
-impacted `^:external` slice exactly as a standalone `done` does. A milestone
+commit point's `done!` is a *real* done — `:external? true`, so it runs the
+impacted `^:external` slice exactly as a standalone `done` does. A commit point
 therefore DOES stop over a red `^:external` test this episode touched
-(`commit-test/a-milestone-catches-a-touched-red-external-test`); it is only the
+(`commit-test/a-commit point-catches-a-touched-red-external-test`); it is only the
 UNTOUCHED corner that rides through to `full_check`. A 2026-07-20 review found
 `commit-point!` had regressed to calling `done!` with `:external? false` — a
-milestone weaker than a plain done, laundering a touched red external green.
+commit point weaker than a plain done, laundering a touched red external green.
 Fixed; the two commit-tests above pin both halves.
 
 The trigger worth internalising is **"you deleted a caller"**: dead public
@@ -1279,7 +1279,7 @@ and the tool description.
 
 ### The hole this opened, and the fix
 
-Episode scope plus a milestone with no checks of its own meant **a red done
+Episode scope plus a commit point with no checks of its own meant **a red done
 could be laundered by committing**: `done` reports red → ignore it →
 `commit_point` runs a fresh `done` → nothing changed since → `:test-status
 :none` → publishes green. Found by `episode-test/unused-publics-gate-the-done`.
@@ -1871,7 +1871,7 @@ Each fix is guarded by a merge-test modeling the production failure that
 motivated it. Acceptance on the real web←main resync: 33 residual
 conflicts became 2, both genuine divergence. Bidirectional branch flow is
 unblocked. Deliberately NOT done: lineage-aware conflict prose ("their
-edit builds on your v2") and milestone-marker travel (#9) — both
+edit builds on your v2") and commit point-marker travel (#9) — both
 recorded, neither load-bearing.
 
 ## D-fold-field-registry (2026-07-22) — one declaration site per store op
@@ -1916,7 +1916,7 @@ Element/delta/blob storage stays bespoke (the registry covers the
 meta-row folds, per the idea file's scope). `ideas/store-fold-field-
 registry.md` is closed by this entry.
 
-## D-episode-grain (2026-07-22) — discharge windows look past the baseline; milestones do not travel
+## D-episode-grain (2026-07-22) — discharge windows look past the baseline; commit points do not travel
 
 Two decisions from the frictions-architecture program's episode wave:
 
@@ -1932,9 +1932,9 @@ Two decisions from the frictions-architecture program's episode wave:
   seen unmarked, the marker discharges silently. A marker ALREADY present
   at the baseline keeps the remove-the-flag discipline unchanged — the
   self-policing that stops markers decaying into permanent opt-outs.
-- **Milestone markers deliberately do NOT travel through merges**
+- **Commit point markers deliberately do NOT travel through merges**
   (frictions #9, now settled): a branch merge is a squash — main's history
-  stays at main's own milestone cadence, the branch line keeps its fine
+  stays at main's own commit point cadence, the branch line keeps its fine
   grain while it lives, and merge-logs' `{:skipped :commit}` note is the
   honest record. Replaying `:commit` markers would mint mid-merge git
   commits whose `:tree` snapshots never existed on the receiving line.
@@ -2168,7 +2168,7 @@ hand-shared schema; scoped in `.context/roadmap.md`, user ask 2026-07-23). Super
 `ideas/clojurescript-client-code.md`. Wave frictions:
 `ideas/logs/cljs-wave-frictions.md`.
 
-**Shipped after the milestone (user ask, 2026-07-23):** (1) the REFACTOR ops
+**Shipped after the commit point (user ask, 2026-07-23):** (1) the REFACTOR ops
 handle `:cljs` forms — every compiling refactor op (`edit_rename`/
 `edit_move_forms`/`edit_extract`/`change_signature`/`edit_requalify`/
 `rename_sweep`) funnels through `slopp.ops.engine/hot-load-all!`, guarded once
@@ -2667,7 +2667,7 @@ defers as "the npm/JS dependency world (its own later record)". Scoped in
 
 ## D-comments-are-content (2026-07-27) — whitespace is rendering; the form is the only unit
 
-Came out of asking why a milestone needs a byte-exact tree snapshot, which
+Came out of asking why a commit point needs a byte-exact tree snapshot, which
 was the wrong question. The right one is why slopp stored whitespace at all.
 
 ### Byte-exactness was never a real requirement
@@ -2675,11 +2675,11 @@ was the wrong question. The right one is why slopp stored whitespace at all.
 `byte-exact` appeared in three places in the store and they were all one
 decision: `commit-point!`'s tree snapshot. The reasoning was that a git sha
 hashes bytes, so the projection must be a pure function of the marker delta.
-True, and irrelevant — **`git_map` already records each milestone's sha.** You
+True, and irrelevant — **`git_map` already records each commit point's sha.** You
 do not recompute an answer you wrote down.
 
 Settled with the user: **git is an EXTERNAL INTERFACE between slopp repos, not
-something slopp reproduces.** Push a milestone, record its sha, use it as the
+something slopp reproduces.** Push a commit point, record its sha, use it as the
 parent next time; pull and map incoming shas back onto slopp commits. Nothing
 needs slopp to re-derive a historic tree. The only surviving requirement is
 that rendering be *stable* — same store, same output — which is the contract
@@ -2744,14 +2744,14 @@ grouping *within* a namespace is deliberately lost.
 ### Step 4 (2026-07-27) — the snapshot goes, and the journal has to earn it
 
 Deleting the tree snapshot was not a deletion. `project-journal!` needs a tree
-per milestone, and the only honest replacement is to DERIVE it — which means
+per commit point, and the only honest replacement is to DERIVE it — which means
 the journal has to actually be a complete account rather than be described as
 one. Two things had to become true first.
 
 **`replay-delta` is TOTAL.** Six ops returned nil, meaning "reload from the
 elements table": `:ingest`, `:move`, `:rename-ns`, `:move-forms`,
 `:extract-ns`, `:module-extract` — 861 deltas here. A nil used to cost a slow
-reload; it now costs a milestone whose bytes cannot be reconstructed. All six
+reload; it now costs a commit point whose bytes cannot be reconstructed. All six
 already carried what they needed. Four are `apply-changeset`, which rewrites
 nodes BY FORM-ID wherever they live, so they collapse into the `:replace`
 case — the relocation people assume they carry rides separate
@@ -2763,7 +2763,7 @@ gives a plausible, wrong replay. Read the writer.
 is quadratic in the journal. A marker normally targets the delta before it,
 which is where the fold stands on arrival; a retroactive `:target` is rendered
 as the walk passes it and HELD. A held tree must survive its first reader:
-a milestone's own target is the delta before it, which is what an earlier
+a commit point's own target is the delta before it, which is what an earlier
 retroactive marker also points at, and releasing it there left the retroactive
 commit projecting the current state instead.
 
@@ -2772,7 +2772,7 @@ the start of this arc). Gone: `commit-point!`'s capture, `db/tree-diff` /
 `tree-apply` / `tree-at` / `delta-tree` / `max-tree-chain`, `git/backfill-tree`
 and its lossy-reconstruction problem, the `tree` column, `:tree-bytes`.
 
-**Accepted consequence:** historic milestones re-render, so their shas change
+**Accepted consequence:** historic commit points re-render, so their shas change
 (the trial projection moved the local tip from `9880a5c` to `30b60f0`). That is
 the settled trade — `git_map` records what was already pushed, and git is an
 interface between slopp repos rather than something slopp reproduces. The next
@@ -3071,7 +3071,7 @@ side of the line.
 
 ### D-hub part 5 — the framework sheds presentation (2026-07-28)
 
-Stage 4 landed at milestone `d17437`. The framework store now serves data and
+Stage 4 landed at commit point `d17437`. The framework store now serves data and
 nothing else.
 
 **Layout is the consumer's business — decided and done.** `/api/modules` used
@@ -3121,7 +3121,7 @@ three surfaces described the pre-split world and every check was green.
 
 **`ui_serve` and `:ui` are an API, and the prose said otherwise.** The tool
 description promised "a browsable HTML view of THIS store for a human: the
-namespace index, form source, … the milestone timeline and per-milestone change
+namespace index, form source, … the commit point timeline and per-commit point change
 review" and told the caller to hand that url over, for a listener answering
 `404 {"error":"no route"}` at `/`. `slopp-review/SKILL.md` sent reviewers to
 `<ui_serve url>change/<from>..<to>`; `docs/reference/tools.md` carried a whole
@@ -3567,15 +3567,15 @@ project's configuration at all.
 ### Three things fell out that the plan did not anticipate
 
 1. **`ensure-wip!` was dead the moment the listener went.** `refs/heads/wip/<line>`
-   held a throwaway commit of live un-milestone'd state so a client could
+   held a throwaway commit of live un-commit point'd state so a client could
    `git diff origin/main..origin/wip/main`. Its own docstring records that wip
-   refs are never pinned in `git_map`, never a milestone parent, and rejected
+   refs are never pinned in `git_map`, never a commit point parent, and rejected
    on push — so the advertisement was the only reader. It was minted into the
    IN-MEMORY projection repo, which `mirror-push!` never touches (that uses the
    on-disk `.git`), and `push-to-remote!` pushes named branches only. Deleted,
    along with `delete-ref!`, whose only caller it was. This was not free to
    keep: minting one rendered every source in the store and inserted a commit
-   object on **every** projection — every push, pull and milestone.
+   object on **every** projection — every push, pull and commit point.
 
 2. **`slopp.sync/pull!` got simpler, not harder.** It read the listener's shared
    jgit ctx and fell back to opening its own. The plan treated preserving that
@@ -3907,7 +3907,7 @@ could clear it alone.
 
 So `done` reports two verdicts. `:test-status` grades the STORE and is
 unchanged — `commit_point` and `session_brief` read it, and a red store still
-cannot milestone. `:episode-status` grades this episode's own work, and the
+cannot take a commit point. `:episode-status` grades this episode's own work, and the
 land reads that one. They differ only when the failing tests provably exercise
 nothing the episode touched.
 
@@ -3933,7 +3933,7 @@ weaker version charged every agent for every other agent's red.
 **What is NOT an agent gets no thread of its own to hide in.** A clone lands
 what it ingested, because a project whose `main` is empty is not a clone of
 anything — the next serve would decide the store was still empty and import
-again. A milestone lands its marker, because a milestone naming work the branch
+again. A commit point lands its marker, because a commit point naming work the branch
 does not contain is unreadable. A turn marker is written on the agent's line
 rather than the branch, because it is part of that agent's episode and the
 session that it describes reads its own thread.
@@ -4963,7 +4963,7 @@ endpoints, all under `/api/`, ZERO content endpoints. So every page-side
 assertion is fixture-only, and the consuming store's five content endpoints are
 the only real ones. Building a page-versus-API distinction in a store with no
 pages is the *works on exactly the store it was developed on* hazard pointed
-the other way, and the milestone says so rather than implying coverage.
+the other way, and the commit point says so rather than implying coverage.
 
 ### Decision 2 — `:rest/client` is retired; `:rest/media-type` says what an endpoint ANSWERS
 
@@ -6115,7 +6115,7 @@ a store you cannot reach*.
 ### D-history-off-the-value — the store value carries the head and a window, never the log (2026-08-29)
 
 **Decision.** A store value holds no `:deltas`. It carries `:head`,
-`:line-pos`, `:recent` (since the last milestone plus the done that earned
+`:line-pos`, `:recent` (since the last commit point plus the done that earned
 it), `:pending`, `:prompts` and `:refs`; history is read from the journal
 through `ops/with-history` / `ops/journal` / `db/line-deltas` at the moment
 a view is asked, and `store/deltas` on a value without them THROWS rather
@@ -6136,15 +6136,15 @@ from a `:pure` namespace (tier-layering catches it — `read.history` went
 external and came back pure with a hydrated-session contract instead), and
 a half-landed flip is not a state the trunk may be in: the `--live` host
 reloads trunk code against its own value, so the value shape and every
-reader of it land in ONE milestone. Learned the hard way at 05:30 when the
-first milestone landed half of it and the running server's `done` threw
+reader of it land in ONE commit point. Learned the hard way at 05:30 when the
+first commit point landed half of it and the running server's `done` threw
 the new message.
 
 ### D-one-vocabulary — one argument has one spelling, and the schema is the whole accepted set (2026-08-29)
 
 **Decision.** Across every tool: a form is `ns` + `name`; a rename goes
 `from` → `to`; an exact subform is `match`; flags spell the way tool names
-do (`dry_run`, `to_ns`, `content_type`); a milestone takes `label`, the
+do (`dry_run`, `to_ns`, `content_type`); a commit point takes `label`, the
 word `done` takes. A tool's `inputSchema` IS its accepted set — the alias
 table behind the dispatch (`extra-accepted-arg-keys`) is deleted, and a
 retired spelling is refused as an unknown argument, by name.
@@ -6160,7 +6160,7 @@ spelling is what the strict-argument refusal exists to catch.
 **What it does not license.** Not a compatibility layer in either
 direction: there is no window in which the old spelling is accepted with a
 warning. The consumer (slopp-ui) was sent the before/after table before the
-milestone landed and took it in one pass; their one objection — `match`
+commit point landed and took it in one pass; their one objection — `match`
 over `source` on `edit_extract`, because `source` is what is WRITTEN in
 the three tools that take it and this argument is a needle — was the
 better word and is what shipped.
@@ -6214,7 +6214,7 @@ agent-written ones here were the same fact chosen by hand. An arrangement in
 the log is also the one merge failure shape that invents a state neither side
 had (§4 of the review, five times in one week), and a cold-load refusal at
 the merge door for a composition no line wrote. The tiebreak is RANK and not
-"current position" because the projection derives each milestone's tree from
+"current position" because the projection derives each commit point's tree from
 a fold, and a history-dependent tiebreak let the fold and the live store
 disagree about the same forms.
 
@@ -6572,8 +6572,21 @@ next ask inside that window used to lose its turn.
 
 Corollary for the handoff injection (same wave): the composed handoff
 is rendered as TEXT in the ask's order (asks oldest first with their
-`:turn` ids and forms, milestones, changes rolled up by namespace, the
+`:turn` ids and forms, commit points, changes rolled up by namespace, the
 suite verdict and command), fitted by whole rows, closing "this IS the
 record — quote the ids" — never a mid-EDN `pr-str` snip, and never a
 "(deeper: …)" tail that teaches the drill-down the injection exists to
 pre-empt (s17 measured that tail's cost at 5 + 7 calls per handoff).
+
+## D-vocabulary-commit-point (2026-09-02) — "milestone" is retired; the word is "commit point"
+
+The `:commit` delta, the `commit_point` tool and the prose word "milestone"
+were three names for one thing, and the bare word "commit" collides with
+the git commit the store commit projects to. The vocabulary is the tool's
+own name — **commit point** — everywhere the word is live (code, skills,
+docs, DEV/AGENTS/README, the hook); dated findings keep the word they were
+written with. `done` is NOT absorbed: it is the other grain (lands work,
+is not a commit), and an audit of every swept usage found none that meant
+done. Wire keys followed the word: `report`'s and `/api/timeline`'s
+`:milestones` became `:commit-points` (announced to slopp-ui);
+`query_cost {by "milestone"}` became `{by "commit-point"}`.

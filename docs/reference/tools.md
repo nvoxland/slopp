@@ -26,7 +26,7 @@ were deferred by the client and cost a search turn each to find.
 
 | Tool | What it does |
 |---|---|
-| `session_brief` | Start here, once. Namespaces with form names, recent milestones and their asks, git alignment, the loop. |
+| `session_brief` | Start here, once. Namespaces with form names, recent commit points and their asks, git alignment, the loop. |
 | `query_project` | Every namespace's outline -- names, arities, `!`-status, test-ness -- in one response. `since` returns a one-liner when nothing changed. |
 | `query_search {pattern}` | Regex across all store source; one hit per matching form, the hit is the form's card. |
 | `explore {ops}` | Several READ questions, one call: `ops = [{op ...} ...]`, answered one result per op (`query_batch` is its de-advertised alias). |
@@ -75,9 +75,9 @@ by heartbeats, renders every page, and proxies `/p/<slug>/api/*` to whichever
 project owns that slug. Every screen lives there:
 
 - **`/`** -- the picker: every project that has checked in, linked.
-- **`/p/<slug>`** -- that project's timeline, milestones newest first, each
+- **`/p/<slug>`** -- that project's timeline, commit points newest first, each
   linking its own change screen, plus what has been written since the newest.
-- **`/p/<slug>/change/<from>..<to>`** -- that milestone reviewed form by form,
+- **`/p/<slug>/change/<from>..<to>`** -- that commit point reviewed form by form,
   grouped module then namespace, each form leading with its recorded ask, then
   a line diff, then how many forms call it.
 - **`/p/<slug>/store/form/<id>`** -- one form's permalink. Form ids are stable
@@ -178,9 +178,9 @@ namespace list:
 {:slopp/contract-version 2
  :endpoints [{:method :get :path "/api/timeline" :name timeline
               :handler slopp.api.endpoints/timeline
-              :doc "GET /api/timeline -- milestones newest first, plus the working set."
+              :doc "GET /api/timeline -- commit points newest first, plus the working set."
               :media-type "application/json" :effectful? false :auth :public
-              :request nil :response [:map [:milestones …]]}]}
+              :request nil :response [:map [:commit points …]]}]}
 ```
 
 `:doc` is the handler's own docstring, de-indented and whole -- so a handler
@@ -248,8 +248,8 @@ Three things worth knowing:
 |---|---|
 | `query_history` | Everything that happened. Routes by args: `{}`, `{ns name}`, `{ns name at}`, `{at}`, `{contains}`, `{dead_ends}`. |
 | `query_changes {from to}` | Net per-form diffs with the red/green arc. `from` takes `"start"`, `"last-commit"`, `"last-done"` or a delta id. |
-| `report {since? contains? limit?}` | The handoff in one read: `:by-ask` (each ask verbatim with the forms it added, changed, deleted, renamed), milestones, net form changes, the last verification. |
-| `query_commits` | Milestones newest first, with `:alignment` proving the git branch head matches the latest projection. |
+| `report {since? contains? limit?}` | The handoff in one read: `:by-ask` (each ask verbatim with the forms it added, changed, deleted, renamed), commit points, net form changes, the last verification. |
+| `query_commits` | Commit points newest first, with `:alignment` proving the git branch head matches the latest projection. |
 | `query_git` | This session's git view: the saved external remote and the clone base it grafts onto. |
 
 ## Writing
@@ -273,7 +273,7 @@ Three things worth knowing:
 | `edit_requalify {ns name}` | Namespace a function's option keys in its arglist and every caller's map literal together. |
 | `edit_extract {ns from name}` | Extract a subform into a new fn. Address it by `match` (its exact text) or, for a large one, by `at` (an anchor). |
 | `edit_move_forms {ns forms to}` | Relocate a cluster to another namespace, rewriting callers everywhere. |
-| `undo {deltas\|to}` | Walk back your own recent writes. `to: "last-commit"` scraps everything since the milestone. |
+| `undo {deltas\|to}` | Walk back your own recent writes. `to: "last-commit"` scraps everything since the commit point. |
 | `episode_revert` | Roll back everything you changed since your last done. |
 | `cleanup {ns\|all}` | Bring a namespace (or the whole store) up to current standards. Reports, never auto-fixes. |
 
@@ -283,7 +283,7 @@ Three things worth knowing:
 |---|---|
 | `done {label}` | Close a unit of work. Episode-scoped; reports rather than refuses. |
 | `full_check` | The whole store: every namespace linted, dead surface everywhere, both layering graphs (purity tiers and module rules), the rule catalog swept over every form, every test in every tier. `affected: true` is the middle gear. `:rules` is the only whole-store rule answer there is — a `done`-grain rule sees only what an episode changed, so turning a rule on never checks the code already there; `:not-swept` names the rules a whole-store run cannot ask. Carries `:app {:behind n}` when a managed app server is up — how far the SERVED image lags the store it just called green. |
-| `commit_point {label}` | Record a milestone. Green-gated; `force: true` records a red honestly. `target` marks an earlier spot. |
+| `commit_point {label}` | Record a commit point. Green-gated; `force: true` records a red honestly. `target` marks an earlier spot. |
 | `test_run` | Spot-check specific tests. `{external true}` for the external tier, `{all true}` for the whole in-image suite. |
 | `draft_test {ns name code?}` | Draft a `deftest` from observed calls. Writes nothing. |
 | `build {dir main?}` | Materialize every namespace to `.clj` files. `main` adds a GraalVM native-image recipe. Returns `missing-artifacts` for any derived file absent from the cache, each with the call that refills it. |
@@ -307,7 +307,7 @@ a ghost that every register view has to carry.
 
 A **thread** is the private line your session writes to; a green `done` lands it
 on the branch. You never create one — see
-[Done points and milestones](../guide/done-and-milestones.md). These two verbs
+[Done points and commit points](../guide/done-and-commit-points.md). These two verbs
 exist for the leftovers: work somebody started and nobody finished.
 
 | Tool | What it does |
@@ -328,7 +328,7 @@ exist for the leftovers: work somebody started and nobody finished.
 | `git_push {url? branches?}` | Publish slopp history to the remote. Fast-forward only. |
 | `git_pull` | Fetch and absorb remote history by a form-granular 3-way merge. |
 | `git_clone {url dir}` | Clone a remote into a fileless store. |
-| `import_dir {dir}` | Absorb a directory of files the same way `git_pull` absorbs a remote — 3-way against your last milestone, no git anywhere. |
+| `import_dir {dir}` | Absorb a directory of files the same way `git_pull` absorbs a remote — 3-way against your last commit point, no git anywhere. |
 | `git_conflicts` | Unresolved pull conflicts, with the raw remote content. |
 | `git_resolve {path?}` | Mark a conflict resolved. Unblocks `git_push`. |
 

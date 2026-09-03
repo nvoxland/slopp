@@ -15,7 +15,7 @@ session_brief {}
 ```
 
 One small call returns every namespace with its form names, the recent
-milestones and what was asked for at each, git alignment, and any findings
+commit points and what was asked for at each, git alignment, and any findings
 left over from the last session. That is the whole orientation step -- there
 is no "list the files" phase, because there are no files.
 
@@ -114,7 +114,7 @@ marks the episode boundary, and reports its findings. It reports rather than
 refuses, so a finding you cannot fix right now never deadlocks you -- but a red
 `done` stands until new work supersedes it.
 
-## 6. Milestone
+## 6. Commit point
 
 ```clj
 commit_point {description "line totals apply per-line discounts"}

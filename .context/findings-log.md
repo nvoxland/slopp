@@ -2152,3 +2152,25 @@ requires); and never make a reader re-buy what it already holds.
   :publish 189104}`. The publish — `ensure-projected!` re-folding every
   journal before the push — is 98% of the milestone's wall. D2 is the
   target, now as a fact.
+
+## 2026-09-02 — the "milestone" → "commit point" sweep, and what rename_sweep got wrong
+
+- Vocabulary: "milestone" retired for "commit point" (D-vocabulary-commit-point).
+  An audit of every swept usage — store and files — found NONE that meant
+  `done`; `done` stays the other grain.
+- rename_sweep is TOKEN-EXACT: the singular sweep left `milestones` (and
+  with it the `:milestones` wire key on `report` and `/api/timeline`),
+  `Milestones`, `Milestone` and `MILESTONE` untouched. Four sweeps for one
+  word. A concept rename should offer case/plural variants, or at least
+  REPORT the variants it saw and did not touch.
+- rename_sweep REPORTS `:metadata-lost` (^:export, ^:external) on renamed
+  forms that in fact kept their metadata — the renamed external tests still
+  ran in the external tier, and `:source-now` showed `^:export` intact. A
+  false alarm in the drift report, which cost a restore attempt.
+- A sweep turns VERBS into the new noun: "must not milestone" → "must not
+  commit-point" (twice), "what it milestones" → "what it commit points".
+  Hand-fixed; a sweep cannot know a word is a verb, but the report could
+  flag hits followed by a period or "not".
+- The docs page `done-and-milestones.md` was renamed with `git mv`; the
+  sweep rewrote its link TEXT to "done-and-commit points.md" — a broken
+  link had the file not been renamed to match.

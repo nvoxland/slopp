@@ -414,7 +414,7 @@ the rule's default; `<rule>` is a write-gate var name (`schema-refusal`,
   `run-done-advisories!` skips an `:off` advisory. A project turns off a gate it
   can't live with instead of fighting a wall.
 - **`:error`** — for done advisories, flip `test-status` red (block the
-  milestone). Dial `key-typos`/`breaking-changes` up when they matter to you.
+  commit point). Dial `key-typos`/`breaking-changes` up when they matter to you.
 - **`:advisory`** — surface, never block. Dial `schema-drift` down if you want it
   informational.
 - **`:refuse`** — the write-gate default (hard-refuse).

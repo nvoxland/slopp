@@ -58,7 +58,7 @@ You give up opening the project in an editor and reading it, and you give up
 
 What gives it back:
 
-- **The git projection.** Milestones render the store as ordinary files and
+- **The git projection.** Commit points render the store as ordinary files and
   become deterministic git commits, so the code is browsable, diffable and
   reviewable on GitHub like anything else. Edits made there come back through a
   form-granular 3-way merge.

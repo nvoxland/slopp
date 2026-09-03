@@ -251,8 +251,8 @@ First-person friction (2026-07-15) — six items from the module-system
 window, ALL FIXED same day: (1) the full isolated suite (~3.5min) was
 the only gate — `test_run {isolated true, affected true}` now runs just
 the test namespaces whose require-closure reaches a change since the
-last milestone (provable slice; empty slice says so; full suite stays
-the milestone gate). Fixing it exposed that the :test alias's baked
+last commit point (provable slice; empty slice says so; full suite stays
+the commit point gate). Fixing it exposed that the :test alias's baked
 `-r ".*"` (Q13) UNIONS with -n in cognitect's runner — :ns narrowing
 had been silently broadened ever since; narrowed runs now use a
 filter-free :test-run alias. (2) big edit_group payloads truncated on

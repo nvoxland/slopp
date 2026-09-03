@@ -58,7 +58,7 @@ nav:
       - The store: guide/store.md
       - Editing forms: guide/editing.md
       - Verification: guide/verification.md
-      - Done points and milestones: guide/done-and-milestones.md
+      - Done points and commit points: guide/done-and-commit-points.md
       - History and provenance: guide/history.md
       - Modules and purity tiers: guide/modules-and-tiers.md
       - Branches and merging: guide/branches.md

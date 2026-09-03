@@ -76,7 +76,7 @@ it reads.
 
 | Key | What it does |
 |---|---|
-| `user.name` / `user.email` | Milestone author identity. `"<git>"` defers to git config. |
+| `user.name` / `user.email` | Commit point author identity. `"<git>"` defers to git config. |
 | `git-remote` | Where `git_push` publishes. `"."` means the local repo, resolved against the store directory. |
 | `git-branch` | The one branch slopp owns. Default `slopp`. |
 

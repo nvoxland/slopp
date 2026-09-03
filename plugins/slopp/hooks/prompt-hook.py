@@ -13,7 +13,7 @@ a prompt):
      — and their hyphenated bigrams, so "billable weight" finds
      billable-weight-g — matched against form names, those sources inline;
   3. the old micro-brief.
-Recent asks + the last milestone + a red-done heads-up ride along from
+Recent asks + the last commit point + a red-done heads-up ride along from
 sqlite whichever tier answered. stdout becomes prompt context."""
 import json
 import os
@@ -137,7 +137,7 @@ def sqlite_bundle(c):
 
 
 def tail_context(c):
-    """Recent asks, last milestone, red-done heads-up — from sqlite."""
+    """Recent asks, last commit point, red-done heads-up — from sqlite."""
     bits = []
     try:
         n = c.execute("SELECT COUNT(DISTINCT ns) FROM elements").fetchone()[0]
@@ -145,7 +145,7 @@ def tail_context(c):
                         "ORDER BY seq DESC LIMIT 1").fetchone()
         m = re.search(r':description "((?:[^"\\]|\\.)*)"', row[0]) if row else None
         desc = (m.group(1) if m else "none yet")[:80]
-        bits.append("[slopp] live store here: %d namespaces; last milestone: %s."
+        bits.append("[slopp] live store here: %d namespaces; last commit point: %s."
                     " Work through the slopp tools — the store is the source,"
                     " not the files." % (n, desc))
         asks = c.execute("SELECT payload FROM deltas WHERE op='turn-begin' "

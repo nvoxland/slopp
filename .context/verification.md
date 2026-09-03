@@ -355,7 +355,7 @@ The oracle must never return a false verdict. Everything here serves that.
    summary (incl. `:failures`, `:staleness-detected`/`:fresh-confirmed`).
    **There are TWO evidence citizens (2026-08-06), and the split is
    deliberate.** A `:verify` delta is a claim a WRITE makes about the store —
-   `done`'s scope logic, milestone `:status` and the trace map all read it, so
+   `done`'s scope logic, commit point `:status` and the trace map all read it, so
    widening it weakens what a verification MEANS. An **`:observe` delta**
    (`store/record-observation`, registered in `store.fields/markers`) is the
    narrower *these tests ran, in this tier, and this is what happened*.
@@ -523,8 +523,8 @@ The oracle must never return a false verdict. Everything here serves that.
    fn stays invisible, and no cheap check sees it.
    **Deliberately not wired:** `test_run` (a spot-check whose own contract
    points at done/commit_point for the real verdict) and `commit_point`'s
-   GATE. A green done carrying `:host-stale` still records a milestone today —
-   changing the milestone bar is decision-grade and was not taken here.
+   GATE. A green done carrying `:host-stale` still records a commit point today —
+   changing the commit point bar is decision-grade and was not taken here.
    **Which ARTIFACT produced the verdict (2026-08-05, task #30).** Everything
    above measures a NAMESPACE against the store, which presumes the code doing
    the measuring is the code you think it is. The layer under it — the jar —

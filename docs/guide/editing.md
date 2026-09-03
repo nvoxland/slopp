@@ -200,7 +200,7 @@ three.
 ## Undoing
 
 `undo {deltas n}` walks back your own writes; `undo {to "last-commit"}` scraps
-everything since the last milestone; `undo {to "last-done"}` goes back to your
+everything since the last commit point; `undo {to "last-done"}` goes back to your
 last done point. It is addressed by delta rather than by name, so it also
 restores a form you *deleted* -- the case `edit_revert` structurally cannot
 reach, since there is no name left to look up. Forms another session also wrote
@@ -212,5 +212,5 @@ revert as a searchable **dead end**, so a later session running
 `query_history {dead_ends "some.ns"}` finds "someone tried X here and dropped
 it because Y" instead of walking it again.
 
-Reverting before a `commit_point` keeps the milestone history clean: the dead
+Reverting before a `commit_point` keeps the commit point history clean: the dead
 end shows up in `dead_ends`, not in the commit log.

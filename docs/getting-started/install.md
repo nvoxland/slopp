@@ -5,7 +5,7 @@ slopp needs **Java 21+** and nothing else. Everything below runs the same jar.
 !!! note
     slopp is experimental. On-disk shapes and tool signatures still change
     between releases. The store is a SQLite journal in your project -- back it
-    up the way you would back up a database, and push milestones to git.
+    up the way you would back up a database, and push commit points to git.
 
 ## Claude Code plugin (recommended)
 

@@ -256,7 +256,7 @@ Two rules for writing:
 
 ## Benchmarks
 
-At milestones:
+At commit points:
 
 ```sh
 clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main
@@ -295,8 +295,8 @@ run on `workflow_dispatch` and a schedule rather than per push.
 
 ## Commits
 
-- **Both ledgers, every milestone**: `commit_point` (green-gated store
-  milestone — what `git_push` publishes) *and* a git commit of kernel/docs
+- **Both ledgers, every commit point**: `commit_point` (green-gated store
+  commit point — what `git_push` publishes) *and* a git commit of kernel/docs
   changes, with plain descriptive messages.
 - **Never credit Claude or any AI** — no `Co-Authored-By`, no "Generated
   with" footers.

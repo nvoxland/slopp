@@ -40,7 +40,7 @@ recorded total covers part of a long form's life and says which part.
 
 **When the answer is for a HUMAN, hand over a URL rather than a wall of
 pasted source** — your tools answer questions, a page lets someone LOOK.
-There is a browsable view of the store: a milestone timeline, a per-milestone
+There is a browsable view of the store: a commit-point timeline, a per-commit-point
 change review (module → namespace → form, with each form's recorded ask, its
 line diff and its blast radius), form permalinks by ID with callers above and
 callees inlined below, and the namespace index.
@@ -93,12 +93,12 @@ a store it cannot open. See "Consuming someone else's API" above.
 
 **When you hit a dead end, revert cleanly and say WHY.** `undo` walks back
 your OWN writes by delta — `{deltas n}` for the last n, or `{to :last-commit}`
-to scrap everything since the last milestone (the usual "this whole approach
+to scrap everything since the last commit point (the usual "this whole approach
 was wrong" move) / `{to :last-done}` to your last done. Always pass a
 `prompt` naming *why* you're abandoning it: that records the revert as a
 searchable **dead-end**, so a later session (or you) running
 `query_history {dead_ends "some.ns"}` finds "someone tried X here and dropped
 it because Y" instead of re-walking it. `episode_revert` scraps the whole
-episode. Reverting before a `commit_point` leaves the milestone history clean
+episode. Reverting before a `commit_point` leaves the commit point history clean
 — the dead end shows in `dead_ends`, not in the commit log.
 

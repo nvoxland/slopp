@@ -7,7 +7,7 @@ categories:
 
 # slopp 0.2.0 -- the rules are enforced now
 
-Nine days and 172 milestones since 0.1.2. The short version: slopp stopped
+Nine days and 172 commit points since 0.1.2. The short version: slopp stopped
 *advising* and started *enforcing*, the reference question got exactly one
 answer, and the write flow became REPL-shaped instead of transaction-shaped.
 
@@ -87,7 +87,7 @@ you. A red `done` stands until new work supersedes it, which means you cannot
 clear one by committing without changing anything.
 
 Dead public surface is now a hard gate: a public `defn` nothing in the store
-calls is an error at `done` and refuses milestones. Deliberate surface takes
+calls is an error at `done` and refuses commit points. Deliberate surface takes
 `^:unused-ok`, and the dial polices itself -- putting the marker on a var that
 *is* called fails with "remove the flag".
 
@@ -220,7 +220,7 @@ Changed:
 something, and that records a searchable dead end:
 `query_history {dead_ends "some.ns"}` finds "someone tried X here and dropped it
 because Y" instead of letting the next session walk it again. Reverting before a
-milestone keeps the commit log clean -- the dead end shows in `dead_ends`, not
+commit point keeps the commit log clean -- the dead end shows in `dead_ends`, not
 in the history.
 
 ## Polymorphism, tracing, and the child image
@@ -254,7 +254,7 @@ Test narrowing also decides **per form** now. It used to collapse to
 
 `git_push` and `git_pull` each got exactly one meaning: push sends your
 `slopp/<branch>` mirrors up, pull fetches them down and absorbs remote store
-history. Milestones mirror into local git automatically as `slopp/<branch>`, so
+history. Commit points mirror into local git automatically as `slopp/<branch>`, so
 a checkout durably carries slopp history with no ceremony. One-off push urls
 never rewrite the saved default.
 

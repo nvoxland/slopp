@@ -169,7 +169,7 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   lands; the thread keeps the work, so iterate and done again rather than
   reaching for the db. A red that is provably somebody ELSE's — its failing
   tests exercise nothing you touched — does not hold your thread: `done`
-  reports `:test-status :red` (the store is red; no milestone) alongside
+  reports `:test-status :red` (the store is red; no commit point) alongside
   `:episode-status :green`, names the tests under `:red-attribution`, and
   lands. Reasoning: `.context/decisions.md` § `D-threads`.
 - **Red/green TDD, always.** Tests first, watch them fail, then implement —
@@ -204,7 +204,7 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
 - **Dogfooding is a standing practice:** build real things through slopp
   itself under `projects/<name>/` (untracked); write findings to a
   `REPORT.md` there; findings drive the roadmap. See `.context/dogfooding.md`.
-- **Benchmark at milestones** (`clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main` — the tree is fileless; plain `-m slopp.lab.benchmark` finds nothing).
+- **Benchmark at commit points** (`clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main` — the tree is fileless; plain `-m slopp.lab.benchmark` finds nothing).
   The row appends to `benchmarks/results.md`, which is **gitignored** — a LOCAL
   record, never committed. See `.context/dogfooding.md`.
 - **The image is the oracle:** verification correctness depends on

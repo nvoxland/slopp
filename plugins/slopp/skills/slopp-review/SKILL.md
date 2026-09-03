@@ -18,7 +18,7 @@ reads a text diff). Reach for this when the code lives in a store.
 
 An author reviewing their own work is weak regardless of tooling. Route a real
 review through the **`slopp-reader` subagent** (fresh eyes, read-only) — give it
-the scope (a milestone range, a namespace, a module) and prompt it
+the scope (a commit point range, a namespace, a module) and prompt it
 **adversarially**: *assume there ARE bugs and hunt them, and VERIFY each finding
 in the live image with `query_eval` before reporting it.* A descriptive "how does
 X work" pass rubber-stamps; an adversarial, image-verified pass is what surfaces
@@ -54,10 +54,10 @@ conclusions, so the review reasons about findings, not source dumps.
    to. Run the tests before you scan — nothing is `:observed` until a
    `full_check` populates the trace, so an untouched session under-reports the
    strong case rather than the weak one.
-2. **Reviewing a CHANGE → `report {since}`** composes milestones + changes + the
+2. **Reviewing a CHANGE → `report {since}`** composes commit points + changes + the
    asks + verification + alignment in one read; **`query_changes {from to}`** gives
    the net per-form diff (`:was`/`:now` + red/green arc) between two points
-   (milestone `:target`s from `query_commits`). `query_changes {agent}` scopes to
+   (commit point `:target`s from `query_commits`). `query_changes {agent}` scopes to
    one author's work.
 3. **Drill into a form → `query_slice {ns name}`** — full source of that one form
    plus interface CARDS for everything it reaches (sig, doc, why, warranty). For a
@@ -110,7 +110,7 @@ conclusions, so the review reasons about findings, not source dumps.
 - **Contract findings → `query_rules` + the `done` boundary.** `query_rules` lists
   every rule active in this store and its severity — so a review knows what the
   gates already guarantee (don't re-check) and what's dialed `:off` (check by
-  hand). The done/milestone boundary records the contract findings a review should
+  hand). The done/commit point boundary records the contract findings a review should
   read: `:schema-drift` (a `:=>` schema that lies about its impl), `:breaking-changes`
   (a boundary contract narrowed vs the last-done baseline — arity / `:=>` schema-key /
   visibility), `:key-typos` (a likely-mis-spelled domain key). `report {since}`
@@ -150,8 +150,8 @@ rows the gates can't see:
   state in one read.
 - **Point the human at the change screen — on the HUB, not on your own port.**
   `session_brief`'s `:hub` is the address that renders pages, and the slug is
-  already in it; `<hub>/change/<from>..<to>` (the milestone ids from
-  `query_commits`) is that milestone reviewed form by form — recorded ask, line
+  already in it; `<hub>/change/<from>..<to>` (the commit point ids from
+  `query_commits`) is that commit point reviewed form by form — recorded ask, line
   diff, blast radius, each form linking its permalink with callers above and
   callees inlined. `:ui` is your project's own listener and serves `/api/*`
   JSON only, so handing that one out costs someone a 404. Give the url

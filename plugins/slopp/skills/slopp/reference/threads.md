@@ -25,7 +25,7 @@ because each part surprises somebody:
   is still there: fix it and call `done` again.
 - **Another agent's red does not hold your thread.** If the branch is red
   for reasons that exercise nothing you touched, `done` still says
-  `:test-status :red` — the store IS red and no milestone can be taken —
+  `:test-status :red` — the store IS red and no commit point can be taken —
   but it names the failing tests as `:foreign` under `:red-attribution`,
   sets `:episode-status :green`, and lands. Innocence has to be proven, so
   a failing test with no trace (`:untraced`), or one the run counted but
@@ -35,11 +35,11 @@ because each part surprises somebody:
   until your `done` moves it. Your verification image is a different thing
   and always holds your thread's code — which is why your tests are right
   about your work while the server is still right about the branch.
-- **`commit_point` lands too**, so a milestone always names a branch that
-  contains what it milestones. When that land is REFUSED — the branch moved
-  and the rebase conflicts, or the thread is unreachable — the milestone comes
+- **`commit_point` lands too**, so a commit point always names a branch that
+  contains what it marks. When that land is REFUSED — the branch moved
+  and the rebase conflicts, or the thread is unreachable — the commit point comes
   back `:status :unlanded` and carries the refusal in `:land`, because the one
-  thing worse than a refused milestone is a green one naming a branch that
+  thing worse than a refused commit point is a green one naming a branch that
   does not hold the work. Resolve what `:land` names and call it again.
 - **Identity comes from your harness, before your first write.** Your thread
   is keyed by `(agent, branch)`, and the agent id is the CONVERSATION your

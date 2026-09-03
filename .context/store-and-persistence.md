@@ -10,7 +10,7 @@
   blank lines and comments, positional and idless, kept so rendering could be
   lossless. Lumping those together forced byte preservation: a comment stored
   positionally is content the delta log never recorded, which is why a
-  milestone had to snapshot every namespace's bytes to keep it. Splitting them
+  commit point had to snapshot every namespace's bytes to keep it. Splitting them
   dissolved the requirement. **The space between forms is RENDERING** —
   `render-ns` supplies one blank line, nothing stores it — and **a comment is
   CONTENT owned by a form**, travelling in that form's delta like anything
@@ -84,7 +84,7 @@
   `move-form`, `reorder-to`, `edit_move` and `edit_add_form before` are gone;
   a `:move` in an older journal (1,048 here) replays as a no-op and crosses a
   merge as applied. Why the rank tiebreak matters: the git projection FOLDS
-  the journal to render a milestone's tree, and a tiebreak by "where the
+  the journal to render a commit point's tree, and a tiebreak by "where the
   form sits today" made the derivation depend on the vector's history, so a
   fold (creation order) and the live store (arranged at every write) could
   disagree; rank is the same fact on both sides. `refs/ns-key` hashes the
@@ -121,7 +121,7 @@
   has none THROWS, naming the doors, rather than answering `[]` as if the
   line had no history. The doors: `ops/with-history` (a copy of the
   session hydrated from `db/line-deltas`, `:ops [:commit]` when only the
-  milestones are wanted), `ops/journal`, and `db/line-deltas` itself, whose
+  commit points are wanted), `ops/journal`, and `db/line-deltas` itself, whose
   op filter is SQL so a reader of forty markers never parses the payloads it
   did not ask for. `slopp.read.history` is `:pure` and takes a hydrated
   session; a bare one reaches the throw. After: `load-store` ~3 s (3.5 s
@@ -525,12 +525,12 @@ ADDING A REGISTER = one row here. Nothing else.
   `query-lineage` should match it (it matches `:form-id` and `:form-ids`),
   and register the op in `slopp.store.fields` (a marker op joins `markers`,
   else foreign-journal sync falls through to a full reload and a merge
-  REFUSES it). `:commit` (P4-m7 milestones) is a marker carrying only its
+  REFUSES it). `:commit` (P4-m7 commit points) is a marker carrying only its
   description, target and status — plus `:git-sha` on imports.
 - **`replay-delta` is TOTAL, and that is load-bearing rather than tidy.** A nil
   return means "the journal is not enough, reload from the elements table",
-  and the git projection now derives each milestone's tree by folding the log
-  — so an op that cannot replay is a milestone whose bytes cannot be
+  and the git projection now derives each commit point's tree by folding the log
+  — so an op that cannot replay is a commit point whose bytes cannot be
   reconstructed. Six ops used to return nil (`:ingest`, `:move`, `:rename-ns`,
   `:move-forms`, `:extract-ns`, `:module-extract`); all six carry what they
   need and now replay. The four `apply-changeset` ops are pure node rewrites
@@ -569,7 +569,7 @@ ADDING A REGISTER = one row here. Nothing else.
   - Each marker used to carry a byte-exact `:tree` snapshot instead: 82 MB
     across 272 markers (39% of the journal), and 94% of a 344 MB journal in an
     earlier round. It existed because comments lived positionally in the
-    elements table — CURRENT state only — so a past milestone's bytes were
+    elements table — CURRENT state only — so a past commit point's bytes were
     genuinely unreconstructible. Once comments became form-owned content the
     log was complete and the snapshot had no job.
   - **ONE pass matters.** Folding from empty per marker is quadratic in the
@@ -577,14 +577,14 @@ ADDING A REGISTER = one row here. Nothing else.
   - A marker normally targets the delta immediately before it, which is exactly
     where the fold stands on arrival. `commit_point {:target ...}` can name an
     EARLIER delta, so those positions are rendered as the walk passes them and
-    held. **A held tree is not released at its first reader** — a milestone's
+    held. **A held tree is not released at its first reader** — a commit point's
     own target is the delta before it, which is what an earlier retroactive
     marker also points at, and dropping it there left the retroactive commit
     silently projecting the CURRENT state.
 - `git_map` (main store.db) pins each `:commit` delta → sha at first projection,
   keyed `(delta_id, fingerprint)` (fingerprint = SHA-256 of `[id at description
   target]`); query surfaces read it, and it's the insert-skip key above.
-- **The local SERVER face is GONE (2026-08-02).** Milestones used to be served
+- **The local SERVER face is GONE (2026-08-02).** Commit points used to be served
   over localhost smart-HTTP so a git client could clone/fetch the store as a
   remote. It forced exact-project handling that got complex for what it bought,
   and it carried the third `derived-port` implementation. Removed with
@@ -600,13 +600,13 @@ ADDING A REGISTER = one row here. Nothing else.
   generated deps.edn); `slopp.sync/push!` saves the remote as `git-remote` meta.
 - **The graft:** a cloned store records `git-base-sha` (the remote tip it was
   cloned at); `project-journal!` seeds its parent chain with it, so the clone's
-  first local milestone chains onto the remote's REAL history and its pushes
+  first local commit point chains onto the remote's REAL history and its pushes
   fast-forward. `push-to-remote!` fetches the remote's objects first when the
   base object isn't in the in-memory repo (fresh process). Serving the LOCAL
   listener for a cloned store offline (base objects unfetched) degrades with an
   error — push/pull paths always fetch first.
-- The remote is a normal file repo: only MILESTONES cross the wire (a clone
-  gets the last commit_point's tree, not un-milestone'd live state); non-source
+- The remote is a normal file repo: only COMMIT POINTS cross the wire (a clone
+  gets the last commit_point's tree, not un-commit point'd live state); non-source
   files on a remote (README, CI) are ignored by clone/pull.
 - **Pull (G4):** `sync/pull!` = fetch → `merge-base(ours, tip)` → 3-way diff
   applied at form granularity (remote wins where we're clean; verified
@@ -616,7 +616,7 @@ ADDING A REGISTER = one row here. Nothing else.
   rows exist; the agent merges via edit tools then `git_resolve`. The pull
   ends with a `:commit` marker carrying `:git-sha <tip>`, which
   `project-journal!` ADOPTS as the chain node (never mints) — the next
-  milestone parents on the remote tip, keeping pushes fast-forward.
+  commit point parents on the remote tip, keeping pushes fast-forward.
   `ensure-projected!` lazily fetches chain objects it doesn't hold
   (`requiring-resolve` of `fetch-remote!` — append-order forced the late
   bind); offline, ref updates throw and callers degrade.

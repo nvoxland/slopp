@@ -6,7 +6,7 @@ description: "Set up, sync, and ship a slopp-managed repo: adopt slopp in a proj
 # Setting up and shipping a slopp repo
 
 The store is a SQLite delta journal at `<project>/.slopp/store.db` — gitignore
-it. What git tracks is a **projection**: at every milestone (`commit_point`)
+it. What git tracks is a **projection**: at every commit point (`commit_point`)
 slopp can render the store as ordinary `.clj` files and push them as a git
 commit. Day-to-day editing happens through the MCP tools (see the `slopp`
 skill); this skill covers everything around that — onboarding, sync, config,
@@ -75,7 +75,7 @@ worth running on one that wasn't.
 ## The branch-ownership model
 
 slopp owns exactly ONE branch — store config `git-branch`, default `"slopp"`.
-- `git_push {url?, branch?}` publishes milestones to that branch of the
+- `git_push {url?, branch?}` publishes commit points to that branch of the
   configured remote (`git-remote`; a relative value like `"."` resolves
   against the store dir). It refuses to move the checked-out branch of a
   non-bare local repo.
@@ -85,11 +85,11 @@ slopp owns exactly ONE branch — store config `git-branch`, default `"slopp"`.
 - `git_clone {url, dir}` rebuilds a fileless store from a published repo.
 - `import_dir {dir}` absorbs a DIRECTORY the same way, with no git on either
   side — a zip, a scratch tree, another tool's output. Same 3-way merge, same
-  conflict handling, same `done` gate; the base is your last milestone. Git is
+  conflict handling, same `done` gate; the base is your last commit point. Git is
   a *caller* of import, not a requirement for it.
 - Humans own `main` (and everything else) with regular git; merge
   `slopp ↔ main` yourself when you want code to cross the boundary.
-- Milestone authorship: `config {key: "user.name"|"user.email", value}`
+- Commit point authorship: `config {key: "user.name"|"user.email", value}`
   (value `"<git>"` defers to git config).
 
 ## Source lives in slopp; everything else lives in git

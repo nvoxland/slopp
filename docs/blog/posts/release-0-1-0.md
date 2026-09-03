@@ -41,7 +41,7 @@ every commit on the code branch was generated and pushed by the system itself.
   you resolve.
 - **Files manifest.** Non-code files ride every projected tree, so the CI
   workflow can live in the store alongside the code.
-- **Author identity.** Milestones are stamped with the store's configured
+- **Author identity.** Commit points are stamped with the store's configured
   `user.name` / `user.email`; `"<git>"` defers to your git config.
 - **A release pipeline.** Tagging builds an uberjar and attaches it, plus a
   native-image proof job that compiles a slopp-built sample app to a GraalVM

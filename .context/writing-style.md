@@ -16,7 +16,7 @@ share the voice rules and the AI-tropes section.
   **"We"** for project-level statements. Second person for instructions.
 - **Developer-to-developer.** A technical forum post, not a press release.
 - **Plainspoken.** No buzzwords, no hype adjectives. Say what the thing does.
-- **Comfortable with imperfection.** Admit missed milestones, known issues,
+- **Comfortable with imperfection.** Admit missed commit points, known issues,
   half-baked ideas. "Not yet production ready" is fine.
 - **Honest about uncertainty.** "I'm not sure this is the right approach"
   beats false confidence. An n=1 measurement gets labelled as one.

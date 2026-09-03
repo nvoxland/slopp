@@ -20,7 +20,7 @@ by convention it must not redefine code; redefinition belongs to edit ops).
 
 commit points → turns → episodes → span diffs → forms, each row carrying
 the ids to drill into the next: `query-commits` (rows carry `:sha`, the
-milestone's git commit id, once the P4-m8 projection has minted it) /
+commit point's git commit id, once the P4-m8 projection has minted it) /
 `query-history {collapse
 true}` (COMMIT rows with description + status; turn brackets with the
 verbatim intent + nested episode rows; `:contains` searches turn INTENTS,
@@ -167,8 +167,8 @@ write time, instead of a fresh JVM catching it later.
   else n/8 capped at 4 and half the cores); explicit N overrides, a
   single `:ns`/`:only` run never shards. `:affected true` = the provable slice
   (test namespaces whose require-closure reaches a form changed since
-  the last milestone; empty slice returns a note, full suite stays the
-  milestone gate); narrowed runs use the generated `:test-run` alias
+  the last commit point; empty slice returns a note, full suite stays the
+  commit point gate); narrowed runs use the generated `:test-run` alias
   (no baked `-r` — cognitect's runner UNIONS -r with -n, which silently
   defeated `:ns` narrowing before). Red results carry `:failing`,
   `:all-failing` {file [tests]}, and `:themes` (cause phrases clustered
@@ -180,7 +180,7 @@ write time, instead of a fresh JVM catching it later.
   tests, records a labeled `:done` delta. Never rewrites silently
   mid-edit — only at this explicit call. Add rules deliberately (they must be
   provably behavior-preserving) and note them in the normalize ns.
-- `commit-point!` — MILESTONE (P4-m7): the done pipeline, then a
+- `commit-point!` — COMMIT POINT (P4-m7): the done pipeline, then a
   `:commit` marker at the result with a human `description`. Green-gated
   (`:force` records `:status :red` honestly); `:target` = retroactive pure
   marker (no `:tree`). Since P4-m8 the marker snapshots the rendered
@@ -430,7 +430,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 - ~~**Git smart-HTTP**~~ — **REMOVED 2026-08-02.** Serving the store to a git
   client AS a remote (`slopp.git.server`, the embedded listener `slopp.mcp/-main`
   opened on a dir-derived port, `query_git`'s `:git-url`, and the
-  `refs/heads/wip/<branch>` mirror of un-milestone'd state) is gone. It forced
+  `refs/heads/wip/<branch>` mirror of un-commit point'd state) is gone. It forced
   exact-project handling that got complex for what it bought, and it carried
   the third `derived-port` implementation — the salt in
   `api.server/derived-port` exists to dodge a port nothing binds now.
@@ -478,7 +478,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 - **The series runs itself (Q10/Q11, revised 2026-07-14):** `commit_point`
   in a git checkout MIRRORS the projection into local git as
   `slopp/<store-branch>` and reports `:published {:branch ...}` (errors
-  ride along; the milestone never fails on mirror trouble). Remote
+  ride along; the commit point never fails on mirror trouble). Remote
   publishing is explicit (`git_push`; first URL saved as default, never
   rewritten by one-off pushes).
   `edit_rename` results carry `:mentions` — prose/string occurrences of
@@ -491,7 +491,7 @@ its store-backed static reader moved to `api.web/store-reader`.
   trace-map coverage). Impact is change_signature's discovery as a read —
   plan the edit before paying for it.
 - **Alignment is proven, not asserted (Q12):** `query_commits` carries
-  `:alignment` (local-remote branch head vs the latest milestone's minted
+  `:alignment` (local-remote branch head vs the latest commit point's minted
   sha) so handoff audits are one trusted read — the eval8 trust spiral
   (worktrees, raw sqlite, duplicate runs) was the demand signal.
 - **One door per question (consolidation, 2026-07-14):** dependency
@@ -509,7 +509,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 ## Git bridge tools (`git_push` / `git_clone` / `query_git`)
 
 - `git_push {url? token? branch?}` → `sync/push!`: project + push the store's
-  milestone history to a normal remote as real files. `url` once (saved as
+  commit point history to a normal remote as real files. `url` once (saved as
   `git-remote` meta), reused after. Fast-forward only. Durable sessions only.
 - `git_clone {url dir token?}` → `sync/clone!`: rebuild a FILELESS store from
   a remote at `dir` (no `.clj` materialized); records `git-remote` +
@@ -574,7 +574,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 - `build!` MATERIALIZES the store to files (for tooling/native-image);
   `boot` RUNS it in place. Two exits from the store, same source of truth.
 - `config {key value?}` — store config: user.name/user.email, the git author
-  identity stamped ON the milestone marker at commit_point time (G5);
+  identity stamped ON the commit point marker at commit_point time (G5);
   unset or "<git>" defers to `git config` in the project dir. Determinism:
   identity lives on the marker, never read from config at projection time.
 

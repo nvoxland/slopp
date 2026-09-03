@@ -9,7 +9,7 @@ slopp rewards a specific shape of code — the shape that stays correct when the
 one editing it (you) sees a narrow slice, not the whole codebase. These are not
 style opinions; each rule names the slopp surface that checks it, or says plainly
 that it's on your judgment. The operational loop (reads, writes, `done`,
-milestones) is the main `slopp` skill — this is the *what to write*, not *how to
+commit points) is the main `slopp` skill — this is the *what to write*, not *how to
 drive the tools*.
 
 The organizing idea: **a pure function is a closed world.** Its whole contract is

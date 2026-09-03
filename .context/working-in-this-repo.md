@@ -64,8 +64,8 @@ in the same pass (`grep` the old name across `docs/` and `plugins/`).
 
 ## Commits
 
-- **Both ledgers, every milestone**: `commit_point` (green-gated store
-  milestone — what `git_push` publishes) AND a git commit of kernel/docs
+- **Both ledgers, every commit point**: `commit_point` (green-gated store
+  commit point — what `git_push` publishes) AND a git commit of kernel/docs
   changes, with plain descriptive messages.
 - **Never credit Claude/AI** — no Co-Authored-By, no "Generated with".
 - Update the relevant `.context/` doc in the same commit as the change it

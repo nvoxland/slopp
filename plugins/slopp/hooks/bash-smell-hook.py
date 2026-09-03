@@ -33,7 +33,7 @@ RAW_DB_REASON = (
     "The store answers this itself: "
     "query_store {code \"(fn [store] ...)\"} for read-only analysis over the "
     "immutable store VALUE (deltas, namespaces, metadata sweeps); "
-    "report for milestones + per-form changes with their recorded asks, the "
+    "report for commit points + per-form changes with their recorded asks, the "
     "verbatim user :intents, and :code (the follow-up that carries source); "
     "query_history {contains X} / {dead_ends true} for the asks and the "
     "scrapped explorations. "

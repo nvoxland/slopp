@@ -1,4 +1,4 @@
-# Done points and milestones
+# Done points and commit points
 
 There is exactly one bar in slopp, and it is `done`.
 
@@ -40,7 +40,7 @@ again.
 A red that belongs to somebody else is a different thing, and it used to be
 treated the same. `done` answers two questions now. `:test-status` grades the
 **store** — `commit_point` and `session_brief` read it, and a red store cannot
-milestone. `:episode-status` grades **your work**, and the land turns on that
+commit point. `:episode-status` grades **your work**, and the land turns on that
 one. When the branch is red for reasons that exercise nothing you touched, done
 names the failing tests under `:red-attribution`:
 
@@ -147,7 +147,7 @@ episode without paying for the entire store.
 ## Dead surface is a hard gate
 
 A public `defn` or `def` that nothing in the store calls is an error at `done`,
-and it refuses milestones globally.
+and it refuses commit points globally.
 
 Deliberate? Mark the name: `(defn ^:unused-ok f ...)` -- for genuinely external
 surface, string-eval'd entry points, runtime-resolved handlers. The dial
@@ -173,7 +173,7 @@ by a *different store* that cannot ask you what format it is in.
 One construct is not markdown: `[[name]]` is a reference to another form. A
 renderer may resolve it or leave it as text.
 
-## Milestones
+## Commit points
 
 ```clj
 commit_point {description "line totals apply per-line discounts"}
@@ -186,10 +186,10 @@ diffs and reverts to -- coarser than done points and turns.
 verdict. That is deliberate: two different bars would mean two different
 definitions of finished. You do not need a `test_run` first.
 
-`force: true` records a red milestone honestly instead of refusing, and
+`force: true` records a red commit point honestly instead of refusing, and
 `target: "<delta id>"` marks an earlier spot.
 
-A milestone carries a byte-exact rendered tree, which is what makes the git
+A commit point carries no tree of its own; the git projection folds the journal to the state it names, which is what makes the git
 projection deterministic. In a git checkout it also mirrors the store's history
 into local git as `slopp/<store-branch>` automatically, so the repo durably
 carries slopp history with no ceremony. Publishing to a remote stays explicit:

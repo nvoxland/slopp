@@ -50,7 +50,7 @@
   work lands, identical changes converge, same-form divergence is an MV
   conflict (ours live, theirs surfaced).
 - **Every write is a tracked delta** `{op, ns, prompt, agent, at, ...}`; the
-  provenance stack is MILESTONE (commit_point: named, green-gated; carries
+  provenance stack is COMMIT POINT (commit_point: named, green-gated; carries
   a byte-exact rendered `:tree` snapshot — the git projection's input,
   P4-m8) ⊃ TURN (verbatim user ask, `turn_begin`/`turn_end`; enforced on
   real servers) ⊃ EPISODE (per-agent work-unit between DONE-POINTS —

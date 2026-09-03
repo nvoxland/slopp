@@ -75,14 +75,14 @@ changes; `--snapshot` freezes at startup. From a checkout of this repo,
   any form's life; `query_form_at` time-travels; `file_history`/`file_get`
   do the same for tracked non-code files (the CI workflow rides the files
   manifest; the jar manifest is structured config).
-- **Milestones are git commits.** `commit_point` (green-gated) snapshots a
+- **Commit points are git commits.** `commit_point` (green-gated) snapshots a
   byte-exact tree onto the marker; the git projection deterministically
   mints these as the commits you see here, authored per the store's
   `user.name`/`user.email` config (`"<git>"` defers to your git config).
 
 ## Working with git (this repo)
 
-- `git_push` — publish the milestone history to a normal remote
+- `git_push` — publish the commit point history to a normal remote
   (fast-forward only, never force).
 - `git_clone` — rebuild a **fileless** store from a remote; the clone grafts
   onto the remote's history so its pushes fast-forward.

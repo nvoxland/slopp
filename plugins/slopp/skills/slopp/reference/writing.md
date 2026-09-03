@@ -356,7 +356,7 @@ renames, moves, and the unused gate can see — a naked quoted symbol or a
 var name in a string is invisible to all three.
 
 **Dead surface fails the gate:** a public `defn`/`def` nothing in the
-store calls is an ERROR at `done` and refuses milestones (globally).
+store calls is an ERROR at `done` and refuses commit points (globally).
 Deliberate? Mark the NAME: `(defn ^:unused-ok f ...)` — external surface,
 string-eval'd or runtime-resolved entries. The dial polices itself: a
 marker on a var that IS called fails with "remove the flag". Fixture

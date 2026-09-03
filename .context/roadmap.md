@@ -229,22 +229,22 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
   server absorbs them via m5b sync, so the model never has to relay its own
   instructions. A turn may end red — failed turns are history too.
 
-- **P4-m7 — Commit points: the MILESTONE grain, purely in-journal
+- **P4-m7 — Commit points: the COMMIT POINT grain, purely in-journal
   (user-designed).** `commit_point {description, agent}` = the full
   checkpoint pipeline, then a `:commit` marker delta `{:description :target
   :status :agent :at}` — a named pointer at the just-checkpointed head; the
-  better-controlled milestone above turn ends, episode ends, and plain
+  better-controlled commit point above turn ends, episode ends, and plain
   checkpoints, per branch. GREEN-GATED: red verification refuses the
-  milestone (the checkpoint still stands) unless `:force true`, which
+  commit point (the checkpoint still stands) unless `:force true`, which
   records `:status :red` honestly. `:target <past delta id>` = pure
   retroactive marker (status derived from the log's last `:verify`).
   Markers-as-deltas ride the journal, branch snapshots, and merge replay
   for free (`:commit` is a no-content op in `replay-delta`). Surfaces:
   `query_commits` (newest first; targets anchor query_changes from/to
-  between-milestone diffs), COMMIT rows in the collapsed history
+  between-commit point diffs), COMMIT rows in the collapsed history
   (contains-searchable by description). **Git integration explicitly
   REJECTED for now** (user, 2026-07-04): a `git_export` projection
-  (build! + one git commit per milestone + sha cross-link) was built and
+  (build! + one git commit per commit point + sha cross-link) was built and
   removed same-day — commit points are slopp-internal; whether/how to
   bridge to git remains an open question, to be driven by demand, not
   built ahead of it. *Revised same day by P4-m8 (user-driven demand): the
@@ -252,7 +252,7 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
   points stay slopp-internal-first.*
 
 - **P4-m8 — Git compatibility layer: serve the protocol, project the
-  milestones (user-requested; explicit revision of P4-m7's rejection).**
+  commit points (user-requested; explicit revision of P4-m7's rejection).**
   > **REVISED (self-host, user-driven): the projection is now IN-MEMORY and
   > READ-ONLY.** `slopp.git/open-repo!` builds a JGit `InMemoryRepository`
   > generated from the journal on demand — there is NO on-disk `.slopp/git`
@@ -283,7 +283,7 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
     before every refs advertisement). Keeps JGit out of every agent
     server's write path and makes concurrent projectors converge on
     identical shas with no coordination. Cost accepted: tens of KB of
-    journal per milestone (rare top grain; delta-encoding is a recorded
+    journal per commit point (rare top grain; delta-encoding is a recorded
     follow-on). Markers WITHOUT `:tree` (pre-m8 history, retroactive
     `:target`) backfill lossily (inter-form trivia isn't in deltas) — pinned
     at first projection, never recomputed.
@@ -296,7 +296,7 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
     credentials/SSH/config). Server-only v1; slopp-as-client is a follow-on.
   - **Red pushes land honestly** (user-confirmed): a push that compiles but
     turns tests red is accepted and recorded `:status :red`; only compile
-    failures reject. Matches the write-model (edits record, milestones
+    failures reject. Matches the write-model (edits record, commit points
     gate).
   - Ordering invariant (crash-safe): journal marker → git objects
     (content-addressed, idempotent) → git_map row (INSERT OR IGNORE +
@@ -327,14 +327,14 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
     state is a working-directory feature. The protocol-legal idiom
     (cf. refs/pull/*, Gerrit refs/changes/*): `refs/heads/wip/<branch>`
     holds a throwaway commit of the LIVE store state (parent = last
-    milestone, tree = the element rows via `db/rendered-sources`,
-    byte-exact) whenever it differs from the milestone tree; deleted when
+    commit point, tree = the element rows via `db/rendered-sources`,
+    byte-exact) whenever it differs from the commit point tree; deleted when
     clean. Tools `git diff origin/main..origin/wip/main`. Deterministic →
-    concurrent projectors converge; never in git_map, never a milestone
+    concurrent projectors converge; never in git_map, never a commit point
     parent, pushes to wip/* reject (before the lazy session boots). Known
     costs: the ref moves non-fast-forward by design (fetch shows "forced
     update"), and orphaned wip objects accumulate in the bare repo until a
-    gc (maintenance follow-on). A store with zero milestones gets no wip
+    gc (maintenance follow-on). A store with zero commit points gets no wip
     ref (no baseline). Hidden-namespace variant (refs/slopp/wip/*) is a
     one-line change if branch-listing noise ever bothers.
   - **Embedded listener (M7, user-requested):** the agent's OWN MCP server
@@ -358,12 +358,12 @@ historical, `.context/` is authoritative); MCP request-level concurrency.
     as a git CLIENT; the user's git owns auth.
   - **v1 limits (recorded, not accidental):** localhost-only, no auth; no
     branch creation/deletion/tags over push (git clients can't push to a
-    store with zero milestones — the first milestone comes from slopp);
+    store with zero commit points — the first commit point comes from slopp);
     form order and inter-form trivia normalize back to slopp's layout on
-    round-trip; **`branch_merge` does not transfer milestones** —
+    round-trip; **`branch_merge` does not transfer commit points** —
     `merge-logs` routes `:commit` through the unknown-op skip-with-note
     (store.clj), so a merged branch's history surfaces in git only at the
-    next main milestone.
+    next main commit point.
   - **Follow-ons (demand-driven):** slopp-as-client (fetch/push to GitHub
     from slopp), auth, push-creates-branch, per-commit import groups
     (better query-changes spans at N× verification cost), file
@@ -523,7 +523,7 @@ JVM+classload ~0.8s · `boot/load-store!` (load 161 nses into the JVM) ~5s ·
 **94% of the journal is `:commit` payloads:** 239 markers × ~1.35MB of P4-m8
 byte-exact `:tree` snapshots = **323.7MB of 344MB total**. Parsing all deltas
 costs 7424ms; excluding commits, **454ms**. D-web/P4-m8 recorded this cost as
-"tens of KB of journal per milestone" — it is ~50× that, and now dominates
+"tens of KB of journal per commit point" — it is ~50× that, and now dominates
 every session open.
 
 **Not a state-reconstruction problem.** Current state is already checkpointed
@@ -608,7 +608,7 @@ D-web-cljs. Needs its own design pass and decision record before building.
 (not a lint); gate = refuse-for-new; named `.cljc` schemas are the paved road
 with inline allowed and a DRY advisory to guide. Part 1: `web-endpoint-schema`
 refuses a `:web/path` endpoint missing `:web/response` (every endpoint) or
-`:web/request` (`:post`/`:put`/`:patch` body methods) — milestones d11968/d11981.
+`:web/request` (`:post`/`:put`/`:patch` body methods) — commit points d11968/d11981.
 Part 2: `generate_client` — a stored, edit-protected, inspectable `:cljs`
 namespace of typed fetch wrappers; the `^:generated` marker's triple duty; the
 `:cljc`-placement check; the explicit-regeneration `web-stale-client` advisory; the

@@ -1,7 +1,7 @@
 # Working with git
 
 The store is the source. What git tracks is a **projection**: at every
-milestone slopp renders the store as ordinary `.clj` files and mints a
+commit point slopp renders the store as ordinary `.clj` files and mints a
 deterministic commit from it. The result is a repo you can browse, review, and
 PR against like any other.
 
@@ -47,7 +47,7 @@ git_resolve {path}
     the base they share, how far each is past it, and a `:cause` --
     `:mirror-ahead` (the destination builds on your projection; someone else
     wrote the ref) reads nothing like `:remint` (both tips stamp the *same*
-    milestone and are different commits, so a projection is not reproducing
+    commit point and are different commits, so a projection is not reproducing
     itself). Git gives both the same status and they have opposite remedies.
 - **`git_pull`** fetches the remote's mirrors down and absorbs remote history
   by a 3-way merge **at form granularity**. The remote wins where your store is
@@ -59,14 +59,14 @@ git_resolve {path}
   remote's history so later pushes fast-forward.
 - **`import_dir {dir}`** does what `git_pull` does, from a **directory**, with
   no git on either side. Same form-granular 3-way merge, same conflicts, same
-  `done` gate. The base is your last milestone -- which is "the state this
+  `done` gate. The base is your last commit point -- which is "the state this
   directory was exported from" in the common case, and the conservative answer
-  otherwise: work you did since that milestone is yours-only and survives.
+  otherwise: work you did since that commit point is yours-only and survives.
   Paths the export never carried, and that are not namespaces, are left alone
   and noted. Git is a *caller* of import here, not a requirement for it.
 - **`query_git`** and **`query_commits`** show the projection state and prove
-  store/git alignment -- by asking the branch head which milestone it is. Every
-  projected commit carries a `Slopp-Commit:` trailer naming the milestone it
+  store/git alignment -- by asking the branch head which commit point it is. Every
+  projected commit carries a `Slopp-Commit:` trailer naming the commit point it
   came from, so the proof reads the artifact rather than trusting a sha the
   store recorded when the commit was minted. Minting happens whether or not the
   push after it succeeds; the two are different facts, and only one of them is
@@ -84,7 +84,7 @@ setup for a repo you clone normally and want to keep working on with git.
 
 ## Authorship
 
-Milestones are stamped with the store's configured identity:
+Commit points are stamped with the store's configured identity:
 
 ```clj
 config {key "user.name"  value "Ada Lovelace"}

@@ -3,7 +3,7 @@
 ## The loop — and the budget
 
 A whole task should be ~10–20 tool calls: orient (1) → read (1) → write
-REPL-style (small individual writes) → `done` → ONE milestone. `done` is
+REPL-style (small individual writes) → `done` → ONE commit point. `done` is
 not once-per-session: call it at every point you believe a piece of work is
 complete, before starting the next. Each extra
 call re-reads your entire context; the patterns below are where sessions
@@ -24,7 +24,7 @@ its implementation, because red-first means you have to SEE the red. `done`
 ends a turn's batch by definition — its verdict is what decides the next move.
 
 1. **Orient with ONE small call per session: `session_brief`.** Form
-   names, recent milestones with their asks, git alignment, the loop —
+   names, recent commit points with their asks, git alignment, the loop —
    everything a fresh session needs to start working. **Then ONE call per
    ask: `orient {ask "<the ask, verbatim>"}`** — the forms that matter for
    it, ranked by a walk over the reference graph and the tests that cover
@@ -52,7 +52,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    conclusions; your context should hold decisions, not source.
    **For summaries/handoffs/audits: `report` is TERMINAL, not a starting
    point.** One read already carries `:intents` (the USER's verbatim asks,
-   recorded per turn), `:milestones`, `:changes` with their recorded `:asks`,
+   recorded per turn), `:commit-points`, `:changes` with their recorded `:asks`,
    `:dead-ends`, the suite state, and `:code` — the follow-up that carries
    source. Narrow it with `report {contains "eco"}`; do NOT re-ask
    `query_history {contains …}` once per feature (measured: four such calls
@@ -87,7 +87,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    that provably exercises nothing you touched does not hold you: done
    reports it under `:red-attribution` as `:foreign` and lands anyway. Two
    verdicts, and they answer different questions: `:test-status` grades the
-   STORE (a red one still cannot milestone), `:episode-status` grades YOUR
+   STORE (a red one still cannot take a commit point), `:episode-status` grades YOUR
    work and is what the land turns on. Finished a unit of work and about to
    start the next? That's a done point. Call it, read the findings, and
    find out whether you were actually done before you move on. Multiple
@@ -220,7 +220,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    **A verdict that still STANDS is handed back, not re-earned.** When nothing
    since the last whole-store check could have changed what it says, you get
    that verdict with `:standing true` in about a millisecond and no check runs
-   — the same courtesy `commit_point` has always shown an unchanged milestone.
+   — the same courtesy `commit_point` has always shown an unchanged commit point.
    Any write of any kind retires it; `{force true}` re-runs regardless. So
    asking again is cheap and honest rather than something to ration: the
    reason this exists is that over one store's journal, 117 of 325 runs were
@@ -236,7 +236,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    **`{affected true}` is the MIDDLE GEAR, and what it saves depends entirely
    on WHERE you changed things.** Lint, dead surface, layering and the in-image
    suite still cover every namespace; only the `^:external` tier narrows, to
-   the tests your changes since the last milestone can REACH. So it is a
+   the tests your changes since the last commit point can REACH. So it is a
    reachability filter, not a discount: change a leaf namespace and it runs a
    handful of tests; change `slopp.ops`, `slopp.mcp` or `slopp.rules` and
    nearly everything reaches you.

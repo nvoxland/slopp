@@ -12,7 +12,7 @@ reconstructed later -- it is captured at edit time, when it is still true.
   and agents never plan the grouping.
 - **Turn** -- one user ask, verbatim. Opened by `turn_begin {intent}`, closed by
   `turn_end`.
-- **Milestone** -- `commit_point`. Named, green-gated, a git commit.
+- **Commit point** -- `commit_point`. Named, green-gated, a git commit.
 
 Turns are automatic under the Claude Code plugin: a prompt hook drops the
 verbatim ask where the server picks it up, and identity comes off the harness
@@ -30,7 +30,7 @@ words, not your paraphrase. The verbatim ask is the part that has value later.
 |---|---|
 | `query_history {}` | recent episodes |
 | `query_history {ns name}` | one form's whole life |
-| `query_history {ns name at}` | that form as of a past delta or milestone |
+| `query_history {ns name at}` | that form as of a past delta or commit point |
 | `query_history {at}` | was it green at that point |
 | `query_history {contains "invoice"}` | which asks touched this |
 | `query_history {dead_ends true}` | abandoned explorations |
@@ -46,7 +46,7 @@ lifetime. This is how you read what changed, not `git diff`, and never the raw
 
 ## Summaries and handoffs
 
-`report` is the composite: the user's verbatim asks per turn, milestones,
+`report` is the composite: the user's verbatim asks per turn, commit points,
 changes with their recorded reasons, dead ends, suite state, and the code
 itself. Narrow it with `report {contains "invoice"}`.
 
@@ -68,7 +68,7 @@ That records a searchable dead end. Six weeks later someone asking
 `query_history {dead_ends "billing.queue"}` finds out the idea was tried and
 why it was dropped, instead of spending a day rediscovering it.
 
-Reverting before a `commit_point` keeps the milestone history clean: the dead
+Reverting before a `commit_point` keeps the commit point history clean: the dead
 end lives in `dead_ends`, not in the commit log.
 
 ## Provenance survives refactoring

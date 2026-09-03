@@ -1126,7 +1126,7 @@ substitutes a proxy — source-text change, reload-threw, deltas-since-boot — 
 a proxy is wrong in BOTH directions. The wave hit both: three silent divergences
 that every check called green (a `def` capturing another form's value; var
 metadata capturing a schema's value; a generated namespace written and never
-loaded) and one false alarm that cost a milestone a fresh JVM (a failed reload
+loaded) and one false alarm that cost a commit point a fresh JVM (a failed reload
 reported as "the host still runs their previous code" while the image was
 current).
 
@@ -2829,7 +2829,7 @@ motivated by a new guard: the guard's existence is a separate claim from the
 suite's colour, and only one of them is tested by restarting.
 
 **The steady-state generalization, same consumer, same day**, on finding their
-jar at a milestone nobody had announced:
+jar at a commit point nobody had announced:
 
 > green proves nothing BROKE; it does not prove nothing CHANGED that I should
 > be adopting
@@ -2838,7 +2838,7 @@ The companion above is about one migration; this is about every ordinary
 restart. A green suite is a statement about the consumer's code against the
 jar it HAS, and it is structurally silent about the jar it could have. The
 consumer cannot close that gap by testing harder — the information is not in
-their store. Only the producer can close it, by announcing, and **a milestone
+their store. Only the producer can close it, by announcing, and **a commit point
 that lands without a message has moved the cost onto someone who cannot pay
 it.** They asked rather than inferred, which is the correct default and not a
 fallback; the failure was mine for making the question necessary.
@@ -3621,9 +3621,9 @@ required the BROWSER namespace to encode a request body — a server-side client
 reaching into `webapp` — and nothing had ever complained, because the guard's
 predicate permitted it and no rest-only store had been built to break on it.
 
-## A milestone and a consumer's artifact are different events (2026-08-27)
+## A commit point and a consumer's artifact are different events (2026-08-27)
 
-I told a consuming store a wave was "ready", meaning: milestone green,
+I told a consuming store a wave was "ready", meaning: commit point green,
 `full_check` green, bundle recompiled. All true. None of them the jar, which
 had not been rebuilt in fourteen hours — so the namespace at the centre of the
 wave was in the store and in no artifact anybody could load.
@@ -3636,7 +3636,7 @@ wave exists to prevent: *it reads like your own mistake.*
 
 **The gap has been seen from both ends in one week.** A jar arrived unannounced
 and they asked rather than inferred; then a wave was announced and had not
-arrived. One gap: my milestone and their artifact are separate events, and each
+arrived. One gap: my commit point and their artifact are separate events, and each
 side can only see its own.
 
 **The rule: a coordination message carries `jar: <head>` unconditionally,
@@ -3689,7 +3689,7 @@ a mixed image.
 
 **The disproof was already in their own table.** `/api/webapp/routes` answered
 200 on my process, and that endpoint had been deleted from the store two
-milestones earlier. A process serving a deleted endpoint is not a process with a
+commit points earlier. A process serving a deleted endpoint is not a process with a
 data-dependent bug; it is a process running code that no longer exists.
 
 The generalisable half: **when the same code answers differently on two stores,
