@@ -2252,3 +2252,19 @@ Review of the remaining commit logic, with numbers on this store's main line:
   produced; model p50 context 668k, ~656k cached tokens per request; commit
   point publish 821 ms. Rent, refusal shapes and retries accumulate from
   the bracket fix onward.
+
+## 2026-09-03 — correction (user): a dead owner is not "nobody will finish this"
+
+- The first thread GC settled open threads on owner-process death alone.
+  Wrong rule: a returning agent is meant to pick its thread back up
+  (thread_list / thread_drop exist for exactly that decision). Of the 134 it
+  settled on this store, ~110 carried un-landed content. Deltas and rows are
+  intact, but `abandoned` is not resumable today.
+- Rule now: compaction auto-settles only a thread with NOTHING TO RESUME —
+  zero un-landed content since its fork (the fresh thread a done leaves,
+  then orphaned). Every thread with work stays open however dead its owner.
+- What would make idle-but-resumable threads cheap WITHOUT settling them:
+  treat the VIEW as a cache for open threads too — drop it when idle,
+  rematerialize on adopt by replaying the thread's un-landed deltas over its
+  parent's view. That path does not exist yet; filed in ideas/ (it would also
+  be the resurrect path for the ~110 already settled).
