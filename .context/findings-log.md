@@ -2448,3 +2448,38 @@ Review of the remaining commit logic, with numbers on this store's main line:
   the rewriter. Two text patches broke a string literal by carrying raw
   quotes (a JSON `\"` decodes to `"`); the group failed to compile with
   `No such namespace: ns` — the tell for that mistake.
+
+## 2026-09-03 — eval24 canary: cards by default is cards-then-fetch, twice
+
+**Setup.** Three step-2 cells from the eval23 post-step-1 snapshot, the
+reads/writes wave's jar, eval23-step2's rules (median turns ≤ 17; whole-ns
+reads ≤ 1; one `query_flow`), pre-registered with a revisit clause: if the
+median regressed past 19 the cards default would be revisited before the
+lifetime run. Records: `projects/eval24-reads/RUNS.md`.
+
+**e24s (jar d131e0cc7da47, `full true` advertised in the hint and the
+descriptor): 22 / 14 / 24.** Every namespace read was `{full true}` — the
+cards were bypassed, not fetched after. Cell 2's 14 is the best step 2 on
+record: the history question answered in one call from the import
+`:origin` line, the feature written in one change. Cell 3 lost six turns to
+a BUG: the group's alias-repair loop, anchoring on the first namespace in
+the group when the compile error had lost its coordinate, added
+`[logi.discount :as discount]` to two namespaces that never mention it.
+Fixed (anchor on the error's own `:form`), with a second fix beside it: a
+change step naming a namespace that does not exist creates it instead of
+refusing ("ingest it first" cost cell 1 a turn).
+
+**e24t (jar d771ce3ecd036, escape unadvertised): 24 / 29 / 18.** Eight
+card reads and three `targets` fetches in cell 1; zero `query_flow` in any
+cell. The eval10 shape exactly: the habit walks every namespace whatever
+the answer looks like, and cards make each walk two calls.
+
+**Verdict and change.** MISS on turns twice; the cards default is reverted
+to whole-when-small (≤ 6k) with the hint riding along, and the bundle's
+whole-namespace section is restored smallest-first under a cap of six.
+`:v`, `query_flow`, versioned `targets` and canonical refs stay. The
+revisit re-runs as e24u under the same rules before Part 2 (all models).
+
+**Method note.** The external runner's `only` takes qualified names
+(`ns/test`); a bare name fails with `Could not resolve var`, naming one of
+them, whether or not it exists.

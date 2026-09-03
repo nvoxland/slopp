@@ -173,8 +173,11 @@ write time, instead of a fresh JVM catching it later.
   store namespace the ns form never requires (a fresh boot's failure,
   caught at the write); `missing-alias-require` answers a dotted
   `No such namespace: a.b.c` with the bare `[a.b.c]`.
-- Reads (2026-09-03): `query_source {ns}` is `orient/ns-cards` (cards with
-  `:v`, one example deftest, a hint) and never the source without `full`;
+- Reads (2026-09-03): `query_source {ns}` is the whole source when ≤ 6k
+  chars (with `orient/ns-cards`' hint riding along), else `ns-cards` (cards
+  with `:v`, one example deftest, the hint) — cards by default measured as
+  cards-then-fetch (eval24 canary) and was reverted the same day; the
+  bundle sends the smallest named namespaces whole under `orient/whole-ns-caps`;
   `query_flow` is `query/flow-view` over `graph/call-path` / `call-reach`,
   rows shaped `{:ns :name :source :v}` so `dedupe-sources!` ledgers them
   (it walks `:forms` now); `orient/form-version` is the one version fact. Restarts

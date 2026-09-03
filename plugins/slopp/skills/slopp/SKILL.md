@@ -140,7 +140,7 @@ text replace; say `text: true` next time.
 | you want to know | call |
 |---|---|
 | what matters for this ask, with source for what it names | `orient {ask}` |
-| how forms connect — the path between two, or the reach around one | `depends {op query_flow from "x.a/f" to "x.b/g"}` or `{op query_flow on "x.a/f" reach 2}` — the bodies on the way ride along, across namespaces. A namespace is CARDS by default (`read {op query_source ns "x.a"}`: name, sig, first doc sentence, `:v`, one example test) and never the unit of reading |
+| how forms connect — the path between two, or the reach around one | `depends {op query_flow from "x.a/f" to "x.b/g"}` or `{op query_flow on "x.a/f" reach 2}` — the bodies on the way ride along, across namespaces. A small namespace (`read {op query_source ns "x.a"}`) comes back whole in one read; a big one as cards (name, sig, first doc sentence, `:v`, one example test) — either way it is a filing unit, not the question |
 | the bodies you will edit | `read {op query_source targets ["x.a/f" "x.b/g"]}` — several in one call; each row carries `:v`, and a form you already hold at that version comes back as a reference |
 | what changed here, why, and what was asked — a handoff | `history {op report}` (`{contains "x"}` narrows; `query_changes` for per-form diffs) |
 | who calls X / what X reaches / the module graph | `depends {op query_depends on "ns/x"}` (`modules true`) |

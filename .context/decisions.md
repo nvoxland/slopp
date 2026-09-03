@@ -6249,6 +6249,25 @@ still arrive whole where they are asked for (seeds, the flow's path,
 `targets`). Not a version on the outline stub: a card's `:v` moving with
 its body is the point — the read after an edit shows the edit.
 
+**Amended the same evening (2026-09-03) — measured, and reverted in part.**
+The eval24 canary ran cards-by-default twice. With `full true` advertised
+the model bypassed cards through it (22 / 14 / 24 turns, every read a dump);
+with the escape unadvertised it did exactly what eval10 measured in August:
+cards for every namespace it would have read whole, then `targets` for the
+bodies — 24 / 29 / 18 against eval23's 19 / 20 / 17 — and still zero
+`query_flow`. Model habit, not answer shape, decides the read count; the
+form of the answer decides only how many calls each habit costs. So:
+`query_source {ns}` is WHOLE when the namespace is ≤ 6k chars, with the
+cards' hint riding along, and cards above that; the bundle's whole-namespace
+section is RESTORED, the SMALLEST named namespaces first under
+`orient/whole-ns-caps` (six, 2k each, 6k total — mention order had dropped
+exactly the three the eval23 cells then read by hand). What stands from
+this decision: `:v` on every card and body row, `query_flow`, versioned
+`targets`, the hint. The pin that turned:
+`slopp.mcp-test/a-namespace-read-is-cards-by-default` now says whole-when-small
+in its body under its old name, and the orient-test pin carries its own
+reversal in its name.
+
 ### D-canonical-refs — qualified in, alias on store; the loader hole closed (2026-09-03)
 
 **Decision.** A form may name a lib fully qualified (`logi.fuel/eco-fuel`).
