@@ -913,19 +913,30 @@
         (is (not (contains? forms 'logi.money/cents)) "a namespace the ask did not name is not an answer to it")))))
 
 (deftest the-bundle-sends-no-namespace-whole-and-names-the-flow-read
-  ;; The whole-namespace section (2026-09-03, morning) bought turns by
-  ;; sending more source: the file habit served faster, not replaced. The
-  ;; bundle is the seeds with their source, cards with :v for the rest, and
-  ;; a header that names query_flow for how things connect.
-  (let [st  (-> (store/empty-store)
-                (store/ingest 'logi.booking "(ns logi.booking)\n(defn book! \"B.\" [p] p)\n(defn cancel! \"C.\" [p] p)\n")
-                (store/ingest 'logi.billing "(ns logi.billing)\n(defn bill \"Bill.\" [p] p)\n"))
+  ;; Renamed in place by its history: the whole-namespace section was retired
+  ;; in the afternoon and RESTORED the same evening when the canary measured
+  ;; cards-then-fetch (24/29 turns against 19). What survives of the retirement:
+  ;; the SMALLEST named namespaces go first, up to six, under a chars cap —
+  ;; mention order dropped exactly the three the model then read by hand —
+  ;; and the header names query_flow.
+  (let [big (apply str (repeat 2100 "x"))
+        st  (-> (store/empty-store)
+                (store/ingest 'logi.quoting (str "(ns logi.quoting)\n(defn quote-cents \"" big "\" [p] p)\n"))
+                (store/ingest 'logi.booking "(ns logi.booking)\n(defn book! \"B.\" [p] p)\n")
+                (store/ingest 'logi.billing "(ns logi.billing)\n(defn bill \"Bill.\" [p] p)\n")
+                (store/ingest 'logi.invoice "(ns logi.invoice)\n(defn invoice-str \"I.\" [p] (str p))\n")
+                (store/ingest 'logi.money "(ns logi.money)\n(defn cents \"M.\" [x] x)\n"))
         sess (atom {:store st :test-map {}})
-        r    (orient/bundle sess "eco carriers everywhere: booking and billing; make bill charge more")
+        r    (orient/bundle sess "quoting first, then booking, billing and invoices")
         txt  (:text r)]
-    (is (not (re-find #"names, whole" txt)) txt)
-    (is (not (re-find #"\(defn book!" txt)) "a namespace named by word is cards, not source")
-    (is (re-find #"logi\.booking/book!" txt) "and its forms are on the map")
+    (is (re-find #"names, whole" txt) txt)
+    (is (re-find #"\(defn book!" txt) "the small ones ride whole even though quoting was named first")
+    (is (re-find #"\(defn bill" txt) txt)
+    (is (re-find #"\(defn invoice-str" txt) txt)
+    (is (not (re-find #"\(defn quote-cents" txt)) "over the per-namespace cap: cards")
+    (is (re-find #"logi\.quoting/quote-cents" txt) "and still on the map")
+    (is (not (re-find #"\(defn cents" txt)) "a namespace the ask did not name is not sent")
     (is (re-find #"query_flow" txt) "the header names the flow read")
-    (is (re-find #":v \[" txt) "cards carry a version stamp")
-    (is (re-find #"\(defn bill" txt) "a form the ask names by NAME still arrives whole")))
+    (is (some (fn [[id _]] (= id (:id (store/form-named st 'logi.booking 'book!)))) (:sent r)) "whole namespaces enter the ledger")
+    (testing "a delta bundle sends no namespace whole"
+      (is (not (re-find #"names, whole" (:text (orient/bundle sess "quoting first, then booking, billing and invoices" :whole-ns? false))))))))

@@ -37,7 +37,7 @@
                                :on {:type "string"}
                                :reach {:type "integer"}}}}
    {:name "query_source"
-    :description "{ns} alone: the namespace as CARDS — per form its name, sig, first doc sentence and :v (version stamp), plus one example test whole and a hint naming the better questions; never the bodies. targets [\"ns/name\" …] reads the BODIES of named forms in ONE call — the normal read before an edit; each row carries :v, and a form you already hold at that version comes back as :source-already-sent. How forms connect is query_flow, not a namespace."
+    :description "{ns} alone: a small namespace whole (one read), a big one as CARDS — per form its name, sig, first doc sentence and :v (version stamp), plus one example test whole; either way a hint names the better questions. targets [\"ns/name\" …] reads the BODIES of named forms in ONE call — the normal read before an edit; each row carries :v, and a form you already hold at that version comes back as :source-already-sent. How forms connect is query_flow, not a namespace."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :full {:type "boolean"}

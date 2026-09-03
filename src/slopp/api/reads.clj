@@ -442,7 +442,9 @@
                                            :sources (if (or same? handoff?) 1 2)
                                            ;; the delta is a refresher for a reader that
                                            ;; holds the map; versions ride the first map
-                                           :versions? (not same?))
+                                           :versions? (not same?)
+                                           ;; the whole namespaces are first-map material too
+                                           :whole-ns? (not (or same? handoff?)))
         text     (if (and handoff? (not same?))
                    (str text "\n" (orient/handoff-text (ops/report session :limit 50) 3800))
                    text)

@@ -2666,13 +2666,17 @@
       "query_source" (text! (told! session name a
                                         (let [full?   (:full a)
                                               gate    (fn [n]
-                                                        ;; CARDS by default, whatever the size: six
-                                                        ;; step-2 sessions made 41 whole-namespace
-                                                        ;; reads for flow and style questions a
-                                                        ;; namespace never answered. A card's :v
-                                                        ;; moves with its body, so the read after an
-                                                        ;; edit shows the edit rather than a stub.
-                                                        (orient/ns-cards session n))]
+                                                        ;; a SMALL namespace is one read, whole — cards
+                                                        ;; by default measured as cards-then-fetch (eval24
+                                                        ;; canary: 24/29 turns against 19 whole); the flow
+                                                        ;; hint rides either way. A big one is cards with
+                                                        ;; :v, so the read after an edit shows the edit.
+                                                        (let [src (query/query-source session n)
+                                                              src (if (string? src) src (:source src))]
+                                                          (if (and src (<= (count (str src)) 6000))
+                                                            {:ns n :source src :whole true
+                                                             :hint (orient/read-hint "whole, small.")}
+                                                            (orient/ns-cards session n))))]
                                           ;; whole-ns reads walk the require graph one edge
                                           ;; per turn (eval12 wave A) — hand the next
                                           ;; edge over with this one

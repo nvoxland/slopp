@@ -391,7 +391,7 @@
             {:ns "tk.core"
              :source (apply str "(ns tk.core)\n"
                             (for [i (range 1 91)]
-                              (str "(defn f" i " \"Form " i ".\" [x] (+ x " i "))\n")))})
+                              (str "(defn f" i " \"Form " i ", with a docstring long enough that ninety of them put the namespace past the size where a read is cards.\" [x] (+ x " i "))\n")))})
       (testing "an identical re-read returns an :already-sent stub, not the payload"
         (let [a (call! sess "query_source" {:ns "tk.core"})
               b (call! sess "query_source" {:ns "tk.core"})]
@@ -416,6 +416,15 @@
       (testing "a change the view can SEE invalidates it"
         (call! sess "edit_add_form" {:ns "tk.core" :source "(defn g [x] x)"})
         (is (re-find #"tk\.core/g" (call! sess "query_source" {:ns "tk.core"}))))
+      (testing "a SMALL namespace is whole, its re-read a stub, and an edit moves the view"
+        (call! sess "ns_create" {:ns "tk.small" :source "(ns tk.small)\n(defn h \"H.\" [x] (inc x))\n"})
+        (let [a (call! sess "query_source" {:ns "tk.small"})
+              b (call! sess "query_source" {:ns "tk.small"})]
+          (is (re-find #":whole true" a) a)
+          (is (re-find #"\(inc x\)" a) a)
+          (is (re-find #":already-sent true" b) b)
+          (call! sess "edit_replace_form" {:ns "tk.small" :name "h" :source "(defn h [x] (dec x))"})
+          (is (re-find #"\(dec x\)" (call! sess "query_source" {:ns "tk.small"})) "the read after the edit shows the edit")))
       (finally (ops/close! sess)))))
 
 (deftest ^:external usage-smells-hint-once
@@ -4645,7 +4654,8 @@
       (testing "query_slice {ns} reads the namespace"
         (let [r (call! sess "query_slice" {:ns "rq.core"})]
           (is (re-find #"routed \"query_source\"" r) r)
-          (is (re-find #"rq\.core/f" r) "the namespace's cards name the form")
+          (is (re-find #"\(defn f" r) "a small namespace arrives whole")
+          (is (re-find #":hint \"whole" r) "and its hint says so, not the cards' line")
           (is (not (re-find #"needs :name" r)) r)))
       (testing "query_commits {contains} is report's question"
         (let [r (call! sess "query_commits" {:contains "fuel"})]
@@ -4686,39 +4696,36 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-namespace-read-is-cards-by-default
-  ;; Six step-2 eval sessions: 41 whole-namespace reads (median 867 chars),
-  ;; zero query_depends — the questions behind them were flows and a style
-  ;; question ("what does a test here look like"), and the namespace was the
-  ;; only shape the agent had a habit for. The default read is now the
-  ;; INTERFACE: per form a card (name, sig, first doc sentence, a version
-  ;; stamp), one example test whole, and the better questions named. Bodies
-  ;; are a targets read or a query_flow away; `full true` is the dump.
-  (let [sess (external/open!)]
+  ;; The read shape that measured best across eval22/23/24 (turns, the unit
+  ;; that costs): a SMALL namespace whole — one read, not cards and then a
+  ;; fetch (eval24 canary: cards by default cost 24 and 29 turns where whole
+  ;; cost 19) — with the flow hint riding along; a big namespace as cards
+  ;; (name, sig, first doc sentence, :v, one example test) with the better
+  ;; questions named. Either way the answer says which it is.
+  (let [sess (external/open!)
+        pad  (apply str (for [i (range 80)]
+                          (str "(defn ^:unused-ok p" i " \"Padding form " i ", long enough that the whole namespace is over the size where cards are the answer.\" [x] (+ x " i "))\n")))]
     (try
       (call! sess "ns_create" {:ns "nc.core" :source "(ns nc.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"Adds one. Then more words.\" [x] (inc x))\n(defn g \"Doubles.\" [x] (* 2 x))\n(deftest f-t (is (= 2 (f 1))))\n"})
-      (let [r (call! sess "query_source" {:ns "nc.core"})]
-        (testing "cards, not bodies"
+      (call! sess "ns_create" {:ns "nc.big" :source (str "(ns nc.big)\n" pad)})
+      (testing "a small namespace is one read, whole, and still points at the flow read"
+        (let [r (call! sess "query_source" {:ns "nc.core"})]
+          (is (re-find #":whole true" r) r)
+          (is (re-find #"\(inc x\)" r) r)
+          (is (re-find #"query_flow" r) r)))
+      (testing "a big namespace is cards with versions, one example test, and the better questions"
+        (let [r (call! sess "query_source" {:ns "nc.big"})]
           (is (re-find #":whole false" r) r)
-          (is (not (re-find #"\(inc x\)" r)) (str "no body rode along: " r))
-          (is (re-find #":form nc\.core/f\b" r) r)
-          (is (re-find #":sig \[x\]" r) r)
-          (is (re-find #":doc \"Adds one\.\"" r) r)
-          (is (re-find #":v \[" r) "every card carries a version stamp"))
-        (testing "one example test rides whole — the style question was a real reason for the read"
-          (is (re-find #"\(deftest f-t" r) r))
-        (testing "the better questions are named"
+          (is (not (re-find #"\(\+ x 1\)" r)) "no body rode along")
+          (is (re-find #":form nc\.big/p1\b" r) r)
+          (is (re-find #":v \[" r) "every card carries a version stamp")
           (is (re-find #"query_flow" r) r)
           (is (re-find #"targets" r) r)))
-      (testing "full: true is still the whole source"
-        (is (re-find #"\(inc x\)" (call! sess "query_source" {:ns "nc.core" :full true}))))
-      (testing "a body edit moves that form's version and no other"
-        (let [v-of (fn [r nm] (second (re-find (re-pattern (str ":form nc\\.core/" nm "\\b[^}]*:v (\\[[^\\]]*\\])")) r)))
-              a    (call! sess "query_source" {:ns "nc.core" :resend true})]
-          (call! sess "change" {:prompt "triple" :impl [{:ns "nc.core" :name "g" :source "(defn g \"Triples.\" [x] (* 3 x))"}]})
-          (let [b (call! sess "query_source" {:ns "nc.core" :resend true})]
-            (is (some? (v-of a "g")) a)
-            (is (not= (v-of a "g") (v-of b "g")) (str a "\n" b))
-            (is (= (v-of a "f") (v-of b "f"))))))
+      (testing "a big namespace's example test rides whole"
+        (call! sess "change" {:prompt "a test in the big one" :impl [{:ns "nc.big" :source "(deftest p1-t (is (= 1 (p1 0))))"}]})
+        (is (re-find #"\(deftest p1-t" (call! sess "query_source" {:ns "nc.big"}))))
+      (testing "full: true is the whole source whatever the size"
+        (is (re-find #"\(\+ x 1\)" (call! sess "query_source" {:ns "nc.big" :full true}))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-targets-read-is-versioned
