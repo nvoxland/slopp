@@ -33,6 +33,12 @@ First launch downloads the ~27MB jar; a SessionStart hook pre-warms the
 cache, but if the very first session's MCP connection times out mid-download,
 reconnect with `/mcp` once the fetch finishes — every later start is instant.
 
+If you run Claude Code in `auto` permission mode, allow the server once
+(`"permissions": {"allow": ["mcp__plugin_slopp_slopp"]}` in
+`.claude/settings.json`): otherwise every slopp call is judged by the
+permission classifier first — a billed model call and ~1.5 s per call
+that built-in tools never pay. The `slopp-setup` skill has the details.
+
 **From the release jar** (needs Java 21+ and the [Clojure CLI](https://clojure.org/guides/install_clojure)):
 
 ```sh

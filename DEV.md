@@ -151,6 +151,26 @@ and the next launch gets the new one. Note `slopp.kernel.boot` is file AND store
 namespace (like `slopp.kernel.rt`) and the jar bundles the STORE copy — kernel
 edits go to both.
 
+### Profiling the server — which side of the pipe
+
+"slopp is slow" has two possible homes, and the transcript cannot tell them
+apart: a tool call's span there is the harness's view and includes whatever
+the harness does around the call. Measure the server alone first:
+
+```sh
+bin/mcp-roundtrip.py /path/to/project --jar target/slopp.jar [--jfr out.jfr]
+jfr print --events jdk.ExecutionSample out.jfr      # hot stacks, if the server was the cost
+```
+
+It speaks raw JSON-RPC over stdio to a fresh server and prints each call's
+round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
+slopp call while this measured 0.00–0.38 s for the same ops: the gap was
+Claude Code's auto-mode permission classifier (a model call per unallowed
+MCP tool call), fixed by allowing the server in `.claude/settings.json`,
+not by anything in the JVM. Had it been the JVM, `SLOPP_SERVER_JVM_OPTS`
+takes any `-XX:StartFlightRecording=…` flag for the plugin-launched server
+too.
+
 ## Test
 
 There is **no `:test` alias**, and `clojure -M:test` does not work here: the

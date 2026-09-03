@@ -40,6 +40,26 @@ yet; nothing to do about it — a write carrying `prompt` opens its own turn,
 so the first write creates the store and its turn in one call, and from then
 on the hook records each ask.
 
+## Pre-allow the server (auto permission mode)
+
+Under Claude Code's `auto` permission mode, a tool call that no rule allows
+is judged by a classifier before it runs — a billed model call and about
+1.5 s of wall, PER CALL. Built-in tools skip it; MCP tools do not. Measured
+2026-09-03 over three real sessions: every slopp call carried a ~1.3–1.9 s
+floor whatever it did (the server itself answers in milliseconds), 54–76
+calls a session, 100–225 s of wall each — a quarter to a third of the
+session. Allow the server once, in the project's or your user
+`.claude/settings.json`:
+
+```json
+{"permissions": {"allow": ["mcp__plugin_slopp_slopp"]}}
+```
+
+or `--allowedTools mcp__plugin_slopp_slopp` on a `claude -p` command. The
+rule names the plugin's server, so it covers every family and op. Nothing
+changes under the other modes: a prompting mode asks you per call anyway,
+and `bypassPermissions` never classifies.
+
 ## Importing a repo that's published this way
 
 A slopp-published repo has a `slopp` branch (the store's projection) alongside

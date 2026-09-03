@@ -2291,3 +2291,59 @@ Review of the remaining commit logic, with numbers on this store's main line:
   re-forked line so the ask's bracket survives.
 - The verification image reported a never-loaded form in slopp.ops.engine
   after the land; `restart` cleared it before full_check.
+
+## 2026-09-03 — eval21: the wall gap was the harness's permission classifier
+
+- eval21 (matched lifetime, task B, sonnet-5 medium, n=3 interleaved pairs,
+  jar at d2c2cb1023de6), medians: WALL MISS 571 vs 348 s (+64%); COST MISS
+  $1.42 vs $1.31 (+8%); TURNS PASS 77 vs 95 (−19%); acceptance 11/11 in all
+  six cells. Recorded as pre-registered in `projects/eval21-matched/RUNS.md`.
+- Attribution, transcript spans joined call-by-call to the cell store's own
+  `:ms` rows: every slopp MCP call had a ~1.3–1.9 s floor harness-side
+  whatever the op (a `query_source` the server finished in 1 ms took 3.5 s);
+  100 / 165 / 225 s per slopp cell, a quarter to a third of each wall.
+  Plain's Read 0.01 s, Edit 0.01 s, Bash 0.05 s. Model time was not the gap
+  (m1: slopp 308 s vs plain 341 s). Hooks ruled out: the plugin's match Bash
+  only, the global workmux PostToolUse hook is 50 ms.
+- Raw JSON-RPC over stdio against the same jar and store, JFR attached
+  (`bin/mcp-roundtrip.py`): every call 0.00–0.38 s. The cost was between
+  Claude Code and the server, not in it.
+- Cause: `--permission-mode auto` sends every tool call no rule allows
+  through a classifier — a billed model call — and built-in tools skip it
+  while MCP tools do not. Controlled experiment, two `store` calls: auto
+  3.1 s non-API / $0.19; tool pre-allowed 0.1 s / $0.05 (per call 1.60 s
+  and 1.43 s → 0.02 s and 0.01 s); the whole-server rule
+  `mcp__plugin_slopp_slopp` works too. So the COST miss carries the same
+  artifact, unquantified (modelUsage does not list the classifier).
+- With the tax removed the wall median would have been ~346 vs 348 s.
+  eval22 (`projects/eval22-allowed/`) is pre-registered to test exactly
+  that: eval21's design with the harness allowing the server.
+- Process: the ask "maybe add in a profiler to actually see where time is
+  spent — it is often not where you expect" was right. Three rounds of
+  reasoning about hooks, the server loop and `tools-note!` preceded the
+  ten-minute measurement that settled it, and the answer was outside every
+  candidate. The driver stays as `bin/mcp-roundtrip.py`; DEV.md says to run
+  it first.
+- Fixed the same day: the harness allows the server for the slopp cohort;
+  the `slopp-setup` skill, README and the install page tell users to. The
+  edit adding the rule to this repo's `.claude/settings.json` was refused by
+  this session's own classifier and is left to the user.
+
+## 2026-09-03 — eval22: the same design with the server pre-allowed passes every rule
+
+- eval22 = eval21 exactly (same jar, day, task, model, n=3 interleaved
+  pairs) with one change: the harness allows `mcp__plugin_slopp_slopp`.
+  Medians: WALL PASS 362 vs 401 s (−10%); COST PASS $1.21 vs $1.42 (−15%);
+  TURNS PASS 71 vs 97 (−27%); acceptance 11/11 in all six cells. Pairwise,
+  slopp's wall beat its concurrently-run plain cell in all three pairs
+  (362/430, 363/381, 358/401), cost in two, turns in three.
+- The rule held: slopp MCP calls per cell 62/70/56 at median 0.02–0.08 s,
+  11–16 s harness-side per cell, against 100–225 s in eval21.
+- Plain's median moved too between the runs (348 → 401 s, same day), so
+  the −10% is not the claim; the pairwise wins are. This is the first
+  matched lifetime run where slopp is ahead on wall AND cost AND turns
+  with every cell accepted — the session goal, on the measurement the
+  goal was stated against.
+- What remains is per-session, not per-call: step 2 is 27–30 slopp turns
+  in every cell, level with plain; the other four steps are where slopp's
+  turn advantage lives. Record: `projects/eval22-allowed/RUNS.md`.

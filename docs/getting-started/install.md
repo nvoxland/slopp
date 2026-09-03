@@ -23,6 +23,18 @@ SessionStart hook pre-warms that cache, but if the very first session's MCP
 connection times out mid-download, reconnect with `/mcp` once the fetch
 finishes. Every later start is instant.
 
+If you run Claude Code in `auto` permission mode, allow the server once, in
+the project's or your user `.claude/settings.json`:
+
+```json
+{"permissions": {"allow": ["mcp__plugin_slopp_slopp"]}}
+```
+
+Otherwise every slopp call is judged by the permission classifier before it
+runs -- a billed model call and about 1.5 s per call, which built-in tools
+skip and MCP tools do not. Measured over real sessions that was 100--225 s
+of a session's wall, with the server itself answering in milliseconds.
+
 Check the wiring end to end:
 
 ```sh
