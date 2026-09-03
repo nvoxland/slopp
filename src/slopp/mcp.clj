@@ -2830,11 +2830,11 @@
                                                ;; hydrated for this call only
                                                (ops/with-history session) :since (:since a)
                                                :by (:by a)
-                                               :otel (ops/otel-measurements session)
+                                               :otel (ops/otel-measurements session :since (:since a))
                                                ;; the per-call rows make :tools a
                                                ;; census with chars-out, not the
                                                ;; turn-end ring's top-five bound
-                                               :tool-calls (ops/tool-call-measurements session))))
+                                               :tool-calls (ops/tool-call-measurements session :since (:since a)))))
       "edit_replace_form" (text! (-> (ops/edit-replace! session (sym :ns) (sym :name)
                                                        (src :source) :prompt (:prompt a)
                                                        :agent (:agent a))

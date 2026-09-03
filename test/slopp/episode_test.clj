@@ -1237,3 +1237,32 @@
                        (call "edit_add_form" {:ns "ep2.core" :agent "bob"
                                               :source "(defn zz [x] x)"})))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-turn-survives-the-commit-point-taken-inside-it
+  ;; The turn is the USER-ASK bracket, and an ask routinely ends with a
+  ;; commit point. turn-open? read the store's :recent window, which is the
+  ;; deltas SINCE THE LAST COMMIT POINT — so a commit point taken inside an
+  ;; ask severed its turn: no :turn-end, and the ask's timing ring discarded
+  ;; at the next begin. Its docstring called that a harmless extra marker.
+  ;; Measured on slopp's own store, one day: seven commit points, nine asks
+  ;; opened turns, two closed; every per-turn metric had been blind since
+  ;; threads landed.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory "tb" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'tb.core "(ns tb.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (ops/turn-begin! sess :agent "alice" :intent "the first ask")
+      (is (ops/turn-open? sess "alice"))
+      (ops/add-form! sess 'tb.core "(defn ^:unused-ok g \"G.\" [] 2)" :prompt "work" :agent "alice")
+      (is (nil? (:error (external/commit-point! sess "the ask's commit point" :agent "alice"))))
+      (testing "the turn is still open after the commit point taken inside it"
+        (is (ops/turn-open? sess "alice")))
+      (testing "so the next ask CLOSES it, timing and all"
+        ;; the wire fills this ring per call; stand in for one call
+        (swap! sess update :slopp.read.telemetry/calls (fnil conj [])
+               {:tool "read" :start 1 :end 5 :chars 10})
+        (ops/turn-begin! sess :agent "alice" :intent "the second ask")
+        (let [ends (filter #(and (= :turn-end (:op %)) (= "alice" (:agent %))) (ops/journal sess))]
+          (is (= 1 (count ends)) (pr-str (map (juxt :op :agent) (ops/journal sess))))
+          (is (:timing (first ends)) "the first ask's cost landed with its bracket")))
+      (finally (ops/close! sess)))))

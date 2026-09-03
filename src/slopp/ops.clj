@@ -375,7 +375,9 @@
   (`:slopp.read.telemetry/calls`); this folds it with
   `telemetry/call-timing` onto the `:turn-end` delta and clears the ring, so
   each ask measures only itself. Nothing called → no `:timing` key, rather
-  than a zeroed record that would read as measured.
+  than a zeroed record that would read as measured. The session's record of
+  the open agent (:open-turn) is cleared when it is this agent's, or a
+  sub-agent riding it.
 
   The turn is the right grain because it is the USER-ASK bracket the prompt
   hook already maintains: the question worth answering is \"what did this ask
@@ -389,7 +391,13 @@
                                                  :agent agent :note note
                                                  :timing timing))
                       [])
-    (swap! session dissoc :slopp.read.telemetry/calls)
+    (swap! session (fn [s]
+                     (let [held (:open-turn s)]
+                       (cond-> (dissoc s :slopp.read.telemetry/calls)
+                         (and held agent
+                              (or (= held agent)
+                                  (clojure.string/starts-with? (str held) (str agent "/"))))
+                         (dissoc :open-turn)))))
     ;; and the same rollup as an `ask` MEASUREMENT, anchored to the turn-end
     ;; it describes: the delta carries `:timing` for the fold, the row is what
     ;; a per-ask chart reads without folding the log — and, once the deltas
@@ -404,18 +412,26 @@
 
 (defn turn-open?
   "Does `agent-label` (or any of its path ancestors — sub-agents ride the
-  root agent's turn) have an open :turn-begin?"
+  root agent's turn) have an open :turn-begin?
+
+  The SESSION is asked first: `turn-begin!` records the open agent on it and
+  `turn-end!` clears it, and that record survives everything the journal
+  view does not. The store's `:recent` window is the fallback — a session
+  with no memory of its own (a one-shot process) has only the journal — and
+  it is the deltas SINCE THE LAST COMMIT POINT, so on its own a commit point
+  taken inside an ask read the ask's turn as closed: no :turn-end, and the
+  ask's timing ring discarded at the next begin. Measured on slopp's own
+  store, one day: seven commit points, nine asks opened turns, two closed."
   [session agent-label]
-  (let [;; the recent window: a turn open across a commit-point reads as closed,
-        ;; and the next write opens a fresh one — one extra marker, never
-        ;; a refused write
-        ds (:recent (:store @session))
+  (let [ds    (:recent (:store @session))
+        held  (:open-turn @session)
         open? (fn [lbl]
-                (let [marks (filter #(and (contains? #{:turn-begin :turn-end}
-                                                     (:op %))
-                                          (= lbl (:agent %)))
-                                    ds)]
-                  (= :turn-begin (:op (last marks)))))
+                (or (= lbl held)
+                    (let [marks (filter #(and (contains? #{:turn-begin :turn-end}
+                                                         (:op %))
+                                              (= lbl (:agent %)))
+                                        ds)]
+                      (= :turn-begin (:op (last marks))))))
         roots (when agent-label
                 (let [parts (clojure.string/split agent-label #"/")]
                   (map #(clojure.string/join "/" (take (inc %) parts))
@@ -426,7 +442,9 @@
   "Open `agent`'s turn, recording the VERBATIM user ask as the root intent of
   everything until turn-end. A new begin supersedes an unclosed one. The
   intent also stays on the session (:last-intent) — orientation mines it so
-  the brief arrives task-shaped.
+  the brief arrives task-shaped — and so does the open agent (:open-turn),
+  which is how `turn-open?` still knows the turn is open after a commit
+  point inside the ask has scrolled its begin out of the recent window.
 
   Also resets the wall-clock ring (`:slopp.read.telemetry/calls`) so this ask
   measures only itself. The wire records a call AFTER it returns — otherwise
@@ -451,6 +469,7 @@
                                                :agent agent :intent intent
                                                :user user))
                     [])
+  (swap! session assoc :open-turn agent)
   {:turn :open :agent agent :intent intent})
 
 ^:reads (defn query-observe
@@ -3154,7 +3173,9 @@
   "Every harness-telemetry batch this store has recorded, as the payloads
   [[record-otel!]] wrote — `[{:requests [...]}, ...]`, oldest first. Empty for
   a session with no journal, because an ephemeral store keeps no
-  measurements.
+  measurements. `:since` (a delta id) windows to batches recorded AFTER that
+  delta, by the row's timestamp against the delta's `:at` — a measurement
+  has no position in the journal.
 
   The read TWIN of the writer, and it lives here for the same reason the
   writer does: measurements are beside the journal rather than in it, and
@@ -3163,9 +3184,13 @@
   not earn — invisible to every done, because a tier is a whole-store
   question and `full_check` is the only thing that asks. It asked once and
   said so."
-  [session]
+  [session & {:keys [since]}]
   (if-let [conn (:db @session)]
-    (mapv :payload (db/measurements conn "otel" nil))
+    (let [floor (when since (:at (db/delta-by-id conn since)))]
+      (into []
+            (comp (filter #(or (nil? floor) (> (:at %) floor)))
+                  (map :payload))
+            (db/measurements conn "otel" nil)))
     []))
 
 (defn ^:export record-otel!
@@ -3231,15 +3256,26 @@
 
 (defn ^:export tool-call-measurements
   "Every `tool-call` row this store has recorded, as the payloads
-  [[record-tool-call!]] wrote — `[{:tool :ms :chars :refused? :agent} …]`,
-  oldest first. Empty for a session with no journal.
+  [[record-tool-call!]] wrote — `[{:tool :op :ms :chars :chars-in :refused?
+  :agent :at} …]`, oldest first, `:at` being the row's own timestamp. Empty
+  for a session with no journal.
+
+  `:since` (a delta id) windows to rows recorded AFTER that delta — by the
+  row's timestamp against the delta's `:at`, because a measurement is not in
+  the journal and has no position in it (s20: `query_cost {since}` windowed
+  turns and read records and sat a windowed header over all-time tool
+  totals).
 
   The read twin of the writer, here rather than in `slopp.read.query` for
   the reason [[otel-measurements]] is: the front door is declared `:pure`,
   and reading a table is IO."
-  [session]
+  [session & {:keys [since]}]
   (if-let [conn (:db @session)]
-    (mapv :payload (db/measurements conn "tool-call" nil))
+    (let [floor (when since (:at (db/delta-by-id conn since)))]
+      (into []
+            (comp (filter #(or (nil? floor) (> (:at %) floor)))
+                  (map #(assoc (:payload %) :at (:at %))))
+            (db/measurements conn "tool-call" nil)))
     []))
 
 (defn ^:export jar-currency

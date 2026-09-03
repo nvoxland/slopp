@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev] [slopp.index.refs :as refs])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -2583,3 +2583,56 @@
           (is (= [{:from 'ba.core/k :to 'ba.core/g}] (:renamed latest)) (pr-str latest))
           (is (nil? (:added latest)) "nothing was added in the second ask")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-census-is-windowed-by-since
+  ;; s20 tracking: query_cost {since <delta>} windowed turns and read
+  ;; records but not the per-call census, so a windowed header sat over
+  ;; all-time tool totals. A measurement row carries its own timestamp; a
+  ;; delta carries :at; rows after the delta are the window.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory "cw" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      ;; the db exists once something has been written
+      (ops/ingest! sess 'cw.core "(ns cw.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (ops/record-tool-call! sess {:tool "read" :op "query_source" :start 1 :end 3 :chars 10})
+      (Thread/sleep 5)
+      (ops/add-form! sess 'cw.core "(defn ^:unused-ok g \"G.\" [] 2)" :prompt "the mark")
+      (let [mark (:head (:store @sess))]
+        (Thread/sleep 5)
+        (ops/record-tool-call! sess {:tool "edit" :op "change" :start 10 :end 12 :chars 5})
+        (is (= 2 (count (ops/tool-call-measurements sess))))
+        (is (= ["edit"] (mapv :tool (ops/tool-call-measurements sess :since mark)))
+            "only the rows after the delta"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external compact-settles-the-open-threads-nobody-will-finish
+  ;; On slopp's own store: 138 open threads, each holding a full materialized
+  ;; copy of the store — 466,128 element rows against main's 3,539, 1.16 GB
+  ;; of a 2.1 GB file — most owned by processes that died days ago. A
+  ;; landed or dropped thread releases its view; an open one whose owner is
+  ;; gone never will unless something settles it. Compaction is the
+  ;; deliberate step, so it settles those first and says how many. Deltas
+  ;; and the row stay: nobody will finish this, not this never happened.
+  (let [dir (str (java.nio.file.Files/createTempDirectory "gc" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a   (external/open! {:slopp.ops/dir dir})
+        _   (ops/ingest! a 'gc.a "(ns gc.a)\n(defn ^:unused-ok fa \"A.\" [] 1)\n")
+        b   (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! b 'gc.core "(ns gc.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (let [conn   (:db @a)
+            b-line (engine/session-line b)
+            rows   (fn [] (:n (jdbc/execute-one! conn ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" b-line])))]
+        (is (pos? (rows)) "b's open thread holds a view")
+        (testing "an open thread whose owner is ALIVE is left alone"
+          (let [r (external/compact-store! a)]
+            (is (zero? (:threads-settled r 0)) (pr-str r))
+            (is (pos? (rows)))))
+        (testing "one whose owner died a week ago is settled, its view reclaimed, its deltas kept"
+          (jdbc/execute! conn ["UPDATE lines SET owner_pid = 999999, used_at = ? WHERE id = ?"
+                               (- (System/currentTimeMillis) (* 8 86400000)) b-line])
+          (let [r (external/compact-store! a)]
+            (is (= 1 (:threads-settled r)) (pr-str r))
+            (is (zero? (rows)) "its view is reclaimed")
+            (is (= "abandoned" (:status (first (filter #(= b-line (:id %)) (db/lines conn))))))
+            (is (some #(= :ingest (:op %)) (db/line-deltas conn b-line)) "its deltas are still walkable"))))
+      (finally (ops/close! b) (ops/close! a)))))

@@ -2244,3 +2244,28 @@
                              " SELECT * FROM deltas WHERE id IN (SELECT id FROM anc)
                                 AND op = 'commit' ORDER BY seq DESC LIMIT ?")
                         (line-head conn line-id) (long n)])))
+
+^:reads (defn ^:export stale-open-threads
+  "The open THREAD lines nobody is going to finish: untouched for longer
+  than `max-age-ms`, and their owner process no longer alive (a thread with
+  no recorded owner counts as unowned). Each one still holds a full
+  materialized copy of its branch — on slopp's own store, 138 of them held
+  466,128 element rows against main's 3,539, 1.16 GB of a 2.1 GB file.
+
+  The age is a safety margin over the liveness test, not the signal: a pid
+  can be reused, and a thread a process opened minutes ago must not be
+  settled under it."
+  [conn max-age-ms]
+  (let [cutoff (- (System/currentTimeMillis) max-age-ms)
+        alive? (fn [pid]
+                 (boolean
+                  (when pid
+                    (let [h (java.lang.ProcessHandle/of (long pid))]
+                      (and (.isPresent h)
+                           (.isAlive ^java.lang.ProcessHandle (.get h)))))))]
+    (filterv (fn [l]
+               (and (= "thread" (:kind l))
+                    (= "open" (:status l))
+                    (some-> (:used-at l) (< cutoff))
+                    (not (alive? (:owner-pid l)))))
+             (lines conn))))
