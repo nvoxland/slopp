@@ -164,7 +164,20 @@ write time, instead of a fresh JVM catching it later.
   four-namespace `change` was refused as a compile error. A clojure.test
   public name (`deftest`, `is`, `testing`…) is never stubbed: it is a
   missing require, which `edit/missing-require` names and the write path
-  adds (`:auto-require`), extending a partial `:refer` rather than refusing. Restarts
+  adds (`:auto-require`), extending a partial `:refer` rather than refusing.
+- Qualified in, alias on store (2026-09-03): `edit-group!` runs
+  `canonicalize-steps` before the group — every add/replace step's source
+  through `refactor/canonicalize-refs` against `read.modules/project-aliases`,
+  the requires it owes prepended as `:require` steps — and stamps
+  `:canonicalized`. `cold-load-errors` refuses a qualified reference to a
+  store namespace the ns form never requires (a fresh boot's failure,
+  caught at the write); `missing-alias-require` answers a dotted
+  `No such namespace: a.b.c` with the bare `[a.b.c]`.
+- Reads (2026-09-03): `query_source {ns}` is `orient/ns-cards` (cards with
+  `:v`, one example deftest, a hint) and never the source without `full`;
+  `query_flow` is `query/flow-view` over `graph/call-path` / `call-reach`,
+  rows shaped `{:ns :name :source :v}` so `dedupe-sources!` ledgers them
+  (it walks `:forms` now); `orient/form-version` is the one version fact. Restarts
   and reopens with stubs outstanding survive the same way. Future write
   paths inherit all of this by construction — anything that compiles
   through the image is covered. The isolated suite (fresh JVM, no image)

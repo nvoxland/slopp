@@ -31,7 +31,8 @@ were deferred by the client and cost a search turn each to find.
 | `query_search {pattern}` | Regex across all store source; one hit per matching form, the hit is the form's card. |
 | `explore {ops}` | Several READ questions, one call: `ops = [{op ...} ...]`, answered one result per op (`query_batch` is its de-advertised alias). |
 | `check {code}` | Run assertion code in the image with `clojure.test` reporting captured — `{:value :pass :fail :assertions}`, nothing written. The find-something-out red as an answer. |
-| `query_source {targets}` | Source of several named forms in one call. `{ns}` alone returns the outline; `full: true` dumps the namespace. |
+| `query_source {targets}` | Source of several named forms in one call, each row with a `:v` version stamp; a form you already hold at that version comes back as a reference. `{ns}` alone returns the namespace as cards (name, signature, first doc sentence, `:v`, one example test); `full: true` dumps the namespace. |
+| `query_flow {from to}` / `{on reach}` | How forms connect: the call path between two forms with every form on it whole, or the callers and callees around one form (bodies one hop out, cards beyond). Across namespaces -- the question a namespace read stood in for. |
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards (signature, doc line, test warranty) for everything it reaches. `match` + `window` narrows a giant form; `verbose` adds each card's recorded why. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |

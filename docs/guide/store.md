@@ -41,8 +41,9 @@ record.
 | Question | Call |
 |---|---|
 | What is in this store at all? | `session_brief` |
-| What is in this namespace? | `query_source {ns}` -- outline by default, `full: true` for everything |
-| The source of specific forms | `query_source {targets [{ns name} ...]}` |
+| What is in this namespace? | `query_source {ns}` -- cards by default (name, signature, first doc sentence, a `:v` version stamp, one example test), `full: true` for the source |
+| How do these forms connect? | `query_flow {from "a/f" to "b/g"}` -- the call path with every form on it whole; `query_flow {on "a/f" reach 2}` -- callers and callees around one form. Across namespaces; this is the question a namespace read was standing in for |
+| The source of specific forms | `query_source {targets ["a/f" "b/g"]}` -- each row carries `:v`; a form you already hold at that version comes back as a reference |
 | The form I am about to edit, plus what it calls | `query_slice {ns name}` |
 | Where is X mentioned? | `query_search {pattern}` |
 | Everything, in one call | `query_project` |

@@ -60,6 +60,17 @@ full map.
 - `:failures` — expected/actual/exception per failure. Diagnose from the
   response; a follow-up `test_run` re-derives what you already have.
   `:implicated` — which of YOUR changes each failing test exercises.
+- `:v` — a form's version stamp, `[form-id hash-of-text]`, on every card of a
+  namespace read, every `targets` row and every `query_flow` row. The id is
+  stable across edits; the hash is the version. A body you already hold at
+  that version comes back as `:source-already-sent true` with the same `:v`.
+- `:canonicalized` — on a `change`: the fully-qualified references your steps
+  carried, rewritten to the aliases the store speaks (`[{:from :to :ns}]`);
+  the requires they owed rode as `:auto-require(s)`.
+- `query_flow` — `{:path [qsym …] :forms [{:ns :name :source :v :via}] :edges
+  :cards}` for `{from to}`, `{:on :reach :forms :cards :edges}` for `{on reach}`,
+  `:unreachable true` with a hint when no path exists. The forms on the path
+  (or one hop around `on`) are whole; the periphery is cards.
 - `:origin` — on a `query_history` version whose `:op` is `:ingest` in a
   store imported from git: `{:git-sha :remote}`, plus a `:note` when no ask
   was recorded before it. That IS the answer to "what do the records say":

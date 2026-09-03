@@ -24,9 +24,9 @@ import time
 import urllib.request
 import urllib.parse
 
-# room for the bundle's whole-namespace section (capped server-side at
-# 6000 chars) beside the cards: 9000 cut it mid-namespace
-MAX_CHARS = 14000
+# the bundle is seeds with source plus versioned cards — no namespace is
+# ever sent whole (a section that did was retired the day it shipped)
+MAX_CHARS = 10000
 HTTP_BUDGET_S = 6.5
 
 prompt = ""

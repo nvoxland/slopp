@@ -21,7 +21,7 @@ own tools and take no `op`.
 |---|---|
 | `orient` | orient, session_brief |
 | `read` | explore, check, query_slice, query_source, query_brief, query_detail, query_search, query_project |
-| `depends` | query_depends, query_call, query_macroexpand |
+| `depends` | query_flow (the call path between two forms or the reach around one, bodies on the way), query_depends, query_call, query_macroexpand |
 | `history` | query_history, query_changes, query_commits, query_git, query_branches, report, file_history |
 | `eval` | query_eval, query_observe, query_store |
 | `edit` | change, edit_comment, edit_revert, undo, episode_revert — the former write ops (edit_group, edit_subform, edit_delete_form, edit_add_form, edit_replace_form, intent) and query_batch are de-advertised dispatchable aliases: `change {impl […]}` is the group write, `explore {ops […]}` is the batch read |

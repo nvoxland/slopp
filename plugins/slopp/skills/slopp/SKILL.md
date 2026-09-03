@@ -44,8 +44,10 @@ continuously. Address code as `ns` + `name` — never a path or a line. Every
 write hot-reloads, runs exactly the tests that exercise the touched forms,
 and records your stated intent (`prompt`). Form ORDER is derived
 (definitions before callers) — write forms in any order and never ask where
-one goes. Requires are added for you when exactly one namespace can supply
-an alias (`:auto-require` says so). Turns and identity are automatic: the
+one goes. Write a call as `lib/fn` fully qualified when you do not know the
+alias: the store keeps the project's alias and adds the require
+(`:canonicalized`, `:auto-require` say so) — you never read a namespace for
+its ns form. Turns and identity are automatic: the
 prompt hook records your ask, and a write carrying `prompt` opens its own
 turn; never call `turn_begin`.
 
@@ -118,7 +120,10 @@ forms/tests the change reaches. `:failures` — `[{:test :implicated
 `:proposed {match source}` — the one patch entry (`{match source text true}`)
 that accepts the new behaviour, if the change was deliberate. `:warnings` — new lint, with `:suggest`.
 `:red-first` — stubs you now owe. `:auto-require` — a require added for
-you. `:hint` — one line slopp wants you to read. `:already-sent` — you
+you. `:canonicalized` — a `lib/fn` you wrote fully qualified, stored as the
+project's alias. `:v` — a form's version stamp (`[id hash]`) on every card
+and body row; cite it, and expect a reference back at the same version.
+`:hint` — one line slopp wants you to read. `:already-sent` — you
 already hold this payload in this ask; `:source-already-sent true` on a row —
 you hold that form's text at this version (a read you made, or your own
 write), so it was not resent. `:truncated {:shown :of}` — what a
@@ -135,7 +140,8 @@ text replace; say `text: true` next time.
 | you want to know | call |
 |---|---|
 | what matters for this ask, with source for what it names | `orient {ask}` |
-| the namespaces you are about to work in, whole | `read {op query_source targets ["x.a" "x.b" "x.c"] full true}` — SEVERAL in one call; one call per namespace is the file habit in new clothes |
+| how forms connect — the path between two, or the reach around one | `depends {op query_flow from "x.a/f" to "x.b/g"}` or `{op query_flow on "x.a/f" reach 2}` — the bodies on the way ride along, across namespaces. A namespace is CARDS by default (`read {op query_source ns "x.a"}`: name, sig, first doc sentence, `:v`, one example test) and never the unit of reading |
+| the bodies you will edit | `read {op query_source targets ["x.a/f" "x.b/g"]}` — several in one call; each row carries `:v`, and a form you already hold at that version comes back as a reference |
 | what changed here, why, and what was asked — a handoff | `history {op report}` (`{contains "x"}` narrows; `query_changes` for per-form diffs) |
 | who calls X / what X reaches / the module graph | `depends {op query_depends on "ns/x"}` (`modules true`) |
 | what a fn really does with real inputs | `eval {op query_observe ns name code}` |

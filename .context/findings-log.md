@@ -2419,3 +2419,32 @@ Review of the remaining commit logic, with numbers on this store's main line:
 - Harness note: accept9's single probe cannot compile at step 2 (it names
   step-3/4 vars) and its mode detection keys on a step-4 name; the
   step-2 half lives in `eval23-step2/accept23.sh`.
+
+## 2026-09-03 — why agents read namespaces, and the loader hole under a qualified ref
+
+- Census over the six slopp step-2 sessions (eval22 + eval23): 41
+  whole-namespace reads (median 867 chars), 9 searches, 5 slices, ZERO
+  `query_depends` or `orient`. The questions behind the reads were flows
+  (the path from `quote-breakdown` to the fuel surcharge; how a carrier
+  travels through booking, billing, invoicing) and one style question
+  (what a test here looks like). Nobody needed a namespace; it was the only
+  shape the agent had a habit for, cheap enough that nothing corrected it.
+  The second reason to read one: its ns form, for the aliases.
+- Built (D-agent-reads, D-canonical-refs): cards-by-default namespace
+  read with `:v` and one example test; `query_flow` (path / reach, bodies on
+  the way); versioned `targets` rows; the bundle back to seeds plus cards
+  (the morning's whole-namespace section retired the same day); qualified
+  references canonicalized on write with requires added; aliases handed
+  once; the cold-load gate's third shape.
+- Found on the way: a fully-qualified reference to a store namespace the
+  form's ns does not require landed GREEN (the live image has every ns
+  loaded; kondo's `:unresolved-namespace` is a warning; load order reads
+  ns forms alone) and failed on a fresh boot into `:image-load-failures`,
+  never refused. Pinned red before the fix (`ops/restart!` after such a
+  write reported the failure); this store held zero such references.
+- Process: `slopp.edit` is a pure tier — the first canonicalize draft used
+  atoms and was refused by the purity gate; `slopp.edit` cannot reach
+  `edit.refactor/rewrite-symbols` without a cycle, so the fn lives beside
+  the rewriter. Two text patches broke a string literal by carrying raw
+  quotes (a JSON `\"` decodes to `"`); the group failed to compile with
+  `No such namespace: ns` — the tell for that mistake.

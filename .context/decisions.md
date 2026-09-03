@@ -6220,6 +6220,58 @@ the caps are absolute, so a 200-namespace store gets the same ceiling as a
 ten-namespace one (the s10 lesson: appended rows reshape step 1). Not a
 prefix match: `bill` must not name `logi.billable`.
 
+### D-agent-reads — a namespace is cards by default; flows and bodies are the reads; every form shown is versioned (2026-09-03)
+
+**Decision.** `query_source {ns}` answers the namespace's INTERFACE
+(`orient/ns-cards`: per form name, sig, first doc sentence, `:v`; one
+example deftest whole; a hint naming the better questions) whatever its
+size; `full true` is the human-shaped dump, and only it anticipates the
+requires' sources. `query_flow {from to}` / `{on reach}` (family `depends`)
+answers how forms connect, across namespaces, with the bodies on the path
+(one hop around `on`) whole and the periphery as cards. Every card and
+body row carries `:v` = `[form-id text-hash]`, the same fact the form
+ledger keys on (`orient/form-version`), so "which version do I hold" and
+"already sent" are one fact. The bundle is seeds-with-source plus versioned
+cards and names `query_flow`; D-orient-namespaces' whole-namespace section
+is RETIRED — it bought turns by sending more source, the file habit served
+faster.
+
+**Why.** Six step-2 eval sessions: 41 whole-namespace reads (median 867
+chars), 9 searches, zero `query_depends`/`orient`. The questions behind the
+reads were flows and one style question; the namespace was the only shape
+the agent had a habit for, and cheap enough that nothing corrected it.
+Namespaces are a human filing unit; the agent's unit is the form and the
+edges around it, which is how the store already holds code.
+
+**What it does not license.** Not "cards, then fetch": eval10 measured
+that as eleven reads before the first write, so the forms an ask is ABOUT
+still arrive whole where they are asked for (seeds, the flow's path,
+`targets`). Not a version on the outline stub: a card's `:v` moving with
+its body is the point — the read after an edit shows the edit.
+
+### D-canonical-refs — qualified in, alias on store; the loader hole closed (2026-09-03)
+
+**Decision.** A form may name a lib fully qualified (`logi.fuel/eco-fuel`).
+On the way to the store, `refactor/canonicalize-refs` rewrites it to the
+alias the namespace holds, else to the project's alias
+(`read.modules/project-aliases`: dominant convention per lib, the derived
+`canonical-alias` for a store namespace nobody requires yet, the well-known
+clojure.* ones) and the require it owes lands as a leading `:require` step
+of the same group; an alias already taken keeps the ref qualified and owes
+the bare require. Quoted symbols and ns forms are untouched. The result
+stamps `:canonicalized`; the requires ride `:auto-require(s)`. The aliases
+are handed once: `session_brief :aliases` and one line on the first bundle.
+`cold-load-errors` gains a third shape — a qualified reference to a store
+namespace the ns form never requires — for what arrives another way; and
+a dotted `No such namespace: a.b.c` repairs with the bare require.
+
+**Why.** The other reason an agent read a namespace was its ns form. And
+the trace found a real hole: such a reference compiled in the live image
+(every namespace is loaded there), kondo's `:unresolved-namespace` is a
+warning, and load order is derived from ns forms alone — so it landed
+green and failed on a fresh boot, collected into `:image-load-failures`.
+This store held zero such references when the gate landed.
+
 ### D-derived-order — a form's place is derived from what it references; nothing journals an arrangement (2026-08-29)
 
 **Decision.** A form carries a creation RANK and nothing else about where it
