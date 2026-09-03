@@ -2245,17 +2245,24 @@
                                 AND op = 'commit' ORDER BY seq DESC LIMIT ?")
                         (line-head conn line-id) (long n)])))
 
-^:reads (defn ^:export stale-open-threads
-  "The open THREAD lines nobody is going to finish: untouched for longer
-  than `max-age-ms`, and their owner process no longer alive (a thread with
-  no recorded owner counts as unowned). Each one still holds a full
-  materialized copy of its branch — on slopp's own store, 138 of them held
-  466,128 element rows against main's 3,539, 1.16 GB of a 2.1 GB file.
+^:reads (defn ^:export
+  ^{:breaking-ok "the 2-arity settled a thread on owner death alone — the wrong rule, corrected the same day; its one caller (compact-store!) moved in the same write"}
+  stale-open-threads
+  "The open THREAD lines that have NOTHING TO RESUME and nobody minding them:
+  no un-landed content since their fork (`content-ops` says which ops are
+  content), untouched for longer than `max-age-ms`, and their owner process
+  no longer alive (a thread with no recorded owner counts as unowned). The
+  usual case is the fresh thread a `done` leaves a session on, then orphaned
+  when the process ends: it holds a full materialized copy of the branch and
+  not one write of its own. On slopp's own store 138 open threads held
+  466,128 element rows against main's 3,539.
 
-  The age is a safety margin over the liveness test, not the signal: a pid
-  can be reused, and a thread a process opened minutes ago must not be
-  settled under it."
-  [conn max-age-ms]
+  A thread WITH un-landed work is never in this list, however dead its
+  owner: a returning agent is meant to pick its thread back up, and its
+  un-landed work IS the thread. Whether that one is finished is a person's
+  or the agent's call (`thread_drop`), not compaction's. The age is a safety
+  margin over the liveness test, not the signal: a pid can be reused."
+  [conn max-age-ms content-ops]
   (let [cutoff (- (System/currentTimeMillis) max-age-ms)
         alive? (fn [pid]
                  (boolean
@@ -2267,5 +2274,6 @@
                (and (= "thread" (:kind l))
                     (= "open" (:status l))
                     (some-> (:used-at l) (< cutoff))
-                    (not (alive? (:owner-pid l)))))
+                    (not (alive? (:owner-pid l)))
+                    (zero? (unlanded-count conn (:id l) content-ops))))
              (lines conn))))

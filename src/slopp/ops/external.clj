@@ -1074,13 +1074,16 @@ client-deps (merge (:client-deps st) (:client provided))
 (defn ^:export compact-store!
   "Reclaim the views settled lines still carry and vacuum the file — the
   DELIBERATE step for a store that grew before `land-thread!` learned to drop a
-  landed thread's rows. First it SETTLES the open threads nobody will finish
-  ([[slopp.store.db/stale-open-threads]]: untouched for a day, owner process
-  gone; never this session's own line) — each held a full materialized copy
-  of the store, and on slopp's own store 138 of them were 1.16 GB of a 2.1 GB
-  file. Settling keeps the deltas and the row; only the derived view goes.
-  Returns `{:threads-settled :rows-dropped :bytes-before :bytes-after}` plus
-  `:reclaimed` in bytes, or a `:note` when nothing is on disk yet.
+  landed thread's rows. First it SETTLES the open threads that have nothing
+  to resume ([[slopp.store.db/stale-open-threads]]: no un-landed content,
+  untouched for a day, owner process gone; never this session's own line) —
+  each held a full materialized copy of the store, and on slopp's own store
+  138 open threads were 1.16 GB of a 2.1 GB file. A thread WITH un-landed
+  work is left open however dead its owner: a returning agent picks its
+  thread back up, and finishing or dropping it is a decision, not
+  housekeeping. Settling keeps the deltas and the row; only the derived view
+  goes. Returns `{:threads-settled :rows-dropped :bytes-before :bytes-after}`
+  plus `:reclaimed` in bytes, or a `:note` when nothing is on disk yet.
 
   Sits beside [[store-health]] on purpose: that one answers what the store
   COSTS, this one gives some of it back. It is a tool rather than a side effect
@@ -1093,7 +1096,7 @@ client-deps (merge (:client-deps st) (:client provided))
     (if db
       (let [mine    (engine/session-line session)
             stale   (remove #(= mine (:id %))
-                            (db/stale-open-threads db (* 24 3600 1000)))
+                            (db/stale-open-threads db (* 24 3600 1000) history/content-ops))
             settled (count (doall (map #(db/abandon-thread! db (:id %)) stale)))
             r       (db/compact! db)]
         (assoc r
