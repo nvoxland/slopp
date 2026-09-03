@@ -2174,3 +2174,25 @@ requires); and never make a reader re-buy what it already holds.
 - The docs page `done-and-milestones.md` was renamed with `git mv`; the
   sweep rewrote its link TEXT to "done-and-commit points.md" — a broken
   link had the file not been renamed to match.
+
+## 2026-09-02 — D2: the projection repo persists, and a commit point is 30s instead of 200s
+
+- Root cause was not the replay: `open-repo!` built an `InMemoryRepository`
+  and `publish-local!` opens a fresh context per publish, so the pinned-sha
+  short-circuit in `ensure-projected!` could never fire — every publish
+  re-rendered and re-inserted the tree of EVERY commit point in the journal
+  (270+ full-store renders) to mint one commit.
+- Fix: the same bare repo, persisted at `.slopp/git-cache` (a rebuildable
+  cache — a pin deletes it and gets byte-identical shas back). A scratch
+  repo with no dir (clone!'s remote fetch) stays in-memory. 30 MB on this
+  store.
+- Measured on real commit points: publish 199,105 ms (the one warm-up
+  walk) → 26,984 ms. Commit point wall ~200s → ~30s. Rule was ≥40%.
+- What the remaining 27s is: the walk still folds every delta from an
+  empty store (linear in the journal) before rendering the one new tree.
+  The incremental fold — resume from the last projected head per line — is
+  the next lever, now with its own number.
+- Process: the on-disk cache broke `clone!` on first try (nil dir → a path
+  at the filesystem root) — caught by sync-test, fixed by keeping the
+  no-dir case in-memory. The in-memory design's rationale was "nothing
+  touches disk", not correctness.

@@ -6590,3 +6590,19 @@ is not a commit), and an audit of every swept usage found none that meant
 done. Wire keys followed the word: `report`'s and `/api/timeline`'s
 `:milestones` became `:commit-points` (announced to slopp-ui);
 `query_cost {by "milestone"}` became `{by "commit-point"}`.
+
+
+## G3-revised (2026-09-02) — the projection repo PERSISTS as a rebuildable cache; git is still not state
+
+G3 said "slopp is a git CLIENT in memory — no on-disk git state returns."
+Its intent stands: git is never a source of truth, `store.db` is, and the
+projection is a pure function of the journal. What changes is the CACHE:
+`open-repo!` now persists the projection repo at `.slopp/git-cache` (a bare
+JGit `FileRepository`, created on first use) instead of an
+`InMemoryRepository` rebuilt from nothing per context. Measured reason:
+`publish-local!` opens a fresh context per publish, so the pinned-sha
+short-circuit in `ensure-projected!` could never fire and every publish
+re-rendered every commit point in the journal — 98% of a commit point's
+wall (199s). Persisted: 27s. The cache is not state — a pin deletes the
+directory and gets byte-identical shas back — and a scratch repo opened
+with no dir (`clone!`'s remote fetch) stays in-memory. D2 of s20.

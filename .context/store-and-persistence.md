@@ -552,10 +552,13 @@ ADDING A REGISTER = one row here. Nothing else.
 - `.slopp/` is gitignored; what users commit to VCS is an open Phase-4
   question (the delta DAG is meant to BE the history).
 
-## Git bridge (P4-m8 + G-series, `slopp.git` + `slopp.sync`) — in-memory, projection + transport-out
+## Git bridge (P4-m8 + G-series, `slopp.git` + `slopp.sync`) — a persisted projection cache + transport-out
 
-- **No on-disk git repo, ever.** `open-repo!` builds a JGit in-memory
-  `InMemoryRepository` (DFS backend, built with `FS/DETECTED` — TransportLocal
+- **The projection repo is a CACHE, persisted at `.slopp/git-cache`** (G3-revised,
+  2026-09-02): `open-repo!` builds a bare JGit `FileRepository` there, created on
+  first use — it was an in-memory `InMemoryRepository` rebuilt per context, which made
+  every publish re-mint every commit point (199s → 27s). With no dir it is still an
+  in-memory scratch repo (built with `FS/DETECTED` — TransportLocal
   needs an FS to resolve file-path remotes); the whole projection is
   **generated from the journal on demand**. `store.db` is the source of truth;
   the git repo is a pure, rebuildable cache.
