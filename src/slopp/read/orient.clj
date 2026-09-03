@@ -16,7 +16,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings] [slopp.index.refs :as refs]))
+            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings] [slopp.index.refs :as refs] [slopp.store.render :as store.render]))
 
 (defn ^:export snip
   "Cap `s` at `n` chars with an ellipsis — composites (brief/report) carry
@@ -667,6 +667,75 @@
          " behind this store — anyone reading the ARTIFACT rather than the"
          " store will not see this work until it is rebuilt")))
 
+(defn ^:export handoff-text
+  "The handoff, rendered for INJECTION: `r` (an `ops/report` map) as plain
+  text in the order a handoff ask reads — the asks oldest first, each with
+  its :turn id and the forms it added/changed/deleted; commit-points; the
+  changes rolled up by namespace with one recorded ask and a delta each;
+  the suite verdict with the command that re-runs it — fitted to `budget`
+  by dropping WHOLE rows (the rollup's tail first, then the oldest asks),
+  never cutting mid-row. Measured (s18): a pr-str snip put teaching prose
+  and twelve alphabetical per-form rows ahead of :by-ask and cut it off in
+  every s17 handoff cell, and the \"(deeper: …)\" tail taught the 5+7-call
+  drill-down that followed. The closing line says this IS the record."
+  [r budget]
+  (let [asks     (vec (reverse (:by-ask r)))
+        forms    (fn [k a] (when (seq (get a k))
+                             (str (name k) ": " (str/join " " (take 8 (get a k)))
+                                  (when (< 8 (count (get a k))) " …"))))
+        ask-line (fn [i a]
+                   (str (inc i) ". [turn " (:turn a) "] \"" (snip (:ask a) 160) "\""
+                        (when-let [ps (seq (keep #(forms % a) [:added :changed :deleted :renamed]))]
+                          (str " — " (str/join "; " ps)))))
+        ms-lines (mapv #(str "  " (:commit %) " " (snip (:description %) 90) " @" (:at %))
+                       (:commit-points r))
+        rollup   (->> (:changes r)
+                      (group-by :ns)
+                      (sort-by (comp str key))
+                      (mapv (fn [[nsx rows]]
+                              (str "  " nsx ": " (count rows) " form(s) "
+                                   (pr-str (vec (distinct (mapcat :ops rows))))
+                                   (when-let [a (first (mapcat :asks rows))]
+                                     (str " — \"" (snip a 80) "\""))
+                                   " " (pr-str (vec (take 3 (distinct (mapcat :deltas rows)))))))))
+        suite    (str "suite: " (name (or (get-in r [:suite :status]) :unknown))
+                      (when-let [as-of (get-in r [:suite :as-of])] (str " as of " as-of))
+                      " — run it: slopp --call test_run '{\"external\":true}';"
+                      " commit-points: slopp --call query_commits")
+        head     (str "--- the composed handoff — the store's OWN records; the ids ARE the"
+                      " citations (:turn per ask, :deltas per change, :commit per commit-point) ---")
+        close    (str "This IS the record — quote the :turn and :deltas ids as your citations;"
+                      " the suite command above is the one to hand over.")
+        render   (fn [n-asks n-roll]
+                   (let [shown (vec (take-last n-asks asks))
+                         from  (- (count asks) (count shown))]
+                     (str/join "\n"
+                               (concat [head (str "asks, oldest first (" (count asks) "):")]
+                                       (when (pos? from)
+                                         [(str "  … " from " earlier ask(s) — report {} lists them")])
+                                       (map-indexed (fn [i a] (ask-line (+ from i) a)) shown)
+                                       (when (seq ms-lines) (cons "commit-points:" ms-lines))
+                                       (when (pos? n-roll) (cons "changes by namespace:" (take n-roll rollup)))
+                                       [suite close]))))]
+    (loop [n-asks (count asks), n-roll (count rollup)]
+      (let [t (render n-asks n-roll)]
+        (cond
+          (<= (count t) budget) t
+          (pos? n-roll)         (recur n-asks (dec n-roll))
+          (< 1 n-asks)          (recur (dec n-asks) 0)
+          :else                 (subs t 0 budget))))))
+
+(def ^:private stop-words
+  "Function words an ask is full of that name nothing — shared by the two
+  seeders so they agree on what a word is."
+  #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
+    "tell" "every" "should" "their" "them" "than" "then" "they"
+    "what" "where" "which" "been" "back" "also" "only" "into"
+    "make" "return" "returns" "call" "calls" "form" "forms"
+    "the" "and" "for" "its" "not" "but" "can" "are" "was" "one"
+    "all" "any" "each" "once" "several" "accept" "does" "use"
+    "everywhere" "anywhere" "class" "creating" "accepted" "work"})
+
 (defn- ask-seeds
   "The forms an `ask` names, scored. Two signals:
 
@@ -684,17 +753,12 @@
   than the form it tests, and the form is what the ask is about. Returns
   `[[qsym score] …]`, best first, for the forms that matched at all.
   Names, deliberately, not docstrings: a docstring mentions its neighbours,
-  and seeding on those turns every ask into the whole module."
+  and seeding on those turns every ask into the whole module. The
+  NAMESPACES an ask names are `ask-namespaces`' answer, beside this one."
   [st ask]
-  (let [stop   #{"with" "that" "this" "must" "have" "from" "when" "will" "your"
-                 "tell" "every" "should" "their" "them" "than" "then" "they"
-                 "what" "where" "which" "been" "back" "also" "only" "into"
-                 "make" "return" "returns" "call" "calls" "form" "forms"
-                 "the" "and" "for" "its" "not" "but" "can" "are" "was" "one"
-                 "all" "any" "each" "once" "several" "accept" "does" "use"}
-        raw    (into [] (comp (map str/lower-case) (filter #(<= 3 (count %))))
+  (let [raw    (into [] (comp (map str/lower-case) (filter #(<= 3 (count %))))
                      (re-seq #"[A-Za-z][A-Za-z0-9]*" (str ask)))
-        words  (into #{} (remove stop) raw)
+        words  (into #{} (remove stop-words) raw)
         grams  (into #{} (map vector raw (rest raw)))
         named  (for [nsx (keys (:namespaces st))
                      e   (store/forms st nsx)
@@ -718,6 +782,45 @@
              [q (* (if (test? q) 0.5 1.0) s)])
            (sort-by (fn [[q s]] [(- s) (str q)]))
            vec))))
+
+(defn ^:export ask-namespaces
+  "The namespaces an `ask` names by WORD, in order of mention: a word of four
+  letters or more that IS a namespace's last segment, allowing for a plural
+  or an -ing/-ed ending — `invoices` names `logi.invoice`, `quoting` names
+  `logi.quoting`, `carriers` names `logi.carrier`. Equality on a handful of
+  variants, never a prefix: `bill` must not name `logi.billable`. Test
+  namespaces are never named this way.
+
+  eval22 step 2: \"everywhere carriers are accepted (quoting, booking,
+  billing, invoices)\" seeded nothing, because seeds came from form names
+  alone — and the agent then read each of the four by hand."
+  [st ask]
+  (let [variants (fn [w]
+                   (let [n (count w)]
+                     (cond-> #{w}
+                       (str/ends-with? w "ies") (conj (str (subs w 0 (- n 3)) "y"))
+                       (str/ends-with? w "es")  (conj (subs w 0 (- n 2)))
+                       (str/ends-with? w "s")   (conj (subs w 0 (- n 1)))
+                       (str/ends-with? w "ing") (conj (subs w 0 (- n 3))
+                                                      (str (subs w 0 (- n 3)) "e"))
+                       (str/ends-with? w "ed")  (conj (subs w 0 (- n 2))
+                                                      (subs w 0 (- n 1))))))
+        words    (->> (re-seq #"[A-Za-z][A-Za-z0-9]*" (str ask))
+                      (map str/lower-case)
+                      (filter #(<= 4 (count %)))
+                      (remove stop-words)
+                      distinct)
+        nses     (->> (keys (:namespaces st))
+                      (remove #(str/ends-with? (str %) "-test"))
+                      (sort-by str))
+        last-seg (fn [nsx] (last (str/split (str nsx) #"\.")))]
+    (->> (for [w   words
+               :let [vs (variants w)]
+               nsx nses
+               :when (contains? vs (last-seg nsx))]
+           nsx)
+         distinct
+         vec)))
 
 (defn ^:export orient-map
   "THE orientation call for an ask: the forms that matter for it, ranked,
@@ -780,7 +883,16 @@
                      :when (node? q)]
                  [q 1])
         found  (take 5 (ask-seeds st ask))
-        seedv  (into {} (concat found named))
+        ;; the namespaces the ask names by WORD: their forms enter the walk
+        ;; at a low weight, so "everywhere carriers are accepted (quoting,
+        ;; booking, billing, invoices)" maps those four without a read
+        ;; apiece (eval22 step 2). A form the ask names by NAME outranks them.
+        nss    (if (str/blank? (str ask)) [] (ask-namespaces st ask))
+        ns-forms (for [nsx nss
+                       e   (store/forms st nsx)
+                       :when (and (:name e) (not= (:name e) nsx))]
+                   [(symbol (str nsx) (str (:name e))) 0.4])
+        seedv  (into {} (concat ns-forms found named))
         seed-order (vec (distinct (concat (map first named) (map first found))))
         ;; personalized PageRank, 20 iterations at d = 0.85; the teleport
         ;; vector is the seeds (uniform when there are none)
@@ -909,26 +1021,57 @@
                                     (recur (pop rows) (+ freed (est (peek rows))))))))
                             rows missing))]
     (cond-> {:seeds seed-order :rows rows :tokens used :budget tokens}
+      (seq nss)   (assoc :ns-seeds (vec nss))
       (pos? more) (assoc :more more))))
+
+(def ^:export default-whole-ns
+  "How much of a NAMED namespace the bundle sends whole: a namespace up to
+  `:max-chars` of source, at most `:max-nses` of them, `:max-total` chars
+  between them. Fixed caps rather than a share of the budget, so a project
+  of two hundred namespaces gets the same ceiling as one of ten — the s10
+  lesson that appended rows reshape a session's first step."
+  {:max-chars 2000 :max-nses 4 :max-total 6000})
 
 (defn ^:export bundle
   "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.
   `:text` is `orient-map` rendered as ONE plain-text block sized for prompt
   injection — a header that orients, the ranked rows as one-line cards with
-  their `:via`, and full sources for at most `sources` seed rows. The cap is
-  the diet: measured, the sources section was 85% of the bundle, and the
-  injected text rides EVERY later request of the session as context rent —
-  rows past the cap stay cards, in rank order. `:sent` is the form versions
-  whose text was emitted, for the caller to stash toward the session's form
-  ledger — the bundle, the write results and the reads share one ledger. A
-  blank ask is the plain ranking, never an error — same stance as the
-  search endpoint."
-  [session ask & {:keys [tokens sources cli?] :or {tokens 1100 sources 2}}]
+  their `:via`, full sources for at most `sources` seed rows, and the SMALL
+  namespaces the ask names by word sent WHOLE (`:whole-ns`, the caps in
+  `default-whole-ns`; nil sends none — the same-session delta bundle). The
+  cap is the diet: measured, the sources section was 85% of the bundle, and
+  the injected text rides EVERY later request of the session as context
+  rent — rows past the cap stay cards, in rank order. A namespace sent whole
+  is cheaper than the read that followed its cards (eval22 step 2: one
+  `query_source {ns}` per named namespace, every cell), and its forms are
+  dropped from the cards so nothing is sent twice. `:sent` is the form
+  versions whose text was emitted, for the caller to stash toward the
+  session's form ledger — the bundle, the write results and the reads share
+  one ledger. A blank ask is the plain ranking, never an error — same stance
+  as the search endpoint."
+  [session ask & {:keys [tokens sources cli? whole-ns]
+                  :or {tokens 1100 sources 2 whole-ns default-whole-ns}}]
   (let [st      (:store @session)
         m       (orient-map session :ask (str ask) :tokens tokens)
-        withs   (vec (take sources (filter :source (:rows m))))
+        ;; the named namespaces small enough to send whole, in the caps
+        wholes  (when whole-ns
+                  (let [{:keys [max-chars max-nses max-total]} whole-ns]
+                    (loop [nss (:ns-seeds m), acc [], total 0]
+                      (if (or (empty? nss) (<= max-nses (count acc)))
+                        acc
+                        (let [nsx (first nss)
+                              src (store.render/render-ns st nsx)
+                              c   (count src)]
+                          (if (and (pos? c) (<= c max-chars) (<= (+ total c) max-total))
+                            (recur (rest nss) (conj acc [nsx src]) (+ total c))
+                            (recur (rest nss) acc total)))))))
+        whole?  (into #{} (map first) wholes)
+        in-whole? (fn [q] (whole? (symbol (namespace q))))
+        withs   (vec (take sources (filter #(and (:source %) (not (in-whole? (:form %))))
+                                           (:rows m))))
         keep?   (into #{} (map :form) withs)
         cards   (into [] (comp (remove (comp keep? :form))
+                               (remove (comp in-whole? :form))
                                (map #(dissoc % :source)))
                       (:rows m))
         line    (fn [{:keys [form sig doc via]}]
@@ -936,12 +1079,16 @@
                        (when sig (str " " (pr-str sig)))
                        (when (seq (str doc)) (str " — " (snip doc 70)))
                        "  [" via "]"))
-        sent    (vec (for [r withs
-                           :let [q (:form r)
-                                 e (store/form-named st (symbol (namespace q))
-                                                     (symbol (name q)))]
-                           :when e]
-                       [(:id e) (hash (:source r))]))]
+        sent    (vec (concat
+                      (for [r withs
+                            :let [q (:form r)
+                                  e (store/form-named st (symbol (namespace q))
+                                                      (symbol (name q)))]
+                            :when e]
+                        [(:id e) (hash (:source r))])
+                      (for [[nsx _] wholes
+                            e (store/forms st nsx)]
+                        [(:id e) (hash (n/string (:node e)))])))]
     {:sent sent
      :text (str "[slopp] " (count (:namespaces st)) (if cli? " namespaces; live store — drive it" " namespaces; live store — work")
                 (if cli?
@@ -963,62 +1110,8 @@
                 (when (seq withs)
                   (str "--- the forms the ask names, in full ---\n"
                        (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
-                                             withs)))))}))
-
-(defn ^:export handoff-text
-  "The handoff, rendered for INJECTION: `r` (an `ops/report` map) as plain
-  text in the order a handoff ask reads — the asks oldest first, each with
-  its :turn id and the forms it added/changed/deleted; commit-points; the
-  changes rolled up by namespace with one recorded ask and a delta each;
-  the suite verdict with the command that re-runs it — fitted to `budget`
-  by dropping WHOLE rows (the rollup's tail first, then the oldest asks),
-  never cutting mid-row. Measured (s18): a pr-str snip put teaching prose
-  and twelve alphabetical per-form rows ahead of :by-ask and cut it off in
-  every s17 handoff cell, and the \"(deeper: …)\" tail taught the 5+7-call
-  drill-down that followed. The closing line says this IS the record."
-  [r budget]
-  (let [asks     (vec (reverse (:by-ask r)))
-        forms    (fn [k a] (when (seq (get a k))
-                             (str (name k) ": " (str/join " " (take 8 (get a k)))
-                                  (when (< 8 (count (get a k))) " …"))))
-        ask-line (fn [i a]
-                   (str (inc i) ". [turn " (:turn a) "] \"" (snip (:ask a) 160) "\""
-                        (when-let [ps (seq (keep #(forms % a) [:added :changed :deleted :renamed]))]
-                          (str " — " (str/join "; " ps)))))
-        ms-lines (mapv #(str "  " (:commit %) " " (snip (:description %) 90) " @" (:at %))
-                       (:commit-points r))
-        rollup   (->> (:changes r)
-                      (group-by :ns)
-                      (sort-by (comp str key))
-                      (mapv (fn [[nsx rows]]
-                              (str "  " nsx ": " (count rows) " form(s) "
-                                   (pr-str (vec (distinct (mapcat :ops rows))))
-                                   (when-let [a (first (mapcat :asks rows))]
-                                     (str " — \"" (snip a 80) "\""))
-                                   " " (pr-str (vec (take 3 (distinct (mapcat :deltas rows)))))))))
-        suite    (str "suite: " (name (or (get-in r [:suite :status]) :unknown))
-                      (when-let [as-of (get-in r [:suite :as-of])] (str " as of " as-of))
-                      " — run it: slopp --call test_run '{\"external\":true}';"
-                      " commit-points: slopp --call query_commits")
-        head     (str "--- the composed handoff — the store's OWN records; the ids ARE the"
-                      " citations (:turn per ask, :deltas per change, :commit per commit-point) ---")
-        close    (str "This IS the record — quote the :turn and :deltas ids as your citations;"
-                      " the suite command above is the one to hand over.")
-        render   (fn [n-asks n-roll]
-                   (let [shown (vec (take-last n-asks asks))
-                         from  (- (count asks) (count shown))]
-                     (str/join "\n"
-                               (concat [head (str "asks, oldest first (" (count asks) "):")]
-                                       (when (pos? from)
-                                         [(str "  … " from " earlier ask(s) — report {} lists them")])
-                                       (map-indexed (fn [i a] (ask-line (+ from i) a)) shown)
-                                       (when (seq ms-lines) (cons "commit-points:" ms-lines))
-                                       (when (pos? n-roll) (cons "changes by namespace:" (take n-roll rollup)))
-                                       [suite close]))))]
-    (loop [n-asks (count asks), n-roll (count rollup)]
-      (let [t (render n-asks n-roll)]
-        (cond
-          (<= (count t) budget) t
-          (pos? n-roll)         (recur n-asks (dec n-roll))
-          (< 1 n-asks)          (recur (dec n-asks) 0)
-          :else                 (subs t 0 budget))))))
+                                             withs))
+                       "\n"))
+                (when (seq wholes)
+                  (str "--- the namespaces the ask names, whole — current, no need to read them ---\n"
+                       (str/join "\n\n" (map (fn [[nsx src]] (str ";; " nsx "\n" src)) wholes)))))}))

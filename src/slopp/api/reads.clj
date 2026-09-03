@@ -439,7 +439,11 @@
         {:keys [text sent]} (orient/bundle session ask
                                            :cli? (= "1" (str (:cli query-params)))
                                            :tokens (cond same? 450 handoff? 500 :else 1100)
-                                           :sources (if (or same? handoff?) 1 2))
+                                           :sources (if (or same? handoff?) 1 2)
+                                           ;; a namespace whole is FIRST-map material;
+                                           ;; the delta and the handoff keep their diet
+                                           :whole-ns (when-not (or same? handoff?)
+                                                       orient/default-whole-ns))
         text     (if (and handoff? (not same?))
                    (str text "\n" (orient/handoff-text (ops/report session :limit 50) 3800))
                    text)

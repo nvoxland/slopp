@@ -11,7 +11,7 @@
             [slopp.store.db :as db]
             [slopp.git :as git]
             [slopp.store :as store]
-            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external])
+            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
@@ -957,3 +957,32 @@
           "a dev entry the store HOLDS was still treated as projected")
       (is (projected? "capabilities")
           "the fallback stopped working for an ordinary path"))))
+
+(deftest ^:external a-clone-records-where-each-imported-form-came-from
+  ;; clone! ingested every namespace WITHOUT a prompt while its sibling
+  ;; writes (deps, files, platforms) all carried one, so an imported form's
+  ;; first version answered "why does this exist" with silence.
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sess  (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (ops/ingest! sess 'gc.core seed)
+      (external/commit-point! sess "v1: f ships" :agent "alice")
+      (let [p1 (sync/push! dir-a :url bare)]
+        (is (nil? (:error p1)) (pr-str p1))
+        (let [c (sync/clone! bare dir-b :agent "bob")]
+          (is (nil? (:error c)) (pr-str c)))
+        (let [sb (external/open! {:slopp.ops/dir dir-b})]
+          (try
+            (let [[v1] (history/query-form-history (ops/with-history sb) 'gc.core 'f)]
+              (is (= :ingest (:op v1)))
+              (is (re-find #"^imported from git [0-9a-f]{7,} \(" (str (:prompt v1))) (pr-str v1))
+              (is (= (:pushed p1) (get-in v1 [:origin :git-sha])) (pr-str v1))
+              (is (= (str bare) (get-in v1 [:origin :remote])) (pr-str v1)))
+            (finally (ops/close! sb)))))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))

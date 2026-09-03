@@ -977,7 +977,8 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   `:impl` is that one impl step; `query_slice {targets}` is a
   `query_source`; `query_changes {ns name}` is the form's history;
   `query_changes {since}` is `:from`; `query_commits {limit}` drops the
-  key; `ns_add_require {requires}` is `:require`. Returns
+  key; `ns_add_require {requires}` is `:require`; `query_slice {ns}` alone is the
+  namespace read; `query_commits {contains}` is `report` (eval22 step 2). Returns
   {:name :arguments :repaired} — :repaired nil when nothing moved, else a
   small map the result carries so the accepted shape is learned for free.
   A shape with TWO readings (top-level ns beside an :impl) is left for the
@@ -1009,8 +1010,25 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
       {:name name :arguments (assoc (dissoc a :since) :from (:since a))
        :repaired {:renamed {:since :from}}}
 
-      (and (= "query_commits" name) (contains? a :limit))
+      (and (= "query_commits" name) (contains? a :limit) (nil? (:contains a)))
       {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
+
+      ;; the namespace read: `query_slice {ns}` with nothing else names the
+      ;; whole namespace, which is query_source's answer (whole when small,
+      ;; the outline when not) — refused "needs :name" in eval22 step 2
+      (and (= "query_slice" name) (:ns a) (nil? (:name a)) (nil? (:targets a)))
+      (let [keep    (select-keys a [:ns :full :resend :prompt :agent :verbose])
+            dropped (vec (remove (set (keys keep)) (keys a)))]
+        {:name "query_source" :arguments keep
+         :repaired (cond-> {:routed "query_source"}
+                     (seq dropped) (assoc :dropped dropped))})
+
+      ;; `contains` is report's key: a commit list filtered by what it
+      ;; contains IS the store-wide history question report answers
+      (and (= "query_commits" name) (:contains a))
+      {:name "report"
+       :arguments (select-keys a [:contains :since :limit :agent :prompt :verbose])
+       :repaired {:routed "report"}}
 
       (and (= "ns_add_require" name) (:requires a) (nil? (:require a)))
       (let [r   (:requires a)

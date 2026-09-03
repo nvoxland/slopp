@@ -59,13 +59,17 @@
   [row]
   (when row (val (first row))))
 
-(defn- copy-view!
+(defn ^:export copy-view!
   "Copy line `from`'s VIEW onto line `to`: its `elements`, and the reference
   index computed from them (`form_refs`, `refs_keys`). The three are one
   thing — a materialization and what was derived from it — and a fork or a
   land that copied one without the others would hand a line a view whose
   index belonged to somebody else's source. `to`'s existing rows are the
-  caller's to drop first (`drop-view!`)."
+  caller's to drop first (`drop-view!`).
+
+  Public so a test can build the shape every thread had BEFORE fork on
+  write — a full copy with no write of its own in it — which is the shape
+  that served a two-day-old view as the branch after a restart."
   [tx from to]
   (jdbc/execute! tx ["INSERT INTO elements
                         (line,ns,pos,kind,form_id,name,source,comment,rank)
@@ -1852,14 +1856,21 @@
   reading its branch's view — and must leave it holding its WHOLE value,
   elements and index for every namespace, not only the one it touched; the
   next load of this line would otherwise see one namespace and call that the
-  store.
+  store. A WRITE, not any append: a marker, a verify or a read-cost touches
+  no namespace and leaves the line rowless — the first marker after a done
+  used to copy the whole store back onto the thread.
 
   The reference index (`form_refs` + `refs_keys`) follows the same rule per
   namespace: its rows are REPLACED from the value's `:refs` entry, and a
   namespace the value has no entry for has none on disk afterwards — the db
   never invents an index, so a stale one cannot outlive the value's."
   [tx store nses line-id]
-  (let [nses (if (line-has-view? tx line-id) nses (keys (:namespaces store)))]
+  (let [;; a BOOKKEEPING append (no namespace touched) materializes nothing:
+        ;; a rowless line stays rowless, reading its branch. Without this the
+        ;; first marker after a done copied the whole store onto the thread.
+        nses (if (or (empty? nses) (line-has-view? tx line-id))
+               nses
+               (keys (:namespaces store)))]
     (doseq [ns-sym nses]
       ;; delete ALWAYS: a ns absent from the store (renamed away) must have
       ;; its rows purged, not linger for the next reopen
@@ -2232,17 +2243,25 @@
                   (assoc :deltas (line-deltas conn line-id))))
 
 (defn ^:export refork-thread!
-  "Re-point a ROWLESS thread at its branch's current head: base and head
+  "Re-point a thread WITHOUT WORK at its branch's current head: base and head
   both. A thread that has written nothing has nothing to pin — a fresh
   fork would start from exactly here — so when the branch moves under it,
   following is the only state that is not stale. Bookkeeping deltas the
-  thread wrote meanwhile (a verify from a spot-check) stay in the journal,
-  reachable by id, no longer from this line. A thread WITH rows is never
-  re-forked: its view is pinned by its writes."
+  thread wrote meanwhile (a verify from a spot-check, a done that landed
+  nothing) stay in the journal, reachable by id, no longer from this line.
+
+  A view the thread carries is DROPPED, not kept: a thread minted before
+  fork on write holds a full copy of its branch as of the fork, and a copy
+  with no write of its own in it is exactly the stale state this exists to
+  leave behind. Kept, it was served as the branch after a restart and the
+  live server ran two days behind. Rows are not a pin; work is, and the
+  caller decides work (`unlanded-count` over its content ops)."
   [conn thread-line-id branch-line-id]
   (let [head (line-head conn branch-line-id)]
-    (jdbc/execute! conn ["UPDATE lines SET base = ?, head = ?, used_at = ? WHERE id = ?"
-                         head head (System/currentTimeMillis) thread-line-id])
+    (jdbc/with-transaction [tx conn]
+      (drop-view! tx thread-line-id)
+      (jdbc/execute! tx ["UPDATE lines SET base = ?, head = ?, used_at = ? WHERE id = ?"
+                         head head (System/currentTimeMillis) thread-line-id]))
     head))
 
 ^:reads (defn ^:export line-base

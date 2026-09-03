@@ -19,7 +19,7 @@
             [slopp.ops.engine :as engine]
             [slopp.ops.external :as external]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render] [next.jdbc :as jdbc]))
+            [slopp.store.render :as store.render] [next.jdbc :as jdbc] [slopp.store :as store]))
 
 (def ^:private seed "(ns th.core)\n\n(defn f [x] (inc x))\n")
 
@@ -562,6 +562,12 @@
         (testing "and still reads its branch whole"
           (is (some? (get-in (:store @a) [:namespaces 'fw.core])))
           (is (some? (get-in (:store @a) [:namespaces 'fw.util]))))
+        (testing "a BOOKKEEPING delta is not a write: a turn marker leaves it rowless"
+          ;; the first marker after a done used to copy the whole store onto
+          ;; the thread, which is the 138-copies problem back through the side door
+          (slopp.ops.engine/commit-appended! a #(first (slopp.store/record-turn % :turn-begin :agent "alice" :intent "a look")) [])
+          (is (not= (slopp.store.db/line-head (:db @a) fresh) (slopp.store.db/line-base (:db @a) fresh)) "fixture: the marker moved the head")
+          (is (zero? (rows a fresh)) "still no element rows"))
         (testing "a returning session adopts the rowless thread and sees everything"
           (let [a2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})]
             (try
@@ -600,3 +606,44 @@
           (is (nil? (:error r)) (pr-str (select-keys r [:error :findings])))
           (is (= "main" (get-in r [:land :landed])) (pr-str (:land r)))))
       (finally (ops/close! a)))))
+
+(deftest ^:external a-thread-with-a-stale-copied-view-and-no-work-follows-its-branch
+  ;; Found 2026-09-03 on slopp's own store. A thread minted BEFORE fork on
+  ;; write holds a full copied view. Left open with nothing of its own but the
+  ;; Stop hook's done markers, it was re-adopted after a restart and its
+  ;; two-day-old copy was served as "main": the live server ran code 1,238
+  ;; deltas behind, and every read was answered from it. Rows are not a pin;
+  ;; WORK is. A thread with no un-landed content follows its branch whether
+  ;; or not it carries rows.
+  (let [dir (str (java.nio.file.Files/createTempDirectory "sv" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})
+        line   (atom nil)
+        branch (atom nil)]
+    (try
+      (is (nil? (:error (ops/ingest! a 'sv.core "(ns sv.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
+      (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
+      ;; give alice's fresh thread the pre-fork-on-write shape: a copied view
+      ;; of the branch with no write of its own in it
+      (reset! line (engine/session-line a))
+      (reset! branch (engine/session-branch-line a))
+      (db/copy-view! (:db @a) @branch @line)
+      (is (db/line-has-view? (:db @a) @line) "fixture: the thread carries a copied view")
+      ;; bob moves the branch
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "bob"})]
+        (try
+          (is (nil? (:error (ops/ingest! b 'sv.other "(ns sv.other)\n(defn ^:unused-ok o \"O.\" [] 2)\n"))))
+          (is (nil? (:error (external/done! b :label "bob lands" :agent "bob"))))
+          (finally (ops/close! b))))
+      (finally (ops/close! a)))
+    ;; alice returns in a new process and is re-adopted onto the same thread
+    (let [a2   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})
+          conn (:db @a2)]
+      (try
+        (is (= @line (engine/session-line a2)) "fixture: the same thread was re-adopted")
+        (ops/sync-with-journal! a2)
+        (is (some? (get-in (:store @a2) [:namespaces 'sv.other]))
+            "bob's namespace is visible: the stale copy was not served as the branch")
+        (is (= (db/line-head conn @branch) (db/line-base conn @line))
+            "the thread re-forked at the branch head")
+        (is (not (db/line-has-view? conn @line)) "and its stale rows are gone — it reads the branch until it writes")
+        (finally (ops/close! a2))))))

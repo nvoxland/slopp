@@ -850,7 +850,14 @@
                     (swap! sess assoc :adopting? true)
                     (doseq [ns-sym (boot/dependency-order sources)]
                       (let [r (ops/ingest! sess ns-sym (get sources ns-sym)
-                                           :agent agent)]
+                                           :agent agent
+                                           ;; the ask that created it — the one
+                                           ;; write here that had none, so an
+                                           ;; imported form's first version answered
+                                           ;; "why does this exist" with silence
+                                           :prompt (str "imported from git "
+                                                        (subs tip 0 (min 12 (count tip)))
+                                                        " (" url ")"))]
                         (when (:error r)
                           (throw (ex-info (str ns-sym ": " (:error r)) {})))))
                     (swap! sess dissoc :adopting?)

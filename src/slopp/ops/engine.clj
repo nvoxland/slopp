@@ -12,10 +12,10 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings] [slopp.read.history :as history]))
 
-^{:auto-declare "mutual recursion: commit-appended!, rebased-write!, refresh-cache!"}
-(declare commit-appended! rebased-write! refresh-cache!)
+^{:auto-declare "mutual recursion: adopt-line!, commit-appended!, follow-branch-if-idle!, rebased-write!, refresh-cache!"}
+(declare adopt-line! commit-appended! follow-branch-if-idle! rebased-write! refresh-cache!)
 
 (def ^{:export "slopp.concurrency"} ^:dynamic *pre-commit-hook*
   "Test seam (item 4): invoked between an op's hot-load and its commit CAS to
@@ -1328,36 +1328,6 @@
                [n (sha256 (str/join "|" (cons deps (map #(get per-ns % "?")
                                                         (sort (store/ns-closure store n))))))]))))
 
-(defn ^:export adopt-line!
-  "Put the session on its thread for the current branch, resynchronizing the
-  store and the image when that thread already holds work. Returns the line
-  id, or nil for an ephemeral session.
-
-  Called when a session's IDENTITY becomes known — the harness session id
-  arrives on the first prompt, after the session is already open — and
-  therefore after the store and image were loaded from the branch. If the
-  agent left un-landed work in a thread last time, both are loaded from the
-  wrong line, and only the store would heal on its own: the write CAS fails,
-  the cache refreshes, and the write lands. The IMAGE would not, and a
-  verification run against the branch's code while the store holds the
-  thread's is a wrong verdict rather than a slow one.
-
-  So the reboot is gated on the one question that distinguishes the two
-  cases: does the thread's head match what the session is holding? A freshly
-  minted thread sits exactly on the branch head, which is what the session
-  loaded, so the ordinary path costs two SELECTs and no reboot. Only a
-  genuine resume pays for an image."
-  [session]
-  (when-let [conn (:db @session)]
-    (let [line (db/adopt-thread! conn (session-branch-line session)
-                                 (:agent-id @session))]
-      (swap! session assoc :line line)
-      (when (not= (db/line-head conn line)
-                  (:head (:store @session)))
-        (swap! session assoc :store (db/load-store conn line))
-        (when (:image @session) (fresh-image! session)))
-      line)))
-
 (defn marker-readers
   "Test forms that READ a marker `ns-sym/nm` carries — the tests whose subject is
   a declaration rather than a call.
@@ -1610,24 +1580,33 @@
   namespace before it exists has no row there — kondo reports it as
   unresolved, and only the load error names it. When `err` is `Unable to
   resolve symbol: X` and the form it failed in (`edit/anchor-error`) is a
-  deftest, intern a throwing stub for `ns-sym/X` in `image` and return
-  `[qsym]`; nil for anything else, so a production form's genuine
+  deftest, intern a throwing stub for that form's namespace `/X` in `image`
+  and return `[qsym]`; nil for anything else, so a production form's genuine
   unresolved symbol stays the compile error it is. eval10 s5: a test-first
   `ns_create` on a namespace that keeps its tests beside its code failed to
-  load three times while the agent wrote the stubs by hand."
+  load three times while the agent wrote the stubs by hand.
+
+  The namespace is the ANCHOR's, and `ns-sym` only the fallback when the
+  error carries no coordinate: a group touching several namespaces asked
+  this once per namespace with the anchored form's NAME, and the first
+  namespace holding a form of that name won the stub."
   [image candidate ns-sym err]
   (when-let [[_ sym] (re-find #"Unable to resolve symbol: ([^\s/]+) in this context" (str err))]
     (let [anchor (edit/anchor-error candidate err)
+          nsx    (or (some-> (:form anchor) namespace symbol) ns-sym)
           form   (some-> (:form anchor) name symbol)
-          e      (when form (store/form-named candidate ns-sym form))
+          e      (when form (store/form-named candidate nsx form))
           head   (when e (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
                            (when (seq? s) (first s))))]
       (when (and (= 'deftest head)
-                 (not (store/form-named candidate ns-sym (symbol sym))))
-        (let [q (symbol (str ns-sym) sym)]
+                 ;; a clojure.test name is a missing REQUIRE, never a stub: stubbed,
+                 ;; `deftest` became a var and the next error named the test itself
+                 (not (edit/clojure-test-public? (symbol sym)))
+                 (not (store/form-named candidate nsx (symbol sym))))
+        (let [q (symbol (str nsx) sym)]
           (repl/eval! image
                       (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
-                              ns-sym sym q q))
+                              nsx sym q q))
           [q])))))
 
 (defn hot-load-all!
@@ -1701,10 +1680,15 @@
                 (loop [err err1, acc [], n 0]
                   (if (or (nil? err) (<= 12 n))
                     [err (not-empty acc)]
-                    (let [s   (or (not-empty (stub!))
-                                  (some #(stub-unresolved-test-symbol!
-                                          (:image @session) candidate % err)
-                                        nses))
+                    (let [;; BOTH sources, every round — never `or`. The graph source
+                          ;; answers from the STORE and names the same vars every
+                          ;; round; behind an `or` the load error's one unqualified
+                          ;; symbol was never consulted, and a four-namespace change
+                          ;; was refused as a compile error (eval22 step 2)
+                          s   (into (vec (stub!))
+                                    (some #(stub-unresolved-test-symbol!
+                                            (:image @session) candidate % err)
+                                          nses))
                           new (seq (remove (set acc) s))]
                       (if new
                         (recur (load-all) (into acc new) (inc n))
@@ -1761,34 +1745,12 @@
   [session]
   (when-let [conn (:db @session)]
     (let [line   (session-line session)
-          branch (session-branch-line session)
-          ;; FORK ON WRITE: a rowless thread reads its branch's view and has
-          ;; nothing to pin, so when the branch moved it re-forks at the new
-          ;; head — the state a fresh thread would start from — and the value
-          ;; is reloaded from there. A thread with rows keeps its pin.
-          _      (when (and line branch (not= line branch)
-                            (not (db/line-has-view? conn line))
-                            ;; MOVED means the thread's BASE is behind the branch —
-                            ;; not its head, which a turn marker of its own advances
-                            (not= (db/line-base conn line) (db/line-head conn branch)))
-                   (let [agent (:agent-id @session)
-                         marks (filter #(and (contains? #{:turn-begin :turn-end} (:op %))
-                                             (= agent (:agent %)))
-                                       (db/line-deltas conn line))
-                         open  (let [m (last marks)] (when (= :turn-begin (:op m)) m))]
-                     (db/refork-thread! conn line branch)
-                     (swap! session assoc :store (db/load-store conn line))
-                     ;; the re-fork leaves the thread's own markers behind; an
-                     ;; OPEN turn is the ask's bracket and rides across, so a
-                     ;; one-shot process that began a turn before another agent
-                     ;; landed still finds it open
-                     (when open
-                       (commit-appended! session
-                                         #(first (store/record-turn % :turn-begin
-                                                                    :agent agent
-                                                                    :intent (:intent open)
-                                                                    :user (:user open)))
-                                         []))))
+          ;; FORK ON WRITE: a thread with no un-landed content has nothing to
+          ;; pin, so when the branch moved it re-forks at the new head — the
+          ;; state a fresh thread would start from — and the value is reloaded
+          ;; from there. A thread with WORK keeps its pin; rows alone are not
+          ;; work (`follow-branch-if-idle!`).
+          _      (follow-branch-if-idle! session)
           local  (:store @session)
           suffix (db/deltas-after conn line (:line-pos local 0))
           digest (db/elements-digest conn line)]
@@ -1958,6 +1920,39 @@
                            (:red-first-arity load-res))
                       (assoc :red-first-arity (:red-first-arity load-res))))))))))))
 
+(defn ^:export adopt-line!
+  "Put the session on its thread for the current branch, resynchronizing the
+  store and the image when that thread already holds work. Returns the line
+  id, or nil for an ephemeral session.
+
+  Called when a session's IDENTITY becomes known — the harness session id
+  arrives on the first prompt, after the session is already open — and
+  therefore after the store and image were loaded from the branch. If the
+  agent left un-landed work in a thread last time, both are loaded from the
+  wrong line, and only the store would heal on its own: the write CAS fails,
+  the cache refreshes, and the write lands. The IMAGE would not, and a
+  verification run against the branch's code while the store holds the
+  thread's is a wrong verdict rather than a slow one.
+
+  So the reboot is gated on the one question that distinguishes the two
+  cases: does the thread's head match what the session is holding? A freshly
+  minted thread sits exactly on the branch head, which is what the session
+  loaded, so the ordinary path costs two SELECTs and no reboot. Only a
+  genuine resume pays for an image."
+  [session]
+  (when-let [conn (:db @session)]
+    (let [line (db/adopt-thread! conn (session-branch-line session)
+                                 (:agent-id @session))]
+      (swap! session assoc :line line)
+      ;; a thread with nothing to pin follows the branch before anything is
+      ;; read from it (2026-09-03: a stale copy served as the branch)
+      (follow-branch-if-idle! session)
+      (when (not= (db/line-head conn line)
+                  (:head (:store @session)))
+        (swap! session assoc :store (db/load-store conn line))
+        (when (:image @session) (fresh-image! session)))
+      line)))
+
 (defn ^:export commit-appended!
   "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
   retrying across journal/cache races. Returns the committed store'.
@@ -1987,3 +1982,48 @@
                 {:retryable true}))))))
 
 (defmethod after-write! :default [_ _] nil)
+
+(defn ^:export follow-branch-if-idle!
+  "Re-fork the session's thread at its branch's head when it has NOTHING TO
+  PIN — no un-landed content of its own — and its base is behind the branch;
+  the store value is reloaded from there. True when it did, nil otherwise.
+
+  Rows are not a pin; WORK is. A thread minted before fork on write carries a
+  full copied view with not one write in it, and a rule that re-forked only
+  ROWLESS threads served that copy as the branch after a restart: the live
+  server ran code 1,238 deltas behind, every read answered from it, and
+  nothing said so (2026-09-03). What a thread has written since its fork is
+  the only thing that can hold its view still.
+
+  Called at every point a session lands on a thread — `open!` when the
+  caller named the agent, `adopt-line!` when the identity arrives later, and
+  `refresh-cache!` on every sync — because the first two happen BEFORE any
+  journal change could make the third fire.
+
+  The re-fork leaves the thread's own markers behind in the journal; an OPEN
+  turn is the ask's bracket and rides across, so a one-shot process that
+  began a turn before another agent landed still finds it open."
+  [session]
+  (when-let [conn (:db @session)]
+    (let [line   (:line @session)
+          branch (session-branch-line session)]
+      (when (and line branch (not= line branch)
+                 (zero? (db/unlanded-count conn line history/content-ops))
+                 ;; MOVED means the thread's BASE is behind the branch — not its
+                 ;; head, which a turn marker of its own advances
+                 (not= (db/line-base conn line) (db/line-head conn branch)))
+        (let [agent (:agent-id @session)
+              marks (filter #(and (contains? #{:turn-begin :turn-end} (:op %))
+                                  (= agent (:agent %)))
+                            (db/line-deltas conn line))
+              open  (let [m (last marks)] (when (= :turn-begin (:op m)) m))]
+          (db/refork-thread! conn line branch)
+          (swap! session assoc :store (db/load-store conn line))
+          (when open
+            (commit-appended! session
+                              #(first (store/record-turn % :turn-begin
+                                                         :agent agent
+                                                         :intent (:intent open)
+                                                         :user (:user open)))
+                              []))
+          true)))))

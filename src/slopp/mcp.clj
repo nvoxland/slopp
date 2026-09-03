@@ -1820,10 +1820,12 @@
                         (ledger-written! session "edit_group" {:steps tests})
                         (text! {:ok true
                                 :status (if (seq went-red) :red :green)
-                                :tests {:landed (count tests) :went-red went-red
-                                        :spec-run (select-keys (:test rt)
-                                                               [:test :pass :fail :error
-                                                                :failed-tests :status])}
+                                :tests (cond-> {:landed (count tests) :went-red went-red
+                                                :spec-run (select-keys (:test rt)
+                                                                       [:test :pass :fail :error
+                                                                        :failed-tests :status])}
+                                         (:auto-require rt)
+                                         (assoc :auto-require (:auto-require rt)))
                                 :note (if (seq went-red)
                                         (str "the tests landed RED and are watched — the"
                                              " implementation is the next change {impl …}")
@@ -1846,8 +1848,13 @@
                                                         ;; failing all the same
                                                         (keep :test (:failures (:test rt))))))
                         _ (when rt (ledger-written! session "edit_group" {:steps tests}))
-                        ri (ops/edit-group! session impl
-                                            :prompt (:prompt a) :agent (:agent a))]
+                        ri (let [r (ops/edit-group! session impl
+                                                     :prompt (:prompt a) :agent (:agent a))]
+                             ;; a require the TESTS phase added is this write's repair
+                             ;; too — unreported, the agent learned nothing from it
+                             (merge (select-keys rt [:auto-require :auto-requires
+                                                     :auto-module-dep :auto-module-deps])
+                                    r))]
                     (if (:error ri)
                       (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
                                             :phase :impl)

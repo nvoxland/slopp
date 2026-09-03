@@ -485,3 +485,35 @@
               metadata VALUE is not — the existing rule stands"
       (is (nil? (refusal "(def ^{:heads '#{defmacro}} x 1)")))
       (is (some? (refusal "(def ^{:h (eval 1)} y 2)"))))))
+
+(deftest a-missing-clojure-test-refer-is-a-require-the-pipeline-can-add
+  ;; eval22 step 2, every cell: `ns_create` with no requires, then a change
+  ;; whose tests use deftest — "Unable to resolve symbol: deftest", then a
+  ;; read, an ns_add_require and a retry: three turns for a require the
+  ;; pipeline could have added the way it adds a missing alias.
+  (testing "the compile error names a clojure.test public → the one require that supplies it"
+    (is (= "[clojure.test :refer [deftest is testing use-fixtures]]"
+           (edit/missing-refer-require "Syntax error compiling at (ct/core.clj:3:1).\nUnable to resolve symbol: deftest in this context")))
+    (is (= "[clojure.test :refer [deftest is testing use-fixtures]]"
+           (edit/missing-refer-require "Unable to resolve symbol: testing in this context")))
+    (is (nil? (edit/missing-refer-require "Unable to resolve symbol: frobnicate in this context"))
+        "an ordinary unresolved symbol is the compile error it is")
+    (is (nil? (edit/missing-refer-require "No such namespace: str"))))
+  (testing "what counts as clojure.test's surface"
+    (is (edit/clojure-test-public? 'deftest))
+    (is (edit/clojure-test-public? 'use-fixtures))
+    (is (not (edit/clojure-test-public? 'dbl))))
+  (testing "a partial refer is EXTENDED, not refused as already required"
+    (let [r (edit/add-require-source "(ns x (:require [clojure.test :refer [deftest is]]))"
+                                     "[clojure.test :refer [deftest is testing use-fixtures]]")]
+      (is (nil? (:error r)) (pr-str r))
+      (is (re-find #":refer \[deftest is testing use-fixtures\]" (str (:src r))) (pr-str r))
+      (is (= '[deftest is testing use-fixtures] (:merged-refer r)) (pr-str r))))
+  (testing ":refer :all already supplies everything"
+    (is (:already (edit/add-require-source "(ns x (:require [clojure.test :refer :all]))"
+                                          "[clojure.test :refer [deftest is]]"))))
+  (testing "an alias-only clause gains the refer"
+    (let [r (edit/add-require-source "(ns x (:require [clojure.test :as t]))"
+                                     "[clojure.test :refer [deftest is]]")]
+      (is (nil? (:error r)) (pr-str r))
+      (is (re-find #"\[clojure\.test :as t :refer \[deftest is\]\]" (str (:src r))) (pr-str r)))))

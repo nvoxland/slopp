@@ -279,7 +279,13 @@
 
 (defn- set-branch-ref!
   "Point refs/heads/<nm> at `sha` (CAS; the journal is authoritative, so a
-  lost race is retried against the moved ref — convergence, not failure)."
+  lost race is retried against the moved ref — convergence, not failure).
+
+  A LOCK_FAILURE is another projector holding the ref's lock file: since the
+  projection repo lives on disk, two contexts (two processes, or one test's
+  two futures) share one repo and meet here. Three immediate retries all met
+  the same held lock; the retry now WAITS, longer each time, and gives the
+  other side the milliseconds a ref write takes."
   [^Repository repo nm sha]
   (let [ref-name (str "refs/heads/" nm)
         new-id   (ObjectId/fromString sha)]
@@ -293,7 +299,9 @@
                 res (.name (.update ru))]
             (cond
               (#{"NEW" "FORCED" "FAST_FORWARD" "NO_CHANGE"} res) nil
-              (and (= "LOCK_FAILURE" res) (< n 3)) (recur (inc n))
+              (and (= "LOCK_FAILURE" res) (< n 10))
+              (do (Thread/sleep (long (* 25 (inc n))))
+                  (recur (inc n)))
               :else (throw (ex-info (str "git ref update failed: " res)
                                     {:ref ref-name :result res})))))))))
 

@@ -4597,3 +4597,82 @@
           (is (not (re-find #"keys shown" out)) out)
           (is (re-find #":status :green" out) out)
           (is (re-find #":withheld \{:keys 1, :of 6\}" out) "the fact rides in-band, without the invitation"))))))
+
+(deftest ^:external a-multi-namespace-tests-group-stubs-both-red-first-sources
+  ;; eval22 step 2: ONE change carrying tests in several namespaces — one
+  ;; naming an unqualified same-ns fn not yet written, another calling a
+  ;; cross-ns alias to a var not yet written — was refused: "group failed to
+  ;; compile: Unable to resolve symbol: apply-eco-discount", :phase :tests.
+  ;; The stub loop consulted its two sources with `or`: the graph source
+  ;; answers from the store and names the same cross-ns vars every round, so
+  ;; the load error's unqualified symbol was never consulted and the loop
+  ;; exited on "nothing new". The single-namespace pin beside this passes
+  ;; because the graph source is empty there.
+  (let [sess (external/open!)]
+    (try
+      (doseq [[n src] [["ms.fuel" "(ns ms.fuel (:require [clojure.test :refer [deftest is]]))\n"]
+                       ["ms.discount" "(ns ms.discount (:require [clojure.test :refer [deftest is]]))\n"]
+                       ["ms.quoting" "(ns ms.quoting (:require [clojure.test :refer [deftest is]] [ms.fuel :as fuel]))\n"]]]
+        (call! sess "ns_create" {:ns n :source src}))
+      (let [r (call! sess "change"
+                     {:prompt "eco: half fuel, 3% discount — specs first, three namespaces"
+                      :tests [{:ns "ms.discount" :source "(deftest disc-t (is (= 97 (apply-eco-discount 100 :eco))))"}
+                              {:ns "ms.quoting"  :source "(deftest eco-quote-t (is (= 15 (fuel/eco-fuel 30))))"}
+                              {:ns "ms.fuel"     :source "(deftest half-t (is (= 15 (eco-fuel 30))))"}]
+                      :impl  [{:ns "ms.discount" :source "(defn apply-eco-discount \"D.\" [cents class] (if (= :eco class) (quot (* cents 97) 100) cents))"}
+                              {:ns "ms.fuel"     :source "(defn eco-fuel \"H.\" [cents] (quot cents 2))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (not (re-find #":phase :tests" r))
+            (str "the tests group must land red, not be refused as a compile error: " r))
+        (doseq [t ["ms.discount/disc-t" "ms.quoting/eco-quote-t" "ms.fuel/half-t"]]
+          (is (re-find (re-pattern (str ":went-red \\[[^\\]]*" (java.util.regex.Pattern/quote t))) r)
+              (str t " watched red first: " r)))
+        (is (re-find #":status :green" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-change-into-a-bare-namespace-gets-clojure-test-required
+  ;; eval22 step 2, all three cells, three turns each: ns_create with no
+  ;; requires, then change {tests impl} → "Unable to resolve symbol: deftest"
+  ;; — or, worse, the same-namespace stubber stubbed a var NAMED deftest and
+  ;; the next error named the test itself. The require is added the way a
+  ;; missing alias is, and clojure.test's names are never stubbed.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ct.core"})
+      (let [r (call! sess "change"
+                     {:prompt "double, spec first, in a namespace with no requires"
+                      :tests [{:ns "ct.core" :source "(deftest dbl-t (is (= 4 (dbl 2))))"}]
+                      :impl  [{:ns "ct.core" :source "(defn dbl \"D.\" [x] (* 2 x))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":went-red \[ct\.core/dbl-t\]" r) (str "watched red first: " r))
+        (is (re-find #":auto-require \{:added \"\[clojure\.test :refer" r) (str "the require was added for the agent: " r))
+        (is (not (re-find #"ct\.core/deftest" r)) (str "clojure.test's own names are never stubbed: " r))
+        (is (re-find #":status :green" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external two-more-shapes-are-repaired-not-refused
+  ;; eval22 step 2: `query_slice {ns}` with no name — the agent wanted the
+  ;; namespace — was refused "needs :name", and `query_commits {contains}`
+  ;; (report's key) was an unknown argument: one to two turns a cell for
+  ;; two shapes with exactly one reading each. Refusals are for rules.
+  (testing "the remap itself"
+    (is (= {:name "query_source" :arguments {:ns "a"} :repaired {:routed "query_source"}}
+           (tools/remap-arguments "query_slice" {:ns "a"})))
+    (is (= {:name "query_slice" :arguments {:ns "a" :name "b"}}
+           (tools/remap-arguments "query_slice" {:ns "a" :name "b"}))
+        "a form read is untouched")
+    (is (= {:name "report" :arguments {:contains "fuel"} :repaired {:routed "report"}}
+           (tools/remap-arguments "query_commits" {:contains "fuel"}))))
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rq.core" :source "(ns rq.core)\n(defn f \"F.\" [x] (inc x))\n"})
+      (testing "query_slice {ns} reads the namespace"
+        (let [r (call! sess "query_slice" {:ns "rq.core"})]
+          (is (re-find #"routed \"query_source\"" r) r)
+          (is (re-find #"defn f" r) r)
+          (is (not (re-find #"needs :name" r)) r)))
+      (testing "query_commits {contains} is report's question"
+        (let [r (call! sess "query_commits" {:contains "fuel"})]
+          (is (re-find #"routed \"report\"" r) r)
+          (is (not (re-find #"unknown argument" r)) r)))
+      (finally (ops/close! sess)))))

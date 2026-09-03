@@ -268,7 +268,9 @@
                   (loop [res res, acc [], n 0]
                     (if (or (nil? (:err res)) (<= 12 n))
                       [res (not-empty acc)]
-                      (let [s   (or (engine/stub-missing-test-vars! (:image @session) candidate [ns-sym])
+                      (let [;; both sources every round — the graph source repeats itself, and
+                          ;; behind an `or` it starved the load error's symbol
+                          s   (into (vec (engine/stub-missing-test-vars! (:image @session) candidate [ns-sym]))
                                     (engine/stub-unresolved-test-symbol! (:image @session) candidate ns-sym (:err res)))
                             new (remove (set acc) s)]
                         (if (seq new)
@@ -3339,10 +3341,13 @@
   journal (`slopp.store.db/line-deltas`), read now — or, with `:ops`, only
   the deltas of those kinds (`[:commit]` for a commit-point list), which is the
   difference between a few dozen rows and the whole log for readers that
-  want one kind of marker. Returns a NEW atom over a copy of the session —
-  the live session never carries the list. A session with no journal (a bare
-  test fixture over a value built by writes) is returned as it is: its
-  value's own `:deltas` is all the history there is.
+  want one kind of marker — and `:git-origin` `{:sha :remote}` when the store
+  was imported from git (the `git-base-sha` / `git-remote` meta rows), so an
+  imported form's first version can say where it came from. Returns a NEW
+  atom over a copy of the session — the live session never carries the
+  list. A session with no journal (a bare test fixture over a value built by
+  writes) is returned as it is: its value's own `:deltas` is all the history
+  there is.
 
   The history views (`query_history`, `query_changes`, a commit-point's status,
   an undo span) are pure over a store value and read `store/deltas`. The
@@ -3353,8 +3358,10 @@
   [session & {:keys [ops]}]
   (let [s @session]
     (if-let [conn (:db s)]
-      (atom (update s :store assoc :deltas
-                    (db/line-deltas conn (engine/session-line session) :ops ops)))
+      (atom (update s :store assoc
+                    :deltas (db/line-deltas conn (engine/session-line session) :ops ops)
+                    :git-origin (when-let [sha (db/get-meta conn "git-base-sha")]
+                                  {:sha sha :remote (db/get-meta conn "git-remote")})))
       session)))
 
 ^:reads (defn query-commits
@@ -5294,7 +5301,7 @@
   `:no-auto-require true` on the retry so this runs once."
   [session ns-sym r retry & {:keys [agent]}]
   (if-let [spec (and (:error r)
-                     (edit/missing-alias-require (:store @session) (:error r)))]
+                     (edit/missing-require (:store @session) (:error r)))]
     (let [add (fn [] (add-require! session ns-sym spec
                                    :prompt fields/auto-require-prompt :system true
                                    :agent agent))
@@ -5611,8 +5618,19 @@
           (loop [r r, tried tried, n 0]
             (let [added  (vec (:auto-requires r))
                   spec   (when (:error r)
-                           (edit/missing-alias-require (:store @session) (:error r)))
-                  ns-sym (when spec (first (remove #(tried [% spec]) nses)))]
+                           (edit/missing-require (:store @session) (:error r)))
+                  ;; the namespace the error ANCHORS to first — the require is
+                  ;; missing THERE. Asking the first namespace in the group
+                  ;; added a require where nothing used it (2026-09-03: the
+                  ;; db layer gained a require of the read layer)
+                  anchored (when spec
+                             (some-> (edit/anchor-error (:store @session) (:error r))
+                                     :form namespace symbol))
+                  ns-sym (when spec
+                           (or (when (and anchored (some #{anchored} nses)
+                                          (not (tried [anchored spec])))
+                                 anchored)
+                               (first (remove #(tried [% spec]) nses))))]
               (if (or (nil? spec) (nil? ns-sym) (< (* 4 (count nses)) n))
                 [r tried]
                 (let [r2    (auto-require-retry session ns-sym r once :agent agent)

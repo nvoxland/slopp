@@ -322,13 +322,28 @@
 (defn add-require-source
   "F5: structurally add one require clause (`require-str`, e.g.
   \"[clojure.string :as str]\") to an ns form's source. Returns {:src new-src}
-  or {:error msg} (bad clause / already required)."
+  or {:error msg} (bad clause / already required in a different spelling).
+
+  Same lib, `:refer` vectors on both sides: the existing refer is EXTENDED
+  (`:merged-refer` names the result) rather than refused — a spec needing
+  `testing` in a namespace that refers `[deftest is]` is the commonest shape
+  there is, and \"already required\" blocked the pipeline's own repair of it.
+  An existing `:refer :all` already supplies everything (`:already`); an
+  alias-only clause gains the refer."
   [ns-source require-str]
   (try
     (let [req  (n/sexpr (p/parse-string require-str))
           lib  (if (vector? req) (first req) req)
           spec (n/sexpr (p/parse-string ns-source))
-          ]
+          refer-of (fn [v] (when (vector? v) (:refer (apply hash-map (rest v)))))
+          replace-clause (fn [existing clause]
+                           (let [zloc (z/of-string ns-source)
+                                 tgt  (some-> (z/find-value zloc z/next :require) z/up
+                                              (z/find z/next
+                                                      (fn [loc]
+                                                        (= existing (try (z/sexpr loc)
+                                                                         (catch Exception _ ::none))))))]
+                             (when tgt (-> tgt (z/replace clause) z/root-string))))]
       (if-let [existing (first (filter (fn [r] (= lib (if (vector? r) (first r) r)))
                                        (for [clause spec
                                              :when (and (seq? clause) (= :require (first clause)))
@@ -348,15 +363,28 @@
           ;; (s14, measured) — and blocked auto-require's repair of the
           ;; same miss
           (and (symbol? existing) (vector? req))
-          (let [zloc (z/of-string ns-source)
-                tgt  (some-> (z/find-value zloc z/next :require) z/up
-                             (z/find z/next
-                                     (fn [loc]
-                                       (= existing (try (z/sexpr loc)
-                                                        (catch Exception _ ::none))))))]
-            (if tgt
-              {:src (-> tgt (z/replace req) z/root-string) :upgraded (str existing)}
-              {:error (str "already required: " lib)}))
+          (if-let [src (replace-clause existing req)]
+            {:src src :upgraded (str existing)}
+            {:error (str "already required: " lib)})
+
+          ;; a :refer vector asked of a clause that refers everything
+          (and (vector? existing) (= :all (refer-of existing)) (vector? (refer-of req)))
+          {:src ns-source :already true}
+
+          ;; a :refer vector asked of a same-lib clause: EXTEND its refer
+          (and (vector? existing) (vector? (refer-of req)))
+          (let [have   (let [r (refer-of existing)] (if (vector? r) r []))
+                merged (into have (remove (set have)) (refer-of req))]
+            (if (= (count merged) (count have))
+              {:src ns-source :already true}
+              (let [pairs  (partition 2 (rest existing))
+                    pairs' (if (some #(= :refer (first %)) pairs)
+                             (map (fn [[k v]] (if (= :refer k) [k merged] [k v])) pairs)
+                             (concat pairs [[:refer merged]]))
+                    clause (into [lib] (apply concat pairs'))]
+                (if-let [src (replace-clause existing clause)]
+                  {:src src :merged-refer merged}
+                  {:error (str "already required: " lib)}))))
 
           :else
           {:error (str "already required: " lib " as " (pr-str existing)
@@ -1243,3 +1271,45 @@
      (if-let [a (anchor-error store err)]
        (assoc a :error msg)
        {:error msg}))))
+
+(def clojure-test-publics
+  "clojure.test's public names — what a spec uses unqualified through
+  `:refer`. A compile error naming one of these is a missing REQUIRE, not a
+  red-first symbol: the same-namespace stubber once interned a var named
+  `deftest` in a namespace that had never required clojure.test, and the
+  next error named the test itself."
+  '#{deftest deftest- is are testing use-fixtures run-tests run-all-tests
+     run-test run-test-var with-test set-test test-var test-vars test-ns
+     test-all-vars successful? compose-fixtures join-fixtures})
+
+(defn ^:export clojure-test-public?
+  "Is `sym` (qualified or not) one of clojure.test's public names?"
+  [sym]
+  (contains? clojure-test-publics (symbol (name sym))))
+
+(def clojure-test-require
+  "The one require the pipeline adds for an unresolved clojure.test name —
+  the four every spec namespace ends up wanting."
+  "[clojure.test :refer [deftest is testing use-fixtures]]")
+
+(defn ^:export missing-refer-require
+  "The require that supplies an unresolved clojure.test name — `Unable to
+  resolve symbol: deftest` in a namespace that never required clojure.test —
+  or nil when the failure is not that shape. The sibling of
+  `missing-alias-require` for the :refer'd surface: the write path adds it
+  as a `:system` require and retries. Every cell of eval22's step 2 spent
+  three turns on this — the error, a read of the ns form, an
+  `ns_add_require` — for a require the pipeline could name itself."
+  [err]
+  (when-let [[_ sym] (re-find #"Unable to resolve symbol: ([^\s/]+)(?: in this context)?" (str err))]
+    (when (clojure-test-public? (symbol sym))
+      clojure-test-require)))
+
+(defn ^:export missing-require
+  "The ONE require a compile failure asks for — a missing alias
+  (`missing-alias-require`) or a missing clojure.test refer
+  (`missing-refer-require`) — or nil. The write path's two repairs consult
+  this and nothing else, so a new shape of missing require is one clause here."
+  [store err]
+  (or (missing-alias-require store err)
+      (missing-refer-require err)))

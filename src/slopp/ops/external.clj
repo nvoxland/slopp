@@ -949,6 +949,12 @@ client-deps (merge (:client-deps st) (:client provided))
                 :pinned-agent? stable?
                 :branch-image-ttl-ms ttl
                 :warm-spare? (boolean warm-spare?))
+         ;; an adopted thread with nothing to pin follows its branch BEFORE
+         ;; the image boots from it: a thread minted before fork on write
+         ;; carries a copied view with no write of its own, and a restart onto
+         ;; one served that two-day-old copy as the branch (2026-09-03). The
+         ;; boot below reads the session's store, which this may have replaced.
+         (engine/follow-branch-if-idle! session)
          ;; #134: kondo's cross-ns cache follows the STORE, not the process cwd.
          ;; Unset, kondo resolves it from cwd — so cross-ns findings existed only
          ;; where a .clj-kondo/ happened to sit beside the process, and a user
@@ -964,12 +970,12 @@ client-deps (merge (:client-deps st) (:client provided))
          ;; which arms the ready-promise await-image! blocks on
          (if async-image?
            (do (swap! session assoc :image-ready (promise))
-               (doto (Thread. ^Runnable #(boot-image! session store conn me ttl)
+               (doto (Thread. ^Runnable #(boot-image! session (:store @session) conn me ttl)
                               "slopp-image-boot")
                  (.setDaemon true)
                  (.start))
                session)
-           (boot-image! session store conn me ttl)))
+           (boot-image! session (:store @session) conn me ttl)))
        (catch Throwable t
          (ops/close! session)
          (throw t))))))

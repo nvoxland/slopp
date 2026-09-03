@@ -7,7 +7,7 @@
             [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.mcp]
-            [slopp.ops.external :as external] [slopp.read.history :as history]))
+            [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db]))
 
 (deftest ^:external form-history-is-reconstructible
   (let [sess (external/open!)]
@@ -327,4 +327,35 @@
         (is (every? ids (:deltas row)) "a change row cites real journal deltas")
         (is (re-find #"(?i)citation" (str (:records r)))
             "the result says the ids ARE the citations"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-imported-version-with-no-ask-says-where-it-came-from
+  ;; eval22 step 2, every cell: `query_history` on an imported form answered
+  ;; `:op :ingest :prompt nil`, and the agent spent five to seven more calls
+  ;; hunting for "the recorded reasoning" — which the store could have said
+  ;; does not exist: the form arrived by import from a git sha it knows.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory "ho" (make-array java.nio.file.attribute.FileAttribute 0)))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "importer"})]
+    (try
+      ;; the shape clone! left behind before 2026-09-03: an ingest with no prompt
+      (is (nil? (:error (ops/ingest! sess 'ho.core "(ns ho.core)\n(defn f \"Doubles.\" [x] (* 2 x))\n"))))
+      (db/set-meta! (:db @sess) "git-base-sha" "0123456789abcdef0123456789abcdef01234567")
+      (db/set-meta! (:db @sess) "git-remote" "https://example.test/proj.git")
+      (let [[v1 :as vs] (history/query-form-history (ops/with-history sess) 'ho.core 'f)]
+        (is (= 1 (count vs)))
+        (is (= :ingest (:op v1)))
+        (is (nil? (:prompt v1)) "fixture: no ask was recorded")
+        (is (= "0123456789abcdef0123456789abcdef01234567" (get-in v1 [:origin :git-sha])) (pr-str v1))
+        (is (= "https://example.test/proj.git" (get-in v1 [:origin :remote])) (pr-str v1))
+        (is (re-find #"no ask recorded" (str (get-in v1 [:origin :note]))) (pr-str v1)))
+      (testing "the story says it in the why slot"
+        (let [txt (history/query-form-history (ops/with-history sess) 'ho.core 'f :format "text")]
+          (is (re-find #"imported from git 0123456789ab" txt) txt)
+          (is (re-find #"no ask recorded" txt) txt)))
+      (testing "a later version written here carries no origin"
+        (is (nil? (:error (ops/edit-replace! sess 'ho.core 'f "(defn f \"Triples.\" [x] (* 3 x))" :prompt "triple" :agent "importer"))))
+        (let [vs (history/query-form-history (ops/with-history sess) 'ho.core 'f)]
+          (is (= 2 (count vs)))
+          (is (nil? (:origin (second vs))) (pr-str (second vs)))
+          (is (= "triple" (:prompt (second vs))))))
       (finally (ops/close! sess)))))

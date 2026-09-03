@@ -885,3 +885,58 @@
                                             "(ns nw.core)\n(defn ^:unused-ok lone \"L.\" [x] x)\n")})
                 :ask "change lone" :tokens 220)]
         (is (not-any? #(re-find #"^tests " (str (:via %))) (:rows m2)))))))
+
+(deftest ask-words-name-namespaces-too
+  ;; eval22 step 2: "everywhere carriers are accepted (quoting, booking,
+  ;; billing, invoices)" seeded nothing from those four namespaces — seeds
+  ;; came from FORM names only, and "quoting"/"invoices" match no form. The
+  ;; agent then read each namespace by hand, one call apiece.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'logi.quoting "(ns logi.quoting)\n(defn quote-cents \"Q.\" [p] p)\n")
+               (store/ingest 'logi.booking "(ns logi.booking)\n(defn book! \"B.\" [p] p)\n")
+               (store/ingest 'logi.billing "(ns logi.billing)\n(defn bill \"Bill.\" [p] p)\n")
+               (store/ingest 'logi.invoice "(ns logi.invoice)\n(defn invoice-str \"I.\" [p] (str p))\n")
+               (store/ingest 'logi.carrier "(ns logi.carrier)\n(defn make-carrier \"C.\" [id] id)\n")
+               (store/ingest 'logi.money "(ns logi.money)\n(defn cents \"M.\" [x] x)\n"))]
+    (testing "a word names a namespace by its last segment, plural and -ing allowed"
+      (is (= #{'logi.quoting 'logi.booking 'logi.billing 'logi.invoice 'logi.carrier}
+             (set (orient/ask-namespaces st "Creating carriers with the :eco class must work everywhere carriers are accepted (quoting, booking, billing, invoices)."))))
+      (is (= ['logi.invoice] (orient/ask-namespaces st "the invoices")))
+      (is (empty? (orient/ask-namespaces st "the eco class")) "a short word or a stop word names nothing"))
+    (testing "the map seeds the named namespaces' forms and says so"
+      (let [r (orient/orient-map (atom {:store st :test-map {}})
+                                 :ask "must work everywhere carriers are accepted (quoting, booking, billing, invoices)"
+                                 :tokens 4000)
+            forms (set (map :form (:rows r)))]
+        (is (= #{'logi.quoting 'logi.booking 'logi.billing 'logi.invoice 'logi.carrier} (set (:ns-seeds r))) (pr-str r))
+        (is (every? forms ['logi.quoting/quote-cents 'logi.booking/book! 'logi.billing/bill 'logi.invoice/invoice-str]) (pr-str forms))
+        (is (not (contains? forms 'logi.money/cents)) "a namespace the ask did not name is not an answer to it")))))
+
+(deftest the-bundle-carries-a-small-named-namespace-whole
+  ;; A named namespace of a few hundred chars is cheaper sent whole than
+  ;; read back by name: eval22's bundle listed logi.booking's forms as cards
+  ;; and the agent's next call was query_source {ns logi.booking}. Capped —
+  ;; per namespace, in count, and in total — so a big project's bundle keeps
+  ;; its shape; a namespace over the cap stays cards.
+  (let [big (apply str (repeat 2100 "x"))
+        st  (-> (store/empty-store)
+                (store/ingest 'logi.quoting (str "(ns logi.quoting)\n(defn quote-cents \"" big "\" [p] p)\n"))
+                (store/ingest 'logi.booking "(ns logi.booking)\n(defn book! \"B.\" [p] p)\n")
+                (store/ingest 'logi.billing "(ns logi.billing)\n(defn bill \"Bill.\" [p] p)\n")
+                (store/ingest 'logi.money "(ns logi.money)\n(defn cents \"M.\" [x] x)\n"))
+        sess (atom {:store st :test-map {}})
+        r    (orient/bundle sess "eco carriers everywhere: quoting, booking and billing")
+        txt  (:text r)]
+    (is (re-find #"--- the namespaces the ask names, whole" txt) txt)
+    (is (re-find #"\(ns logi\.booking\)" txt) txt)
+    (is (re-find #"\(defn book!" txt) txt)
+    (is (re-find #"\(defn bill" txt) txt)
+    (is (not (re-find #"\(defn quote-cents" txt)) "a namespace over the per-namespace cap stays cards")
+    (is (re-find #"logi\.quoting/quote-cents" txt) "and its forms are still on the map as cards")
+    (is (not (re-find #"\(defn cents" txt)) "a namespace the ask did not name is not sent")
+    (is (some (fn [[id _]] (= id (:id (store/form-named st 'logi.booking 'book!)))) (:sent r))
+        "what was sent whole enters the ledger")
+    (is (= 1 (count (re-seq #"\(defn book!" txt))) "sent once, not as a card too")
+    (testing "a delta bundle sends no namespace whole"
+      (let [d (orient/bundle sess "eco carriers everywhere: quoting, booking and billing" :whole-ns nil)]
+        (is (not (re-find #"names, whole" (:text d))))))))

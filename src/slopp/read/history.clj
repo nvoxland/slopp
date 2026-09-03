@@ -142,7 +142,14 @@
          (mapcat
           (fn [prev v]
             (cons (str "  " (:delta v) " " (name (:op v))
-                       (when-let [why (or (:prompt v) (:turn-intent v))]
+                       (when-let [why (or (:prompt v) (:turn-intent v)
+                                          ;; an imported version with no ask says so,
+                                          ;; and says where it came from
+                                          (when-let [o (:origin v)]
+                                            (str "imported from git " (:git-sha o)
+                                                 (when (:remote o) (str " (" (:remote o) ")"))
+                                                 "; no ask recorded — the docstring is the"
+                                                 " only recorded reasoning")))]
                          (str " — " why))
                        "  [" (name (:status v)) "]"
                        (when (:at v) (str "  @ " (:at v))))
@@ -829,9 +836,16 @@
   "Every content version of `nm`'s form, oldest first, with the intent that
   produced it, when, the verification state it landed in, and what that
   verification COST:
-  [{:delta :op :prompt :source :status :at :turn-intent :ms}]. `:status`
+  [{:delta :op :prompt :source :status :at :turn-intent :ms :origin}]. `:status`
   (was-green-at, HM2) is the project's verification state governing each
   version — semantic × history, per form.
+
+  `:origin` rides an `:ingest` version of a store that was IMPORTED from git
+  (`:git-origin` on the value, which `slopp.ops/with-history` reads from the
+  store's meta): `{:git-sha :remote}`, plus a `:note` when no ask was
+  recorded — the form arrived by import and the docstring is the only
+  recorded reasoning. Without it an agent asked \"why is it this way\" went
+  hunting through README and git log for a record that did not exist.
 
   Three views over ONE derivation of the form's life, because a second walk is
   how two surfaces come to disagree about the same version:
@@ -845,6 +859,7 @@
         id (:id (store/form-named st ns-sym nm))]
     (when id
       (let [ti       (turn-intents (store/deltas st))
+            origin   (:git-origin st)
             versions (vec (for [d     (store/deltas st)
                                 :let  [src (get-in d [:sources id])]
                                 :when src]
@@ -853,6 +868,13 @@
                                      :status (status-after st (:id d))
                                      :at (human-time (:at d))}
                               (ti (:id d)) (assoc :turn-intent (ti (:id d)))
+                              (and origin (= :ingest (:op d)))
+                              (assoc :origin
+                                     (cond-> {:git-sha (:sha origin) :remote (:remote origin)}
+                                       (nil? (:prompt d))
+                                       (assoc :note (str "imported — no ask recorded before it;"
+                                                         " the docstring is the only recorded"
+                                                         " reasoning"))))
                               ;; the cost the verification recorded, present
                               ;; only for versions written after verification
                               ;; started timing itself — form-effort reports
