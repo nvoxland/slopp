@@ -2196,3 +2196,28 @@ requires); and never make a reader re-buy what it already holds.
   at the filesystem root) — caught by sync-test, fixed by keeping the
   no-dir case in-memory. The in-memory design's rationale was "nothing
   touches disk", not correctness.
+
+## 2026-09-02 — D2b: the head commit is minted from the head state; a commit point is 5.5s
+
+Review of the remaining commit logic, with numbers on this store's main line:
+39,862 deltas (5.2s just to load and parse), 603 markers, `load-store`
+3.1s, render 0.7s, 0 named branch lines (the 1,097 lines are threads).
+- Finding 1 (fixed): the projection folded the whole journal from empty on
+  every publish to render ONE new tree, while the head was materialized in
+  `elements` and the session held it. `ensure-projected!` is three-way per
+  line now — :current (nothing loaded), :head (materialized head + pinned
+  parent, no replay), :walk (grafts, adoptions, retroactive targets) — and
+  returns `:via`. Measured: publish 26,984 → 2,541 ms (`:via :head`).
+- Finding 2 (fixed): the unchanged case loaded the whole ancestry to learn
+  there was nothing to do; now two rows and a ref resolve.
+- Finding 3 (OPEN, ideas/projection/refs-drift.md): historical trees are
+  arranged with today's reference index, so "delete the cache and get the
+  same shas back" holds only while refs have not changed; pinned shas hide
+  it and the rebuild pin cannot see it.
+- Finding 4 (OPEN, ideas/product/thread-lines-and-journal-size.md): 1,097
+  thread lines never collected; a 2.1 GB journal that makes parsing it 5s.
+- Also fixed: commit-point!'s refusal listed `ms` and `episode-status` as
+  things that fired — informational keys, now excluded like `:scope`.
+- Sound and kept: marker-first ordering, deterministic commits, the
+  Slopp-Commit trailer, the fallback walk, publish trouble beside a green
+  commit point.

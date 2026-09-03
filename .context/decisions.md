@@ -6606,3 +6606,10 @@ re-rendered every commit point in the journal — 98% of a commit point's
 wall (199s). Persisted: 27s. The cache is not state — a pin deletes the
 directory and gets byte-identical shas back — and a scratch repo opened
 with no dir (`clone!`'s remote fetch) stays in-memory. D2 of s20.
+
+Addendum (D2b, same day): the projection reads the MATERIALIZED head. `ensure-projected!`
+is three-way per line — `:current` (the newest marker is minted and live: nothing loaded),
+`:head` (only the newest marker is unminted, non-retroactive, followed by bookkeeping
+only, its parent pinned-live: the tree is `load-store`'s head or the caller's store, one
+render, one insert — no replay), `:walk` (the fold, for grafts, adoptions and retroactive
+targets) — and returns `:via`. Measured on a real commit point: publish 26,984 → 2,541 ms.

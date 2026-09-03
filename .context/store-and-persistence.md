@@ -554,6 +554,14 @@ ADDING A REGISTER = one row here. Nothing else.
 
 ## Git bridge (P4-m8 + G-series, `slopp.git` + `slopp.sync`) — a persisted projection cache + transport-out
 
+- **A publish mints only the head** (D2b, 2026-09-02): `ensure-projected!` decides per line
+  from two rows — the newest two `:commit` markers — before loading any journal. `:current`
+  when the newest is minted and its object is live; `:head` when only the newest is unminted,
+  it targets the delta before it, nothing but bookkeeping follows it, and its parent (the
+  previous marker or the graft base) is live — then `db/load-store` (or the caller's own
+  store, when its head is the line head) is arranged and rendered ONCE and inserted with the
+  pinned parent; `:walk` otherwise (`project-journal!`, unchanged). Result carries `:via`.
+  Measured: 26,984 → 2,541 ms.
 - **The projection repo is a CACHE, persisted at `.slopp/git-cache`** (G3-revised,
   2026-09-02): `open-repo!` builds a bare JGit `FileRepository` there, created on
   first use — it was an in-memory `InMemoryRepository` rebuilt per context, which made
