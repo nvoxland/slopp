@@ -6613,3 +6613,21 @@ is three-way per line — `:current` (the newest marker is minted and live: noth
 only, its parent pinned-live: the tree is `load-store`'s head or the caller's store, one
 render, one insert — no replay), `:walk` (the fold, for grafts, adoptions and retroactive
 targets) — and returns `:via`. Measured on a real commit point: publish 26,984 → 2,541 ms.
+
+## D-fork-on-write (2026-09-03) — a thread's view is materialized on its first write
+
+A thread was minted with a full copy of its branch's materialized view
+(`elements` + reference index). Every `done` leaves a session on a fresh
+thread, so a session that landed and then ended left a complete copy of the
+store behind with not one write in it — 138 such threads were 85% of a 2.1 GB
+file. Now `create-line!` copies nothing for a thread. While a thread is
+ROWLESS it reads its branch's view (`view-line!` resolves every reader —
+`load-elements`, `load-refs`, `elements-digest` — for an OPEN thread only;
+a settled thread resolves to itself, empty), and because it has nothing to
+pin it RE-FORKS at the branch's head when the branch moves (`refork-thread!`,
+at adopt and in `refresh-cache!`). Its first write persists its WHOLE value
+(`write-snapshot!` writes every namespace when the line has no rows), and
+from then on it is pinned exactly as before. `land-thread!` never copies an
+empty view over the branch's. Consequence: "an open thread with a view"
+now means "a thread with work in it" — which is the distinction the thread
+GC could only approximate, and the reason a dead owner is not a signal.

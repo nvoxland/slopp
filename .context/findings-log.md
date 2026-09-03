@@ -2268,3 +2268,16 @@ Review of the remaining commit logic, with numbers on this store's main line:
   rematerialize on adopt by replaying the thread's un-landed deltas over its
   parent's view. That path does not exist yet; filed in ideas/ (it would also
   be the resurrect path for the ~110 already settled).
+
+## 2026-09-03 — fork on write
+
+- Root cause of the 138 copies: not un-landed work but the FRESH thread every
+  done leaves a session on, copying the branch's view before writing anything.
+  A thread now materializes its view on its first write (D-fork-on-write).
+- Semantics pinned: a rowless thread reads its branch and re-forks when the
+  branch moves; a thread with work stays pinned; a fork reads its parent's
+  index and owns one after its first write; a settled thread never resolves
+  to its parent. Three store.db pins moved with the decision.
+- Process: seven patches were refused as fragments before landing (a `do`
+  body, a `let` header); the matcher's span rule made two of the fixes
+  one-line matches on complete forms.
