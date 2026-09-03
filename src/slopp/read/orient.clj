@@ -26,38 +26,6 @@
   (let [s (str s)]
     (if (<= (count s) n) s (str (subs s 0 n) "…"))))
 
-(defn ^:export fit-report
-  "G13 at the gate boundary — by AGGREGATION, never amputation: an
-  over-budget report first trims asks to 1/row, then ROLLS CHANGES UP by
-  namespace ({:ns :forms :ops :asks}) — the information survives at a
-  coarser grain and report {contains} expands any group. Amputation
-  (take 20 of the rollup) is the last resort for pathological stores.
-  (eval9: the take-20 amputation CAUSED the handoff fan-out — agents went
-  hunting for what the report dropped.)"
-  [r]
-  (let [fits? #(<= (count (pr-str %)) 6500)]
-    (if (fits? r)
-      r
-      (let [slim (update r :changes
-                         (fn [cs] (mapv #(update % :asks (comp vec (partial take 1))) cs)))]
-        (if (fits? slim)
-          (assoc slim :note "asks trimmed to 1/row — report {contains} narrows")
-          (let [rolled (->> (:changes slim)
-                            (group-by :ns)
-                            (mapv (fn [[nsx rows]]
-                                    {:ns nsx :forms (count rows)
-                                     :ops (vec (distinct (mapcat :ops rows)))
-                                     :asks (vec (take 1 (distinct (mapcat :asks rows))))}))
-                            (sort-by (comp str :ns)))
-                slim2  (assoc slim :changes (vec rolled)
-                              :note "changes rolled up by namespace — report {contains <ns or word>} expands a group")]
-            (if (fits? slim2)
-              slim2
-              (-> slim2
-                  (update :changes #(vec (take 20 %)))
-                  (assoc :note (str "rolled up by namespace, showing 20 of "
-                                    (count rolled) " — {contains} narrows"))))))))))
-
 (def ^:private doc-summary-cap
   "The character budget for a doc summary. Composites carry MANY of these, so
   one verbose docstring must not eat the result."
@@ -158,6 +126,38 @@
         why   (assoc :why (snip why 90))
         teach (assoc :teach teach)
         examples (assoc :examples examples)))))
+
+(defn ^:export fit-report
+  "G13 at the gate boundary — by AGGREGATION, never amputation: an
+  over-budget report first trims asks to 1/row, then ROLLS CHANGES UP by
+  namespace ({:ns :forms :ops :asks}) — the information survives at a
+  coarser grain and report {contains} expands any group. Amputation
+  (take 20 of the rollup) is the last resort for pathological stores.
+  (eval9: the take-20 amputation CAUSED the handoff fan-out — agents went
+  hunting for what the report dropped.)"
+  [r]
+  (let [fits? #(<= (count (pr-str %)) 6500)]
+    (if (fits? r)
+      r
+      (let [slim (update r :changes
+                         (fn [cs] (mapv #(update % :asks (comp vec (partial take 1))) cs)))]
+        (if (fits? slim)
+          (assoc slim :note "asks trimmed to 1/row — report {contains} narrows")
+          (let [rolled (->> (:changes slim)
+                            (group-by :ns)
+                            (mapv (fn [[nsx rows]]
+                                    {:ns nsx :forms (count rows)
+                                     :ops (vec (distinct (mapcat :ops rows)))
+                                     :asks (vec (take 1 (distinct (mapcat :asks rows))))}))
+                            (sort-by (comp str :ns)))
+                slim2  (assoc slim :changes (vec rolled)
+                              :note "changes rolled up by namespace — report {contains <ns or word>} expands a group")]
+            (if (fits? slim2)
+              slim2
+              (-> slim2
+                  (update :changes #(vec (take 20 %)))
+                  (assoc :note (str "rolled up by namespace, showing 20 of "
+                                    (count rolled) " — {contains} narrows"))))))))))
 
 (def stuck-reload-attempts
   "Consecutive failed reload polls after which a namespace is STUCK rather

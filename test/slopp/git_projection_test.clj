@@ -498,3 +498,91 @@
                 (is (= tip (get-in (git/ensure-projected! ctx) [:refs "main"])) "rebuilt, byte-identical")
                 (finally (git/close-ctx! ctx)))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-head-commit-is-minted-from-the-head-state-not-a-replay
+  ;; D2b: the projection re-derived state the system already holds — it
+  ;; folded every delta of the line (39,862 here, 5.2s just to parse them)
+  ;; from an empty store to render ONE new tree, while `load-store` hands
+  ;; back the materialized head in 3s and the live session holds it for
+  ;; free. The pinned parent, the head store, one render, one insert.
+  ;; Byte-identical to the walk, which a full rebuild proves.
+  ;;
+  ;; Later commit points are :force true: a doc advisory that persists
+  ;; across dones escalates and refuses the third one, and this pin is
+  ;; about the projection, which mints a red marker the same way.
+  (let [dir      (temp-dir)
+        sess     (external/open! {:slopp.ops/dir dir})
+        project! (fn [& opts]
+                   (let [ctx (git/open-ctx! dir)]
+                     (try (apply git/ensure-projected! ctx opts)
+                          (finally (git/close-ctx! ctx)))))
+        counting (fn [f]
+                   ;; how many times the projection went to the journal
+                   (let [n (atom 0) orig slopp.store.db/deltas-after]
+                     (with-redefs [slopp.store.db/deltas-after (fn [& a] (swap! n inc) (apply orig a))]
+                       [(f) @n])))
+        rebuild! (fn []
+                   ;; the full walk, from nothing: no cache, no pins
+                   (let [cache (java.io.File. (java.io.File. (str dir) ".slopp") "git-cache")]
+                     (run! #(.delete ^java.io.File %) (reverse (file-seq cache))))
+                   (let [ctx (git/open-ctx! dir)]
+                     (try (jdbc/execute! (:slopp.git/map-conn ctx) ["DELETE FROM git_map"])
+                          (git/ensure-projected! ctx)
+                          (finally (git/close-ctx! ctx)))))]
+    (try
+      (ops/ingest! sess 'gp.core seed)
+      (external/config! sess "user.name" "alice")
+      (external/config! sess "user.email" "alice@slopp")
+      (is (nil? (:error (external/commit-point! sess "v1" :agent "alice"))))
+      (ops/edit-replace! sess 'gp.core 'f "(defn f \"F.\" [x] (+ 10 x))" :prompt "v2" :agent "alice")
+      (is (nil? (:error (external/commit-point! sess "v2" :agent "alice"))))
+      (let [first-run (project!)]
+        (is (= :walk (get-in first-run [:via "main"])) (pr-str (:via first-run)))
+        (testing "nothing new since: nothing is loaded, nothing is minted"
+          (let [[r n] (counting project!)]
+            (is (= :current (get-in r [:via "main"])) (pr-str (:via r)))
+            (is (= (get-in first-run [:refs "main"]) (get-in r [:refs "main"])))
+            (is (zero? n) "the journal was not read")))
+        (ops/edit-replace! sess 'gp.core 'f "(defn f \"F.\" [x] (+ 100 x))" :prompt "v3" :agent "alice")
+        (is (nil? (:error (external/commit-point! sess "v3" :agent "alice" :force true))))
+        (testing "a new head marker is minted from the materialized head, without the journal"
+          (let [[r n] (counting project!)
+                tip   (get-in r [:refs "main"])]
+            (is (= :head (get-in r [:via "main"])) (pr-str (:via r)))
+            (is (zero? n) "no replay")
+            (is (= tip (get-in (rebuild!) [:refs "main"])) "the walk mints the same sha — byte-identical")))
+        (ops/edit-replace! sess 'gp.core 'f "(defn f \"F.\" [x] (+ 1000 x))" :prompt "v4" :agent "alice")
+        (is (nil? (:error (external/commit-point! sess "v4" :agent "alice" :force true))))
+        (testing "a caller that already holds the head store hands it over, and it agrees with the walk too"
+          (let [[r n] (counting #(project! :head-stores {"main" (:store @sess)}))
+                tip   (get-in r [:refs "main"])]
+            (is (= :head (get-in r [:via "main"])) (pr-str (:via r)))
+            (is (zero? n))
+            (is (= tip (get-in (rebuild!) [:refs "main"])) "byte-identical"))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-retroactive-target-still-takes-the-walk
+  ;; D2b: the fast path is for the ordinary shape — a new marker at the
+  ;; head whose target is the delta before it. A retroactive
+  ;; `commit_point {:target …}` names an EARLIER state, which only the fold
+  ;; can render, so it takes the walk and says so.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'gp.core seed)
+      (external/config! sess "user.name" "alice")
+      (external/config! sess "user.email" "alice@slopp")
+      (is (nil? (:error (external/commit-point! sess "v1" :agent "alice"))))
+      (let [ctx (git/open-ctx! dir)] (try (git/ensure-projected! ctx) (finally (git/close-ctx! ctx))))
+      (ops/edit-replace! sess 'gp.core 'f "(defn f \"F.\" [x] (+ 10 x))" :prompt "v2" :agent "alice")
+      (is (nil? (:error (external/commit-point! sess "v2" :agent "alice"))))
+      (let [ingest-id (:id (first (filter #(= :ingest (:op %)) (ops/journal sess))))]
+        (is (string? ingest-id))
+        (is (nil? (:error (external/commit-point! sess "back then" :agent "alice" :target ingest-id))))
+        (let [ctx (git/open-ctx! dir)]
+          (try
+            (let [r (git/ensure-projected! ctx)]
+              (is (= :walk (get-in r [:via "main"])) (pr-str (:via r)))
+              (is (string? (get-in r [:refs "main"]))))
+            (finally (git/close-ctx! ctx)))))
+      (finally (ops/close! sess)))))

@@ -199,13 +199,6 @@
   [ctx req]
   (dispatch/handle! ctx req))
 
-(defn stop!
-  "Stop a `serve!` return."
-  [srv]
-  (case (:http/adapter srv)
-    :http-kit (httpkit/stop! srv)
-    :jdk (jdk/stop! srv)))
-
 (defn bind-diagnosis
   "The leading sentence for a failed bind on `port`, or nil when `failure`
   is not a port clash. `failure` is either a Throwable or the TEXT one left
@@ -288,6 +281,13 @@
         (if-let [d (bind-diagnosis port t)]
           (throw (ex-info (str d "\n" (ex-message t)) {:http/port port} t))
           (throw t))))))
+
+(defn stop!
+  "Stop a `serve!` return."
+  [srv]
+  (case (:http/adapter srv)
+    :http-kit (httpkit/stop! srv)
+    :jdk (jdk/stop! srv)))
 
 (defn ^:export driver
   "This served app as a DRIVER — what the fake browser needs, derived from the

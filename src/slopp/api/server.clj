@@ -30,6 +30,39 @@
   []
   (some-> @current (select-keys [:port :url])))
 
+(defn ^:export serving
+  "The running listener and the currency of what it SERVES — or nil when
+  nothing is up.
+
+  `{:url :port :process :derived-from :current? :why}`. `:process` is the
+  `{:pid :started}` that ANSWERS that url, because a listener runs in the MCP
+  host while `query_eval` runs in a child image JVM loading the whole store
+  fresh — same store, same code, two loading strategies, and nothing said so.
+  An evening was lost to that once, and it broke only because an eval happened
+  to print its own pid.
+
+  The route table, both
+  performer vocabularies and the shell's serve-time state (`:webapp/base`,
+  `:webapp/bundle`, `:webapp/routes`) are all assembled once by
+  `serving-opts` and then held by the listener, so a route added afterwards
+  answers 404 — correctly, for the table this process has, and
+  indistinguishably from a path that genuinely does not exist.
+
+  Re-deriving per request is not the answer: assembly walks every served
+  namespace's var metadata, and a listener that rebuilt itself on every
+  request would pay that on every request. What was missing is cheaper and
+  more honest — the listener knows what it was built from, so it can SAY it
+  is behind. `:current? nil` means the session carried no journal to compare
+  against, which is neither current nor stale and must not be reported as
+  either."
+  [session]
+  (when-let [c @current]
+    (let [r (slopp.currency/report (:db @session) (:stamp c))]
+      (cond-> (merge (select-keys c [:url :port :process]) r)
+        (false? (:current? r))
+        (assoc :remedy (str "ui_serve again — the route table is rebuilt at"
+                            " serve time, and only then"))))))
+
 (defn ^:export stop!
   "Stop the UI server if one is running; true when it stopped something.
   Idempotent, because eviction and an explicit stop are the same act."
@@ -145,6 +178,30 @@
    :http/perform-ctx {:session session
                       :served-namespaces served-namespaces}})
 
+(defn ^:export context
+  "The reviewer API's dispatch context, assembled ONE way — over `session`.
+
+  **This exists because there were seventeen.** Every test that drove these
+  endpoints built its own `slopp.http/context` inline, and `serve!` built a
+  third; none of them wrapped, so the whole typed surface was served and
+  exercised with nothing honouring a single declared contract. One of those
+  tests opens by claiming *\"the response is validated against the SAME schema
+  var the generated client validates with\"*, which was false for as long as it
+  had been written.
+
+  `slopp.rest/validating` is what makes that claim true, and it is here rather
+  than at each call site for the reason a consuming store measured: an app that
+  can be stood up two ways will eventually be stood up both, and only one of
+  them will validate. Theirs was — production wrapped, the test path did not,
+  and a test that started a real server and asserted 200 passed while the
+  served endpoint was answering 500.
+
+  `slopp.http/context` now REFUSES a route that declares a contract with no
+  validator, so this cannot silently drift back; what this adds is that there
+  is one place to keep right."
+  [session]
+  (slopp.http/context (serving-opts session)))
+
 (defn ^:export serve!
   "Serve the reviewer UI on `port` over the CALLER's session, and return
   `{:url :port}` — or `{:error :port}` when the port is taken.
@@ -205,60 +262,3 @@
       (if-let [d (slopp.http/bind-diagnosis port e)]
         {:error d :port port}
         (throw e)))))
-
-(defn ^:export context
-  "The reviewer API's dispatch context, assembled ONE way — over `session`.
-
-  **This exists because there were seventeen.** Every test that drove these
-  endpoints built its own `slopp.http/context` inline, and `serve!` built a
-  third; none of them wrapped, so the whole typed surface was served and
-  exercised with nothing honouring a single declared contract. One of those
-  tests opens by claiming *\"the response is validated against the SAME schema
-  var the generated client validates with\"*, which was false for as long as it
-  had been written.
-
-  `slopp.rest/validating` is what makes that claim true, and it is here rather
-  than at each call site for the reason a consuming store measured: an app that
-  can be stood up two ways will eventually be stood up both, and only one of
-  them will validate. Theirs was — production wrapped, the test path did not,
-  and a test that started a real server and asserted 200 passed while the
-  served endpoint was answering 500.
-
-  `slopp.http/context` now REFUSES a route that declares a contract with no
-  validator, so this cannot silently drift back; what this adds is that there
-  is one place to keep right."
-  [session]
-  (slopp.http/context (serving-opts session)))
-
-(defn ^:export serving
-  "The running listener and the currency of what it SERVES — or nil when
-  nothing is up.
-
-  `{:url :port :process :derived-from :current? :why}`. `:process` is the
-  `{:pid :started}` that ANSWERS that url, because a listener runs in the MCP
-  host while `query_eval` runs in a child image JVM loading the whole store
-  fresh — same store, same code, two loading strategies, and nothing said so.
-  An evening was lost to that once, and it broke only because an eval happened
-  to print its own pid.
-
-  The route table, both
-  performer vocabularies and the shell's serve-time state (`:webapp/base`,
-  `:webapp/bundle`, `:webapp/routes`) are all assembled once by
-  `serving-opts` and then held by the listener, so a route added afterwards
-  answers 404 — correctly, for the table this process has, and
-  indistinguishably from a path that genuinely does not exist.
-
-  Re-deriving per request is not the answer: assembly walks every served
-  namespace's var metadata, and a listener that rebuilt itself on every
-  request would pay that on every request. What was missing is cheaper and
-  more honest — the listener knows what it was built from, so it can SAY it
-  is behind. `:current? nil` means the session carried no journal to compare
-  against, which is neither current nor stale and must not be reported as
-  either."
-  [session]
-  (when-let [c @current]
-    (let [r (slopp.currency/report (:db @session) (:stamp c))]
-      (cond-> (merge (select-keys c [:url :port :process]) r)
-        (false? (:current? r))
-        (assoc :remedy (str "ui_serve again — the route table is rebuilt at"
-                            " serve time, and only then"))))))

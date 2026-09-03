@@ -64,6 +64,89 @@
   [session ns-sym]
   (store.render/render-ns (:store @session) ns-sym))
 
+(defn ^:export ns-effectful-vars
+  "The set of `ns/name` symbols in `ns-sym` that reach an effect (D6) — THE
+  one spelling of a namespace's effect set, so every surface that badges it,
+  reports it or refuses on it reads the same answer.
+
+  Effectfulness is a per-FORM property and it is DERIVED, never declared:
+  the `!` convention seeds the fixpoint and reachability carries it, so a
+  form with no `!` in its name that calls one is in this set. That is the
+  distinction consumers keep getting wrong — a purity TIER is a NAMESPACE
+  declaration, identical for every form in it, which makes it useless as a
+  per-form mark however much it sounds like one.
+
+  Members are qualified by the full namespace, so a caller looks up
+  `(symbol (str ns-sym) (str nm))` rather than reconstructing an alias."
+  [st ns-sym]
+  (derive/effectful-vars (analyze/analyze (store.render/render-ns st ns-sym))))
+
+(defn ^:export query-symbol
+  "Describe the form defining `nm`: id, name, effectfulness (D6), source."
+  [session ns-sym nm]
+  (let [st  (:store @session)
+        f   (store/form-named st ns-sym nm)
+        eff (ns-effectful-vars st ns-sym)]
+    (when f
+      (cond-> {:id         (:id f)
+               :name       (:name f)
+               :effectful? (contains? eff (symbol (str ns-sym) (str nm)))
+               :source     (n/string (:node f))}
+        (edit/unsafe? (:node f)) (assoc :unsafe? true)
+        (edit/reads? (:node f))  (assoc :reads? true)))))
+
+(defn ^:export query-outline
+  "A namespace's shape at a glance (orientation, T2): every defined var with
+  arities, `!`-effect status, and test-ness — a fraction of the tokens of
+  reading the source. COMPACT by default; `:detail true` adds each var's
+  docstring first line (the outline's token bulk)."
+  [session ns-sym & {:keys [detail]}]
+  (let [st  (:store @session)
+        an  (analyze/analyze (store.render/render-ns st ns-sym))
+        eff (ns-effectful-vars st ns-sym)]
+    {:ns ns-sym
+     :forms
+     (vec (for [d (:var-definitions an)
+                :when (= ns-sym (:ns d))]
+            (cond-> {:name (:name d)}
+              (:fixed-arities d)      (assoc :arities (vec (sort (:fixed-arities d))))
+              (:varargs-min-arity d)  (assoc :varargs-min (:varargs-min-arity d))
+              (and detail (:doc d))   (assoc :doc (orient/doc-summary (:doc d)))
+              (derive/test-definition? d) (assoc :test? true)
+              (and (not (derive/test-definition? d))
+                   (contains? eff (symbol (str ns-sym) (str (:name d)))))
+              (assoc :effectful? true))))}))
+
+(defn ^:export query-project
+  "The WHOLE store's shape in one call: every namespace with its outline
+  (item 1 — orientation was ~90% of tool calls in successful runs; this
+  replaces the namespaces→outline×N chain). COMPACT by default (names,
+  arities, flags); `:detail true` adds doc lines. Pass `:since <delta id>`
+  on a re-check: when nothing STRUCTURAL changed after that delta the
+  response is a one-liner instead of the full outline (verify/turn/
+  commit-point markers don't count as change).
+
+  `:since` is judged against the value's RECENT window — everything since
+  the last commit-point plus the done that earned it. A `since` older than the
+  window is not in it, and cannot be unchanged: a commit-point landed after it,
+  and a commit-point follows work."
+  [session & {:keys [since detail]}]
+  (let [st   (:store @session)
+        ds   (:recent st)
+        head (:head st)
+        quiet-ops #{:verify :done :commit :turn-begin :turn-end}
+        unchanged? (and since
+                       (some #(= since (:id %)) ds)
+                       (->> ds
+                            (drop-while #(not= since (:id %)))
+                            rest
+                            (every? #(contains? quiet-ops (:op %)))))]
+    (if unchanged?
+      {:unchanged-since since :head head}
+      {:head       head
+       :namespaces (mapv (fn [ns-sym] (query-outline session ns-sym :detail detail))
+                         (sort (keys (:namespaces st))))})))
+
 (defn ^:export query-search
   "The missing grep: regex over all store source, form-addressed — ONE row
   per matching form: `{:ns :form :line [:matches n] :sig :doc [:effectful]}`,
@@ -179,210 +262,6 @@
         (> (count reached) limit) (assoc :omitted (- (count reached) limit))))
     (edit/missing-form-error (:store @session) ns-sym nm)))
 
-(defn ^:export query-vocabulary
-  "Browse the store's domain-keyword vocabulary — namespaced keys, most-used
-   first — so you REUSE an established key (`:user/email`) instead of coining a
-   near-duplicate the key-hygiene advisory would flag. Optional `ns` narrows to a
-   keyword namespace (exact or dotted-child, e.g. \"user\" → :user/* and
-   :user.address/*). Derived from the forms, so it reflects the current branch/
-   revision exactly."
-  [session & {:keys [ns]}]
-  (let [attrs (keywords/vocabulary (:store @session) :ns-prefix ns)]
-    {:count (count attrs) :attributes attrs}))
-
-(defn ^:export query-rule-telemetry
-  "The D9 rules' fire-rate + discharge signal for THIS store — the demand signal
-   the severity dial is set by: how often each rule fires (`:dones`/`:instances`),
-   whether its findings get `:discharged` (flagged once) or `:persisted` (keep
-   recurring — ignored / friction), the `:escape-markers` density (agents opting
-   out via `^:unsafe`/`^:reads`/`^:unused-ok`), and the current `:dials`. Read-only
-   analysis over the delta log — no instrumentation. `:since` (a delta or
-   commit-point id from `query_commits`) windows it."
-  [session & {:keys [since]}]
-  (telemetry/rule-telemetry (:store @session) :since since))
-
-(defn ^:export query-capabilities
-  "Every capability setting for THIS store: the declared registry joined with
-   the stored `capabilities` config — per setting the default, the EFFECTIVE
-   value, and (when set) the raw stored string; wildcard families ride as
-   `:patterns`. Set one with `config_file {path \"capabilities\" key <k> value
-   <v>}` — capability writes validate against the registry at write time.
-
-   `:capabilities` is the FEATURE view of the same facts: per capability, what
-   it requires, what requires it, whether it is on, and — the part a reader
-   cannot get anywhere else — **the rules opting in would ARM**. A capability
-   is a bargain, and half of it was invisible: the settings said what could be
-   configured and nothing said what would start refusing writes.
-
-   **The join lives HERE rather than in the registry**, and that is a layering
-   fact rather than a preference. `slopp.project.capabilities` loads in the
-   boot JVM on kernel deps and must not reach the gate or advisory registries;
-   this namespace already reads both. So the pure registry stays pure, and the
-   one place that can see all three sides does the joining."
-  [session]
-  (let [store (:store @session)
-        armed (fn [c]
-                (vec (sort-by (comp str :rule)
-                              (concat
-                               (for [v gates/per-form-write-gates
-                                     :when (= c (gates/gate-capability v))]
-                                 {:rule (:name (meta v)) :grain :form})
-                               ;; the SAME derivation the sweep reads, not a second
-                               ;; `starts-with?` beside it. The two answered
-                               ;; separately and disagreed: this list said
-                               ;; opting in would arm four contract rules while
-                               ;; the sweep ran them regardless of the switch.
-                               (for [r catalog/rule-catalog
-                                     :when (and (= :done (:grain r))
-                                                (= c (capabilities/rule-owner (:rule r))))]
-                                 {:rule (:rule r) :grain :done})))))]
-    (assoc (capabilities/report store)
-           :capabilities
-           (vec (for [{:keys [capability requires reserved always-on doc]}
-                      capabilities/capability-catalog]
-                  (cond-> {:capability capability :doc doc}
-                    reserved  (assoc :reserved true)
-                    always-on (assoc :always-on true)
-                    requires  (assoc :enabled (capabilities/enabled? store capability)
-                                     :requires (vec requires)
-                                     :required-by (vec (sort (capabilities/dependents capability)))
-                                     :arms (armed capability))))))))
-
-(defn ^:export ns-effectful-vars
-  "The set of `ns/name` symbols in `ns-sym` that reach an effect (D6) — THE
-  one spelling of a namespace's effect set, so every surface that badges it,
-  reports it or refuses on it reads the same answer.
-
-  Effectfulness is a per-FORM property and it is DERIVED, never declared:
-  the `!` convention seeds the fixpoint and reachability carries it, so a
-  form with no `!` in its name that calls one is in this set. That is the
-  distinction consumers keep getting wrong — a purity TIER is a NAMESPACE
-  declaration, identical for every form in it, which makes it useless as a
-  per-form mark however much it sounds like one.
-
-  Members are qualified by the full namespace, so a caller looks up
-  `(symbol (str ns-sym) (str nm))` rather than reconstructing an alias."
-  [st ns-sym]
-  (derive/effectful-vars (analyze/analyze (store.render/render-ns st ns-sym))))
-
-(defn ^:export query-symbol
-  "Describe the form defining `nm`: id, name, effectfulness (D6), source."
-  [session ns-sym nm]
-  (let [st  (:store @session)
-        f   (store/form-named st ns-sym nm)
-        eff (ns-effectful-vars st ns-sym)]
-    (when f
-      (cond-> {:id         (:id f)
-               :name       (:name f)
-               :effectful? (contains? eff (symbol (str ns-sym) (str nm)))
-               :source     (n/string (:node f))}
-        (edit/unsafe? (:node f)) (assoc :unsafe? true)
-        (edit/reads? (:node f))  (assoc :reads? true)))))
-
-(defn ^:export query-outline
-  "A namespace's shape at a glance (orientation, T2): every defined var with
-  arities, `!`-effect status, and test-ness — a fraction of the tokens of
-  reading the source. COMPACT by default; `:detail true` adds each var's
-  docstring first line (the outline's token bulk)."
-  [session ns-sym & {:keys [detail]}]
-  (let [st  (:store @session)
-        an  (analyze/analyze (store.render/render-ns st ns-sym))
-        eff (ns-effectful-vars st ns-sym)]
-    {:ns ns-sym
-     :forms
-     (vec (for [d (:var-definitions an)
-                :when (= ns-sym (:ns d))]
-            (cond-> {:name (:name d)}
-              (:fixed-arities d)      (assoc :arities (vec (sort (:fixed-arities d))))
-              (:varargs-min-arity d)  (assoc :varargs-min (:varargs-min-arity d))
-              (and detail (:doc d))   (assoc :doc (orient/doc-summary (:doc d)))
-              (derive/test-definition? d) (assoc :test? true)
-              (and (not (derive/test-definition? d))
-                   (contains? eff (symbol (str ns-sym) (str (:name d)))))
-              (assoc :effectful? true))))}))
-
-(defn ^:export query-project
-  "The WHOLE store's shape in one call: every namespace with its outline
-  (item 1 — orientation was ~90% of tool calls in successful runs; this
-  replaces the namespaces→outline×N chain). COMPACT by default (names,
-  arities, flags); `:detail true` adds doc lines. Pass `:since <delta id>`
-  on a re-check: when nothing STRUCTURAL changed after that delta the
-  response is a one-liner instead of the full outline (verify/turn/
-  commit-point markers don't count as change).
-
-  `:since` is judged against the value's RECENT window — everything since
-  the last commit-point plus the done that earned it. A `since` older than the
-  window is not in it, and cannot be unchanged: a commit-point landed after it,
-  and a commit-point follows work."
-  [session & {:keys [since detail]}]
-  (let [st   (:store @session)
-        ds   (:recent st)
-        head (:head st)
-        quiet-ops #{:verify :done :commit :turn-begin :turn-end}
-        unchanged? (and since
-                       (some #(= since (:id %)) ds)
-                       (->> ds
-                            (drop-while #(not= since (:id %)))
-                            rest
-                            (every? #(contains? quiet-ops (:op %)))))]
-    (if unchanged?
-      {:unchanged-since since :head head}
-      {:head       head
-       :namespaces (mapv (fn [ns-sym] (query-outline session ns-sym :detail detail))
-                         (sort (keys (:namespaces st))))})))
-
-(defn ^:export query-brief
-  "The one-call dossier: everything the store knows about `ns-sym/nm` —
-  source, effect flags, cross-ns callers, the tests that exercise it
-  (`:covered-by`, trace map; `:coverage :unknown` until a test_run builds one),
-  the tests that REACH or CLAIM it but haven't been observed to run it
-  (`:reached-by`, each tagged `:via` — `:static` reach carries `:hops`,
-  a `:declared` ^{:covers} marker does not; real for the untraced external
-  tier and dispatch paths, never a green claim), and the recorded WHY (the last change's prompt + its enclosing
-  turn intent). Collapses the source→references→lineage read chain into one
-  response."
-  [session ns-sym nm]
-  (if (nil? (store/form-named (:store @session) ns-sym nm))
-    (edit/missing-form-error (:store @session) ns-sym nm)
-    (let [
-          sym     (query-symbol session ns-sym nm)
-          callers (vec (graph/query-references session ns-sym nm))
-          tmap    (:test-map @session)
-          qsym    (symbol (str ns-sym) (str nm))
-          tests   (let [e  (store/form-named (:store @session) ns-sym nm)
-                        ks (store/form-trace-keys ns-sym e)]
-                    ;; evidence can arrive under any name the form defines (#129)
-                    (->> tmap
-                         (keep (fn [[t forms]] (when (some forms ks) t)))
-                         distinct sort vec))
-          reached (let [seen (set tests)]
-                    (->> (refs/covered-by (:store @session) tmap qsym)
-                         ;; everything that REACHES/CLAIMS the form but wasn't
-                         ;; observed to run it — static reach (with :hops) AND
-                         ;; ^{:covers} declarations (:via #{:declared}, no hops).
-                         ;; Never a green claim; :via stays visible.
-                         (filter #(and (not (contains? (:via %) :observed))
-                                       (not (seen (:test %)))))
-                         (mapv #(select-keys % [:test :via :hops]))))
-          ;; the author's newest recorded ask for this form — the value carries
-          ;; it (`:prompts`, kept by every write), so the dossier never walks
-          ;; the log. The enclosing turn intent and the agent are one
-          ;; `query_history {name}` away, on the log, where they live.
-          why     (let [fid (:id (store/form-named (:store @session) ns-sym nm))]
-                    (some->> (get (store/prompt-by-form (:store @session)) fid)
-                             (hash-map :prompt)))]
-      (cond-> {:ns ns-sym :name nm :source (:source sym)}
-        (:effectful? sym) (assoc :effectful? true)
-        (:reads? sym)     (assoc :reads? true)
-        (:unsafe? sym)    (assoc :unsafe? true)
-        (seq callers)     (assoc :callers callers)
-        (seq tests)       (assoc :covered-by (graph/coverage-view tests))
-        (seq reached)     (assoc :reached-by reached)
-        (and (seq tmap) (empty? tests) (empty? reached) (not (:test? sym)))
-        (assoc :untested true)
-        (empty? tmap)     (assoc :coverage :unknown)
-        why               (assoc :why why)))))
-
 (defn ^:export cause-chain
   "An exception as `Class: message <- Class: message …`, outermost first,
   capped at four links.
@@ -455,6 +334,127 @@
                         {:result (str (subs s 0 32768) " …")
                          :truncated true :ms ms}
                         (assoc out :ms ms)))))))))))))
+
+(defn ^:export query-brief
+  "The one-call dossier: everything the store knows about `ns-sym/nm` —
+  source, effect flags, cross-ns callers, the tests that exercise it
+  (`:covered-by`, trace map; `:coverage :unknown` until a test_run builds one),
+  the tests that REACH or CLAIM it but haven't been observed to run it
+  (`:reached-by`, each tagged `:via` — `:static` reach carries `:hops`,
+  a `:declared` ^{:covers} marker does not; real for the untraced external
+  tier and dispatch paths, never a green claim), and the recorded WHY (the last change's prompt + its enclosing
+  turn intent). Collapses the source→references→lineage read chain into one
+  response."
+  [session ns-sym nm]
+  (if (nil? (store/form-named (:store @session) ns-sym nm))
+    (edit/missing-form-error (:store @session) ns-sym nm)
+    (let [
+          sym     (query-symbol session ns-sym nm)
+          callers (vec (graph/query-references session ns-sym nm))
+          tmap    (:test-map @session)
+          qsym    (symbol (str ns-sym) (str nm))
+          tests   (let [e  (store/form-named (:store @session) ns-sym nm)
+                        ks (store/form-trace-keys ns-sym e)]
+                    ;; evidence can arrive under any name the form defines (#129)
+                    (->> tmap
+                         (keep (fn [[t forms]] (when (some forms ks) t)))
+                         distinct sort vec))
+          reached (let [seen (set tests)]
+                    (->> (refs/covered-by (:store @session) tmap qsym)
+                         ;; everything that REACHES/CLAIMS the form but wasn't
+                         ;; observed to run it — static reach (with :hops) AND
+                         ;; ^{:covers} declarations (:via #{:declared}, no hops).
+                         ;; Never a green claim; :via stays visible.
+                         (filter #(and (not (contains? (:via %) :observed))
+                                       (not (seen (:test %)))))
+                         (mapv #(select-keys % [:test :via :hops]))))
+          ;; the author's newest recorded ask for this form — the value carries
+          ;; it (`:prompts`, kept by every write), so the dossier never walks
+          ;; the log. The enclosing turn intent and the agent are one
+          ;; `query_history {name}` away, on the log, where they live.
+          why     (let [fid (:id (store/form-named (:store @session) ns-sym nm))]
+                    (some->> (get (store/prompt-by-form (:store @session)) fid)
+                             (hash-map :prompt)))]
+      (cond-> {:ns ns-sym :name nm :source (:source sym)}
+        (:effectful? sym) (assoc :effectful? true)
+        (:reads? sym)     (assoc :reads? true)
+        (:unsafe? sym)    (assoc :unsafe? true)
+        (seq callers)     (assoc :callers callers)
+        (seq tests)       (assoc :covered-by (graph/coverage-view tests))
+        (seq reached)     (assoc :reached-by reached)
+        (and (seq tmap) (empty? tests) (empty? reached) (not (:test? sym)))
+        (assoc :untested true)
+        (empty? tmap)     (assoc :coverage :unknown)
+        why               (assoc :why why)))))
+
+(defn ^:export query-vocabulary
+  "Browse the store's domain-keyword vocabulary — namespaced keys, most-used
+   first — so you REUSE an established key (`:user/email`) instead of coining a
+   near-duplicate the key-hygiene advisory would flag. Optional `ns` narrows to a
+   keyword namespace (exact or dotted-child, e.g. \"user\" → :user/* and
+   :user.address/*). Derived from the forms, so it reflects the current branch/
+   revision exactly."
+  [session & {:keys [ns]}]
+  (let [attrs (keywords/vocabulary (:store @session) :ns-prefix ns)]
+    {:count (count attrs) :attributes attrs}))
+
+(defn ^:export query-rule-telemetry
+  "The D9 rules' fire-rate + discharge signal for THIS store — the demand signal
+   the severity dial is set by: how often each rule fires (`:dones`/`:instances`),
+   whether its findings get `:discharged` (flagged once) or `:persisted` (keep
+   recurring — ignored / friction), the `:escape-markers` density (agents opting
+   out via `^:unsafe`/`^:reads`/`^:unused-ok`), and the current `:dials`. Read-only
+   analysis over the delta log — no instrumentation. `:since` (a delta or
+   commit-point id from `query_commits`) windows it."
+  [session & {:keys [since]}]
+  (telemetry/rule-telemetry (:store @session) :since since))
+
+(defn ^:export query-capabilities
+  "Every capability setting for THIS store: the declared registry joined with
+   the stored `capabilities` config — per setting the default, the EFFECTIVE
+   value, and (when set) the raw stored string; wildcard families ride as
+   `:patterns`. Set one with `config_file {path \"capabilities\" key <k> value
+   <v>}` — capability writes validate against the registry at write time.
+
+   `:capabilities` is the FEATURE view of the same facts: per capability, what
+   it requires, what requires it, whether it is on, and — the part a reader
+   cannot get anywhere else — **the rules opting in would ARM**. A capability
+   is a bargain, and half of it was invisible: the settings said what could be
+   configured and nothing said what would start refusing writes.
+
+   **The join lives HERE rather than in the registry**, and that is a layering
+   fact rather than a preference. `slopp.project.capabilities` loads in the
+   boot JVM on kernel deps and must not reach the gate or advisory registries;
+   this namespace already reads both. So the pure registry stays pure, and the
+   one place that can see all three sides does the joining."
+  [session]
+  (let [store (:store @session)
+        armed (fn [c]
+                (vec (sort-by (comp str :rule)
+                              (concat
+                               (for [v gates/per-form-write-gates
+                                     :when (= c (gates/gate-capability v))]
+                                 {:rule (:name (meta v)) :grain :form})
+                               ;; the SAME derivation the sweep reads, not a second
+                               ;; `starts-with?` beside it. The two answered
+                               ;; separately and disagreed: this list said
+                               ;; opting in would arm four contract rules while
+                               ;; the sweep ran them regardless of the switch.
+                               (for [r catalog/rule-catalog
+                                     :when (and (= :done (:grain r))
+                                                (= c (capabilities/rule-owner (:rule r))))]
+                                 {:rule (:rule r) :grain :done})))))]
+    (assoc (capabilities/report store)
+           :capabilities
+           (vec (for [{:keys [capability requires reserved always-on doc]}
+                      capabilities/capability-catalog]
+                  (cond-> {:capability capability :doc doc}
+                    reserved  (assoc :reserved true)
+                    always-on (assoc :always-on true)
+                    requires  (assoc :enabled (capabilities/enabled? store capability)
+                                     :requires (vec requires)
+                                     :required-by (vec (sort (capabilities/dependents capability)))
+                                     :arms (armed capability))))))))
 
 (defn ^:export query-surface
   "Everything this store declares it EXPOSES, sectioned by the capability that

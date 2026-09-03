@@ -618,6 +618,129 @@
     :description "Mark a pull conflict resolved (omit path = all). Unblocks git_push."
     :inputSchema {:type "object" :properties {:path {:type "string"}}}}])
 
+(defn classify
+  "`entries` with `k` resolved — `default?` unless an entry already states its
+  own.
+
+  The classification belongs to the GROUP because the group is already the
+  answer: `orientation-tools` is 20 reads, `edit-tools` is 23 writes. Measured
+  across all six for both facts it carries today, only NINE tools disagree with
+  their group about `:read-only` and TWELVE about `:image-free`, and those
+  state it on themselves.
+
+  Replaces a hand-kept set of name strings living three hundred lines from the
+  descriptors it classified. Such a set was measured correct and had no
+  mechanism keeping it so: adding a tool was two writes, and forgetting the
+  second is the quietest failure here — the tool works, nothing goes red, and
+  the client prompts for permission forever (`:read-only`) or waits for the
+  image boot (`:image-free`).
+
+  Takes the key rather than hardcoding one, because the second registry to
+  collapse would otherwise arrive as a second copy of this function — which is
+  the defect the first collapse was for."
+  [entries k default?]
+  (mapv #(update % k (fn [stated] (if (some? stated) stated default?))) entries))
+
+(def ^:private classified
+  "Every descriptor with its classifications resolved — the ONE list the wire
+  payload, [[read-only-tools]] and [[image-free-tools]] all derive from.
+
+  The group is the classification: orientation and history are reads that
+  answer from the store value, the other four are writes that need the image.
+  The tools that disagree carry the fact on themselves — NINE for
+  `:read-only`, TWELVE for `:image-free`. Nothing downstream restates a tool
+  name.
+
+  **Two dials, not one.** Their per-group defaults happen to coincide, and
+  their exceptions do not: `query_eval` is read-only (the observe gate blocks
+  redefinition) and is NOT image-free (it evals IN the image). Merging them
+  because today's defaults agree would put one switch on two facts."
+  (into []
+        cat
+        [(-> orientation-tools (classify :read-only true)  (classify :image-free true))
+         (-> history-tools     (classify :read-only true)  (classify :image-free true))
+         (-> edit-tools        (classify :read-only false) (classify :image-free false))
+         (-> flow-tools        (classify :read-only false) (classify :image-free false))
+         (-> env-tools         (classify :read-only false) (classify :image-free false))
+         (-> sync-tools        (classify :read-only false) (classify :image-free false))]))
+
+(def image-free-tools
+  "Tools that answer from the STORE VALUE + in-process analysis alone — they
+  touch neither the owned image nor a write path, so the MCP dispatch serves
+  them WITHOUT waiting for the async image boot (the server claims ready as
+  soon as the store loads; orientation and reading are instant). Everything
+  else — the oracle tools (query_eval/query_call/query_observe/
+  query_macroexpand/query_store, which eval in the image) and every write —
+  `api/await-image!`s the boot first.
+
+  DERIVED from [[classified]], not maintained. It was a set of 25 name strings
+  living three hundred lines from the descriptors it classified: adding a
+  store-value read was TWO writes, and forgetting the second is silent — the
+  tool works and merely waits for a boot it never needed.
+
+  Being CONSERVATIVE is still safe and still the rule, but it is now stated per
+  tool rather than by omission: a tool marked `:image-free false` waits for the
+  boot; one wrongly marked true would touch a not-yet-live image. `store_doctor`
+  and `store_health` are deliberately NOT image-free even though they only read
+  — the conservative side of a judgement, which is worth being able to see on
+  the entry."
+  (into #{} (comp (filter :image-free) (map :name)) classified))
+
+(def read-only-tools
+  "Tool names that never modify the STORE — advertised with the MCP
+  readOnlyHint annotation so clients (Claude Code plan mode, permission
+  systems) can auto-permit them instead of prompting.
+
+  DERIVED from [[classified]], not maintained. It was a set of 32 name strings
+  living three hundred lines from the descriptors it classified: adding a
+  read-only tool was TWO writes, and forgetting the second is the quietest
+  failure in this system — the tool works, no test goes red, and the client
+  prompts for permission forever, which is indistinguishable from behaving
+  correctly.
+
+  `query_eval` and `query_observe` qualify because the observe gate blocks
+  redefinition — the code they run cannot change the codebase (observation
+  captures are a metadata cache). That is a judgement, which is why the fact is
+  DECLARED on the tool rather than inferred from the dispatch."
+  (into #{} (comp (filter :read-only) (map :name)) classified))
+
+(def registry
+  "Every tool descriptor the server advertises — derived from [[classified]];
+  read-only tools carry the MCP readOnlyHint annotation so plan-mode clients
+  auto-permit them.
+
+  The classification markers are STRIPPED here. `slopp.mcp/handle!` answers
+  `tools/list` with this value serialized as-is, so a descriptor must carry no
+  key the protocol does not define — `:read-only` exists to produce the
+  annotation and `:image-free` to gate the dispatch during the async image
+  boot, and neither has any business on the wire."
+  (mapv (fn [t]
+          (cond-> (dissoc t :read-only :image-free)
+            (:read-only t) (assoc :annotations {:readOnlyHint true})))
+        classified))
+
+(defn accepted-arg-keys
+  "The full set of argument keys tool `name` accepts: its inputSchema
+   properties plus the universal cross-cutting keys (:agent stamped by the
+   dispatch, :prompt intent, :verbose full payload). There are no aliases —
+   one argument has one spelling, and the schema is it. nil for a name the
+   server does not advertise (an unknown name) — that tool opts OUT of strict validation rather than
+   refusing every key."
+  [name]
+  (when-let [d (some #(when (= name (:name %)) %) registry)]
+    (into #{:agent :prompt :verbose}
+          (keys (get-in d [:inputSchema :properties])))))
+
+(defn unknown-arg-keys
+  "The keys in `arguments` that tool `name` does not accept — the ones the
+   dispatch would otherwise silently DROP. Returns a seq, or nil when the tool
+   opts out (see accepted-arg-keys) or every key is accepted. The wire refuses
+   a call carrying any, so a mistyped or unsupported argument fails loudly
+   instead of evaporating into a no-op (or, for a safety flag, its opposite)."
+  [name arguments]
+  (when-let [acc (accepted-arg-keys name)]
+    (seq (remove acc (keys arguments)))))
+
 (def cheat-sheet
   "slopp cheat-sheet — the one-page loop; help {topic} for a chapter
 TOOLS:   14 families; an op is called through its family:
@@ -723,129 +846,6 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :warnings :existing-warnings :advisories :drift :manual
     ;; a preview's whole point
     :dry-run :in-code :in-strings})
-
-(defn classify
-  "`entries` with `k` resolved — `default?` unless an entry already states its
-  own.
-
-  The classification belongs to the GROUP because the group is already the
-  answer: `orientation-tools` is 20 reads, `edit-tools` is 23 writes. Measured
-  across all six for both facts it carries today, only NINE tools disagree with
-  their group about `:read-only` and TWELVE about `:image-free`, and those
-  state it on themselves.
-
-  Replaces a hand-kept set of name strings living three hundred lines from the
-  descriptors it classified. Such a set was measured correct and had no
-  mechanism keeping it so: adding a tool was two writes, and forgetting the
-  second is the quietest failure here — the tool works, nothing goes red, and
-  the client prompts for permission forever (`:read-only`) or waits for the
-  image boot (`:image-free`).
-
-  Takes the key rather than hardcoding one, because the second registry to
-  collapse would otherwise arrive as a second copy of this function — which is
-  the defect the first collapse was for."
-  [entries k default?]
-  (mapv #(update % k (fn [stated] (if (some? stated) stated default?))) entries))
-
-(def ^:private classified
-  "Every descriptor with its classifications resolved — the ONE list the wire
-  payload, [[read-only-tools]] and [[image-free-tools]] all derive from.
-
-  The group is the classification: orientation and history are reads that
-  answer from the store value, the other four are writes that need the image.
-  The tools that disagree carry the fact on themselves — NINE for
-  `:read-only`, TWELVE for `:image-free`. Nothing downstream restates a tool
-  name.
-
-  **Two dials, not one.** Their per-group defaults happen to coincide, and
-  their exceptions do not: `query_eval` is read-only (the observe gate blocks
-  redefinition) and is NOT image-free (it evals IN the image). Merging them
-  because today's defaults agree would put one switch on two facts."
-  (into []
-        cat
-        [(-> orientation-tools (classify :read-only true)  (classify :image-free true))
-         (-> history-tools     (classify :read-only true)  (classify :image-free true))
-         (-> edit-tools        (classify :read-only false) (classify :image-free false))
-         (-> flow-tools        (classify :read-only false) (classify :image-free false))
-         (-> env-tools         (classify :read-only false) (classify :image-free false))
-         (-> sync-tools        (classify :read-only false) (classify :image-free false))]))
-
-(def read-only-tools
-  "Tool names that never modify the STORE — advertised with the MCP
-  readOnlyHint annotation so clients (Claude Code plan mode, permission
-  systems) can auto-permit them instead of prompting.
-
-  DERIVED from [[classified]], not maintained. It was a set of 32 name strings
-  living three hundred lines from the descriptors it classified: adding a
-  read-only tool was TWO writes, and forgetting the second is the quietest
-  failure in this system — the tool works, no test goes red, and the client
-  prompts for permission forever, which is indistinguishable from behaving
-  correctly.
-
-  `query_eval` and `query_observe` qualify because the observe gate blocks
-  redefinition — the code they run cannot change the codebase (observation
-  captures are a metadata cache). That is a judgement, which is why the fact is
-  DECLARED on the tool rather than inferred from the dispatch."
-  (into #{} (comp (filter :read-only) (map :name)) classified))
-
-(def registry
-  "Every tool descriptor the server advertises — derived from [[classified]];
-  read-only tools carry the MCP readOnlyHint annotation so plan-mode clients
-  auto-permit them.
-
-  The classification markers are STRIPPED here. `slopp.mcp/handle!` answers
-  `tools/list` with this value serialized as-is, so a descriptor must carry no
-  key the protocol does not define — `:read-only` exists to produce the
-  annotation and `:image-free` to gate the dispatch during the async image
-  boot, and neither has any business on the wire."
-  (mapv (fn [t]
-          (cond-> (dissoc t :read-only :image-free)
-            (:read-only t) (assoc :annotations {:readOnlyHint true})))
-        classified))
-
-(def image-free-tools
-  "Tools that answer from the STORE VALUE + in-process analysis alone — they
-  touch neither the owned image nor a write path, so the MCP dispatch serves
-  them WITHOUT waiting for the async image boot (the server claims ready as
-  soon as the store loads; orientation and reading are instant). Everything
-  else — the oracle tools (query_eval/query_call/query_observe/
-  query_macroexpand/query_store, which eval in the image) and every write —
-  `api/await-image!`s the boot first.
-
-  DERIVED from [[classified]], not maintained. It was a set of 25 name strings
-  living three hundred lines from the descriptors it classified: adding a
-  store-value read was TWO writes, and forgetting the second is silent — the
-  tool works and merely waits for a boot it never needed.
-
-  Being CONSERVATIVE is still safe and still the rule, but it is now stated per
-  tool rather than by omission: a tool marked `:image-free false` waits for the
-  boot; one wrongly marked true would touch a not-yet-live image. `store_doctor`
-  and `store_health` are deliberately NOT image-free even though they only read
-  — the conservative side of a judgement, which is worth being able to see on
-  the entry."
-  (into #{} (comp (filter :image-free) (map :name)) classified))
-
-(defn accepted-arg-keys
-  "The full set of argument keys tool `name` accepts: its inputSchema
-   properties plus the universal cross-cutting keys (:agent stamped by the
-   dispatch, :prompt intent, :verbose full payload). There are no aliases —
-   one argument has one spelling, and the schema is it. nil for a name the
-   server does not advertise (an unknown name) — that tool opts OUT of strict validation rather than
-   refusing every key."
-  [name]
-  (when-let [d (some #(when (= name (:name %)) %) registry)]
-    (into #{:agent :prompt :verbose}
-          (keys (get-in d [:inputSchema :properties])))))
-
-(defn unknown-arg-keys
-  "The keys in `arguments` that tool `name` does not accept — the ones the
-   dispatch would otherwise silently DROP. Returns a seq, or nil when the tool
-   opts out (see accepted-arg-keys) or every key is accepted. The wire refuses
-   a call carrying any, so a mistyped or unsupported argument fails loudly
-   instead of evaporating into a no-op (or, for a safety flag, its opposite)."
-  [name arguments]
-  (when-let [acc (accepted-arg-keys name)]
-    (seq (remove acc (keys arguments)))))
 
 (defn missing-required-keys
   "The keys the registry descriptor for `name` marks `:required` that

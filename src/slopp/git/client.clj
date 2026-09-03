@@ -125,27 +125,31 @@
   http(s)). `:branch` = the LOCAL projection line (default \"main\", the
   store's main line); `:remote-branch` = the DEST ref name (default =
   branch) — mixed-ownership repos point it at the slopp-owned branch while
-  humans keep main. Projects first; a cloned store fetches the remote's
-  objects so its grafted chain is complete. Fast-forward only — a diverged
-  remote is an honest :error, never a force. Returns
-  {:pushed sha :status s :remote-branch b} | {:error msg :divergence d}.
+  humans keep main. Projects first (`:head-stores` is the optional hint a
+  caller that holds a line's head passes through to `ensure-projected!`); a
+  cloned store fetches the remote's objects so its grafted chain is complete.
+  Fast-forward only — a diverged remote is an honest :error, never a force.
+  Returns {:pushed sha :status s :remote-branch b :via v} | {:error msg
+  :divergence d :via v}, `:via` being how the projection was brought current
+  (`:current`, `:head` or `:walk` per line).
 
   `:divergence` rides beside a refusal rather than inside its sentence: the
   status alone cannot tell \"the destination moved under you\" from \"this
-  process minted a different history\", and the objects that separate them die
-  with the in-memory projection. See [[slopp.git/divergence]].
+  process minted a different history\", and the objects that separate them
+  used to die with the in-memory projection. See [[slopp.git/divergence]].
 
   `ctx` is an OPAQUE handle from `git/open-ctx!` — see `git/close-ctx!`."
   [ctx url
-   & {:keys [token branch remote-branch timeout mirror?]
+   & {:keys [token branch remote-branch timeout mirror? head-stores]
       :or {branch "main" timeout 30}}]
   (let [map-conn         (:slopp.git/map-conn ctx)
         ^Repository repo (:slopp.git/repo ctx)]
     (when-let [base (db/get-meta map-conn "git-base-sha")]
       (when-not (.has (.getObjectDatabase repo) (ObjectId/fromString base))
         (fetch-remote! repo url :token token :timeout timeout)))
-    (git/ensure-projected! ctx)
-    (let [rbranch (or remote-branch branch)
+    (let [proj    (git/ensure-projected! ctx :head-stores head-stores)
+          via     (:via proj)
+          rbranch (or remote-branch branch)
           src     (str "refs/heads/" branch)
           dst     (str "refs/heads/" rbranch)
           s       (str url)
@@ -162,9 +166,10 @@
                 ^RemoteRefUpdate upd (first (.getRemoteUpdates res))
                 status (str (.getStatus upd))]
             (if (contains? #{"OK" "UP_TO_DATE"} status)
-              {:pushed (.name tip) :status status :remote-branch rbranch}
+              {:pushed (.name tip) :status status :remote-branch rbranch :via via}
               (let [err {:error (push-refusal status (.getMessage upd)
-                                              {:mirror? mirror? :dst dst})}
+                                              {:mirror? mirror? :dst dst})
+                         :via via}
                     ^Ref advertised (.getAdvertisedRef res dst)
                     adv (some-> advertised (.getObjectId) (.name))]
                 (if adv
@@ -174,4 +179,5 @@
                                              :timeout timeout}))
                   err)))))
         {:error (str "nothing to push — no " src
-                     " in the projection (no commit-points yet?)")}))))
+                     " in the projection (no commit-points yet?)")
+         :via via}))))

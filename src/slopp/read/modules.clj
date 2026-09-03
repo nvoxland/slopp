@@ -24,6 +24,28 @@
             [rewrite-clj.node :as n]
             [slopp.store :as store] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [clojure.set :as set] [slopp.edit.tiers :as tiers] [slopp.store.fields :as fields]))
 
+(def ^:export tiers-resource-path
+  "Where a build writes its purity tiers and where `deps_add` looks for them.
+
+  A classpath resource, under the source root, so it rides into a published
+  jar with the code it describes — which is the whole point: the tier is a
+  declaration in the PRODUCER's store, and until now only the code travelled.
+  Named once because two sides have to agree on it."
+  "META-INF/slopp/tiers.edn")
+
+(defn ^:export tiers-resource
+  "The purity register projected for PUBLICATION — `{path tier}`, sorted, or
+  nil when nothing is declared.
+
+  Every declared tier travels, not only the `:pure` ones. A consumer that
+  knows a namespace is `:external` knows something real; the alternative is
+  inferring it from absence, which is exactly the mistake this fixes — an
+  undeclared namespace reads as `:external` whether it was decided or never
+  considered, and those are different facts."
+  [store]
+  (when (seq (:module-tiers store))
+    (into (sorted-map) (:module-tiers store))))
+
 (defn ^:export modules-config-entry
   "The module manifest PROJECTED as a structured-config entry — how the
   edge fold becomes a `modules` file in git commits and builds (read-only
@@ -300,28 +322,6 @@
                                (every? banded (deps-of m))))]
     (set/union banded (into #{} (filter hub?) nodes))))
 
-(def ^:export tiers-resource-path
-  "Where a build writes its purity tiers and where `deps_add` looks for them.
-
-  A classpath resource, under the source root, so it rides into a published
-  jar with the code it describes — which is the whole point: the tier is a
-  declaration in the PRODUCER's store, and until now only the code travelled.
-  Named once because two sides have to agree on it."
-  "META-INF/slopp/tiers.edn")
-
-(defn ^:export tiers-resource
-  "The purity register projected for PUBLICATION — `{path tier}`, sorted, or
-  nil when nothing is declared.
-
-  Every declared tier travels, not only the `:pure` ones. A consumer that
-  knows a namespace is `:external` knows something real; the alternative is
-  inferring it from absence, which is exactly the mistake this fixes — an
-  undeclared namespace reads as `:external` whether it was decided or never
-  considered, and those are different facts."
-  [store]
-  (when (seq (:module-tiers store))
-    (into (sorted-map) (:module-tiers store))))
-
 (defn ^:export merge-production-cycle
   "The PRODUCTION module cycle a merge CREATED, or nil.
 
@@ -385,33 +385,6 @@
                             (contains? actual [m d])
                             (not (contains? (get prod m #{}) d)))]
             [m d])))))
-
-(defn ^:export empty-namespaces
-  "Namespaces holding nothing but their own `ns` form, sorted.
-
-  A HUSK is what a move leaves behind when it carries a namespace's whole
-  contents somewhere else — `slopp.http-rules-test` after the R6 rules move
-  took its tests to what is today `slopp.rules.http-test`. It survived two days
-  and a green `full_check`, because a husk is invisible to every other check by
-  construction: there is no form to be dead, undocumented, uncovered or
-  unreachable, and `namespace-purpose` deliberately EXEMPTS an empty namespace
-  since a newborn one has nothing to describe yet.
-
-  The exemption is the second reason. The first is ADDRESSING: a done-advisory
-  is handed changed FORM IDS, and `rules/sweep-store!` builds its whole-store
-  population the same way (`mapcat store/forms`), so a namespace with zero
-  forms is in neither population and no rule can reach it however it is
-  written. That is why this is a namespace-grained read rather than another
-  rule.
-
-  Reported by `full_check`, never refused — the newborn case is real, and it
-  is discharged by the same act that ends it. `ns_delete` is the remedy for a
-  genuine husk."
-  [store]
-  (vec (sort (for [ns-sym (keys (:namespaces store))
-                   :let [es (store/forms store ns-sym)]
-                   :when (empty? (remove #(= (str (:name %)) (str ns-sym)) es))]
-               ns-sym))))
 
 (defn ^:export canonical-alias
   "The one alias `ns-sym` should be required under: its shortest trailing
@@ -511,6 +484,33 @@
                     :let [libs (get by-alias as)]]
                 (cond-> {:ns ns :lib lib :as as :canonical want}
                   (< 1 (count libs)) (assoc :ambiguous (vec libs))))))))
+
+(defn ^:export empty-namespaces
+  "Namespaces holding nothing but their own `ns` form, sorted.
+
+  A HUSK is what a move leaves behind when it carries a namespace's whole
+  contents somewhere else — `slopp.http-rules-test` after the R6 rules move
+  took its tests to what is today `slopp.rules.http-test`. It survived two days
+  and a green `full_check`, because a husk is invisible to every other check by
+  construction: there is no form to be dead, undocumented, uncovered or
+  unreachable, and `namespace-purpose` deliberately EXEMPTS an empty namespace
+  since a newborn one has nothing to describe yet.
+
+  The exemption is the second reason. The first is ADDRESSING: a done-advisory
+  is handed changed FORM IDS, and `rules/sweep-store!` builds its whole-store
+  population the same way (`mapcat store/forms`), so a namespace with zero
+  forms is in neither population and no rule can reach it however it is
+  written. That is why this is a namespace-grained read rather than another
+  rule.
+
+  Reported by `full_check`, never refused — the newborn case is real, and it
+  is discharged by the same act that ends it. `ns_delete` is the remedy for a
+  genuine husk."
+  [store]
+  (vec (sort (for [ns-sym (keys (:namespaces store))
+                   :let [es (store/forms store ns-sym)]
+                   :when (empty? (remove #(= (str (:name %)) (str ns-sym)) es))]
+               ns-sym))))
 
 (defn ^:export auto-declared-edges
   "The production module edges the PIPELINE declared on a write's behalf

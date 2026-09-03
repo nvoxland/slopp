@@ -1231,6 +1231,52 @@
           (is (str/includes? (:err r) "launcher, not the application") (pr-str r))
           (is (str/includes? (:err r) "TWICE") (pr-str r)))))))
 
+(deftest a-family-arrives-with-the-families-it-REQUIRES
+  ;; `used-families` reads what a store REACHES FOR, and that is the whole
+  ;; signal it had: a browser app requires `slopp.webapp` and nothing else, so
+  ;; it was handed the webapp family alone. But a vendored family has requires
+  ;; of its own, and `slopp.webapp` requires `slopp.http.endpoint` — one
+  ;; capability over, in a family the store never named.
+  ;;
+  ;; The failure is the one `framework-injection` already describes and could
+  ;; not previously reach: **the framework lands intact and fails inside
+  ;; itself**. It surfaced as `No such namespace: slopp.http.endpoint` from the
+  ;; ClojureScript compiler, which reads exactly like the app's own mistake.
+  ;;
+  ;; The answer is not a hand-kept list of cross-family requires. The catalog
+  ;; already states this: `webapp :requires ["http"]` because a browser app has
+  ;; to be SERVED. What that edge MEANT — the config write turns http on with
+  ;; it — now also decides what is vendored, so a family that may legitimately
+  ;; reach another is a family that arrives with it.
+  (let [files {"_"      {"slopp/lang.cljc" "(ns slopp.lang)"}
+               "http"   {"slopp/http.clj" "(ns slopp.http)"
+                         "slopp/http/endpoint.cljc" "(ns slopp.http.endpoint)"}
+               "webapp" {"slopp/webapp.cljc" "(ns slopp.webapp)"}
+               "cli"    {"slopp/cli.clj" "(ns slopp.cli)"}}
+        browser (-> (store/empty-store)
+                    (store/ingest 'shop.ui
+                                  (str "(ns shop.ui (:require [slopp.webapp :as webapp]))\n"
+                                       "(defn ^{:webapp/path \"/things\"} things \"T.\" [_] [:ul])\n")))
+        cli-app (-> (store/empty-store)
+                    (store/ingest 'app.cmds
+                                  (str "(ns app.cmds)\n"
+                                       "(defn ^{:cli/command \"add\" :cli/args [:catn]} add \"A.\" [ctx args] args)\n")))]
+    (testing "a browser app is handed http as well, because webapp requires it"
+      (let [got (engine/framework-injection browser files)]
+        (is (contains? got "slopp/webapp.cljc") (pr-str (keys got)))
+        (is (contains? got "slopp/http/endpoint.cljc")
+            (str "slopp.webapp requires it, so an app vendored webapp alone"
+                 " compiles against a namespace nobody gave it: "
+                 (pr-str (keys got))))
+        (is (contains? got "slopp/lang.cljc") "the dialect still rides")))
+    (testing "and a capability that requires nothing still carries nothing"
+      ;; the prerequisite walk must not become \"vendor everything\" — cli
+      ;; declares `:requires []` and a command-line app has no server in it
+      (let [got (engine/framework-injection cli-app files)]
+        (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
+        (is (not (contains? got "slopp/http.clj"))
+            (str "a prerequisite nobody declared: " (pr-str (keys got))))))))
+
 (deftest a-store-whose-BROWSER-owns-routing-uses-the-webapp-family
   ;; Wave 4: `webapp` ships a family, and the entry MARKER is the only usage
   ;; signal — `used-families` reads requires and markers, and slopp mounts the
@@ -1403,52 +1449,6 @@
             (is (= 2 (count (spans)))
                 "a third delta here would double every total"))))
       (finally (ops/close! sess)))))
-
-(deftest a-family-arrives-with-the-families-it-REQUIRES
-  ;; `used-families` reads what a store REACHES FOR, and that is the whole
-  ;; signal it had: a browser app requires `slopp.webapp` and nothing else, so
-  ;; it was handed the webapp family alone. But a vendored family has requires
-  ;; of its own, and `slopp.webapp` requires `slopp.http.endpoint` — one
-  ;; capability over, in a family the store never named.
-  ;;
-  ;; The failure is the one `framework-injection` already describes and could
-  ;; not previously reach: **the framework lands intact and fails inside
-  ;; itself**. It surfaced as `No such namespace: slopp.http.endpoint` from the
-  ;; ClojureScript compiler, which reads exactly like the app's own mistake.
-  ;;
-  ;; The answer is not a hand-kept list of cross-family requires. The catalog
-  ;; already states this: `webapp :requires ["http"]` because a browser app has
-  ;; to be SERVED. What that edge MEANT — the config write turns http on with
-  ;; it — now also decides what is vendored, so a family that may legitimately
-  ;; reach another is a family that arrives with it.
-  (let [files {"_"      {"slopp/lang.cljc" "(ns slopp.lang)"}
-               "http"   {"slopp/http.clj" "(ns slopp.http)"
-                         "slopp/http/endpoint.cljc" "(ns slopp.http.endpoint)"}
-               "webapp" {"slopp/webapp.cljc" "(ns slopp.webapp)"}
-               "cli"    {"slopp/cli.clj" "(ns slopp.cli)"}}
-        browser (-> (store/empty-store)
-                    (store/ingest 'shop.ui
-                                  (str "(ns shop.ui (:require [slopp.webapp :as webapp]))\n"
-                                       "(defn ^{:webapp/path \"/things\"} things \"T.\" [_] [:ul])\n")))
-        cli-app (-> (store/empty-store)
-                    (store/ingest 'app.cmds
-                                  (str "(ns app.cmds)\n"
-                                       "(defn ^{:cli/command \"add\" :cli/args [:catn]} add \"A.\" [ctx args] args)\n")))]
-    (testing "a browser app is handed http as well, because webapp requires it"
-      (let [got (engine/framework-injection browser files)]
-        (is (contains? got "slopp/webapp.cljc") (pr-str (keys got)))
-        (is (contains? got "slopp/http/endpoint.cljc")
-            (str "slopp.webapp requires it, so an app vendored webapp alone"
-                 " compiles against a namespace nobody gave it: "
-                 (pr-str (keys got))))
-        (is (contains? got "slopp/lang.cljc") "the dialect still rides")))
-    (testing "and a capability that requires nothing still carries nothing"
-      ;; the prerequisite walk must not become \"vendor everything\" — cli
-      ;; declares `:requires []` and a command-line app has no server in it
-      (let [got (engine/framework-injection cli-app files)]
-        (is (contains? got "slopp/cli.clj") (pr-str (keys got)))
-        (is (not (contains? got "slopp/http.clj"))
-            (str "a prerequisite nobody declared: " (pr-str (keys got))))))))
 
 (deftest ^:external a-whole-store-verdict-is-returned-rather-than-re-earned
   ;; The fold behind this is unit-tested in read.history-test; what is pinned
@@ -1717,404 +1717,6 @@
     (when-not (engine/try-commit! sess base (store/ingest base ns-sym source) [ns-sym])
       (throw (ex-info "fixture could not land" {:ns ns-sym})))))
 
-(deftest ^:external build-supplies-the-framework-a-store-no-longer-declares
-  ;; The build half of D-framework-injection. Once a store stops declaring
-  ;; io.github.nvoxland/slopp-web, the BUILT app still has to get it — otherwise
-  ;; removing the declaration produces an app with no framework at all, which is
-  ;; why the halves are staged in this order.
-  ;;
-  ;; Part 2: it arrives as FILES, not a coord. slopp-web is never published to a
-  ;; remote, so a coord in the generated deps.edn would name something only the
-  ;; machine that ran slim-install can resolve — a build that ships broken to
-  ;; anywhere else, and one that looks fine here.
-  ;;
-  ;; The manifests are FAKED rather than branched on. This suite runs from a
-  ;; materialized tree, where the real readers look for a jar resource that does
-  ;; not exist there and answer nil — so the vendoring assertions used to sit
-  ;; inside an `if` that never took its true arm in the only environment this
-  ;; test ever executes in. A fake also buys an assertion the real manifest
-  ;; cannot: declare TWO families, use ONE, and the tree can be checked for what
-  ;; did NOT arrive. That is where the opt-in is either real or is only a line
-  ;; in a config file.
-  (let [files '{"_"    {"slopp/fixture_syntax.cljc" "(ns slopp.fixture-syntax)\n"}
-                "cli"  {"slopp/cli.clj" "(ns slopp.cli)\n"}
-                "http" {"slopp/http.clj" "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"
-                        "slopp/http/router.clj" "(ns slopp.http.router)\n"}}
-        ;; the "_" path is deliberately NOT slopp/lang.cljc, which is what
-        ;; production files there. Vendoring writes into `src`, and `src` is the
-        ;; FIRST classpath entry of the image running this test — so a stub at a
-        ;; real path shadows the real namespace and breaks the machinery under
-        ;; the assertions. The property being checked is that "_" travels
-        ;; whichever capability is used, and a neutral path checks it safely.
-        deps  '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
-                "http" {garden/garden {:mvn/version "1.3.10"}}}]
-    (with-redefs [boot/framework-files (constantly files)
-                  boot/framework-deps  (constantly deps)]
-      (let [sess (external/open!)
-            dir  (str (java.nio.file.Files/createTempDirectory
-                       "slopp-framework"
-                       (make-array java.nio.file.attribute.FileAttribute 0)))]
-        (try
-          ;; into the store VALUE, exactly as `a-framework-using-store-survives-a-RESTART`
-          ;; does and for the reason recorded there: a store cannot INGEST code
-          ;; requiring a framework its current image cannot load, and this image
-          ;; booted before the store named anything to vendor. Going through
-          ;; `create-ns!` here silently left the store EMPTY — which the previous
-          ;; version of this test did, and never noticed, because its vendoring
-          ;; assertions sat behind a branch that never ran.
-          (land-unloaded! sess 'fw.app
-                          (str "(ns fw.app (:require [slopp.http :as web]))\n\n"
-                               "(defn ^:export handler \"H.\" [req] (web/handle! req))\n"))
-          (is (= #{"http"} (engine/used-families (:store @sess)))
-              "guard the guard: this store must USE http and nothing else, or
-               every assertion below is about an empty derivation")
-          (is (nil? (:error (external/build! sess dir))))
-          (let [d  (edn/read-string (slurp (io/file dir "deps.edn")))
-                at #(io/file dir "src" %)]
-            (testing "the framework is IN the tree, so the app needs no repository"
-              (is (.exists (at "slopp/http.clj")) (str "expected " (at "slopp/http.clj")))
-              (is (str/includes? (slurp (at "slopp/http.clj")) "(ns slopp.http")
-                  "the vendored file must be the real source, not a stub")
-              (is (.exists (at "slopp/http/router.clj"))
-                  "the whole family travels, not just the facade")
-              (is (.exists (at "slopp/fixture_syntax.cljc"))
-                  "and \"_\" with it — the dialect's helpers belong to the syntax
-                   rather than to any one capability, so every user gets them"))
-            (testing "and ONLY the family this store uses"
-              ;; all-or-nothing vendoring would put slopp/cli.clj here and this
-              ;; assertion is what notices. `(require 'slopp.cli)` succeeding in
-              ;; an app that never enabled cli is the capability model holding in
-              ;; the config file and not at runtime, which is the one place a
-              ;; consumer would actually meet it.
-              (is (not (.exists (at "slopp/cli.clj")))
-                  "fw.app names nothing in cli, so no cli framework may be resolvable in it")
-              (is (nil? (get-in d [:deps 'metosin/malli]))
-                  (str "nor may it inherit cli's deps: " (pr-str (:deps d)))))
-            (testing "and it is never a COORD — that would resolve only where
-                      slim-install has run"
-              (is (nil? (get-in d [:deps 'io.github.nvoxland/slopp-web]))
-                  (pr-str (:deps d))))
-            (testing "but what the framework itself REQUIRES is declared, or the app
-                      ships source it cannot load — the build path has the same hole
-                      the image had, found by slopp-ui removing the coord"
-              (is (contains? (:deps d) 'garden/garden)
-                  (str "garden missing from the built deps: " (pr-str (:deps d))))))
-          (finally
-            (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
-              (rm! (io/file dir)))
-            (ops/close! sess)))))))
-
-(deftest ^:external a-framework-using-store-survives-a-RESTART
-  ;; Two bugs, one test, and the second was invisible to the first version of it.
-  ;;
-  ;; (1) Vendoring was wired into session creation alone, so every image AFTER
-  ;; the first booted with an empty src/ — and `fresh-image!` is on the path of
-  ;; restart, deps_add/deps_remove, branch switch, ns_rename and the D5
-  ;; staleness heal.
-  ;;
-  ;; (2) Vendoring copies SOURCE and discards the pom. The framework's own
-  ;; requires — garden, hiccup, cheshire, http-kit — came from that pom, so the
-  ;; files landed correctly and then failed INSIDE them. Reported from slopp-ui:
-  ;; "Could not locate garden/core.clj", raised at slopp.http.css.
-  ;;
-  ;; Both stayed invisible because a store still declaring the coord got source
-  ;; AND deps from ~/.m2 regardless.
-  ;;
-  ;; So the fake framework REQUIRES something external, and the assertion is
-  ;; that the store LOADS. slopp-ui's correction, and it is the whole point: the
-  ;; "resolves from the image dir, no ~/.m2" property was fully satisfied at the
-  ;; moment their store was unloadable. Where a file comes from is not whether
-  ;; the framework works. An earlier cut of this test used a dependency-free
-  ;; fake and passed green against exactly bug (2).
-  (let [fake-web (str "(ns slopp.http (:require [garden.core :as garden]))\n"
-                      "(defn handle! \"H.\" [r] (garden/css [:a {:x 1}]) r)\n")]
-    (with-redefs [boot/framework-files (constantly {"http" {"slopp/http.clj" fake-web}})
-                  boot/framework-deps  (constantly '{"http" {garden/garden {:mvn/version "1.3.10"}}})]
-      (let [sess (external/open!)
-            vendored? (fn [] (.exists (io/file (:dir (:image @sess))
-                                               "src" "slopp" "http.clj")))]
-        (try
-          ;; into the store VALUE: a store cannot ingest code requiring a
-          ;; framework its current image cannot load, and priming a RUNNING
-          ;; image's dir does nothing — a JVM caches a relative classpath dir
-          ;; that did not exist at launch. Which is also why vendoring has to
-          ;; precede process start.
-          (land-unloaded! sess 'fw.app
-                          (str "(ns fw.app (:require [slopp.http :as web]))\n"
-                               "(defn h \"H.\" [r] (web/handle! r))\n"))
-          (testing "the store really does use the framework"
-            (is (some? (engine/framework-injection
-                        (:store @sess) (boot/framework-files)))))
-          (testing "a RESTART gives the new image the framework AND what the
-                    framework itself requires — the store LOADS, which is the
-                    property; the file being present is not"
-            (ops/restart! sess)
-            (is (vendored?) "the restarted image booted without the framework")
-            (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'fw.app))
-                "loading is the real property — a vendored file that cannot
-                 resolve its own requires is a dead store"))
-          (testing "and again — one image is a fluke, two is the property"
-            (ops/restart! sess)
-            (is (vendored?))
-            (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'fw.app))))
-          (finally (ops/close! sess)))))))
-
-(deftest ^:external a-built-web-app-RUNS-outside-slopp-entirely
-  ;; SHAPE was never the question. Every build! test here asserted the tree
-  ;; materializes — files present, deps.edn contains X — and all of them passed
-  ;; while a built app died on its first require, because vendoring copies
-  ;; source and the pom that carried garden/hiccup/cheshire/http-kit was
-  ;; discarded with the coord.
-  ;;
-  ;; The consumer found it, by running the tree. That is the wrong dependency:
-  ;; slopp-ui is ONE app, the next one will not report this well, and slopp's
-  ;; correctness should not rest on a consumer happening to look. So slopp owns
-  ;; a minimal web app of its own and RUNS it.
-  ;;
-  ;; A fresh JVM with no slopp on the classpath — `clojure -M` in the tree — is
-  ;; the point: an image would prove nothing, since the image is the OTHER path
-  ;; and vendors separately. This is what a user's deployment sees.
-  ;;
-  ;; The framework is FAKED, and the fake requires something external, because
-  ;; this suite runs from a checkout where boot/framework-files is nil. A first
-  ;; cut branched on that and skipped the run — leaving a behaviour test that
-  ;; asserted shape in the only environment it ever executes in, which is the
-  ;; defect it exists to catch. The stand-in has the property under test:
-  ;; requires of its own that the built deps.edn must declare.
-  (with-redefs [boot/framework-files
-                (constantly
-                 {"http"
-                  {"slopp/http/css.clj"
-                   (str "(ns slopp.http.css (:require [garden.core :as garden]))\n"
-                        "(defn css-response \"C.\" [rules]\n"
-                        "  {:status 200 :body (garden/css rules)})\n")}})
-                boot/framework-deps
-                (constantly '{"http" {garden/garden {:mvn/version "1.3.10"}}})]
-    (let [sess (external/open!)
-          dir  (str (Files/createTempDirectory "slopp-runs"
-                                               (make-array FileAttribute 0)))]
-      (try
-        ;; into the store VALUE: this session's image was booted on an empty
-        ;; store and so vendored nothing, and create-ns! hot-loads — it would
-        ;; fail on the require and the ns would never land. build! reads the
-        ;; store, which is what is under test here.
-        (land-unloaded! sess 'runs.app
-                        (str "(ns runs.app\n"
-                             "  (:require [slopp.http.css :as css]))\n\n"
-                             "(defn ^:export stylesheet \"S.\" []\n"
-                             "  (css/css-response [[:body {:color \"red\"}]]))\n"))
-        (is (nil? (:error (external/build! sess dir))))
-        (testing "the framework source is IN the tree"
-          (is (.exists (io/file dir "src" "slopp" "http" "css.clj"))))
-        (testing "and what the framework itself requires is declared, or the
-                  tree carries source it cannot load"
-          (is (contains? (:deps (edn/read-string (slurp (io/file dir "deps.edn"))))
-                         'garden/garden)))
-        (testing "so it LOADS in a fresh JVM that has never heard of slopp —
-                  the assertion shape assertions cannot make"
-          (let [r (sh-outside-slopp!
-                   "clojure" "-M" "-e" "(require 'runs.app) (println :LOADED-OK)"
-                   :dir dir)]
-            (is (zero? (:exit r))
-                (str "a built app must run outside slopp.\nexit " (:exit r)
-                     "\nout: " (:out r) "\nerr: " (:err r)))
-            (is (str/includes? (:out r) ":LOADED-OK")
-                (str "out: " (:out r) "\nerr: " (:err r)))))
-        (testing "and it FIRES — without the framework's deps the same tree
-                  fails, which is the bug slopp-ui hit. A green run here proves
-                  nothing unless the red one is reachable, and every defect this
-                  wave was hidden by a check that could not fail"
-          (let [dir2 (str (Files/createTempDirectory
-                           "slopp-runs-nodeps" (make-array FileAttribute 0)))]
-            (try
-              (with-redefs [boot/framework-deps (constantly nil)]
-                (external/build! sess dir2))
-              (let [r (clojure.java.shell/sh
-                       "clojure" "-M" "-e" "(require 'runs.app)" :dir dir2)]
-                (is (not (zero? (:exit r)))
-                    "vendored source with no deps declared must NOT load")
-                (is (str/includes? (:err r) "garden")
-                    (str "and it must fail on the framework's own require: "
-                         (:err r))))
-              (finally
-                (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
-                          (.delete f))]
-                  (rm! (io/file dir2)))))))
-        (finally
-          (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
-            (rm! (io/file dir)))
-          (ops/close! sess))))))
-
-(deftest ^:external the-warm-spare-is-ADOPTED-and-carries-the-framework
-  ;; slopp-ui measured this and slopp should assert it — the same principle as
-  ;; the build-and-run test. Their instrument, kept because it is better than
-  ;; anything timing-based: compare the image JVM's ABSOLUTE start time against a
-  ;; mark taken before the restart was requested.
-  ;;
-  ;;   negative → the JVM existed before I asked → a warmed spare was adopted
-  ;;   positive → it booted during the restart → no spare
-  ;;
-  ;; Immune to round-trip latency, which is what makes uptime-based timing
-  ;; useless here. Their before/after on the two jars: +2696 (fresh boot) then
-  ;; -6288 / -11256 / -8643 (adopted), three for three.
-  ;;
-  ;; Adoption alone is worth nothing — an adopted image MISSING the framework
-  ;; trades a restart bug for a subtler one, so this asserts both. That pairing
-  ;; is the actual claim the one-door change makes.
-  (with-redefs [boot/framework-files
-                (constantly {"http" {"slopp/http.clj"
-                                     "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"}})
-                boot/framework-deps (constantly nil)]
-    (let [sess (external/open! {:slopp.ops/warm-spare? true})]
-      (try
-        (land-unloaded! sess 'sp.app
-                        (str "(ns sp.app (:require [slopp.http :as web]))\n"
-                             "(defn h \"H.\" [r] (web/handle! r))\n"))
-        ;; First restart warms a spare from a store that NOW needs the framework.
-        ;; The spare standing at open was warmed from an empty store and must be
-        ;; discarded rather than adopted — that mismatch is its own hazard, and
-        ;; asserting adoption on this restart would be asserting the bug.
-        (ops/restart! sess)
-        ;; WAIT for the spare's JVM to exist before marking t0. start-spare!
-        ;; returns a future, so the boot happens in the BACKGROUND — and their
-        ;; samples were 6-11s apart by human pacing, which hid this. In a tight
-        ;; loop the mark lands before the spare has launched, and a correctly
-        ;; ADOPTED image then reads as +29ms: the right answer to the wrong
-        ;; question. Deref blocks until the handle is real.
-        (some-> (:spare @sess) deref)
-        (let [t0 (System/currentTimeMillis)]
-          (ops/restart! sess)
-          (let [started (first (repl/eval!
-                                (:image @sess)
-                                (str "(.getStartTime (java.lang.management."
-                                     "ManagementFactory/getRuntimeMXBean))")))]
-            (testing "the spare was ADOPTED — its JVM predates the request"
-              (is (number? started) (pr-str started))
-              (is (< started t0)
-                  (str "image JVM started " (- started t0) "ms relative to the"
-                       " restart request; negative means adopted, positive"
-                       " means it booted during the restart and the spare was"
-                       " lost")))))
-        (testing "and the adopted image CARRIES the framework — adoption without
-                  it is the worse bug, not the fix"
-          (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'sp.app))))
-        (finally (ops/close! sess))))))
-
-(deftest ^:external a-built-rest-app-ENFORCES-its-contract-outside-slopp-entirely
-  ;; The third of these, and each one exists because SHAPE assertions cannot
-  ;; make the claim: the web one because vendored source failed inside itself on
-  ;; a missing garden, the cli one because a generated entry can be present and
-  ;; do nothing. This one because a boundary that is not reachable in a
-  ;; consumer's tree is a boundary that protects slopp and nobody else.
-  ;;
-  ;; What is NOT re-proved here: the socket. That is the adapter's job and
-  ;; `a-built-web-app-RUNS-outside-slopp-entirely` covers it. The claim this
-  ;; makes is the one only rest can make — the vendored family loads, malli
-  ;; resolves from the generated deps.edn, and a body that breaks its contract
-  ;; is REFUSED by code running in a tree that has never heard of slopp.
-  (let [src-of  (fn [p] (some-> (io/resource p) slurp))
-        subtree (fn [top dir-name]
-                  (let [f   (io/file (.toURI (io/resource top)))
-                        dir (io/file (.getParentFile f) dir-name)
-                        n   (inc (count (.getPath dir)))]
-                    (into {top (slurp f)}
-                          (for [x (file-seq dir)
-                                :when (and (.isFile x) (.endsWith (.getName x) ".clj"))]
-                            [(str (subs top 0 (- (count top) 4)) "/" (subs (.getPath x) n))
-                             (slurp x)]))))
-        http-fs (subtree "slopp/http.clj" "http")
-        rest-fs (subtree "slopp/rest.clj" "rest")
-        common  {"slopp/lang.cljc"  (src-of "slopp/lang.cljc")
-                 "slopp/cache.clj"  (src-of "slopp/cache.clj")}
-        files   {"_" common "http" http-fs "rest" rest-fs}
-        deps    '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
-                  "rest" {metosin/malli {:mvn/version "0.20.1"}}
-                  "http" {cheshire/cheshire {:mvn/version "5.13.0"}
-                          hiccup/hiccup     {:mvn/version "2.0.0"}
-                          garden/garden     {:mvn/version "1.3.10"}
-                          http-kit/http-kit {:mvn/version "2.8.0"}}}]
-    ;; guard the guard: an empty family vendors nothing and every assertion
-    ;; below would pass or fail for the wrong reason
-    (is (contains? rest-fs "slopp/rest/contract.clj") (pr-str (keys rest-fs)))
-    (is (contains? http-fs "slopp/http/dispatch.clj") (pr-str (keys http-fs)))
-    (is (every? some? (vals common)))
-
-    (with-redefs [boot/framework-files (constantly files)
-                  boot/framework-deps  (constantly deps)]
-      (let [sess (external/open!)
-            dir  (str (Files/createTempDirectory "slopp-rest-runs"
-                                                 (make-array FileAttribute 0)))
-            ;; the probe an author would write: assemble the app's own context WITH
-            ;; the boundary on it, and call an endpoint with a bad body. Not
-            ;; two steps any more: `context` refuses to assemble a declared
-            ;; contract it cannot honour, so there is no unvalidated context
-            ;; left for a wrap to arrive too late for
-            probe (str "(require 'slopp.http 'slopp.rest 'shop.api)\n"
-                       "(let [ctx (slopp.http/context\n"
-                       "            {:http/namespaces '[shop.api]\n"
-                       "             :http/wrap-context slopp.rest/validating})\n"
-                       "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
-                       "                                :body {:sku 42}})]\n"
-                       "  (println :STATUS (:status r)))")]
-        (try
-          ;; into the store VALUE: this session's image booted on an empty store
-          ;; and vendored nothing, so a hot-loaded require of slopp.rest would
-          ;; fail. build! reads the store, which is what is under test.
-          (land-unloaded! sess 'shop.api
-                          (str "(ns shop.api)\n\n"
-                               "(defn ^{:http/method :post :http/path \"/api/orders\"\n"
-                               "        :http/auth :public\n"
-                               "        :rest/request [:map [:sku :string]]\n"
-                               "        :rest/response [:map [:id :int]]}\n"
-                               "  create! \"Place an order.\" [req] {:status 200 :body {:id 1}})\n"))
-          ;; through the real write, not a hand-built map: a config entry carries a
-          ;; :format its serializer needs, and assoc-in'ing the values alone
-          ;; produces a store that cannot be materialized. The code above has to
-          ;; bypass the image (it requires a framework this image cannot load);
-          ;; a config write has no such problem.
-          (ops/config-file! sess "capabilities" :key "rest.enabled" :value "true"
-                            :prompt "publish a typed API")
-          (is (nil? (:error (external/build! sess dir))))
-
-          (testing "the rest family is IN the tree and its dep is DECLARED"
-            (is (.exists (io/file dir "src" "slopp" "rest" "contract.clj")))
-            (let [d (edn/read-string (slurp (io/file dir "deps.edn")))]
-              (is (contains? (:deps d) 'metosin/malli)
-                  (str "slopp.rest.contract requires malli: " (pr-str (:deps d))))))
-
-          (testing "and the boundary REFUSES a bad body in a JVM that never heard of slopp"
-            (let [r (sh-outside-slopp! "clojure" "-M" "-e" probe :dir dir)]
-              (is (zero? (:exit r))
-                  (str "the vendored rest framework must load.\nout: " (:out r)
-                       "\nerr: " (:err r)))
-              (is (str/includes? (:out r) ":STATUS 400")
-                  (str "a body declaring :sku 42 against [:sku :string] must be"
-                       " refused THERE, not only here.\nout: " (:out r)
-                       "\nerr: " (:err r)))))
-
-          (testing "negative control: without the framework's deps the same tree fails"
-            ;; a green run above proves nothing unless the red one is reachable
-            (let [dir2 (str (Files/createTempDirectory
-                             "slopp-rest-nodeps" (make-array FileAttribute 0)))]
-              (try
-                (with-redefs [boot/framework-deps (constantly nil)]
-                  (external/build! sess dir2))
-                (let [r (clojure.java.shell/sh
-                         "clojure" "-M" "-e" "(require 'slopp.rest)" :dir dir2)]
-                  (is (not (zero? (:exit r)))
-                      "vendored rest source with no deps declared must NOT load")
-                  (is (str/includes? (:err r) "malli")
-                      (str "and it must fail on the framework's own require: "
-                           (:err r))))
-                (finally
-                  (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
-                            (.delete f))]
-                    (rm! (io/file dir2)))))))
-          (finally
-            (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
-              (rm! (io/file dir)))
-            (ops/close! sess)))))))
-
 (deftest ^:external a-built-WEBAPP-COMPILES-and-its-app-code-declares-no-cljs
   ;; The wave's claim, in the one place it can be false: **an app that opts into
   ;; `webapp` writes NO ClojureScript.** `a-REALISTIC-browser-app-is-DRIVEN-…`
@@ -2243,77 +1845,206 @@
                        (pr-str r))))
             (finally (ops/close! sess))))))))
 
-(deftest ^:external a-built-BROWSER-app-gets-its-entry-generated
-  ;; The thing the whole cljnx wave existed to unblock. `webapp-launcher-source`
-  ;; was written, tested, and had NO CALLER for a wave: the entry marker was
-  ;; asked for two incompatible shapes, so a generated `(mount! (entry))`
-  ;; refused at page load for any app that could also be opened headlessly.
+(deftest ^:external a-built-web-app-RUNS-outside-slopp-entirely
+  ;; SHAPE was never the question. Every build! test here asserted the tree
+  ;; materializes — files present, deps.edn contains X — and all of them passed
+  ;; while a built app died on its first require, because vendoring copies
+  ;; source and the pom that carried garden/hiccup/cheshire/http-kit was
+  ;; discarded with the coord.
   ;;
-  ;; With one declaration and one public derivation the fork is gone, and this
-  ;; is the assertion that the capability's stated goal — **an app that opts
-  ;; into `webapp` writes no ClojureScript** — is finally true rather than true
-  ;; except for the two forms every app hand-wrote.
-  (let [app (str "(ns shop.ui\n"
-                 "  (:require [slopp.webapp :as webapp]))\n\n"
-                 "(defn ^{:webapp/path \"/things\"} things \"The list.\"\n"
-                 "  [{:keys [state]}]\n"
-                 "  [:ul (for [t (webapp/load-value state :main)] [:li (:name t)])])\n\n"
-                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
-                 "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
-                 "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
-                 ;; no `:webapp/routes` — the pages carry their own addresses,
-                 ;; and the build is what joins them into a table
-                 "(defn ^:app/entry app \"The application.\" []\n"
-                 "  {:webapp/state (atom {})})\n")
-        dir (str (System/getProperty "java.io.tmpdir")
-                 "/slopp-browser-entry-" (System/nanoTime))
-        sess (external/open!)]
-    (try
-      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
-                        :prompt "a browser app")
-      (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
-      (land-unloaded! sess 'shop.ui app)
+  ;; The consumer found it, by running the tree. That is the wrong dependency:
+  ;; slopp-ui is ONE app, the next one will not report this well, and slopp's
+  ;; correctness should not rest on a consumer happening to look. So slopp owns
+  ;; a minimal web app of its own and RUNS it.
+  ;;
+  ;; A fresh JVM with no slopp on the classpath — `clojure -M` in the tree — is
+  ;; the point: an image would prove nothing, since the image is the OTHER path
+  ;; and vendors separately. This is what a user's deployment sees.
+  ;;
+  ;; The framework is FAKED, and the fake requires something external, because
+  ;; this suite runs from a checkout where boot/framework-files is nil. A first
+  ;; cut branched on that and skipped the run — leaving a behaviour test that
+  ;; asserted shape in the only environment it ever executes in, which is the
+  ;; defect it exists to catch. The stand-in has the property under test:
+  ;; requires of its own that the built deps.edn must declare.
+  (with-redefs [boot/framework-files
+                (constantly
+                 {"http"
+                  {"slopp/http/css.clj"
+                   (str "(ns slopp.http.css (:require [garden.core :as garden]))\n"
+                        "(defn css-response \"C.\" [rules]\n"
+                        "  {:status 200 :body (garden/css rules)})\n")}})
+                boot/framework-deps
+                (constantly '{"http" {garden/garden {:mvn/version "1.3.10"}}})]
+    (let [sess (external/open!)
+          dir  (str (Files/createTempDirectory "slopp-runs"
+                                               (make-array FileAttribute 0)))]
+      (try
+        ;; into the store VALUE: this session's image was booted on an empty
+        ;; store and so vendored nothing, and create-ns! hot-loads — it would
+        ;; fail on the require and the ns would never land. build! reads the
+        ;; store, which is what is under test here.
+        (land-unloaded! sess 'runs.app
+                        (str "(ns runs.app\n"
+                             "  (:require [slopp.http.css :as css]))\n\n"
+                             "(defn ^:export stylesheet \"S.\" []\n"
+                             "  (css/css-response [[:body {:color \"red\"}]]))\n"))
+        (is (nil? (:error (external/build! sess dir))))
+        (testing "the framework source is IN the tree"
+          (is (.exists (io/file dir "src" "slopp" "http" "css.clj"))))
+        (testing "and what the framework itself requires is declared, or the
+                  tree carries source it cannot load"
+          (is (contains? (:deps (edn/read-string (slurp (io/file dir "deps.edn"))))
+                         'garden/garden)))
+        (testing "so it LOADS in a fresh JVM that has never heard of slopp —
+                  the assertion shape assertions cannot make"
+          (let [r (sh-outside-slopp!
+                   "clojure" "-M" "-e" "(require 'runs.app) (println :LOADED-OK)"
+                   :dir dir)]
+            (is (zero? (:exit r))
+                (str "a built app must run outside slopp.\nexit " (:exit r)
+                     "\nout: " (:out r) "\nerr: " (:err r)))
+            (is (str/includes? (:out r) ":LOADED-OK")
+                (str "out: " (:out r) "\nerr: " (:err r)))))
+        (testing "and it FIRES — without the framework's deps the same tree
+                  fails, which is the bug slopp-ui hit. A green run here proves
+                  nothing unless the red one is reachable, and every defect this
+                  wave was hidden by a check that could not fail"
+          (let [dir2 (str (Files/createTempDirectory
+                           "slopp-runs-nodeps" (make-array FileAttribute 0)))]
+            (try
+              (with-redefs [boot/framework-deps (constantly nil)]
+                (external/build! sess dir2))
+              (let [r (clojure.java.shell/sh
+                       "clojure" "-M" "-e" "(require 'runs.app)" :dir dir2)]
+                (is (not (zero? (:exit r)))
+                    "vendored source with no deps declared must NOT load")
+                (is (str/includes? (:err r) "garden")
+                    (str "and it must fail on the framework's own require: "
+                         (:err r))))
+              (finally
+                (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                          (.delete f))]
+                  (rm! (io/file dir2)))))))
+        (finally
+          (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+            (rm! (io/file dir)))
+          (ops/close! sess))))))
 
-      (testing "the fixture is a webapp with exactly one marked entry"
-        ;; population control: with no entry there is nothing to generate, and
-        ;; every assertion below would pass by describing an empty build
-        (let [st (:store @sess)]
-          (is (= 1 (count (rules.webapp/page-rows st)))
-              (pr-str (rules.webapp/page-rows st)))))
+(deftest ^:external a-built-rest-app-ENFORCES-its-contract-outside-slopp-entirely
+  ;; The third of these, and each one exists because SHAPE assertions cannot
+  ;; make the claim: the web one because vendored source failed inside itself on
+  ;; a missing garden, the cli one because a generated entry can be present and
+  ;; do nothing. This one because a boundary that is not reachable in a
+  ;; consumer's tree is a boundary that protects slopp and nobody else.
+  ;;
+  ;; What is NOT re-proved here: the socket. That is the adapter's job and
+  ;; `a-built-web-app-RUNS-outside-slopp-entirely` covers it. The claim this
+  ;; makes is the one only rest can make — the vendored family loads, malli
+  ;; resolves from the generated deps.edn, and a body that breaks its contract
+  ;; is REFUSED by code running in a tree that has never heard of slopp.
+  (let [src-of  (fn [p] (some-> (io/resource p) slurp))
+        subtree (fn [top dir-name]
+                  (let [f   (io/file (.toURI (io/resource top)))
+                        dir (io/file (.getParentFile f) dir-name)
+                        n   (inc (count (.getPath dir)))]
+                    (into {top (slurp f)}
+                          (for [x (file-seq dir)
+                                :when (and (.isFile x) (.endsWith (.getName x) ".clj"))]
+                            [(str (subs top 0 (- (count top) 4)) "/" (subs (.getPath x) n))
+                             (slurp x)]))))
+        http-fs (subtree "slopp/http.clj" "http")
+        rest-fs (subtree "slopp/rest.clj" "rest")
+        common  {"slopp/lang.cljc"  (src-of "slopp/lang.cljc")
+                 "slopp/cache.clj"  (src-of "slopp/cache.clj")}
+        files   {"_" common "http" http-fs "rest" rest-fs}
+        deps    '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
+                  "rest" {metosin/malli {:mvn/version "0.20.1"}}
+                  "http" {cheshire/cheshire {:mvn/version "5.13.0"}
+                          hiccup/hiccup     {:mvn/version "2.0.0"}
+                          garden/garden     {:mvn/version "1.3.10"}
+                          http-kit/http-kit {:mvn/version "2.8.0"}}}]
+    ;; guard the guard: an empty family vendors nothing and every assertion
+    ;; below would pass or fail for the wrong reason
+    (is (contains? rest-fs "slopp/rest/contract.clj") (pr-str (keys rest-fs)))
+    (is (contains? http-fs "slopp/http/dispatch.clj") (pr-str (keys http-fs)))
+    (is (every? some? (vals common)))
 
-      (let [r (external/build! sess dir)]
-        (is (nil? (:error r)) (pr-str r))
+    (with-redefs [boot/framework-files (constantly files)
+                  boot/framework-deps  (constantly deps)]
+      (let [sess (external/open!)
+            dir  (str (Files/createTempDirectory "slopp-rest-runs"
+                                                 (make-array FileAttribute 0)))
+            ;; the probe an author would write: assemble the app's own context WITH
+            ;; the boundary on it, and call an endpoint with a bad body. Not
+            ;; two steps any more: `context` refuses to assemble a declared
+            ;; contract it cannot honour, so there is no unvalidated context
+            ;; left for a wrap to arrive too late for
+            probe (str "(require 'slopp.http 'slopp.rest 'shop.api)\n"
+                       "(let [ctx (slopp.http/context\n"
+                       "            {:http/namespaces '[shop.api]\n"
+                       "             :http/wrap-context slopp.rest/validating})\n"
+                       "      r   (slopp.rest/call ctx {:method :post :path \"/api/orders\"\n"
+                       "                                :body {:sku 42}})]\n"
+                       "  (println :STATUS (:status r)))")]
+        (try
+          ;; into the store VALUE: this session's image booted on an empty store
+          ;; and vendored nothing, so a hot-loaded require of slopp.rest would
+          ;; fail. build! reads the store, which is what is under test.
+          (land-unloaded! sess 'shop.api
+                          (str "(ns shop.api)\n\n"
+                               "(defn ^{:http/method :post :http/path \"/api/orders\"\n"
+                               "        :http/auth :public\n"
+                               "        :rest/request [:map [:sku :string]]\n"
+                               "        :rest/response [:map [:id :int]]}\n"
+                               "  create! \"Place an order.\" [req] {:status 200 :body {:id 1}})\n"))
+          ;; through the real write, not a hand-built map: a config entry carries a
+          ;; :format its serializer needs, and assoc-in'ing the values alone
+          ;; produces a store that cannot be materialized. The code above has to
+          ;; bypass the image (it requires a framework this image cannot load);
+          ;; a config write has no such problem.
+          (ops/config-file! sess "capabilities" :key "rest.enabled" :value "true"
+                            :prompt "publish a typed API")
+          (is (nil? (:error (external/build! sess dir))))
 
-        (testing "the browser entry is GENERATED, under the client source root"
-          ;; cljs-src/, not src/ — the ClojureScript compiler has to see it and
-          ;; the JVM classpath must not
-          (let [f (io/file dir "cljs-src" "native" "client.cljs")]
-            (is (.exists f)
-                (str "no generated browser entry — every browser app is still"
-                     " hand-writing the two forms this capability exists to"
-                     " remove. :client-entry was " (pr-str (:client-entry r))))
-            (when (.exists f)
-              (let [src (slurp f)]
-                (testing "it mounts the app's own entry"
-                  (is (str/includes? src "shop.ui/app") src)
-                  (is (str/includes? src "dom/mount!") src))
-                (testing "and REQUIRES what that entry reaches"
-                  ;; naming a page without requiring its closure is a call to a
-                  ;; var that does not exist, which reaches a reader as a blank
-                  ;; page and reads like a rendering bug rather than a wiring one
-                  (is (str/includes? src "[shop.ui]") src))
-                (testing "and carries the table the PAGES declared"
-                  ;; the entry fn declares no `:webapp/routes` at all — the
-                  ;; address lives on the page, and the build is the reader
-                  ;; that joins them. Without this the app mounts and every
-                  ;; url renders not-found, which looks like a routing bug in
-                  ;; an app whose routing was never wired
-                  (is (str/includes? src "\"/things\" shop.ui/things") src)
-                  (is (str/includes? src ":webapp/routes") src))))))
+          (testing "the rest family is IN the tree and its dep is DECLARED"
+            (is (.exists (io/file dir "src" "slopp" "rest" "contract.clj")))
+            (let [d (edn/read-string (slurp (io/file dir "deps.edn")))]
+              (is (contains? (:deps d) 'metosin/malli)
+                  (str "slopp.rest.contract requires malli: " (pr-str (:deps d))))))
 
-        (testing "and the result SAYS it emitted one"
-          (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))
-      (finally (ops/close! sess)))))
+          (testing "and the boundary REFUSES a bad body in a JVM that never heard of slopp"
+            (let [r (sh-outside-slopp! "clojure" "-M" "-e" probe :dir dir)]
+              (is (zero? (:exit r))
+                  (str "the vendored rest framework must load.\nout: " (:out r)
+                       "\nerr: " (:err r)))
+              (is (str/includes? (:out r) ":STATUS 400")
+                  (str "a body declaring :sku 42 against [:sku :string] must be"
+                       " refused THERE, not only here.\nout: " (:out r)
+                       "\nerr: " (:err r)))))
+
+          (testing "negative control: without the framework's deps the same tree fails"
+            ;; a green run above proves nothing unless the red one is reachable
+            (let [dir2 (str (Files/createTempDirectory
+                             "slopp-rest-nodeps" (make-array FileAttribute 0)))]
+              (try
+                (with-redefs [boot/framework-deps (constantly nil)]
+                  (external/build! sess dir2))
+                (let [r (clojure.java.shell/sh
+                         "clojure" "-M" "-e" "(require 'slopp.rest)" :dir dir2)]
+                  (is (not (zero? (:exit r)))
+                      "vendored rest source with no deps declared must NOT load")
+                  (is (str/includes? (:err r) "malli")
+                      (str "and it must fail on the framework's own require: "
+                           (:err r))))
+                (finally
+                  (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                            (.delete f))]
+                    (rm! (io/file dir2)))))))
+          (finally
+            (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+              (rm! (io/file dir)))
+            (ops/close! sess)))))))
 
 (deftest ^:external a-store-that-mounts-its-OWN-browser-entry-gets-no-second-one
   ;; Reported by a consuming store, which compiled the bundle and COUNTED the
@@ -2394,6 +2125,275 @@
               (str "the reason does not name the form that already mounts: "
                    (pr-str (:client-entry-skipped r))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-built-BROWSER-app-gets-its-entry-generated
+  ;; The thing the whole cljnx wave existed to unblock. `webapp-launcher-source`
+  ;; was written, tested, and had NO CALLER for a wave: the entry marker was
+  ;; asked for two incompatible shapes, so a generated `(mount! (entry))`
+  ;; refused at page load for any app that could also be opened headlessly.
+  ;;
+  ;; With one declaration and one public derivation the fork is gone, and this
+  ;; is the assertion that the capability's stated goal — **an app that opts
+  ;; into `webapp` writes no ClojureScript** — is finally true rather than true
+  ;; except for the two forms every app hand-wrote.
+  (let [app (str "(ns shop.ui\n"
+                 "  (:require [slopp.webapp :as webapp]))\n\n"
+                 "(defn ^{:webapp/path \"/things\"} things \"The list.\"\n"
+                 "  [{:keys [state]}]\n"
+                 "  [:ul (for [t (webapp/load-value state :main)] [:li (:name t)])])\n\n"
+                 "(defn ^{:http/method :get :http/path \"/\" :http/auth :public\n"
+                 "        :rest/response :string :webapp/client-routes [\"/things\"]}\n"
+                 "  doc \"The document.\" [_] {:status 200 :body \"<html></html>\"})\n\n"
+                 ;; no `:webapp/routes` — the pages carry their own addresses,
+                 ;; and the build is what joins them into a table
+                 "(defn ^:app/entry app \"The application.\" []\n"
+                 "  {:webapp/state (atom {})})\n")
+        dir (str (System/getProperty "java.io.tmpdir")
+                 "/slopp-browser-entry-" (System/nanoTime))
+        sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "webapp.enabled" :value "true"
+                        :prompt "a browser app")
+      (ops/module-platform! sess "shop.ui" :cljc :prompt "an app's own code is portable")
+      (land-unloaded! sess 'shop.ui app)
+
+      (testing "the fixture is a webapp with exactly one marked entry"
+        ;; population control: with no entry there is nothing to generate, and
+        ;; every assertion below would pass by describing an empty build
+        (let [st (:store @sess)]
+          (is (= 1 (count (rules.webapp/page-rows st)))
+              (pr-str (rules.webapp/page-rows st)))))
+
+      (let [r (external/build! sess dir)]
+        (is (nil? (:error r)) (pr-str r))
+
+        (testing "the browser entry is GENERATED, under the client source root"
+          ;; cljs-src/, not src/ — the ClojureScript compiler has to see it and
+          ;; the JVM classpath must not
+          (let [f (io/file dir "cljs-src" "native" "client.cljs")]
+            (is (.exists f)
+                (str "no generated browser entry — every browser app is still"
+                     " hand-writing the two forms this capability exists to"
+                     " remove. :client-entry was " (pr-str (:client-entry r))))
+            (when (.exists f)
+              (let [src (slurp f)]
+                (testing "it mounts the app's own entry"
+                  (is (str/includes? src "shop.ui/app") src)
+                  (is (str/includes? src "dom/mount!") src))
+                (testing "and REQUIRES what that entry reaches"
+                  ;; naming a page without requiring its closure is a call to a
+                  ;; var that does not exist, which reaches a reader as a blank
+                  ;; page and reads like a rendering bug rather than a wiring one
+                  (is (str/includes? src "[shop.ui]") src))
+                (testing "and carries the table the PAGES declared"
+                  ;; the entry fn declares no `:webapp/routes` at all — the
+                  ;; address lives on the page, and the build is the reader
+                  ;; that joins them. Without this the app mounts and every
+                  ;; url renders not-found, which looks like a routing bug in
+                  ;; an app whose routing was never wired
+                  (is (str/includes? src "\"/things\" shop.ui/things") src)
+                  (is (str/includes? src ":webapp/routes") src))))))
+
+        (testing "and the result SAYS it emitted one"
+          (is (= "cljs-src/native/client.cljs" (:client-entry r)) (pr-str r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-warm-spare-is-ADOPTED-and-carries-the-framework
+  ;; slopp-ui measured this and slopp should assert it — the same principle as
+  ;; the build-and-run test. Their instrument, kept because it is better than
+  ;; anything timing-based: compare the image JVM's ABSOLUTE start time against a
+  ;; mark taken before the restart was requested.
+  ;;
+  ;;   negative → the JVM existed before I asked → a warmed spare was adopted
+  ;;   positive → it booted during the restart → no spare
+  ;;
+  ;; Immune to round-trip latency, which is what makes uptime-based timing
+  ;; useless here. Their before/after on the two jars: +2696 (fresh boot) then
+  ;; -6288 / -11256 / -8643 (adopted), three for three.
+  ;;
+  ;; Adoption alone is worth nothing — an adopted image MISSING the framework
+  ;; trades a restart bug for a subtler one, so this asserts both. That pairing
+  ;; is the actual claim the one-door change makes.
+  (with-redefs [boot/framework-files
+                (constantly {"http" {"slopp/http.clj"
+                                     "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"}})
+                boot/framework-deps (constantly nil)]
+    (let [sess (external/open! {:slopp.ops/warm-spare? true})]
+      (try
+        (land-unloaded! sess 'sp.app
+                        (str "(ns sp.app (:require [slopp.http :as web]))\n"
+                             "(defn h \"H.\" [r] (web/handle! r))\n"))
+        ;; First restart warms a spare from a store that NOW needs the framework.
+        ;; The spare standing at open was warmed from an empty store and must be
+        ;; discarded rather than adopted — that mismatch is its own hazard, and
+        ;; asserting adoption on this restart would be asserting the bug.
+        (ops/restart! sess)
+        ;; WAIT for the spare's JVM to exist before marking t0. start-spare!
+        ;; returns a future, so the boot happens in the BACKGROUND — and their
+        ;; samples were 6-11s apart by human pacing, which hid this. In a tight
+        ;; loop the mark lands before the spare has launched, and a correctly
+        ;; ADOPTED image then reads as +29ms: the right answer to the wrong
+        ;; question. Deref blocks until the handle is real.
+        (some-> (:spare @sess) deref)
+        (let [t0 (System/currentTimeMillis)]
+          (ops/restart! sess)
+          (let [started (first (repl/eval!
+                                (:image @sess)
+                                (str "(.getStartTime (java.lang.management."
+                                     "ManagementFactory/getRuntimeMXBean))")))]
+            (testing "the spare was ADOPTED — its JVM predates the request"
+              (is (number? started) (pr-str started))
+              (is (< started t0)
+                  (str "image JVM started " (- started t0) "ms relative to the"
+                       " restart request; negative means adopted, positive"
+                       " means it booted during the restart and the spare was"
+                       " lost")))))
+        (testing "and the adopted image CARRIES the framework — adoption without
+                  it is the worse bug, not the fix"
+          (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'sp.app))))
+        (finally (ops/close! sess))))))
+
+(deftest ^:external a-framework-using-store-survives-a-RESTART
+  ;; Two bugs, one test, and the second was invisible to the first version of it.
+  ;;
+  ;; (1) Vendoring was wired into session creation alone, so every image AFTER
+  ;; the first booted with an empty src/ — and `fresh-image!` is on the path of
+  ;; restart, deps_add/deps_remove, branch switch, ns_rename and the D5
+  ;; staleness heal.
+  ;;
+  ;; (2) Vendoring copies SOURCE and discards the pom. The framework's own
+  ;; requires — garden, hiccup, cheshire, http-kit — came from that pom, so the
+  ;; files landed correctly and then failed INSIDE them. Reported from slopp-ui:
+  ;; "Could not locate garden/core.clj", raised at slopp.http.css.
+  ;;
+  ;; Both stayed invisible because a store still declaring the coord got source
+  ;; AND deps from ~/.m2 regardless.
+  ;;
+  ;; So the fake framework REQUIRES something external, and the assertion is
+  ;; that the store LOADS. slopp-ui's correction, and it is the whole point: the
+  ;; "resolves from the image dir, no ~/.m2" property was fully satisfied at the
+  ;; moment their store was unloadable. Where a file comes from is not whether
+  ;; the framework works. An earlier cut of this test used a dependency-free
+  ;; fake and passed green against exactly bug (2).
+  (let [fake-web (str "(ns slopp.http (:require [garden.core :as garden]))\n"
+                      "(defn handle! \"H.\" [r] (garden/css [:a {:x 1}]) r)\n")]
+    (with-redefs [boot/framework-files (constantly {"http" {"slopp/http.clj" fake-web}})
+                  boot/framework-deps  (constantly '{"http" {garden/garden {:mvn/version "1.3.10"}}})]
+      (let [sess (external/open!)
+            vendored? (fn [] (.exists (io/file (:dir (:image @sess))
+                                               "src" "slopp" "http.clj")))]
+        (try
+          ;; into the store VALUE: a store cannot ingest code requiring a
+          ;; framework its current image cannot load, and priming a RUNNING
+          ;; image's dir does nothing — a JVM caches a relative classpath dir
+          ;; that did not exist at launch. Which is also why vendoring has to
+          ;; precede process start.
+          (land-unloaded! sess 'fw.app
+                          (str "(ns fw.app (:require [slopp.http :as web]))\n"
+                               "(defn h \"H.\" [r] (web/handle! r))\n"))
+          (testing "the store really does use the framework"
+            (is (some? (engine/framework-injection
+                        (:store @sess) (boot/framework-files)))))
+          (testing "a RESTART gives the new image the framework AND what the
+                    framework itself requires — the store LOADS, which is the
+                    property; the file being present is not"
+            (ops/restart! sess)
+            (is (vendored?) "the restarted image booted without the framework")
+            (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'fw.app))
+                "loading is the real property — a vendored file that cannot
+                 resolve its own requires is a dead store"))
+          (testing "and again — one image is a fluke, two is the property"
+            (ops/restart! sess)
+            (is (vendored?))
+            (is (nil? (image/load-ns! (:image @sess) (:store @sess) 'fw.app))))
+          (finally (ops/close! sess)))))))
+
+(deftest ^:external build-supplies-the-framework-a-store-no-longer-declares
+  ;; The build half of D-framework-injection. Once a store stops declaring
+  ;; io.github.nvoxland/slopp-web, the BUILT app still has to get it — otherwise
+  ;; removing the declaration produces an app with no framework at all, which is
+  ;; why the halves are staged in this order.
+  ;;
+  ;; Part 2: it arrives as FILES, not a coord. slopp-web is never published to a
+  ;; remote, so a coord in the generated deps.edn would name something only the
+  ;; machine that ran slim-install can resolve — a build that ships broken to
+  ;; anywhere else, and one that looks fine here.
+  ;;
+  ;; The manifests are FAKED rather than branched on. This suite runs from a
+  ;; materialized tree, where the real readers look for a jar resource that does
+  ;; not exist there and answer nil — so the vendoring assertions used to sit
+  ;; inside an `if` that never took its true arm in the only environment this
+  ;; test ever executes in. A fake also buys an assertion the real manifest
+  ;; cannot: declare TWO families, use ONE, and the tree can be checked for what
+  ;; did NOT arrive. That is where the opt-in is either real or is only a line
+  ;; in a config file.
+  (let [files '{"_"    {"slopp/fixture_syntax.cljc" "(ns slopp.fixture-syntax)\n"}
+                "cli"  {"slopp/cli.clj" "(ns slopp.cli)\n"}
+                "http" {"slopp/http.clj" "(ns slopp.http)\n(defn handle! \"H.\" [r] r)\n"
+                        "slopp/http/router.clj" "(ns slopp.http.router)\n"}}
+        ;; the "_" path is deliberately NOT slopp/lang.cljc, which is what
+        ;; production files there. Vendoring writes into `src`, and `src` is the
+        ;; FIRST classpath entry of the image running this test — so a stub at a
+        ;; real path shadows the real namespace and breaks the machinery under
+        ;; the assertions. The property being checked is that "_" travels
+        ;; whichever capability is used, and a neutral path checks it safely.
+        deps  '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
+                "http" {garden/garden {:mvn/version "1.3.10"}}}]
+    (with-redefs [boot/framework-files (constantly files)
+                  boot/framework-deps  (constantly deps)]
+      (let [sess (external/open!)
+            dir  (str (java.nio.file.Files/createTempDirectory
+                       "slopp-framework"
+                       (make-array java.nio.file.attribute.FileAttribute 0)))]
+        (try
+          ;; into the store VALUE, exactly as `a-framework-using-store-survives-a-RESTART`
+          ;; does and for the reason recorded there: a store cannot INGEST code
+          ;; requiring a framework its current image cannot load, and this image
+          ;; booted before the store named anything to vendor. Going through
+          ;; `create-ns!` here silently left the store EMPTY — which the previous
+          ;; version of this test did, and never noticed, because its vendoring
+          ;; assertions sat behind a branch that never ran.
+          (land-unloaded! sess 'fw.app
+                          (str "(ns fw.app (:require [slopp.http :as web]))\n\n"
+                               "(defn ^:export handler \"H.\" [req] (web/handle! req))\n"))
+          (is (= #{"http"} (engine/used-families (:store @sess)))
+              "guard the guard: this store must USE http and nothing else, or
+               every assertion below is about an empty derivation")
+          (is (nil? (:error (external/build! sess dir))))
+          (let [d  (edn/read-string (slurp (io/file dir "deps.edn")))
+                at #(io/file dir "src" %)]
+            (testing "the framework is IN the tree, so the app needs no repository"
+              (is (.exists (at "slopp/http.clj")) (str "expected " (at "slopp/http.clj")))
+              (is (str/includes? (slurp (at "slopp/http.clj")) "(ns slopp.http")
+                  "the vendored file must be the real source, not a stub")
+              (is (.exists (at "slopp/http/router.clj"))
+                  "the whole family travels, not just the facade")
+              (is (.exists (at "slopp/fixture_syntax.cljc"))
+                  "and \"_\" with it — the dialect's helpers belong to the syntax
+                   rather than to any one capability, so every user gets them"))
+            (testing "and ONLY the family this store uses"
+              ;; all-or-nothing vendoring would put slopp/cli.clj here and this
+              ;; assertion is what notices. `(require 'slopp.cli)` succeeding in
+              ;; an app that never enabled cli is the capability model holding in
+              ;; the config file and not at runtime, which is the one place a
+              ;; consumer would actually meet it.
+              (is (not (.exists (at "slopp/cli.clj")))
+                  "fw.app names nothing in cli, so no cli framework may be resolvable in it")
+              (is (nil? (get-in d [:deps 'metosin/malli]))
+                  (str "nor may it inherit cli's deps: " (pr-str (:deps d)))))
+            (testing "and it is never a COORD — that would resolve only where
+                      slim-install has run"
+              (is (nil? (get-in d [:deps 'io.github.nvoxland/slopp-web]))
+                  (pr-str (:deps d))))
+            (testing "but what the framework itself REQUIRES is declared, or the app
+                      ships source it cannot load — the build path has the same hole
+                      the image had, found by slopp-ui removing the coord"
+              (is (contains? (:deps d) 'garden/garden)
+                  (str "garden missing from the built deps: " (pr-str (:deps d))))))
+          (finally
+            (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
+              (rm! (io/file dir)))
+            (ops/close! sess)))))))
 
 (deftest ^:external closing-a-session-twice-releases-nothing-twice
   ;; `close!` PARKS the image for the next session. A second `close!` on the
