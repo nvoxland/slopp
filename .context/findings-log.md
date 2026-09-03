@@ -2281,3 +2281,13 @@ Review of the remaining commit logic, with numbers on this store's main line:
 - Process: seven patches were refused as fragments before landing (a `do`
   body, a `let` header); the matcher's span rule made two of the fixes
   one-line matches on complete forms.
+- The impacted slice (147 tests) caught a real bug in the first re-fork rule:
+  it compared the thread's HEAD to the branch head, so a rowless thread
+  carrying only a turn_begin looked "moved" and was re-forked, orphaning its
+  open turn — `one-shot-call` (turn_begin in one process, the write in the
+  next: the Stop hook's shape) failed. Moved means the thread's BASE is
+  behind the branch head; and when a branch really has moved under a
+  rowless thread with an open turn, the turn is re-recorded on the
+  re-forked line so the ask's bracket survives.
+- The verification image reported a never-loaded form in slopp.ops.engine
+  after the land; `restart` cleared it before full_check.

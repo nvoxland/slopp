@@ -6624,8 +6624,11 @@ file. Now `create-line!` copies nothing for a thread. While a thread is
 ROWLESS it reads its branch's view (`view-line!` resolves every reader —
 `load-elements`, `load-refs`, `elements-digest` — for an OPEN thread only;
 a settled thread resolves to itself, empty), and because it has nothing to
-pin it RE-FORKS at the branch's head when the branch moves (`refork-thread!`,
-at adopt and in `refresh-cache!`). Its first write persists its WHOLE value
+pin it RE-FORKS at the branch's head when the branch moves — moved meaning the
+thread's BASE is behind the branch head, never its own head, which a turn
+marker advances (`refork-thread!`: at adopt for a thread with no deltas of its
+own; in `refresh-cache!` otherwise, re-recording an open turn-begin on the
+re-forked line so a one-shot process's bracket survives). Its first write persists its WHOLE value
 (`write-snapshot!` writes every namespace when the line has no rows), and
 from then on it is pinned exactly as before. `land-thread!` never copies an
 empty view over the branch's. Consequence: "an open thread with a view"
