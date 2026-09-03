@@ -460,3 +460,41 @@
                 "the folded tree and the live store agree byte for byte"))
           (finally (git/close-ctx! ctx))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-projection-persists-across-contexts-and-stays-rebuildable
+  ;; D2 (s20): the repo was InMemoryRepository and publish-local! opens a
+  ;; fresh context per publish, so `.has` was false for every pinned sha
+  ;; and every publish re-rendered and re-inserted the tree of EVERY
+  ;; commit point in the journal — 270+ full-store renders to mint one
+  ;; commit. Measured at 98% of a commit point's wall. The projection is a
+  ;; cache; a cache that forgets on every use is a recomputation.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})
+        has? (fn [ctx sha] (.has (.getObjectDatabase ^org.eclipse.jgit.lib.Repository (:slopp.git/repo ctx))
+                                 (org.eclipse.jgit.lib.ObjectId/fromString sha)))]
+    (try
+      (ops/ingest! sess 'gp.core seed)
+      (external/config! sess "user.name" "alice")
+      (external/config! sess "user.email" "alice@slopp")
+      (is (nil? (:error (external/commit-point! sess "v1" :agent "alice"))))
+      (ops/edit-replace! sess 'gp.core 'f "(defn f [x] (+ 10 x))" :prompt "v2" :agent "alice")
+      (is (nil? (:error (external/commit-point! sess "v2" :agent "alice"))))
+      (let [tip (let [ctx (git/open-ctx! dir)]
+                  (try (get-in (git/ensure-projected! ctx) [:refs "main"])
+                       (finally (git/close-ctx! ctx))))]
+        (is (string? tip))
+        (testing "a NEW context already holds the objects the last one minted"
+          (let [ctx (git/open-ctx! dir)]
+            (try
+              (is (has? ctx tip) "the tip's object is live before any projection runs")
+              (is (= tip (get-in (git/ensure-projected! ctx) [:refs "main"])))
+              (finally (git/close-ctx! ctx)))))
+        (testing "and it is still a CACHE: deleted, the same shas come back"
+          (let [cache (java.io.File. (java.io.File. (str dir) ".slopp") "git-cache")]
+            (run! #(.delete ^java.io.File %) (reverse (file-seq cache)))
+            (let [ctx (git/open-ctx! dir)]
+              (try
+                (is (not (has? ctx tip)) "gone")
+                (is (= tip (get-in (git/ensure-projected! ctx) [:refs "main"])) "rebuilt, byte-identical")
+                (finally (git/close-ctx! ctx)))))))
+      (finally (ops/close! sess)))))

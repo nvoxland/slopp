@@ -1,7 +1,8 @@
 (ns slopp.git
-  "P4-m8: the git compatibility layer. Two faces over one in-memory JGit
-  repo (`InMemoryRepository` — there is NO on-disk git repo; `store.db` is
-  the source of truth and the git repo a rebuildable cache):
+  "P4-m8: the git compatibility layer. Two faces over one bare JGit
+  repo persisted at `.slopp/git-cache` (`store.db` is the source of truth
+  and the git repo a REBUILDABLE CACHE — delete it and it is regenerated;
+  it persists so a publish mints only what the journal gained, D2/s20):
 
   - PROJECTION: the journal's :commit commit-points generated as git objects.
     Serving these to a git client over local smart-HTTP was removed — it
@@ -33,6 +34,7 @@
            [org.eclipse.jgit.dircache DirCache DirCacheEntry]
            [org.eclipse.jgit.internal.storage.dfs DfsRepositoryDescription
             InMemoryRepository$Builder]
+           [org.eclipse.jgit.storage.file FileRepositoryBuilder]
            [org.eclipse.jgit.lib CommitBuilder Constants FileMode
             ObjectId ObjectInserter PersonIdent Repository]
            [org.eclipse.jgit.revwalk RevWalk]
@@ -42,18 +44,44 @@
 
 ;; ---------------------------------------------------------------------------
 ;; repo + mapping table
-(defn open-repo!
-  "An in-memory bare repo (JGit DFS `InMemoryRepository`) — the projection is
-  regenerated into it from the journal on demand; nothing touches disk. Built
-  with a real FS handle: `TransportLocal` resolves file-path remotes through
-  the LOCAL repo's FS, and a DFS repo has none by default (NPE without it)."
-  ^Repository [_dir]
-  (let [repo (.. (InMemoryRepository$Builder.)
-                 (setRepositoryDescription (DfsRepositoryDescription. "slopp"))
-                 (setFS FS/DETECTED)
-                 (build))]
-    (-> repo (.updateRef Constants/HEAD) (.link "refs/heads/main"))
-    repo))
+(defn ^:live-handle open-repo!
+  "The projection repo. With a store `dir`: a bare JGit `FileRepository` at
+  `<dir>/.slopp/git-cache`, created on first use and PERSISTED on purpose
+  (D2, s20) — it was an `InMemoryRepository`, and since `publish-local!`
+  opens a fresh context per publish, every publish re-rendered and
+  re-inserted the tree of every commit point in the journal: the pinned-sha
+  short-circuit in `ensure-projected!` can never fire on an object database
+  born empty a moment ago. Measured at 98% of a commit point's wall (189s,
+  then 210s a day later). On disk, `.has` is true for everything already
+  minted, and a publish renders only what the journal gained.
+
+  With NO dir (nil): an in-memory SCRATCH repo — `clone!` fetches a remote
+  into one before any store exists, and there is nothing to persist.
+
+  Still a CACHE either way: `store.db` is the source of truth, shas are
+  deterministic, and deleting the directory regenerates byte-identical
+  objects. Both are built with a real FS handle because `TransportLocal`
+  resolves file-path remotes through the LOCAL repo's FS (a DFS repo has
+  none by default — NPE without it)."
+  ^Repository [dir]
+  (if (clojure.string/blank? (str dir))
+    (let [repo (.. (InMemoryRepository$Builder.)
+                   (setRepositoryDescription (DfsRepositoryDescription. "slopp"))
+                   (setFS FS/DETECTED)
+                   (build))]
+      (-> repo (.updateRef Constants/HEAD) (.link "refs/heads/main"))
+      repo)
+    (let [git-dir (java.io.File. (java.io.File. (str dir) ".slopp") "git-cache")
+          fresh?  (not (.exists (java.io.File. git-dir "HEAD")))
+          repo    (.. (FileRepositoryBuilder.)
+                      (setGitDir git-dir)
+                      (setBare)
+                      (setFS FS/DETECTED)
+                      (build))]
+      (when fresh?
+        (.create repo true)
+        (-> repo (.updateRef Constants/HEAD) (.link "refs/heads/main")))
+      repo)))
 
 (defn ensure-map!
   "Create the git_map pinning table (delta↔sha) if absent; returns conn.
@@ -79,10 +107,11 @@
    :slopp.git/lock     (Object.)})
 
 (defn close-ctx!
-  "Close a git context's in-memory JGit repo and its git_map connection, and
-  return nil. The repo is a rebuildable CACHE of the journal's commit-points — the
-  store is the source of truth — so closing one loses nothing;
-  `ensure-projected!` rebuilds it on demand.
+  "Close a git context's JGit repo and its git_map connection, and return
+  nil. The repo is a rebuildable CACHE of the journal's commit-points — the
+  store is the source of truth — so closing one loses nothing; it persists
+  at `.slopp/git-cache` between contexts, and `ensure-projected!` rebuilds
+  whatever is missing on demand.
 
   `ctx` is an OPAQUE handle from `open-ctx!`: it carries a live JGit
   `Repository`, a JDBC `Connection` and a lock, so no caller builds one and no
