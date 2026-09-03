@@ -1,4 +1,7 @@
 {
+  "permissions": {
+    "allow": ["mcp__plugin_slopp_slopp"]
+  },
   "env": {
     "SLOPP_LIVE": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
