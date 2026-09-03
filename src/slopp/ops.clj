@@ -5669,8 +5669,12 @@
                   ;; added a require where nothing used it (2026-09-03: the
                   ;; db layer gained a require of the read layer)
                   anchored (when spec
-                             (some-> (edit/anchor-error (:store @session) (:error r))
-                                     :form namespace symbol))
+                             ;; `compile-error` strips the coordinate from the
+                             ;; message and puts the anchor on the result as
+                             ;; :form — read THAT first; the text is a fallback
+                             (or (some-> (:form r) namespace symbol)
+                                 (some-> (edit/anchor-error (:store @session) (:error r))
+                                         :form namespace symbol)))
                   ns-sym (when spec
                            (or (when (and anchored (some #{anchored} nses)
                                           (not (tried [anchored spec])))

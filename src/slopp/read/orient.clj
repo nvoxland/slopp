@@ -1133,7 +1133,7 @@
              :hint (str "cards, not bodies. How these connect: query_flow {from to} (the call"
                         " path, bodies on it) or {on reach} (callers and callees). The bodies"
                         " you will edit: query_source {targets [\"ns/name\" …]}. Blast radius:"
-                        " query_depends {on \"ns/name\"}. The whole namespace: full true.")}
+                        " query_depends {on \"ns/name\"}.")}
       example (assoc :example example))))
 
 (defn ^:export aliases-line

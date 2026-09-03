@@ -350,7 +350,7 @@
           (is (not (re-find #"\(\* x 2\)" r)) r)
           (is (re-find #":whole false" r) r)
           (is (re-find #"f" r) r)
-          (is (re-find #"full" r) r)))
+          (is (re-find #"query_flow" r) r)))
       (testing "named targets stay a cheap direct read"
         (is (re-find #"\(\* x 2\)"
                      (call! sess "query_source" {:targets [{:ns "gt.core" :name "f"}]}))))
@@ -4772,4 +4772,45 @@
       (testing "and a fresh image boots clean — the require is real"
         (ops/restart! sess)
         (is (empty? (:image-load-failures @sess)) (pr-str (:image-load-failures @sess))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-groups-alias-repair-lands-where-the-error-is
+  ;; eval24 canary, cell 3: one change touching carrier, fuel, discount and
+  ;; quoting; quoting spoke `discount/…` with a bare require. The repair loop
+  ;; added [logi.discount :as discount] to carrier AND fuel first — neither
+  ;; mentions discount — because the compile error's file coordinate had been
+  ;; stripped before the loop looked for an anchor, and it fell back to the
+  ;; first namespace in the group. The error result carries its :form; the
+  ;; loop reads that.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rl.lib" :source "(ns rl.lib)\n(defn f \"F.\" [x] (inc x))\n"})
+      (call! sess "ns_create" {:ns "ra.app" :source "(ns ra.app)\n"})
+      (call! sess "ns_create" {:ns "rb.app" :source "(ns rb.app)\n"})
+      (let [r (call! sess "change" {:prompt "two namespaces, one of them speaking an alias it never declared"
+                                   :impl [{:ns "ra.app" :source "(defn ^:unused-ok a \"A.\" [x] x)"}
+                                          {:ns "rb.app" :source "(defn ^:unused-ok b \"B.\" [x] (lib/f x))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":auto-require \{:added \"\[rl\.lib :as lib\]\", :ns rb\.app\}" r) r)
+        (is (not (re-find #":ns ra\.app" r)) (str "ra.app needed nothing and got nothing: " r))
+        (is (not (re-find #"rl\.lib" (call! sess "query_source" {:ns "ra.app" :full true})))
+            "ra.app's ns form is untouched"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-step-naming-a-namespace-that-does-not-exist-creates-it
+  ;; eval24 canary, cell 1: a change whose steps put a new fn and its test in
+  ;; `logi.discount` before the namespace existed was refused "no namespace —
+  ;; ingest it first"; the model created it and re-sent. The red-first seam
+  ;; already mints an empty namespace for a spec's require; a step is the
+  ;; same intent, stated more directly.
+  (let [sess (external/open!)]
+    (try
+      (let [r (call! sess "change" {:prompt "a discount namespace, born of its first form"
+                                   :tests [{:ns "nx.discount" :source "(deftest apply-t (is (= 97 (apply-discount 100))))"}]
+                                   :impl  [{:ns "nx.discount" :source "(defn apply-discount \"D.\" [c] (- c 3))"}]})]
+        (is (re-find #":ok true" r) r)
+        (is (re-find #":created" r) (str "the namespace's creation is on the result: " r))
+        (is (re-find #":went-red \[nx\.discount/apply-t\]" r) r)
+        (is (re-find #":status :green" r) r))
+      (is (re-find #"\(ns nx\.discount" (call! sess "query_source" {:ns "nx.discount" :full true})))
       (finally (ops/close! sess)))))

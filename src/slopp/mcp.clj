@@ -1734,16 +1734,23 @@
         (if (vector? res) (into res rows) (into [res] rows))))))
 
 (defn- create-leading-ns!
-  "Steps whose source IS an `(ns …)` form for a namespace the store does not
-  have yet: create each namespace (the same `create-ns!` a scaffold uses)
-  and return `{:steps <the rest> :created [create-results]}` — or
-  `{:error …}` when a create refuses. The whole-file heredoc gesture — how
-  every model writes a NEW file — leads with its ns form; without this the
-  blob refused with \"no namespace — ingest it first\" (probed live, s13).
-  An ns form for an EXISTING namespace is not a create: it stays in the
-  group and replaces — a require edit arriving by blob."
+  "Namespaces a change's steps need that the store does not have yet. Two
+  shapes: a step whose source IS an `(ns …)` form for a missing namespace
+  creates it from that form and leaves the group (the whole-file heredoc
+  gesture — how every model writes a NEW file — leads with its ns form;
+  without this the blob refused with \"no namespace — ingest it first\",
+  probed live, s13); and any other step naming a missing namespace creates
+  it EMPTY and stays in the group (eval24 canary: a fn and its test bound
+  for `logi.discount` were refused, the model created it and re-sent — the
+  red-first seam already mints an empty namespace for a spec's require, and
+  a step is the same intent said more directly; the requires it needs
+  follow from its forms). Returns `{:steps <the rest> :created
+  [create-results]}` — or `{:error …}` when a create refuses. An ns form
+  for an EXISTING namespace is not a create: it stays in the group and
+  replaces — a require edit arriving by blob."
   [session steps a]
   (let [st       (:store @session)
+        exists?  (fn [s] (some? (get-in (:store @session) [:namespaces (symbol (str s))])))
         ns-step? (fn [s]
                    (and (nil? (:action s)) (string? (:source s)) (:ns s)
                         (nil? (get-in st [:namespaces (symbol (str (:ns s)))]))
@@ -1762,7 +1769,24 @@
                          [] creates)]
     (if (map? results)
       {:error (:error results)}
-      {:steps (vec (remove ns-step? steps)) :created results})))
+      ;; the other shape: a plain step for a namespace nobody has created
+      (let [rest-steps (vec (remove ns-step? steps))
+            missing    (->> rest-steps
+                            (filter #(and (:ns %) (string? (:source %))
+                                          (contains? #{nil :add :replace} (:action %))
+                                          (not (exists? (:ns %)))))
+                            (map #(symbol (str (:ns %))))
+                            distinct)
+            empties    (reduce (fn [acc nsx]
+                                 (let [r (ops/create-ns! session nsx
+                                                         :source (str "(ns " nsx ")\n")
+                                                         :prompt (:prompt a)
+                                                         :agent (:agent a))]
+                                   (if (:error r) (reduced r) (conj acc r))))
+                               [] missing)]
+        (if (map? empties)
+          {:error (:error empties)}
+          {:steps rest-steps :created (into results empties)})))))
 
 (def ^:private change-handlers!
   "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
@@ -1877,6 +1901,9 @@
                                                       " spec was never watched failing;"
                                                       " a green you did not watch fail"
                                                       " proves nothing"))))
+                           ;; a namespace this change had to create for a step is part of
+                           ;; what it did
+                           (seq (:created born)) (assoc :created (mapv #(select-keys % [:ns :forms]) (:created born)))
                            (:finisher ri)      (assoc :finisher (:finisher ri))
                            (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
                            (red? (:test ri))
