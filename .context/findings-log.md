@@ -2398,3 +2398,24 @@ Review of the remaining commit logic, with numbers on this store's main line:
   undoing the impl once (D) or by landing the spec first (C, A, B, E).
   A red `change` reports "nothing landed" while its impl IS on the thread
   — the note means the branch, and it misled once here.
+
+## 2026-09-03 — eval23-step2: 27–30 turns → 19 / 20 / 17, rule missed by one
+
+- Step-2-only cells from one post-step-1 snapshot, new jar (d7d115d4b431d):
+  19 / 20 / 17 turns (median 19; eval22 median 29, −34%), $0.34 / 0.40 /
+  0.31, 120 / 118 / 90 s, p1+p2 acceptance and a green suite in all three.
+  Pre-registered rule was median ≤ 18: MISS by one; no lifetime run.
+- What the mechanical fixes removed removed cleanly: zero deftest
+  refusals, zero stub-loop refusals, `query_commits {contains}` repaired in
+  every cell, history hunt 7–8 → 3–4.
+- What is left is model habit meeting a cap: every cell hand-read
+  booking, billing and invoice — the three namespaces the whole section
+  dropped because the four-namespace cap filled in MENTION order; one cell
+  re-read three namespaces it had been sent whole, at full size, because a
+  whole-namespace read does not consult the ledger. Levers filed in
+  `projects/eval23-step2/RUNS.md` and the real-usage backlog: size-ordered
+  selection under a cap of six; `:source-already-sent` for a whole-ns read
+  of a bundled namespace; an origin line the model stops at.
+- Harness note: accept9's single probe cannot compile at step 2 (it names
+  step-3/4 vars) and its mode detection keys on a step-4 name; the
+  step-2 half lives in `eval23-step2/accept23.sh`.
