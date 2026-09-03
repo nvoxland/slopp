@@ -743,19 +743,27 @@
 
 (defn cold-load-errors
   "The cold-load half of the compile gate: nil when every ns in `ns-syms`
-  renders to a namespace a FRESH load can resolve — top-to-bottom AND without
-  a require cycle; else one actionable message.
+  renders to a namespace a FRESH load can resolve — top-to-bottom, without
+  a require cycle, and without a qualified reference to a store namespace
+  the ns form never requires; else one actionable message.
 
-  TWO failure shapes, because there are two ways a fresh load dies:
+  THREE failure shapes, because there are three ways a fresh load dies:
 
   - a FORWARD REFERENCE inside a namespace (`index/forward-refs`);
   - a REQUIRE CYCLE between namespaces (`require-cycles`) — Clojure's
-    `Cyclic load dependency`.
+    `Cyclic load dependency`;
+  - an UN-REQUIRED qualified reference (`a.b/x` with no `[a.b …]` in the ns
+    form). Load order is derived from ns forms, so nothing guarantees `a.b`
+    is loaded first, and `No such namespace` follows on a fresh boot.
 
-  Hot-loading into the live image cannot see either: the vars already exist
-  there. Without this check a write commits a store that boot/restart cannot
-  load. The cycle half was added after a `move_forms` group did exactly that
-  and verified GREEN — the gate was there, it simply could not see cycles."
+  Hot-loading into the live image cannot see any of them: the vars already
+  exist there. Without this check a write commits a store that boot/restart
+  cannot load. The cycle half was added after a `move_forms` group did
+  exactly that and verified GREEN; the un-required half after eval22's
+  step-2 trace showed a qualified call landing green in the image and
+  collected into `:image-load-failures` on the next fresh boot. The write
+  path canonicalizes qualified refs to aliases and adds the require before
+  this gate sees them, so it fires only for what arrived another way."
   [store ns-syms]
   (let [cycles   (require-cycles store ns-syms)
         findings (mapcat (fn [ns-sym]
@@ -763,7 +771,26 @@
                                 (derive/forward-refs
                                  (analyze/analyze (store.render/render-ns store ns-sym))
                                  ns-sym)))
-                         (distinct ns-syms))]
+                         (distinct ns-syms))
+        ;; kondo emits no usage row for a namespace it cannot resolve — which
+        ;; is exactly this case — so read the forms' own qualified symbols
+        unreq    (for [ns-sym (distinct ns-syms)
+                       :let [have (set (vals (require-aliases store ns-sym)))
+                             walk (fn walk [x]
+                                    (cond
+                                      (and (seq? x) (= 'quote (first x))) []
+                                      (coll? x)   (mapcat walk x)
+                                      (symbol? x) [x]
+                                      :else       []))]
+                       e (store/forms store ns-sym)
+                       :let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                       :when (and s (not (and (seq? s) (= 'ns (first s)))))
+                       sym (distinct (walk s))
+                       :let [to (some-> (namespace sym) symbol)]
+                       :when (and to (not= to ns-sym)
+                                  (contains? (:namespaces store) to)
+                                  (not (contains? have to)))]
+                   {:ns ns-sym :to to :name (symbol (name sym)) :from (:name e)})]
     (cond
       (seq cycles)
       (str "would not cold-load — require CYCLE: "
@@ -783,7 +810,19 @@
                           findings))
            " — every write arranges definitions before their callers, so a reference"
            " still forward after arranging is either a cycle (the write declares"
-           " it itself) or one the reference graph cannot see"))))
+           " it itself) or one the reference graph cannot see")
+
+      (seq unreq)
+      (str "would not cold-load — a qualified reference to a namespace the ns form"
+           " never requires: "
+           (str/join "; " (map (fn [{:keys [ns to name from]}]
+                                 (str ns "/" (or from "<top-level>") " calls " to "/" name
+                                      " but " ns " does not require " to))
+                               (distinct (map #(select-keys % [:ns :to :name :from]) unreq))))
+           ". The live image tolerates it (every namespace is loaded there); a"
+           " fresh boot does not. Add the require (ns_add_require {ns require"
+           " \"[" (:to (first unreq)) " :as …]\"}), or write the call through change,"
+           " which stores the project's alias and adds the require itself."))))
 
 (def write-coherence-lint
   "The kondo finding types that refuse a WRITE. Everything else kondo reports
@@ -1201,9 +1240,13 @@
           conv       (sort-by (comp - val) (get (alias-conventions store) alias))
           [[l1 n1] [_ n2]] conv
           dominant   (when (and l1 (or (nil? n2) (<= (* 2 n2) n1))) [l1])
+          ;; a DOTTED name is a fully-qualified ref to a store namespace
+          ;; the ns form never required: the repair is the bare require
+          exact      (when (contains? (:namespaces store) (symbol alias)) [(symbol alias)])
           from-store (filter #(= alias (last (str/split (str %) #"\.")))
                              (keys (:namespaces store)))
-          cands      (or (seq dominant)
+          cands      (or (seq exact)
+                         (seq dominant)
                          (seq (sort-by str from-store))
                          (some-> (well-known alias) vector)
                          (seq (mapv key conv)))]
@@ -1215,11 +1258,16 @@
   the alias a `No such namespace: X` failure names, or nil when the failure
   is not that shape, nothing can supply it, or SEVERAL namespaces could
   (`missing-alias-hint` names those; a guess costs more than a question).
-  The write path adds this as a `:system` require and retries the write."
+  A DOTTED X is a fully-qualified reference to a store namespace the ns form
+  never required (a cold image's shape of the loader hole): the repair is
+  the bare `\"[a.b.c]\"`. The write path adds this as a `:system` require
+  and retries the write."
   [store err]
   (when-let [[alias cands] (alias-candidates store err)]
     (when (= 1 (count cands))
-      (str "[" (first cands) " :as " alias "]"))))
+      (if (and (str/includes? alias ".") (= (symbol alias) (first cands)))
+        (str "[" (first cands) "]")
+        (str "[" (first cands) " :as " alias "]")))))
 
 (defn- missing-alias-hint
   "For a `No such namespace: X` compile failure, the `ns_add_require` call that
@@ -1313,3 +1361,26 @@
   [store err]
   (or (missing-alias-require store err)
       (missing-refer-require err)))
+
+(def well-known-aliases
+  "The clojure.* aliases everyone uses, as `{lib alias}` — the floor under
+  the project's own conventions."
+  {'clojure.string 'str 'clojure.set 'set 'clojure.edn 'edn 'clojure.java.io 'io
+   'clojure.walk 'walk 'clojure.pprint 'pp 'clojure.core.async 'async})
+
+(defn ^:export dominant-aliases
+  "`{lib alias}` — what THIS store's own code means by each lib, inverted from
+  `alias-conventions`: the alias most namespaces require the lib under, and
+  only when it is dominant (at least twice the runner-up) or alone. A lib
+  two conventions split evenly has no answer here."
+  [store]
+  (let [by-alias (alias-conventions store)
+        per-lib  (reduce (fn [m [alias libs]]
+                           (reduce (fn [m [lib n]] (update m lib (fnil conj []) [alias n])) m libs))
+                         {} by-alias)]
+    (into {}
+          (keep (fn [[lib cands]]
+                  (let [[[a1 n1] [_ n2]] (sort-by (comp - second) cands)]
+                    (when (and a1 (or (nil? n2) (<= (* 2 n2) n1)))
+                      [lib (symbol a1)]))))
+          per-lib)))

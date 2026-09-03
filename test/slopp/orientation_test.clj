@@ -661,3 +661,15 @@
     (testing "an ordinary error is left alone rather than decorated"
       (is (nil? (ops/session-var-hint "Unable to resolve symbol: no-such-fn in this context")))
       (is (nil? (ops/session-var-hint "Divide by zero"))))))
+
+(deftest ^:external the-brief-hands-the-projects-aliases
+  ;; The other reason to read a namespace was its ns form. The brief says
+  ;; what the project means by each lib, once.
+  (let [sess (external/open!)]
+    (try
+      (ops/create-ns! sess 'ab.fuel :source "(ns ab.fuel)\n(defn f \"F.\" [x] x)\n")
+      (ops/create-ns! sess 'ab.quoting :source "(ns ab.quoting (:require [ab.fuel :as fuel] [clojure.string :as str]))\n(defn q \"Q.\" [x] (fuel/f (str/trim x)))\n")
+      (let [a (:aliases (ops/session-brief sess))]
+        (is (= 'fuel (get a 'ab.fuel)) (pr-str a))
+        (is (= 'str (get a 'clojure.string)) (pr-str a)))
+      (finally (ops/close! sess)))))

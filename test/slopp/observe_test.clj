@@ -8,7 +8,7 @@
   namespace, and the pair belongs together: they are the store admitting the
   limits of reading."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store :as store] [slopp.ops.engine :as engine]))
+            [slopp.ops :as ops] [slopp.ops.external :as external]))
 
 (deftest ^:external observe-captures-what-flows-through
   (let [sess (external/open!)]

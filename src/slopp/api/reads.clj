@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -440,12 +440,17 @@
                                            :cli? (= "1" (str (:cli query-params)))
                                            :tokens (cond same? 450 handoff? 500 :else 1100)
                                            :sources (if (or same? handoff?) 1 2)
-                                           ;; a namespace whole is FIRST-map material;
-                                           ;; the delta and the handoff keep their diet
-                                           :whole-ns (when-not (or same? handoff?)
-                                                       orient/default-whole-ns))
+                                           ;; the delta is a refresher for a reader that
+                                           ;; holds the map; versions ride the first map
+                                           :versions? (not same?))
         text     (if (and handoff? (not same?))
                    (str text "\n" (orient/handoff-text (ops/report session :limit 50) 3800))
+                   text)
+        ;; the project's aliases, once: the first map carries them, the delta
+        ;; assumes the reader holds them
+        text     (if-let [line (when-not same?
+                                 (orient/aliases-line (read.modules/project-aliases (:store @session))))]
+                   (str text "\n" line)
                    text)
         ;; the schema diet's other half: the op-index prose the advertised
         ;; surface shed rides HERE as compact cards — once per ask, not per

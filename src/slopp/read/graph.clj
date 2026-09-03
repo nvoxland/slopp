@@ -309,3 +309,64 @@
           {:error (str "nothing named " on
                        " — `on` is a namespace, var (ns/name), or :keyword;"
                        " modules true reads the module manifest")})))))
+
+(def reach-node-cap
+  "Where `call-reach` stops growing: a neighbourhood past this many forms is
+  a module, not an answer, and the walk keeps the last complete level."
+  60)
+
+(defn ^:export call-path
+  "The call PATH from `from` to `to` over the store-internal callee graph —
+  `{:path [qsym …]}` in call order, `from` first, shortest by hops — or nil
+  when `to` is not reachable. Calls run one way, so the path from a callee
+  back to its caller is nil, and a form reaches itself. The question behind
+  most whole-namespace reads (\"how does quote-breakdown reach the fuel
+  surcharge\"), answered as the path itself rather than as every namespace
+  on the way."
+  [st from to]
+  (let [known? (fn [q] (some? (store/form-named st (symbol (namespace q)) (symbol (name q)))))
+        adj    (callee-adjacency st)
+        walk   (fn [parents x]
+                 (loop [x x, acc ()]
+                   (if (nil? x) (vec acc) (recur (get parents x) (cons x acc)))))]
+    (when (and (known? from) (known? to))
+      (if (= from to)
+        {:path [from]}
+        (loop [frontier [from], parents {from nil}, seen #{from}]
+          (when-let [q (first frontier)]
+            (let [cs (vec (remove seen (get adj q [])))]
+              (if (some #{to} cs)
+                {:path (walk (assoc parents to q) to)}
+                (recur (into (subvec frontier 1) cs)
+                       (into parents (map (fn [c] [c q])) cs)
+                       (into seen cs))))))))))
+
+(defn ^:export call-reach
+  "The call graph around `on` out to `depth` hops, BOTH directions:
+  `{:nodes [qsym …] :edges [{:from :to} …]}` — each node once, in order of
+  distance then name, edges from the caller's side among the nodes shown.
+  Capped at `reach-node-cap` nodes, keeping the last complete level and
+  saying so under `:truncated`."
+  [st on depth]
+  (let [adj     (callee-adjacency st)
+        callers (reduce (fn [m [from tos]]
+                          (reduce (fn [m to] (update m to (fnil conj (sorted-set)) from)) m tos))
+                        {} adj)
+        nbrs    (fn [q] (concat (get adj q []) (get callers q [])))
+        finish  (fn [order seen d truncated?]
+                  (cond-> {:nodes order
+                           :edges (vec (sort-by (juxt (comp str :from) (comp str :to))
+                                                (for [[from tos] adj
+                                                      :when (seen from)
+                                                      to tos
+                                                      :when (seen to)]
+                                                  {:from from :to to})))}
+                    truncated? (assoc :truncated {:node-cap reach-node-cap :depth-reached d})))]
+    (loop [d 0, frontier [on], seen #{on}, order [on]]
+      (if (or (= d depth) (empty? frontier))
+        (finish order seen d false)
+        (let [next (vec (sort-by str (distinct (remove seen (mapcat nbrs frontier)))))]
+          (cond
+            (empty? next) (finish order seen depth false)
+            (< reach-node-cap (+ (count seen) (count next))) (finish order seen d true)
+            :else (recur (inc d) next (into seen next) (into order next))))))))

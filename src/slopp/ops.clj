@@ -22,8 +22,8 @@
             [slopp.index.normalize :as normalize]
             [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
 
-^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
-(declare add-form! add-require! auto-require-retry edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
+^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
+(declare add-form! add-require! auto-require-retry canonical-source! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
 
 (defn reap-idle-images!
   "Stop parked branch images idle past the session TTL (the session's reaper
@@ -3506,7 +3506,9 @@
     ;; no :loop line: it was 472 chars byte-identical in every session of a
     ;; lifetime, re-teaching what the skill said. The brief carries what
     ;; CHANGED and what needs the agent, nothing that is true every time.
-    (cond-> {:project project}
+    (cond-> {:project project
+             ;; what the code means by each lib — the ns-form question, answered once
+             :aliases (read.modules/project-aliases (:store @session))}
       (seq ms)   (assoc :commit-points ms)
       last-done  (assoc :last-done last-done)
       ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
@@ -5011,6 +5013,39 @@
   (query-eval session
               (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
 
+(defn- canonicalize-steps
+  "Canonicalize every add/replace step's source against the store's aliases
+  (`refactor/canonicalize-refs`) and prepend the requires those rewrites owe
+  as `:require` steps, one per [ns spec], so the group verifies them together
+  and a form's hot-load sees its alias. Returns `{:steps :canonicalized}` —
+  the second empty when nothing moved. A step whose source does not parse is
+  left for the group's own refusal."
+  [session steps]
+  (let [st      (:store @session)
+        aliases (read.modules/project-aliases st)
+        out     (reduce (fn [{:keys [steps owed rewrites]} step]
+                          (let [{:keys [action ns source]} step
+                                nsx (some-> ns (as-> n (symbol (str n))))]
+                            (if (and nsx source (contains? #{nil :add :replace} action)
+                                     (get-in st [:namespaces nsx]))
+                              (let [pf (edit/parse-form source)]
+                                (if-let [node (:node pf)]
+                                  (let [c (refactor/canonicalize-refs st nsx node aliases)]
+                                    {:steps    (conj steps (if (seq (:rewrites c))
+                                                             (assoc step :source (n/string (:node c)))
+                                                             step))
+                                     :owed     (into owed (map (fn [spec] [nsx spec])) (:requires c))
+                                     :rewrites (into rewrites (map #(assoc % :ns nsx) (:rewrites c)))})
+                                  {:steps (conj steps step) :owed owed :rewrites rewrites}))
+                              {:steps (conj steps step) :owed owed :rewrites rewrites})))
+                        {:steps [] :owed [] :rewrites []}
+                        steps)
+        reqs    (mapv (fn [[nsx spec]] {:action :require :ns nsx :require spec})
+                      (distinct (:owed out)))]
+    {:steps (into reqs (:steps out))
+     :canonicalized (vec (:rewrites out))
+     :requires (mapv (fn [[nsx spec]] {:added spec :ns nsx}) (distinct (:owed out)))}))
+
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
   pipeline + hot-reload, then re-verify — only the tests the trace map says
@@ -5026,6 +5061,9 @@
   (that require) on its delta."
   [session ns-sym nm new-source & {:keys [prompt agent system no-auto-require]}]
   (let [t0 (System/nanoTime)
+        ;; qualified in, alias on store — the single-form door's half; the
+        ;; pipeline's own :system writes (a require) are already canonical
+        new-source (if system new-source (canonical-source! session ns-sym new-source))
         pf       (edit/parse-form new-source)
         ;; a replaced defmethod leaves its OLD dispatch registered unless the
         ;; replacement re-registers the same [multi dispatch] (#131): hot-load
@@ -5345,6 +5383,8 @@
   reason :cljs-deferred-to-compile) rather than running the suite. D-web-cljs."
   [session ns-sym source & {:keys [prompt agent no-auto-require]}]
   (let [t0 (System/nanoTime)
+        ;; qualified in, alias on store — the single-form door's half
+        source (canonical-source! session ns-sym source)
         pfs (edit/parse-forms source)]
     (if (and (nil? (:error pfs)) (< 1 (count (:nodes pfs))))
       (add-forms! session ns-sym (:nodes pfs) :prompt prompt :agent agent)
@@ -5604,7 +5644,12 @@
   whole feature in one call meets the same gates a whole feature in one form
   does."
   [session steps & {:keys [prompt agent no-auto-require]}]
-  (let [once   (fn [] (edit-group-once! session steps :prompt prompt :agent agent))
+  (let [;; qualified in, alias on store: the rewrites and their requires are
+        ;; part of the group, and the result says what moved
+        {steps :steps, canon :canonicalized, owed :requires} (canonicalize-steps session steps)
+        once   (fn [] (cond-> (edit-group-once! session steps :prompt prompt :agent agent)
+                        (seq canon) (assoc :canonicalized canon)
+                        (seq owed)  (assoc :auto-require (first owed) :auto-requires (vec owed))))
         r      (once)
         nses   (vec (distinct (map :ns steps)))
         stamps [:auto-require :auto-requires :auto-require-refused
@@ -5659,3 +5704,30 @@
                   (< 8 n))
             rb
             (recur rb tried (inc n))))))))
+
+(defn- canonical-source!
+  "The single-form doors' half of qualified-in, alias-on-store: rewrite
+  `source` (one form of `ns-sym`) to the aliases the store speaks
+  (`refactor/canonicalize-refs`) and add the requires it owes as `:system`
+  writes BEFORE the form lands, so its hot-load sees the alias. Best effort:
+  a require the gates refuse (an undeclared module edge, a cycle) leaves
+  the source as written, and the write's own refusal says why. Returns the
+  source to write — unchanged when nothing moved, the form does not parse
+  on its own (a multi-form blob takes the group door), or the namespace
+  does not exist yet."
+  [session ns-sym source]
+  (let [st   (:store @session)
+        node (when (get-in st [:namespaces ns-sym]) (:node (edit/parse-form source)))]
+    (if-not node
+      source
+      (let [c (refactor/canonicalize-refs st ns-sym node (read.modules/project-aliases st))]
+        (if (and (empty? (:rewrites c)) (empty? (:requires c)))
+          source
+          (let [landed? (every? (fn [spec]
+                                  (nil? (:error (add-require! session ns-sym spec
+                                                              :prompt fields/auto-require-prompt
+                                                              :system true))))
+                                (:requires c))]
+            (if (and landed? (seq (:rewrites c)))
+              (n/string (:node c))
+              source)))))))

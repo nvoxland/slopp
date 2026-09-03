@@ -2196,3 +2196,63 @@
          {:error (str "no form named " form-name " in " ns-sym)}))
      (catch Exception ex
        {:error (str "subform edit failed: " (ex-message ex))}))))
+
+(defn ^:export canonicalize-refs
+  "Rewrite the fully-qualified references in `node` (a form of `ns-sym`) to
+  the aliases the store speaks: `{:node :requires [spec …] :rewrites [{:from
+  :to} …]}`. `aliases` is the project's `{lib alias}` table. A lib the
+  namespace already requires under an alias is rewritten to THAT alias; a
+  lib it requires under its full name is left qualified; a lib it does not
+  require is rewritten to the project's alias and `[lib :as alias]` is owed —
+  unless that alias is already taken by another lib here, in which case the
+  ref stays qualified and the bare `[lib]` is owed so a fresh boot still
+  loads it. Quoted symbols and an `ns` form are never touched; a namespace
+  the table does not know is left alone for the compile gate.
+
+  Why: the other reason an agent read a namespace was its ns form — the
+  aliases a new form must speak. Now it may write `lib/fn` and the store
+  keeps the convention. And without the require a qualified ref compiled in
+  the live image (every namespace is loaded there) and failed on a fresh
+  boot, whose load order reads ns forms alone."
+  [store ns-sym node aliases]
+  (let [sexpr (try (n/sexpr node) (catch Exception _ nil))
+        head  (when (seq? sexpr) (first sexpr))]
+    (if (or (nil? sexpr) (= 'ns head))
+      {:node node :requires [] :rewrites []}
+      (let [have     (edit/require-aliases store ns-sym)
+            alias-of (reduce (fn [m [a lib]] (if (= a lib) m (assoc m lib a))) {} have)
+            full?    (into #{} (for [[a lib] have :when (and (= a lib) (nil? (alias-of lib)))] lib))
+            taken    (into #{} (for [[a lib] have :when (not= a lib)] a))
+            known?   (fn [lib] (or (contains? (:namespaces store) lib) (contains? aliases lib)))
+            ;; the unquoted symbols of the form, quote subtrees skipped
+            syms     (letfn [(walk [x]
+                               (cond
+                                 (and (seq? x) (= 'quote (first x))) []
+                                 (coll? x) (mapcat walk x)
+                                 (symbol? x) [x]
+                                 :else []))]
+                       (distinct (walk sexpr)))
+            decide   (fn [sym]
+                       (when-let [nsp (namespace sym)]
+                         (let [lib (symbol nsp)]
+                           (when (and (known? lib)
+                                      ;; a symbol whose namespace part is itself an
+                                      ;; alias here is already canonical
+                                      (not (and (contains? have lib) (not= (get have lib) lib))))
+                             (cond
+                               (full? lib) nil
+                               (alias-of lib)
+                               {:from sym :to (symbol (str (alias-of lib)) (name sym))}
+                               (and (aliases lib) (not (taken (aliases lib))))
+                               {:from sym :to (symbol (str (aliases lib)) (name sym))
+                                :require (str "[" lib " :as " (aliases lib) "]")}
+                               (aliases lib)
+                               {:from sym :require (str "[" lib "]")}
+                               :else nil)))))
+            decided  (vec (keep decide syms))
+            moves    (into {} (keep (fn [d] (when (:to d) [(:from d) (:to d)])) decided))]
+        {:node     (if (seq moves)
+                     (rewrite-symbols node moves {:skip-quoted true})
+                     node)
+         :requires (vec (distinct (keep :require decided)))
+         :rewrites (vec (for [d decided :when (:to d)] (select-keys d [:from :to])))}))))

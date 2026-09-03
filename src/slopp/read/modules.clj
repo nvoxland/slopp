@@ -22,7 +22,7 @@
   crossed back."
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [clojure.set :as set] [slopp.edit.tiers :as tiers] [slopp.store.fields :as fields]))
+            [slopp.store :as store] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [clojure.set :as set] [slopp.edit.tiers :as tiers] [slopp.store.fields :as fields] [slopp.cache :as cache] [slopp.edit :as edit]))
 
 (def ^:export tiers-resource-path
   "Where a build writes its purity tiers and where `deps_add` looks for them.
@@ -540,3 +540,22 @@
        (map (fn [[[from to] id]] {:from from :to to :delta id}))
        (sort-by (juxt :from :to))
        vec))
+
+(defn ^:export project-aliases
+  "THE alias table for a project, `{lib alias}`: what the code already means
+  by each lib (`edit/dominant-aliases`), the derived `canonical-alias` for
+  every store namespace nobody requires yet, and the well-known clojure.*
+  aliases underneath. This is what a new form is stored as when it names a
+  lib fully qualified, what the first bundle hands the agent once, and what
+  `session_brief` carries as `:aliases` — so no namespace is ever read for
+  its ns form. Memoized through the blessed cache on the ns forms' text:
+  every write consults it, and re-parsing every ns form per write is the
+  cost `alias-conventions` was only ever meant to pay on a failure."
+  [store]
+  (let [nses (sort-by str (keys (:namespaces store)))
+        key  (hash (mapv (fn [nsx] (some-> (store/form-named store nsx nsx) :node n/string)) nses))]
+    (cache/cached ::project-aliases key
+                  (fn []
+                    (merge edit/well-known-aliases
+                           (into {} (map (fn [nsx] [nsx (canonical-alias store nsx)])) nses)
+                           (edit/dominant-aliases store))))))

@@ -89,7 +89,7 @@
    [:history #{"query_history" "query_changes" "report"} #(>= (:history %) 2)
     "stitching history calls — report {since/contains} composes commit-points + changes + asks in ONE read"]
    [:dumps #{"query_source"} #(>= (:dumps %) 2)
-    "repeated whole-namespace dumps — query_slice {ns name} gives one form's source + cards for what it reaches; targets [{ns name}] reads named forms"]
+    "repeated whole-namespace dumps — query_flow {from to} or {on reach} shows how forms connect with the bodies on the way; targets [\"ns/name\" …] reads the bodies you will edit; the default {ns} read is already the cards"]
    [:renames #{"edit_rename"} #(>= (:renames %) 2)
     "several renames — if this is one CONCEPT changing name, rename_sweep {from to} does namespaces + vars + keys + prose in ONE call"]
    [:searches #{"query_search"} #(>= (:searches %) 3)

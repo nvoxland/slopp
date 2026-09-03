@@ -1372,3 +1372,20 @@
         (is (not (re-find #"OP-CARDS-MARKER" two)) "the second is the delta — no tool call between")
         (is (< (count two) (count one))))
       (finally (ops/close! sess)))))
+
+(deftest the-first-bundle-hands-the-projects-aliases-once
+  ;; What the code means by each lib rides the first map of a session as one
+  ;; line; the same-session delta assumes the reader holds it.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'ab.fuel "(ns ab.fuel)\n(defn f \"F.\" [x] x)\n")
+                (store/ingest 'ab.quoting "(ns ab.quoting (:require [ab.fuel :as fuel]))\n(defn q \"Q.\" [x] (fuel/f x))\n"))
+        GET (fn [sess q] (slopp.http/handle! (server/context sess)
+                                             {:request-method :get
+                                              :uri "/api/bundle"
+                                              :query-string q}))
+        full  (:bundle (:body (GET (atom {:store st :test-map {}}) "ask=quote%20eco&session-id=s1")))
+        delta (:bundle (:body (GET (atom {:store st :test-map {} :intent-sid "s2"}) "ask=quote%20eco&session-id=s2")))]
+    (is (re-find #"aliases" full) full)
+    (is (re-find #"fuel=ab\.fuel" full) full)
+    (is (re-find #"str=clojure\.string" full) "the well-known ones ride too")
+    (is (not (re-find #"aliases" delta)) delta)))

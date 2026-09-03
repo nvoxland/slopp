@@ -41,8 +41,10 @@
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
   {:ns sym} (whole namespace) or {:ns sym :name sym} (one form). Returns
-  a vector of {:ns :name? :source} in target order; unknown targets get
-  {:error} entries instead of failing the batch."
+  a vector of {:ns :name? :source :v?} in target order; unknown targets get
+  {:error} entries instead of failing the batch. A named form's row carries
+  `:v` — `orient/form-version`, the same fact the wire's ledger keys on —
+  so what an agent holds is citable and a reference can say which version."
   [session targets]
   (let [st (:store @session)]
     (mapv (fn [{:keys [ns name]}]
@@ -55,7 +57,8 @@
 
               :else
               (if-let [e (store/form-named st ns name)]
-                {:ns ns :name name :source (n/string (:node e))}
+                {:ns ns :name name :source (n/string (:node e))
+                 :v (orient/form-version session ns name)}
                 {:ns ns :name name :error "no such form"})))
           targets)))
 
@@ -611,3 +614,64 @@
     (telemetry/cost-by-commit-point (:store @session))
     (telemetry/turn-cost (:store @session)
                          :since since :otel otel :tool-calls tool-calls)))
+
+(defn ^:export flow-view
+  "The answer behind `query_flow`. `{from to}`: the call path between two
+  forms (`graph/call-path`) — every form on it as a row `{:ns :name :source
+  :v :via}`, the forms the path calls but does not pass through as cards,
+  `:edges` between consecutive steps; an unreachable pair says
+  `:unreachable true` and where to look. `{on reach}`: the neighbourhood
+  around one form (`graph/call-reach`, default 2 hops) — `on` and its direct
+  callers and callees as rows with source, the rest as cards. Rows carry
+  `:ns`+`:name`+`:source`, so the wire's form ledger references what the
+  reader already holds and records what it sends."
+  [session & {:keys [from to on reach]}]
+  (let [st   (:store @session)
+        q    (fn [s] (symbol (str s)))
+        nsn  (fn [qs] [(symbol (namespace qs)) (symbol (name qs))])
+        row  (fn [qs via]
+               (let [[nsx nm] (nsn qs)
+                     e        (store/form-named st nsx nm)]
+                 (cond-> {:ns nsx :name nm :via via}
+                   e (assoc :source (n/string (:node e))
+                            :v (orient/form-version session nsx nm)))))
+        card (fn [qs via]
+               (let [[nsx nm] (nsn qs)
+                     c        (orient/form-card session nsx nm)]
+                 (cond-> {:form qs :via via :v (orient/form-version session nsx nm)}
+                   (:sig c) (assoc :sig (:sig c))
+                   (:doc c) (assoc :doc (:doc c)))))
+        adj  (graph/callee-adjacency st)]
+    (cond
+      (and from to)
+      (let [f (q from) t (q to)]
+        (if-let [{:keys [path]} (graph/call-path st f t)]
+          (let [on-path   (set path)
+                periphery (vec (distinct (for [x path, c (get adj x []) :when (not (on-path c))] c)))]
+            {:from f :to t :path path
+             :forms (mapv (fn [[prev x]] (row x (if prev (str "called by " prev) "seed")))
+                          (map vector (cons nil path) path))
+             :edges (mapv (fn [[a b]] {:from a :to b :via "calls"}) (partition 2 1 path))
+             :cards (mapv #(card % "called from the path") periphery)})
+          {:from f :to t :unreachable true
+           :hint (str "no call path from " f " to " t " over the store's callee graph"
+                      " — query_depends {on \"" t "\"} lists its callers;"
+                      " query_flow {on \"" f "\" reach 2} shows the neighbourhood")}))
+
+      on
+      (let [o     (q on)
+            depth (or reach 2)
+            r     (graph/call-reach st o depth)
+            near  (set (:nodes (graph/call-reach st o 1)))
+            via   (fn [x] (cond (= x o) "seed"
+                                (some #(and (= (:from %) x) (= (:to %) o)) (:edges r)) (str "calls " o)
+                                (some #(and (= (:from %) o) (= (:to %) x)) (:edges r)) (str "called by " o)
+                                :else "reach"))]
+        (cond-> {:on o :reach depth
+                 :forms (mapv #(row % (via %)) (filter near (:nodes r)))
+                 :cards (mapv #(card % (via %)) (remove near (:nodes r)))
+                 :edges (mapv #(assoc % :via "calls") (:edges r))}
+          (:truncated r) (assoc :truncated (:truncated r))))
+
+      :else
+      {:error "query_flow needs {from to} (the call path between two forms) or {on [reach]} (the neighbourhood around one)"})))

@@ -1199,14 +1199,6 @@
       (:empty-namespaces r) (assoc :empty-namespaces (:empty-namespaces r))
       (:crossings r)       (assoc :crossings (:crossings r)))))
 
-(defn- form-version
-  "`[form-id hash-of-text]` for `ns-sym/nm` on the current store value — the
-  identity the ledger keys on — or nil when there is no such form. The form
-  id is stable across edits, so the text hash is the version."
-  [session ns-sym nm]
-  (when-let [e (store/form-named (:store @session) ns-sym nm)]
-    [(:id e) (hash (n/string (:node e)))]))
-
 (defn- ledger-held?
   "Is this `[form-id text-hash]` held by the reader of the CURRENT ask? The
   ledger stores the ask number it was recorded under, so a new ask forgets
@@ -1315,9 +1307,9 @@
   replaced by `:source-already-sent true` (everything else on the row
   stays); not held, it is sent and recorded. Walks the shapes that carry
   source today: a vector of items (`query_source`), `:rows` (`orient`),
-  `:target` (`query_slice`), or the map itself (`query_brief`). A source
-  whose text is not the form's current text — a window, an older version —
-  is never a reference.
+  `:forms` (`query_flow`), `:target` (`query_slice`), or the map itself
+  (`query_brief`). A source whose text is not the form's current text — a
+  window, an older version — is never a reference.
 
   Why: `told!` stubs a whole payload the same call already returned and
   knows nothing about forms, so orient → slice → query_source of one form
@@ -1326,7 +1318,7 @@
   [session x]
   (let [row (fn [m ns-sym nm]
               (let [s (:source m)
-                    v (when (string? s) (form-version session ns-sym nm))]
+                    v (when (string? s) (orient/form-version session ns-sym nm))]
                 (cond
                   (nil? v)                    m
                   (not= (second v) (hash s))  m
@@ -1343,8 +1335,9 @@
     (cond
       (vector? x) (mapv one x)
       (map? x)    (cond-> (one x)
-                    (vector? (:rows x)) (update :rows #(mapv one %))
-                    (map? (:target x))  (update :target one))
+                    (vector? (:rows x))  (update :rows #(mapv one %))
+                    (vector? (:forms x)) (update :forms #(mapv one %))
+                    (map? (:target x))   (update :target one))
       :else       x)))
 
 (defn- told!
@@ -1393,7 +1386,7 @@
           payload (dedupe-sources! session payload)
           k [tool (select-keys a [:ns :name :targets :since :detail :depth
                                   :limit :contains :full :at :collapse :format
-                                  :on :direction])]
+                                  :on :direction :from :to :reach])]
           h     [(get @session ::ask 0) (hash payload)]
           p-str (pr-str payload)
           stub  {:already-sent true
@@ -1442,7 +1435,7 @@
                                        [(:ns s) nm])
                  nil)]
     (doseq [[ns-sym nm] forms :when (and ns-sym nm)]
-      (ledger-hold! session (form-version session (symbol (str ns-sym)) (symbol (str nm)))))
+      (ledger-hold! session (orient/form-version session (symbol (str ns-sym)) (symbol (str nm)))))
     nil))
 
 (defn- held-after-write!
@@ -1868,7 +1861,7 @@
                          (cond->
                           {:ok true
                            :impl (select-keys ri [:group :steps :warnings :drift
-                                                  :red-first :note
+                                                  :red-first :note :canonicalized
                                                   :auto-require :auto-requires
                                                   :auto-module-dep :auto-module-deps])
                            :test (:test ri)
@@ -2646,25 +2639,13 @@
       "query_source" (text! (told! session name a
                                         (let [full?   (:full a)
                                               gate    (fn [n]
-                                                        ;; a SMALL namespace is one read — the
-                                                        ;; outline-then-targets two-step cost opus
-                                                        ;; 13 query_source calls per cell on
-                                                        ;; namespaces of ten forms
-                                                        (let [src   (query/query-source session n)
-                                                              src   (if (string? src) src (:source src))
-                                                              chars (count (str src))]
-                                                          (if (and src (<= chars 6000))
-                                                            {:ns n :source src :whole true}
-                                                            ;; no size in the payload: an outline must
-                                                            ;; stay identical across body edits, which is
-                                                            ;; what makes its re-read a stub
-                                                            {:ns n
-                                                             :whole false
-                                                             :outline (:forms (query/query-outline session n))
-                                                             :note (str "outline — the namespace is over 6k"
-                                                                        " chars; name the forms you need"
-                                                                        " (targets [{ns name}]) or pass"
-                                                                        " full: true for it all")})))]
+                                                        ;; CARDS by default, whatever the size: six
+                                                        ;; step-2 sessions made 41 whole-namespace
+                                                        ;; reads for flow and style questions a
+                                                        ;; namespace never answered. A card's :v
+                                                        ;; moves with its body, so the read after an
+                                                        ;; edit shows the edit rather than a stub.
+                                                        (orient/ns-cards session n))]
                                           ;; whole-ns reads walk the require graph one edge
                                           ;; per turn (eval12 wave A) — hand the next
                                           ;; edge over with this one
@@ -2679,9 +2660,14 @@
                                                (query/query-source session (sym :ns))
                                                (gate (sym :ns))))
                                            session
-                                           (if-let [ts (some-> (:targets a) normalize-targets seq)]
-                                             (set (keep :ns ts))
-                                             #{(sym :ns)}))))
+                                           ;; anticipation (the requires' sources) rides the WHOLE
+                                           ;; read only; a card read's next question is a flow or
+                                           ;; a body, not its requires' dumps
+                                           (if full?
+                                             (if-let [ts (some-> (:targets a) normalize-targets seq)]
+                                               (set (keep :ns ts))
+                                               #{(sym :ns)})
+                                             #{}))))
                                  ;; an EXPLICIT read: the caller named what it wanted, and
                                  ;; trimming it was measured as a tax — 69% re-bought, each
                                  ;; re-buy a whole model request (s20). 32k still walls a
@@ -2728,6 +2714,13 @@
                                               reds (when (= :var (:kind r))
                                                      (ops/red-after session (:on a)))]
                                           (cond-> r reds (assoc :red-after reds)))))
+      ;; HOW forms connect, with the bodies on the way — the question a
+      ;; whole-namespace read was standing in for (eval22 step 2: 41 of
+      ;; them, zero graph questions)
+      "query_flow" (text! (told! session name a
+                                     (query/flow-view session :from (:from a) :to (:to a)
+                                                      :on (:on a) :reach (:reach a)))
+                              :budgeted? true)
       "session_brief" ;; git alignment is a QUESTION (query_git), not orientation: it rode on
                        ;; every brief as ~500 chars an agent never acted on
                        (if (:db @session)

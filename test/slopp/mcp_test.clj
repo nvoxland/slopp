@@ -389,35 +389,33 @@
     (try
       (call! sess "ns_create"
             {:ns "tk.core"
-             ;; big enough to be an OUTLINE — a small namespace is one read
-             ;; (its source rides), and this test is about the outline's stub
              :source (apply str "(ns tk.core)\n"
                             (for [i (range 1 91)]
-                              (str "(defn f" i " \"Form " i ", padded so the namespace is long enough that the outline is the answer.\" [x] (+ x " i "))\n")))})
+                              (str "(defn f" i " \"Form " i ".\" [x] (+ x " i "))\n")))})
       (testing "an identical re-read returns an :already-sent stub, not the payload"
         (let [a (call! sess "query_source" {:ns "tk.core"})
               b (call! sess "query_source" {:ns "tk.core"})]
-          (is (re-find #":outline" a) a)
+          (is (re-find #":forms" a) a)
           (is (re-find #":already-sent true" b) b)
           (is (< (count b) (count a)))))
-      (testing "a body edit leaves the OUTLINE honestly identical — and the stub says so"
-        ;; THE measured trap, and the reason the key is not called
-        ;; `:unchanged`. An outline names forms, not their source, so a body
-        ;; edit cannot move it. An agent read `:unchanged` as "your edit did
-        ;; not apply", re-applied it on top of itself, stacked a duplicate
-        ;; malli key and 500'd a live endpoint. The payload hash was right
-        ;; about the view the whole time; the KEY made a claim about the store
-        ;; that only the reader could have made about themselves.
-        (call! sess "edit_replace_form" {:ns "tk.core" :name "f1"
-                                        :source "(defn f1 [x] (* x 9))"})
-        (let [b (call! sess "query_source" {:ns "tk.core"})]
-          (is (re-find #":already-sent true" b) b)
-          (is (re-find #"NOT whether the store changed" b)
-              (str "the stub has to say whose fact this is, or it reads as"
-                   " \"your write did not land\": " b))))
+      (testing "a body edit moves that form's version, so the re-read is not a stub and says which form moved"
+        ;; THE measured trap this replaces: an outline could not move when a
+        ;; body did, so the read after an edit was stubbed, and an agent read
+        ;; the stub as \"your edit did not apply\", re-applied it on top of
+        ;; itself, stacked a duplicate malli key and 500'd a live endpoint. A
+        ;; card carries its version, so the read after an edit SHOWS the edit.
+        (let [v-of (fn [r nm] (second (re-find (re-pattern (str ":form tk\\.core/" nm "\\b[^}]*:v (\\[[^\\]]*\\])")) r)))
+              a    (call! sess "query_source" {:ns "tk.core" :resend true})]
+          (call! sess "edit_replace_form" {:ns "tk.core" :name "f1"
+                                          :source "(defn f1 [x] (* x 9))"})
+          (let [b (call! sess "query_source" {:ns "tk.core"})]
+            (is (not (re-find #":already-sent true" b)) b)
+            (is (some? (v-of a "f1")) a)
+            (is (not= (v-of a "f1") (v-of b "f1")) (str (v-of a "f1") " vs " (v-of b "f1")))
+            (is (= (v-of a "f2") (v-of b "f2")) "an untouched form keeps its version"))))
       (testing "a change the view can SEE invalidates it"
         (call! sess "edit_add_form" {:ns "tk.core" :source "(defn g [x] x)"})
-        (is (re-find #":outline" (call! sess "query_source" {:ns "tk.core"}))))
+        (is (re-find #"tk\.core/g" (call! sess "query_source" {:ns "tk.core"}))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external usage-smells-hint-once
@@ -425,13 +423,13 @@
     (try
       (call! sess "ns_create" {:ns "sm.a" :source "(ns sm.a)\n(defn f [x] x)\n(defn g [x] x)\n"})
       (call! sess "ns_create" {:ns "sm.b" :source "(ns sm.b)\n(defn h [x] x)\n"})
-      (testing "a second whole-namespace dump earns the slice hint, ONCE"
+      (testing "a second whole-namespace dump earns the flow hint, ONCE"
         (call! sess "query_source" {:ns "sm.a" :full true})
         (let [r2 (call! sess "query_source" {:ns "sm.b" :full true})]
-          (is (re-find #"query_slice" r2) r2))
+          (is (re-find #"query_flow" r2) r2))
         (call! sess "ns_create" {:ns "sm.c" :source "(ns sm.c)\n(defn i [x] x)\n"})
         (let [r3 (call! sess "query_source" {:ns "sm.c" :full true})]
-          (is (not (re-find #"query_slice" r3)) r3)))
+          (is (not (re-find #"repeated whole-namespace" r3)) r3)))
       (testing "a rename streak earns the sweep hint"
         (call! sess "edit_rename" {:ns "sm.a" :from "f" :to "f2"})
         (let [r (call! sess "edit_rename" {:ns "sm.a" :from "g" :to "g2"})]
@@ -2198,7 +2196,7 @@
         "the annotation the marker exists to produce is still set"))
   (testing "the classification itself did not change — this is a refactor"
     ;; positive control on the refactor: same answer, different home
-    (is (= 36 (count tools/read-only-tools)))
+    (is (= 37 (count tools/read-only-tools)))
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
     (is (not (contains? tools/read-only-tools "ui_serve")))
@@ -2243,7 +2241,7 @@
     (is (not-any? #(contains? % :read-only) tools/registry)))
   (testing "the classification did not change — this is a refactor"
     ;; positive control: same answer, different home
-    (is (= 27 (count tools/image-free-tools)))
+    (is (= 28 (count tools/image-free-tools)))
     (is (contains? tools/image-free-tools "session_brief"))
     (is (contains? tools/image-free-tools "query_git") "a sync-group exception")
     (is (not (contains? tools/image-free-tools "query_eval"))
@@ -3216,7 +3214,7 @@
           (is (re-find #":ok true" r) r))
         ;; the write held g's text in the ask's ledger, so the read through
         ;; the read family answers with a reference (D-form-ledger)
-        (is (re-find #":name g, :source-already-sent true"
+        (is (re-find #":name g,[^}]*:source-already-sent true"
                      (call! sess "read" {:op "query_source" :targets [{:ns "fam.core" :name "g"}]}))))
       (testing "the op's own validation, by name"
         (is (re-find #"unknown op frobnicate for edit — ops: change edit_comment" (call! sess "edit" {:op "frobnicate"})))
@@ -3324,7 +3322,7 @@
       (call! sess "edit_replace_form" {:ns "lw.core" :name "f" :prompt "held"
                                        :source "(defn f \"F.\" [x] (inc x))"})
       (let [r (call! sess "query_source" {:targets [{:ns "lw.core" :name "f"} {:ns "lw.core" :name "g"}]})]
-        (is (re-find #":name f, :source-already-sent true" r) r)
+        (is (re-find #":name f,[^}]*:source-already-sent true" r) r)
         (is (re-find #":name g, :source \"\(defn" r) "g was never sent"))
       (testing "sent once, a form is a reference on the next read of ANY shape"
         (is (re-find #":source-already-sent true" (call! sess "query_brief" {:ns "lw.core" :name "g"}))))
@@ -3401,34 +3399,6 @@
                                                       "(deftest red-t (is (= 8 (quad (util/twice 1)))))\n")})]
           (is (not (re-find #"does not declare" r)) (str "the edge question must be answered, not asked: " r))
           (is (re-find #":auto-module-dep \{:from \"mg\.red\", :to \"mg\.util\"\}" r) r)))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external a-small-namespace-is-one-read
-  ;; eval10 opus s4: 13 query_source calls per lifetime cell on namespaces of
-  ;; ~10 forms — the outline first, then the forms it named. Plain-files opus
-  ;; `cat`s the file once. When the whole namespace fits comfortably, the
-  ;; outline is a detour: answer with the source. A big namespace keeps the
-  ;; outline (and says why), and `full true` still forces the source.
-  (let [sess (external/open!)]
-    (try
-      (call! sess "ns_create" {:ns "sm.core" :source "(ns sm.core)\n(defn ^:unused-ok a [x] x)\n(defn ^:unused-ok b [x] (a x))\n"})
-      (call! sess "ns_create" {:ns "big.core"
-                               :source (apply str "(ns big.core)\n"
-                                              (for [i (range 120)]
-                                                (str "(defn ^:unused-ok f" i " \"Form number " i ", padded out to make the namespace long enough that an outline is the right answer.\" [x] (+ x " i "))\n")))})
-      (testing "small: the source, and a note saying it is the whole namespace"
-        (let [r (call! sess "query_source" {:ns "sm.core"})]
-          (is (re-find #":source \"\(ns sm\.core\)" r) r)
-          (is (re-find #":whole true" r) r)
-          (is (not (re-find #":outline" r)) r)))
-      (testing "big: the outline, with the size that decided it"
-        (let [r (call! sess "query_source" {:ns "big.core"})]
-          (is (re-find #":outline" r) r)
-          (is (re-find #"over 6k" r) r)
-          (is (re-find #":whole false" r) "the shape names itself in both branches; nobody branches on an absent key")
-          (is (not (re-find #"defn \^:unused-ok f1 " r)) "no source rode along")))
-      (testing "full true is still the whole thing, whatever the size"
-        (is (re-find #"defn \^:unused-ok f1 " (call! sess "query_source" {:ns "big.core" :full true}))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-test-first-namespace-with-its-tests-beside-the-code-lands-red
@@ -3786,22 +3756,28 @@
   ;; namespaces and then read their REQUIRES, one edge per turn — 46-61% of
   ;; sonnet's read calls were answerable from the previous read's require
   ;; set at ~3k tokens per lifetime. So the answer to a whole-ns read
-  ;; carries those sources up front, marked, and never twice.
+  ;; carries those sources up front, marked, and never twice. The WHOLE read
+  ;; is `full true` now; the default read is cards, and cards anticipate
+  ;; nothing — the next question after a card is a flow or a body, not the
+  ;; requires' dumps.
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "ant.b" :source "(ns ant.b)\n(defn b \"B.\" [x] x)\n"})
       (call! sess "ns_create" {:ns "ant.a" :source "(ns ant.a (:require [ant.b :as b]))\n(defn a \"A.\" [x] (b/b x))\n"})
       (call! sess "ns_create" {:ns "ant.c" :source "(ns ant.c (:require [ant.b :as b]))\n(defn c \"C.\" [x] (b/b x))\n"})
       (testing "a whole-ns read attaches its direct requires' sources, marked"
-        (let [r (call! sess "query_source" {:ns "ant.a"})]
+        (let [r (call! sess "query_source" {:ns "ant.a" :full true})]
           (is (re-find #"defn a" r) r)
           (is (re-find #"defn b" r) "ant.b rode along")
           (is (re-find #":anticipated true" r) r)))
       (testing "what one read attached, a later read does not attach again"
-        (let [r (call! sess "query_source" {:ns "ant.c"})]
+        (let [r (call! sess "query_source" {:ns "ant.c" :full true})]
           (is (re-find #"defn c" r) r)
           (is (not (re-find #":anticipated true" r))
               (str "ant.b is already in the reader's hands: " r))))
+      (testing "a card read anticipates nothing"
+        (call! sess "ns_create" {:ns "ant.d" :source "(ns ant.d (:require [ant.c :as c]))\n(defn d \"D.\" [x] (c/c x))\n"})
+        (is (not (re-find #":anticipated true" (call! sess "query_source" {:ns "ant.d"})))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-handoff-shaped-ask-arrives-with-the-report-composed
@@ -3856,7 +3832,7 @@
                                       :arguments {:ns "cd.a"}})))))
         (testing "a routed read answers exactly what MCP answers — anticipation included"
           (let [r (post! {:tool "query_source" :token "tok-1"
-                          :arguments {:ns "cd.a"}})
+                          :arguments {:ns "cd.a" :full true}})
                 t (str (:body r))]
             (is (= 200 (:status r)))
             (is (re-find #"defn a" t) t)
@@ -3929,14 +3905,14 @@
           (is (re-find #":replace" r) "keep-me existed — replaced")
           (is (re-find #":add" r) "fresh/also are new — added")))
       (testing "the landed store agrees"
-        (let [r (call! sess "query_source" {:ns "blob.core"})]
+        (let [r (call! sess "query_source" {:ns "blob.core" :full true})]
           (is (re-find #"K!" r) r)
           (is (re-find #"defn \^:unused-ok also" r) r)))
       (testing "a blob whose text does not parse refuses whole, nothing lands"
         (let [r (call! sess "edit" {:op "change" :prompt "p"
                                     :impl [{:ns "blob.core" :source "(defn broken \"B.\" [x"}]})]
           (is (re-find #"error" r) r)
-          (is (not (re-find #"broken" (call! sess "query_source" {:ns "blob.core"}))))))
+          (is (not (re-find #"broken" (call! sess "query_source" {:ns "blob.core" :full true}))))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external cli-mode-advertises-no-tools
@@ -4141,7 +4117,7 @@
         (let [r (call! sess "ns_add_require" {:ns "upq.user" :require "[upq.core :as core]"
                                               :prompt "the upgrade"})]
           (is (re-find #":ok true" r) r))
-        (let [src (call! sess "query_source" {:ns "upq.user"})]
+        (let [src (call! sess "query_source" {:ns "upq.user" :full true})]
           (is (re-find #"\[upq\.core :as core\]" src) src)
           (is (not (re-find #"upq\.core\)?\s+upq\.core" src)) "one clause, not two")))
       (testing "an identical spec is the state asked for, already holding (s17: a success, nothing written)"
@@ -4170,7 +4146,7 @@
         (is (re-find #":ok true" r) r)
         (is (re-find #":auto-require" r) r)
         (is (re-find #"\[fixq\.core :as core\]"
-                     (call! sess "query_source" {:ns "fixq.ship"}))
+                     (call! sess "query_source" {:ns "fixq.ship" :full true}))
             "the bare clause was upgraded in place"))
       (finally (ops/close! sess)))))
 
@@ -4669,10 +4645,131 @@
       (testing "query_slice {ns} reads the namespace"
         (let [r (call! sess "query_slice" {:ns "rq.core"})]
           (is (re-find #"routed \"query_source\"" r) r)
-          (is (re-find #"defn f" r) r)
+          (is (re-find #"rq\.core/f" r) "the namespace's cards name the form")
           (is (not (re-find #"needs :name" r)) r)))
       (testing "query_commits {contains} is report's question"
         (let [r (call! sess "query_commits" {:contains "fuel"})]
           (is (re-find #"routed \"report\"" r) r)
           (is (not (re-find #"unknown argument" r)) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external query-flow-carries-the-bodies-on-the-path
+  ;; Six step-2 sessions: 41 whole-namespace reads and zero graph questions —
+  ;; the questions were flows ("the path from quote-breakdown to the fuel
+  ;; surcharge"), answered by reading every namespace on the way. One call:
+  ;; the forms ON the path, whole and versioned; the rest as cards; and what
+  ;; it sent enters the ledger so the next read is a reference.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "fw.b" :source "(ns fw.b)\n(defn leaf \"L.\" [x] (inc x))\n(defn ^:unused-ok other \"O.\" [x] x)\n"})
+      (call! sess "ns_create" {:ns "fw.a" :source "(ns fw.a (:require [fw.b :as b]))\n(defn mid \"M.\" [x] (b/leaf x))\n(defn ^:unused-ok entry \"E.\" [x] (mid x))\n"})
+      (testing "the path, with every form on it whole"
+        (let [r (call! sess "query_flow" {:from "fw.a/entry" :to "fw.b/leaf"})]
+          (is (re-find #":path \[fw\.a/entry fw\.a/mid fw\.b/leaf\]" r) r)
+          (is (re-find #"\(defn mid" r) r)
+          (is (re-find #"\(defn leaf" r) r)
+          (is (re-find #":v \[" r) "every form carries its version")
+          (is (not (re-find #"\(defn \^:unused-ok other" r)) "a form off the path is at most a card")))
+      (testing "what the flow sent, a later read answers as a reference"
+        (is (re-find #":source-already-sent true" (call! sess "query_source" {:targets ["fw.b/leaf"]}))))
+      (testing "the reach around a form: callers and callees"
+        (let [r (call! sess "query_flow" {:on "fw.a/mid" :reach 1})]
+          (is (re-find #"fw\.a/entry" r) r)
+          (is (re-find #"fw\.b/leaf" r) r)))
+      (testing "an unreachable pair says so instead of answering nothing"
+        (is (re-find #":unreachable true" (call! sess "query_flow" {:from "fw.b/leaf" :to "fw.a/entry"}))))
+      (testing "advertised under depends, and explore admits it"
+        (is (some #(and (= "depends" (:name %)) (some #{"query_flow"} (:ops %))) tools/families))
+        (let [r (call! sess "explore" {:ops [{:op "query_flow" :on "fw.b/leaf" :reach 2}]})]
+          (is (re-find #"fw\.a/mid" r) r)
+          (is (not (re-find #"is a write" r)) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-namespace-read-is-cards-by-default
+  ;; Six step-2 eval sessions: 41 whole-namespace reads (median 867 chars),
+  ;; zero query_depends — the questions behind them were flows and a style
+  ;; question ("what does a test here look like"), and the namespace was the
+  ;; only shape the agent had a habit for. The default read is now the
+  ;; INTERFACE: per form a card (name, sig, first doc sentence, a version
+  ;; stamp), one example test whole, and the better questions named. Bodies
+  ;; are a targets read or a query_flow away; `full true` is the dump.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "nc.core" :source "(ns nc.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"Adds one. Then more words.\" [x] (inc x))\n(defn g \"Doubles.\" [x] (* 2 x))\n(deftest f-t (is (= 2 (f 1))))\n"})
+      (let [r (call! sess "query_source" {:ns "nc.core"})]
+        (testing "cards, not bodies"
+          (is (re-find #":whole false" r) r)
+          (is (not (re-find #"\(inc x\)" r)) (str "no body rode along: " r))
+          (is (re-find #":form nc\.core/f\b" r) r)
+          (is (re-find #":sig \[x\]" r) r)
+          (is (re-find #":doc \"Adds one\.\"" r) r)
+          (is (re-find #":v \[" r) "every card carries a version stamp"))
+        (testing "one example test rides whole — the style question was a real reason for the read"
+          (is (re-find #"\(deftest f-t" r) r))
+        (testing "the better questions are named"
+          (is (re-find #"query_flow" r) r)
+          (is (re-find #"targets" r) r)))
+      (testing "full: true is still the whole source"
+        (is (re-find #"\(inc x\)" (call! sess "query_source" {:ns "nc.core" :full true}))))
+      (testing "a body edit moves that form's version and no other"
+        (let [v-of (fn [r nm] (second (re-find (re-pattern (str ":form nc\\.core/" nm "\\b[^}]*:v (\\[[^\\]]*\\])")) r)))
+              a    (call! sess "query_source" {:ns "nc.core" :resend true})]
+          (call! sess "change" {:prompt "triple" :impl [{:ns "nc.core" :name "g" :source "(defn g \"Triples.\" [x] (* 3 x))"}]})
+          (let [b (call! sess "query_source" {:ns "nc.core" :resend true})]
+            (is (some? (v-of a "g")) a)
+            (is (not= (v-of a "g") (v-of b "g")) (str a "\n" b))
+            (is (= (v-of a "f") (v-of b "f"))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-targets-read-is-versioned
+  ;; The bodies an agent will edit come from `targets`, and what it holds
+  ;; should be citable: each row carries :v, a repeat at the same version is
+  ;; a reference, and an edit in between moves :v and re-sends the body.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "tv.core" :source "(ns tv.core)\n(defn f \"F.\" [x] (inc x))\n(defn g \"G.\" [x] (dec x))\n"})
+      (let [v-of (fn [r nm] (second (re-find (re-pattern (str ":name " nm "\\b[^}]*:v (\\[[^\\]]*\\])")) r)))
+            a    (call! sess "query_source" {:targets ["tv.core/f" "tv.core/g"]})]
+        (is (re-find #"\(inc x\)" a) a)
+        (is (some? (v-of a "f")) (str "a row carries its version: " a))
+        (testing "a repeat at the same version is a reference that still says which version"
+          (let [b (call! sess "query_source" {:targets ["tv.core/f"]})]
+            (is (re-find #":source-already-sent true" b) b)
+            (is (= (v-of a "f") (v-of b "f")) b)))
+        (testing "an edit in between moves :v and re-sends the body"
+          (call! sess "change" {:prompt "double" :impl [{:ns "tv.core" :name "f" :source "(defn f \"F.\" [x] (* 2 x))"}]})
+          (let [c (call! sess "query_source" {:targets ["tv.core/f" "tv.core/g"]})]
+            (is (re-find #"\(\* 2 x\)" c) c)
+            (is (not= (v-of a "f") (v-of c "f")))
+            (is (= (v-of a "g") (v-of c "g")) "the untouched form keeps its version"))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-fully-qualified-call-is-stored-aliased-with-its-require
+  ;; The other reason to read a namespace was its ns form: the aliases a new
+  ;; form must speak. Write the call fully qualified; slopp stores the
+  ;; project's alias and adds the require. And the hole this closes: a
+  ;; qualified ref to an un-required namespace landed GREEN in the live image
+  ;; (every ns is loaded there) and failed on a fresh boot, whose load order
+  ;; reads ns forms alone.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "cq.fuel" :source "(ns cq.fuel)\n(defn eco-fuel \"H.\" [c] (quot c 2))\n"})
+      (call! sess "ns_create" {:ns "cq.quoting" :source "(ns cq.quoting (:require [cq.fuel :as fuel]))\n(defn ^:unused-ok q \"Q.\" [c] (fuel/eco-fuel c))\n"})
+      (call! sess "ns_create" {:ns "cq.billing" :source "(ns cq.billing)\n"})
+      (testing "in a namespace that holds the alias, the call is stored with it"
+        (let [r (call! sess "change" {:prompt "use eco fuel"
+                                     :impl [{:ns "cq.quoting" :source "(defn ^:unused-ok q2 \"Q2.\" [c] (cq.fuel/eco-fuel c))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":canonicalized" r) r)
+          (is (re-find #"\(fuel/eco-fuel c\)" (call! sess "query_source" {:targets ["cq.quoting/q2"]})))))
+      (testing "in a namespace without it, the project's alias is used and the require added"
+        (let [r (call! sess "change" {:prompt "bill eco"
+                                     :impl [{:ns "cq.billing" :source "(defn ^:unused-ok bill \"B.\" [c] (cq.fuel/eco-fuel c))"}]})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":auto-require" r) r)
+          (is (re-find #"\(fuel/eco-fuel c\)" (call! sess "query_source" {:targets ["cq.billing/bill"]})))
+          (is (re-find #"\[cq\.fuel :as fuel\]" (call! sess "query_source" {:ns "cq.billing" :full true})))))
+      (testing "and a fresh image boots clean — the require is real"
+        (ops/restart! sess)
+        (is (empty? (:image-load-failures @sess)) (pr-str (:image-load-failures @sess))))
       (finally (ops/close! sess)))))

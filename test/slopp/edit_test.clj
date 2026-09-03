@@ -17,7 +17,7 @@
             [slopp.store.render :as store.render]
             [slopp.image.repl :as repl]
             [slopp.image :as image]
-            [slopp.edit :as edit] [slopp.index.refs :as refs] [slopp.edit.hotload :as hotload] [clojure.string :as str] [slopp.image.currency :as image.currency]))
+            [slopp.edit :as edit] [slopp.index.refs :as refs] [slopp.edit.hotload :as hotload] [clojure.string :as str] [slopp.image.currency :as image.currency] [rewrite-clj.node :as n] [slopp.edit.refactor :as refactor]))
 
 (def src "(ns demo)\n(defn add [x y]\n  (+ x y))\n(def z 1)\n")
 
@@ -517,3 +517,66 @@
                                      "[clojure.test :refer [deftest is]]")]
       (is (nil? (:error r)) (pr-str r))
       (is (re-find #"\[clojure\.test :as t :refer \[deftest is\]\]" (str (:src r))) (pr-str r)))))
+
+(deftest a-qualified-reference-is-stored-as-the-projects-alias
+  ;; Agents may write `lib/fn` fully qualified; the store keeps the alias the
+  ;; namespace already speaks, or the project's, and says which require it
+  ;; owes. Pure: the alias table is an argument.
+  (let [st      (-> (store/empty-store)
+                    (store/ingest 'pa.fuel "(ns pa.fuel)\n(defn f \"F.\" [x] x)\n")
+                    (store/ingest 'pa.other "(ns pa.other)\n(defn g \"G.\" [x] x)\n")
+                    (store/ingest 'pa.billing "(ns pa.billing (:require [pa.fuel :as fuel]))\n")
+                    (store/ingest 'pa.full "(ns pa.full (:require [clojure.string]))\n")
+                    (store/ingest 'pa.clash "(ns pa.clash (:require [pa.other :as fuel]))\n"))
+        aliases {'pa.fuel 'fuel 'clojure.string 'str 'pa.other 'other}
+        parse   (fn [s] (:node (edit/parse-form s)))
+        text    (fn [r] (n/string (:node r)))]
+    (testing "an alias this namespace already holds is used; a lib it lacks gets the project's alias and the require"
+      (let [r (refactor/canonicalize-refs st 'pa.billing (parse "(defn z \"Z.\" [x] (pa.fuel/f (clojure.string/trim x)))") aliases)]
+        (is (re-find #"\(fuel/f \(str/trim x\)\)" (text r)) (text r))
+        (is (= ["[clojure.string :as str]"] (:requires r)) (pr-str r))
+        (is (= 2 (count (:rewrites r))) (pr-str (:rewrites r)))))
+    (testing "quoted symbols and the ns form are untouched"
+      (let [r (refactor/canonicalize-refs st 'pa.billing (parse "(def k 'pa.fuel/f)") aliases)]
+        (is (= "(def k 'pa.fuel/f)" (text r)))
+        (is (empty? (:requires r))))
+      (let [r (refactor/canonicalize-refs st 'pa.billing (parse "(ns pa.billing (:require [pa.fuel :as fuel]))") aliases)]
+        (is (= "(ns pa.billing (:require [pa.fuel :as fuel]))" (text r)))))
+    (testing "a lib the namespace requires under its full name stays qualified"
+      (let [r (refactor/canonicalize-refs st 'pa.full (parse "(defn t [x] (clojure.string/trim x))") aliases)]
+        (is (re-find #"clojure\.string/trim" (text r)))
+        (is (empty? (:requires r)))))
+    (testing "an alias already taken by another lib leaves the ref qualified and requires the lib bare"
+      (let [r (refactor/canonicalize-refs st 'pa.clash (parse "(defn u [x] (pa.fuel/f x))") aliases)]
+        (is (re-find #"pa\.fuel/f" (text r)))
+        (is (= ["[pa.fuel]"] (:requires r)) (pr-str r))))
+    (testing "a plain alias call is left alone"
+      (let [r (refactor/canonicalize-refs st 'pa.billing (parse "(defn v [x] (fuel/f x))") aliases)]
+        (is (= "(defn v [x] (fuel/f x))" (text r)))
+        (is (empty? (:rewrites r)))))))
+
+(deftest cold-load-errors-names-a-qualified-reference-with-no-require
+  ;; The hole: `cl.fuel/f` in a namespace that never requires cl.fuel
+  ;; compiles in the live image (every namespace is loaded there) and fails
+  ;; on a fresh boot, whose load order reads ns forms alone. The gate a fresh
+  ;; boot applies, applied at the write.
+  (let [base (store/ingest (store/empty-store) 'cl.fuel "(ns cl.fuel)\n(defn f \"F.\" [x] x)\n")]
+    (testing "un-required: refused, naming the namespace and the require"
+      (let [st (store/ingest base 'cl.app "(ns cl.app)\n(defn a \"A.\" [x] (cl.fuel/f x))\n")
+            e  (edit/cold-load-errors st '[cl.app])]
+        (is (string? e))
+        (is (re-find #"cl\.fuel" (str e)) e)
+        (is (re-find #"require" (str e)) e)))
+    (testing "aliased, or required under its full name: fine"
+      (is (nil? (edit/cold-load-errors (store/ingest base 'cl.app "(ns cl.app (:require [cl.fuel :as fuel]))\n(defn a \"A.\" [x] (fuel/f x))\n") '[cl.app])))
+      (is (nil? (edit/cold-load-errors (store/ingest base 'cl.app "(ns cl.app (:require [cl.fuel]))\n(defn a \"A.\" [x] (cl.fuel/f x))\n") '[cl.app]))))
+    (testing "a namespace outside the store is not this gate's business"
+      (is (nil? (edit/cold-load-errors (store/ingest base 'cl.app "(ns cl.app)\n(defn a \"A.\" [x] (clojure.string/trim x))\n") '[cl.app]))))))
+
+(deftest a-dotted-missing-namespace-repairs-with-a-bare-require
+  ;; A cold image says `No such namespace: cl.fuel` for a fully-qualified
+  ;; ref; the alias repair only knew last-segment aliases and answered nil.
+  (let [st (store/ingest (store/empty-store) 'cl.fuel "(ns cl.fuel)\n(defn f \"F.\" [x] x)\n")]
+    (is (= "[cl.fuel]" (edit/missing-alias-require st "Syntax error compiling at (cl/app.clj:2:1).\nNo such namespace: cl.fuel")))
+    (is (nil? (edit/missing-alias-require st "No such namespace: cl.nope")))
+    (is (= "[cl.fuel :as fuel]" (edit/missing-alias-require st "No such namespace: fuel")) "the last-segment repair is unchanged")))

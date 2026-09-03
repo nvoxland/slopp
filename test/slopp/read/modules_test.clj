@@ -834,3 +834,20 @@
     (is (= [{:from "b" :to "c" :delta "d3"}]
            (read.modules/auto-declared-edges deltas))
         "declared by the pipeline, still standing, production edges only")))
+
+(deftest project-aliases-are-the-conventions-the-code-already-holds
+  ;; The other reason an agent read a namespace: its ns form, for the
+  ;; aliases a new form must speak. One table answers that for the whole
+  ;; project — what the code already means by each lib.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'pa.fuel "(ns pa.fuel)\n(defn f \"F.\" [x] x)\n")
+               (store/ingest 'pa.carrier "(ns pa.carrier)\n(defn c \"C.\" [x] x)\n")
+               (store/ingest 'pa.quoting "(ns pa.quoting (:require [pa.fuel :as fuel] [clojure.string :as str]))\n(defn q \"Q.\" [x] (fuel/f (str/trim x)))\n")
+               (store/ingest 'pa.billing "(ns pa.billing (:require [pa.fuel :as fuel]))\n(defn b \"B.\" [x] (fuel/f x))\n")
+               (store/ingest 'pa.odd "(ns pa.odd (:require [pa.fuel :as fu]))\n(defn o \"O.\" [x] (fu/f x))\n"))
+        a  (read.modules/project-aliases st)]
+    (is (= 'fuel (get a 'pa.fuel)) "the dominant convention wins (two namespaces against one)")
+    (is (= 'str (get a 'clojure.string)))
+    (is (= 'carrier (get a 'pa.carrier)) "a store namespace nobody requires yet gets its derived alias")
+    (is (= 'set (get a 'clojure.set)) "the well-known clojure.* aliases are there even before anyone uses them")
+    (is (nil? (get a 'pa.nope)))))

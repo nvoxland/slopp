@@ -29,8 +29,15 @@
                   :properties {:pattern {:type "string"}
                                :limit {:type "integer"}}
                   :required ["pattern"]}}
+   {:name "query_flow"
+    :description "HOW forms connect, with the bodies on the way — the question a whole-namespace read stands in for. {from \"ns/a\" to \"ns/b\"}: the call path between two forms, each form on it whole and versioned (:v), the forms it calls off the path as cards, :edges between steps; an unreachable pair says :unreachable. {on \"ns/x\" reach 2}: callers and callees around one form, bodies one hop out, cards beyond. Across namespaces. What it sends enters the ledger — a later read of the same form is a reference."
+    :inputSchema {:type "object"
+                  :properties {:from {:type "string"}
+                               :to {:type "string"}
+                               :on {:type "string"}
+                               :reach {:type "integer"}}}}
    {:name "query_source"
-    :description "{ns} alone: the WHOLE source when the namespace is small (≤6k chars, :whole true) — one read, not an outline and then its forms — and the outline (with :chars) when it is not; full: true forces the source. Form source from the store. targets [{ns name}…] reads SEVERAL named forms in ONE call — the normal read. ns alone returns the OUTLINE (name forms, or pass full: true for a whole-namespace dump — rarely needed; compose edits from the outline and let :source-now correct misses)."
+    :description "{ns} alone: the namespace as CARDS — per form its name, sig, first doc sentence and :v (version stamp), plus one example test whole and a hint naming the better questions; never the bodies (full: true is the whole-namespace dump, rarely needed). targets [\"ns/name\" …] reads the BODIES of named forms in ONE call — the normal read before an edit; each row carries :v, and a form you already hold at that version comes back as :source-already-sent. How forms connect is query_flow, not a namespace."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :full {:type "boolean"}
@@ -838,7 +845,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :delta :deltas :group :forms :affected :renamed :renamed-namespaces
     :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
     :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
-    :extracted :step :steps :auto-require :auto-module-dep :finisher :accept-unused :to-ns :keys :unknown-shape
+    :extracted :step :steps :auto-require :canonicalized :auto-module-dep :finisher :accept-unused :to-ns :keys :unknown-shape
     ;; what a realias moved, and what it declined to
     :sites :lib :left-behind
     ;; what it cost and whether to believe it
@@ -870,7 +877,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   such rather than pretending to be a cluster (slopp-ui, 2026-08-30)."
   [{:name "orient" :blurb "Where to start: the forms that matter for an ask, ranked with why; or the project brief." :ops ["orient" "session_brief"]}
    {:name "read" :blurb "Read code by form, never by file: MANY questions in one explore call, an in-image check, one form with what it reaches, a search, the outline, a spooled remainder." :ops ["explore" "check" "query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project"]}
-   {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
+   {:name "depends" :blurb "What reaches what: the call path between two forms or the neighbourhood around one (bodies on the way), callers and callees, the module graph, a macro expansion." :ops ["query_flow" "query_depends" "query_call" "query_macroexpand"]}
    {:name "history" :blurb "What changed, why and when: form history, intents, commit-points, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
    {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it." :ops ["change" "edit_comment" "edit_revert" "undo" "episode_revert"]}

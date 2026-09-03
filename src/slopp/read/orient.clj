@@ -16,7 +16,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [rewrite-clj.node :as n]
-            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings] [slopp.index.refs :as refs] [slopp.store.render :as store.render]))
+            [slopp.store :as store] [slopp.store.fields :as fields] [slopp.edit.modules :as edit.modules] [slopp.index.crossings :as crossings] [slopp.index.refs :as refs]))
 
 (defn ^:export snip
   "Cap `s` at `n` chars with an ellipsis — composites (brief/report) carry
@@ -1024,71 +1024,54 @@
       (seq nss)   (assoc :ns-seeds (vec nss))
       (pos? more) (assoc :more more))))
 
-(def ^:export default-whole-ns
-  "How much of a NAMED namespace the bundle sends whole: a namespace up to
-  `:max-chars` of source, at most `:max-nses` of them, `:max-total` chars
-  between them. Fixed caps rather than a share of the budget, so a project
-  of two hundred namespaces gets the same ceiling as one of ten — the s10
-  lesson that appended rows reshape a session's first step."
-  {:max-chars 2000 :max-nses 4 :max-total 6000})
+^:reads (defn ^:export form-version
+  "`[form-id hash-of-text]` for `ns-sym/nm` on the session's store value —
+  the ONE version fact: what the form ledger keys on, and what a card or
+  a row shows as `:v`. The form id is stable across edits, so the text hash
+  is the version; nil when there is no such form. Public so every read that
+  shows a form can stamp it, and \"which version do I hold\" and \"is it
+  already sent\" are the same fact rather than two that drift."
+  [session ns-sym nm]
+  (when-let [e (store/form-named (:store @session) ns-sym nm)]
+    [(:id e) (hash (n/string (:node e)))]))
 
 (defn ^:export bundle
   "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.
   `:text` is `orient-map` rendered as ONE plain-text block sized for prompt
-  injection — a header that orients, the ranked rows as one-line cards with
-  their `:via`, full sources for at most `sources` seed rows, and the SMALL
-  namespaces the ask names by word sent WHOLE (`:whole-ns`, the caps in
-  `default-whole-ns`; nil sends none — the same-session delta bundle). The
-  cap is the diet: measured, the sources section was 85% of the bundle, and
-  the injected text rides EVERY later request of the session as context
-  rent — rows past the cap stay cards, in rank order. A namespace sent whole
-  is cheaper than the read that followed its cards (eval22 step 2: one
-  `query_source {ns}` per named namespace, every cell), and its forms are
-  dropped from the cards so nothing is sent twice. `:sent` is the form
+  injection — a header that orients and names the reads that answer a
+  task (`query_flow` for how forms connect, `targets` for bodies), the
+  ranked rows as one-line cards with their `:via` and `:v`, and full sources
+  for at most `sources` seed rows. The cap is the diet: measured, the
+  sources section was 85% of the bundle, and the injected text rides EVERY
+  later request of the session as context rent — rows past the cap stay
+  cards, in rank order. No namespace is ever sent whole: a section that did
+  (2026-09-03, one morning) bought turns by sending more source — the file
+  habit served faster — and was retired the same day. `:sent` is the form
   versions whose text was emitted, for the caller to stash toward the
   session's form ledger — the bundle, the write results and the reads share
   one ledger. A blank ask is the plain ranking, never an error — same stance
   as the search endpoint."
-  [session ask & {:keys [tokens sources cli? whole-ns]
-                  :or {tokens 1100 sources 2 whole-ns default-whole-ns}}]
+  [session ask & {:keys [tokens sources cli? versions?] :or {tokens 1100 sources 2 versions? true}}]
   (let [st      (:store @session)
         m       (orient-map session :ask (str ask) :tokens tokens)
-        ;; the named namespaces small enough to send whole, in the caps
-        wholes  (when whole-ns
-                  (let [{:keys [max-chars max-nses max-total]} whole-ns]
-                    (loop [nss (:ns-seeds m), acc [], total 0]
-                      (if (or (empty? nss) (<= max-nses (count acc)))
-                        acc
-                        (let [nsx (first nss)
-                              src (store.render/render-ns st nsx)
-                              c   (count src)]
-                          (if (and (pos? c) (<= c max-chars) (<= (+ total c) max-total))
-                            (recur (rest nss) (conj acc [nsx src]) (+ total c))
-                            (recur (rest nss) acc total)))))))
-        whole?  (into #{} (map first) wholes)
-        in-whole? (fn [q] (whole? (symbol (namespace q))))
-        withs   (vec (take sources (filter #(and (:source %) (not (in-whole? (:form %))))
-                                           (:rows m))))
+        withs   (vec (take sources (filter :source (:rows m))))
         keep?   (into #{} (map :form) withs)
         cards   (into [] (comp (remove (comp keep? :form))
-                               (remove (comp in-whole? :form))
                                (map #(dissoc % :source)))
                       (:rows m))
+        v-of    (fn [q] (form-version session (symbol (namespace q)) (symbol (name q))))
         line    (fn [{:keys [form sig doc via]}]
                   (str "  " form
                        (when sig (str " " (pr-str sig)))
                        (when (seq (str doc)) (str " — " (snip doc 70)))
-                       "  [" via "]"))
-        sent    (vec (concat
-                      (for [r withs
-                            :let [q (:form r)
-                                  e (store/form-named st (symbol (namespace q))
-                                                      (symbol (name q)))]
-                            :when e]
-                        [(:id e) (hash (:source r))])
-                      (for [[nsx _] wholes
-                            e (store/forms st nsx)]
-                        [(:id e) (hash (n/string (:node e)))])))]
+                       "  [" via "]"
+                       (when-let [v (and versions? (v-of form))] (str " :v " (pr-str v)))))
+        sent    (vec (for [r withs
+                           :let [q (:form r)
+                                 e (store/form-named st (symbol (namespace q))
+                                                     (symbol (name q)))]
+                           :when e]
+                       [(:id e) (hash (:source r))]))]
     {:sent sent
      :text (str "[slopp] " (count (:namespaces st)) (if cli? " namespaces; live store — drive it" " namespaces; live store — work")
                 (if cli?
@@ -1102,7 +1085,10 @@
                        " verifies itself and reports.")
                   " through the slopp tools (the store is the source, not the files).")
                 " The forms below are ranked for THIS ask; their sources, when"
-                " present, are current — no need to re-read them.\n"
+                " present, are current — no need to re-read them. How they connect:"
+                " query_flow {from to} or {on reach} (bodies on the way); the bodies"
+                " you will edit: query_source {targets [\"ns/name\" …]} — never a"
+                " whole namespace.\n"
                 (when (seq (:seeds m))
                   (str "seeds: " (str/join " " (:seeds m)) "\n"))
                 (when (seq cards)
@@ -1110,8 +1096,54 @@
                 (when (seq withs)
                   (str "--- the forms the ask names, in full ---\n"
                        (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
-                                             withs))
-                       "\n"))
-                (when (seq wholes)
-                  (str "--- the namespaces the ask names, whole — current, no need to read them ---\n"
-                       (str/join "\n\n" (map (fn [[nsx src]] (str ";; " nsx "\n" src)) wholes)))))}))
+                                             withs)))))}))
+
+(defn ^:export ns-cards
+  "A namespace as its INTERFACE — the default answer to `query_source {ns}`:
+  `{:ns :whole false :forms [{:form :v :sig :doc [:effectful] [:test?]} …]
+  [:example src] :hint}`. Per form a slim card — name, signature, first doc
+  sentence, and `:v` (`form-version`) so the agent can hold and cite a
+  version — never the body; ONE example whole, the namespace's first
+  `deftest`, because \"what does a test here look like\" was a real reason
+  to read a namespace; and a hint naming the questions a namespace read was
+  standing in for.
+
+  Why: six step-2 eval sessions made 41 whole-namespace reads (median 867
+  chars) and zero graph questions — the questions behind them were flows
+  and a style question, and the namespace was the only shape the agent had
+  a habit for. Cheap enough that nothing corrected it. The bodies an ask is
+  ABOUT still arrive whole where they are asked for: the bundle's seeds, a
+  `query_flow` path, a `targets` read."
+  [session ns-sym]
+  (let [st       (:store @session)
+        forms    (filter #(and (:name %) (not= (:name %) ns-sym)) (store/forms st ns-sym))
+        deftest? (fn [e] (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                           (and (seq? s) (contains? #{'deftest 'clojure.test/deftest} (first s)))))
+        card     (fn [e]
+                   (let [c (form-card session ns-sym (:name e))]
+                     (cond-> {:form (:form c) :v (form-version session ns-sym (:name e))}
+                       (:sig c)       (assoc :sig (:sig c))
+                       (:doc c)       (assoc :doc (:doc c))
+                       (:effectful c) (assoc :effectful true)
+                       (deftest? e)   (assoc :test? true))))
+        example  (some #(when (deftest? %) (n/string (:node %))) forms)]
+    (cond-> {:ns ns-sym
+             :whole false
+             :forms (mapv card forms)
+             :hint (str "cards, not bodies. How these connect: query_flow {from to} (the call"
+                        " path, bodies on it) or {on reach} (callers and callees). The bodies"
+                        " you will edit: query_source {targets [\"ns/name\" …]}. Blast radius:"
+                        " query_depends {on \"ns/name\"}. The whole namespace: full true.")}
+      example (assoc :example example))))
+
+(defn ^:export aliases-line
+  "The project's alias table as ONE line for the first bundle: `aliases
+  (write lib/fn fully qualified if unsure — stored as these): fuel=logi.fuel
+  str=clojure.string …`, sorted by alias, at most `cap` entries. The other
+  reason an agent read a namespace was its ns form; this is that answer,
+  once per session."
+  ([aliases] (aliases-line aliases 80))
+  ([aliases cap]
+   (when (seq aliases)
+     (str "aliases (write lib/fn fully qualified if unsure — stored as these): "
+          (str/join " " (take cap (sort (map (fn [[lib a]] (str a "=" lib)) aliases))))))))

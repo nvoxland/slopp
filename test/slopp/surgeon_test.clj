@@ -77,7 +77,8 @@
         (testing "requires and FQ refs across the store were rewritten"
           (let [u (query/query-source sess 'sg.util)]
             (is (re-find #"\[sg\.central :as c\]" u))
-            (is (re-find #"sg\.central/leaf" u))
+            (is (re-find #"c/leaf" u)
+                "the FQ ref was stored as the alias sg.util holds and follows the rename through its require")
             (is (not (re-find #"sg\.core" u)))))
         (testing "still verified end-to-end in the image"
           (is (= [8] (ops/query-eval sess "(sg.util/wrap 2)")))))
