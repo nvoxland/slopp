@@ -2347,3 +2347,54 @@ Review of the remaining commit logic, with numbers on this store's main line:
 - What remains is per-session, not per-call: step 2 is 27–30 slopp turns
   in every cell, level with plain; the other four steps are where slopp's
   turn advantage lives. Record: `projects/eval22-allowed/RUNS.md`.
+
+## 2026-09-03 — eval22 step 2: six detours, and a stale thread served as main
+
+- Turn-by-turn over the three slopp step-2 transcripts (27/29/30 turns):
+  the same six detours in every cell. (A) history hunt after
+  `query_history` answered `:op :ingest :prompt nil`, 7–8 turns —
+  `clone!` never passed a prompt to `ingest!` though its sibling writes
+  do, and the versions carried no origin though the store holds
+  `git-base-sha`/`git-remote`. (B) one `query_source {ns}` per namespace
+  the ask names, 7–9 turns — the bundle arrived (9k chars, 107 ms) but the
+  hook sent `prompt[:500]` and the namespace list sat at byte 703;
+  `ask-seeds` matched form names only, no stemming, and the bundle inlined
+  two sources. (C) `ns_create` then `change {tests}` → "Unable to resolve
+  symbol: deftest" → read → `ns_add_require` → retry, 3 turns — and worse,
+  the same-ns stubber interned a var NAMED `deftest`, so the next error
+  named the test itself. (D) a four-namespace `change {tests impl}` refused
+  "group failed to compile: apply-eco-discount" — the stub loop's `or`
+  starved the load-error source whenever the graph source (which repeats
+  itself) had anything. (E) `query_slice {ns}` and `query_commits
+  {contains}` refused, 1–2 turns. (F) done + full_check, 2 turns, left.
+  Plain spends its 26–30 the same way on reads and one-file edits.
+- All five fixed red-first as separate dones; records: `D-orient-namespaces`,
+  D-repair's list, `operation-api.md`'s red-first paragraph, the results
+  and setup references. Measurement pre-registered in
+  `projects/eval23-step2/RUNS.md`: median step-2 turns ≤ 18.
+- Found on the way, and worse than any of the six: after a server
+  restart this session's live server ran code 1,238 deltas behind. A
+  thread minted 2026-09-01 (before fork on write, so with a full copied
+  view) was left open with nothing of its own; the restart re-adopted it
+  (the newer threads had landed; the agent id had flipped across a
+  resume), and the re-fork rule fired only for ROWLESS threads. Every
+  read answered from the copy; `session_brief` said "main, 0 un-landed".
+  Fixed: a thread with no un-landed CONTENT follows its branch at
+  adoption (`follow-branch-if-idle!`, called from `open!`, `adopt-line!`
+  and `refresh-cache!`), `refork-thread!` drops a stale view, and a
+  bookkeeping append no longer materializes a rowless line's view (it
+  copied the whole store onto the thread at the first marker after a
+  done — the 138-copies problem through the side door). Rows are not a
+  pin; work is.
+- Also on the way: two projection contexts on the on-disk repo met a
+  `LOCK_FAILURE` on `refs/heads/main` that three back-to-back retries
+  could not clear (`concurrent-projection-converges` red); the ref update
+  now backs off. And the group auto-require retry added a require to the
+  FIRST namespace in the group rather than the one the error anchored
+  to (`slopp.store.db` briefly required the read layer); it asks the
+  anchored namespace first now.
+- Process: three external pins were landed in the same `change` as their
+  impl, so the change could not watch them fail; each was re-run red by
+  undoing the impl once (D) or by landing the spec first (C, A, B, E).
+  A red `change` reports "nothing landed" while its impl IS on the thread
+  — the note means the branch, and it misled once here.

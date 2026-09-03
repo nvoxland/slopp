@@ -24,7 +24,9 @@ import time
 import urllib.request
 import urllib.parse
 
-MAX_CHARS = 9000
+# room for the bundle's whole-namespace section (capped server-side at
+# 6000 chars) beside the cards: 9000 cut it mid-namespace
+MAX_CHARS = 14000
 HTTP_BUDGET_S = 6.5
 
 prompt = ""
@@ -56,8 +58,12 @@ def http_bundle_once():
         pid = int(info.get("pid", 0))
         if pid:
             os.kill(pid, 0)  # raises if that process is gone
+        # the WHOLE ask, not its first 500 chars: eval22's step-2 prompt
+        # named its namespaces ("quoting, booking, billing, invoices") at
+        # byte 703, so the seeds never saw them and the agent read each
+        # namespace by hand. 2000 chars is a URL the listener takes
         url = (info["url"].rstrip("/") + "/api/bundle?ask="
-               + urllib.parse.quote(prompt[:500])
+               + urllib.parse.quote(prompt[:2000])
                # the server answers a session it has already mapped with the
                # small DELTA instead of a second full map (bundle diet 3c)
                + ("&session-id=" + urllib.parse.quote(SID) if SID else "")

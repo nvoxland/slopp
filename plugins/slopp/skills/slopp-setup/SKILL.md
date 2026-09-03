@@ -76,6 +76,12 @@ pushes/pulls the **local repo's** `slopp` branch, and you do all origin
 interaction with regular git, on both branches. (`slopp` here is the plugin's
 bundled CLI, on your PATH; it's the same jar the MCP server runs.)
 
+Every imported form's first version says where it came from: its history
+(`query_history {ns name}`) carries `:origin {:git-sha :remote}` and, when
+no ask was recorded before the import, a note saying so. Asked "why is X
+this way — what do the records say", that line is the whole answer; there
+is no earlier reasoning to find.
+
 **After ANY adoption — this import, `git_clone`, or pointing slopp at an
 existing codebase — run `store_doctor` once.** Every gate slopp has runs at the
 WRITE, so code that arrived another way has never met one. The doctor is the

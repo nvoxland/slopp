@@ -27,7 +27,9 @@ compaction the next ask gets payloads again; when one does appear and you have
 not in fact seen it (a subagent shares the session), its `:detail` id is a
 `query_detail` away.
 History is ONE door:
-`query_history` routes by args ({} episodes · {ns name} a form's life ·
+`query_history` routes by args ({} episodes · {ns name} a form's life — an
+imported form's first version carries `:origin {:git-sha :remote}`, and
+that IS the recorded reasoning when no ask preceded it ·
 {ns name at} time-travel · {ns name effort true} what that form COST to get
 green · {at} was-green-at · {contains} which asks
 touched X · {dead_ends true} the SCRAPPED explorations, {dead_ends "some.ns"}

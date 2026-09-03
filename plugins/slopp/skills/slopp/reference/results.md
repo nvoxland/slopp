@@ -60,6 +60,15 @@ full map.
 - `:failures` — expected/actual/exception per failure. Diagnose from the
   response; a follow-up `test_run` re-derives what you already have.
   `:implicated` — which of YOUR changes each failing test exercises.
+- `:origin` — on a `query_history` version whose `:op` is `:ingest` in a
+  store imported from git: `{:git-sha :remote}`, plus a `:note` when no ask
+  was recorded before it. That IS the answer to "what do the records say":
+  the form arrived by import, and its docstring is the only recorded
+  reasoning — do not go hunting through README or git log for more.
+- `:auto-require` on a `change` — the require the pipeline added for you,
+  whether the impl needed it or the TESTS did (a spec in a namespace that
+  never required clojure.test gets `[clojure.test :refer …]`, and a partial
+  refer is extended). It is stamped, never a refusal.
 - `:red-first` — the not-yet-written vars a new spec named (stubbed to fail
   honestly). `:also-created` (`ns_create`) — the not-yet-written NAMESPACES a
   scaffold's requires named, brought into being empty.

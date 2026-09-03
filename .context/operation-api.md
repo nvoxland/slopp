@@ -155,7 +155,16 @@ write time, instead of a fresh JVM catching it later.
   throwing stub interned in the image (kondo rows for aliased/qualified
   calls; the ns form's `:refer` vectors for bare names, since stubs
   precede the require) and the load retries: the spec lands as an honest
-  red with `:red-first` naming the vars (carried on the wire). Restarts
+  red with `:red-first` naming the vars (carried on the wire). The loop has
+  TWO sources and consults BOTH every round (2026-09-03): the graph source
+  above, and `stub-unresolved-test-symbol!`, which reads the load error for
+  an unqualified same-namespace symbol a deftest names — the graph has no
+  row for it. An `or` between them starved the second whenever the first
+  had anything to say, since it says the same thing every round, and a
+  four-namespace `change` was refused as a compile error. A clojure.test
+  public name (`deftest`, `is`, `testing`…) is never stubbed: it is a
+  missing require, which `edit/missing-require` names and the write path
+  adds (`:auto-require`), extending a partial `:refer` rather than refusing. Restarts
   and reopens with stubs outstanding survive the same way. Future write
   paths inherit all of this by construction — anything that compiles
   through the image is covered. The isolated suite (fresh JVM, no image)

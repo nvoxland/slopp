@@ -149,7 +149,10 @@ around it (no Bash/`sqlite3` against the store, no hand-written `declare`,
 no file edits — the store is the code). A SPELLING is not a rule: an
 unambiguous argument-shape mistake is repaired and the result says so
 (`;; repaired {…}` on its first line) — read that line once and use the
-accepted shape next time.
+accepted shape next time. `query_slice {ns}` with no name reads the
+namespace; `query_commits {contains}` is `report`'s question and answers
+as one. A spec landing in a namespace that never required clojure.test
+gets the require added (`:auto-require`), never a refusal.
 
 ## Other agents on this store
 

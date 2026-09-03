@@ -6195,6 +6195,31 @@ source"). The shape when one appears is `GET /api/orient?ask=…&tokens=…` →
 changes every write defeats frozen vectors; the graph is what makes a
 `query_search` hit navigable, and text search stays.
 
+### D-orient-namespaces — an ask names namespaces too, and a small named namespace rides the bundle whole (2026-09-03)
+
+**Decision.** `orient` seeds from two signals: form names (as before) and
+NAMESPACE names — a word of the ask that is a namespace's last segment,
+allowing a plural or an -ing/-ed ending, equality only (`ask-namespaces`).
+Named namespaces' forms enter the walk at a low teleport weight and the map
+reports them as `:ns-seeds`. The first-ask bundle sends a named namespace
+WHOLE when it is small, under fixed caps (`default-whole-ns`: ≤ 2,000 chars
+per namespace, ≤ 4 namespaces, ≤ 6,000 chars total), dropping those forms
+from the cards and entering them in the ledger; the same-session delta and
+the handoff bundle send none. The hook passes the whole ask (2,000 chars,
+was 500) and caps the injected text at 14,000 chars (was 9,000).
+
+**Why.** eval22 step 2, every cell: the ask said "everywhere carriers are
+accepted (quoting, booking, billing, invoices)" and the map seeded none of
+the four — the words sat past the hook's 500-char cut, and seeds came from
+form names only — so each cell read seven to nine namespaces by hand, one
+call each, before its first write. A namespace of a few hundred chars is
+cheaper sent once than read back by name.
+
+**What it does not license.** Not a budget that grows with the project:
+the caps are absolute, so a 200-namespace store gets the same ceiling as a
+ten-namespace one (the s10 lesson: appended rows reshape step 1). Not a
+prefix match: `bill` must not name `logi.billable`.
+
 ### D-derived-order — a form's place is derived from what it references; nothing journals an arrangement (2026-08-29)
 
 **Decision.** A form carries a creation RANK and nothing else about where it
@@ -6532,7 +6557,9 @@ Explicitly re-litigated, not smuggled:
   argument") STANDS for retired names; the remap covers only measured,
   unambiguous shape mistakes (change's top-level ns/name/source, a
   step's :code, query_slice {targets}, query_changes {ns name} /
-  {since}, query_commits {limit}, ns_add_require {requires}). A shape
+  {since}, query_commits {limit}, ns_add_require {requires}; from
+  2026-09-03, eval22 step 2: query_slice {ns} alone → the namespace read,
+  query_commits {contains} → report). A shape
   with two readings (top-level ns beside an :impl) is still refused, and
   the refusal still names the accepted keys.
 - `the-advertised-surface-is-fourteen-families…` now counts three VERB
@@ -6634,3 +6661,20 @@ from then on it is pinned exactly as before. `land-thread!` never copies an
 empty view over the branch's. Consequence: "an open thread with a view"
 now means "a thread with work in it" — which is the distinction the thread
 GC could only approximate, and the reason a dead owner is not a signal.
+
+**Amended the same day, after a restart served a two-day-old view as main:**
+rows are not the pin — un-landed CONTENT is. A thread minted before this
+decision carries a full copied view with nothing in it, and a re-fork rule
+keyed on "rowless" kept it: re-adopted after a restart, the copy became the
+session's store and the live server ran 1,238 deltas behind, silently. So
+(1) "nothing to pin" is `(zero? (unlanded-count line content-ops))`, decided
+in the engine (`follow-branch-if-idle!`) and applied at EVERY adoption —
+`open!`, `adopt-line!`, `refresh-cache!` — because the first two happen
+before any journal change could make the third fire; (2) `refork-thread!`
+drops whatever view the thread carries; (3) a bookkeeping append (a marker,
+a verify, a read-cost — `nses` empty) materializes NOTHING on a rowless
+line: `write-snapshot!` wrote every namespace whenever the line had no
+rows, so the first marker after a done copied the whole store back onto
+the thread, the 138-copies problem through the side door. Pinned by
+`a-thread-with-a-stale-copied-view-and-no-work-follows-its-branch` and the
+marker block of `a-fresh-thread-holds-no-copy-until-it-writes`.
