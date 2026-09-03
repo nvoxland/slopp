@@ -2221,3 +2221,28 @@ Review of the remaining commit logic, with numbers on this store's main line:
 - Sound and kept: marker-first ordering, deterministic commits, the
   Slopp-Commit trailer, the fallback walk, publish trouble beside a green
   commit point.
+
+## 2026-09-03 — the instruments were blind, and the store was 85% dead copies
+
+- TURN BRACKET: `turn-open?` read the store's `:recent` window — the deltas
+  since the last COMMIT POINT — so a commit point taken inside an ask
+  severed its turn (its docstring called that a harmless extra marker). No
+  `:turn-end`, the ask's timing ring discarded at the next begin. One day
+  on this store: 7 commit points, 9 asks opened turns, 2 closed. Every
+  per-turn metric (wall split, rent, refusal shapes, retries) had been
+  blind since threads landed on 2026-08-15 — the s19/s20 instruments were
+  built on a broken bracket. Fixed: the session remembers its open turn
+  (:open-turn), the window is the fallback for a session with no memory.
+- CENSUS WINDOW: `tool-call-measurements` and `otel-measurements` ignored
+  `:since`, so `query_cost {since}` sat a windowed header over all-time
+  totals. Fixed: rows window by their own timestamp against the delta's :at.
+- THREAD VIEWS: 138 open threads each held a full materialized copy of the
+  store — 466,128 element rows vs main's 3,539; `elements` was 1.16 GB and
+  `form_refs` 477 MB of a 2.1 GB file; the journal (`deltas`) only 225 MB.
+  Most owners had died days ago (the s16 probes, eval sessions).
+  `compact-store!` now settles open threads whose owner is gone and
+  untouched >24h (view dropped, deltas + row kept), then vacuums. Run on
+  this store: 2.10 GB → 322 MB, 134 settled, 1.78 GB reclaimed.
+- GUARD CELL on the D2b jar (sonnet-41 lifetime): 54 turns, 11/11, $1.53,
+  537s — best on record (s15 62, s17 57, s18 95). Refusals 10%: store-wide
+  `query_history {}` ×4 is the standing residue.
