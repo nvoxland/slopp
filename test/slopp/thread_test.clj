@@ -540,3 +540,63 @@
                 (is (re-find #":grams 2" src) "B's resolution is what landed"))))
           (finally (ops/close! a) (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-fresh-thread-holds-no-copy-until-it-writes
+  ;; The fresh thread a done leaves a session on copied its branch's whole
+  ;; view at fork — thousands of rows, a full copy of the store — before it
+  ;; had written anything. On slopp's own store 138 such threads were 85% of
+  ;; a 2.1 GB file. Now the view is the thread's on its first write: until
+  ;; then it has no rows and reads its branch's; after, it holds the WHOLE
+  ;; value, not just the namespace it touched, so a resume sees everything.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory "fw" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a    (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})
+        rows (fn [sess line] (:n (next.jdbc/execute-one! (:db @sess) ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" line])))
+        nss  (fn [sess line] (:n (next.jdbc/execute-one! (:db @sess) ["SELECT COUNT(DISTINCT ns) AS n FROM elements WHERE line = ?" line])))]
+    (try
+      (is (nil? (:error (ops/ingest! a 'fw.core "(ns fw.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
+      (is (nil? (:error (ops/ingest! a 'fw.util "(ns fw.util)\n(defn ^:unused-ok u \"U.\" [] 2)\n"))))
+      (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
+      (let [fresh (slopp.ops.engine/session-line a)]
+        (testing "after the land, the fresh thread holds NO copy"
+          (is (zero? (rows a fresh)) "no element rows for a thread that has written nothing"))
+        (testing "and still reads its branch whole"
+          (is (some? (get-in (:store @a) [:namespaces 'fw.core])))
+          (is (some? (get-in (:store @a) [:namespaces 'fw.util]))))
+        (testing "a returning session adopts the rowless thread and sees everything"
+          (let [a2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})]
+            (try
+              (is (some? (get-in (:store @a2) [:namespaces 'fw.util])))
+              (finally (ops/close! a2)))))
+        (testing "its FIRST write gives it the whole view, not only the namespace it touched"
+          (is (nil? (:error (ops/add-form! a 'fw.core "(defn ^:unused-ok g \"G.\" [] 3)" :prompt "first write" :agent "alice"))))
+          (is (= 2 (nss a fresh)) "both namespaces materialized for the thread")
+          (is (pos? (rows a fresh))))
+        (testing "and it lands as any thread does"
+          (is (nil? (:error (external/done! a :label "land again" :agent "alice"))))))
+      (finally (ops/close! a)))))
+
+(deftest ^:external a-rowless-thread-follows-its-branch-until-it-writes
+  ;; A thread with no writes has nothing to pin: when the branch moves under
+  ;; it, it follows — the same state a freshly minted thread would start
+  ;; from — and its first write then lands cleanly on the moved branch. A
+  ;; thread WITH writes keeps its pinned view exactly as before.
+  (let [dir (str (java.nio.file.Files/createTempDirectory "fb" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})]
+    (try
+      (is (nil? (:error (ops/ingest! a 'fb.core "(ns fb.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
+      (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
+      ;; alice is on a rowless thread; bob moves the branch
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "bob"})]
+        (try
+          (is (nil? (:error (ops/ingest! b 'fb.other "(ns fb.other)\n(defn ^:unused-ok o \"O.\" [] 2)\n"))))
+          (is (nil? (:error (external/done! b :label "bob lands" :agent "bob"))))
+          (finally (ops/close! b))))
+      (testing "alice's rowless thread follows the branch"
+        (ops/sync-with-journal! a)
+        (is (some? (get-in (:store @a) [:namespaces 'fb.other])) "bob's namespace is visible without a write of alice's own"))
+      (testing "and her first write lands cleanly on the moved branch"
+        (is (nil? (:error (ops/add-form! a 'fb.core "(defn ^:unused-ok g \"G.\" [] 3)" :prompt "after the move" :agent "alice"))))
+        (let [r (external/done! a :label "alice lands" :agent "alice")]
+          (is (nil? (:error r)) (pr-str (select-keys r [:error :findings])))
+          (is (= "main" (get-in r [:land :landed])) (pr-str (:land r)))))
+      (finally (ops/close! a)))))

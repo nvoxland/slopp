@@ -718,26 +718,35 @@
       (finally (.close conn)))))
 
 (deftest ^:external a-thread-forks-at-the-branch-head-and-then-stays-pinned
-  ;; Two claims that only look alike. A thread opened after the branch moved
-  ;; must start from where the branch is NOW — otherwise a returning agent
-  ;; begins behind work that has already landed. And a thread already open
+  ;; Three claims that only look alike. A thread opened after the branch
+  ;; moved must start from where the branch is NOW — otherwise a returning
+  ;; agent begins behind work that has already landed. A thread WITH WORK
   ;; must NOT move when it is re-adopted: it is pinned at its fork point for
-  ;; its whole life, rebasing exactly once, at its own done. That is what
-  ;; keeps its view stable and its verdict meaningful mid-work, and it is why
-  ;; every conflict arrives together at the end instead of arriving one at a
-  ;; time under an agent that is trying to finish.
+  ;; its whole life, rebasing exactly once, at its own done — that is what
+  ;; keeps its view stable and its verdict meaningful mid-work, and why every
+  ;; conflict arrives together at the end. And a thread with NO work has
+  ;; nothing to pin (fork on write: it holds no view of its own), so when it
+  ;; is re-adopted after the branch moved it re-forks where a fresh thread
+  ;; would start — which is also where its returning agent expects to be.
   (let [dir  (temp-dir)
         conn (db/open! dir)]
     (try
       (let [row-of (fn [id] (first (filter #(= id (:id %)) (db/lines conn))))
+            nses   (fn [line] (set (keys (:namespaces (db/load-store conn line)))))
             s1     (store/ingest (store/empty-store) 'th.one "(ns th.one)\n\n(def a 1)\n")
             trunk  (db/trunk-line-id! conn)]
         (is (true? (db/append! conn s1 (store/deltas s1) ['th.one] trunk nil)))
-        (let [h1    (db/line-head conn trunk)
-              early (db/adopt-thread! conn trunk "agent-early")
-              s2    (store/ingest s1 'th.two "(ns th.two)\n\n(def b 2)\n")
-              new2  (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
+        (let [h1     (db/line-head conn trunk)
+              early  (db/adopt-thread! conn trunk "agent-early")
+              idle   (db/adopt-thread! conn trunk "agent-idle")
+              ;; early WRITES: its view is now its own, pinned at h1
+              s1e    (store/ingest s1 'th.mine "(ns th.mine)\n\n(def m 1)\n")
+              new-e  (vec (drop (count (store/deltas s1)) (store/deltas s1e)))
+              s2     (store/ingest s1 'th.two "(ns th.two)\n\n(def b 2)\n")
+              new2   (vec (drop (count (store/deltas s1)) (store/deltas s2)))]
           (is (= h1 (:base (row-of early))) "a thread forks at the branch head")
+          (is (= h1 (:base (row-of idle))))
+          (is (true? (db/append! conn s1e new-e ['th.mine] early h1)))
           (is (true? (db/append! conn s2 new2 ['th.two] trunk h1)))
 
           (let [h2   (db/line-head conn trunk)
@@ -745,14 +754,19 @@
             (is (not= h1 h2) "fixture: the branch really moved")
             (is (= h2 (:base (row-of late)))
                 "a thread opened later starts from where the branch is NOW")
-            (is (= #{'th.one 'th.two} (set (keys (:namespaces (db/load-store conn late)))))
-                "so it reads the work that landed before it existed"))
+            (is (= #{'th.one 'th.two} (nses late))
+                "so it reads the work that landed before it existed")
 
-          (testing "and re-adoption does not rebase — the pin holds"
-            (is (= early (db/adopt-thread! conn trunk "agent-early")))
-            (is (= h1 (:base (row-of early))) "its base did not follow the branch")
-            (is (= #{'th.one} (set (keys (:namespaces (db/load-store conn early)))))
-                "and neither did its view"))))
+            (testing "a thread WITH work is re-adopted where it was — the pin holds"
+              (is (= early (db/adopt-thread! conn trunk "agent-early")))
+              (is (= h1 (:base (row-of early))) "its base did not follow the branch")
+              (is (= #{'th.one 'th.mine} (nses early))
+                  "and neither did its view: its own work, not the branch's later work"))
+
+            (testing "a thread WITHOUT work has nothing to pin: re-adopted after the move, it re-forks where the branch is now"
+              (is (= idle (db/adopt-thread! conn trunk "agent-idle")))
+              (is (= h2 (:base (row-of idle))) "its base followed the branch")
+              (is (= #{'th.one 'th.two} (nses idle)) "and it reads the branch as a fresh thread would")))))
       (finally (.close conn)))))
 
 (deftest ^:external open-threads-are-this-branchs-live-lines-most-recent-first
@@ -1571,11 +1585,12 @@
       (finally (.close conn)))))
 
 (deftest ^:external the-reference-index-follows-a-lines-view
-  ;; `elements` is materialized per line and copied at a fork, replaced at a
-  ;; land, dropped at an abandon. The index derived from those rows has to
-  ;; travel with them, or a fresh thread starts with no index (the cold
-  ;; rebuild it exists to avoid) and a landed branch keeps an index computed
-  ;; from source it no longer holds.
+  ;; `elements` is materialized per line — on a thread's first write (fork
+  ;; on write), replaced at a land, dropped at an abandon. The index derived
+  ;; from those rows has to travel with them: a rowless thread READS its
+  ;; branch's index (not a cold rebuild), a thread that has written OWNS one,
+  ;; and a landed branch never keeps an index computed from source it no
+  ;; longer holds.
   (let [dir  (temp-dir)
         conn (db/open! dir)
         rows (fn [line] (mapv :form_refs/to_name
@@ -1593,25 +1608,34 @@
         (is (= ["f"] (rows trunk)) "fixture: the trunk carries one edge")
         (let [head   (db/line-head conn trunk)
               thread (db/create-line! conn {:kind "thread" :base head :parent trunk :agent "a"})]
-          (testing "a fork inherits the index with the elements"
-            (is (= ["f"] (rows thread)))
-            (is (= ["lv.core" "lv.core.two"] (keyed thread))))
-          (testing "a land moves the thread's index onto the branch and releases the thread's"
+          (testing "a fork owns no rows yet, and reads its parent's index whole"
+            (is (= [] (rows thread)))
+            (is (= [] (keyed thread)))
+            (is (= #{'lv.core 'lv.core.two} (set (keys (db/load-refs conn thread))))
+                "the parent's index, through the rowless thread"))
+          (testing "its first write gives it an index of its own, and a land moves it onto the branch"
             (let [st2 (refs/refresh
                        (first (store/replace-node (store/committed st) 'lv.core.two 'g
                                                   (p/parse-string "(defn g [x] x)")
                                                   :prompt "t"))
                        ['lv.core.two])]
               (is (true? (db/append! conn st2 (:pending st2) ['lv.core.two] thread head)))
+              (is (= ["lv.core" "lv.core.two"] (keyed thread)) "the whole index is the thread's now")
               (is (= [] (rows thread)) "fixture: g calls nothing now")
               (is (true? (db/land-thread! conn thread trunk head)))
               (is (= [] (rows trunk)) "the branch's index is the thread's")
               (is (= ["lv.core" "lv.core.two"] (keyed trunk)))
               (is (empty? (keyed thread)) "and the settled thread holds none")))
           (testing "an abandoned thread releases its index too"
-            (let [t2 (db/create-line! conn {:kind "thread" :base (db/line-head conn trunk)
-                                            :parent trunk :agent "b"})]
-              (is (seq (keyed t2)) "fixture: the fork copied it")
+            (let [t2  (db/create-line! conn {:kind "thread" :base (db/line-head conn trunk)
+                                             :parent trunk :agent "b"})
+                  st3 (refs/refresh
+                       (first (store/replace-node (store/committed st) 'lv.core 'f
+                                                  (p/parse-string "(defn f [x] (inc x))")
+                                                  :prompt "t"))
+                       ['lv.core])]
+              (is (true? (db/append! conn st3 (:pending st3) ['lv.core] t2 (db/line-head conn trunk))))
+              (is (seq (keyed t2)) "fixture: the write gave it an index")
               (is (true? (db/abandon-thread! conn t2)))
               (is (empty? (keyed t2)))))))
       (finally (.close conn)))))

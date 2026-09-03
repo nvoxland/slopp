@@ -2608,22 +2608,22 @@
 (deftest ^:external compact-settles-the-open-threads-nobody-will-finish
   ;; On slopp's own store: 138 open threads, each holding a full materialized
   ;; copy of the store — 466,128 element rows against main's 3,539, 1.16 GB
-  ;; of a 2.1 GB file. A landed or dropped thread releases its view; an
-  ;; open one whose owner is gone never will unless something settles it.
+  ;; of a 2.1 GB file. Fork on write removed the cause (a fresh thread holds
+  ;; no copy now), and compaction settles what is left: an open thread with
+  ;; NOTHING TO RESUME — no un-landed content since its fork — untouched for
+  ;; a day, its owner process gone.
   ;;
   ;; But \"the owner process died\" is not \"nobody will finish this\": a
   ;; returning agent picks its thread back up, and its un-landed work IS the
-  ;; thread. So compaction settles automatically only a thread with NOTHING
-  ;; TO RESUME — no un-landed content since its fork (the fresh thread a done
-  ;; leaves behind, then orphaned) — and leaves every other idle thread open,
-  ;; however dead its owner. Deltas and rows stay either way.
+  ;; thread. A thread WITH work stays open however dead its owner. Deltas and
+  ;; rows stay either way.
   (let [dir (str (java.nio.file.Files/createTempDirectory "gc" (make-array java.nio.file.attribute.FileAttribute 0)))
         a   (external/open! {:slopp.ops/dir dir})
         _   (ops/ingest! a 'gc.a "(ns gc.a)\n(defn ^:unused-ok fa \"A.\" [] 1)\n")
         b   (external/open! {:slopp.ops/dir dir})
         week-ago (- (System/currentTimeMillis) (* 8 86400000))]
     (try
-      ;; b lands its work: it is now on a fresh thread with a view and nothing to resume
+      ;; b lands its work: it is now on a fresh thread with nothing to resume
       (is (nil? (:error (ops/ingest! b 'gc.core "(ns gc.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
       (is (nil? (:error (external/done! b :label "land" :agent "b"))))
       ;; c opens on the moved branch and has un-landed work
@@ -2632,25 +2632,24 @@
           (is (nil? (:error (ops/ingest! c 'gc.other "(ns gc.other)\n(defn ^:unused-ok g \"G.\" [] 2)\n")))
               "c's write lands on c's thread")
           (let [conn   (:db @a)
-                b-line (engine/session-line b)
-                c-line (engine/session-line c)
+                b-line (slopp.ops.engine/session-line b)
+                c-line (slopp.ops.engine/session-line c)
                 rows   (fn [line] (:n (jdbc/execute-one! conn ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" line])))
                 status (fn [line] (:status (first (filter #(= line (:id %)) (db/lines conn)))))]
-            (is (pos? (rows b-line)) "b's fresh thread holds a view")
-            (is (pos? (rows c-line)) "c's thread holds a view")
+            (is (zero? (rows b-line)) "b's fresh thread holds NO copy — fork on write")
+            (is (pos? (rows c-line)) "c's thread holds its own view: it wrote")
             (is (pos? (db/unlanded-count conn c-line slopp.read.history/content-ops)) "c has un-landed work")
             (is (zero? (db/unlanded-count conn b-line slopp.read.history/content-ops)) "b has none")
             (testing "live owners: nothing is touched"
               (let [r (external/compact-store! a)]
                 (is (zero? (:threads-settled r 0)) (pr-str r))
-                (is (pos? (rows b-line)))
+                (is (= "open" (status b-line)))
                 (is (pos? (rows c-line)))))
             (doseq [line [b-line c-line]]
               (jdbc/execute! conn ["UPDATE lines SET owner_pid = 999999, used_at = ? WHERE id = ?" week-ago line]))
-            (testing "dead owners: the thread with nothing to resume is settled, its view reclaimed, its deltas kept"
+            (testing "dead owners: the thread with nothing to resume is settled, its deltas kept"
               (let [r (external/compact-store! a)]
                 (is (= 1 (:threads-settled r)) (pr-str r))
-                (is (zero? (rows b-line)) "b's view is reclaimed")
                 (is (= "abandoned" (status b-line)))
                 (is (seq (db/line-deltas conn b-line)) "its deltas are still walkable")))
             (testing "and the thread WITH un-landed work stays open for whoever comes back, however dead its owner"

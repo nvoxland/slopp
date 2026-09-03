@@ -14,6 +14,9 @@
   to be applied four times."
   (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings]))
 
+^{:auto-declare "mutual recursion: commit-appended!, rebased-write!, refresh-cache!"}
+(declare commit-appended! rebased-write! refresh-cache!)
+
 (def ^{:export "slopp.concurrency"} ^:dynamic *pre-commit-hook*
   "Test seam (item 4): invoked between an op's hot-load and its commit CAS to
   simulate a concurrent competitor deterministically. Never set in production.
@@ -602,64 +605,6 @@
                                     (assoc s :store landed)
                                     s)))]
         (identical? (:store old) base)))))
-
-(defn refresh-cache!
-  "Advance the cached store from the journal (the record of truth in a
-  durable session): INCREMENTALLY when every foreign delta in the suffix
-  replays (the common case — no full re-parse), falling back to a full
-  load-store otherwise (:ingest/:move/unknown ops). Advance-only — the
-  cache can never regress, and \"ahead\" is read off `:line-pos`, the
-  position along the line `record-delta` maintains.
-
-  When the suffix is EMPTY something still committed, and it is not always
-  bookkeeping: `elements` is the journal materialized, and a migration, a
-  repair script or any external process rewriting rows changes what the store
-  IS without appending a delta. Every branch here used to be gated on the
-  suffix, so such a change was invisible indefinitely — and worse than
-  invisible, since the next write re-persisted the cached shape over the
-  migrated rows. `restart` cannot help: the stale value is upstream of the
-  image.
-
-  That case is gated on `db/elements-digest` rather than on `data_version`,
-  which is too coarse to act on — it moves for git_map pins, the trace map and
-  the dep-surface cache, none of which touch a form. An unrecorded digest
-  (a session that has not refreshed yet) counts as CHANGED: absence is not
-  agreement, and one rebuild per session is the cheap side of that bet.
-
-  The LINE is resolved once and shared by all three reads. Digesting one line
-  and rebuilding from another would advance the cache from a view it never
-  graded — and once a session sits on its own thread rather than the trunk,
-  that is not a hypothetical."
-  [session]
-  (when-let [conn (:db @session)]
-    (let [line   (session-line session)
-          local  (:store @session)
-          suffix (db/deltas-after conn line (:line-pos local 0))
-          digest (db/elements-digest conn line)]
-      (if (seq suffix)
-        (let [incr  (reduce (fn [st d]
-                              (if-let [st' (store/replay-delta st d)]
-                                st'
-                                (reduced nil)))
-                            local suffix)
-              ;; the incremental path replays FOREIGN deltas verbatim, and a
-              ;; :commit marker arrives carrying its whole files manifest — so
-              ;; every commit-point landed during this server's life would add one
-              ;; back, undoing at runtime what load-store does at open. The
-              ;; full-load fallback thins itself.
-              fresh (or incr (db/load-store conn line))]
-          (when fresh
-            (swap! session
-                   (fn [s]
-                     (if (> (:line-pos fresh 0) (:line-pos (:store s) 0))
-                       (assoc s :store fresh)
-                       s)))))
-        ;; the journal did not move, so the position advance test cannot
-        ;; decide this one — the rows themselves are the evidence, and they
-        ;; were just read from the db, so accepting them is not a regression
-        (when (not= digest (:elements-digest @session))
-          (swap! session update :store assoc :namespaces (db/load-elements conn line))))
-      (swap! session assoc :elements-digest digest))))
 
 (defn persist-trace!
   "Q3: the trace map survives the session — written to store meta so the NEXT
@@ -1480,36 +1425,6 @@
                                   (some #(str/includes? src (str %)) marks))]
                    (symbol (str nsx) (str (:name t)))))))))
 
-(defn ^:export commit-appended!
-  "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
-  retrying across journal/cache races. Returns the committed store'.
-
-  **The retry is a race now, not a livelock.** It used to be possible for
-  every attempt to be identical: two sessions drawing ids from one shared
-  counter re-derived the same id each pass and collided twelve times in a row.
-  Ids are random names minted per call, so a losing attempt genuinely differs
-  from the one before it — which is what makes retrying a strategy rather than
-  a ritual.
-
-  Exhausting the retries therefore means one thing, and the throw says it:
-  the branch head moved under every attempt because another writer is landing
-  continuously."
-  [session f nses]
-  (loop [n 0]
-    (let [base (:store @session)
-          st'  (f base)]
-      (cond
-        (try-commit! session base st' nses) st'
-        (< n 12) (do (refresh-cache! session) (recur (inc n)))
-        :else
-        (throw (ex-info
-                (str "the branch head moved under all 12 attempts — another"
-                     " writer is landing continuously. Ordinary contention on a"
-                     " busy branch: call again.")
-                {:retryable true}))))))
-
-(defmethod after-write! :default [_ _] nil)
-
 (defn red-history
   "The tests that went red in episodes where `ns-sym/nm` changed, from the
   red-after index (`db/reds-for`) — nil without a durable store or without
@@ -1816,6 +1731,92 @@
           (reconcile!))
         result))))
 
+(defn refresh-cache!
+  "Advance the cached store from the journal (the record of truth in a
+  durable session): INCREMENTALLY when every foreign delta in the suffix
+  replays (the common case — no full re-parse), falling back to a full
+  load-store otherwise (:ingest/:move/unknown ops). Advance-only — the
+  cache can never regress, and \"ahead\" is read off `:line-pos`, the
+  position along the line `record-delta` maintains.
+
+  When the suffix is EMPTY something still committed, and it is not always
+  bookkeeping: `elements` is the journal materialized, and a migration, a
+  repair script or any external process rewriting rows changes what the store
+  IS without appending a delta. Every branch here used to be gated on the
+  suffix, so such a change was invisible indefinitely — and worse than
+  invisible, since the next write re-persisted the cached shape over the
+  migrated rows. `restart` cannot help: the stale value is upstream of the
+  image.
+
+  That case is gated on `db/elements-digest` rather than on `data_version`,
+  which is too coarse to act on — it moves for git_map pins, the trace map and
+  the dep-surface cache, none of which touch a form. An unrecorded digest
+  (a session that has not refreshed yet) counts as CHANGED: absence is not
+  agreement, and one rebuild per session is the cheap side of that bet.
+
+  The LINE is resolved once and shared by all three reads. Digesting one line
+  and rebuilding from another would advance the cache from a view it never
+  graded — and once a session sits on its own thread rather than the trunk,
+  that is not a hypothetical."
+  [session]
+  (when-let [conn (:db @session)]
+    (let [line   (session-line session)
+          branch (session-branch-line session)
+          ;; FORK ON WRITE: a rowless thread reads its branch's view and has
+          ;; nothing to pin, so when the branch moved it re-forks at the new
+          ;; head — the state a fresh thread would start from — and the value
+          ;; is reloaded from there. A thread with rows keeps its pin.
+          _      (when (and line branch (not= line branch)
+                            (not (db/line-has-view? conn line))
+                            ;; MOVED means the thread's BASE is behind the branch —
+                            ;; not its head, which a turn marker of its own advances
+                            (not= (db/line-base conn line) (db/line-head conn branch)))
+                   (let [agent (:agent-id @session)
+                         marks (filter #(and (contains? #{:turn-begin :turn-end} (:op %))
+                                             (= agent (:agent %)))
+                                       (db/line-deltas conn line))
+                         open  (let [m (last marks)] (when (= :turn-begin (:op m)) m))]
+                     (db/refork-thread! conn line branch)
+                     (swap! session assoc :store (db/load-store conn line))
+                     ;; the re-fork leaves the thread's own markers behind; an
+                     ;; OPEN turn is the ask's bracket and rides across, so a
+                     ;; one-shot process that began a turn before another agent
+                     ;; landed still finds it open
+                     (when open
+                       (commit-appended! session
+                                         #(first (store/record-turn % :turn-begin
+                                                                    :agent agent
+                                                                    :intent (:intent open)
+                                                                    :user (:user open)))
+                                         []))))
+          local  (:store @session)
+          suffix (db/deltas-after conn line (:line-pos local 0))
+          digest (db/elements-digest conn line)]
+      (if (seq suffix)
+        (let [incr  (reduce (fn [st d]
+                              (if-let [st' (store/replay-delta st d)]
+                                st'
+                                (reduced nil)))
+                            local suffix)
+              ;; the incremental path replays FOREIGN deltas verbatim, and a
+              ;; :commit marker arrives carrying its whole files manifest — so
+              ;; every commit-point landed during this server's life would add one
+              ;; back, undoing at runtime what load-store does at open. The
+              ;; full-load fallback thins itself.
+              fresh (or incr (db/load-store conn line))]
+          (when fresh
+            (swap! session
+                   (fn [s]
+                     (if (> (:line-pos fresh 0) (:line-pos (:store s) 0))
+                       (assoc s :store fresh)
+                       s)))))
+        ;; the journal did not move, so the position advance test cannot
+        ;; decide this one — the rows themselves are the evidence, and they
+        ;; were just read from the db, so accepting them is not a regression
+        (when (not= digest (:elements-digest @session))
+          (swap! session update :store assoc :namespaces (db/load-elements conn line))))
+      (swap! session assoc :elements-digest digest))))
+
 (defn rebased-write!
   "Run a single-form write with an atomic rebasing commit (item 4, the
   granularity dodge). The pure `transform` (store → {:store :delta ...} |
@@ -1956,3 +1957,33 @@
                       (and (nil? (:error @res)) (nil? (:conflict @res))
                            (:red-first-arity load-res))
                       (assoc :red-first-arity (:red-first-arity load-res))))))))))))
+
+(defn ^:export commit-appended!
+  "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
+  retrying across journal/cache races. Returns the committed store'.
+
+  **The retry is a race now, not a livelock.** It used to be possible for
+  every attempt to be identical: two sessions drawing ids from one shared
+  counter re-derived the same id each pass and collided twelve times in a row.
+  Ids are random names minted per call, so a losing attempt genuinely differs
+  from the one before it — which is what makes retrying a strategy rather than
+  a ritual.
+
+  Exhausting the retries therefore means one thing, and the throw says it:
+  the branch head moved under every attempt because another writer is landing
+  continuously."
+  [session f nses]
+  (loop [n 0]
+    (let [base (:store @session)
+          st'  (f base)]
+      (cond
+        (try-commit! session base st' nses) st'
+        (< n 12) (do (refresh-cache! session) (recur (inc n)))
+        :else
+        (throw (ex-info
+                (str "the branch head moved under all 12 attempts — another"
+                     " writer is landing continuously. Ordinary contention on a"
+                     " busy branch: call again.")
+                {:retryable true}))))))
+
+(defmethod after-write! :default [_ _] nil)
