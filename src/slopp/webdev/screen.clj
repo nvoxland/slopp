@@ -75,7 +75,7 @@
          "            drive (requiring-resolve 'slopp.cljnx/drive!)"
          "            text  (requiring-resolve 'slopp.cljnx/text)"
          ;; THE shared derivation, not a copy of it. This branched on the
-         ;; entry's shape itself for one milestone, which is a second wiring of
+         ;; entry's shape itself for one commit-point, which is a second wiring of
          ;; one app with nothing comparing it to the consumer's — so a project
          ;; whose tests spelled the wrapping by hand would drive a lookalike
          ;; and pass, each half asserting against its own reconstruction.

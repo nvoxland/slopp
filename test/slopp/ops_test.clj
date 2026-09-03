@@ -197,7 +197,7 @@
       (finally (ops/close! sess)))))
 
 (deftest ^:external query-commits-rows-carry-title-lines
-  ;; frictions #7: needing ONE sha fetched five multi-paragraph milestone
+  ;; frictions #7: needing ONE sha fetched five multi-paragraph commit-point
   ;; descriptions — the TOP rung already carried the whole story, inverting
   ;; the ladder. Rows carry the title line (+ :more-lines); the full prose
   ;; is one drill-down away via {commit "dN"}.
@@ -212,7 +212,7 @@
         (testing "the list rung is title lines"
           (is (= "The title line" (:description row)) (pr-str row))
           (is (pos? (:more-lines row 0)) (pr-str row)))
-        (testing "the drill-down rung is one full milestone"
+        (testing "the drill-down rung is one full commit-point"
           (let [full (ops/query-commits sess :commit (:commit row))]
             (is (map? full))
             (is (re-find #"body paragraph" (:description full)) (pr-str full)))))
@@ -459,7 +459,7 @@
 
 (deftest ^:external store-health-counts-the-artifact-cache
   ;; store_health exists because uncounted bytes accumulate — a tree snapshot
-  ;; reached 94% of a 344MB journal across 239 milestones with nothing
+  ;; reached 94% of a 344MB journal across 239 commit-points with nothing
   ;; measuring it. Moving the compiled bundle out of the delta log and into a
   ;; directory no tool reported would have been that same mistake with a
   ;; better hiding place.
@@ -575,7 +575,7 @@
   ;; edit. commit_point then reaches back to the last done that DID judge,
   ;; which can be arbitrarily old, and no amount of new work supersedes it:
   ;; each new done judges nothing either, so the store gets greener while the
-  ;; milestone stays refused. full_check ALREADY records its verdict as a
+  ;; commit-point stays refused. full_check ALREADY records its verdict as a
   ;; :verify delta scoped :full-check; nothing read it.
   (let [red   (first (store/record-done (store/empty-store) "r"
                                         :findings {:test-status :red :failures 2}))
@@ -2415,7 +2415,7 @@
   ;; friction #5 — a served page whose stylesheet was still the old one while
   ;; every surface said fine — and the rule it fixed: a counter that reads 0
   ;; both when you are current and when nobody updated it is not a counter.
-  ;; `jar-currency` is friction #17 — a green milestone whose jar had never
+  ;; `jar-currency` is friction #17 — a green commit-point whose jar had never
   ;; been rebuilt, caught twice by a consumer reading the artifact. Both used
   ;; to fold the whole delta list the value carried; both are one indexed
   ;; read now, so the value need not carry it.

@@ -957,7 +957,7 @@
   ;;
   ;; The fix is a SECOND journal citizen, never a widened `:verify`: a
   ;; spot-check is a narrower claim than a verification, and `done`'s scope
-  ;; logic, milestone `:status` and the trace map all read `:verify`.
+  ;; logic, commit-point `:status` and the trace map all read `:verify`.
   ;;
   ;; NOTE the fixture uses `replace-node`, not a second `ingest`: ingest
   ;; RE-MINTS form ids, so the check's baseline-source lookup misses and it

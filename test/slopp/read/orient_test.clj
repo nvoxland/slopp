@@ -14,7 +14,7 @@
             [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.ops.external :as external] [clojure.string :as str] [slopp.store :as store]))
 
 (deftest fit-report-keeps-reports-under-the-gate
-  (let [fat {:milestones [{:commit "d9" :description "m"}]
+  (let [fat {:commit-points [{:commit "d9" :description "m"}]
              :changes (vec (for [i (range 80)]
                              {:ns (symbol (str "big.ns" i)) :form (symbol (str "fn" i))
                               :ops [:replace]
@@ -22,11 +22,11 @@
              :suite {:status :green} :verify "test_run"}
         r  (#'orient/fit-report fat)]
     (is (<= (count (pr-str r)) 6500) (str (count (pr-str r))))
-    (is (seq (:milestones r)))
+    (is (seq (:commit-points r)))
     (is (re-find #"narrows" (str (:note r))) (pr-str (keys r)))))
 
 (deftest fit-report-aggregates-instead-of-amputating
-  (let [fat {:milestones [{:commit "d9" :description "m"}]
+  (let [fat {:commit-points [{:commit "d9" :description "m"}]
              :changes (vec (for [i (range 80)]
                              {:ns (symbol (str "big.ns" (mod i 8))) :form (symbol (str "fn" i))
                               :ops [:replace]
@@ -748,15 +748,15 @@
       (is (= :http/path (get-in r [:markers :web/path :now])) (pr-str r))
       (is (re-find #"rename_sweep" (:note r)) (:note r)))))
 
-(deftest a-milestone-can-be-green-while-the-jar-was-never-built
+(deftest a-commit-point-can-be-green-while-the-jar-was-never-built
   ;; Friction #17, hit twice in one night and caught both times by a CONSUMER
-  ;; reading the artifact rather than by anything slopp said. A milestone is
+  ;; reading the artifact rather than by anything slopp said. A commit-point is
   ;; the announcement other people act on, and it was making a claim about the
   ;; store while saying nothing about the jar that carries the store to them.
   ;;
   ;; Announcement → artifact → process are three states, and nothing joined
   ;; them. `slopp.ops/jar-currency` derives the middle one from the journal;
-  ;; this is the sentence a milestone can say about it.
+  ;; this is the sentence a commit-point can say about it.
   (testing "a jar built from the head has nothing to report"
     (is (nil? (orient/jar-warning {:head "d3" :behind 0}))))
   (testing "a jar behind the store names its own head and what it costs"

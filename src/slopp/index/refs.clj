@@ -874,7 +874,7 @@
 
 (defn ^:export arrange-all
   "Every namespace of `store` in its derived order. What a FOLDED store —
-  a milestone's tree, an import's merge base — needs before it is rendered:
+  a commit-point's tree, an import's merge base — needs before it is rendered:
   the journal records creation order and content, and the arrangement is
   recomputed here exactly as the live writes computed it. `refs` seeds the
   value's reference index (persisted rows from the live store, keyed on each

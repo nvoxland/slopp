@@ -161,7 +161,7 @@
       ;; the elements table was the only account of what a namespace held. It
       ;; carries `:sources` and `:comments` now, so a whole new namespace
       ;; arrives incrementally like everything else — and it HAS to, because
-      ;; the git projection derives each milestone's tree by folding the log.
+      ;; the git projection derives each commit-point's tree by folding the log.
       (let [w2 (store/ingest w 'ir.extra "(ns ir.extra)\n\n(defn z [] 1)\n")
             r2 (store/replay-delta r (last (store/deltas w2)))]
         (is (some? r2))

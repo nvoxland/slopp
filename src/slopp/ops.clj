@@ -267,7 +267,7 @@
   "Does `agent-label` (or any of its path ancestors — sub-agents ride the
   root agent's turn) have an open :turn-begin?"
   [session agent-label]
-  (let [;; the recent window: a turn open across a milestone reads as closed,
+  (let [;; the recent window: a turn open across a commit-point reads as closed,
         ;; and the next write opens a fresh one — one extra marker, never
         ;; a refused write
         ds (:recent (:store @session))
@@ -567,11 +567,11 @@
   "Ids of forms touched by deltas after `since-id` (nil = since the beginning
   of the recent window) that still exist in the store.
 
-  Read from `:recent` — everything since the last milestone plus the done
+  Read from `:recent` — everything since the last commit-point plus the done
   that earned it. A `since-id` older than the window (a done from before the
-  last milestone) means everything in the window changed since it, which is
+  last commit-point) means everything in the window changed since it, which is
   what the window's cut guarantees: nothing between that done and the
-  milestone is un-judged."
+  commit-point is un-judged."
   [store since-id]
   (let [ds   (:recent store)
         tail (if (and since-id (some #(= since-id (:id %)) ds))
@@ -1174,7 +1174,7 @@
     (if at
       (let [conn  (:db @session)
             line  (engine/session-line session)
-            ;; a milestone id resolves through its :target — one row by id
+            ;; a commit-point id resolves through its :target — one row by id
             at-d  (db/delta-by-id conn at)
             at-id (if (= :commit (:op at-d)) (:target at-d) at)
             c     (store/file-at (db/line-deltas conn line) (str path) at-id)]
@@ -1568,10 +1568,10 @@
 (defn affected-test-nses
   "The PROVABLE verification slice: test namespaces (any ns holding a
   deftest) whose require-closure reaches a form changed since the last
-  MILESTONE — a test can only exercise code it can load. Returns
+  COMMIT-POINT — a test can only exercise code it can load. Returns
   {:changed-nses [...] :selected [...]}; empty :selected = nothing since
-  the milestone can affect any test. Full-suite confidence stays the
-  milestone gate's job."
+  the commit-point can affect any test. Full-suite confidence stays the
+  commit-point gate's job."
   [session]
   (let [st      (:store @session)
         last-c  (:id (db/last-marker (:db @session) (engine/session-line session) :commit))
@@ -1828,7 +1828,7 @@
   Exists because `done` is episode-scoped: calling it twice with no writes
   between yields `:none` the second time — nothing changed, so nothing was
   checked. Without this a RED done could be laundered by simply committing
-  afterwards: the milestone runs its own done, gets `:none`, and publishes.
+  afterwards: the commit-point runs its own done, gets `:none`, and publishes.
   The last real verdict stands until new work supersedes it.
 
   **A green `full_check` is such a verdict (friction 14).** Reading only
@@ -1836,7 +1836,7 @@
   have no covering tests — a rename, a docstring, a `:cljs` edit — judges
   `:none`, so `commit_point` reaches back to a verdict that can be arbitrarily
   old, and every subsequent done judges `:none` too. The store got greener
-  while the milestone stayed refused, and the whole-store check — broader,
+  while the commit-point stayed refused, and the whole-store check — broader,
   slower, more authoritative — could not clear what the narrower one left
   behind. Now it can, and a later `done` supersedes it in turn: most recent
   judgement wins, whichever kind it is.
@@ -1853,7 +1853,7 @@
   non-zero, so an informational count would make a refusal say `namespaces`
   as though that were the thing that fired."
   [store]
-  (->> ;; the RECENT window: since the last milestone, plus the done that
+  (->> ;; the RECENT window: since the last commit-point, plus the done that
        ;; earned it — which is as far back as a standing verdict can be
        (:recent store)
        (keep (fn [d]
@@ -3210,14 +3210,14 @@
 (defn ^:export with-history
   "`session` with its store value HYDRATED: `:deltas` is the line's whole
   journal (`slopp.store.db/line-deltas`), read now — or, with `:ops`, only
-  the deltas of those kinds (`[:commit]` for a milestone list), which is the
+  the deltas of those kinds (`[:commit]` for a commit-point list), which is the
   difference between a few dozen rows and the whole log for readers that
   want one kind of marker. Returns a NEW atom over a copy of the session —
   the live session never carries the list. A session with no journal (a bare
   test fixture over a value built by writes) is returned as it is: its
   value's own `:deltas` is all the history there is.
 
-  The history views (`query_history`, `query_changes`, a milestone's status,
+  The history views (`query_history`, `query_changes`, a commit-point's status,
   an undo span) are pure over a store value and read `store/deltas`. The
   value stopped carrying the log — it was 94% of every session's memory and
   the cost of every open, read for two scalars and a bounded window — so the
@@ -3231,19 +3231,19 @@
       session)))
 
 ^:reads (defn query-commits
-  "Milestones, newest first:
+  "Commit-points, newest first:
   [{:commit :description :target :status :agent :at :sha}]. The list rung
   carries each description's TITLE LINE only (+ :more-lines when a body
-  follows) — needing one sha used to fetch five whole milestone essays;
-  `:commit \"dN\"` returns that ONE milestone with its full description.
+  follows) — needing one sha used to fetch five whole commit-point essays;
+  `:commit \"dN\"` returns that ONE commit-point with its full description.
   Commit `:target` ids plug straight into query-changes :from/:to for
-  between-milestone diffs. `:sha` (P4-m8) is the milestone's git commit id —
+  between-commit-point diffs. `:sha` (P4-m8) is the commit-point's git commit id —
   present once the git projection has minted it (imported markers carry
   theirs from birth).
 
-  This is `history/milestone-rows` — a pure fold over the delta log — plus
+  This is `history/commit-point-rows` — a pure fold over the delta log — plus
   the one thing that needs the db: joining the shas the git projection
-  pinned. The split is why the reviewer UI can read milestones at :pure."
+  pinned. The split is why the reviewer UI can read commit-points at :pure."
   [session & {:keys [commit]}]
   (let [{:keys [dir]} @session
         st   (:store @(with-history session :ops [:commit]))
@@ -3257,8 +3257,8 @@
                  row))]
     (if commit
       (some #(when (= (str commit) (:commit %)) (join %))
-            (history/milestone-rows st))
-      (mapv join (history/milestone-rows st :titles-only true)))))
+            (history/commit-point-rows st))
+      (mapv join (history/commit-point-rows st :titles-only true)))))
 
 ^:reads (defn session-brief
   "THE one-call orientation, task-shaped (knowledge-differential stance):
@@ -3373,7 +3373,7 @@
     ;; lifetime, re-teaching what the skill said. The brief carries what
     ;; CHANGED and what needs the agent, nothing that is true every time.
     (cond-> {:project project}
-      (seq ms)   (assoc :milestones ms)
+      (seq ms)   (assoc :commit-points ms)
       last-done  (assoc :last-done last-done)
       ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
       ;; every add, so nothing a store does under the gate can create one.
@@ -3836,11 +3836,11 @@
          vec)))
 
 ^:reads (defn report
-  "The handoff/summary composite (ratio push): milestones, net form-level
+  "The handoff/summary composite (ratio push): commit-points, net form-level
   changes with their recorded ASKS, and the last verification state — the
   history fan-out (query_history + query_history {contains} + query_changes +
   query_commits + git diffs) as ONE deterministic read. `:since` = a
-  delta/milestone id; `:contains` filters asks/descriptions — and carries
+  delta/commit-point id; `:contains` filters asks/descriptions — and carries
   `:story` for the most-storied matching forms (version rows: the recorded
   ask, op, time, verification state; ranked, capped at 3, never withheld),
   because the provenance question is exactly what a narrow report is asked
@@ -3954,10 +3954,10 @@
                                not-empty)))))]
     (orient/fit-report
      (cond-> {:records (str "every row cites the journal: :turn on an ask, :deltas on a"
-                           " change, :delta on a story version, :commit on a milestone"
+                           " change, :delta on a story version, :commit on a commit-point"
                            " — the ids ARE the citations a handoff can quote;"
                            " query_history {ns … name …} expands any one form")
-             :milestones ms
+             :commit-points ms
              :changes changes
              :suite (when verify*
                       {:as-of (:id verify*)
@@ -4598,7 +4598,7 @@
   Addressed by DELTA, not by name: `:deltas n` (default 1) undoes your last `n`
   content writes, `:to \"d123\"` undoes everything of yours after that delta.
   `:to` also takes a NAMED anchor — `:last-commit` (scrap everything since the
-  last milestone — the usual dead-end rollback) or `:last-done` (back to your
+  last commit-point — the usual dead-end rollback) or `:last-done` (back to your
   last done point) — as a keyword or the same string over the wire. One atomic
   verified group, recorded as honest provenance rather than erased.
 

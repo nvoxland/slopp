@@ -44,7 +44,7 @@
       (update c :searches inc)
 
       (= tool "test_run")
-      ;; the ISOLATED suite before a milestone is the documented gate —
+      ;; the ISOLATED suite before a commit-point is the documented gate —
       ;; only in-image runs count toward the redundant-pre-flight smell
       (-> c (update :test-runs (if (:external args) identity inc))
           (assoc :searches 0))
@@ -87,7 +87,7 @@
    [:pre-done-test #{"done" "commit_point"} :done-now
     "done already runs the affected tests for everything you touched — a pre-flight test_run is redundant; mid-episode runs are for spot-checks"]
    [:history #{"query_history" "query_changes" "report"} #(>= (:history %) 2)
-    "stitching history calls — report {since/contains} composes milestones + changes + asks in ONE read"]
+    "stitching history calls — report {since/contains} composes commit-points + changes + asks in ONE read"]
    [:dumps #{"query_source"} #(>= (:dumps %) 2)
     "repeated whole-namespace dumps — query_slice {ns name} gives one form's source + cards for what it reaches; targets [{ns name}] reads named forms"]
    [:renames #{"edit_rename"} #(>= (:renames %) 2)

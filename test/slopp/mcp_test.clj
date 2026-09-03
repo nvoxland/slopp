@@ -89,7 +89,7 @@
       (testing "a write between test_run and done keeps done QUIET (spot-check flow)"
         (call! sess "edit_replace_form" {:ns "hint" :name "f" :source "(defn f [x] x)"})
         (is (not (re-find #"pre-flight" (call! sess "done" {:label "quiet"})))))
-      (testing "an ISOLATED run before done stays quiet — it is the milestone gate"
+      (testing "an ISOLATED run before done stays quiet — it is the commit-point gate"
         (call! sess "test_run" {:ns "hint" :external true})
         (is (not (re-find #"pre-flight" (call! sess "done" {:label "gated"})))))
       (testing "an in-image test_run immediately before done earns the redundancy hint"
@@ -300,7 +300,7 @@
           (is (not (re-find #":mentions" r)) r)))
       (finally (ops/close! sess)))))
 
-(deftest ^:external milestones-publish-themselves
+(deftest ^:external commit-points-publish-themselves
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-pub" (make-array java.nio.file.attribute.FileAttribute 0)))
         _    (sh/sh "git" "init" dir)
@@ -309,7 +309,7 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (testing "a milestone mirrors into LOCAL git as slopp/<store-branch> (user decision 2026-07-14)"
+      (testing "a commit-point mirrors into LOCAL git as slopp/<store-branch> (user decision 2026-07-14)"
         (let [r (call! sess "commit_point" {:label "first"})]
           (is (re-find #":published" r) r)
           (is (re-find #"slopp/main" r) r))
@@ -1238,7 +1238,7 @@
         (is (contains? tools/read-only-tools "query_capabilities")))
       (finally (ops/close! sess)))))
 
-(deftest ^:external branch-milestones-mirror-the-branch-line
+(deftest ^:external branch-commit-points-mirror-the-branch-line
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-bpub" (make-array java.nio.file.attribute.FileAttribute 0)))
         _    (sh/sh "git" "init" dir)
@@ -1248,16 +1248,16 @@
         rev  (fn [ref] (clojure.string/trim (:out (sh/sh "git" "-C" dir "rev-parse" ref))))]
     (try
       (call! sess "ns_create" {:ns "bp.core" :source "(ns bp.core)\n(defn ^:unused-ok f [x] x)\n"})
-      (call! sess "commit_point" {:label "trunk milestone"})
+      (call! sess "commit_point" {:label "trunk commit-point"})
       (call! sess "branch_create" {:name "feature"})
       (call! sess "edit_add_form" {:ns "bp.core" :source "(defn ^:unused-ok g [x] x)"
                                    :prompt "branch work"})
-      (let [r      (call! sess "commit_point" {:label "branch milestone"})
+      (let [r      (call! sess "commit_point" {:label "branch commit-point"})
             pushed (:pushed (:published (edn/read-string r)))
             trunk  (rev "refs/heads/slopp/main")
             head   (rev "refs/heads/slopp/feature")]
         (is (re-find #"slopp/feature" r) r)
-        (testing "the mirrored ref carries the BRANCH milestone, not the fork point"
+        (testing "the mirrored ref carries the BRANCH commit-point, not the fork point"
           (is (not= trunk head) (str "slopp/feature stuck at the fork-point sha " head))
           (is (= pushed head) (str ":published claims " pushed " but git has " head))
           (is (re-find #"defn \^:unused-ok g"
@@ -1930,7 +1930,7 @@
 (deftest ^:external the-project-listeners-description-promises-only-what-it-serves
   ;; ui_serve's description outlived the surface it described. It said "a
   ;; browsable HTML view of THIS store for a human: the namespace index, form
-  ;; source, and … the milestone timeline and per-milestone change review",
+  ;; source, and … the commit-point timeline and per-commit-point change review",
   ;; and told the caller to hand that url to a human — for a listener that
   ;; answers 404 {"error":"no route"} at `/`. The pages moved to the hub with
   ;; D-hub part 4 and the description did not follow.
@@ -1954,7 +1954,7 @@
                (pr-str non-api))))
     (testing "so the description may not promise a human a page"
       (is (some? desc) "ui_serve is not in the registry")
-      (is (empty? (re-seq #"(?i)HTML view|browsable|namespace index|form source|milestone timeline|change review"
+      (is (empty? (re-seq #"(?i)HTML view|browsable|namespace index|form source|commit-point timeline|change review"
                           desc))
           (str "ui_serve's description promises pages this listener does not"
                " serve: " (pr-str desc)))
@@ -2335,7 +2335,7 @@
           (finally (ops/close! sess))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
 
-(deftest ^:external a-milestone-re-serves-the-app-the-way-a-done-does
+(deftest ^:external a-commit-point-re-serves-the-app-the-way-a-done-does
   ;; slopp-ui, 2026-08-16, with the ordering measured at the time: they enabled
   ;; `http` in a session that had booted with it OFF, restarted, ran
   ;; `full_check`, then `commit_point`. Afterwards nothing was listening —
@@ -2344,8 +2344,8 @@
   ;;
   ;; The cause is one call site. `refresh-app!` runs on the `done` TOOL;
   ;; `commit_point` PERFORMS a done — it runs the whole done pipeline and
-  ;; appends a milestone — and its handler never refreshed. So a session that
-  ;; migrates config and goes straight to a milestone, which is the natural
+  ;; appends a commit-point — and its handler never refreshed. So a session that
+  ;; migrates config and goes straight to a commit-point, which is the natural
   ;; order and the one they took, never re-serves.
   ;;
   ;; This is the SAME defect `refresh-app!`'s own docstring already records one
@@ -2363,12 +2363,12 @@
         (call! sess "done" {:label "the grain that already worked"})
         (is (= [:refreshed] @calls)
             "guard the guard: the done tool refreshes, so a miss below is the
-             milestone path and not the redef")
+             commit-point path and not the redef")
 
         (reset! calls [])
-        (call! sess "commit_point" {:label "a milestone is a done point too"})
+        (call! sess "commit_point" {:label "a commit-point is a done point too"})
         (is (= [:refreshed] @calls)
-            "a milestone runs a done and must re-serve like one — otherwise the
+            "a commit-point runs a done and must re-serve like one — otherwise the
              app a project exists to serve is left behind by the very call that
              says the work is finished"))
       (finally (ops/close! sess)))))

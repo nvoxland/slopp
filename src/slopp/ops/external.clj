@@ -26,7 +26,7 @@
         (when-not (str/blank? v) v)))))
 
 ^:reads (defn ^:export author-identity
-  "The author identity milestones are stamped with (G5): meta `user.name` /
+  "The author identity commit-points are stamped with (G5): meta `user.name` /
   `user.email`; a key that is unset or \"<git>\" defers to `git config` in
   the project dir. Nil when nothing resolves (the projection then falls back
   to the legacy agent identity). Durable sessions only."
@@ -45,9 +45,9 @@
 
 (defn ^:export config!
   "Read or set store config (the meta k/v side-table): keys `user.name` /
-  `user.email` — the git author identity milestones are stamped with (G5).
+  `user.email` — the git author identity commit-points are stamped with (G5).
   A key unset or set to \"<git>\" defers to `git config <key>` in the project
-  dir, resolved AT MILESTONE TIME. With no `v`: read —
+  dir, resolved AT COMMIT-POINT TIME. With no `v`: read —
   {:key :configured :effective}. Durable sessions only."
   [session k & [v]]
   (let [allowed #{"user.name" "user.email" "git-remote"}]
@@ -195,7 +195,7 @@
   Reach for it when a session feels slow to open, before growing what a delta
   carries, and periodically. `full_check` answers whether the store is CORRECT;
   this answers what it COSTS, and nothing else did — which is how a byte-exact
-  tree snapshot in every milestone reached 94% of a 344MB journal, unnoticed
+  tree snapshot in every commit-point reached 94% of a 344MB journal, unnoticed
   across 239 of them, against a design note estimating \"tens of KB\". Naming it
   was not enough either: it was still 82MB, 39% of the journal, when the
   snapshot was finally removed rather than made cheaper. A store can rot by
@@ -364,7 +364,7 @@
 
   Three callers each reasonably ask for a done-point and none can see that the
   others just did: the agent, the plugin's Stop hook, and `commit-point!`, which
-  runs `done!` itself because the milestone has no gates of its own. Measured on
+  runs `done!` itself because the commit-point has no gates of its own. Measured on
   slopp's own store, that left five `:done` deltas in the last eight, every one
   recording `:test-status :none` — the representation that means \"this judged
   nothing\". A log of markers asserting nothing is worse than quiet: it is what
@@ -1208,7 +1208,7 @@ client-deps (merge (:client-deps st) (:client provided))
   the source, which is what lets the working dir go fileless. `:ns` narrows
   to one test namespace, `:only` to specific ns-qualified test vars (Q2);
   `:affected true` narrows to the PROVABLE slice (test namespaces whose
-  require-closure reaches a form changed since the last milestone);
+  require-closure reaches a form changed since the last commit-point);
   `:parallel` SHARDS a full/affected run across concurrent JVMs — one
   build, round-robin namespace shards, merged into one summary. Defaults
   to AUTO (auto-parallel: scales with test-ns count + cores, serial below
@@ -1238,7 +1238,7 @@ client-deps (merge (:client-deps st) (:client provided))
   always available and never decomposed.
 
   Every runner is BOUNDED (testrun/run-cmd!) — a hung ^:external test used
-  to wedge done! and the milestone gate forever. A green summary is only
+  to wedge done! and the commit-point gate forever. A green summary is only
   trusted when the JVM also exited zero: a runner that printed green then
   died (System/exit in teardown, OOM in a shutdown hook) is :error, not
   :green. The throwaway build dir is deleted when the run ends, whatever
@@ -1256,7 +1256,7 @@ client-deps (merge (:client-deps st) (:client provided))
     (if (and aff (empty? (:selected aff)))
       (stamp {:external true :ran 0 :status :green :affected aff
               :note (str "no test namespace can reach the changes since the last"
-                         " milestone — nothing to verify (run without affected for"
+                         " commit-point — nothing to verify (run without affected for"
                          " the full gate)")})
       ;; the full/affected set is shardable (a single :ns or :only run is not);
       ;; :parallel defaults to AUTO — scale the shard count to the work + cores
@@ -1706,7 +1706,7 @@ client-deps (merge (:client-deps st) (:client provided))
       ]
   ;; TWO verdicts, because a done answers two questions that are not the
   ;; same question. :test-status grades the STORE — commit_point and
-  ;; session_brief read it, and a red store must not milestone.
+  ;; session_brief read it, and a red store must not take a commit point.
   ;; :episode-status grades THIS EPISODE's work, and the land reads it.
   ;; They differ exactly when the store is red for reasons that provably
   ;; exercise nothing this episode touched, which is the case that used to
@@ -1717,7 +1717,7 @@ client-deps (merge (:client-deps st) (:client provided))
   ;; codebase good?", and they are episode-scoped, so they are also this
   ;; episode's. They were absent here while commit-point! kept its own
   ;; dead-surface scan; with that removed, omitting them let a store with
-  ;; dead surface milestone green.
+  ;; dead surface commit-point green.
   ;;
   ;; :none is judged AFTER red, never before it. An error-grade finding that
   ;; fires on a DELTA rather than on code — tier-governance,
@@ -1826,7 +1826,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; "green" and "on the branch" are two different facts and nothing
         ;; joined them — measured with two forms, one of which landed and one
         ;; of which did not, after which every request served 200 while the
-        ;; milestone read green. A red that lies costs an investigation; a
+        ;; commit-point read green. A red that lies costs an investigation; a
         ;; GREEN that lies ships.
         ;;
         ;; Read from the BRANCH, never from this session: checking a landing
@@ -1843,7 +1843,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; cannot see one go missing, and one going missing is measured rather
         ;; than hypothetical: three edges declared and landed were gone from
         ;; the trunk hours later while still present in the declaring session's
-        ;; store, which left that agent GREEN and another agent's milestone
+        ;; store, which left that agent GREEN and another agent's commit-point
         ;; blocked by twenty undeclared edges it could not repair.
         ;;
         ;; Gated on the episode having declared any at all, which is rare, so
@@ -1899,7 +1899,7 @@ client-deps (merge (:client-deps st) (:client provided))
                                              " you on the branch where the repair can"
                                              " take. Until then another agent's"
                                              " full_check is red on your edges and"
-                                             " cannot milestone.")})))))
+                                             " cannot take a commit point.")})))))
 
 (defn ^:export run-full-check!
   "The WHOLE-STORE check, on demand: kondo over every namespace, the
@@ -2089,7 +2089,7 @@ client-deps (merge (:client-deps st) (:client provided))
                                   " suite covered ALL "
                                   (count nses) " namespaces;"
                                   " the ^:external tier was narrowed to the tests"
-                                  " that changes since the last milestone can"
+                                  " that changes since the last commit-point can"
                                   " reach. Drop :affected for the whole tier"))
       (seq errs)          (assoc :lint errs)
       (seq warns)         (assoc :warnings warns)
@@ -2192,26 +2192,26 @@ client-deps (merge (:client-deps st) (:client provided))
       true                  (record-full-check! session nses t0))))
 
 (defn ^:export commit-point!
-  "Record a MILESTONE (P4-m7): run the full done pipeline (normalize,
+  "Record a COMMIT-POINT (P4-m7): run the full done pipeline (normalize,
   declare hygiene, verify) for `:agent`, then append a `:commit` marker
   pointing at the resulting state with a human `description`.
 
-  THE MILESTONE HAS NO GATES OF ITS OWN. It runs `done!` and gates on that
+  THE COMMIT-POINT HAS NO GATES OF ITS OWN. It runs `done!` and gates on that
   verdict — nothing is re-judged here, and nothing whole-store is forced.
   `full_check` (every namespace, every tier) is the agent's call, before a
-  commit or any other time; a milestone records what the done point verified. Two enforcement points DRIFT: this
+  commit or any other time; a commit-point records what the done point verified. Two enforcement points DRIFT: this
   function used to recompute status from raw test counts and so never saw
   the `:error` done-advisories at all, and it carried its own copies of the
   dead-surface and lint scans. `done` means done, which only holds if done
   is the single bar; a second bar is somewhere to accidentally put a check
   that then does not apply at done.
 
-  GREEN-GATED: a red verification refuses the milestone (the done still
+  GREEN-GATED: a red verification refuses the commit-point (the done still
   stands — fix and retry) unless `:force true`, which records `:status :red`
-  honestly. Re-requesting a milestone on an UNCHANGED store returns the
+  honestly. Re-requesting a commit-point on an UNCHANGED store returns the
   existing marker instead of minting an empty one. With `:target` (a past
   delta id) it is a pure retroactive marker: no done runs, status is
-  derived from the log at that spot. No milestone captures a tree at all now;
+  derived from the log at that spot. No commit-point captures a tree at all now;
   the projection folds the journal, so a retroactive marker gets the exact
   state it names rather than a lossy reconstruction of it. `:extra` merges
   op-specific payload into the marker delta
@@ -2235,24 +2235,24 @@ client-deps (merge (:client-deps st) (:client provided))
                   ;; the marker is a statement about the BRANCH, so it has to reach one.
                   ;; done landed the work a moment ago and left this session on a
                   ;; FRESH thread, which is exactly where the marker delta just
-                  ;; went — so without this a milestone records itself onto a line
+                  ;; went — so without this a commit-point records itself onto a line
                   ;; nobody will ever read, and the projection folds a branch whose
-                  ;; last delta is the one before the milestone.
+                  ;; last delta is the one before the commit-point.
                   ;;
                   ;; Unconditional, `:force` included. Forcing is an explicit
-                  ;; request to record a red state as a milestone, and a milestone
+                  ;; request to record a red state as a commit-point, and a commit-point
                   ;; naming work the branch does not contain is not honest, it is
                   ;; unreadable.
                   (let [t1   (System/currentTimeMillis)
                         land (branch/land-thread! session)
                         land-ms (- (System/currentTimeMillis) t1)
-                        ;; A REFUSED land is the one case the milestone must not
+                        ;; A REFUSED land is the one case the commit-point must not
                         ;; smooth over. The delta is recorded by now, but it was
                         ;; recorded onto the same thread the work is stranded on,
                         ;; so nothing reached the branch — and returning
                         ;; `:status :green` for that is the failure observed on
                         ;; `d32474`: the branch did not contain what the
-                        ;; milestone named, and everything downstream reads the
+                        ;; commit-point named, and everything downstream reads the
                         ;; stamp rather than the branch.
                         ;;
                         ;; The value used to be discarded here, which is the
@@ -2260,12 +2260,12 @@ client-deps (merge (:client-deps st) (:client provided))
                         ;; indistinguishable from a landing that worked.
                         refused? (false? (:landed land))
                         ;; #17, and the same shape one artifact over. A
-                        ;; milestone is the announcement OTHER PEOPLE act on,
+                        ;; commit-point is the announcement OTHER PEOPLE act on,
                         ;; and it made a claim about the store while saying
                         ;; nothing about the jar that carries the store to
                         ;; them. Announcement → artifact → process are three
                         ;; states and nothing joined them; twice in one night a
-                        ;; consumer caught a green milestone whose jar had
+                        ;; consumer caught a green commit-point whose jar had
                         ;; never been rebuilt, and caught it by reading the
                         ;; artifact rather than by believing the announcement.
                         ;;
@@ -2297,16 +2297,16 @@ client-deps (merge (:client-deps st) (:client provided))
           (merge {:commit (:id last-d) :target (:target last-d)
                   :status (:status last-d)
                   :description (:description last-d)
-                  :note "nothing changed since this milestone — returning it"})
+                  :note "nothing changed since this commit-point — returning it"})
           (let [t0     (System/currentTimeMillis)
                 cp     (done! session :label description :agent agent)
-                ;; where the milestone's time goes, as a fact: done here, land
+                ;; where the commit-point's time goes, as a fact: done here, land
                 ;; in mark!, the publish on the wire (s20)
                 done-ms (- (System/currentTimeMillis) t0)
                 ;; done runs the impacted ^:external slice itself (:external?
-                ;; defaults true), so the milestone's done is a REAL done — not
+                ;; defaults true), so the commit-point's done is a REAL done — not
                 ;; one weakened to skip the tier the in-image suite already
-                ;; skips. The milestone still runs no WHOLE-store check (that is
+                ;; skips. The commit-point still runs no WHOLE-store check (that is
                 ;; `full_check`, the agent's call, per D-full-check): a red
                 ;; ^:external test the episode never TOUCHED does not stop it,
                 ;; but one this episode touched does — exactly what a standalone
@@ -2319,7 +2319,7 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; :none means this done judged NOTHING (no writes since the last
                 ;; one) — so the previous real verdict stands. Otherwise a red
                 ;; done is laundered by committing without changing anything.
-                ;; the findings this milestone is judged on: THIS done's when it
+                ;; the findings this commit-point is judged on: THIS done's when it
                 ;; judged something, otherwise the last done that did.
                 verdict (if (#{:red :green} (get-in cp [:findings :test-status]))
                           (:findings cp)
@@ -2327,12 +2327,12 @@ client-deps (merge (:client-deps st) (:client provided))
                 status  (or (:test-status verdict)
                             (history/status-at (:store @(ops/with-history session)) head))
                 status (if (= :unknown status) :green status) ; nothing ever ran red
-                ;; NO tree is captured. A milestone used to carry a byte-exact
+                ;; NO tree is captured. A commit-point used to carry a byte-exact
                 ;; snapshot of every namespace, because comments lived
                 ;; positionally in the elements table — CURRENT state only —
                 ;; and so could not be re-derived. That cost 82 MB here, 39% of
                 ;; the journal, and by the end it was already a diff chain
-                ;; against the previous milestone. Comments are form-owned
+                ;; against the previous commit-point. Comments are form-owned
                 ;; content now, so the log is a complete account and
                 ;; `git/project-journal!` folds it to render the tree it needs.
                 ;; a SUMMARY of done's findings, not a second implementation:
@@ -2348,7 +2348,7 @@ client-deps (merge (:client-deps st) (:client provided))
                             (map (comp name key))
                             sort vec)]
             (if (and (= :red status) (not force))
-              {:error (str "verification is RED — milestone refused"
+              {:error (str "verification is RED — commit-point refused"
                            (when (seq wrong)
                              (str " — " (str/join ", " wrong)))
                            ". Your work is at its done-point; the full"
@@ -2356,7 +2356,7 @@ client-deps (merge (:client-deps st) (:client provided))
                            " judged nothing (no writes since the last"
                            " one), the RED verdict of that earlier done"
                            " still stands. Fix and retry, or :force"
-                           " true to record a red milestone honestly.")
+                           " true to record a red commit-point honestly.")
                :status :red :done (:done cp) :test (:test cp)
                :findings verdict}
               (mark! head status {:done (:done cp) :ms {:done done-ms}}
@@ -2433,7 +2433,7 @@ client-deps (merge (:client-deps st) (:client provided))
   fresh JVM boots in the external tier — and its own journal says it was
   asked twice for one answer constantly: 325 runs, 117 of them REPEATS inside
   a single ask, 7.6 hours. `commit_point` has always returned an unchanged
-  milestone rather than re-minting one, and the argument is the same, only
+  commit-point rather than re-minting one, and the argument is the same, only
   the number is four hundred times larger.
 
   It REPORTS rather than refuses, which is the same stance `done` takes. An

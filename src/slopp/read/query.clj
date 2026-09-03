@@ -308,12 +308,12 @@
   arities, flags); `:detail true` adds doc lines. Pass `:since <delta id>`
   on a re-check: when nothing STRUCTURAL changed after that delta the
   response is a one-liner instead of the full outline (verify/turn/
-  milestone markers don't count as change).
+  commit-point markers don't count as change).
 
   `:since` is judged against the value's RECENT window — everything since
-  the last milestone plus the done that earned it. A `since` older than the
-  window is not in it, and cannot be unchanged: a milestone landed after it,
-  and a milestone follows work."
+  the last commit-point plus the done that earned it. A `since` older than the
+  window is not in it, and cannot be unchanged: a commit-point landed after it,
+  and a commit-point follows work."
   [session & {:keys [since detail]}]
   (let [st   (:store @session)
         ds   (:recent st)
@@ -592,7 +592,7 @@
    tools run more than once inside ONE ask, ranked by what the extra runs
    cost. Read-only analysis over the delta log; no instrumentation. `:since`
    (a delta or commit-point id from `query_commits`) windows it, and
-   `:by \"milestone\"` splits it per milestone instead — the series that says
+   `:by \"commit-point\"` splits it per commit-point instead — the series that says
    whether a landed change moved the numbers.
 
    `:otel` is the model-side half — the harness telemetry batches, which live
@@ -607,7 +607,7 @@
    passed it, so every reading came from the turn-top path the tool's own
    description calls a lower bound (s19)."
   [session & {:keys [since otel tool-calls by]}]
-  (if (= "milestone" (str by))
-    (telemetry/cost-by-milestone (:store @session))
+  (if (= "commit-point" (str by))
+    (telemetry/cost-by-commit-point (:store @session))
     (telemetry/turn-cost (:store @session)
                          :since since :otel otel :tool-calls tool-calls)))

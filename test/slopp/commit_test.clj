@@ -1,5 +1,5 @@
 (ns slopp.commit-test
-  "Commit points (P4-m7): named MILESTONE markers in a branch's history — the
+  "Commit points (P4-m7): named COMMIT-POINT markers in a branch's history — the
   human-important grain above turn ends, episode ends, and done-points.
   A commit point implies a done, is green-gated (:force records a red
   one honestly), and is a plain :commit marker delta so it rides the journal,
@@ -15,7 +15,7 @@
        "(defn ^:unused-ok g [x] (dec x))\n"
        "(deftest f-t (is (= 2 (f 1))))\n"))
 
-(deftest ^:external commit-point-marks-a-verified-milestone
+(deftest ^:external commit-point-marks-a-verified-commit-point
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'cm.core seed)
@@ -46,11 +46,11 @@
           (is (= "v1: plus-ten shipped" (:description c1)))
           (is (= :green (:status c2)))
           (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}" (str (:at c2))))))
-      (testing "commit targets anchor query-changes spans (diff between milestones)"
+      (testing "commit targets anchor query-changes spans (diff between commit-points)"
         (let [[c2 c1] (ops/query-commits sess)
               c (history/query-changes (ops/with-history sess) :from (:target c1) :to (:target c2))]
           (is (some #(= 'cm.core/g (:form %)) (:forms c)))))
-      (testing "the collapsed history shows the milestone; contains finds it"
+      (testing "the collapsed history shows the commit-point; contains finds it"
         (let [rows (history/query-history (ops/with-history sess) :collapse true :contains "plus-ten shipped")]
           (is (= "v1: plus-ten shipped"
                  (get-in (first rows) [:commit :description]))))
@@ -64,12 +64,12 @@
       (ops/ingest! sess 'cm.core seed)
       (ops/edit-replace! sess 'cm.core 'f-t "(deftest f-t (is (= 999 (f 1))))"
                          :prompt "deliberately red" :agent "bob")
-      (testing "a red state refuses the milestone (work stays at its done-point)"
-        (let [r (external/commit-point! sess "broken milestone" :agent "bob")]
+      (testing "a red state refuses the commit-point (work stays at its done-point)"
+        (let [r (external/commit-point! sess "broken commit-point" :agent "bob")]
           (is (:error r))
           (is (= :red (:status r)))
           (is (empty? (ops/query-commits sess)))))
-      (testing ":force records the red milestone HONESTLY"
+      (testing ":force records the red commit-point HONESTLY"
         (let [r (external/commit-point! sess "broken but important" :agent "bob"
                                    :force true)]
           (is (nil? (:error r)) (pr-str r))
@@ -122,7 +122,7 @@
           (is (re-find #"m1" (call "query_commits" {})))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external repeat-milestone-on-unchanged-store-returns-it
+(deftest ^:external repeat-commit-point-on-unchanged-store-returns-it
   (let [sess (external/open!)]
     (try
       (ops/create-ns! sess 'rm.core :source "(ns rm.core)\n(defn ^:unused-ok f [] 1)\n")
@@ -135,15 +135,15 @@
           (is (re-find #"nothing changed" (str (:note m2))))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external the-milestone-forces-no-whole-store-check
-  ;; CONTRACT (D-full-check): the milestone runs `done!` and gates on that
+(deftest ^:external the-commit-point-forces-no-whole-store-check
+  ;; CONTRACT (D-full-check): the commit-point runs `done!` and gates on that
   ;; verdict — the impacted ^:external slice included, since that IS what a
   ;; standalone done runs. What it does NOT do is run the WHOLE external suite;
   ;; `full_check` is the whole-store answer and is the agent's call.
   ;;
   ;; The cost is pinned here deliberately: a red ^:external test the episode
-  ;; never TOUCHED will not stop a milestone (only full_check catches it). A
-  ;; TOUCHED red one does — a-milestone-catches-a-touched-red-external-test.
+  ;; never TOUCHED will not stop a commit-point (only full_check catches it). A
+  ;; TOUCHED red one does — a-commit-point-catches-a-touched-red-external-test.
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'mg.bad "(ns mg.bad)\n\n(defn f \"F.\" [x] x)\n")
@@ -151,33 +151,33 @@
                    (str "(ns mg.bad-test (:require [mg.bad :as bad]\n"
                         "                          [clojure.test :refer [deftest is]]))\n\n"
                         "(deftest ^:external f-t (is (= :nope (bad/f 1))))\n"))
-      ;; record the red spec as an honest red milestone; now it sits in the
+      ;; record the red spec as an honest red commit-point; now it sits in the
       ;; store, and the NEXT episode does not touch it
       (external/commit-point! sess "known-red corner" :force true)
-      (testing "unrelated work milestones green over the untouched red corner"
+      (testing "unrelated work commit-points green over the untouched red corner"
         (ops/ingest! sess 'mg.ok "(ns mg.ok)\n\n(defn ^:unused-ok g \"G.\" [x] (inc x))\n")
         (let [r (external/commit-point! sess "unrelated work")]
           (is (:commit r) (pr-str (dissoc r :test :findings)))
           (is (not= :red (:status r)) (pr-str (dissoc r :test :findings)))))
       (testing "full_check is where the untouched red external spec surfaces"
-        (let [r (external/run-full-check! sess)]
+        (let [r (external/full-check! sess)]
           (is (= :red (:status r)) (pr-str (dissoc r :lint :warnings)))
           (is (= :red (:status (:external r))) (pr-str (:external r)))))
       (testing "and once the spec is honest, full_check is green"
         (ops/edit-replace! sess 'mg.bad-test 'f-t
                            "(deftest ^:external f-t (is (= 1 (bad/f 1))))"
                            :prompt "fix the spec")
-        (let [r (external/run-full-check! sess)]
+        (let [r (external/full-check! sess)]
           (is (= :green (:status r)) (pr-str (dissoc r :lint :warnings)))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-milestone-catches-a-touched-red-external-test
-  ;; D-full-check: `done` runs the impacted ^:external slice, and a milestone
+(deftest ^:external a-commit-point-catches-a-touched-red-external-test
+  ;; D-full-check: `done` runs the impacted ^:external slice, and a commit-point
   ;; "gates on done's verdict". So a red ^:external test the episode TOUCHED
-  ;; must stop the milestone — only an UNTOUCHED one is exempt (that is what
+  ;; must stop the commit-point — only an UNTOUCHED one is exempt (that is what
   ;; full_check is for). commit-point! passed done! :external? false, making
-  ;; the milestone's done SKIP the external tier the in-image suite already
-  ;; skips — so going straight to a milestone (no prior standalone done to
+  ;; the commit-point's done SKIP the external tier the in-image suite already
+  ;; skips — so going straight to a commit-point (no prior standalone done to
   ;; carry a verdict) landed green over exactly the red a plain done catches.
   (let [sess (external/open!)]
     (try
@@ -186,18 +186,18 @@
                    (str "(ns mt.core-test (:require [mt.core :as core]\n"
                         "                           [clojure.test :refer [deftest is]]))\n\n"
                         "(deftest ^:external f-t (is (= :nope (core/f 1))))\n"))
-      (testing "the milestone runs the impacted external tier and refuses"
+      (testing "the commit-point runs the impacted external tier and refuses"
         (let [r (external/commit-point! sess "should refuse")]
           (is (= :red (:status r)) (pr-str (dissoc r :test :findings)))
           (is (:error r) (pr-str (dissoc r :test :findings)))
-          (is (empty? (ops/query-commits sess)) "no green milestone was minted")))
+          (is (empty? (ops/query-commits sess)) "no green commit-point was minted")))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-milestone-cannot-report-GREEN-when-its-own-land-was-refused
-  ;; Observed on `d32474`: a milestone recorded `:status :green` while its land
-  ;; had been refused, so the branch did not contain the work the milestone
+(deftest ^:external a-commit-point-cannot-report-GREEN-when-its-own-land-was-refused
+  ;; Observed on `d32474`: a commit-point recorded `:status :green` while its land
+  ;; had been refused, so the branch did not contain the work the commit-point
   ;; names. The skill promises the opposite — "commit_point lands too, so a
-  ;; milestone always names a branch that contains what it milestones" — and
+  ;; commit-point always names a branch that contains what it commit-points" — and
   ;; everything downstream reads the stamp rather than the branch.
   ;;
   ;; The mechanism is one discarded value: `commit-point!` called
@@ -209,7 +209,7 @@
   ;;
   ;; `:force` because the gate is not what is under test: forcing skips the
   ;; external suite and still lands, and the comment on that land says it is
-  ;; unconditional *because* a milestone naming work the branch does not
+  ;; unconditional *because* a commit-point naming work the branch does not
   ;; contain is not honest, it is unreadable.
   (let [sess (external/open!)]
     (try
@@ -217,33 +217,33 @@
       (let [r (with-redefs [branch/land-thread!
                             (fn [_] {:landed false
                                      :reason "main moved while you worked, and rebasing onto it conflicts"})]
-                (external/commit-point! sess "a milestone whose work never reached the branch"
+                (external/commit-point! sess "a commit-point whose work never reached the branch"
                                         :force true))]
         (testing "the refusal reaches the caller"
           (is (some? (:land r))
-              (str "the milestone dropped its land result, so a branch missing"
-                   " the work it names still reports as a milestone: "
+              (str "the commit-point dropped its land result, so a branch missing"
+                   " the work it names still reports as a commit-point: "
                    (pr-str r)))
           (is (false? (:landed (:land r))) (pr-str (:land r))))
 
-        (testing "and the milestone does not read as green"
+        (testing "and the commit-point does not read as green"
           ;; the stamp is what everything downstream trusts, so it is the thing
           ;; that must not lie — a refusal recorded as :green is worse than a
           ;; refusal to record
           (is (not= :green (:status r))
-              (str "recorded :green for a milestone whose land was refused: "
+              (str "recorded :green for a commit-point whose land was refused: "
                    (pr-str (select-keys r [:status :land :commit]))))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-milestone-says-where-its-time-went
+(deftest ^:external a-commit-point-says-where-its-time-went
   ;; s20: commit_point averaged 125s against done's 33s on this store, and
   ;; nothing in the result or the delta said where the other ninety seconds
-  ;; went — a reader's estimate stood in for a fact. The milestone times
+  ;; went — a reader's estimate stood in for a fact. The commit-point times
   ;; its done and its land; the wire adds the app refresh and the publish.
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'ms.core "(ns ms.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
-      (let [r (external/commit-point! sess "timed milestone" :agent "bob")]
+      (let [r (external/commit-point! sess "timed commit-point" :agent "bob")]
         (is (nil? (:error r)) (pr-str r))
         (is (number? (get-in r [:ms :done])) (pr-str (:ms r)))
         (is (number? (get-in r [:ms :land])) (pr-str (:ms r))))

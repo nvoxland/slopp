@@ -3,7 +3,7 @@
   REAL agent surface (mcp/handle, JSON round-tripped) with deterministic
   scripts, measuring wall time and token cost (chars/4 of the JSON actually
   sent/received). Deliberate red steps are included — debugging is part of
-  real usage. Run at milestones (the tree is fileless, so this goes through the
+  real usage. Run at commit-points (the tree is fileless, so this goes through the
   boot kernel):
   clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main
   Appends rows to benchmarks/results.md (committed).

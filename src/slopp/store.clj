@@ -9,7 +9,7 @@
   positional and idless, kept so that rendering could be lossless. Lumping
   those together forced slopp to preserve BYTES, because a comment stored
   positionally is content the delta log never recorded — which is why a
-  milestone had to carry a byte-exact snapshot of every namespace to keep it.
+  commit-point had to carry a byte-exact snapshot of every namespace to keep it.
   Splitting them dissolves the requirement: the space between forms is
   RENDERING (`slopp.store.render` supplies it, nothing stores it), and a
   comment is CONTENT owned by the form it describes, travelling in that form's
@@ -1005,7 +1005,7 @@
 
   These are the derived facts a PURE reader can be handed; everything else
   about history — which deltas touched a form, what a form was at a
-  milestone, the merge — is a `slopp.store.db` read over the journal."
+  commit-point, the merge — is a `slopp.store.db` read over the journal."
   [store d]
   (let [ns-sym (:ns d)
         fids   (cond-> (or (:form-ids d) [])
@@ -1027,7 +1027,7 @@
                 ;; this and `committed` clears it — no more recovering two new
                 ;; entries by dropping one whole list's count off another's
                 (update :pending (fnil conj []) d)
-                ;; the RECENT window: everything since the last milestone plus
+                ;; the RECENT window: everything since the last commit-point plus
                 ;; the done that earned it. The readers of the recent past —
                 ;; was the last done green, is a turn open, what changed since
                 ;; the done — look back no further, so they get hundreds of
@@ -1236,7 +1236,7 @@
      did]))
 
 (defn record-commit
-  "Append a `:commit` MILESTONE marker (P4-m7) — a named pointer at `target`
+  "Append a `:commit` COMMIT-POINT marker (P4-m7) — a named pointer at `target`
   (a delta id, normally the head the done-point just produced) with a human-facing
   `description`. The important-done grain above turns; git's annotated
   tag, inside the journal. `extra` merges op-specific payload into the delta
@@ -1578,7 +1578,7 @@
 
   A comment BELONGS to the form it describes. Stored positionally as a `:sep`
   it is content that lives nowhere in the delta log — which is precisely why
-  a milestone had to carry a byte-exact tree snapshot to keep it. Owned by a
+  a commit-point had to carry a byte-exact tree snapshot to keep it. Owned by a
   form it is ordinary content: recorded in the delta, replayable from the log
   alone, and mergeable without a position to reconcile.
 
@@ -1772,7 +1772,7 @@
   A VERIFICATION is a claim a WRITE makes about the store. An OBSERVATION is
   narrower — *these tests ran, in this tier, and this is what happened* —
   which is why `test_run` and the external tier could not simply append a
-  `:verify`: `done`'s scope logic, milestone `:status` and the trace map all
+  `:verify`: `done`'s scope logic, commit-point `:status` and the trace map all
   read `:verify`, and widening it would weaken what a verification MEANS.
 
   Three facts, in three places:
@@ -1900,8 +1900,8 @@
   it; only the element-content machinery lives here.
 
   **A nil is a claim that the journal is not enough**, and it costs more than
-  a reload: the git projection derives each milestone's tree by folding the
-  log, so an op that cannot replay is a milestone whose bytes cannot be
+  a reload: the git projection derives each commit-point's tree by folding the
+  log, so an op that cannot replay is a commit-point whose bytes cannot be
   reconstructed. That is what the stored `:tree` snapshot used to paper over.
   Every op slopp writes today replays; the default is for a RETIRED op (a
   historic `:trivia`, which edited `:sep` elements nothing reads any more)

@@ -311,7 +311,7 @@
   Why a measurement and not the watcher's `:failed` map: those disagree, and
   friction 20a is the case where the map was wrong. A rename left the watcher
   retrying a namespace that no longer EXISTS — failing forever, reporting the
-  host stale, costing a milestone a fresh JVM — while the process held every
+  host stale, costing a commit-point a fresh JVM — while the process held every
   live namespace at current source. A comparison against the store's current
   sources answers that correctly and for free: a deleted namespace is simply
   not in `now`, so it cannot be stale."}

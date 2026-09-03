@@ -61,7 +61,7 @@
                   :properties {:ns {:type "string"} :name {:type "string"}}
                   :required ["ns" "name"]}}
    {:name "session_brief"
-    :description "START HERE, once: namespaces with form names, recent milestones, git alignment, and the working loop — orientation in one small call. Depth on demand: query_source {ns}/query_brief/report."
+    :description "START HERE, once: namespaces with form names, recent commit-points, git alignment, and the working loop — orientation in one small call. Depth on demand: query_source {ns}/query_brief/report."
     :inputSchema {:type "object" :properties {}}}
    {:name "orient" :image-free true :read-only true
     :description "THE map for an ask, in ONE budgeted call: the forms that matter for it, ranked by a walk over the reference graph and the tests that cover them, fitted to `tokens` (default 1500). Each row is a card (sig, doc line, recorded why, test warranty) plus :via — the edge that made it relevant (seed / called by X / calls X / covered by T). Give it the ask verbatim (`ask`) and/or the forms you already know (`seeds` [\"ns/name\"]). The forms the ask NAMES (the seeds) carry their :source when the budget allows, so the write that follows needs no read in between; the neighbourhood is cards. :more counts what the budget cut."
@@ -154,18 +154,18 @@
    {:name "query_cost" :image-free true :read-only true
     :description "WHERE THE WALL CLOCK WENT, folded over the per-turn records every turn already writes. Three-way and exhaustive: :slopp-ms inside a tool, :idle-ms for the session nobody was in, :outside-ms for agent reasoning plus every non-slopp tool — which the server cannot tell apart and does not pretend to. :slopp-share is taken against ACTIVE time, so a human going to bed is not counted as time slopp failed to use. Also :tools ranked by total cost, :refused with its per-tool breakdown (each refusal is a whole round trip that produced nothing), and :repeats — a tool run more than once inside ONE ask, ranked by what the extra runs cost, which is how an ordinary second read is told apart from a second whole-store check. :tools is a LOWER BOUND: only the five costliest tools per turn are recorded, so a cheap tool's absence is not evidence it was not called. Read-only over the delta log; optional since (a delta/commit id from query_commits) windows it."
     :inputSchema {:type "object" :properties {:since {:type "string"}
-                                              :by {:type "string" :enum ["milestone"]}}}}])
+                                              :by {:type "string" :enum ["commit-point"]}}}}])
 
 (def history-tools
   "Provenance tool descriptors: history, time-travel, change queries. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "report"
-    :description "THE summary/handoff composite, one read: :by-ask — every ask verbatim with the forms it added, changed, deleted and renamed (newest first) — plus milestones, net form changes, the last verification and alignment. It answers 'what changed here and why' by itself; per-namespace histories are for drilling into ONE form. contains matching form NAMES also carries :story — the most-storied forms' version rows (ask/op/at/state): the provenance answer ('why is X what it is') in this same call. since=<delta/milestone id>, contains=<filter>. Prefer over stitching query_history/query_changes/query_commits."
+    :description "THE summary/handoff composite, one read: :by-ask — every ask verbatim with the forms it added, changed, deleted and renamed (newest first) — plus commit-points, net form changes, the last verification and alignment. It answers 'what changed here and why' by itself; per-namespace histories are for drilling into ONE form. contains matching form NAMES also carries :story — the most-storied forms' version rows (ask/op/at/state): the provenance answer ('why is X what it is') in this same call. since=<delta/commit-point id>, contains=<filter>. Prefer over stitching query_history/query_changes/query_commits."
     :inputSchema {:type "object"
                   :properties {:since {:type "string"}
                                :contains {:type "string"}
                                :limit {:type "integer"}}}}
    {:name "query_history"
-    :description "EVERYTHING that happened, one tool: no args = change history (collapse=true for episode rows); {ns name} = one form's life; {ns name at} = TIME-TRAVEL to a past delta/milestone; {ns name effort true} = what that form COST to get green (red→green cycles, distinct asks, recorded verification time + how much of its life that covers); {at} = was-green-at; {contains} = which asks/prompts touched X; {dead_ends true} = SCRAPPED explorations (reverts) with their why + the forms they dropped, {dead_ends \"some.ns\"} narrows to ones that touched it — check it before re-walking a path someone already abandoned. format=text for humans. For summaries/handoffs use report."
+    :description "EVERYTHING that happened, one tool: no args = change history (collapse=true for episode rows); {ns name} = one form's life; {ns name at} = TIME-TRAVEL to a past delta/commit-point; {ns name effort true} = what that form COST to get green (red→green cycles, distinct asks, recorded verification time + how much of its life that covers); {at} = was-green-at; {contains} = which asks/prompts touched X; {dead_ends true} = SCRAPPED explorations (reverts) with their why + the forms they dropped, {dead_ends \"some.ns\"} narrows to ones that touched it — check it before re-walking a path someone already abandoned. format=text for humans. For summaries/handoffs use report."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :at {:type "string"} :contains {:type "string"}
@@ -175,7 +175,7 @@
                                :dead_ends {:type ["boolean" "string"]}
                                :format {:type "string" :enum ["edn" "text"]}}}}
    {:name "query_changes"
-    :description "THE code-level change view — net per-form diffs (:was/:now) + red/green arc. Your open episode by default, or a span via :from/:to. :from takes NAMED ANCHORS as well as delta ids: \"start\" (the whole lifetime), \"last-commit\" (since the last milestone), \"last-done\". This is what answers 'show me what changed, WITH the code' — reach for it instead of shelling out to git diff; format=text renders line diffs."
+    :description "THE code-level change view — net per-form diffs (:was/:now) + red/green arc. Your open episode by default, or a span via :from/:to. :from takes NAMED ANCHORS as well as delta ids: \"start\" (the whole lifetime), \"last-commit\" (since the last commit-point), \"last-done\". This is what answers 'show me what changed, WITH the code' — reach for it instead of shelling out to git diff; format=text renders line diffs."
     :inputSchema {:type "object"
                   :properties {:from {:type "string"} :to {:type "string"}
                                :format {:type "string" :enum ["edn" "text"]}}}}])
@@ -287,7 +287,7 @@
                                :name {:type "string"}
                                :prompt {:type "string"}}
                   :required ["ns" "from" "name"]}}
-   {:description "Walk back your OWN recent writes — the cheap, reach-for-it-immediately undo. deltas: n (default 1) undoes your last n writes; to: \"d123\" undoes everything of yours after that delta. to also takes a NAMED anchor: \"last-commit\" scraps everything since the last milestone (the usual dead-end rollback — no delta id to hunt), \"last-done\" goes back to your last done point. Addressed by DELTA, not by name, so it also restores a form you DELETED. Forms another agent also wrote in the span are skipped and reported. deltas counts over the LOG and REFUSES rather than reaching past: a delta whose op it cannot invert (ns_rename, edit_move_forms, ns_delete, config_file, module_dep — anything changing more than form sources) comes back in :blocked with NOTHING reverted, rather than being stepped over to undo something older. One atomic verified group. Reach for this the moment a write turns out wrong; use episode_revert only to scrap a whole episode.", :inputSchema {:properties {:prompt {:type "string"}, :deltas {:type "integer"}, :to {:type "string"}}, :type "object"}, :name "undo"}
+   {:description "Walk back your OWN recent writes — the cheap, reach-for-it-immediately undo. deltas: n (default 1) undoes your last n writes; to: \"d123\" undoes everything of yours after that delta. to also takes a NAMED anchor: \"last-commit\" scraps everything since the last commit-point (the usual dead-end rollback — no delta id to hunt), \"last-done\" goes back to your last done point. Addressed by DELTA, not by name, so it also restores a form you DELETED. Forms another agent also wrote in the span are skipped and reported. deltas counts over the LOG and REFUSES rather than reaching past: a delta whose op it cannot invert (ns_rename, edit_move_forms, ns_delete, config_file, module_dep — anything changing more than form sources) comes back in :blocked with NOTHING reverted, rather than being stepped over to undo something older. One atomic verified group. Reach for this the moment a write turns out wrong; use episode_revert only to scrap a whole episode.", :inputSchema {:properties {:prompt {:type "string"}, :deltas {:type "integer"}, :to {:type "string"}}, :type "object"}, :name "undo"}
    {:name "episode_revert"
     :description "Roll back everything YOU changed since your last done (other sessions' forms skipped, reported). To walk back just one write, or a short chain, without losing the rest of the episode, use undo."
     :inputSchema {:type "object"
@@ -333,7 +333,7 @@
                                :prompt {:type "string"}}}}])
 
 (def flow-tools
-  "Session-flow tool descriptors: turns, tests, done-points, milestones, build. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
+  "Session-flow tool descriptors: turns, tests, done-points, commit-points, build. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "turn_begin"
     :description "Open a turn manually (records the verbatim user ask as intent). Turns are normally opened FOR you by the plugin's hooks — only needed if a write is refused."
     :inputSchema {:type "object"
@@ -345,7 +345,7 @@
     :inputSchema {:type "object"
                   :properties {:note {:type "string"}}}}
    {:name "full_check"
-    :description "The WHOLE-STORE check, on demand: kondo over every namespace, dead public surface over every namespace, and every test in every tier — in-image, ^:integration, and the external ^:external suite. One call, everything; there is no separate integration-only or lint-only tool. NOTHING forces this — not done, not commit_point. `done` is episode-scoped (it answers whether the work you just did is good); this answers whether the STORE is good, which is slower and is your judgement call. Reach for it when a change was broad, when you deleted a caller (dead surface appears in namespaces you never touched), or before a commit you want to stand behind. affected=true is the MIDDLE GEAR between done and the whole thing: lint/dead-surface/layering/in-image still cover every namespace (they cost ~5-7s), while the ^:external tier — which is ~187s of a ~190s run — narrows to the tests your changes since the last milestone can reach. The result states the narrowing. A verdict that STILL STANDS is returned instead of re-earned: when nothing since the last whole-store check could have changed what it says, you get that verdict back with :standing true in about a millisecond, and no check runs. Asking twice for one answer cost this store 7.6 hours before that existed. force=true runs it anyway; any write of any kind retires the standing verdict on its own. READING :external :cost (read this once, here): the tier costs its SLOWEST shard, not the sum; the FASTEST shard still paid a whole JVM boot plus dependency resolution (~8s of it), so :narrowing-ceiling-ms (slowest minus fastest) is the most affected=true can ever return, and only when your changes are local enough to drop whole test namespaces — a core-namespace change reaches nearly everything and narrows to almost the same set. :unbalanced? true means the SPREAD between shards is part of the cost and fewer tests will not address it; re-balancing has measured worse three times because a namespace's cost here depends on what its neighbours leave it (the same namespace measured 0.8s and 27.1s across two runs), so treat :ns-ms as evidence about a run, never a weight for the next one."
+    :description "The WHOLE-STORE check, on demand: kondo over every namespace, dead public surface over every namespace, and every test in every tier — in-image, ^:integration, and the external ^:external suite. One call, everything; there is no separate integration-only or lint-only tool. NOTHING forces this — not done, not commit_point. `done` is episode-scoped (it answers whether the work you just did is good); this answers whether the STORE is good, which is slower and is your judgement call. Reach for it when a change was broad, when you deleted a caller (dead surface appears in namespaces you never touched), or before a commit you want to stand behind. affected=true is the MIDDLE GEAR between done and the whole thing: lint/dead-surface/layering/in-image still cover every namespace (they cost ~5-7s), while the ^:external tier — which is ~187s of a ~190s run — narrows to the tests your changes since the last commit-point can reach. The result states the narrowing. A verdict that STILL STANDS is returned instead of re-earned: when nothing since the last whole-store check could have changed what it says, you get that verdict back with :standing true in about a millisecond, and no check runs. Asking twice for one answer cost this store 7.6 hours before that existed. force=true runs it anyway; any write of any kind retires the standing verdict on its own. READING :external :cost (read this once, here): the tier costs its SLOWEST shard, not the sum; the FASTEST shard still paid a whole JVM boot plus dependency resolution (~8s of it), so :narrowing-ceiling-ms (slowest minus fastest) is the most affected=true can ever return, and only when your changes are local enough to drop whole test namespaces — a core-namespace change reaches nearly everything and narrows to almost the same set. :unbalanced? true means the SPREAD between shards is part of the cost and fewer tests will not address it; re-balancing has measured worse three times because a namespace's cost here depends on what its neighbours leave it (the same namespace measured 0.8s and 27.1s across two runs), so treat :ns-ms as evidence about a run, never a weight for the next one."
     :inputSchema {:type "object" :properties {:affected {:type "boolean"}
                                               :force {:type "boolean"}
                                               :verbose {:type "boolean"}}}}
@@ -353,14 +353,14 @@
     :description "Close a unit of work: normalize your touched forms, re-verify, record a labeled boundary. EPISODE-SCOPED (:scope :episode on every result — read this once, here): it runs the whole in-image suite plus the ^:external tests your changes impact, but lint and dead-surface cover only the namespaces you touched and the full ^:external / ^:integration tiers do not run — `full_check` is the whole store. The two also differ in ISOLATION the other way: done puts every impacted ^:external test in ONE serial JVM and full_check shards across four, so a pair that fails only TOGETHER fails here and can pass there — a red done beside a green full_check is not done being wrong. When the impacted ^:external set is most of the suite it is DEFERRED (:external-pending, with the count) and the green is the in-image suite only; that gets likelier as a change gets broader, so on a broad change `full_check` is the only external evidence the episode gets. done REPORTS; it never refuses — an unfixable finding is recorded honestly rather than blocking you. Selection is per form: trace evidence where it exists, the form's own namespace-reach where it does not."
     :inputSchema {:type "object" :properties {:label {:type "string"}}}}
    {:name "commit_point"
-    :description "Record a MILESTONE — it runs a full done (normalize, verify, the IMPACTED ^:external slice, advisories) and gates on that verdict; force=true records red honestly and skips the gate. It does NOT run a whole-store check: a red ^:external test this episode never touched will not stop it, which is `full_check`'s job and yours to call. This said 'green-gated on the FULL ^:external suite' for a while and that was never what it did — a description claiming a stronger gate than exists is worse than one claiming none, because it is trusted instead of checked. The git-projection grain; target=<delta id> marks an earlier spot."
+    :description "Record a COMMIT-POINT — it runs a full done (normalize, verify, the IMPACTED ^:external slice, advisories) and gates on that verdict; force=true records red honestly and skips the gate. It does NOT run a whole-store check: a red ^:external test this episode never touched will not stop it, which is `full_check`'s job and yours to call. This said 'green-gated on the FULL ^:external suite' for a while and that was never what it did — a description claiming a stronger gate than exists is worse than one claiming none, because it is trusted instead of checked. The git-projection grain; target=<delta id> marks an earlier spot."
     :inputSchema {:type "object"
                   :properties {:label {:type "string"}
                                :force {:type "boolean"}
                                :target {:type "string"}}
                   :required ["label"]}}
    {:name "test_run"
-    :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the milestone runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last milestone. Red external runs return :failing + :all-failing {file [tests]} + :themes."
+    :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the commit-point runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last commit-point. Red external runs return :failing + :all-failing {file [tests]} + :themes."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :only {:type "array" :items {:type "string"}}
@@ -393,7 +393,7 @@
 (def env-tools
   "Environment tool descriptors: deps, files, config, branches. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "config"
-    :description "Read/set store config (user.name / user.email — the milestone author; \"<git>\" defers to git config). Omit value to read."
+    :description "Read/set store config (user.name / user.email — the commit-point author; \"<git>\" defers to git config). Omit value to read."
     :inputSchema {:type "object"
                   :properties {:key {:type "string"}
                                :value {:type "string"}}
@@ -452,7 +452,7 @@
     :description "The files manifest: {path bytes}."
     :inputSchema {:type "object" :properties {}}}
    {:name "file_get" :image-free true :read-only true
-    :description "A manifest file's content (optionally at a past delta/milestone via `at`)."
+    :description "A manifest file's content (optionally at a past delta/commit-point via `at`)."
     :inputSchema {:type "object"
                   :properties {:path {:type "string"} :at {:type "string"}}
                   :required ["path"]}}
@@ -584,7 +584,7 @@
 (def sync-tools
   "Git-sync tool descriptors: push/pull/clone/conflicts and remotes. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
   [{:name "query_commits" :image-free true :read-only true
-    :description "Milestones, newest first — TITLE lines only (+ :more-lines); {commit \"dN\"} drills into ONE full description (targets plug into query_changes from/to). With a git remote configured, :alignment PROVES whether the slopp branch head is the latest milestone's projection — trust it; no worktree/sqlite cross-checks."
+    :description "Commit-points, newest first — TITLE lines only (+ :more-lines); {commit \"dN\"} drills into ONE full description (targets plug into query_changes from/to). With a git remote configured, :alignment PROVES whether the slopp branch head is the latest commit-point's projection — trust it; no worktree/sqlite cross-checks."
     :inputSchema {:type "object" :properties {:commit {:type "string"}}}}
    {:name "query_git" :image-free true :read-only true
     :description "This session's git view: the saved external remote and the clone base it grafts onto, or a refusal naming how to set one."
@@ -607,7 +607,7 @@
                   :properties {:url {:type "string"} :token {:type "string"}
                                :branches {:type "array" :items {:type "string"}}}}}
    {:name "import_dir"
-    :description "Absorb a DIRECTORY of files into this store as ordinary tracked form edits — 3-way against your last milestone, same conflict handling and same done gate as git_pull, with NO git anywhere. For a zip, a scratch tree, or another tool's output. Paths the exported base never carried and that are not namespaces are left alone and noted."
+    :description "Absorb a DIRECTORY of files into this store as ordinary tracked form edits — 3-way against your last commit-point, same conflict handling and same done gate as git_pull, with NO git anywhere. For a zip, a scratch tree, or another tool's output. Paths the exported base never carried and that are not namespaces are left alone and noted."
     :inputSchema {:type "object"
                   :properties {:dir {:type "string"}}
                   :required ["dir"]}}
@@ -660,8 +660,8 @@ RESULTS: the result IS the check — do not re-read, restart or test_run after
 FINISH:  done {label} when the UNIT is finished — a unit may span
          change -> explore -> change, and the Stop hook runs done if you
          forget. full_check (whole store) and commit_point {label} (a
-         milestone) are the human's grain.
-SHARE:   git_push {url?} · git_pull · config {key value?} (milestone identity)
+         commit-point) are the human's grain.
+SHARE:   git_push {url?} · git_pull · config {key value?} (commit-point identity)
 CLI:     every op, from a shell, routed to THIS running server (fast):
          slopp <op> '{…json…}' · whole-blob writes with RAW heredoc source:
          slopp add <ns> <<'EOF' …forms… EOF · slopp replace <ns/name> <<'EOF'
@@ -871,7 +871,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   [{:name "orient" :blurb "Where to start: the forms that matter for an ask, ranked with why; or the project brief." :ops ["orient" "session_brief"]}
    {:name "read" :blurb "Read code by form, never by file: MANY questions in one explore call, an in-image check, one form with what it reaches, a search, the outline, a spooled remainder." :ops ["explore" "check" "query_slice" "query_source" "query_brief" "query_detail" "query_search" "query_project"]}
    {:name "depends" :blurb "What reaches what: callers and callees, the module graph, a macro expansion." :ops ["query_depends" "query_call" "query_macroexpand"]}
-   {:name "history" :blurb "What changed, why and when: form history, intents, milestones, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
+   {:name "history" :blurb "What changed, why and when: form history, intents, commit-points, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
    {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it." :ops ["change" "edit_comment" "edit_revert" "undo" "episode_revert"]}
    {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}

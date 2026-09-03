@@ -927,7 +927,7 @@
   ;; and unlike a bare `:map` there is no token in the schema to notice.
   ;;
   ;; Measured when this was written: `/api/timeline` sent EIGHT keys per
-  ;; milestone and declared three — `:at :status :agent :sha :more-lines` all
+  ;; commit-point and declared three — `:at :status :agent :sha :more-lines` all
   ;; arrived unannounced, and `:working` sent `:since`, the anchor every other
   ;; number in that map is relative to. Every other endpoint was already clean,
   ;; which is why this is a guard and not a project.
@@ -962,9 +962,9 @@
 
     (testing "and the walker can SEE an undeclared key — without this the five
               assertions above are five empty lists agreeing with each other"
-      (is (= [[:milestones :at]]
-             (vec (distinct (undeclared [:map [:milestones [:sequential [:map [:commit :string]]]]]
-                                        {:milestones [{:commit "d1" :at "now"}]}
+      (is (= [[:commit-points :at]]
+             (vec (distinct (undeclared [:map [:commit-points [:sequential [:map [:commit :string]]]]]
+                                        {:commit-points [{:commit "d1" :at "now"}]}
                                         []))))))))
 
 (deftest every-path-parameter-is-declared-in-the-endpoints-request

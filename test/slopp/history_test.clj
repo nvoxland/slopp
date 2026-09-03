@@ -57,7 +57,7 @@
           (testing "a form renders as it stood at a past delta"
             (is (= "(defn f [x] (+ x 1))" (:source (at 'f (:target v1)))))
             (is (= "(defn f [x] (+ x 100))" (:source (at 'f (:target v2))))))
-          (testing "a COMMIT id resolves to its target (time-travel to a milestone)"
+          (testing "a COMMIT id resolves to its target (time-travel to a commit-point)"
             (is (= "(defn f [x] (+ x 1))" (:source (at 'f (:commit v1))))))
           (testing "the version carries the was-green-at status of that point"
             (is (= :green (:status (at 'f (:target v2))))))))
@@ -178,9 +178,9 @@
       (testing "a commit-point DESCRIPTION is searchable"
         ;; :force — the earlier edits left f-t red; we only care that the
         ;; :commit marker (with its description) lands and is searchable
-        (external/commit-point! sess "auth milestone shipped" :agent "a" :force true)
-        (is (some #(= "auth milestone shipped" (:description %))
-                  (history/query-search-history (ops/with-history sess) "milestone"))))
+        (external/commit-point! sess "auth commit-point shipped" :agent "a" :force true)
+        (is (some #(= "auth commit-point shipped" (:description %))
+                  (history/query-search-history (ops/with-history sess) "commit-point"))))
       (testing "a blank pattern is refused; limit is respected"
         (is (:error (history/query-search-history (ops/with-history sess) "  ")))
         (is (<= (count (history/query-search-history (ops/with-history sess) "x" :limit 1)) 1)))
@@ -307,7 +307,7 @@
   ;; back to query_history per form, and one fed turn uuids in as :name,
   ;; hunting for exactly these ids. So every grain cites: the ask row its
   ;; turn delta, the change row its content deltas, the story its versions
-  ;; (already), the milestone its commit — and the result says the ids are
+  ;; (already), the commit-point its commit — and the result says the ids are
   ;; the citations.
   (let [sess (external/open!)]
     (try

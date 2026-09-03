@@ -79,7 +79,7 @@
   So a single non-fast-forward sentence said \"the remote branch has history
   this store doesn't build on (pull first)\" about a LOCAL ref, where pulling
   is not unhelpful but impossible — and it ran automatically on every
-  milestone, while `git_push` answered its own case correctly. Reported by a
+  commit-point, while `git_push` answered its own case correctly. Reported by a
   consumer who read the confident wrong cause, went looking for a remote that
   had never existed, and nearly filed it as something else entirely.
 
@@ -174,4 +174,4 @@
                                              :timeout timeout}))
                   err)))))
         {:error (str "nothing to push — no " src
-                     " in the projection (no milestones yet?)")}))))
+                     " in the projection (no commit-points yet?)")}))))

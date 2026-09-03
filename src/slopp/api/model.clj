@@ -3,7 +3,7 @@
   operation API's pure surfaces. No hiccup, no HTTP, no writes.
 
   Four models, one per screen — `timeline` (the landing page),
-  `change-view` (what happened between two milestones), `form-view`
+  `change-view` (what happened between two commit-points), `form-view`
   (one form's permalink) and `module-index` (the Code landing: the
   architecture as a drawable picture).
 
@@ -24,9 +24,9 @@
             [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render]))
 
 (defn ^:export change-view
-  "What changed between two milestones, grouped module → namespace → form
+  "What changed between two commit-points, grouped module → namespace → form
   with a count at every rung so a collapsed row still says how much is
-  under it. `from`/`to` are milestone delta ids — exactly the pair
+  under it. `from`/`to` are commit-point delta ids — exactly the pair
   `timeline` hands over in each row's `:range`.
 
   Two rungs, not three: wave 1 made components REAL namespace prefixes, so
@@ -96,7 +96,7 @@
 
 (defn- snip
   "Cap `s` at `line-cap` characters with an ellipsis. A landing model is a
-  SUMMARY: a milestone whose title line is a whole paragraph, or twenty
+  SUMMARY: a commit-point whose title line is a whole paragraph, or twenty
   prompts at full length, turn the page into the thing it exists to save
   you from reading. Capped in the MODEL, not the page, so a JSON sink is
   bounded too."
@@ -106,31 +106,31 @@
       (if (<= (count s) line-cap) s (str (subs s 0 line-cap) "…")))))
 
 (defn ^:export timeline
-  "The reviewer landing model: milestones newest first, each carrying the
+  "The reviewer landing model: commit-points newest first, each carrying the
   `from..to` range that addresses its own change screen, plus the WORKING
-  SET — what has been written since the newest milestone.
+  SET — what has been written since the newest commit-point.
 
   The range is computed here rather than in the page so a template stays a
-  template: a milestone's range runs from the milestone BEFORE it, and the
-  oldest milestone has no `:range` at all rather than an empty one.
+  template: a commit-point's range runs from the commit-point BEFORE it, and the
+  oldest commit-point has no `:range` at all rather than an empty one.
 
   Deliberately not `query-changes`: this page shows counts and recorded
   asks, never sources, and `query-changes` reconstructs the before/after
   text of every touched form to answer a question nobody asked here.
 
-  Milestones come from `history/milestone-rows`, the pure fold, not from
+  Commit-points come from `history/commit-point-rows`, the pure fold, not from
   `query-commits`: this namespace is :pure and query-commits opens the db
   to join the git projection's pinned shas. The cost is exactly that —
-  `:sha` appears only for milestones whose DELTA carries one. The fold
+  `:sha` appears only for commit-points whose DELTA carries one. The fold
   needs the value's `:deltas` to hold the `:commit` markers and nothing
   more (`slopp.ops/with-history` with `:ops [:commit]`); the working set
   is the RECENT window the value always carries — everything since the
-  newest milestone plus the done that earned it, and the content filter
+  newest commit-point plus the done that earned it, and the content filter
   drops that marker."
   [session]
   (let [st         (:store @session)
-        rows       (history/milestone-rows st :titles-only true)
-        milestones (vec (map-indexed
+        rows       (history/commit-point-rows st :titles-only true)
+        commit-points (vec (map-indexed
                          (fn [i row]
                            (let [prev (:commit (nth rows (inc i) nil))]
                              (cond-> (-> (select-keys row [:commit :description :more-lines
@@ -147,7 +147,7 @@
         mine       (filter #(contains? history/content-ops (:op %)) (:recent st))
         asks       (vec (keep :prompt mine))
         shown      8]
-    {:milestones milestones
+    {:commit-points commit-points
      :working (cond-> {:since      (or last-commit :log-start)
                        :forms      (count (distinct (mapcat history/delta-fids mine)))
                        :namespaces (vec (distinct (keep #(some-> (:ns %) str) mine)))

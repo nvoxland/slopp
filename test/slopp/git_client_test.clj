@@ -45,7 +45,7 @@
       (external/commit-point! sess "v1: f ships" :agent "alice")
       (let [ctx (git/open-ctx! dir)]
         (try
-          (testing "push lands the milestone tip in the bare remote"
+          (testing "push lands the commit-point tip in the bare remote"
             (let [r (git.client/push-to-remote! ctx bare)]
               (is (nil? (:error r)) (pr-str r))
               (is (string? (:pushed r)))
@@ -83,7 +83,7 @@
         (rm-rf! (io/file bare))))))
 
 (deftest ^:external push-refuses-when-nothing-projected
-  ;; no milestone → no refs/heads/main → an honest error, not an NPE
+  ;; no commit-point → no refs/heads/main → an honest error, not an NPE
   (let [dir  (temp-dir)
         bare (bare-repo! (str (temp-dir) "/remote.git"))
         ctx  (git/open-ctx! dir)]
@@ -125,7 +125,7 @@
   ;;
   ;; So the refusal said "the remote branch has history this store doesn't
   ;; build on (pull first)" about a LOCAL mirror ref, where pulling is not
-  ;; unhelpful but impossible — and it ran automatically on every milestone,
+  ;; unhelpful but impossible — and it ran automatically on every commit-point,
   ;; while git_push answered its own case correctly. One condition, two
   ;; surfaces, opposite answers, and the WRONG one is the automatic one.
   ;;
@@ -174,7 +174,7 @@
   new sha.
 
   A rival carrying the tip's own message is the reproduction that matters: two
-  commits stamping one milestone is what a divergent mint looks like."
+  commits stamping one commit-point is what a divergent mint looks like."
   [dir branch {:keys [parent message]}]
   (let [repo (-> (FileRepositoryBuilder.) (.setGitDir (io/file dir)) (.build))]
     (try
@@ -199,14 +199,14 @@
   ;; A push refused as non-fast-forward answered REJECTED_NONFASTFORWARD and
   ;; nothing else, and the diverged objects lived in an in-memory repo that
   ;; dies with the process — so on 2026-08-14 deciding whether ONE refusal was
-  ;; benign cost a full investigation: fold the journal to the milestone,
+  ;; benign cost a full investigation: fold the journal to the commit-point,
   ;; re-render 210 paths, re-mint the commit, push to a scratch mirror. The
   ;; answer was one fact, and the refusal already had everything needed to
   ;; state it.
   ;;
   ;; The two stories a refusal must tell apart:
   ;;   - the destination moved under you (someone else wrote the ref), and
-  ;;   - this process minted a DIFFERENT history for a milestone the
+  ;;   - this process minted a DIFFERENT history for a commit-point the
   ;;     destination already carries.
   ;; Same status, opposite remedies.
   (let [dir  (temp-dir)
@@ -224,9 +224,9 @@
             (is (string? sha1))
             (is (string? sha2))
 
-            (testing "a rival mint of the SAME milestone is named as one"
+            (testing "a rival mint of the SAME commit-point is named as one"
               ;; Same parent, same stamp, different committer: two commits
-              ;; claiming one milestone, which is what a divergent mint is.
+              ;; claiming one commit-point, which is what a divergent mint is.
               (let [msg   (:message (remote-head bare "main"))
                     rival (mint-rival! bare "main" {:parent sha1 :message msg})
                     r     (git.client/push-to-remote! ctx bare)
@@ -240,9 +240,9 @@
                 (is (= sha1 (:base d)))
                 (is (= 1 (:ahead d)))
                 (is (= 1 (:behind d)))
-                (is (= (-> d :projected :milestone) (-> d :mirror :milestone))
-                    "both stamp one milestone — that is what makes it a re-mint")
-                (is (some? (-> d :projected :milestone)))
+                (is (= (-> d :projected :commit-point) (-> d :mirror :commit-point))
+                    "both stamp one commit-point — that is what makes it a re-mint")
+                (is (some? (-> d :projected :commit-point)))
                 (is (= :remint (:cause d)))))
 
             (testing "someone pushing ON TOP of us is a different cause"
@@ -252,7 +252,7 @@
                     d     (:divergence r)]
                 (is (some? (:error r)))
                 (is (= ahead (-> d :mirror :sha)))
-                (is (nil? (-> d :mirror :milestone))
+                (is (nil? (-> d :mirror :commit-point))
                     "a commit this projection did not mint carries no stamp")
                 (is (= :mirror-ahead (:cause d))
                     "the destination builds ON this projection — nothing was re-minted")

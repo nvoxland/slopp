@@ -374,7 +374,7 @@
   ;; inside the twenty.
   ;;
   ;; The bargain is unchanged where it is load-bearing: the store is red,
-  ;; done SAYS red, and no milestone can be taken. What changes is the
+  ;; done SAYS red, and no commit-point can be taken. What changes is the
   ;; attribution — a failing test whose trace is disjoint from everything
   ;; this episode touched is evidence about somebody else's work, and it
   ;; is not a verdict on mine.

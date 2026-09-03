@@ -205,7 +205,7 @@
                         "                           [clojure.test :refer [deftest is]]))\n"
                         "(deftest g-t (is (= 0 (c/g 1))))\n"))
       (external/commit-point! sess "baseline")
-      (testing "right after a milestone the slice is empty — and says so"
+      (testing "right after a commit-point the slice is empty — and says so"
         (let [r (external/external-test-run! sess :affected true)]
           (is (zero? (:ran r)) (pr-str r))
           (is (re-find #"full gate" (str (:note r))))))
@@ -223,7 +223,7 @@
 
 (deftest ^:external parallel-external-runs-shard-and-merge
   ;; the full external suite is the wall-time king (~210s at repo scale,
-  ;; run at every milestone) — sharding test nses across parallel JVMs
+  ;; run at every commit-point) — sharding test nses across parallel JVMs
   ;; must return the same merged truth
   (let [sess (external/open!)]
     (try
@@ -565,7 +565,7 @@
 
 (deftest run-cmd-kills-a-runner-that-stopped-talking
   ;; run-shard! and the serial branch blocked in sh/sh with no bound — one
-  ;; hung ^:external test wedged done! and the milestone gate indefinitely,
+  ;; hung ^:external test wedged done! and the commit-point gate indefinitely,
   ;; and killing the server orphaned the runner. The deadline kills the
   ;; child; exit 124 with no parseable summary is what the shard-death
   ;; retry already treats as a dead JVM.
@@ -629,13 +629,13 @@
       (mk 'fa.one 1)
       (mk 'fa.two 2)
       ;; assert the baseline LANDS — `affected` measures from the last
-      ;; milestone, so a refused commit silently degrades this to "everything"
+      ;; commit-point, so a refused commit silently degrades this to "everything"
       (let [c (external/commit-point! sess "baseline")]
         (is (:commit c) (str "fixture: baseline must land — "
                              (pr-str (dissoc c :test :findings)))))
       (ops/edit-replace! sess 'fa.one 'f "(defn f \"F.\" [x] (inc x))"
                          :prompt "touch one namespace only")
-      (let [r   (external/run-full-check! sess :affected true)
+      (let [r   (external/full-check! sess :affected true)
             sel (set (map str (get-in r [:external :affected :selected])))]
         (testing "the external tier narrows to what the change can reach"
           (is (seq sel) (pr-str (:external r)))

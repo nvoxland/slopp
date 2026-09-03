@@ -65,7 +65,7 @@
   ;; holding the whole episode, and then lands. If anything drops between
   ;; those two moments the green is honest and wrong — measured with two
   ;; forms, where `http.dispatch/handle!` landed and `http/context` did not,
-  ;; and every shell then served 200 while the milestone read green.
+  ;; and every shell then served 200 while the commit-point read green.
   ;;
   ;; A red that lies costs an investigation. A GREEN that lies ships.
   (let [judged #{['app.core "f"] ['app.core "g"] ['app.web "handle"]}]
@@ -106,7 +106,7 @@
   ;; later while still present in the declaring session's store. The declaring
   ;; agent's full_check stayed green (it reads its own session); another
   ;; agent's went red on twenty undeclared edges belonging to somebody who
-  ;; could not see the loss, and their milestone was blocked by it.
+  ;; could not see the loss, and their commit-point was blocked by it.
   ;;
   ;; The MECHANISM is still unknown — the fold is edge-grained, `merge-logs`
   ;; unions concurrent declarations, and a two-agent land preserves them

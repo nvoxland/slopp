@@ -845,7 +845,7 @@
                               :git-base-sha (db/get-meta conn "git-base-sha")}))]
                        (if ext
                          {:external ext
-                          :note (str "milestones (commit_point) are the commits; "
+                          :note (str "commit-points (commit_point) are the commits; "
                                      "git_push publishes the projection to the "
                                      "remote and git_pull absorbs from it")}
                          {:error (str "no git remote configured — git_push {url}"
@@ -854,9 +854,9 @@
    "query_commits"
    (fn [session a _sym]
      (text! (if (:commit a)
-              ;; the drill-down rung: ONE milestone, full description
+              ;; the drill-down rung: ONE commit-point, full description
               (or (ops/query-commits session :commit (:commit a))
-                  {:error (str "no milestone " (:commit a))})
+                  {:error (str "no commit-point " (:commit a))})
               (let [rows (ops/query-commits session)
                     conn (:db @session)
                     al   (when (and conn (:dir @session))
@@ -2556,7 +2556,7 @@
                                      (get {["query_history" :ns]
                                            (str " — asking store-wide? report {since}"
                                                 " composes the whole story;"
-                                                " query_commits lists milestones")}
+                                                " query_commits lists commit-points")}
                                           [name k] ""))
                                 {}))))
         ;; source args are passed raw (not through `sym`), so a misnamed key
@@ -3002,7 +3002,7 @@
                                         (str "the last full_check (" (:id fc) ") was green"
                                              " and this done re-verified everything your"
                                              " episode touched — a full_check now re-runs"
-                                             " the WHOLE store, usually the milestone-time"
+                                             " the WHOLE store, usually the commit-point-time"
                                              " call (commit_point runs the same gate)."))))))]
                  (text! (assoc (terse-done (if-let [note (app-note-for app)]
                                              (assoc r :app-note note)
@@ -3015,7 +3015,7 @@
                                                        :agent (:agent a)
                                                        :force (:force a)
                                                        :target (:target a))
-                                  ;; A MILESTONE IS A DONE POINT. `commit-point!`
+                                  ;; A COMMIT-POINT IS A DONE POINT. `commit-point!`
                                   ;; runs the whole done pipeline, so the app
                                   ;; server catches up here exactly as it does on
                                   ;; the `done` tool — same call, same bound,
@@ -3040,9 +3040,9 @@
                                         (assoc r :app-note note)
                                         r)]
                                     ;; Q10: the mechanical series is the system's job —
-                                    ;; a green milestone on a git-configured store
+                                    ;; a green commit-point on a git-configured store
                                     ;; publishes itself; publish trouble rides along
-                                    ;; without failing the milestone
+                                    ;; without failing the commit-point
                                     (if (and (:commit r) (not= :red (:status r))
                                              (:dir @session))
                                       (let [tp (System/currentTimeMillis)
@@ -3060,7 +3060,7 @@
                                                                      ;; which cost a full investigation once
                                                                      :divergence]))
                                               ;; the publish, timed: it re-folds every journal
-                                              ;; before the push and was the milestone's
+                                              ;; before the push and was the commit-point's
                                               ;; unmeasured ninety seconds (s20)
                                               (update :ms assoc :publish (- (System/currentTimeMillis) tp)))
                                           r))

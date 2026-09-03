@@ -175,9 +175,9 @@
         (testing "names-only project map"
           (is (= '[f g] (:forms (first (filter #(= 'br.a (:ns %)) (:project r)))))
               (pr-str r)))
-        (testing "milestones ride along"
+        (testing "commit-points ride along"
           (is (some #(re-find #"seeded the br domain" (str (:description %)))
-                    (:milestones r))
+                    (:commit-points r))
               (pr-str r)))
         (testing "no loop prose rides along, and the whole thing is SMALL"
           ;; the loop is the skill's (one page, loaded once per session); the
@@ -197,8 +197,8 @@
                          :agent "t")
       (external/commit-point! sess "f increments now" :agent "t")
       (let [r (ops/report sess)]
-        (testing "milestones + changes with their recorded asks"
-          (is (some #(re-find #"f increments" (str (:description %))) (:milestones r)) (pr-str r))
+        (testing "commit-points + changes with their recorded asks"
+          (is (some #(re-find #"f increments" (str (:description %))) (:commit-points r)) (pr-str r))
           (is (some #(and (= 'rp.core (:ns %)) (= 'f (:form %))
                           (some (fn [a] (re-find #"make f increment" (str a))) (:asks %)))
                     (:changes r))

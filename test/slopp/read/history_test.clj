@@ -1,5 +1,5 @@
 (ns slopp.read.history-test
-  "The pure FOLDS under the store's history reads — the milestone rows behind
+  "The pure FOLDS under the store's history reads — the commit-point rows behind
   `query_commits`, and the join of provenance, verification and cost behind
   form effort.
 
@@ -11,7 +11,7 @@
             [slopp.read.history :as history]
             [slopp.store :as store]))
 
-(deftest milestone-rows-is-the-pure-fold-behind-query-commits
+(deftest commit-point-rows-is-the-pure-fold-behind-query-commits
   ;; query-commits is :external because it opens the db to join git shas
   ;; from the projection's pinning table. The FOLD underneath is a pure
   ;; read of the delta log, and that is what a pure reader (the reviewer
@@ -21,32 +21,32 @@
                   :deltas
                   [{:id "d1" :op :add :form-id "f1"}
                    {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
-                    :description "first milestone\n\nwith a body\nand another line"}
+                    :description "first commit-point\n\nwith a body\nand another line"}
                    {:id "d3" :op :add :form-id "f2"}
                    {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000
-                    :description "second milestone" :agent "ada" :git-sha "abc123"}])]
+                    :description "second commit-point" :agent "ada" :git-sha "abc123"}])]
     (testing "newest first — the order a reader scans"
-      (is (= ["d4" "d2"] (mapv :commit (history/milestone-rows st)))))
-    (testing "the full row carries what a milestone IS"
-      (let [r (first (history/milestone-rows st))]
-        (is (= "second milestone" (:description r)))
+      (is (= ["d4" "d2"] (mapv :commit (history/commit-point-rows st)))))
+    (testing "the full row carries what a commit-point IS"
+      (let [r (first (history/commit-point-rows st))]
+        (is (= "second commit-point" (:description r)))
         (is (= "d3" (:target r)) "the target plugs into query-changes as a range end")
         (is (= :green (:status r)))
         (is (= "ada" (:agent r)))
         (is (re-find #"^\d{4}-\d{2}-\d{2} " (:at r)) "the timestamp is human, not epoch ms")))
     (testing "a sha the DELTA carries needs no db — that is what keeps this pure"
-      (is (= "abc123" (:sha (first (history/milestone-rows st)))))
-      (is (nil? (:sha (second (history/milestone-rows st))))
-          "absent, not blank — a milestone the projection has not minted yet"))
+      (is (= "abc123" (:sha (first (history/commit-point-rows st)))))
+      (is (nil? (:sha (second (history/commit-point-rows st))))
+          "absent, not blank — a commit-point the projection has not minted yet"))
     (testing "titles-only is the LIST rung: one line, with the body COUNTED not dropped"
-      (let [[newest oldest] (history/milestone-rows st :titles-only true)]
-        (is (= "second milestone" (:description newest)))
+      (let [[newest oldest] (history/commit-point-rows st :titles-only true)]
+        (is (= "second commit-point" (:description newest)))
         (is (nil? (:more-lines newest)) "nothing more to read — absent, not zero")
-        (is (= "first milestone" (:description oldest)))
+        (is (= "first commit-point" (:description oldest)))
         (is (= 2 (:more-lines oldest))
             "blank lines don't count; needing one sha should not fetch five essays")))
-    (testing "a log with no milestones is empty, not nil"
-      (is (= [] (history/milestone-rows (store/empty-store)))))))
+    (testing "a log with no commit-points is empty, not nil"
+      (is (= [] (history/commit-point-rows (store/empty-store)))))))
 
 (deftest form-effort-joins-provenance-verification-and-cost
   ;; The semantic × history combination, applied to the question the journal
@@ -89,7 +89,7 @@
   ;; `query_cost` over this store: 325 full_checks at ~236s, and 117 of them
   ;; were REPEATS inside a single ask — 7.6 hours spent re-asking a question
   ;; already answered. `commit_point` has always returned an unchanged
-  ;; milestone rather than re-minting one; this is the same courtesy for the
+  ;; commit-point rather than re-minting one; this is the same courtesy for the
   ;; most expensive operation slopp performs.
   ;;
   ;; The predicate is deliberately CONSERVATIVE. It is not "no form changed" —

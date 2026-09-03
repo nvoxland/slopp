@@ -59,7 +59,7 @@
 (deftest ^:external record-commit-extra-round-trips
   ;; the schemaless payload carries op-specific extras — `:git-sha` on an
   ;; imported commit is the live one. It used to carry `:tree` too, and the
-  ;; example is deliberately not that any more: a milestone carries no tree.
+  ;; example is deliberately not that any more: a commit-point carries no tree.
   (let [st (store/ingest (store/empty-store) 'gp.core seed)
         [st2 d] (store/record-commit st "v1" :agent "alice"
                                      :extra {:git-sha "abc"
@@ -77,12 +77,12 @@
           (is (= d (first (db/deltas-after conn (slopp.store.db/trunk-line-id! conn) 0))))
           (finally (.close conn) (rm-rf! dir)))))))
 
-(deftest ^:external a-milestone-carries-no-tree
+(deftest ^:external a-commit-point-carries-no-tree
   ;; The inverse of what this used to assert, and the regression it guards is
-  ;; expensive rather than subtle: a milestone once snapshotted every
+  ;; expensive rather than subtle: a commit-point once snapshotted every
   ;; namespace's rendered source into its own delta, which reached 82 MB
   ;; across 272 markers here — 39% of the journal — and 94% of a 344 MB
-  ;; journal in an earlier round, unnoticed across 239 milestones. Nothing
+  ;; journal in an earlier round, unnoticed across 239 commit-points. Nothing
   ;; measured it, so nothing complained.
   ;;
   ;; The tree is DERIVED now: `git/project-journal!` folds the log. What has
@@ -115,7 +115,7 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (ops/ingest! sess 'gp.core seed)
-      ;; G5: milestones stamp a configured author; pin it so the assertions
+      ;; G5: commit-points stamp a configured author; pin it so the assertions
       ;; below don't depend on this machine's global git config
       (external/config! sess "user.name" "alice")
       (external/config! sess "user.email" "alice@slopp")
@@ -178,7 +178,7 @@
                 feat-tip (get refs "feature")]
             (is main-tip)
             (is feat-tip)
-            (testing "the branch commit chains on main's milestone"
+            (testing "the branch commit chains on main's commit-point"
               (is (= [main-tip] (:parents (commit-info (:slopp.git/repo ctx) feat-tip)))))
             (testing "ONE mapping row for the shared v1 marker (2 rows total)"
               (is (= 2 (:n (jdbc/execute-one!
@@ -196,7 +196,7 @@
   ;; Comments are form-owned content now, so the fold is exact and the
   ;; approximation is gone. What is still worth pinning is that a retroactive
   ;; marker gets the state it NAMES rather than the state at the end of the
-  ;; walk — and it shares its target delta with the earlier milestone, which
+  ;; walk — and it shares its target delta with the earlier commit-point, which
   ;; is the case that broke first: released after its first reader, the
   ;; retroactive tree silently became the CURRENT one.
   (let [dir  (temp-dir)
@@ -227,7 +227,7 @@
             (finally (git/close-ctx! ctx)))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external forced-red-milestone-carries-status-trailer
+(deftest ^:external forced-red-commit-point-carries-status-trailer
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
@@ -281,24 +281,24 @@
           (finally (git/close-ctx! ctx))))
       (finally (ops/close! sess)))))
 
-(deftest a-projected-commit-stamps-the-milestone-it-came-from
-  (testing "the message commit-message writes is the message stamped-milestone reads"
+(deftest a-projected-commit-stamps-the-commit-point-it-came-from
+  (testing "the message commit-message writes is the message stamped-commit-point reads"
     ;; ONE producer, ONE reader, asserted as a round trip. The trailer is the
-    ;; only thing that lets a reader ask a commit WHICH milestone it is instead
+    ;; only thing that lets a reader ask a commit WHICH commit-point it is instead
     ;; of trusting a sha recorded when it was minted -- and a sha recorded at
     ;; mint time says nothing about what was published.
     (let [msg (#'slopp.git/commit-message {:id "d27235" :description "a title"})]
-      (is (= "d27235" (slopp.git/stamped-milestone msg)) msg)))
-  (testing "a red milestone and an agent trailer do not confuse the reader"
+      (is (= "d27235" (slopp.git/stamped-commit-point msg)) msg)))
+  (testing "a red commit-point and an agent trailer do not confuse the reader"
     (let [msg (#'slopp.git/commit-message {:id "d42" :description "t" :status :red
                                            :author "a" :agent "ag"})]
-      (is (= "d42" (slopp.git/stamped-milestone msg)) msg)))
+      (is (= "d42" (slopp.git/stamped-commit-point msg)) msg)))
   (testing "a commit this projection did not mint carries no stamp"
     ;; An ADOPTED remote commit (a pull) is a real chain node with no trailer.
     ;; nil is the discriminator alignment uses to fall back, so it is asserted
     ;; rather than assumed.
-    (is (nil? (slopp.git/stamped-milestone "someone else's commit\n\nSigned-off-by: x\n")))
-    (is (nil? (slopp.git/stamped-milestone nil)))))
+    (is (nil? (slopp.git/stamped-commit-point "someone else's commit\n\nSigned-off-by: x\n")))
+    (is (nil? (slopp.git/stamped-commit-point nil)))))
 
 (deftest a-re-projection-corrects-a-pin-it-had-already-written
   ;; The pin was INSERT OR IGNORE on the argument that minting is deterministic,
@@ -329,7 +329,7 @@
   ;; The base is the hard half: git hands you a merge-base commit, and a
   ;; directory hands you nothing.
   ;;
-  ;; The store already knows. Folding the journal to the last milestone is
+  ;; The store already knows. Folding the journal to the last commit-point is
   ;; what `project-journal!` does on every projection, and the tree it renders
   ;; there IS "the state this directory was exported from" in the common case.
   ;;
@@ -351,7 +351,7 @@
           (let [tip  (git/ensure-projected! ctx)
                 sha  (get-in tip [:refs "main"])
                 from-git (git/tree-at (:slopp.git/repo ctx) sha)
-                from-store (git/milestone-tree
+                from-store (git/commit-point-tree
                             (db/line-deltas (:db @sess)
                                             (or (:line @sess) (db/trunk-line-id! (:db @sess))))
                             #(db/get-blob (:slopp.git/map-conn ctx) %))]
@@ -395,7 +395,7 @@
           (let [tip (get-in (git/ensure-projected! ctx) [:refs "main"])
                 src (blob-text (:slopp.git/repo ctx) tip "src/up/core.clj")]
             (is (re-find #":landed" src)
-                "the projection carries what the milestone landed")
+                "the projection carries what the commit-point landed")
             (is (nil? (re-find #":un-landed" src))
                 "and nothing that is still in the thread"))
           (finally (git/close-ctx! ctx))))
@@ -436,7 +436,7 @@
                                         tree))))))))
 
 (deftest ^:external the-projection-orders-forms-exactly-as-the-live-store-does
-  ;; The projection FOLDS the journal to render each milestone's tree, and the
+  ;; The projection FOLDS the journal to render each commit-point's tree, and the
   ;; journal no longer carries a single ordering delta. So the fold and the
   ;; live store must derive the same arrangement from the same facts — forms,
   ;; references, ranks — or a checkout would hold a file the live store never

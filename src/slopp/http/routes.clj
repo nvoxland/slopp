@@ -44,7 +44,7 @@
   shell declares its own `**` path now, so the catch-all IS the declaration and
   there is nothing to synthesize.
 
-  The prose outlived the code by two milestones and cited a function that had
+  The prose outlived the code by two commit-points and cited a function that had
   been deleted, which is exactly how a retired marker goes on reading as a live
   declaration: a store kept declaring it, sixteen deep links 404d on a hard
   load, and an in-app click to the same address worked. `edit.webapp/webapp-client-routes-retired`

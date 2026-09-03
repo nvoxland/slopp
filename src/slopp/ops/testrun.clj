@@ -7,7 +7,7 @@
   shard, and each of those spawns a fresh image JVM per test.
 
   Owning that tree is the recurring problem here, not a detail. Every runner
-  is BOUNDED (a hung test used to wedge `done` and the milestone gate
+  is BOUNDED (a hung test used to wedge `done` and the commit-point gate
   forever), and killing one now takes its whole subtree with it (`reap!`) —
   because destroying the runner alone leaves exactly the processes that do the
   damage, orphaned and reachable by nothing. Two abandoned runs once took a
@@ -129,7 +129,7 @@
 
 (def shard-timeout-ms
   "Upper bound for one test-runner JVM. A hung ^:external test used to block
-  sh/sh forever — wedging done! and the milestone gate with it. Test failures
+  sh/sh forever — wedging done! and the commit-point gate with it. Test failures
   PARSE; the only thing this deadline ever kills is a JVM that stopped
   talking."
   (* 20 60 1000))
@@ -349,7 +349,7 @@
           ;; the work — and running FEWER tests does not address that at all.
           ;; Measured here the day this landed: [43.6s 131.7s 135.8s 217.5s],
           ;; roughly 85s per run lost to the spread, on every full_check and
-          ;; every milestone.
+          ;; every commit-point.
           others  (butlast sorted)
           mean    (when (seq others) (/ (double (reduce + others)) (count others)))
           uneven? (boolean (and mean (> slowest (* 1.5 mean))))]

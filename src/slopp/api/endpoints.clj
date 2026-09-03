@@ -82,7 +82,7 @@
         :rest/response contracts/timeline
         :http/reads {:timeline [:ui/timeline []]}}
   timeline
-  "GET /api/timeline — milestones newest first, plus the working set.
+  "GET /api/timeline — commit-points newest first, plus the working set.
 
   A projection, not new logic: `slopp.api.model/timeline` already returns a
   JSON-shaped value, which is why the SPA rewrite is mostly moving rendering
@@ -95,7 +95,7 @@
         :rest/response contracts/change-view
         :http/reads {:change [:ui/change [:path-params :range]]}}
   change
-  "GET /api/change/:range — one milestone reviewed, `from..to`.
+  "GET /api/change/:range — one commit-point reviewed, `from..to`.
 
   A range arrives from a URL, so both ends are user input. The read already
   separates \"nothing changed here\" from \"that is not a range\", and only the

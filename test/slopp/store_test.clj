@@ -417,7 +417,7 @@
   ;; That was honest while the log was incomplete: `:ingest` predated
   ;; `:sources`/`:comments`, so the elements table was the only record of what
   ;; a namespace contained. It is not honest now, and the cost has changed:
-  ;; a nil used to mean a slow reload, and it is about to mean a milestone
+  ;; a nil used to mean a slow reload, and it is about to mean a commit-point
   ;; whose tree cannot be reconstructed — which is the whole basis for
   ;; deleting the stored snapshot.
   (let [base (store/empty-store)
@@ -462,10 +462,10 @@
         (is (= (store.render/render-ns s2 'cs.moved) (store.render/render-ns back 'cs.moved)))))))
 
 (deftest folding-the-journal-reproduces-the-store
-  ;; THE invariant. Once the git projection derives each milestone's tree by
+  ;; THE invariant. Once the git projection derives each commit-point's tree by
   ;; folding the log, "the journal is a complete account" stops being a design
   ;; slogan and becomes the thing a push depends on. An op that does not
-  ;; replay is a milestone whose bytes cannot be reconstructed.
+  ;; replay is a commit-point whose bytes cannot be reconstructed.
   ;;
   ;; Run against slopp's own 13,000-delta journal while the stored `:tree`
   ;; snapshots still existed — the one chance to check a reconstruction
@@ -496,7 +496,7 @@
         folded (reduce (fn [s d] (when s (store/replay-delta s d)))
                        (store/empty-store)
                        (store/deltas s7))]
-    (testing "every delta replays — a nil here is an unreconstructible milestone"
+    (testing "every delta replays — a nil here is an unreconstructible commit-point"
       (is (some? folded)))
     (testing "and the result renders identically, namespace for namespace"
       (is (= (set (keys (:namespaces s7))) (set (keys (:namespaces folded)))))
@@ -931,10 +931,10 @@
       (is (= ["p3"] (map :id (:pending (store/record-delta c {:id "p3" :op :done :ns '*session*}))))
           "and the next append starts a new suffix"))))
 
-(deftest record-delta-keeps-a-bounded-recent-window-cut-at-each-milestone
+(deftest record-delta-keeps-a-bounded-recent-window-cut-at-each-commit-point
   ;; The readers of the RECENT past — was the last done green, is a turn
   ;; open, what changed since the done, is anything un-judged — walked the
-  ;; whole list. They only ever look back as far as the last milestone, and
+  ;; whole list. They only ever look back as far as the last commit-point, and
   ;; the done that earned it. So the value keeps exactly that: `:recent` grows
   ;; with every append and is cut at each `:commit` to the done immediately
   ;; before it (with whatever sat between) plus the commit itself. A pure
@@ -951,11 +951,11 @@
     (is (= [] (:recent (store/empty-store))))
     (is (= ["a1" "a2" "a3"] (map :id (:recent (at 3)))) "grows with every append")
     (is (= ["a2" "a3" "a4"] (map :id (:recent (at 4))))
-        "a milestone cuts the window to the done that earned it, and itself")
+        "a commit-point cuts the window to the done that earned it, and itself")
     (is (= ["a2" "a3" "a4" "a5" "a6"] (map :id (:recent (at 6)))))
     (is (= ["a6" "a7"] (map :id (:recent (at 7)))))
     (is (= ["a6" "a7" "a8"] (map :id (:recent (at 8)))))
-    (testing "a milestone with no done before it keeps just itself"
+    (testing "a commit-point with no done before it keeps just itself"
       (is (= ["c1"] (map :id (:recent (store/record-delta (store/empty-store)
                                                            {:id "c1" :op :commit :ns '*session*}))))))))
 

@@ -495,7 +495,7 @@
 (deftest ^:external done-caps-the-external-slice-and-reports
   ;; The cap is on TESTS (40) and it still exists for the honest reason: a
   ;; :only run is one serial JVM, and a change whose reach is most of the
-  ;; suite belongs to the milestone gate. What CHANGED (#132): a fresh, small
+  ;; suite belongs to the commit-point gate. What CHANGED (#132): a fresh, small
   ;; slice used to defer too — the trace was silent about brand-new forms, one
   ;; silent form collapsed all narrowing, and the ns-grain closure blew a cap
   ;; of 4 on 84.6% of source namespaces. Per-form expansion means the small
@@ -554,7 +554,7 @@
 
 (deftest ^:external unused-publics-gate-the-done
   ;; unused public surface FAILS the done gate (error-grade lint + findings)
-  ;; and refuses the milestone. The deliberate escape is ^:unused-ok on the
+  ;; and refuses the commit-point. The deliberate escape is ^:unused-ok on the
   ;; name — and a STALE marker (the var IS called now) fails symmetrically,
   ;; so the dial can never rot.
   (let [sess (external/open!)]
@@ -572,7 +572,7 @@
                     (:lint r))
               (pr-str (:lint r)))
           (is (pos? (get-in r [:findings :lint-errors])))))
-      (testing "...and it refuses the milestone"
+      (testing "...and it refuses the commit-point"
         (let [r (external/commit-point! sess "should refuse")]
           (is (re-find #"unused" (str (:error r))) (pr-str (dissoc r :test)))))
       (testing "the ^:unused-ok marker is the deliberate escape"
@@ -747,7 +747,7 @@
 
 (deftest ^:external undo-to-without-agent-reverts-cleanly
   ;; The pool-revert bug, distilled. I scrapped a whole exploration with
-  ;; `undo {to <milestone>}` and it SKIPPED my own solely-authored forms as
+  ;; `undo {to <commit-point>}` and it SKIPPED my own solely-authored forms as
   ;; :skipped-shared, leaving the store RED with dangling references.
   ;;
   ;; Trigger: every live write carries the SESSION's agent-id, but the MCP
@@ -807,15 +807,15 @@
   ;; The dead-end anchor. Scrapping an exploration usually means "back to the
   ;; last PUBLISHED-good point" — the last commit — not the last done (which is
   ;; fine-grained; I call done constantly). `undo {to :last-commit}` names that
-  ;; anchor so I don't have to fish the milestone's delta id out of history.
+  ;; anchor so I don't have to fish the commit-point's delta id out of history.
   (let [sess (external/open!)
         me   (:agent-id @sess)]
     (try
       (ops/ingest! sess 'lc.core "(ns lc.core)\n\n(defn f [] 1)\n" :agent me)
-      (external/commit-point! sess "baseline milestone" :force true)   ; the anchor
+      (external/commit-point! sess "baseline commit-point" :force true)   ; the anchor
       (ops/add-form! sess 'lc.core "(defn g [] 2)" :prompt "explore" :agent me)
       (ops/edit-replace! sess 'lc.core 'f "(defn f [] 999)" :prompt "explore" :agent me)
-      (let [r (ops/undo! sess :to :last-commit :prompt "scrap since the milestone")]
+      (let [r (ops/undo! sess :to :last-commit :prompt "scrap since the commit-point")]
         (is (nil? (:error r)) (pr-str r))
         (is (pos? (:reverted r)) (str "must revert the uncommitted work: " (pr-str r)))
         (let [src (query/query-source sess 'lc.core)]
@@ -915,22 +915,22 @@
       (ops/ingest! sess 'sp.core src)
       (ops/edit-replace! sess 'sp.core 'f "(defn f [x] (+ x 1))"
                          :prompt "first change" :agent "alice")
-      (let [c (external/commit-point! sess "a milestone" :agent "alice")]
-        (is (:commit c) (str "fixture: the milestone must land — " (pr-str (dissoc c :test :findings)))))
+      (let [c (external/commit-point! sess "a commit-point" :agent "alice")]
+        (is (:commit c) (str "fixture: the commit-point must land — " (pr-str (dissoc c :test :findings)))))
       (ops/edit-replace! sess 'sp.core 'g "(defn ^:unused-ok g [x] :after-commit)"
-                         :prompt "post-milestone change" :agent "alice")
+                         :prompt "post-commit-point change" :agent "alice")
       (testing ":start spans the whole log and carries the code"
         (let [c  (history/query-changes (ops/with-history sess) :from :start)
               fs (set (map :form (:forms c)))]
           (is (contains? fs 'sp.core/f) (pr-str fs))
           (is (contains? fs 'sp.core/g) (pr-str fs))
           (is (some :now (:forms c)) "the span must carry source, not just names")))
-      (testing ":last-commit spans only work after the milestone"
+      (testing ":last-commit spans only work after the commit-point"
         (let [c  (history/query-changes (ops/with-history sess) :from :last-commit)
               fs (set (map :form (:forms c)))]
           (is (contains? fs 'sp.core/g) (pr-str fs))
           (is (not (contains? fs 'sp.core/f))
-              (str "f predates the milestone: " (pr-str fs)))))
+              (str "f predates the commit-point: " (pr-str fs)))))
       (testing "an anchor with nothing to point at says so instead of throwing"
         (is (map? (history/query-changes (ops/with-history sess) :from :last-done))))
       (finally (ops/close! sess)))))
@@ -988,7 +988,7 @@
   ;; [:verify :verify :done :done :done :commit :done :done] — five done
   ;; markers, no content between any of them. They come from three places that
   ;; each reasonably call done (the agent, the Stop hook, and commit_point,
-  ;; which runs done! itself because the milestone has no gates of its own), and
+  ;; which runs done! itself because the commit-point has no gates of its own), and
   ;; none of them can see that the others just did.
   ;;
   ;; Each of those recorded `:test-status :none`, which is the representation

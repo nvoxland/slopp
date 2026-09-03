@@ -1,6 +1,6 @@
 (ns slopp.gitauthor-test
-  "G5: milestone commits carry a configurable author identity, captured INTO
-  the marker at milestone time (projection determinism — config changes must
+  "G5: commit-point commits carry a configurable author identity, captured INTO
+  the marker at commit-point time (projection determinism — config changes must
   never re-mint old shas). commit-author resolves it per marker."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.git :as git]))

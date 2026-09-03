@@ -73,7 +73,7 @@
                 (is (= (str bare) (db/get-meta conn "git-remote")))
                 (is (= (:pushed p1) (db/get-meta conn "git-base-sha")))))
 
-            (testing "edit + milestone + push from the clone = fast-forward onto the remote's history"
+            (testing "edit + commit-point + push from the clone = fast-forward onto the remote's history"
               (let [e (ops/edit-replace! sb 'gc.core 'f "(defn f [x] (+ 1 x))"
                                          :prompt "flip arg order" :agent "bob")]
                 (is (nil? (:error e)) (pr-str e)))
@@ -216,7 +216,7 @@
               (let [[c] (sync/conflicts dir-b)]
                 (is (= "src/gc/core.clj" (:path c)))
                 (is (str/includes? (str (:source c)) "(+ x 10)"))))
-            (testing "resolve: adopt the remote content, clear, milestone, push"
+            (testing "resolve: adopt the remote content, clear, commit-point, push"
               (ops/edit-group-once! sb [{:action :replace :ns 'gc.core :name 'f
                                     :source "(defn f [x] (+ x 10))"}
                                    {:action :replace :ns 'gc.core :name 'f-t
@@ -534,14 +534,14 @@
 
 (deftest ^:external a-pull-faces-the-same-done-gate-an-agent-does
   ;; An import's writes go onto the branch through the ordinary verbs, which
-  ;; is right — but the milestone that closed it was minted with
+  ;; is right — but the commit-point that closed it was minted with
   ;; `commit_point :target head`, and `:target` is documented as "a pure
   ;; retroactive marker: NO done runs, status is derived from the log at that
   ;; spot". So the episode gate — impacted ^:external tests, lint, dead
   ;; surface, the :error advisories — never ran on imported work at all.
   ;;
   ;; That matters because an external tool never had to satisfy any of it. The
-  ;; remote here is a genuine slopp store that FORCED a red milestone, which is
+  ;; remote here is a genuine slopp store that FORCED a red commit-point, which is
   ;; the honest way to model "a change that loads but is not valid slopp":
   ;; `f` stops satisfying `f-t`, and nothing in the write path objects because
   ;; each form compiles.
@@ -568,11 +568,11 @@
             (testing "the change still LANDS — import writes to the branch like an agent does"
               (is (some #{'gc.core} (:pulled r)) (pr-str r))
               (is (str/includes? (query/query-source sb 'gc.core) "999")))
-            (testing "but it does NOT mint a milestone on a red verdict"
+            (testing "but it does NOT mint a commit-point on a red verdict"
               (is (= :red (:status r)) (str "the pull must run done and report its verdict: "
                                             (pr-str r)))
               (is (nil? (:marker r))
-                  (str "a red import must not close with a milestone: " (pr-str r))))
+                  (str "a red import must not close with a commit-point: " (pr-str r))))
             (testing "and the refusal is actionable: what is in progress, and what is wrong"
               (is (= :red (get-in r [:findings :test-status])) (pr-str r))
               (is (pos? (get-in r [:findings :failures] 0)) (pr-str r))
@@ -581,7 +581,7 @@
                   (str "name the gate the agent has to satisfy: " (pr-str (:error r))))))
 
           ;; The recovery the message PROMISES, exercised rather than asserted.
-          ;; It matters beyond politeness: the refused milestone is what would
+          ;; It matters beyond politeness: the refused commit-point is what would
           ;; have carried the `:git-sha` chain node, so without a working second
           ;; pass the red path strands this line off the remote's history and
           ;; the next push cannot fast-forward.
@@ -596,7 +596,7 @@
               (let [d (->> (ops/journal sb)
                            (filter #(= :commit (:op %))) last)]
                 (is (string? (:git-sha d))
-                    (str "the closing milestone carries the chain node: " (pr-str d))))))
+                    (str "the closing commit-point carries the chain node: " (pr-str d))))))
           (finally (ops/close! sb))))
       (finally
         (ops/close! sa)
@@ -774,12 +774,12 @@
   ;; minted. A later projection re-minted the right sha and pushed fine, but the
   ;; pin is INSERT OR IGNORE, so the wrong value stuck. `:aligned` then read the
   ;; pin and reported false forever against a mirror that was, in fact, the
-  ;; latest milestone's projection -- and advised `git_push`, which cannot fix
+  ;; latest commit-point's projection -- and advised `git_push`, which cannot fix
   ;; it because the projection was already published.
   ;;
   ;; The sha is recorded when a commit is MINTED, which says nothing about what
   ;; was PUBLISHED. The projected commit already stamps `Slopp-Commit: dN`, so
-  ;; the branch head can be asked which milestone it is.
+  ;; the branch head can be asked which commit-point it is.
   (let [dir (work-repo! (temp-dir))
         s   (external/open! {:slopp.ops/dir dir})]
     (try
@@ -789,13 +789,13 @@
           "fixture: the mirror must actually publish, or every assertion below is vacuous")
       (let [rows   (ops/query-commits s)
             latest (first rows)]
-        (is (some? (:commit latest)) "fixture: there must be a milestone to align against")
+        (is (some? (:commit latest)) "fixture: there must be a commit-point to align against")
         (testing "a truthful row aligns"
           (is (:aligned (sync/alignment dir "." "slopp/main" rows))))
         (testing "a recorded sha naming a commit nobody has does NOT make it misreport"
           (is (:aligned (sync/alignment dir "." "slopp/main"
                                         [(assoc latest :sha (apply str (repeat 40 "0")))]))))
-        (testing "and it can still say NO -- the stamp names a different milestone"
+        (testing "and it can still say NO -- the stamp names a different commit-point"
           ;; Without this the assertions above are equally consistent with
           ;; ":aligned true unconditionally", which is the shape of green this
           ;; whole entry is about.
@@ -812,7 +812,7 @@
   ;; maps. Only the doorway was git — `pull!` produced its trees with
   ;; `tree-at` and its base with `merge-base`. A directory supplies the tree by
   ;; walking; the BASE is the half git was really providing, and the store's
-  ;; own last milestone is it.
+  ;; own last commit-point is it.
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-dirimport" (make-array java.nio.file.attribute.FileAttribute 0)))
         out  (str (java.nio.file.Files/createTempDirectory
@@ -839,14 +839,14 @@
         (let [r (sync/import-dir! sess out :agent "outside-tool")]
           (is (nil? (:error r)) (pr-str r))
           (is (empty? (:conflicts r)) (pr-str r))
-          (is (some? (:marker r)) "and the episode closed with a milestone")
+          (is (some? (:marker r)) "and the episode closed with a commit-point")
           (is (re-find #"42" (query/query-source sess 'di.core))
               "the changed body landed")
           (is (re-find #":new" (query/query-source sess 'di.extra))
               "and so did the namespace the store had never seen")))
 
       (testing "a second import of the same directory changes nothing"
-        ;; the base is the last milestone, which the first import just moved —
+        ;; the base is the last commit-point, which the first import just moved —
         ;; so the diff is empty, which is what makes this re-runnable
         (let [r (sync/import-dir! sess out :agent "outside-tool")]
           (is (empty? (:pulled r)) (pr-str r))))
@@ -874,7 +874,7 @@
   ;; Friction #13, reproduced on this store: `git_push` was run, with a real
   ;; token, and succeeded — 133 commits, status OK — and alignment came back
   ;; BYTE-IDENTICAL. The push published what the mirror already held; the
-  ;; projection for every milestone since had never been built, and the sha
+  ;; projection for every commit-point since had never been built, and the sha
   ;; alignment was comparing against existed in no object database on the
   ;; machine.
   ;;

@@ -113,41 +113,41 @@
   [:tuple :string :string])
 
 (def timeline
-  "`GET /api/timeline` — milestones newest first, plus the working set."
+  "`GET /api/timeline` — commit-points newest first, plus the working set."
   [:map
-   [:milestones {:doc "milestones, NEWEST FIRST — render in the order given"}
+   [:commit-points {:doc "commit-points, NEWEST FIRST — render in the order given"}
     [:sequential [:map
-                  [:commit {:doc (str "the milestone's delta id, e.g. d24976 — this"
+                  [:commit {:doc (str "the commit-point's delta id, e.g. d24976 — this"
                                       " store's own address for it, not a git sha")} :string]
-                  [:description {:doc "what the milestone was recorded as achieving"} :string]
+                  [:description {:doc "what the commit-point was recorded as achieving"} :string]
                   [:at {:doc "when it was recorded, formatted — \"2026-08-06 00:38\""} :string]
-                  [:status {:doc (str "the verdict the milestone was recorded under,"
+                  [:status {:doc (str "the verdict the commit-point was recorded under,"
                                       " mirroring its done-point — \"green\" on every"
-                                      " milestone in this store, and not declared as an"
+                                      " commit-point in this store, and not declared as an"
                                       " enum because a red one is expressible and this"
                                       " store has never produced one to check against")} :string]
                   [:range {:optional true
-                           :doc (str "from..to, the delta span this milestone covers,"
+                           :doc (str "from..to, the delta span this commit-point covers,"
                                      " which is what /api/change/:range takes. Absent"
-                                     " on the first milestone, which has no predecessor")} :string]
+                                     " on the first commit-point, which has no predecessor")} :string]
                   [:more-lines {:optional true
                                 :doc (str "how many lines of :description were cut. Present"
                                           " only when it was capped, so its absence means"
                                           " you have the whole thing")} :int]
                   [:agent {:optional true
-                           :doc "who recorded it; absent on milestones written before agents were tracked"} :string]
+                           :doc "who recorded it; absent on commit-points written before agents were tracked"} :string]
                   [:sha {:optional true
-                         :doc (str "the git sha this milestone was projected to. Present"
-                                   " only for milestones whose DELTA carries one — this"
+                         :doc (str "the git sha this commit-point was projected to. Present"
+                                   " only for commit-points whose DELTA carries one — this"
                                    " model is a pure fold and never opens the projection"
                                    " to go looking")} :string]]]]
-   [:working {:doc (str "the work since the newest milestone — what is written and"
-                        " NOT yet milestoned. This is the field with no counterpart"
+   [:working {:doc (str "the work since the newest commit-point — what is written and"
+                        " NOT yet committed. This is the field with no counterpart"
                         " in a git-shaped timeline: it is uncommitted work that is"
                         " nonetheless recorded, verified and addressable")}
     [:map
-     [:since {:doc (str "the delta this set is measured AFTER — the newest milestone's"
-                        " id, or \"log-start\" when there is no milestone yet. Every"
+     [:since {:doc (str "the delta this set is measured AFTER — the newest commit-point's"
+                        " id, or \"log-start\" when there is no commit-point yet. Every"
                         " other number here is relative to it, so a consumer showing"
                         " the counts without it is showing a figure with no baseline")} :string]
      [:forms {:doc "how many forms have been touched since :since"} :int]
@@ -162,7 +162,7 @@
                                " have all of them")} :int]]]])
 
 (def change-view
-  "`GET /api/change/:range` — one milestone reviewed, grouped module then
+  "`GET /api/change/:range` — one commit-point reviewed, grouped module then
   namespace, with a count at every rung.
 
   The diff arrives as LINES (`[\"-(defn f [])\" \"+(defn f [x])\"]`), not as
@@ -171,7 +171,7 @@
   should look."
   [:map
    [:from {:doc "the delta id this range starts AFTER — exclusive"} :string]
-   [:to {:doc "the delta id this range ends at — inclusive, and usually a milestone"} :string]
+   [:to {:doc "the delta id this range ends at — inclusive, and usually a commit-point"} :string]
    [:count {:doc "how many forms changed across the whole range"} :int]
    [:modules {:doc (str "the changes grouped module then namespace, with a count at"
                         " every rung so a consumer can render a collapsed tree"
@@ -657,7 +657,7 @@
   all. slopp-ui reported this as one document carrying two conventions, and
   they were right — `form` declared its parameter and four others did not."
   [:map
-   [:range {:doc (str "the milestone range to review, `from..to` — two commit"
+   [:range {:doc (str "the commit-point range to review, `from..to` — two commit"
                       " point ids. Interpolated into the PATH. Both ends are"
                       " user input: an unparseable range is a 404, which is a"
                       " different answer from a range that parsed and changed"

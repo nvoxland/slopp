@@ -607,7 +607,7 @@
                             new-nses (conj applied (:id d))))
 
                     (contains? fields/markers op)
-                    ;; line-scoped bookkeeping does not travel — milestones
+                    ;; line-scoped bookkeeping does not travel — commit-points
                     ;; deliberately (noted; the travel question is an open
                     ;; decision), verification/merge chatter silently
                     (done st idmap merged conflicts

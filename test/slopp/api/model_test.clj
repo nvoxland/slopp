@@ -42,9 +42,9 @@
 
 (deftest timeline-is-the-reviewer-landing-model
   ;; The landing page answers two questions in the order a reviewer asks
-  ;; them: "what has been finished?" (milestones, newest first) and "what is
+  ;; them: "what has been finished?" (commit-points, newest first) and "what is
   ;; in flight?" (everything written since the newest one). The first is a
-  ;; fold over the milestone markers, the second over the RECENT window the
+  ;; fold over the commit-point markers, the second over the RECENT window the
   ;; value carries — so the fixture is both, written longhand.
   (let [recent [{:id "d5" :op :replace :ns 'demo.core :form-id "f1" :prompt "sharpen it"}
                 {:id "d6" :op :add :ns 'demo.util :form-id "f3" :prompt "a helper"}]
@@ -52,25 +52,25 @@
                   :deltas
                   (into [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "the first form"}
                          {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
-                          :description "first milestone\nand a body line"}
+                          :description "first commit-point\nand a body line"}
                          {:id "d3" :op :add :ns 'demo.core :form-id "f2" :prompt "a second form"}
                          {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000
-                          :description "second milestone"}]
+                          :description "second commit-point"}]
                         recent)
                   :recent recent)
         tl (model/timeline (atom {:store st}))]
-    (testing "milestones read newest first — the reviewer's scan order"
-      (is (= ["d4" "d2"] (mapv :commit (:milestones tl)))))
+    (testing "commit-points read newest first — the reviewer's scan order"
+      (is (= ["d4" "d2"] (mapv :commit (:commit-points tl)))))
     (testing "each row carries a precomputed range, so the page has no logic"
-      (is (= "d2..d4" (:range (first (:milestones tl))))
-          "a milestone's range starts at the milestone before it")
-      (is (nil? (:range (second (:milestones tl))))
-          "the OLDEST milestone has nothing to diff against — absent, not empty"))
+      (is (= "d2..d4" (:range (first (:commit-points tl))))
+          "a commit-point's range starts at the commit-point before it")
+      (is (nil? (:range (second (:commit-points tl))))
+          "the OLDEST commit-point has nothing to diff against — absent, not empty"))
     (testing "descriptions are the title line, with the body counted not dropped"
-      (is (= "second milestone" (:description (first (:milestones tl)))))
-      (is (= "first milestone" (:description (second (:milestones tl)))))
-      (is (= 1 (:more-lines (second (:milestones tl))))))
-    (testing "the working set is everything written since the newest milestone"
+      (is (= "second commit-point" (:description (first (:commit-points tl)))))
+      (is (= "first commit-point" (:description (second (:commit-points tl)))))
+      (is (= 1 (:more-lines (second (:commit-points tl))))))
+    (testing "the working set is everything written since the newest commit-point"
       (is (= "d4" (get-in tl [:working :since])))
       (is (= 2 (get-in tl [:working :forms])))
       (is (= ["demo.core" "demo.util"] (get-in tl [:working :namespaces]))
@@ -229,7 +229,7 @@
 
 (deftest change-view-refuses-a-range-that-names-nothing
   ;; A range arrives from a URL, so it is user input. "Nothing changed
-  ;; between these two milestones" and "those are not delta ids" are
+  ;; between these two commit-points" and "those are not delta ids" are
   ;; different answers, and a page that cannot tell them apart renders an
   ;; empty review where it owes a 404 (D-surface-honesty).
   (let [st   (assoc (store/empty-store)
@@ -244,7 +244,7 @@
 
 (deftest timeline-caps-what-a-landing-page-shows
   ;; Found by serving slopp's own store: nineteen forms in flight rendered
-  ;; nineteen full-length prompts, and one milestone whose title line is a
+  ;; nineteen full-length prompts, and one commit-point whose title line is a
   ;; whole paragraph (no newline after the title) printed all of it. A
   ;; LANDING model has to be bounded — form-card already snips for exactly
   ;; this reason. Bounded here rather than in the page, so a JSON sink is
@@ -260,8 +260,8 @@
                         recent)
                   :recent recent)
         tl (model/timeline (atom {:store st}))]
-    (testing "a milestone title is capped, and says it was cut"
-      (let [d (:description (first (:milestones tl)))]
+    (testing "a commit-point title is capped, and says it was cut"
+      (let [d (:description (first (:commit-points tl)))]
         (is (<= (count d) 120) (str "was " (count d)))
         (is (re-find #"…$" d) d)))
     (testing "the working set shows a bounded number of asks and COUNTS the rest"

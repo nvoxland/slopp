@@ -16,7 +16,7 @@
     check slopp had.
   - **It invents staleness that is not there.** A reload that failed on a
     namespace the image nonetheless holds correctly was reported as \"the host
-    still runs their previous code\", which cost a milestone a fresh JVM to
+    still runs their previous code\", which cost a commit-point a fresh JVM to
     work around a problem that did not exist.
 
   Three kinds, and they are ordered by how hard they were to see:

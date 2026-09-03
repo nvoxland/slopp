@@ -37,7 +37,7 @@
       {:form-id (:id e) :source (n/string (:node e))})))
 
 (defn ^{:http/read :ui/timeline} timeline-read
-  "Read performer: the reviewer landing model — milestones plus the
+  "Read performer: the reviewer landing model — commit-points plus the
   working set."
   [{:keys [session]} _]
   (model/timeline (ops/with-history session :ops [:commit])))

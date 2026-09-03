@@ -383,7 +383,7 @@
   What does NOT: a failed reload on an image that COMPARES CLEAN. That was
   friction 20a — five namespaces reported stale, the image holding every one
   of them at the store's current source, and every verdict from that host
-  marked suspect until a milestone was routed through a fresh JVM to escape a
+  marked suspect until a commit-point was routed through a fresh JVM to escape a
   problem that was not there. A watcher that cannot reload is worth saying out
   loud in the brief; it is not a reason to distrust the tests.
 
@@ -633,7 +633,7 @@
                 " joined the two."))}))))
 
 (defn ^:export
-  ^{:breaking-ok "the 2-arity took a store and read its whole delta list to place the jar's head; the value no longer carries the list, so the derivation moved to slopp.ops/jar-currency (a journal read) and this keeps only the phrasing. Both callers moved in the same write."}
+  
   jar-warning
   "A sentence when the jar is behind the store, else nil — given `currency`,
   the `{:head :behind}` map `slopp.ops/jar-currency` derives from the
@@ -655,7 +655,7 @@
   - a jar built from the head, which is the ordinary good case
 
   Announcement, artifact and process are three states and nothing joined
-  them: a milestone said the store was green while the jar carrying that store
+  them: a commit-point said the store was green while the jar carrying that store
   to everyone else had never been rebuilt. It happened twice in one night and
   a CONSUMER caught it both times, by reading the artifact rather than by
   believing the announcement."
@@ -968,7 +968,7 @@
 (defn ^:export handoff-text
   "The handoff, rendered for INJECTION: `r` (an `ops/report` map) as plain
   text in the order a handoff ask reads — the asks oldest first, each with
-  its :turn id and the forms it added/changed/deleted; milestones; the
+  its :turn id and the forms it added/changed/deleted; commit-points; the
   changes rolled up by namespace with one recorded ask and a delta each;
   the suite verdict with the command that re-runs it — fitted to `budget`
   by dropping WHOLE rows (the rollup's tail first, then the oldest asks),
@@ -986,7 +986,7 @@
                         (when-let [ps (seq (keep #(forms % a) [:added :changed :deleted :renamed]))]
                           (str " — " (str/join "; " ps)))))
         ms-lines (mapv #(str "  " (:commit %) " " (snip (:description %) 90) " @" (:at %))
-                       (:milestones r))
+                       (:commit-points r))
         rollup   (->> (:changes r)
                       (group-by :ns)
                       (sort-by (comp str key))
@@ -999,9 +999,9 @@
         suite    (str "suite: " (name (or (get-in r [:suite :status]) :unknown))
                       (when-let [as-of (get-in r [:suite :as-of])] (str " as of " as-of))
                       " — run it: slopp --call test_run '{\"external\":true}';"
-                      " milestones: slopp --call query_commits")
+                      " commit-points: slopp --call query_commits")
         head     (str "--- the composed handoff — the store's OWN records; the ids ARE the"
-                      " citations (:turn per ask, :deltas per change, :commit per milestone) ---")
+                      " citations (:turn per ask, :deltas per change, :commit per commit-point) ---")
         close    (str "This IS the record — quote the :turn and :deltas ids as your citations;"
                       " the suite command above is the one to hand over.")
         render   (fn [n-asks n-roll]
@@ -1012,7 +1012,7 @@
                                        (when (pos? from)
                                          [(str "  … " from " earlier ask(s) — report {} lists them")])
                                        (map-indexed (fn [i a] (ask-line (+ from i) a)) shown)
-                                       (when (seq ms-lines) (cons "milestones:" ms-lines))
+                                       (when (seq ms-lines) (cons "commit-points:" ms-lines))
                                        (when (pos? n-roll) (cons "changes by namespace:" (take n-roll rollup)))
                                        [suite close]))))]
     (loop [n-asks (count asks), n-roll (count rollup)]

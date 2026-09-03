@@ -39,7 +39,7 @@
   "Fire-rate + discharge signal for the D9 rules, computed READ-ONLY over the delta
    log — no new instrumentation: the log already records every done's `:findings`
    and every escape marker. Optional `:since` (a delta id) windows to deltas AFTER
-   it (e.g. a milestone `:target`). Returns
+   it (e.g. a commit-point `:target`). Returns
    `{:window {:dones :since}
      :fire-rate {rule {:dones :instances :persisted :discharged}}
      :escape-markers {:unsafe :reads :unused-ok}
@@ -600,9 +600,9 @@
                       vec))}
       (seq model) (assoc :model (model-summary model)))))
 
-(defn ^:export cost-by-milestone
-  "[[turn-cost]] per MILESTONE segment: one row for the work recorded after
-  each `:commit`, newest first. `{:by :milestone :rows […]}`.
+(defn ^:export cost-by-commit-point
+  "[[turn-cost]] per COMMIT-POINT segment: one row for the work recorded after
+  each `:commit`, newest first. `{:by :commit-point :rows […]}`.
 
   The series the per-window fold cannot be. A single window answers \"where
   did the clock go\", and the question a project actually asks is whether a
@@ -627,7 +627,7 @@
                               (seq acc)
                               (update-in acc [(dec (count acc)) :deltas] conj d)
 
-                              ;; work before the first milestone belongs to no
+                              ;; work before the first commit-point belongs to no
                               ;; segment; it is not dropped silently — the row
                               ;; for it has no commit to name, so it is left out
                               ;; and the caller can window with :since instead
@@ -635,7 +635,7 @@
                           [])
                   reverse
                   (take limit))]
-    {:by   :milestone
+    {:by   :commit-point
      :rows (mapv (fn [{:keys [commit description at deltas]}]
                    (let [c (turn-cost {:deltas deltas})
                          d (str description)]

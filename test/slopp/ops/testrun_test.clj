@@ -223,7 +223,7 @@
   (testing "an UNBALANCED run says so, because that is a different saving"
     ;; measured on this store the day the breakdown landed:
     ;; [43.6s 131.7s 135.8s 217.5s]. The tier costs its slowest shard, so ~85s
-    ;; per run is lost to the spread — on every full_check and every milestone —
+    ;; per run is lost to the spread — on every full_check and every commit-point —
     ;; and no amount of narrowing addresses it. Two different remedies, and a
     ;; single number recommended neither.
     (let [c (testrun/shard-cost 200 [43615 131743 135795 217519])]

@@ -3,7 +3,7 @@
   repo (`InMemoryRepository` — there is NO on-disk git repo; `store.db` is
   the source of truth and the git repo a rebuildable cache):
 
-  - PROJECTION: the journal's :commit milestones generated as git objects.
+  - PROJECTION: the journal's :commit commit-points generated as git objects.
     Serving these to a git client over local smart-HTTP was removed — it
     forced exact-project handling for less than it bought — so the
     projection now exists to be PUSHED rather than browsed in place.
@@ -11,7 +11,7 @@
     etc.) — the remote holds real .clj files; fetch reads a remote's tip and
     tree back (the clone/pull side lives in `slopp.sync`). A cloned store
     records `git-base-sha`, and the projection GRAFTS onto it so local
-    milestones extend the remote's history — pushes stay fast-forward.
+    commit-points extend the remote's history — pushes stay fast-forward.
 
   Ids: a git commit id IS the hash of its bytes, so stability comes from
   DETERMINISM — each commit is a pure function of its marker delta (:agent,
@@ -80,7 +80,7 @@
 
 (defn close-ctx!
   "Close a git context's in-memory JGit repo and its git_map connection, and
-  return nil. The repo is a rebuildable CACHE of the journal's milestones — the
+  return nil. The repo is a rebuildable CACHE of the journal's commit-points — the
   store is the source of truth — so closing one loses nothing;
   `ensure-projected!` rebuilds it on demand.
 
@@ -139,7 +139,7 @@
 ;; ---------------------------------------------------------------------------
 ;; trees
 (defn- commit-paths
-  "{path content} for a milestone's tree: the rendered namespaces at the paths
+  "{path content} for a commit-point's tree: the rendered namespaces at the paths
   the CALLER resolved (`render/source-path` over the store as it stood — so
   production under `src/`, tests under `test/`, instruments under
   `instruments/`, cljs under `cljs-src/`, same layout as build!), the
@@ -294,7 +294,7 @@
 
 (defn commit-author
   "The projected commit's author identity for marker `d`: the `:author`
-  captured at milestone time ({:name :email} — G5 config), else the legacy
+  captured at commit-point time ({:name :email} — G5 config), else the legacy
   agent-based identity, so pre-G5 markers re-mint byte-identically."
   [d]
   (or (:author d)
@@ -327,14 +327,14 @@
         (.flush ins)
         (.name cid)))))
 
-(defn stamped-milestone
-  "The milestone id a projected commit MESSAGE stamps itself with — the
+(defn stamped-commit-point
+  "The commit-point id a projected commit MESSAGE stamps itself with — the
   `Slopp-Commit:` trailer `commit-message` writes — or nil for a commit this
   projection did not mint (an ADOPTED remote commit, from a pull, carries no
   trailer).
 
   One producer, one reader, deliberately adjacent. It lets a caller ask the
-  COMMIT which milestone it is rather than trust a sha recorded when the commit
+  COMMIT which commit-point it is rather than trust a sha recorded when the commit
   was minted, and those are different facts: minting happens whether or not the
   push that follows it succeeds. On 2026-08-14 a refused push left a pinned sha
   naming a commit nobody had, and because the pin is first-writer-wins no later
@@ -386,12 +386,12 @@
   A refused push answers `REJECTED_NONFASTFORWARD` and nothing else, and the
   objects that would explain it live in an in-memory projection that dies with
   the process. Deciding whether ONE such refusal was benign has cost folding
-  the journal to a milestone, re-rendering every path, re-minting the commit
+  the journal to a commit-point, re-rendering every path, re-minting the commit
   and pushing to a scratch repo to reproduce the conditions — for an answer
   that was one fact. This is that fact, computed where the refusal happens:
 
-      {:projected {:sha … :milestone …}
-       :mirror    {:sha … :milestone …}
+      {:projected {:sha … :commit-point …}
+       :mirror    {:sha … :commit-point …}
        :base … :ahead n :behind n :contains-mirror-tip? bool :cause …}
 
   `:cause` is the clause that separates the two stories one status cannot:
@@ -399,7 +399,7 @@
   | cause | what happened | remedy |
   |---|---|---|
   | `:mirror-ahead` | the destination builds ON this projection — someone else wrote the ref, or this store is behind | pull, or re-project |
-  | `:remint` | both tips stamp the SAME milestone and are different commits: one journal, two mints | the projection is not reproducing itself — investigate before resetting |
+  | `:remint` | both tips stamp the SAME commit-point and are different commits: one journal, two mints | the projection is not reproducing itself — investigate before resetting |
   | `:diverged` | a common base, neither side contains the other | decide which history wins |
   | `:unrelated` | no common base at all | the destination is a different project's history |
   | `:no-divergence` | this projection already contains the destination's tip, so ancestry did not cause this refusal | read the status and git's own message |
@@ -411,14 +411,14 @@
   need the object, which is why a caller fetches before asking and why
   `:unreadable` exists for when it could not."
   [^Repository repo projected mirror]
-  (let [pm (stamped-milestone (message-of repo projected))]
+  (let [pm (stamped-commit-point (message-of repo projected))]
     (if-let [mmsg (message-of repo mirror)]
-      (let [mm       (stamped-milestone mmsg)
+      (let [mm       (stamped-commit-point mmsg)
             ours?    (ancestor? repo mirror projected)
             theirs?  (ancestor? repo projected mirror)
             base     (merge-base repo projected mirror)]
-        {:projected {:sha projected :milestone pm}
-         :mirror    {:sha mirror    :milestone mm}
+        {:projected {:sha projected :commit-point pm}
+         :mirror    {:sha mirror    :commit-point mm}
          :base      base
          :ahead     (commits-past repo projected base)
          :behind    (commits-past repo mirror base)
@@ -428,7 +428,7 @@
                           (nil? base)         :unrelated
                           (and pm mm (= pm mm)) :remint
                           :else               :diverged)})
-      {:projected {:sha projected :milestone pm}
+      {:projected {:sha projected :commit-point pm}
        :mirror    {:sha mirror}
        :contains-mirror-tip? false
        :cause :unreadable})))
@@ -458,7 +458,7 @@
   "Walk one journal's deltas in order, minting a git commit in the in-memory
   repo for every :commit marker whose object isn't already present. Parent =
   the previous marker's sha (journal order IS the chain); `:base` seeds the
-  chain — a cloned store grafts its first milestone onto the remote commit it
+  chain — a cloned store grafts its first commit-point onto the remote commit it
   was cloned at. A marker carrying `:git-sha` (a pull/import) is ADOPTED, not
   minted: the remote commit itself becomes the chain node (its object arrives
   by fetch; the remote durably holds its own history). A pinned sha is reused
@@ -466,9 +466,9 @@
   re-inserted deterministically (same sha). Returns the tip sha (= base when
   no markers) or nil.
 
-  **Each milestone's tree is DERIVED, not stored.** The store is folded from
+  **Each commit-point's tree is DERIVED, not stored.** The store is folded from
   the journal as this walk proceeds, so reaching a marker means holding the
-  store as it stood there, and the tree is `render-ns` over it. Milestones
+  store as it stood there, and the tree is `render-ns` over it. Commit-points
   used to carry a byte-exact snapshot of every namespace instead — 82 MB
   across 272 of them here, 39% of the journal — because comments lived
   positionally and could not be reconstructed. They are form-owned content
@@ -500,17 +500,17 @@
                                    (:target d)))))
                        (range (count dv)))
         ;; PATHS, not namespace names. The fold holds the store as it stood at
-        ;; this milestone, which is the only point where a namespace's platform
+        ;; this commit-point, which is the only point where a namespace's platform
         ;; and role are both known — and the projection has to root them the
         ;; way build! does, because CI jars a checkout of this tree.
         ;; `source-tree`, aliased locally: the fold holds the store as it stood
-        ;; at this milestone, which is the only point where a namespace's
+        ;; at this commit-point, which is the only point where a namespace's
         ;; platform and role are both known.
         ;; ARRANGED before it is rendered: the journal records creation order
         ;; and content, never an arrangement, so the fold derives the order
         ;; from the forms exactly as every write did. `refs` — the store's
         ;; persisted reference index — makes that a lookup for every
-        ;; namespace the milestone holds in its live state.
+        ;; namespace the commit-point holds in its live state.
         tree-of  (fn [st] (source-tree (refs/arrange-all st :refs refs)))]
     (:parent
      (reduce
@@ -535,7 +535,7 @@
                                                        #(db/get-blob map-conn %))]
                               (record-sha! map-conn (:id d) fp s line-label)
                               s))))]
-              ;; NOT dissoc'd: two markers can name the same target — a milestone's
+              ;; NOT dissoc'd: two markers can name the same target — a commit-point's
               ;; own target is the delta before it, which is exactly what an
               ;; earlier retroactive marker also points at. Releasing it at the
               ;; first reader left the second rendering the CURRENT state.
@@ -545,7 +545,7 @@
 
 (defn ensure-projected!
   "Bring the bare repo up to date with the journals — main + every on-disk
-  branch — advancing refs/heads/* to each line's newest milestone. A cloned
+  branch — advancing refs/heads/* to each line's newest commit-point. A cloned
   store (`git-base-sha` meta) grafts every line onto that base commit; pull
   markers (`:git-sha`) adopt remote commits as chain nodes. Chain objects
   this in-memory repo doesn't hold (fresh process) are fetched from
@@ -585,10 +585,10 @@
             (set-branch-ref! repo nm sha))
           {:refs refs})))))
 
-(defn ^:export milestone-tree
-  "{path content} for the tree the LAST milestone in `deltas` projects — folded
+(defn ^:export commit-point-tree
+  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
   from the journal and rendered, **with no git repo anywhere**. nil when there
-  is no milestone yet. `deltas` is the line's journal, oldest first
+  is no commit-point yet. `deltas` is the line's journal, oldest first
   (`slopp.store.db/line-deltas`); the value does not carry it, and an import
   is asked for rarely enough to read it then.
 

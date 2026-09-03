@@ -110,7 +110,7 @@
   This exists because moving bytes out of the journal does not make them
   free, it makes them UNCOUNTED, and `store_health` was built precisely
   because uncounted bytes accumulate: a tree snapshot reached 94% of a 344MB
-  journal across 239 milestones with nothing measuring it. The 30MB this
+  journal across 239 commit-points with nothing measuring it. The 30MB this
   field removed from the delta log would have landed straight back in a
   directory no tool reported.
 

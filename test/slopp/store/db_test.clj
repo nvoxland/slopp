@@ -8,10 +8,10 @@
   written and read back, and the SHAPE of what gets written in the first place.
 
   The recurring lesson is that a store can rot by GROWING. A byte-exact tree
-  snapshot in every milestone reached 94% of a 344MB journal, unnoticed across
+  snapshot in every commit-point reached 94% of a 344MB journal, unnoticed across
   239 of them, and was re-parsed at every session open. What came of that —
   the tree in its own column, read on demand, stored as a diff against the
-  previous milestone — is most of what is tested here."
+  previous commit-point — is most of what is tested here."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
             [slopp.store.render :as store.render]
@@ -191,7 +191,7 @@
 (deftest journal-stats-reports-what-the-store-carries
   ;; Nothing measured the COST of what the store holds, so a byte-exact :tree
   ;; snapshot inline in every :commit payload grew to 94% of a 344MB journal —
-  ;; unnoticed across 239 milestones, against a design note that estimated
+  ;; unnoticed across 239 commit-points, against a design note that estimated
   ;; "tens of KB". full_check counts namespaces and tests; nothing counted
   ;; bytes. The cheapest guard against the next one is a number nobody has to
   ;; go looking for.
@@ -918,7 +918,7 @@
   ;;
   ;; What decides it is not noise, though. `api.model/timeline` already filters
   ;; `:working` by `content-ops`, and the two numbers are designed to be read
-  ;; TOGETHER — written-not-landed beside landed-not-milestoned. One filtered
+  ;; TOGETHER — written-not-landed beside landed-not-committed. One filtered
   ;; and one not makes the pair incoherent, so the caller passes the same set
   ;; and the store stays ignorant of what "content" means, which is policy.
   (let [dir  (temp-dir)
@@ -1044,22 +1044,22 @@
               after (db/measurements conn "otel" (:seq (first all)))]
           (is (= 1 (count after)) (pr-str after)))))))
 
-(deftest only-the-newest-milestone-keeps-its-files-manifest-in-memory
+(deftest only-the-newest-commit-point-keeps-its-files-manifest-in-memory
   ;; The same "don't read it at open" lever as the blobs above, and the largest
   ;; instance of it. `commit_point!` snapshots the WHOLE files manifest into
-  ;; every milestone marker. Measured on this repo: 554 milestones carrying
+  ;; every commit-point marker. Measured on this repo: 554 commit-points carrying
   ;; 73.7 MB of payload, of which **:files alone is 70.8 MB (96%)** — a single
   ;; marker reaching 2.1 MB beside ~3.8 KB of everything else.
   ;;
   ;; A loaded value carries NO delta list any more, so nothing parses these at
   ;; open. The lever now sits on `line-deltas` — the history a VIEW hydrates
-  ;; with — which must not hand a view every milestone's manifest either.
+  ;; with — which must not hand a view every commit-point's manifest either.
   ;; Nothing reads the older ones: `slopp.git/insert-commit!` reads deltas
-  ;; straight from the db on its own connection, and `slopp.git/milestone-tree`
+  ;; straight from the db on its own connection, and `slopp.git/commit-point-tree`
   ;; takes `(last (filter #(= :commit (:op %)) ds))` — only ever the NEWEST.
   ;;
   ;; So the newest keeps its manifest and the rest drop it. Everything else
-  ;; about an older milestone — description, status, target, agent — is small
+  ;; about an older commit-point — description, status, target, agent — is small
   ;; and IS read (query_commits, the timeline), so only :files goes.
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-commits" (make-array java.nio.file.attribute.FileAttribute 0)))
@@ -1069,7 +1069,7 @@
         mk   (fn [st id files]
                (store/record-delta st {:id id :parent (:head st)
                                        :op :commit :ns '*session* :at 1
-                                       :description (str "milestone " id)
+                                       :description (str "commit-point " id)
                                        :status "green" :files files}))
         s2   (-> (store/empty-store) (mk "dc1" f1) (mk "dc2" f2))]
     (try
@@ -1079,14 +1079,14 @@
       (let [cs (filterv #(= :commit (:op %)) (db/line-deltas conn (db/trunk-line-id! conn)))]
         (is (= 2 (count cs)) (pr-str (mapv :id cs)))
 
-        (testing "the newest milestone keeps its manifest — milestone-tree needs it"
+        (testing "the newest commit-point keeps its manifest — commit-point-tree needs it"
           (is (= f2 (:files (last cs)))))
 
-        (testing "older milestones do not carry theirs into a hydrated history"
+        (testing "older commit-points do not carry theirs into a hydrated history"
           (is (nil? (:files (first cs)))))
 
-        (testing "and everything else about an older milestone survives intact"
-          (is (= "milestone dc1" (:description (first cs))))
+        (testing "and everything else about an older commit-point survives intact"
+          (is (= "commit-point dc1" (:description (first cs))))
           (is (= "green" (:status (first cs))))
           (is (= :commit (:op (first cs))))))
       (finally (.close conn)))))
@@ -1315,7 +1315,7 @@
   ;; answered correctly — the two paths must agree. They are read by index
   ;; (the line's head, its ancestry count, `prompt-for-forms` over the forms
   ;; the materialization holds, the newest delta per namespace, the window
-  ;; from the done before the last milestone), never by folding the
+  ;; from the done before the last commit-point), never by folding the
   ;; payloads, because folding them is the cost this whole item exists to
   ;; remove.
   (let [dir   (temp-dir)
@@ -1345,7 +1345,7 @@
           (is (= "x2" (get-in loaded [:last-write 'ld.core :id])) (pr-str (:last-write loaded)))
           (is (some? (get-in loaded [:last-write 'ld.other :id])))
           (is (nil? (get-in loaded [:last-write '*session*]))))
-        (testing "the recent window, cut at the milestone to the done that earned it"
+        (testing "the recent window, cut at the commit-point to the done that earned it"
           (is (= ["x3" "x4" "x5"] (map :id (:recent loaded))) (pr-str (map :id (:recent loaded)))))
         (testing "and the two paths agree: a load answers what the writes built"
           (is (= (:prompts st2) (:prompts loaded)))
@@ -1356,7 +1356,7 @@
 
 (deftest a-line-can-name-its-head-delta-and-say-whether-an-id-is-on-it
   ;; `commit-point!` asked two things of the in-RAM list: "is the newest
-  ;; delta already a milestone" (`(last deltas)`) and "is this target in this
+  ;; delta already a commit-point" (`(last deltas)`) and "is this target in this
   ;; branch's history" (`(some #(= target (:id %)) deltas)`). Both are one
   ;; indexed read over the line's ancestry.
   (let [dir   (temp-dir)

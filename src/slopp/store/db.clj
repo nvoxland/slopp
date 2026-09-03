@@ -500,12 +500,7 @@
   (one-col (jdbc/execute-one! conn ["SELECT id FROM lines WHERE name = ?" nm])))
 
 ^:reads (defn ^:export
-  ^{:breaking-ok
-    (str "the 2-arity is REMOVED rather than defaulted. It counted DELTAS, and "
-         "a delta count is wrong for every reader this has: a verification or a "
-         "done boundary is work to the journal and nothing to a person. Leaving "
-         "it as a default would keep the wrong answer reachable under the same "
-         "name, one day after the right one existed.")}
+  
   unlanded-count
   "How many of `ops` `line-id` has written since it forked — its head walked
   back to its own base, exclusive.
@@ -519,7 +514,7 @@
 
   What settles it is sharper than noise, though. `api.model/timeline` already
   filters its `:working` set by the same `content-ops`, and the two numbers are
-  meant to be read TOGETHER — written-not-landed beside landed-not-milestoned.
+  meant to be read TOGETHER — written-not-landed beside landed-not-committed.
   One filtered and one not makes the pair incoherent.
 
   The op set is a PARAMETER because it is policy: which ops constitute a change
@@ -687,13 +682,13 @@
   "`ds` with `:files` dropped from every `:commit` delta but the NEWEST.
 
   **The largest single thing a session used to hold.** `commit_point!`
-  snapshots the whole tracked-files manifest into every milestone marker
+  snapshots the whole tracked-files manifest into every commit-point marker
   (`(seq (:files st)) (assoc :files (:files st))`), and this loader parsed all
   of them into every session's store value. Measured on slopp's own store: 554
-  milestones carrying 73.7 MB of payload, of which **`:files` alone was 70.8 MB
+  commit-points carrying 73.7 MB of payload, of which **`:files` alone was 70.8 MB
   — 96%** — one marker reaching 2.1 MB beside ~3.8 KB of everything else. As
   parsed Clojure structure that was the dominant object in a live server's
-  heap, and it grew with every milestone forever.
+  heap, and it grew with every commit-point forever.
 
   Safe by construction rather than by luck, which is the same argument
   `:blobs` makes two doors down:
@@ -702,10 +697,10 @@
     EVERY marker's manifest — takes its deltas straight from the db on its own
     connection. `ensure-projected!` says so in its docstring: *reads the dbs
     directly (always-current, no session needed)*. It never sees this value.
-  - `slopp.git/milestone-tree` is the one store-VALUE reader, and it resolves
+  - `slopp.git/commit-point-tree` is the one store-VALUE reader, and it resolves
     `(last (filter #(= :commit (:op %)) ds))` — the newest, which is kept.
 
-  Only `:files` goes. A milestone's `:description`, `:status`, `:target` and
+  Only `:files` goes. A commit-point's `:description`, `:status`, `:target` and
   `:agent` are small and ARE read from the store value (`query_commits`, the
   reviewer timeline), so thinning the whole payload would break them for a few
   more kilobytes.
@@ -715,7 +710,7 @@
   for its life: `slopp.ops.engine/refresh-cache!` advances INCREMENTALLY in the
   common case — `store/replay-delta` over the journal suffix, deliberately
   avoiding a full re-parse — and a foreign `:commit` delta arrives from
-  `deltas-after` carrying its whole manifest. Every milestone landed during a
+  `deltas-after` carrying its whole manifest. Every commit-point landed during a
   server's life would add one back. Measured: a fresh server holds ~515 MB
   post-GC, a worked-in one 2.37 GB."
   [ds]
@@ -824,9 +819,9 @@
   SQLite's LENGTH — nothing is parsed, so it stays cheap on a large journal.
 
   This exists because nothing measured cost. A byte-exact `:tree` snapshot in
-  every `:commit` reached 94% of a 344MB journal — ~1.35MB per milestone
+  every `:commit` reached 94% of a 344MB journal — ~1.35MB per commit-point
   against a design note estimating \"tens of KB\" — and went unnoticed across
-  239 milestones while `full_check` happily counted namespaces and tests. It
+  239 commit-points while `full_check` happily counted namespaces and tests. It
   was NAMED here and still grew to 82MB before it was removed. A store can rot
   by GROWING, and only a number catches that.
 
@@ -884,7 +879,7 @@
   "Every form id delta `d` touches, distinct, in the order the delta names
   them: `:form-id` (a single write), `:form-ids` (a group — rename, move,
   changeset), and the keys of `:sources` (ingest and the whole-namespace
-  shapes). A delta with none — a marker, a milestone, a config write —
+  shapes). A delta with none — a marker, a commit-point, a config write —
   answers `[]`. The index writer and its backfill both read this, so a new
   shape that names forms is taught here once."
   [d]
@@ -1096,7 +1091,7 @@
 ^:reads (defn ^:export head-delta
           "The delta `line-id` currently points at, as a delta map — or nil for a
   line never written to. One row by primary key. `commit-point!` reads it
-  to ask whether the newest entry is already a milestone; it used to take
+  to ask whether the newest entry is already a commit-point; it used to take
   `(last deltas)` off the list the value carried."
           [conn line-id]
           (when-let [h (line-head conn line-id)]
@@ -1106,7 +1101,7 @@
 ^:reads (defn ^:export on-line?
           "True when delta `id` is on `line-id`'s history — reachable from its head
   by the parent walk. False for an id on another line only, and for an id the
-  journal has never seen. A retroactive milestone (`commit_point {target}`)
+  journal has never seen. A retroactive commit-point (`commit_point {target}`)
   asks this before marking a spot; it used to scan the whole in-RAM list."
           [conn line-id id]
           (some? (jdbc/execute-one!
@@ -1119,7 +1114,7 @@
   (or the commit itself when no done precedes it) to the head — the same
   window `record-delta` keeps current on every append, so a loaded value and
   a written one answer the recent past identically. The whole line when it
-  has no milestone yet."
+  has no commit-point yet."
           [conn line-id]
           (let [head   (line-head conn line-id)
                 seq-of (fn [sql & args]
@@ -1226,7 +1221,7 @@
 
 ^:reads (defn ^:export delta-by-id
           "The delta with `id`, as a delta map, or nil. One row by primary key —
-  for the reader that holds an id (a milestone's `:target`, a `:since`
+  for the reader that holds an id (a commit-point's `:target`, a `:since`
   argument) and needs the entry behind it, without scanning a list for it."
           [conn id]
           (some-> (jdbc/execute-one! conn ["SELECT * FROM deltas WHERE id = ?" id])
@@ -1235,14 +1230,14 @@
 ^:reads (defn ^:export line-deltas
           "ONE LINE's whole journal as delta maps, oldest first — or only the part
   after delta `since` when given, or only the deltas whose op is in `ops`
-  (a milestone list wants `[:commit]` and nothing else). This is the read
-  the history VIEWS (`query_history`, `query_changes`, a milestone's tree,
+  (a commit-point list wants `[:commit]` and nothing else). This is the read
+  the history VIEWS (`query_history`, `query_changes`, a commit-point's tree,
   an episode diff) hydrate with, at the moment they are asked: a session no
   longer carries its line's history in the value, because the value read it
   for two scalars and a bounded window, and the views that genuinely need
   all of it are asked a few times a day. The op filter is SQL, so a reader
   that wants a few dozen markers never parses the payloads it does not want.
-  Milestone `:files` manifests are thinned exactly as `load-store` thins
+  Commit-point `:files` manifests are thinned exactly as `load-store` thins
   them."
           [conn line-id & {:keys [since ops]}]
           (thin-commit-manifests
@@ -1342,7 +1337,7 @@
 
   Exported for the git projection, which folds a journal into a store that
   has no index of its own and seeds it with this one, so a namespace the
-  milestone holds in its live state is arranged from a lookup rather than an
+  commit-point holds in its live state is arranged from a lookup rather than an
   analysis."
   [conn line-id]
   (let [keys-of (into {}
@@ -1400,7 +1395,7 @@
       (into
        {:namespaces nss
         ;; …and having named the columns, drop the one that is still huge: every
-        ;; milestone's `:files` snapshot but the newest. See thin-commit-manifests
+        ;; commit-point's `:files` snapshot but the newest. See thin-commit-manifests
         ;; — measured at 70.8 MB of 73.7 MB of commit payload on slopp's own store.
         ;; NO delta list. It was 94% of the value (111 MB of 118 on one store,
         ;; ~162 MB live) and 4.5 s of every 7.6 s open — EDN-parsing every
@@ -1911,7 +1906,7 @@
                               op      TEXT NOT NULL,
                               ns      TEXT NOT NULL,
                               payload TEXT NOT NULL)"])
-  ;; a `tree` column used to hold each milestone's byte-exact snapshot of
+  ;; a `tree` column used to hold each commit-point's byte-exact snapshot of
   ;; every namespace — 94% of a 344MB journal at its worst, still 82MB
   ;; (39%) when it was removed. An older store has the column and its
   ;; rows; nothing reads or writes them, and DROP COLUMN rewrites the

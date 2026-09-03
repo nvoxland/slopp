@@ -501,13 +501,13 @@
         (is (= 1 (:retried (:refused r))) (pr-str (:refused r)))
         (is (= [{:shape "unknown argument" :n 1}] (:by-shape (:refused r))) (pr-str (:refused r)))))))
 
-(deftest the-cost-door-forwards-the-census-and-can-split-by-milestone
+(deftest the-cost-door-forwards-the-census-and-can-split-by-commit-point
   ;; TWO findings in one pin. First: the wire passes :tool-calls (the
   ;; per-call census, with the chars each answer put on the wire) and
   ;; query-turn-cost destructured only [since otel] — so it was dropped, and
   ;; every reading of this store's tools came from the turn-top path the
   ;; descriptor itself calls a LOWER BOUND (five tools per turn). Second:
-  ;; costs keyed to milestones, so a wave's effect is a slope rather than a
+  ;; costs keyed to commit-points, so a wave's effect is a slope rather than a
   ;; hand comparison across recorded rows.
   (let [turn  (fn [at ms] {:op :turn-end :at at
                            :timing {:calls 1 :slopp-ms ms :outside-ms 1 :idle-ms 0
@@ -527,11 +527,11 @@
         (is (= 120 (get-in r [:calls :chars])) (pr-str (:calls r)))))
     (testing "without it the fold still answers, and SAYS which basis it used"
       (is (= :turn-top (get-in (query/query-turn-cost sess) [:calls :basis]))))
-    (testing "by milestone: one row per segment, newest first, each naming the milestone it follows"
-      (let [r (query/query-turn-cost sess :by "milestone")]
-        (is (= :milestone (:by r)) (pr-str r))
+    (testing "by commit-point: one row per segment, newest first, each naming the commit-point it follows"
+      (let [r (query/query-turn-cost sess :by "commit-point")]
+        (is (= :commit-point (:by r)) (pr-str r))
         (is (= ["dM2" "dM1"] (mapv :commit (:rows r))) (pr-str (:rows r)))
-        (is (= [1 2] (mapv :turns (:rows r))) "the segment AFTER each milestone")
+        (is (= [1 2] (mapv :turns (:rows r))) "the segment AFTER each commit-point")
         (is (= 40 (get-in (first (:rows r)) [:wall :slopp-ms])) (pr-str (:rows r)))))))
 
 (deftest a-rate-is-taken-against-the-population-it-came-FROM

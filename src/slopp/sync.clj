@@ -384,7 +384,7 @@
       (finally (.close repo)))))
 
 (defn publish-local!
-  "Mirror the store's milestone history into THIS checkout's local git as
+  "Mirror the store's commit-point history into THIS checkout's local git as
   refs/heads/slopp/<store-branch> (user decision 2026-07-14): every
   commit_point lands in local git automatically, so the repo durably
   carries the slopp history; REMOTE publishing stays explicit (git_push).
@@ -471,7 +471,7 @@
                   {:error (str "mirror push rejected: " (pr-str rows)
                                " — fast-forward only; git_pull first if the remote moved")}))))))
       (finally (.close repo)))
-    {:error (str dir " has no .git — the store IS durable without one (milestones"
+    {:error (str dir " has no .git — the store IS durable without one (commit-points"
                  " live in .slopp/store.db); to ALSO mirror history into git,"
                  " run `git init` there and the next commit_point creates"
                  " slopp/<branch> automatically")}))
@@ -701,10 +701,10 @@
   "Absorb the difference between two trees into the live session: diff
   `treeM`→`treeT` (both plain {path content}), deps first, then namespaces in
   the incoming tree's dependency order, then close the episode with a
-  milestone. Conflicts land in quarantine (push blocks until resolved).
+  commit-point. Conflicts land in quarantine (push blocks until resolved).
 
   `opts`: `:agent`, `:origin` (what the quarantined copy came FROM — a commit
-  sha for a pull, a directory for an import), `:label` (the milestone
+  sha for a pull, a directory for an import), `:label` (the commit-point
   description), `:extra` (extra marker fields — a pull chains `:git-sha`), and
   `:retry` (the verb to name when the done gate refuses).
 
@@ -748,7 +748,7 @@
     ;; The changes STAY applied on the branch on a red verdict, which is the
     ;; same place an agent's own red work sits: they arrived through the
     ;; ordinary verbs and are ordinary form edits. What is withheld is the
-    ;; MILESTONE, because that is what a push projects and nothing downstream
+    ;; COMMIT-POINT, because that is what a push projects and nothing downstream
     ;; re-judges it — `push!` refuses unresolved conflicts and a checked-out
     ;; branch, and does not look at status at all.
     (let [m   (external/commit-point! session label :agent agent :extra extra)
@@ -763,18 +763,18 @@
                (str "the imported changes ARE applied — "
                     (count (:applied @results))
                     " namespace(s), as ordinary form edits on this branch — and"
-                    " the done gate REFUSED them, so no milestone was recorded"
+                    " the done gate REFUSED them, so no commit-point was recorded"
                     " and the import is not closed. " (:error m)
                     " Fix them here the way you would fix your own work, then"
                     " run " retry " again: the diff is already applied so it"
-                    " re-applies nothing, and the milestone it mints then"
+                    " re-applies nothing, and the commit-point it mints then"
                     " carries the marker this one could not."))
         (assoc out :marker (:commit m))))))
 
 (defn- apply-pull!
   "The pull body once fetch/merge-base decided there IS something to absorb:
   produce the two trees from git and hand them to `apply-trees!`. The remote
-  tip becomes a `:git-sha` chain node, so our next milestone parents on it and
+  tip becomes a `:git-sha` chain node, so our next commit-point parents on it and
   pushes stay fast-forward.
 
   This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
@@ -816,7 +816,7 @@
                   (nil? tip)   {:error (str "remote has no slopp/"
                                         (:branch @session "main")
                                         " branch: " url)}
-                  (nil? ours)  {:error "nothing to pull onto — no local milestones or clone base"}
+                  (nil? ours)  {:error "nothing to pull onto — no local commit-points or clone base"}
                   (= tip ours) {:up-to-date true}
                   :else
                   (let [mb (git/merge-base (:slopp.git/repo ctx) ours tip)]
@@ -828,7 +828,7 @@
 
 (defn import-dir!
   "Absorb a DIRECTORY of files into the live session as ordinary tracked form
-  edits — three-way against the store's last milestone, through the same
+  edits — three-way against the store's last commit-point, through the same
   appliers and the same `done` gate a `git_pull` faces. **No git anywhere**:
   not in the source directory, not in the store.
 
@@ -838,9 +838,9 @@
   gate. `git_pull` is now one CALLER of this machinery rather than its
   definition.
 
-  The BASE is the store's own last milestone (`git/milestone-tree`), which is
+  The BASE is the store's own last commit-point (`git/commit-point-tree`), which is
   \"the state this directory was exported from\" in the common case and the
-  conservative answer otherwise: work the store did since that milestone is
+  conservative answer otherwise: work the store did since that commit-point is
   ours-only and survives, where taking the CURRENT rendering as the base would
   make a stale directory silently revert it.
 
@@ -856,14 +856,14 @@
   (let [root (io/file (str dir))]
     (if-not (.isDirectory root)
       {:error (str dir " is not a directory")}
-      (let [base (git/milestone-tree
+      (let [base (git/commit-point-tree
                   ;; the line's journal, read when asked — the value no longer
                   ;; carries it, and an import is asked for rarely
                   (db/line-deltas (:db @session)
                                   (or (:line @session) (db/trunk-line-id! (:db @session))))
                   #(db/get-blob (:db @session) %))]
         (if (nil? base)
-          {:error (str "nothing to import ONTO — this store has no milestones,"
+          {:error (str "nothing to import ONTO — this store has no commit-points,"
                        " so there is no base to merge against. commit_point"
                        " first, or use clone/import for a fresh store.")}
           (let [files    (filter #(.isFile ^java.io.File %) (file-seq root))
@@ -942,7 +942,7 @@
   `:projected?` is the fact that was missing. `git_push` publishes a
   projection that EXISTS; it does not build one. On this store the note said
   *git_push publishes it*, the push ran with a real token, reported OK over
-  133 commits, and alignment came back byte-identical — because the milestone
+  133 commits, and alignment came back byte-identical — because the commit-point
   it names had no projection anywhere, and the sha it compares against was in
   no object database on the machine. \"Behind, and a push will catch it up\"
   and \"behind, and the commits it would need were never created\" are
@@ -955,51 +955,51 @@
   [branch {:keys [stamp latest aligned projected?]}]
   (cond
     (and aligned stamp)
-    (str "the " branch " branch head STAMPS milestone " latest
+    (str "the " branch " branch head STAMPS commit-point " latest
          " — read off the commit itself, not a recorded sha; no"
          " worktree/sqlite cross-check needed")
 
     aligned
-    (str "the " branch " branch head IS milestone " latest
+    (str "the " branch " branch head IS commit-point " latest
          "'s adopted commit; no worktree/sqlite cross-check needed")
 
     (false? projected?)
-    (str "the " branch " branch head is milestone " (or stamp "an earlier state")
-         "'s projection, and milestone " latest "'s commit is in NO reachable"
+    (str "the " branch " branch head is commit-point " (or stamp "an earlier state")
+         "'s projection, and commit-point " latest "'s commit is in NO reachable"
          " object database — so there is nothing for git_push to publish. A"
          " sha is pinned when a commit is MINTED, which says nothing about"
          " whether one was ever built here. git_push from a CHECKOUT mirrors"
          " the slopp/* branches that exist; it does not create a projection.")
 
     stamp
-    (str "the " branch " branch head is milestone " stamp
+    (str "the " branch " branch head is commit-point " stamp
          "'s projection, not the latest (" latest ") — git_push publishes it")
 
     :else
-    (str "the " branch " branch head carries no milestone stamp and is not"
-         " milestone " latest "'s adopted commit — git_push publishes it")))
+    (str "the " branch " branch head carries no commit-point stamp and is not"
+         " commit-point " latest "'s adopted commit — git_push publishes it")))
 
 ^:reads (defn alignment
   "Q12: PROOF that the published slopp branch is the store's latest
-  milestone — {:branch :branch-head :latest-milestone :milestone-sha
-  :head-milestone :aligned :note} — or nil when there is no resolvable LOCAL
-  remote, branch, or milestone. One call answers the cross-check agents
+  commit-point — {:branch :branch-head :latest-commit-point :commit-point-sha
+  :head-commit-point :aligned :note} — or nil when there is no resolvable LOCAL
+  remote, branch, or commit-point. One call answers the cross-check agents
   otherwise perform by hand (throwaway worktrees, raw sqlite, duplicate
   test runs). `commits` = query-commits rows, newest first.
 
-  It asks the branch HEAD which milestone it is — `git/stamped-milestone`
+  It asks the branch HEAD which commit-point it is — `git/stamped-commit-point`
   reads the `Slopp-Commit:` trailer every projected commit carries — rather
   than comparing against the sha the store recorded. Those are different
   facts, and the difference is not hypothetical: a sha is pinned when a commit
   is MINTED, which says nothing about what was published. On 2026-08-14 a
   refused push left a pin naming a commit nobody had; the pin is
   first-writer-wins, so no later projection could correct it, and this read
-  went permanently false against a mirror that WAS the latest milestone's
+  went permanently false against a mirror that WAS the latest commit-point's
   projection — while advising a `git_push` that could not fix it. A stamp
   rides the artifact and cannot disagree with the artifact.
 
   A head with NO stamp was not minted here: it is an ADOPTED remote commit
-  from a pull, and for those the milestone's `:sha` is the remote's own commit
+  from a pull, and for those the commit-point's `:sha` is the remote's own commit
   id — an observation rather than a mint record — so sha equality is the
   right question there, and only there."
   [dir remote branch commits]
@@ -1014,19 +1014,19 @@
                 b    (or branch "slopp")]
             (try
               (when-let [head (.resolve repo (str "refs/heads/" b))]
-                ;; the LATEST milestone, not the latest one that happens to
-                ;; carry a sha: a milestone the projection never minted is
+                ;; the LATEST commit-point, not the latest one that happens to
+                ;; carry a sha: a commit-point the projection never minted is
                 ;; genuinely unaligned, and skipping to an older row reported
-                ;; alignment against a milestone nobody asked about.
+                ;; alignment against a commit-point nobody asked about.
                 (when-let [latest (first commits)]
                   (let [head-sha (.name head)
-                        stamp    (git/stamped-milestone (git/message-of repo head-sha))
+                        stamp    (git/stamped-commit-point (git/message-of repo head-sha))
                         aligned  (if stamp
                                    (= stamp (:commit latest))
                                    (= head-sha (:sha latest)))
                         ;; Does the commit this is comparing against EXIST?
                         ;; `git_push` publishes a projection; it does not build
-                        ;; one, so a milestone nobody projected has nothing to
+                        ;; one, so a commit-point nobody projected has nothing to
                         ;; publish and advising a push means a real push to a
                         ;; public repository that changes nothing. nil when
                         ;; there is no sha to ask about — "not measured" is not
@@ -1037,12 +1037,12 @@
                                      (org.eclipse.jgit.lib.ObjectId/fromString sha))
                                (catch Exception _ nil)))]
                     {:branch b :branch-head head-sha
-                     :latest-milestone (:commit latest)
-                     :milestone-sha (:sha latest)
+                     :latest-commit-point (:commit latest)
+                     :commit-point-sha (:sha latest)
                      ;; what the verdict was actually based on — a reader who
-                     ;; cannot see WHICH milestone the head claims to be has to
+                     ;; cannot see WHICH commit-point the head claims to be has to
                      ;; go and do the cross-check this exists to replace
-                     :head-milestone stamp
+                     :head-commit-point stamp
                      ;; and whether the thing the remedy would publish is even
                      ;; there. Carried as data beside the sentence, so a reader
                      ;; who wants the fact does not have to parse prose for it.

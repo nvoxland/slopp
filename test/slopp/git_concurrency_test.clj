@@ -60,9 +60,9 @@
             (git/close-ctx! ctx2))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external foreign-milestone-projected-without-restart
+(deftest ^:external foreign-commit-point-projected-without-restart
   ;; the m5b operating model: another agent's server shares the store dir, and
-  ;; its milestones must reach the projection with NO restart — projection
+  ;; its commit-points must reach the projection with NO restart — projection
   ;; re-reads the journals from disk every time rather than trusting a cache
   ;; built when the context opened.
   ;;
@@ -85,7 +85,7 @@
           (try
             (ops/edit-replace! sess2 'gc.core 'f "(defn f [x] (+ 10 x))"
                                :prompt "foreign work" :agent "bob")
-            (external/commit-point! sess2 "v2: foreign milestone" :agent "bob")
+            (external/commit-point! sess2 "v2: foreign commit-point" :agent "bob")
             (finally (ops/close! sess2))))
         (let [tip2  (tip ctx)
               fresh (let [c2 (git/open-ctx! dir)]

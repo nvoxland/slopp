@@ -3,7 +3,7 @@
   because a timeline reading and the query that reports it are one subject.
 
   Two halves that lived apart until they did not: the pure FOLDS over the
-  delta log (status at and after a delta, milestone rows, line diffs,
+  delta log (status at and after a delta, commit-point rows, line diffs,
   timestamps, what one form cost to get green) and the READS built on them
   (lineage, a form's every version, delta-log search, the log as a story, an
   episode's net per-form diffs, and time travel to a form as its source
@@ -143,8 +143,8 @@
 
 (defn resolve-at
   "Normalize an `at` argument to a plain delta id: a `:commit` marker id
-  becomes its `:target` (time-travel to a milestone points at the
-  milestone's state); any other existing delta id passes through; an unknown
+  becomes its `:target` (time-travel to a commit-point points at the
+  commit-point's state); any other existing delta id passes through; an unknown
   id → nil (the caller reports it)."
   [store at]
   (when at
@@ -331,7 +331,7 @@
                                     (mapcat #(get-in % [:turn :episodes]))
                                     turns)
                   eps     (remove #(claimed-eps (:episode %)) eps)
-                  ;; commit points: the MILESTONE grain above turns
+                  ;; commit points: the COMMIT-POINT grain above turns
                   commits (vec (for [d ds :when (= :commit (:op d))]
                                  {:commit
                                   (cond-> {:id          (:id d)
@@ -428,8 +428,8 @@
                                                             (:forms d))))}
                     (:undid d) (assoc :undid (:undid d)))))))))
 
-(defn ^:export milestone-rows
-  "Milestones newest first, as a PURE fold over the delta log:
+(defn ^:export commit-point-rows
+  "Commit-points newest first, as a PURE fold over the delta log:
   `[{:commit :description :target :status :at :agent :sha}]`. `:sha` is
   present only when the DELTA carries one (imported markers do from birth);
   the projection's pinning table is a db read and lives one tier up, in
@@ -437,7 +437,7 @@
 
   `:titles-only true` is the LIST rung: each description trimmed to its
   first line, with the remaining non-blank lines counted into
-  `:more-lines`. Needing one sha used to fetch five whole milestone essays.
+  `:more-lines`. Needing one sha used to fetch five whole commit-point essays.
 
   Exported: the reviewer UI's timeline is a pure reader and would otherwise
   have to fold the same log a second time."
@@ -564,9 +564,9 @@
   done) before its first activity, so pre-existing history is never
   mistaken for contested work. nil = log start."
   [store agent-label]
-  (let [;; the recent window: since the last milestone plus the done that
+  (let [;; the recent window: since the last commit-point plus the done that
         ;; earned it. An agent whose own last done is older than that has no
-        ;; un-judged work newer than the milestone's done, so that done is
+        ;; un-judged work newer than the commit-point's done, so that done is
         ;; the right boundary for it too
         ds  (:recent store)
         own (last (filter #(and (= :done (:op %))
@@ -585,7 +585,7 @@
 
 (defn ^:export episode-span
   "Deltas after `agent`'s episode boundary (all agents' — callers filter).
-  Walks the RECENT window — everything since the last milestone plus the
+  Walks the RECENT window — everything since the last commit-point plus the
   done that earned it — which is exactly where `episode-boundary` finds the
   boundary, so a plain store value answers this: no log, no hydration."
   [store agent]
@@ -596,7 +596,7 @@
 
 (defn span-anchor
   "Resolve a NAMED span anchor to the delta id a span should START at:
-  `:start` (the whole log), `:last-commit` (work since the last milestone),
+  `:start` (the whole log), `:last-commit` (work since the last commit-point),
   `:last-done` (work since the last done) — the same vocabulary `undo!`
   accepts, as keyword or wire string. Anything else passes through as a
   literal delta id.
@@ -611,7 +611,7 @@
   (let [ds     (store/deltas st)
         named? (fn [ks] (contains? ks from))
         ;; the delta AFTER the last marker — the span starts with the work
-        ;; that FOLLOWS the milestone/done, not the marker itself
+        ;; that FOLLOWS the commit-point/done, not the marker itself
         after  (fn [pred]
                  (when-let [m (last (filter pred ds))]
                    (:id (second (drop-while #(not= (:id m) (:id %)) ds)))))]
@@ -641,7 +641,7 @@
 (def ^:export verdict-inert-ops
   "Delta ops that cannot change what a WHOLE-STORE check would say.
 
-  Bookkeeping only: a verdict, a done boundary, a milestone marker, a turn
+  Bookkeeping only: a verdict, a done boundary, a commit-point marker, a turn
   bracket, a run observation, a read-cost record. None is code, a
   declaration, a dependency or a module edge, so none can move lint, dead
   surface, layering, the rule sweep or a test.
@@ -656,7 +656,7 @@
   #{:verify :done :commit :turn-begin :turn-end :observe :read-cost})
 
 (defn ^:export
-  ^{:breaking-ok "the 1-arity walked the store's whole delta list for the newest whole-store check; the value no longer carries the list, so the two reads are handed in from slopp.store.db and this keeps only the judgement. Its one caller moved in the same write."}
+  
   standing-full-check
   "The whole-store verdict that STILL STANDS — the most recent `full_check`
   result when nothing since it could have changed what it says — or nil.
@@ -669,7 +669,7 @@
   performs, ~236s on this store, almost all of it fresh JVM boots in the
   external tier. Read over its own journal: 325 runs, and 117 of them repeats
   inside a SINGLE ask — 7.6 hours spent re-asking a question already
-  answered. `commit_point` has always returned an unchanged milestone rather
+  answered. `commit_point` has always returned an unchanged commit-point rather
   than re-minting one; this is the same courtesy for the slowest thing here.
 
   Only the most recent whole-store check counts. An older one that a change

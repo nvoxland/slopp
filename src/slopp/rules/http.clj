@@ -801,7 +801,7 @@
 
   Advisory rather than error at this grain, because the write gate is the
   enforcement: a form that arrived by a route with no gate is a state to be
-  told about, not one to refuse a milestone over."
+  told about, not one to refuse a commit-point over."
   [_session store _changed]
   (for [nsx (keys (:namespaces store))
         e   (store/forms store nsx)

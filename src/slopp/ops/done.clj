@@ -191,7 +191,7 @@
   and the work then LANDS through a rebase that mints new form ids. If
   anything drops between those two moments the green is honest and wrong:
   measured with two forms, where one landed and the other did not, after which
-  every request served 200 while the milestone read green.
+  every request served 200 while the commit-point read green.
 
   `by-ns` must be read from the BRANCH rather than from the session that did
   the work. Checking a landing against the store that produced it is the same

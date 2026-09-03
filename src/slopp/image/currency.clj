@@ -10,7 +10,7 @@
   divergences that every check called green (a `def` that captured another
   form's value, var metadata that captured a schema's value, a generated
   namespace written to the store and never loaded) and one false alarm that
-  sent a milestone through a fresh JVM because a failed reload was reported as
+  sent a commit-point through a fresh JVM because a failed reload was reported as
   \"the host still runs their previous code\" while the image was current.
 
   The fix is identity, not a louder label: the store gives every form an id, a
