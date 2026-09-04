@@ -22,8 +22,8 @@
             [slopp.index.normalize :as normalize]
             [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
 
-^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
-(declare add-form! add-require! auto-require-retry canonical-source! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
+^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, create-ns!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
+(declare add-form! add-require! auto-require-retry canonical-source! create-ns! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
 
 (defn reap-idle-images!
   "Stop parked branch images idle past the session TTL (the session's reaper
@@ -5130,80 +5130,6 @@
       (str "[" t "]")
       t)))
 
-(defn create-ns!
-  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
-   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
-     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
-   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
-     land the entire namespace in one verified call — forward refs within the
-     file resolve as a unit, like a real `.clj` load. For ported/reference/data
-     code that isn't subject to red→green.
-   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
-   (module_platform grain = this namespace) BEFORE the source lands, so a
-   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
-   instead of failing to load into the JVM oracle (the inherited-default
-   footgun). A bad platform refuses the whole create.
-
-   **A scaffold may require a namespace that does not exist yet**, which is how
-   red-first works across a namespace boundary: each such require is created
-   EMPTY and reported in `:also-created`. Without it a spec-first write does not
-   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
-   holds the rule for which requires qualify and why a library never does.
-
-   Delegates to `ingest!` (the shared engine); overwrite is refused there.
-   `:prompt` — the ask — rides every ingest it delegates, so the namespace's
-   birth answers \"why does this exist\"."
-  [session ns-sym & {:keys [requires source agent platform prompt]}]
-  (if (and source (seq requires))
-    {:error (str ":source and :requires are mutually exclusive — put requires "
-                 "inside the source's ns form")}
-    ;; platform must be declared FIRST: ingest reads it to decide whether to
-    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
-    (let [perr (when platform
-                 (:error (module-platform! session (str ns-sym) platform
-                                           :prompt (or prompt "platform declared at namespace creation")
-                                           :agent agent)))
-          ;; computed BEFORE the write, while the store still lacks the name
-          shadow (shadow-warning (:store @session) ns-sym)
-          requires (mapv bracketed-require requires)
-          also   (when-not perr
-                   (unwritten-requires (:store @session) ns-sym requires))]
-      (cond
-        perr {:error perr}
-
-        :else
-        (let [;; the subjects come into being BEFORE the spec that requires
-              ;; them, or the spec's own load is the failure again
-              sub-err (some (fn [n]
-                              (:error (ingest! session n (str "(ns " n ")\n")
-                                               :agent agent :prompt prompt)))
-                            also)
-              r (if sub-err
-                  {:error sub-err}
-                  (if source
-                    ;; a whole namespace is the write most likely to cross a
-                    ;; boundary for the first time; declare its edges as a
-                    ;; single form's write would
-                    (let [source (with-purpose source ns-sym prompt)
-                          once   #(ingest! session ns-sym source :agent agent :prompt prompt)]
-                      (auto-module-dep-retry! session (once) once :agent agent))
-                    (ingest! session ns-sym
-                             (str "(ns " ns-sym
-                                  ;; the ask IS the purpose — the docstring the
-                                  ;; namespace-purpose advisory would otherwise
-                                  ;; ask for at the done (eval24 opus: a change
-                                  ;; and a second done per created namespace)
-                                  (when-let [d (purpose-doc prompt)]
-                                    (str "\n  " (pr-str d)))
-                                  (when (seq requires)
-                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
-                                  ")\n")
-                             :agent agent :prompt prompt)))]
-          (cond-> r
-            (seq also) (assoc :also-created (vec also))
-            (and shadow (not (:error r)))
-            (update :warnings (fnil conj []) shadow)))))))
-
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
   pipeline + hot-reload, then re-verify — only the tests the trace map says
@@ -5764,6 +5690,100 @@
                  :note (str "the match was a fragment (it opened a delimiter it did"
                             " not close) with one home in " form-name " — landed as a"
                             " TEXT replace; `text: true` says so up front next time")))))))
+
+(defn create-ns!
+  "F4: bring a brand-new namespace into being — two modes:
+   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
+     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
+   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
+     land the entire namespace in one verified call — forward refs within the
+     file resolve as a unit, like a real `.clj` load. For ported/reference/data
+     code that isn't subject to red→green.
+   Both together: the requires are MERGED into the source's ns form (eval26
+   opus: refused as exclusive, one turn). On a namespace that already EXISTS,
+   `:requires` alone adds those requires and overwrites nothing
+   (`:already-exists true`); `:source` on an existing namespace is still the
+   overwrite `ingest!` refuses.
+   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
+   (module_platform grain = this namespace) BEFORE the source lands, so a
+   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
+   instead of failing to load into the JVM oracle (the inherited-default
+   footgun). A bad platform refuses the whole create.
+
+   **A scaffold may require a namespace that does not exist yet**, which is how
+   red-first works across a namespace boundary: each such require is created
+   EMPTY and reported in `:also-created`. Without it a spec-first write does not
+   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
+   holds the rule for which requires qualify and why a library never does.
+
+   Delegates to `ingest!` (the shared engine); overwrite is refused there.
+   `:prompt` — the ask — rides every ingest it delegates, so the namespace's
+   birth answers \"why does this exist\"; a namespace born without a docstring
+   stores the prompt as one."
+  [session ns-sym & {:keys [requires source agent platform prompt]}]
+  (let [requires (mapv bracketed-require requires)
+        exists?  (contains? (:namespaces (:store @session)) ns-sym)]
+    (if (and exists? (seq requires) (nil? source))
+      ;; the requires were the whole ask: add them, overwrite nothing
+      (let [rs (mapv #(add-require! session ns-sym % :prompt prompt :agent agent) requires)]
+        (if-let [e (some :error rs)]
+          {:error e}
+          (cond-> {:ok true :ns ns-sym :already-exists true :requires-added requires}
+            (seq (mapcat :also-created rs)) (assoc :also-created (vec (distinct (mapcat :also-created rs)))))))
+      (let [;; both given: the requires belong in the source's ns form, so put
+            ;; them there rather than refuse
+            source   (if (and source (seq requires))
+                       (reduce (fn [src r]
+                                 (let [x (edit/add-require-source src r)]
+                                   (if (:error x) src (:src x))))
+                               source requires)
+                       source)
+            requires (if source [] requires)
+            ;; platform must be declared FIRST: ingest reads it to decide whether to
+            ;; hot-load, so a :cljs source with js/* would fail to load otherwise
+            perr (when platform
+                   (:error (module-platform! session (str ns-sym) platform
+                                             :prompt (or prompt "platform declared at namespace creation")
+                                             :agent agent)))
+            ;; computed BEFORE the write, while the store still lacks the name
+            shadow (shadow-warning (:store @session) ns-sym)
+            also   (when-not perr
+                     (unwritten-requires (:store @session) ns-sym requires))]
+        (cond
+          perr {:error perr}
+
+          :else
+          (let [;; the subjects come into being BEFORE the spec that requires
+                ;; them, or the spec's own load is the failure again
+                sub-err (some (fn [n]
+                                (:error (ingest! session n (str "(ns " n ")\n")
+                                                 :agent agent :prompt prompt)))
+                              also)
+                r (if sub-err
+                    {:error sub-err}
+                    (if source
+                      ;; a whole namespace is the write most likely to cross a
+                      ;; boundary for the first time; declare its edges as a
+                      ;; single form's write would
+                      (let [source (with-purpose source ns-sym prompt)
+                            once   #(ingest! session ns-sym source :agent agent :prompt prompt)]
+                        (auto-module-dep-retry! session (once) once :agent agent))
+                      (ingest! session ns-sym
+                               (str "(ns " ns-sym
+                                    ;; the ask IS the purpose — the docstring the
+                                    ;; namespace-purpose advisory would otherwise
+                                    ;; ask for at the done (eval24 opus: a change
+                                    ;; and a second done per created namespace)
+                                    (when-let [d (purpose-doc prompt)]
+                                      (str "\n  " (pr-str d)))
+                                    (when (seq requires)
+                                      (str "\n  (:require " (str/join "\n            " requires) ")"))
+                                    ")\n")
+                               :agent agent :prompt prompt)))]
+            (cond-> r
+              (seq also) (assoc :also-created (vec also))
+              (and shadow (not (:error r)))
+              (update :warnings (fnil conj []) shadow))))))))
 
 (defn revert-form!
   "One-call rollback (item 4): replace `nm` with an earlier version of itself —

@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -403,6 +403,33 @@
   [ctx {:keys [query-params]}]
   (config-document (:store @(:session ctx)) (:prefix query-params)))
 
+(defn- records-text
+  "The RECORDS section of a bundle answering a records question (\"why is X
+  computed this way — what do the project's own records say\"): for each of
+  `forms` (qualified symbols), its versions — op, when, the ask that made
+  it, and for an imported form the git sha with the note that no ask was
+  recorded and the docstring is the only recorded reasoning. `hsess` is a
+  session hydrated by `ops/with-history`. Nil when no form has a story.
+  eval26 opus step 2, every cell: four turns of file_list, query_git,
+  file_get and git log for exactly this answer."
+  [hsess forms]
+  (let [snip  (fn [s n] (let [t (str s)] (if (> (count t) n) (str (subs t 0 (- n 3)) "…") t)))
+        lines (for [q forms
+                    :let [vs (history/query-form-history hsess (symbol (namespace q)) (symbol (name q)))]
+                    :when (seq vs)]
+                (str "  " q ": "
+                     (str/join "; "
+                                          (for [v (take-last 4 vs)]
+                                            (str (name (:op v)) " " (:at v)
+                                                 (when-let [o (:origin v)]
+                                                   (str " — imported from git "
+                                                        (let [g (str (:git-sha o))] (subs g 0 (min 12 (count g))))
+                                                        (when (:note o) (str " (" (:note o) ")"))))
+                                                 (when (:prompt v) (str " «" (snip (:prompt v) 140) "»")))))))]
+    (when (seq lines)
+      (str "--- the records the ask asks about — each form's versions (op, when, the ask that made it); this IS the record, quote it ---\n"
+           (str/join "\n" lines)))))
+
 (defn ^{:http/read :orient/bundle} bundle-read!
   "Read performer: the ask bundle — `orient/bundle` over the live session,
   the ask from `?ask=` (blank is the plain ranking). `?session-id=` is the
@@ -447,6 +474,18 @@
                                            :whole-ns? (not (or same? handoff?)))
         text     (if (and handoff? (not same?))
                    (str text "\n" (orient/handoff-text (ops/report session :limit 50) 3800))
+                   text)
+        ;; a RECORDS question — why is it this way, what was asked, what do
+        ;; the records say — arrives with the named forms' version story
+        ;; (eval26 opus: four turns of git and README per cell for it)
+        records? (and (not same?)
+                      (re-find #"(?i)\b(why (?:is|was|does|did|are|were)|history|records?|rationale|reasoning|recorded|asked for|what (?:was|were) asked)\b" ask))
+        text     (if-let [rec (when records?
+                                (let [top (->> (:rows (orient/orient-map session :ask ask :tokens 400))
+                                               (map :form) (take 3) vec)]
+                                  (when (seq top)
+                                    (records-text (ops/with-history session) top))))]
+                   (str text "\n" rec)
                    text)
         ;; the project's aliases, once: the first map carries them, the delta
         ;; assumes the reader holds them

@@ -226,7 +226,7 @@
                                :prompt {:type "string"}}
                   :required ["ns" "name" "text"]}}
    {:name "change"
-    :description "THE write door — a whole unit of work, or any slice of one, as ONE call. `tests` steps (OPTIONAL) land first and the result reports which went RED — watched failing, red-first honored; `impl` steps land; `accept`'s expectation shifts finish; ONE verification; one result, with :test-src on any residual red (fix forward from it — a red change lands NOTHING and loses nothing: the work stays on your thread). NO done inside: done is YOUR separate move when the unit is finished — a unit may span change -> explore -> change, and the Stop hook is the landing floor. {prompt, impl} alone is the ordinary write — a docstring, a comment, a one-form fix; tests lead only when there is an expectation to watch fail, and a test you are writing to FIND something out is explore {ops [{op check …}]} instead. Steps: [{action: add|replace|subform|delete|require|patch, ns, name, source, match, text, where, require}] — patch = {action: patch, ns, name, replace: [{match, source, text?, where?} …]}: several small changes INSIDE one form as deltas, never a whole-form retype. A step with no action is inferred (:replace when the named form exists, :add when not). A delete step refuses while callers remain, naming them. Auto-require and auto-module-dep repair as on every write. A change past ~10 steps is two changes."
+    :description "THE write door — a whole unit of work, or any slice of one, as ONE call. `tests` steps (OPTIONAL) land first and the result reports which went RED — watched failing, red-first honored; `impl` steps land; `accept`'s expectation shifts finish; ONE verification; one result, with :test-src on any residual red (fix forward from it — a red change lands NOTHING and loses nothing: the work stays on your thread). `done \"label\"` / `commit true` on the LAST change closes the unit in the same call (:closed); a unit may span change -> explore -> change, and the server lands what is left green on your thread when the session ends. {prompt, impl} alone is the ordinary write — a docstring, a comment, a one-form fix; tests lead only when there is an expectation to watch fail, and a test you are writing to FIND something out is explore {ops [{op check …}]} instead. Steps: [{action: add|replace|subform|delete|require|patch, ns, name, source, match, text, where, require}] — patch = {action: patch, ns, name, replace: [{match, source, text?, where?} …]}: several small changes INSIDE one form as deltas, never a whole-form retype. A step with no action is inferred (:replace when the named form exists, :add when not). A delete step refuses while callers remain, naming them. Auto-require and auto-module-dep repair as on every write. A change past ~10 steps is two changes."
     :inputSchema {:type "object"
                   :properties {:prompt {:type "string"}
                                :tests {:type "array" :items {:type "object"}}
@@ -1006,7 +1006,8 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   (let [a0         (or arguments {})
         ;; a note key first, for ANY op: `op_note`, `why-note` — the caller
         ;; annotating its own call, never an argument
-        notes      (vec (filter #(re-find #"[_-]note$" (clojure.core/name %)) (keys a0)))
+        ;; … and a harness's own flag (`run_in_background`) is never an argument
+        notes      (vec (filter #(re-find #"[_-]note$|^run_in_background$" (clojure.core/name %)) (keys a0)))
         a          (apply dissoc a0 notes)
         noted      (fn [r] (cond-> r
                              (seq notes) (update :repaired #(update (or % {}) :dropped (fnil into []) notes))))
@@ -1043,7 +1044,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
        (and (= "report" name) (contains? a :format))
        {:name name :arguments (dissoc a :format) :repaired {:dropped [:format]}}
 
-       (and (= "query_commits" name) (contains? a :limit) (nil? (:contains a)))
+       (and (#{"query_commits" "query_git"} name) (contains? a :limit) (nil? (:contains a)))
        {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
 
        ;; the namespace read: `query_slice {ns}` / `query_brief {ns}` with no

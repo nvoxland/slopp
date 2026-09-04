@@ -36,10 +36,12 @@
         (let [r (ops/create-ns! sess 'cn.util :requires ["[clojure.string :as str]"])]
           (is (nil? (:error r)))
           (is (re-find #"clojure.string" (query/query-source sess 'cn.util)))))
-      (testing ":source and :requires are mutually exclusive"
-        (is (:error (ops/create-ns! sess 'cn.bad
-                                    :source "(ns cn.bad)\n"
-                                    :requires ["[clojure.string]"]))))
+      (testing ":source with :requires merges the requires into the source's ns form (eval26 opus: the refusal cost a turn)"
+        (let [r (ops/create-ns! sess 'cn.both
+                                :source "(ns cn.both)\n(defn ^:unused-ok g [] 1)\n"
+                                :requires ["[clojure.string :as str]"])]
+          (is (nil? (:error r)) (pr-str r))
+          (is (re-find #"\[clojure\.string :as str\]" (query/query-source sess 'cn.both)))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external operation-surface

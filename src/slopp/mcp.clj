@@ -1757,20 +1757,21 @@
         (if (vector? res) (into res rows) (into [res] rows))))))
 
 (defn- create-leading-ns!
-  "Namespaces a change's steps need that the store does not have yet. Two
+  "Namespaces a change's steps need that the store does not have yet. Three
   shapes: a step whose source IS an `(ns …)` form for a missing namespace
   creates it from that form and leaves the group (the whole-file heredoc
   gesture — how every model writes a NEW file — leads with its ns form;
   without this the blob refused with \"no namespace — ingest it first\",
-  probed live, s13); and any other step naming a missing namespace creates
-  it EMPTY and stays in the group (eval24 canary: a fn and its test bound
-  for `logi.discount` were refused, the model created it and re-sent — the
-  red-first seam already mints an empty namespace for a spec's require, and
-  a step is the same intent said more directly; the requires it needs
-  follow from its forms). Returns `{:steps <the rest> :created
-  [create-results]}` — or `{:error …}` when a create refuses. An ns form
-  for an EXISTING namespace is not a create: it stays in the group and
-  replaces — a require edit arriving by blob."
+  probed live, s13); a step that IS a creation — `{action ns_create ns
+  requires?}`, or `{ns requires}` with no source — runs `create-ns!` and
+  leaves the group (eval26 opus: refused twice as an unknown action and a
+  step with no source, then the ns_create itself refused because a later
+  step had created the namespace empty); and any other step naming a
+  missing namespace creates it EMPTY and stays in the group (eval24
+  canary). Returns `{:steps <the rest> :created [create-results]}` — or
+  `{:error …}` when a create refuses. An ns form for an EXISTING namespace
+  is not a create: it stays in the group and replaces — a require edit
+  arriving by blob."
   [session steps a]
   (let [st       (:store @session)
         exists?  (fn [s] (some? (get-in (:store @session) [:namespaces (symbol (str s))])))
@@ -1782,18 +1783,23 @@
                                                        (catch Exception _ nil))))]
                           (and (seq? sx) (= 'ns (first sx))
                                (= (symbol (str (:ns s))) (second sx))))))
-        creates  (filter ns-step? steps)
+        create-step? (fn [s]
+                       (and (:ns s)
+                            (or (= :ns_create (:action s))
+                                (and (nil? (:action s)) (nil? (:source s)) (:requires s)))))
+        creates  (filter #(or (ns-step? %) (create-step? %)) steps)
         results  (reduce (fn [acc s]
                            (let [r (ops/create-ns! session (symbol (str (:ns s)))
                                                    :source (:source s)
-                                                   :prompt (:prompt a)
+                                                   :requires (:requires s)
+                                                   :prompt (or (:prompt s) (:prompt a))
                                                    :agent (:agent a))]
                              (if (:error r) (reduced r) (conj acc r))))
                          [] creates)]
     (if (map? results)
       {:error (:error results)}
       ;; the other shape: a plain step for a namespace nobody has created
-      (let [rest-steps (vec (remove ns-step? steps))
+      (let [rest-steps (vec (remove #(or (ns-step? %) (create-step? %)) steps))
             missing    (->> rest-steps
                             (filter #(and (:ns %) (string? (:source %))
                                           (contains? #{nil :add :replace} (:action %))
@@ -1863,16 +1869,22 @@
       cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale])))))
 
 (defn- close-unit-after-write!
-  "Threaded after a change's group result `ri`: when the call carried `done`
-  (a label) or `commit` and the write is GREEN, close the unit here — the
-  done, its landing and suite, the whole-store verdict when cheap, the
-  commit point — under `:closed`; a red write closes nothing and `:closed`
-  says so. The write that finishes an ask is one turn, not four."
-  [ri session a]
+  "Threaded after a change's result `ri`: when the call carried `done` (a
+  label) or `commit` and the write is GREEN (`red?` says), close the unit
+  here — the done, its landing and suite, the whole-store verdict when cheap,
+  the commit point — under `:closed`; a red write closes nothing and
+  `:closed` says so. The write that finishes an ask is one turn, not four.
+  Both write shapes take it: the impl change and the tests-only change
+  (eval26 sonnet: a tests-only fix carrying done was ignored, the session
+  ended, and the work stayed on its thread)."
+  [ri session a red?]
   (if-not (or (:done a) (:commit a))
     ri
-    (if (red? (:test ri))
-      (assoc ri :closed {:closed false :why "the change is red — nothing lands until it is green; fix forward and close again"})
+    (if red?
+      (assoc ri :closed {:closed false
+                         :why (if (seq (:impl a))
+                                "the change is red — nothing lands until it is green; fix forward and close again"
+                                "the tests landed red — the impl is the next change; close with it")})
       (let [lbl (or (and (string? (:done a)) (:done a))
                     (and (string? (:commit a)) (:commit a))
                     (:prompt a))
@@ -1931,20 +1943,23 @@
                       (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
                                                             (keep :test (:failures (:test rt))))))]
                         (ledger-written! session "edit_group" {:steps tests})
-                        (text! {:ok true
-                                :status (if (seq went-red) :red :green)
-                                :tests (cond-> {:landed (count tests) :went-red went-red
-                                                :spec-run (select-keys (:test rt)
-                                                                       [:test :pass :fail :error
-                                                                        :failed-tests :status])}
-                                         (:auto-require rt)
-                                         (assoc :auto-require (:auto-require rt)))
-                                :note (if (seq went-red)
-                                        (str "the tests landed RED and are watched — the"
-                                             " implementation is the next change {impl …}")
-                                        (str "the tests landed GREEN — the spec was never"
-                                             " watched failing; a green you did not watch"
-                                             " fail proves nothing"))}))))
+                        (text! (-> {:ok true
+                                    :status (if (seq went-red) :red :green)
+                                    :tests (cond-> {:landed (count tests) :went-red went-red
+                                                    :spec-run (select-keys (:test rt)
+                                                                           [:test :pass :fail :error
+                                                                            :failed-tests :status])}
+                                             (:auto-require rt)
+                                             (assoc :auto-require (:auto-require rt)))
+                                    :note (if (seq went-red)
+                                            (str "the tests landed RED and are watched — the"
+                                                 " implementation is the next change {impl …}")
+                                            (str "the tests landed GREEN — the spec was never"
+                                                 " watched failing; a green you did not watch"
+                                                 " fail proves nothing"))}
+                                   ;; a tests-only change carrying done/commit closes
+                                   ;; too — an expectation fix is often the last write
+                                   (close-unit-after-write! session a (boolean (seq went-red))))))))
                   (text! {:error (str "change needs :impl steps — a question is explore;"
                                       " a test you are writing to FIND something out is"
                                       " explore {ops [{op check code …}]}")})))
@@ -1977,7 +1992,7 @@
                                    (held-after-write! session "edit_group" {:steps impl})
                                    (finish-accepted! session a)
                                    (attach-red-context! session)
-                                   (close-unit-after-write! session a))]
+                                   (close-unit-after-write! session a (red? (:test ri))))]
                         (text!
                          (cond->
                           {:ok true
@@ -2052,6 +2067,36 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
+
+(defn land-on-exit!
+  "The LANDING FLOOR, in the server's own exit path: when the session's
+  thread still holds un-landed content writes as the stdio loop ends, run
+  the done here — a green episode lands on the branch, a red one stays on
+  the thread exactly as an agent's own done would leave it. Returns the
+  done's `:done`, `:land` and `:findings`, or nil when there was nothing to
+  land.
+
+  The plugin's Stop hook used to be this floor: an async `slopp --call done`
+  in a SEPARATE process. A one-shot session (`claude -p`) exits underneath
+  it, and eval26 measured the result — sixteen green writes stranded on a
+  thread, the next step starting from a branch without them. The process
+  that owns the thread is the one that can land it. Never throws: exit must
+  not be blocked by a landing that fails; the failure is said on stderr."
+  [session]
+  (try
+    (when-let [conn (:db @session)]
+      (when-let [line (:line @session)]
+        (when (pos? (or (db/unlanded-count conn line history/content-ops) 0))
+          (let [d (external/done! session :label "session end" :agent (:agent-id @session))]
+            (.println System/err
+                      ^String (str "slopp: landing the session's thread at exit — "
+                                   (name (or (get-in d [:findings :episode-status]) :unknown))
+                                   (when-let [l (:land d)]
+                                     (str ", landed on " (:landed l)))))
+            (select-keys d [:done :land :findings])))))
+    (catch Exception e
+      (.println System/err ^String (str "slopp: landing at exit failed — " (ex-message e)))
+      nil)))
 
 ^:unsafe (defn start-ui!
   "Bring this project's UI listener up beside the MCP server and start its
@@ -2420,6 +2465,9 @@
                                " stdin open) rather than launching it manually."))
         ;; deregister BEFORE the listener goes: the hub should learn we are
         ;; leaving from us, not by ageing us out thirty seconds later.
+        ;; the landing floor, before anything is torn down: what the
+        ;; agent left green on its thread reaches the branch (eval26)
+        (land-on-exit! session)
         (hub/stop! (:hub-heartbeat @session))
         (server/stop!)
         ;; the app image is a CHILD JVM. Its watchdog would reap it when we

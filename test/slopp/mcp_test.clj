@@ -4964,3 +4964,128 @@
         (call! sess "ns_create" {:ns "rq.scaf" :requires ["clojure.test :refer [deftest is]" "[clojure.string :as str]"] :prompt "scaffold"})
         (is (re-find #"\[clojure\.test :refer \[deftest is\]\]" (call! sess "query_source" {:ns "rq.scaf" :full true}))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-tests-only-change-closes-too
+  ;; eval26 sonnet e26s1: the closing change went red on a wrong expectation
+  ;; (nothing landed — right), the FIX was a tests-only change carrying done
+  ;; and commit, the tests-only path ignored the close, and sixteen writes
+  ;; stayed on the thread when the session ended. Steps 3–5 started from a
+  ;; branch without step 2.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "tc.core" :source "(ns tc.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] (* 2 x))\n(deftest f-t (is (= 2 (f 1))))\n"})
+      (testing "a green tests-only change with done lands and closes"
+        (let [r (call! sess "change" {:prompt "a second expectation"
+                                      :tests [{:ns "tc.core" :name "f-t2" :source "(deftest f-t2 (is (= 4 (f 2))))"}]
+                                      :done "f-t2" :commit true})]
+          (is (re-find #":status :green" r) r)
+          (is (re-find #":closed \{" r) r)
+          (is (re-find #":landed \"main\"" r) r)
+          (is (re-find #":commit \{:commit \"d[0-9a-f]+\"" r) r)))
+      (testing "a red tests-only change with done closes nothing and says the impl is next"
+        (let [r (call! sess "change" {:prompt "a spec for g, red first"
+                                      :tests [{:ns "tc.core" :name "g-t" :source "(deftest g-t (is (= 1 (g 1))))"}]
+                                      :done "g"})]
+          (is (re-find #":status :red" r) r)
+          (is (re-find #":closed \{:closed false" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-server-lands-its-thread-when-stdin-closes
+  ;; eval26 sonnet e26s1: sixteen green writes on a thread, the session
+  ;; ended, the async Stop hook's separate process landed nothing, and the
+  ;; next step started from a branch without them (9/11). The landing floor
+  ;; is the server's own exit path, not a hook.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-land-" (System/nanoTime))
+        _    (.mkdirs (java.io.File. dir))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (call! sess "ns_create" {:ns "lx.core" :source "(ns lx.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (call! sess "edit_replace_form" {:ns "lx.core" :name "f" :source "(defn ^:unused-ok f \"F!\" [x] (inc x))" :prompt "never closed by the agent"})
+      (testing "the exit path lands what the agent left green on its thread"
+        (let [r (mcp/land-on-exit! sess)]
+          (is (= "main" (get-in r [:land :landed])) (pr-str r))))
+      (ops/close! sess)
+      (testing "a fresh session on the same store sees it on the branch"
+        (let [s2 (external/open! {:slopp.ops/dir dir})]
+          (try
+            (is (re-find #"\(inc x\)" (call! s2 "query_source" {:ns "lx.core" :full true})))
+            (finally (ops/close! s2)))))
+      (finally
+        (try (ops/close! sess) (catch Exception _ nil))
+        (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
+
+(deftest ^:external a-namespace-creation-sent-as-a-step-is-a-creation
+  ;; eval26 opus e26o2 step 1: a change whose first step was {action
+  ;; ns_create ns requires} was refused (\"unknown action\"), then one with
+  ;; {ns requires} and no source (\"no :action and no :source\"), then the
+  ;; ns_create itself refused because a later step had already created the
+  ;; namespace empty. A creation sent as a step is a creation.
+  (let [sess (external/open!)]
+    (try
+      (testing "action ns_create with requires"
+        (let [r (call! sess "change" {:prompt "a new namespace, as a step"
+                                      :impl [{:action "ns_create" :ns "cs.one" :requires ["[clojure.string :as str]"]}
+                                             {:ns "cs.one" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (str/upper-case x))"}]})]
+          (is (re-find #":status :green" r) r)
+          (is (re-find #":created \[\{:ns cs\.one" r) r)
+          (is (re-find #"clojure\.string :as str" (call! sess "query_source" {:ns "cs.one" :full true})))))
+      (testing "{ns requires} with no source is the same gesture"
+        (let [r (call! sess "change" {:prompt "another"
+                                      :impl [{:ns "cs.two" :requires ["[clojure.set :as cset]"]}
+                                             {:ns "cs.two" :name "g" :source "(defn ^:unused-ok g \"G.\" [a b] (cset/union a b))"}]})]
+          (is (re-find #":status :green" r) r)
+          (is (re-find #":created \[\{:ns cs\.two" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external ns-create-takes-source-with-requires-and-an-existing-namespace
+  ;; eval26 opus: ns_create {ns source requires} refused as \"mutually
+  ;; exclusive\" (the requires belong in the source's ns form — so put them
+  ;; there), and ns_create {ns requires} on a namespace that already existed
+  ;; refused as an overwrite when all the model wanted was its requires.
+  (let [sess (external/open!)]
+    (try
+      (testing "source AND requires: the requires are merged into the source's ns form"
+        (let [r (call! sess "ns_create" {:ns "nx.core" :source "(ns nx.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :requires ["[clojure.string :as str]"] :prompt "both"})]
+          (is (re-find #":ns nx\.core" r) r)
+          (is (not (re-find #":error \"" r)) r)
+          (is (re-find #"\[clojure\.string :as str\]" (call! sess "query_source" {:ns "nx.core" :full true})))))
+      (testing "an existing namespace with requires only: the requires are added, nothing overwritten"
+        (let [r (call! sess "ns_create" {:ns "nx.core" :requires ["[clojure.set :as cset]"] :prompt "again"})]
+          (is (re-find #":already-exists true" r) r)
+          (is (not (re-find #":error \"" r)) r)
+          (let [src (call! sess "query_source" {:ns "nx.core" :full true})]
+            (is (re-find #"clojure\.set :as cset" src) src)
+            (is (re-find #"\(defn \^:unused-ok f" src) "the forms stayed"))))
+      (testing "an existing namespace with SOURCE is still refused — that is an overwrite"
+        (is (re-find #":error \"" (call! sess "ns_create" {:ns "nx.core" :source "(ns nx.core)\n"}))))
+      (finally (ops/close! sess)))))
+
+(deftest the-shapes-eval26-measured-are-repaired-not-refused
+  ;; eval26 opus: full_check {run_in_background} (a harness key), query_git
+  ;; {limit} (a sibling's key) — one turn each.
+  (is (= {:name "full_check" :arguments {} :repaired {:dropped [:run_in_background]}}
+         (tools/remap-arguments "full_check" {:run_in_background true})))
+  (is (= {:name "query_git" :arguments {} :repaired {:dropped [:limit]}}
+         (tools/remap-arguments "query_git" {:limit 40}))))
+
+(deftest ^:external a-records-question-arrives-with-the-form-story
+  ;; eval26 opus step 2, every cell: \"why is the fuel surcharge computed off
+  ;; the weight price — what do the records say\" → file_list, query_git,
+  ;; file_get, git log, the README: four turns, for an answer the store
+  ;; holds — the form was imported and its docstring is the only recorded
+  ;; reasoning. The bundle says so.
+  (let [sess (external/open!)]
+    (try
+      (db/set-meta! (:db @sess) "git-base-sha" "0123456789abcdef0123456789abcdef01234567")
+      (call! sess "ns_create" {:ns "rq.fuel" :source "(ns rq.fuel)\n(defn ^:unused-ok fuel-surcharge-cents \"The carrier's fuel percentage applied to the weight price (not the whole quote).\" [wp pct] (quot (* wp pct) 100))\n"})
+      (let [ctx (server/context sess)
+            txt (str (:body (http/handle!
+                             ctx {:request-method :get :uri "/api/bundle"
+                                  :query-string (str "ask=" (java.net.URLEncoder/encode
+                                                               "Why is the fuel surcharge computed off the weight price rather than the whole quote? I want what this project's own records say — the recorded reasoning or request."
+                                                               "UTF-8"))})))]
+        (is (re-find #"--- the records" txt) txt)
+        (is (re-find #"rq\.fuel/fuel-surcharge-cents" txt) txt)
+        (is (re-find #"(?i)imported" txt) "the origin rides: imported, no ask recorded")
+        (is (re-find #"0123456789ab" txt) "with the sha"))
+      (finally (ops/close! sess)))))
