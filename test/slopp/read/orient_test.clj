@@ -960,3 +960,27 @@
         "every ask survives whole")
     (is (not (contains? r :intents)) "the asks' duplicate went first")
     (is (re-find #"rolled up|narrows" (str (:note r))) (pr-str (:note r)))))
+
+(deftest fit-report-never-snips-an-ask-while-it-can-drop-the-per-form-rows
+  ;; eval25 opus step 5: four asks of ~800 chars plus eighty per-form rows
+  ;; put the report over 6500, the diet snipped the asks to 300, and the
+  ;; model went to query_history fourteen times to read them whole. The
+  ;; per-form rows repeat what :by-ask says; they aggregate and then go,
+  ;; before an ask is touched.
+  (let [ask  (fn [i] (str "ask " i " " (apply str (repeat 1100 "w"))))
+        fat  {:commit-points [{:commit "d9" :description "m"}]
+              :origin {:sha "abc" :note (apply str (repeat 200 "o"))}
+              :by-ask (vec (for [i (range 6)] {:ask (ask i) :turn (str "t" i) :changed ['a.b/c 'a.b/d] :deltas ["d1" "d2"]}))
+              :changes (vec (for [i (range 80)]
+                              {:ns (symbol (str "big.ns" (mod i 8))) :form (symbol (str "fn" i))
+                               :ops [:replace] :asks [(subs (ask (mod i 6)) 0 140)] :deltas ["d1"]}))
+              :suite {:status :green :tests 52 :pass 145 :command "slopp --call full_check '{}'"}
+              :verify "test_run" :code "query_changes" :records "citations"}
+        r    (#'orient/fit-report fat)]
+    (is (<= (count (pr-str r)) 7800) (str (count (pr-str r))))
+    (is (every? #(= (:ask %) (ask (Integer/parseInt (subs (:turn %) 1)))) (:by-ask r))
+        "every ask survives whole")
+    (is (or (not (contains? r :changes))
+            (every? #(number? (:forms %)) (:changes r)))
+        "the per-form rows aggregated or went; the asks did not")
+    (is (string? (:note r)) (pr-str (keys r)))))

@@ -387,10 +387,12 @@
                   {:error (str "already required: " lib)}))))
 
           :else
-          {:error (str "already required: " lib " as " (pr-str existing)
-                       " — a DIFFERENT spelling than " require-str
-                       ". Pick one: keep the existing alias, or restate the"
-                       " whole (ns …) form as a change step (one call).")})
+          ;; a different spelling of the same lib: the one asked for is
+          ;; the one wanted — REPLACE the clause and say what it replaced.
+          ;; Refusing it cost a remove + an add (eval25 opus).
+          (if-let [src (replace-clause existing (if (vector? req) req lib))]
+            {:src src :replaced (pr-str existing)}
+            {:error (str "already required: " lib " as " (pr-str existing))}))
         (let [zloc (z/of-string ns-source)
               rq   (z/find-value zloc z/next :require)]
           {:src (if rq

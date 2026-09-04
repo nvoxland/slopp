@@ -1811,6 +1811,79 @@
           {:error (:error empties)}
           {:steps rest-steps :created (into results empties)})))))
 
+(defn- advertised-tools
+  "What tools/list would advertise to THIS session right now — the one
+  selection both the list and the drift notifier read, so they can never
+  disagree: empty in CLI mode (the shell is the surface), else the dieted
+  fourteen (s14, adopted by measurement: prose rides the bundle as cards)."
+  [session]
+  (if (or (:cli-mode? @session) (some? (System/getenv "SLOPP_CLI")))
+    []
+    tools/dieted-tools))
+
+(defn- tools-note!
+  "The notifications/tools/list_changed message when the tool registry has
+  DRIFTED from what this session last advertised (a live reload renamed or
+  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
+  client could see it), else nil. Emitting updates the baseline, so each
+  drift notifies exactly once. No baseline (tools/list never served) → nil."
+  [session]
+  (let [h    (hash (advertised-tools session))
+        last (:slopp.mcp/tools-hash @session)]
+    (when (and last (not= last h))
+      (swap! session assoc :slopp.mcp/tools-hash h)
+      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
+
+(defn- close-extras!
+  "What closing a unit can hand over BESIDE the done's own verdict, so the
+  agent has no reason to call again: the WHOLE-STORE verdict when it is
+  cheap (the last one cost under eight seconds, or the store is under sixty
+  namespaces — a standing verdict costs a millisecond either way), and a
+  COMMIT POINT when `a` asks for one (`:commit` true, or a label). Neither
+  runs on a red episode: nothing to project, and a whole-store answer would
+  only restate the red. `r` is the done result. eval25 opus: done →
+  full_check → commit_point after every step, ten turns a lifetime."
+  [session a r]
+  (let [red?   (or (= :red (:status r)) (= :red (get-in r [:findings :episode-status])))
+        conn   (:db @session)
+        cheap? (and conn (:line @session)
+                    (let [fc (db/last-full-check conn (:line @session))]
+                      (or (and fc (< (get-in fc [:result :ms] 1e9) 8000))
+                          (< (count (:namespaces (:store @session))) 60))))
+        ws     (when (and cheap? (not red?))
+                 (try (terse-full-check (external/full-check! session))
+                      (catch Exception _ nil)))
+        cp     (when (and (:commit a) (not red?))
+                 (let [lbl (if (string? (:commit a))
+                             (:commit a)
+                             (or (:label a) (:done a) (:prompt a) "commit point"))]
+                   (external/commit-point! session lbl :agent (:agent a))))]
+    (cond-> {}
+      ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
+      cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale])))))
+
+(defn- close-unit-after-write!
+  "Threaded after a change's group result `ri`: when the call carried `done`
+  (a label) or `commit` and the write is GREEN, close the unit here — the
+  done, its landing and suite, the whole-store verdict when cheap, the
+  commit point — under `:closed`; a red write closes nothing and `:closed`
+  says so. The write that finishes an ask is one turn, not four."
+  [ri session a]
+  (if-not (or (:done a) (:commit a))
+    ri
+    (if (red? (:test ri))
+      (assoc ri :closed {:closed false :why "the change is red — nothing lands until it is green; fix forward and close again"})
+      (let [lbl (or (and (string? (:done a)) (:done a))
+                    (and (string? (:commit a)) (:commit a))
+                    (:prompt a))
+            d   (external/done! session :label lbl :agent (:agent a))
+            td  (terse-done d)]
+        (assoc ri :closed
+               (merge (select-keys td [:done :status :landed :suite :external :external-pending :advisories])
+                      (when (= :red (get-in d [:findings :episode-status]))
+                        {:closed false :why "the done is red — see :findings" :findings (:findings d)})
+                      (close-extras! session (assoc a :label lbl) d)))))))
+
 (def ^:private change-handlers!
   "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
   unit of work as one call — tests land first and the result reports which
@@ -1903,7 +1976,8 @@
                       (let [ri (-> ri
                                    (held-after-write! session "edit_group" {:steps impl})
                                    (finish-accepted! session a)
-                                   (attach-red-context! session))]
+                                   (attach-red-context! session)
+                                   (close-unit-after-write! session a))]
                         (text!
                          (cond->
                           {:ok true
@@ -1928,6 +2002,7 @@
                            ;; what it did
                            (seq (:created born)) (assoc :created (mapv #(select-keys % [:ns :forms]) (:created born)))
                            (:finisher ri)      (assoc :finisher (:finisher ri))
+                           (:closed ri)        (assoc :closed (:closed ri))
                            (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
                            (red? (:test ri))
                            (assoc :note (str "red — nothing landed, and nothing is"
@@ -1977,29 +2052,6 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
-
-(defn- advertised-tools
-  "What tools/list would advertise to THIS session right now — the one
-  selection both the list and the drift notifier read, so they can never
-  disagree: empty in CLI mode (the shell is the surface), else the dieted
-  fourteen (s14, adopted by measurement: prose rides the bundle as cards)."
-  [session]
-  (if (or (:cli-mode? @session) (some? (System/getenv "SLOPP_CLI")))
-    []
-    tools/dieted-tools))
-
-(defn- tools-note!
-  "The notifications/tools/list_changed message when the tool registry has
-  DRIFTED from what this session last advertised (a live reload renamed or
-  added a tool — edit_move_forms replaced an earlier extract-to-namespace tool mid-session and no
-  client could see it), else nil. Emitting updates the baseline, so each
-  drift notifies exactly once. No baseline (tools/list never served) → nil."
-  [session]
-  (let [h    (hash (advertised-tools session))
-        last (:slopp.mcp/tools-hash @session)]
-    (when (and last (not= last h))
-      (swap! session assoc :slopp.mcp/tools-hash h)
-      {:jsonrpc "2.0" :method "notifications/tools/list_changed"})))
 
 ^:unsafe (defn start-ui!
   "Bring this project's UI listener up beside the MCP server and start its
@@ -3058,13 +3110,17 @@
                                              " episode touched — a full_check now re-runs"
                                              " the WHOLE store, usually the commit-point-time"
                                              " call (commit_point runs the same gate)."))))))]
-                 (text! (assoc (terse-done (if-let [note (app-note-for app)]
+                 (text! (merge (assoc (terse-done (if-let [note (app-note-for app)]
+                                                    (assoc r :app-note note)
+                                                    r))
+                                      :whole-store whole)
+                               ;; the cheap whole-store verdict and the commit point
+                               ;; ride the same answer (eval25 opus: three calls to close)
+                               (close-extras! session a r)))
+                 (text! (merge (terse-done (if-let [note (app-note-for app)]
                                              (assoc r :app-note note)
                                              r))
-                               :whole-store whole))
-                 (text! (terse-done (if-let [note (app-note-for app)]
-                                      (assoc r :app-note note)
-                                      r)))))
+                               (close-extras! session a r)))))
       "commit_point" (text! (let [r (external/commit-point! session (:label a)
                                                        :agent (:agent a)
                                                        :force (:force a)

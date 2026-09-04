@@ -4089,8 +4089,8 @@
         (is (or (str/starts-with? cards (str op " {"))
                 (str/includes? cards (str "\n" op " {")))
             op)))
-    (testing "a card teaches the REQUIRED arguments by name"
-      (is (re-find #"change \{prompt, \[accept\], \[impl\], \[tests\]" cards) cards))
+    (testing "a card teaches the REQUIRED arguments by name — and the closing arguments a change can carry"
+      (is (re-find #"change \{prompt, \[accept\], \[commit\], \[done\], \[impl\], \[tests\]" cards) cards))
     (testing "the whole block stays bundle-sized"
       (is (< (count cards) 4500) (str (count cards) " chars")))))
 
@@ -4118,7 +4118,7 @@
                                ctx {:request-method :get :uri "/api/bundle"
                                     :query-string "ask=extend+the+quote"})))]
           (is (re-find #"op cards" txt) txt)
-          (is (re-find #"change \{prompt, \[accept\], \[impl\]" txt))))
+          (is (re-find #"change \{prompt, \[accept\], \[commit\], \[done\], \[impl\]" txt))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external an-aliased-require-upgrades-a-bare-one
@@ -4171,26 +4171,25 @@
 (deftest ^:external done-pre-empts-the-ritual-closing-full-check
   ;; s14 opus census: full_check x5 per cell, one per step as a closing
   ;; ritual after done — each a whole-store re-run plus a fat payload that
-  ;; compounds as rent. The two facts that make it redundant exist at done
-  ;; time; done now states them. Answer-shaped, never instructive — and
-  ;; only when a GREEN whole-store verdict exists to cite. eval24 opus: the
-  ;; third fact is the COUNT — \"every test stays green\" wants a number to
-  ;; quote, and without one the model ran test_run {all} after the done.
+  ;; compounds as rent. The facts that make it redundant exist at done time;
+  ;; done states them — and on a store where the whole-store check is CHEAP
+  ;; it simply runs it and hands the verdict over (eval25 opus: full_check
+  ;; after every done, 3–5 a cell, on a 43-namespace store that checks in
+  ;; under a second).
   (let [sess (external/open!)]
     (try
       (call! sess "ns_create" {:ns "ws.core" :source "(ns ws.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
-      (testing "no whole-store verdict yet — done claims nothing about one, and carries its own suite counts"
+      (testing "a green done on a small store carries the whole-store verdict itself, with its counts"
         (let [r (call! sess "done" {:label "first"})]
-          (is (not (re-find #":whole-store" r)))
-          (is (re-find #":suite \{:tests 1, :pass \d+" r) r)))
-      (call! sess "full_check" {})
+          (is (re-find #":suite \{:tests 1, :pass \d+" r) r)
+          (is (re-find #":whole-store \{:status :green" r) r)
+          (is (re-find #":whole-store \{[^}]*:test \{:test \d+" r) "the whole-store counts ride too")))
       (call! sess "edit_replace_form" {:ns "ws.core" :name "f"
                                        :source "(defn f \"F!\" [x] x)"
                                        :prompt "a change after the whole-store check"})
-      (testing "after a green full_check, done carries the two facts"
+      (testing "and again after a change — the verdict is re-earned, never stale"
         (let [r (call! sess "done" {:label "second"})]
-          (is (re-find #":whole-store" r) r)
-          (is (re-find #"was green" r) r)))
+          (is (re-find #":whole-store \{:status :green" r) r)))
       (finally (ops/close! sess)))))
 
 ^:unsafe (deftest the-spool-holds-the-remainder-not-a-second-copy
@@ -4886,3 +4885,82 @@
   (is (= {:name "query_source" :arguments {:ns "a"}}
          (tools/remap-arguments "query_source" {:ns "a"}))
       "nothing to repair, nothing reported"))
+
+(deftest ^:external a-change-can-close-its-unit-in-one-call
+  ;; eval25 opus, every step: change → done → full_check → commit_point, four
+  ;; turns for one unit. The write that finishes the ask closes it: `done`
+  ;; names the boundary, `commit` projects it, and the whole-store verdict
+  ;; rides when it is cheap. A RED change closes nothing and says so.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "oc.core" :source "(ns oc.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
+      (testing "a green change with done + commit lands, projects and reports the suite in ONE result"
+        (let [r (call! sess "change" {:prompt "f doubles"
+                                      :tests [{:ns "oc.core" :name "f-t" :source "(deftest f-t (is (= 2 (f 1))))"}]
+                                      :impl  [{:ns "oc.core" :name "f" :source "(defn f \"F.\" [x] (* 2 x))"}]
+                                      :done "f doubles" :commit true})]
+          (is (re-find #":status :green" r) r)
+          (is (re-find #":closed \{" r) r)
+          (is (re-find #":done \"d[0-9a-f]+\"" r) "the boundary is recorded")
+          (is (re-find #":landed \"main\"" r) "and landed")
+          (is (re-find #":suite \{:tests \d+" r) "with the episode's counts")
+          (is (re-find #":whole-store \{:status :green" r) "and the whole-store verdict, cheap on a store this size")
+          (is (re-find #":commit \{:commit \"d[0-9a-f]+\"" r) "and the commit point")))
+      (testing "a red change with done closes nothing"
+        (let [r (call! sess "change" {:prompt "f triples (wrong test)"
+                                      :impl [{:ns "oc.core" :name "f" :source "(defn f \"F.\" [x] (* 3 x))"}]
+                                      :done "f triples"})]
+          (is (re-find #":status :red" r) r)
+          (is (re-find #":closed \{:closed false" r) r)
+          (is (not (re-find #":landed \"main\"" r)) r)))
+      (testing "done takes commit too"
+        (call! sess "change" {:prompt "f triples, test agrees"
+                              :tests [{:ns "oc.core" :name "f-t" :source "(deftest f-t (is (= 3 (f 1))))"}]
+                              :impl  [{:ns "oc.core" :name "f" :source "(defn f \"F.\" [x] (* 3 x))"}]})
+        (let [r (call! sess "done" {:label "triples" :commit "f triples"})]
+          (is (re-find #":status :green" r) r)
+          (is (re-find #":commit \{:commit \"d[0-9a-f]+\"" r) r)))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-require-ops-take-what-the-model-sends
+  ;; eval25 opus e25o1 step 1, seven turns: ns_remove_require {require}
+  ;; (refused: it wants :lib), ns_add_require {lib} (refused: it wants
+  ;; :require), a clause without its brackets (fails to load), a require of
+  ;; a namespace that does not exist yet (a compile error), and a different
+  ;; spelling of a lib already required (refused). One vocabulary; repairs.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rq.core" :source "(ns rq.core (:require [clojure.test]))\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (testing "either key name, either op"
+        (let [r (call! sess "ns_add_require" {:ns "rq.core" :lib "[clojure.string :as str]"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"repaired \{:renamed \{:lib :require\}" r) r))
+        (let [r (call! sess "ns_remove_require" {:ns "rq.core" :require "clojure.string"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"repaired \{:renamed \{:require :lib\}" r) r)))
+      (testing "a clause without its brackets is wrapped"
+        (let [r (call! sess "ns_add_require" {:ns "rq.core" :require "clojure.set :as set"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #"\[clojure\.set :as set\]" (call! sess "query_source" {:ns "rq.core" :full true})))))
+      (testing "a richer spelling of a lib already required upgrades the clause in place"
+        (let [r (call! sess "ns_add_require" {:ns "rq.core" :require "[clojure.test :refer [deftest is]]"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":merged-refer|:replaced|:upgraded" r) r)
+          (let [src (call! sess "query_source" {:ns "rq.core" :full true})]
+            (is (re-find #"\[clojure\.test :refer \[deftest is\]\]" src) src)
+            (is (= 1 (count (re-seq #"clojure\.test" src))) "one clause, not two"))))
+      (testing "a different alias for a lib already aliased replaces the clause"
+        (let [r (call! sess "ns_add_require" {:ns "rq.core" :require "[clojure.set :as cset]"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":replaced" r) r)
+          (let [src (call! sess "query_source" {:ns "rq.core" :full true})]
+            (is (re-find #"\[clojure\.set :as cset\]" src) src)
+            (is (not (re-find #":as set\]" src)) "the old alias is gone"))))
+      (testing "a require of a namespace of yours that does not exist yet creates it"
+        (let [r (call! sess "ns_add_require" {:ns "rq.core" :require "[rq.later :as later]"})]
+          (is (re-find #":ok true" r) r)
+          (is (re-find #":also-created \[rq\.later\]" r) r)))
+      (testing "a scaffold's bracket-less requires are wrapped too"
+        (call! sess "ns_create" {:ns "rq.scaf" :requires ["clojure.test :refer [deftest is]" "[clojure.string :as str]"] :prompt "scaffold"})
+        (is (re-find #"\[clojure\.test :refer \[deftest is\]\]" (call! sess "query_source" {:ns "rq.scaf" :full true}))))
+      (finally (ops/close! sess)))))

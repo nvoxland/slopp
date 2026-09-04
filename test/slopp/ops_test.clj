@@ -2723,3 +2723,13 @@
           (is (= 1 (get-in d2 [:findings :carried-advisories :namespace-purpose])) (pr-str (:findings d2)))
           (is (not (re-find #"states no purpose" (pr-str d2))) "and no teaching rides the second time")))
       (finally (ops/close! sess)))))
+
+(deftest a-marked-require-clause-is-never-wrapped
+  ;; the bracket wrapper met the done-point's own `^:side-effect [lib :as r]`
+  ;; and wrapped it into `[^:side-effect [lib :as r]]`, losing the require it
+  ;; meant to keep. Only a bare lib followed by options is wrapped.
+  (is (= "[clojure.set :as set]" (#'ops/bracketed-require "clojure.set :as set")))
+  (is (= "clojure.set" (#'ops/bracketed-require "clojure.set")))
+  (is (= "[clojure.set :as set]" (#'ops/bracketed-require "[clojure.set :as set]")))
+  (is (= "^:side-effect [pz.reg :as r]" (#'ops/bracketed-require "^:side-effect [pz.reg :as r]")))
+  (is (= "(quote x)" (#'ops/bracketed-require "(quote x)"))))

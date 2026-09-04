@@ -233,6 +233,10 @@
                                :impl {:type "array" :items {:type "object"}}
                                :accept {:type "array" :items {:type "string"}
                                         :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}
+                               :done {:type "string"
+                                      :description "this change FINISHES the unit: close it in the same call under this label — done, landed, the suite, the whole-store verdict when cheap (:closed); a red change closes nothing"}
+                               :commit {:type ["boolean" "string"]
+                                        :description "and take a commit point (true, or its label) — the write that finishes an ask is one turn"}
                                :verbose {:type "boolean"}}
                   :required ["prompt"]}}
    {:name "edit_revert"
@@ -358,7 +362,9 @@
                                               :verbose {:type "boolean"}}}}
    {:name "done"
     :description "Close a unit of work: normalize your touched forms, re-verify, record a labeled boundary. EPISODE-SCOPED (:scope :episode on every result — read this once, here): it runs the whole in-image suite plus the ^:external tests your changes impact, but lint and dead-surface cover only the namespaces you touched and the full ^:external / ^:integration tiers do not run — `full_check` is the whole store. The two also differ in ISOLATION the other way: done puts every impacted ^:external test in ONE serial JVM and full_check shards across four, so a pair that fails only TOGETHER fails here and can pass there — a red done beside a green full_check is not done being wrong. When the impacted ^:external set is most of the suite it is DEFERRED (:external-pending, with the count) and the green is the in-image suite only; that gets likelier as a change gets broader, so on a broad change `full_check` is the only external evidence the episode gets. done REPORTS; it never refuses — an unfixable finding is recorded honestly rather than blocking you. Selection is per form: trace evidence where it exists, the form's own namespace-reach where it does not."
-    :inputSchema {:type "object" :properties {:label {:type "string"}}}}
+    :inputSchema {:type "object" :properties {:label {:type "string"}
+                                              :commit {:type ["boolean" "string"]
+                                                       :description "also take a commit point (true, or its label) in this same call"}}}}
    {:name "commit_point"
     :description "Record a COMMIT-POINT — it runs a full done (normalize, verify, the IMPACTED ^:external slice, advisories) and gates on that verdict; force=true records red honestly and skips the gate. It does NOT run a whole-store check: a red ^:external test this episode never touched will not stop it, which is `full_check`'s job and yours to call. This said 'green-gated on the FULL ^:external suite' for a while and that was never what it did — a description claiming a stronger gate than exists is worse than one claiming none, because it is trusted instead of checked. The git-projection grain; target=<delta id> marks an earlier spot."
     :inputSchema {:type "object"
@@ -847,7 +853,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
     :extracted :step :steps :auto-require :canonicalized :auto-module-dep :finisher :accept-unused :to-ns :keys :unknown-shape
     ;; what a realias moved, and what it declined to
-    :sites :lib :left-behind
+    :sites :lib :left-behind :also-created :replaced :upgraded :merged-refer :closed :whole-store :commit :repaired
     ;; what it cost and whether to believe it
     :test :ms :untested :image-healed :red-first :red-first-arity :carried-errors
     :warnings :existing-warnings :advisories :drift :manual
@@ -989,7 +995,9 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   eval24 opus: `query_depends {reach}` is `query_flow`'s question, `{sym}`
   is `:on`, a sibling op's key (`collapse`, `format`) is dropped,
   `query_brief {ns}` alone is the namespace read, and a `*_note` key is the
-  caller's annotation to itself. Returns {:name :arguments :repaired} —
+  caller's annotation to itself. eval25 opus: the two require ops take
+  either key name (`lib` / `require`) — they were one argument under two
+  spellings and cost a turn each way. Returns {:name :arguments :repaired} —
   :repaired nil when nothing moved, else a small map the result carries so
   the accepted shape is learned for free. A shape with TWO readings
   (top-level ns beside an :impl) is left for the refusal, which still names
@@ -1073,6 +1081,16 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
            {:name name :arguments (assoc (dissoc a :requires) :require one)
             :repaired {:renamed {:requires :require}}}
            {:name name :arguments a}))
+
+       ;; one argument, two spellings: the add op says :require, the remove
+       ;; op says :lib, and a model that just used one sends it to the other
+       (and (= "ns_add_require" name) (:lib a) (nil? (:require a)))
+       {:name name :arguments (assoc (dissoc a :lib) :require (:lib a))
+        :repaired {:renamed {:lib :require}}}
+
+       (and (= "ns_remove_require" name) (:require a) (nil? (:lib a)))
+       {:name name :arguments (assoc (dissoc a :require) :lib (:require a))
+        :repaired {:renamed {:require :lib}}}
 
        :else {:name name :arguments a}))))
 

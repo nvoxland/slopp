@@ -4652,7 +4652,10 @@
                 census  (fn [st*]
                           {:forms (vec (for [nsx (sort (keys (:namespaces st*)))
                                              e   (store/forms st* nsx)
-                                             :when (and (:name e) (re-find pat-i (n/string (:node e))))]
+                                             ;; the ns form's own name carries the word and the
+                                             ;; namespace rename covers it — forms only
+                                             :when (and (:name e) (not= (:name e) nsx)
+                                                        (re-find pat-i (n/string (:node e))))]
                                          (symbol (str nsx) (str (:name e)))))
                            :files (vec (for [[p e] (sort-by key (:files st*))
                                              :when (and (string? e) (re-find pat-i e))]
@@ -4690,7 +4693,14 @@
                        {:dry-run true
                         :forms (count steps)
                         :in-code (filterv (complement :strings?) rows')
-                        :in-strings (filterv :strings? rows')}
+                        :in-strings (filterv :strings? rows')
+                        ;; the census BEFORE the run: every form and tracked
+                        ;; file that names it, in any case — the coverage
+                        ;; search the model ran beside the preview, answered
+                        :mentions (let [c (census st)]
+                                    {:forms (count (:forms c)) :files (count (:files c))
+                                     :note (str "every mention of " from ", any case, is in"
+                                                " this preview — nothing outside it to search for")})}
                        (when (seq file-hits) {:in-files (mapv #(select-keys % [:path :match]) file-hits)})
                        (when (seq variants-hit) {:case-variants variants-hit})
                        (when (seq requal) {:requalified requal})
@@ -5107,6 +5117,19 @@
           (str (subs (str source) 0 end) "\n  " (pr-str d) rest)))
       source)))
 
+(defn- bracketed-require
+  "A require clause string with its brackets: `clojure.set :as set` — a bare
+  lib followed by its options, no outer vector — becomes `[clojure.set :as
+  set]`; a bare lib name, an already-bracketed clause, or one carrying
+  metadata (`^:side-effect [lib :as r]`, the done-point's own spelling) is
+  returned as it is. The shape is unambiguous and it failed to load (eval25
+  opus)."
+  [s]
+  (let [t (str/trim (str s))]
+    (if (re-matches #"[A-Za-z][A-Za-z0-9_.*+!?<>=$%&|'-]*\s+:.*" t)
+      (str "[" t "]")
+      t)))
+
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
    - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
@@ -5142,6 +5165,7 @@
                                            :agent agent)))
           ;; computed BEFORE the write, while the store still lacks the name
           shadow (shadow-warning (:store @session) ns-sym)
+          requires (mapv bracketed-require requires)
           also   (when-not perr
                    (unwritten-requires (:store @session) ns-sym requires))]
       (cond
@@ -5409,7 +5433,13 @@
   "F5: add one require clause to `ns-sym`'s ns form — structural edit through
   the normal replace pipeline (delta, hot-reload, verification). A clause
   already present in the same spelling is a SUCCESS with nothing written
-  (`{:ok true :already true}`): the state asked for holds.
+  (`{:ok true :already true}`): the state asked for holds; a different
+  spelling REPLACES the clause (`:replaced`). A clause sent without its
+  brackets (`clojure.set :as set`) is wrapped — the shape was unambiguous
+  and it failed to load (eval25 opus). A clause naming a namespace of YOURS
+  that does not exist yet creates it empty first (`:also-created`), the same
+  red-first seam `ns_create` has: a require of an unwritten namespace was a
+  compile error, not a failing test.
 
   Forwards `:agent` (#132): without it the delta landed agent-nil and the edit
   never entered ANY agent's episode — `done` never linted, normalized, or
@@ -5424,7 +5454,14 @@
   gates late)."
   [session ns-sym require-str & {:keys [prompt agent system]}]
   (if-let [f (store/form-named (:store @session) ns-sym ns-sym)]
-    (let [r (edit/add-require-source (n/string (:node f)) require-str)]
+    (let [require-str (bracketed-require require-str)
+          also    (unwritten-requires (:store @session) ns-sym [require-str])
+          sub-err (some (fn [n]
+                          (:error (ingest! session n (str "(ns " n ")\n")
+                                           :agent agent :prompt prompt)))
+                        also)
+          r       (if sub-err {:error sub-err}
+                      (edit/add-require-source (n/string (:node f)) require-str))]
       (cond
         (:error r)   r
         (:already r) {:ok true :already true :ns ns-sym :require require-str}
@@ -5451,7 +5488,11 @@
                           " module_purity {module \"" lib "\" tier \"...\"} —"
                           " a new ns's tier is cheapest at creation."))]
           (cond-> res
-            note (assoc :tier-note note)))))
+            note           (assoc :tier-note note)
+            (:replaced r)  (assoc :replaced (:replaced r))
+            (:upgraded r)  (assoc :upgraded (:upgraded r))
+            (:merged-refer r) (assoc :merged-refer (:merged-refer r))
+            (seq also)     (assoc :also-created (vec also))))))
     {:error (str "no namespace " ns-sym " (create it first)")}))
 
 (defn- auto-require-retry

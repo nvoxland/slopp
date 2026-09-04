@@ -580,3 +580,16 @@
     (is (= "[cl.fuel]" (edit/missing-alias-require st "Syntax error compiling at (cl/app.clj:2:1).\nNo such namespace: cl.fuel")))
     (is (nil? (edit/missing-alias-require st "No such namespace: cl.nope")))
     (is (= "[cl.fuel :as fuel]" (edit/missing-alias-require st "No such namespace: fuel")) "the last-segment repair is unchanged")))
+
+(deftest a-different-spelling-of-a-require-is-replaced-not-refused
+  ;; eval25 opus: the model asked for `[clojure.test :refer [deftest is]]`
+  ;; over a bare `clojure.test` (upgraded, fine) — and for `[x.y :as y]`
+  ;; over `[x.y :as xy]`, which was refused as a different spelling and
+  ;; cost a remove + an add. The spelling asked for is the one wanted.
+  (let [src "(ns a.b (:require [x.y :as xy] [clojure.string :as str]))"
+        r   (edit/add-require-source src "[x.y :as y]")]
+    (is (nil? (:error r)) (pr-str r))
+    (is (= "[x.y :as xy]" (:replaced r)) (pr-str r))
+    (is (re-find #"\[x\.y :as y\]" (:src r)) (:src r))
+    (is (not (re-find #":as xy" (:src r))) "the old clause is gone")
+    (is (re-find #"\[clojure\.string :as str\]" (:src r)) "the neighbour stays")))

@@ -131,15 +131,17 @@
   "G13 at the gate boundary — by AGGREGATION, never amputation, and the
   DUPLICATES go first: an over-budget report drops `:intents` (the asks a
   second time), trims per-form asks to 1/row, ROLLS CHANGES UP by namespace
-  ({:ns :forms :ops :asks} — `report {contains}` expands any group), and only
-  then snips a `:by-ask` ask to 300 chars; amputation (take 20 of the
-  rollup) is the last resort for pathological stores. (eval9: the take-20
+  ({:ns :forms :ops :asks} — `report {contains}` expands any group), DROPS
+  the per-form rows altogether (`:by-ask` names the same forms under the ask
+  that made them), and only past all of that snips a `:by-ask` ask to 300
+  chars. The budget is the wire gate less its note. (eval9: the take-20
   amputation CAUSED the handoff fan-out — agents went hunting for what the
   report dropped. eval24 opus: the asks were snipped while their two
-  duplicates rode whole, and the model spent eight calls recovering them —
-  the ask is the why a handoff is asked for, so it is cut last.)"
+  duplicates rode whole. eval25 opus: snipped again at 6500 with the rows
+  still riding — \"the report snips asks at 300 chars\" and fourteen history
+  reads followed. An ask is what a handoff is asked for; it is cut last.)"
   [r]
-  (let [fits? #(<= (count (pr-str %)) 6500)
+  (let [fits? #(<= (count (pr-str %)) 7800)
         rollup (fn [cs]
                  (->> cs
                       (group-by :ns)
@@ -155,11 +157,10 @@
                  "asks trimmed to 1/row — report {contains} narrows"]
                 [#(assoc % :changes (rollup (:changes %)))
                  "changes rolled up by namespace — report {contains <ns or word>} expands a group"]
+                [#(dissoc % :changes)
+                 "per-form :changes rows dropped — :by-ask names the same forms under the ask that made them; report {contains} narrows to the rows"]
                 [#(update % :by-ask (fn [as] (mapv (fn [a] (update a :ask snip 300)) as)))
-                 "asks snipped to 300 chars — query_history {ns name} or the :turn id expands one"]
-                [#(update % :changes (fn [cs] (vec (take 20 cs))))
-                 (str "rolled up by namespace, showing 20 of " (count (distinct (map :ns (:changes r))))
-                      " — {contains} narrows")]]]
+                 "asks snipped to 300 chars — query_history {ns name} or the :turn id expands one"]]]
     (loop [r r, steps steps]
       (cond
         (fits? r)      r

@@ -1077,3 +1077,16 @@
           (is (nil? (:error r)) (pr-str r))
           (is (not (contains? r :case-variants)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-preview-carries-the-census-so-nothing-is-left-to-search
+  ;; eval25 opus step 3, every cell: dry run, then a case-insensitive search
+  ;; for the same word to check the preview's coverage. The preview counts
+  ;; every mention itself.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pv.zone "(ns pv.zone)\n(def zone-fees \"The Zone fee table.\" {1 500})\n(defn ^:unused-ok zone-fee \"A fee.\" [z] (get zone-fees z 0))\n")
+      (ops/file-put! sess "README.md" "zone pricing\n" :prompt "readme")
+      (let [r (ops/rename-sweep! sess "zone" "region" :dry-run true)]
+        (is (= {:forms 2 :files 1} (select-keys (:mentions r) [:forms :files])) (pr-str (:mentions r)))
+        (is (re-find #"every mention" (str (:note (:mentions r)))) (pr-str (:mentions r))))
+      (finally (ops/close! sess)))))

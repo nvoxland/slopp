@@ -81,8 +81,11 @@
           ;; the alias is genuinely live in the image
           (ops/add-form! sess 'fresh.core "(defn shout [s] (str/upper-case s))")
           (is (= ["HI"] (ops/query-eval sess "(fresh.core/shout \"hi\")")))))
-      (testing "duplicate require rejected"
-        (is (:error (ops/add-require! sess 'fresh.core "[clojure.string :as up]"))))
+      (testing "a different alias for a lib already required REPLACES the clause (eval25 opus: the refusal cost a remove and an add)"
+        (let [r (ops/add-require! sess 'fresh.core "[clojure.string :as up]")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= "[clojure.string :as str]" (:replaced r)) (pr-str r))
+          (is (re-find #"clojure\.string :as up" (query/query-source sess 'fresh.core)))))
       (testing "ns without a :require clause gains one"
         (ops/create-ns! sess 'bare.core)
         (let [r (ops/add-require! sess 'bare.core "[clojure.set :as cset]")]
