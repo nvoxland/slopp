@@ -2690,3 +2690,29 @@ rename means everything named that, and the model was applying sed to it
 by hand. Steps 1, 2, 4, 5 are at the floor: one explore, one or two
 changes, the answer.
 
+## 2026-09-04 — eval30: the cuts have reached the noise floor
+
+**eval30 (opus only, jar d9d0eb5d3fe70: the sweep's run carries every
+rewritten form and rewrites a tracked file's disk twin).** TURNS 30 vs 57
+(−47%), WALL 360 vs 487 s (−26%), COST $2.23 vs $2.55 (−13%), ACCEPT 6/6;
+no un-landed thread. The step-3 target (≤ 6) and the lifetime target
+(≤ 26) both MISSED: step 3 was 8 / 8 / 13. The rewritten forms rode the
+result and the model searched for the fee value anyway; the disk-twin
+rewrite showed up in `git diff` in one cell and cost five turns of
+investigation. Records: `projects/eval30-step3/RUNS.md`.
+
+**The noise floor.** Slopp opus lifetimes over the last three runs: 30 /
+28 / 30 (medians), cells 22–33. Plain opus: 57 / 68 / 57, cells 51–70.
+A single cut moves one to two turns a cell; n=3 resolves about three. The
+per-step shape is 4–6 turns except step 3 (the rename), whose residue is
+the model's own verification habit around a store-wide rewrite: a search
+for the value it is about to patch, a read of the namespace it is about
+to touch. What would move opus further is not another answer shape: it is
+either a different eval (a codebase where reads dominate) or the rent,
+which is the harness's.
+
+**Where this leaves the two models against plain (last run each).**
+opus-5: turns −47% to −59%, cost −13% to −32%, wall −26% to −35%; sonnet-5:
+turns −74%, cost −38%, wall −30%; acceptance 6/6 in every run since the
+landing floor moved into the server.
+
