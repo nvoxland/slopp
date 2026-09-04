@@ -5073,19 +5073,29 @@
   ;; the weight price — what do the records say\" → file_list, query_git,
   ;; file_get, git log, the README: four turns, for an answer the store
   ;; holds — the form was imported and its docstring is the only recorded
-  ;; reasoning. The bundle says so.
+  ;; reasoning. The bundle says so. eval27: the ask carried a second topic (an
+  ;; eco carrier feature) and the records told THAT story; the records are
+  ;; ranked on the sentences that ask the question.
   (let [sess (external/open!)]
     (try
       (db/set-meta! (:db @sess) "git-base-sha" "0123456789abcdef0123456789abcdef01234567")
       (call! sess "ns_create" {:ns "rq.fuel" :source "(ns rq.fuel)\n(defn ^:unused-ok fuel-surcharge-cents \"The carrier's fuel percentage applied to the weight price (not the whole quote).\" [wp pct] (quot (* wp pct) 100))\n"})
-      (let [ctx (server/context sess)
+      (call! sess "ns_create" {:ns "rq.carrier" :source "(ns rq.carrier)\n(defn ^:unused-ok make-carrier \"A carrier: class is :standard or :express.\" [id class] {:id id :class class})\n(def ^:unused-ok standard \"The standard carrier.\" (make-carrier :std :standard))\n(def ^:unused-ok express \"The express carrier.\" (make-carrier :exp :express))\n"})
+      (let [ask (str "Back again, two things. First, a question before you change anything: why is"
+                     " the fuel surcharge computed off the weight price rather than the whole quote?"
+                     " I want what this project's own records/history say — the recorded reasoning"
+                     " or request — not a guess from reading the code.\n\nSecond, we're adding an :eco"
+                     " carrier class (alongside :standard and :express): eco carriers pay HALF the fuel"
+                     " surcharge; creating carriers with the :eco class must work everywhere carriers"
+                     " are accepted. Tests for the new behavior; every existing test stays green.")
+            ctx (server/context sess)
             txt (str (:body (http/handle!
                              ctx {:request-method :get :uri "/api/bundle"
-                                  :query-string (str "ask=" (java.net.URLEncoder/encode
-                                                               "Why is the fuel surcharge computed off the weight price rather than the whole quote? I want what this project's own records say — the recorded reasoning or request."
-                                                               "UTF-8"))})))]
-        (is (re-find #"--- the records" txt) txt)
-        (is (re-find #"rq\.fuel/fuel-surcharge-cents" txt) txt)
-        (is (re-find #"(?i)imported" txt) "the origin rides: imported, no ask recorded")
-        (is (re-find #"0123456789ab" txt) "with the sha"))
+                                  :query-string (str "ask=" (java.net.URLEncoder/encode ask "UTF-8"))})))
+            i   (str/index-of txt "--- the records")]
+        (is i txt)
+        (let [sec (subs txt i)]
+          (is (re-find #"rq\.fuel/fuel-surcharge-cents" sec) "the form the QUESTION is about leads the records")
+          (is (re-find #"(?i)imported" sec) "the origin rides: imported, no ask recorded")
+          (is (re-find #"0123456789ab" sec) "with the sha")))
       (finally (ops/close! sess)))))

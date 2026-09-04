@@ -481,8 +481,14 @@
         records? (and (not same?)
                       (re-find #"(?i)\b(why (?:is|was|does|did|are|were)|history|records?|rationale|reasoning|recorded|asked for|what (?:was|were) asked)\b" ask))
         text     (if-let [rec (when records?
-                                (let [top (->> (:rows (orient/orient-map session :ask ask :tokens 400))
-                                               (map :form) (take 3) vec)]
+                                ;; ranked on the SENTENCES that ask the question, not the
+                                ;; whole ask: a why-question beside a feature request
+                                ;; ranked the feature's forms (eval27 opus)
+                                (let [q-re   #"(?i)\b(why (?:is|was|does|did|are|were)|history|records?|rationale|reasoning|recorded|asked for|what (?:was|were) asked)\b"
+                                      sents  (filter #(re-find q-re %) (re-seq #"[^.?!\n]+[.?!]?" ask))
+                                      q-text (if (seq sents) (str/join " " sents) ask)
+                                      top    (->> (:rows (orient/orient-map session :ask q-text :tokens 400))
+                                                  (map :form) (take 3) vec)]
                                   (when (seq top)
                                     (records-text (ops/with-history session) top))))]
                    (str text "\n" rec)
