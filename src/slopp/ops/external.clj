@@ -619,8 +619,15 @@ client-deps (merge (:client-deps st) (:client provided))
        (fn [st]
          (store/record-verification
           st (vec nses)
-          (assoc (select-keys res [:status :ms :namespaces :lint-errors :lint-warnings])
-                 :scope :full-check)))
+          ;; the SHAPE includes what a standing answer has to hand back:
+          ;; the populations and the counts, never the finding lists
+          ;; (eval24 opus: a standing verdict without :checked or a
+          ;; test count sent the model to test_run for the number)
+          (cond-> (assoc (select-keys res [:status :ms :namespaces :lint-errors
+                                            :lint-warnings :checked])
+                         :scope :full-check)
+            (:test res)     (assoc :test (select-keys (:test res) [:test :pass :fail :error]))
+            (:external res) (assoc :external (select-keys (:external res) [:ran :status])))))
        []))))
 
 (defn ^:export config!
@@ -1686,6 +1693,31 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; new done finding registers in slopp.rules/done-advisories — ONE
       ;; entry — not by hand-wiring a binding, a clause, and a status term here.
       advisories  (rules/run-done-advisories! session st* changed)
+      ;; CARRIED rows — the same finding the previous done already
+      ;; reported, teaching and all — compress to a count per rule. A
+      ;; standing advisory (a seed namespace with no purpose, a README
+      ;; the human branch disagrees on) otherwise rides every done of a
+      ;; lifetime at 300 chars a row, and a model that obeys pays a
+      ;; change and a second done per step (eval24 opus). New rows teach.
+      prev-adv    (when-let [conn (:db @session)]
+                    (some-> (db/last-marker conn (engine/session-line session) :done)
+                            :findings))
+      carried-key (fn [row] (dissoc row :teach))
+      carried     (into {}
+                        (keep (fn [[k rows]]
+                                (when (and (sequential? rows) (sequential? (get prev-adv k)))
+                                  (let [old (into #{} (map carried-key) (get prev-adv k))
+                                        n   (count (filter #(old (carried-key %)) rows))]
+                                    (when (pos? n) [k n])))))
+                        advisories)
+      advisories  (into {}
+                        (keep (fn [[k rows]]
+                                (if (contains? carried k)
+                                  (let [old  (into #{} (map carried-key) (get prev-adv k))
+                                        kept (vec (remove #(old (carried-key %)) rows))]
+                                    (when (seq kept) [k kept]))
+                                  [k rows])))
+                        advisories)
       advisory-red? (rules/status-affecting-fired? st* advisories)
       ;; WHOSE red is this? `implicate` splits the failing tests three ways
       ;; and only :foreign is evidence of innocence — :untraced and :unseen
@@ -1785,6 +1817,7 @@ client-deps (merge (:client-deps st) (:client provided))
     (seq missing-doc) (assoc :missing-doc missing-doc)
     
     (seq advisories)  (merge advisories)
+    (seq carried)     (assoc :carried-advisories carried)
     (seq (:unused unused-rep)) (assoc :unused-public (:unused unused-rep))
     (seq (:stale unused-rep))  (assoc :stale-unused-ok (:stale unused-rep))
     ;; friction #10: the host-currency record existed and only ever reached

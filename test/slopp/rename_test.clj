@@ -1038,3 +1038,42 @@
           (is (some #(re-find #"snapshot 2026-07" (str (:match %))) rows)
               (pr-str rows))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-sweep-reaches-tracked-files-and-says-what-remains
+  ;; eval24 opus step 3: the sweep rewrote every form and walked past the
+  ;; README, so the model grepped the projection, found \"zone pricing\", and
+  ;; spent five turns on file_get, cat, sed and file_put — in all three
+  ;; cells — after a case-insensitive search to check the sweep's coverage.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'tf.zone
+                   (str "(ns tf.zone)\n\n"
+                        "(def zone-fees \"The Zone fee table.\" {1 500})\n\n"
+                        "(defn zone-fee \"A ZONE's fee.\" [z] (get zone-fees z 0))\n"))
+      (ops/file-put! sess "README.md" "# logi\n\nfuel/insurance/zone pricing — Zone fees per ZONE.\n" :prompt "readme")
+      (ops/file-put! sess "NOTES.md" "nothing here names it\n" :prompt "notes")
+      (testing "the preview names the tracked files a sweep will rewrite, with the line"
+        (let [r (ops/rename-sweep! sess "zone" "region" :dry-run true)]
+          (is (= ["README.md"] (mapv :path (:in-files r))) (pr-str r))
+          (is (re-find #"zone pricing" (str (:match (first (:in-files r))))) (pr-str (:in-files r)))
+          (is (= "# logi\n\nfuel/insurance/zone pricing — Zone fees per ZONE.\n"
+                 (:content (store/file-content (:store @sess) "README.md")))
+              "a preview writes nothing")))
+      (testing "the sweep rewrites the file, in every case the word was spelled"
+        (let [r (ops/rename-sweep! sess "zone" "region" :prompt "ops renamed zone to region")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= ["README.md"] (:files r)) (pr-str r))
+          (is (= "# logi\n\nfuel/insurance/region pricing — Region fees per REGION.\n"
+                 (:content (store/file-content (:store @sess) "README.md"))))
+          (is (re-find #"The Region fee table" (query/query-source sess 'tf.region)) "prose in a docstring moved too")
+          (is (re-find #"A REGION's fee" (query/query-source sess 'tf.region)))
+          (is (= [{:from "Zone" :to "Region"} {:from "ZONE" :to "REGION"}] (:case-variants r)) (pr-str r))
+          (testing "and says that nothing named it remains — the grep, answered"
+            (is (= {:forms [] :files []} (:remaining r)) (pr-str (:remaining r)))
+            (is (re-find #"nothing named zone remains" (str (:note r))) (pr-str (:note r))))))
+      (testing "a keyword sweep has no case variants and says so by absence"
+        (ops/ingest! sess 'tf.kw "(ns tf.kw)\n(defn ^:unused-ok k [] {:tf/zone-id 1})\n")
+        (let [r (ops/rename-sweep! sess ":tf/zone-id" ":tf/region-id" :prompt "kw")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (not (contains? r :case-variants)) (pr-str r))))
+      (finally (ops/close! sess)))))

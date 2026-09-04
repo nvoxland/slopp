@@ -128,36 +128,45 @@
         examples (assoc :examples examples)))))
 
 (defn ^:export fit-report
-  "G13 at the gate boundary — by AGGREGATION, never amputation: an
-  over-budget report first trims asks to 1/row, then ROLLS CHANGES UP by
-  namespace ({:ns :forms :ops :asks}) — the information survives at a
-  coarser grain and report {contains} expands any group. Amputation
-  (take 20 of the rollup) is the last resort for pathological stores.
-  (eval9: the take-20 amputation CAUSED the handoff fan-out — agents went
-  hunting for what the report dropped.)"
+  "G13 at the gate boundary — by AGGREGATION, never amputation, and the
+  DUPLICATES go first: an over-budget report drops `:intents` (the asks a
+  second time), trims per-form asks to 1/row, ROLLS CHANGES UP by namespace
+  ({:ns :forms :ops :asks} — `report {contains}` expands any group), and only
+  then snips a `:by-ask` ask to 300 chars; amputation (take 20 of the
+  rollup) is the last resort for pathological stores. (eval9: the take-20
+  amputation CAUSED the handoff fan-out — agents went hunting for what the
+  report dropped. eval24 opus: the asks were snipped while their two
+  duplicates rode whole, and the model spent eight calls recovering them —
+  the ask is the why a handoff is asked for, so it is cut last.)"
   [r]
-  (let [fits? #(<= (count (pr-str %)) 6500)]
-    (if (fits? r)
-      r
-      (let [slim (update r :changes
-                         (fn [cs] (mapv #(update % :asks (comp vec (partial take 1))) cs)))]
-        (if (fits? slim)
-          (assoc slim :note "asks trimmed to 1/row — report {contains} narrows")
-          (let [rolled (->> (:changes slim)
-                            (group-by :ns)
-                            (mapv (fn [[nsx rows]]
-                                    {:ns nsx :forms (count rows)
-                                     :ops (vec (distinct (mapcat :ops rows)))
-                                     :asks (vec (take 1 (distinct (mapcat :asks rows))))}))
-                            (sort-by (comp str :ns)))
-                slim2  (assoc slim :changes (vec rolled)
-                              :note "changes rolled up by namespace — report {contains <ns or word>} expands a group")]
-            (if (fits? slim2)
-              slim2
-              (-> slim2
-                  (update :changes #(vec (take 20 %)))
-                  (assoc :note (str "rolled up by namespace, showing 20 of "
-                                    (count rolled) " — {contains} narrows"))))))))))
+  (let [fits? #(<= (count (pr-str %)) 6500)
+        rollup (fn [cs]
+                 (->> cs
+                      (group-by :ns)
+                      (mapv (fn [[nsx rows]]
+                              {:ns nsx :forms (count rows)
+                               :ops (vec (distinct (mapcat :ops rows)))
+                               ;; a POINTER to the ask, whose whole text is under :by-ask
+                               :asks (vec (take 1 (map #(snip % 80) (distinct (mapcat :asks rows)))))}))
+                      (sort-by (comp str :ns))
+                      vec))
+        steps  [[#(dissoc % :intents) nil]
+                [#(update % :changes (fn [cs] (mapv (fn [c] (update c :asks (comp vec (partial take 1)))) cs)))
+                 "asks trimmed to 1/row — report {contains} narrows"]
+                [#(assoc % :changes (rollup (:changes %)))
+                 "changes rolled up by namespace — report {contains <ns or word>} expands a group"]
+                [#(update % :by-ask (fn [as] (mapv (fn [a] (update a :ask snip 300)) as)))
+                 "asks snipped to 300 chars — query_history {ns name} or the :turn id expands one"]
+                [#(update % :changes (fn [cs] (vec (take 20 cs))))
+                 (str "rolled up by namespace, showing 20 of " (count (distinct (map :ns (:changes r))))
+                      " — {contains} narrows")]]]
+    (loop [r r, steps steps]
+      (cond
+        (fits? r)      r
+        (empty? steps) r
+        :else          (let [[f note] (first steps)
+                             r'       (f r)]
+                         (recur (cond-> r' note (assoc :note note)) (rest steps)))))))
 
 (def stuck-reload-attempts
   "Consecutive failed reload polls after which a namespace is STUCK rather

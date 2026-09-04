@@ -3768,85 +3768,22 @@
               (update r :error str " The edge could not be declared for you: " (:error md))
               (recur (retry) (conj declared e) (inc n)))))))))
 
-(defn create-ns!
-  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
-   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
-     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
-   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
-     land the entire namespace in one verified call — forward refs within the
-     file resolve as a unit, like a real `.clj` load. For ported/reference/data
-     code that isn't subject to red→green.
-   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
-   (module_platform grain = this namespace) BEFORE the source lands, so a
-   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
-   instead of failing to load into the JVM oracle (the inherited-default
-   footgun). A bad platform refuses the whole create.
-
-   **A scaffold may require a namespace that does not exist yet**, which is how
-   red-first works across a namespace boundary: each such require is created
-   EMPTY and reported in `:also-created`. Without it a spec-first write does not
-   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
-   holds the rule for which requires qualify and why a library never does.
-
-   Delegates to `ingest!` (the shared engine); overwrite is refused there.
-   `:prompt` — the ask — rides every ingest it delegates, so the namespace's
-   birth answers \"why does this exist\"."
-  [session ns-sym & {:keys [requires source agent platform prompt]}]
-  (if (and source (seq requires))
-    {:error (str ":source and :requires are mutually exclusive — put requires "
-                 "inside the source's ns form")}
-    ;; platform must be declared FIRST: ingest reads it to decide whether to
-    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
-    (let [perr (when platform
-                 (:error (module-platform! session (str ns-sym) platform
-                                           :prompt (or prompt "platform declared at namespace creation")
-                                           :agent agent)))
-          ;; computed BEFORE the write, while the store still lacks the name
-          shadow (shadow-warning (:store @session) ns-sym)
-          also   (when-not perr
-                   (unwritten-requires (:store @session) ns-sym requires))]
-      (cond
-        perr {:error perr}
-
-        :else
-        (let [;; the subjects come into being BEFORE the spec that requires
-              ;; them, or the spec's own load is the failure again
-              sub-err (some (fn [n]
-                              (:error (ingest! session n (str "(ns " n ")\n")
-                                               :agent agent :prompt prompt)))
-                            also)
-              r (if sub-err
-                  {:error sub-err}
-                  (if source
-                    ;; a whole namespace is the write most likely to cross a
-                    ;; boundary for the first time; declare its edges as a
-                    ;; single form's write would
-                    (let [once #(ingest! session ns-sym source :agent agent :prompt prompt)]
-                      (auto-module-dep-retry! session (once) once :agent agent))
-                    (ingest! session ns-sym
-                             (str "(ns " ns-sym
-                                  (when (seq requires)
-                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
-                                  ")\n")
-                             :agent agent :prompt prompt)))]
-          (cond-> r
-            (seq also) (assoc :also-created (vec also))
-            (and shadow (not (:error r)))
-            (update :warnings (fnil conj []) shadow)))))))
-
 (defn- by-ask-rows
   "The line's content deltas grouped by the ASK that made them: a
   `:turn-begin` opens an ask (its verbatim intent), and every add / replace
   / delete / rename after it is its until the next one. Per ask:
-  `{:ask :at :added :changed :deleted :renamed}` (forms as `ns/name`;
-  renames as `{:from :to}`), newest first, asks that changed nothing
-  omitted, bounded by `limit`. Writes before any turn (an ingest, a script)
-  belong to no ask and are not here.
+  `{:ask :turn :at :added :changed :deleted :renamed :deltas}` (forms as
+  `ns/name`; renames as `{:from :to}`; `:deltas` the change ids under the
+  ask, the citations a handoff quotes), newest first, asks that changed
+  nothing omitted, bounded by `limit`. Writes before any turn (an ingest, a
+  script) belong to no ask and are not here.
 
-  eval10 p5 asked for a rundown of what changed and why from the records;
-  `report` rolled changes up by namespace with each ask snipped to a line,
-  and the agent read five per-namespace histories to attribute forms to
-  asks. The attribution was in the journal the whole time."
+  The ask arrives WHOLE (to 1200 chars). eval10 p5 asked for a rundown of
+  what changed and why from the records; `report` rolled changes up by
+  namespace with each ask snipped to a line, and the agent read five
+  per-namespace histories to attribute forms to asks. eval24 opus paid
+  eight history calls to recover asks snipped to 200 chars — the ask IS the
+  why a handoff is asked for, so it is the last thing `fit-report` cuts."
   [st after limit]
   (let [name-of (fn [d fid]
                   (symbol (str (:ns d))
@@ -3855,7 +3792,7 @@
                   (case (:op d)
                     :turn-begin
                     {:asks (cond-> asks cur (conj cur))
-                     :cur  (cond-> {:ask (orient/snip (:intent d) 200)}
+                     :cur  (cond-> {:ask (orient/snip (:intent d) 1200)}
                              (:id d) (assoc :turn (:id d))
                              (:at d) (assoc :at (history/human-time (:at d))))}
 
@@ -3868,7 +3805,9 @@
                                   :to   (symbol (str (:ns d)) (str (:new d)))}]
                                 (mapv #(name-of d %)
                                       (or (:form-ids d) (some-> (:form-id d) vector))))]
-                        (assoc acc :cur (update cur k (fnil into []) v))))
+                        (assoc acc :cur (-> cur
+                                            (update k (fnil into []) v)
+                                            (cond-> (:id d) (update :deltas (fnil conj []) (:id d)))))))
 
                     acc))
         {:keys [asks cur]} (reduce step {:asks [] :cur nil} after)]
@@ -3876,6 +3815,7 @@
          (filter #(some % [:added :changed :deleted :renamed]))
          (map (fn [a] (reduce (fn [m k] (cond-> m (contains? m k) (update k #(vec (distinct %)))))
                               a [:added :changed :deleted :renamed])))
+         (map (fn [a] (cond-> a (:deltas a) (update :deltas #(vec (take 12 (distinct %)))))))
          reverse
          (take limit)
          vec)))
@@ -3898,6 +3838,9 @@
   (let [st        (:store @session)
         conn      (:db @session)
         line      (engine/session-line session)
+        ;; \"start\" is the lifetime — the same anchor `query_changes`
+        ;; takes, and the shape a handoff ask sends (eval24 opus: refused)
+        since     (when-not (contains? #{"start" ":start" :start} since) since)
         after     (vec (db/line-deltas conn line :since since))
         after-ids (into #{} (map :id) after)
         content   #{:add :replace :delete :rename :move}
@@ -3932,6 +3875,38 @@
                        (mapv #(-> (select-keys % [:commit :description :at :status])
                                   (update :description orient/snip 110))))
         verify*   (db/last-marker conn line :verify)
+        ;; the whole-store verdict when one stands, else the last episode
+        ;; verify; either way the COUNTS and the command — the two things
+        ;; a handoff quotes (eval24 opus: test_run twice for the number)
+        fc        (db/last-full-check conn line)
+        suite     (let [v   (or fc verify*)
+                        res (:result v)]
+                    (when v
+                      (into {}
+                            (remove (comp nil? val))
+                            {:status   (cond (:status res) (:status res)
+                                             (and (number? (:fail res)) (number? (:error res)))
+                                             (if (zero? (+ (:fail res) (:error res))) :green :red)
+                                             :else :unknown)
+                             :scope    (if fc :whole-store :episode)
+                             :as-of    (:id v)
+                             :tests    (:test res)
+                             :pass     (:pass res)
+                             :fail     (:fail res)
+                             :error    (:error res)
+                             :external (:ran (:external res))
+                             :command  (str "slopp --call full_check '{}' — the whole store, every"
+                                            " tier, from a shell with no session; in a session,"
+                                            " verify {op full_check}")})))
+        ;; where the store was seeded from — \"since the original version\"
+        ;; has its anchor here rather than in a git diff (eval24 opus: four
+        ;; turns of `git diff` against the seed sha)
+        origin    (when-let [sha (db/get-meta conn "git-base-sha")]
+                    (into {} (remove (comp nil? val))
+                          {:sha sha :remote (db/get-meta conn "git-remote")
+                           :note (str "the seeded version: every form present at import carries"
+                                      " an :ingest delta citing this sha (an imported form's history"
+                                      " shows it as :origin); everything under :by-ask is since")}))
         dead      (->> after
                        (filter #(= :revert (:op %)))
                        (mapv (fn [d] (cond-> {:why (:why d)
@@ -4003,11 +3978,9 @@
                            " — the ids ARE the citations a handoff can quote;"
                            " query_history {ns … name …} expands any one form")
              :commit-points ms
+             :origin origin
              :changes changes
-             :suite (when verify*
-                      {:as-of (:id verify*)
-                       :status (or (get-in verify* [:summary :status])
-                                   (:status verify*) :unknown)})
+             :suite suite
              ;; the report is names + asks; the CODE lives one call away.
              ;; Say so here, or a handoff goes hunting in `git diff` (eval9
              ;; measured ~20k chars of it) for something slopp already has.
@@ -4510,11 +4483,23 @@
   and prose occurrence of `from` (as a whole word/segment, boundary-guarded)
   becomes `to`, store-wide: matching namespaces rename first (requires
   rewrite along), then every still-matching form rewrites in ONE atomic
-  group with ONE verification. The textual segment match is deliberate: a
-  sweep means 'everything named that', locals and prose included; the
-  dialect/isolation gates and the test run judge the result. eval9's
-  measured loss (13.6k tokens / 37 calls / one restart for zone->region
-  across 41 nses vs sed's one pass) is this op's demand signal.
+  group with ONE verification, and every tracked TEXT FILE that names it
+  (a README, a config) is rewritten the same way. The textual segment match
+  is deliberate: a sweep means 'everything named that', locals and prose
+  included; the dialect/isolation gates and the test run judge the result.
+  eval9's measured loss (13.6k tokens / 37 calls / one restart for
+  zone->region across 41 nses vs sed's one pass) is this op's demand signal.
+
+  A BARE lowercase word sweeps its Capitalized and UPPER spellings too
+  (`Zone`→`Region`, `ZONE`→`REGION`), reported under `:case-variants` when
+  any matched: prose and headings spell a concept every way, and a rename
+  that leaves \"Zone fees\" in a docstring is the one the reader then greps
+  for. A keyword or a dotted name has no such variants. The run ends with
+  `:remaining` — a case-insensitive census of every form and tracked file
+  that still names `from` — and the note says so when it is empty. eval24
+  opus (three cells): the sweep walked past the README, and five turns of
+  grep, file_get, cat, sed and file_put followed, after a case-insensitive
+  search to check the sweep's coverage; the census is that search, answered.
 
   A KEYWORD rename (both sides starting `:`) carries a structural half the
   text pass cannot see: `{:a/keys [x]}` names its key as a SYMBOL, with the
@@ -4535,21 +4520,13 @@
   so the text pass walks past every one. Measured at seven in a single wave,
   two of them surviving every write and three green done-points: one rule then
   refused EVERY declared auth group as unknown, teaching the author to
-  configure the key it was already reading past.
-
-  These were REPORTED and not rewritten, on the reasoning that a pattern is an
-  INTENT — whether a `.` in one separates or matches anything is a question
-  about what the author meant. Sound, and too broad: **slopp owns the dialect,
-  and a dot in a dotted name it governs is a SEPARATOR.** No pattern
-  legitimately means `web<any>static`, so there was never an intent to guess
-  at — only a report somebody had to act on by hand, which is what the two
-  survivors above did not get.
-
-  Only the NAME moves; the rest of the pattern is the author's own matching.
-  The rewrite is REPORTED under `:patterns-rewritten` for the reason
-  `:requalified` is: a rename's diff must not contain a change to what a
-  predicate MATCHES without naming it. `:left-behind :via :regex` survives as
-  the RESIDUE — what the rewrite did not reach — and should now be empty."
+  configure the key it was already reading past. slopp owns the dialect, and a
+  dot in a dotted name it governs is a SEPARATOR — no pattern legitimately
+  means `web<any>static`. Only the NAME moves; the rest of the pattern is the
+  author's own matching. The rewrite is REPORTED under `:patterns-rewritten`
+  for the reason `:requalified` is: a rename's diff must not contain a change
+  to what a predicate MATCHES without naming it. `:left-behind :via :regex`
+  survives as the RESIDUE — what the rewrite did not reach."
   [session from to & {:keys [prompt agent dry-run]}]
   (let [from (str from)
         to   (str to)
@@ -4559,6 +4536,21 @@
         pat  (re-pattern (str "(?<![" cls "])"
                               (java.util.regex.Pattern/quote from)
                               "(?![" cls "])"))
+        ;; the case variants of a BARE word — prose spells a concept every way
+        word?    (fn [s] (boolean (re-matches #"[a-z][a-z0-9-]*" s)))
+        variants (when (and (word? from) (word? to))
+                   [{:from (str/capitalize from) :to (str/capitalize to)}
+                    {:from (str/upper-case from) :to (str/upper-case to)}])
+        to-of    (into {from to} (map (juxt :from :to)) variants)
+        pat*     (re-pattern (str "(?<![" cls "])(?:"
+                                  (str/join "|" (map #(java.util.regex.Pattern/quote %)
+                                                     (cons from (map :from variants))))
+                                  ")(?![" cls "])"))
+        sweep    (fn [s] (str/replace s pat* (fn [m] (get to-of m m))))
+        ;; the census pattern: the same boundary, any case
+        pat-i    (re-pattern (str "(?i)(?<![" cls "])"
+                                  (java.util.regex.Pattern/quote from)
+                                  "(?![" cls "])"))
         why  (or prompt (str "sweep " from " -> " to))]
     (cond
       (or (str/blank? from) (str/blank? to))
@@ -4571,24 +4563,24 @@
       (let [nses (filterv #(re-find pat (str %))
                           (keys (:namespaces (:store @session))))
             ;; namespace renames WRITE, so a preview must not run them — it
-                     ;; reports what they would be instead
-                     nsr  (if dry-run
-                            {:renamed-namespaces
-                             (mapv (fn [nsx]
-                                     [nsx (symbol (str/replace (str nsx) pat to))])
-                                   (sort nses))}
-                            (reduce (fn [acc nsx]
-                                      (if (:error acc)
-                                        acc
-                                        (let [new-ns (str/replace (str nsx) pat to)
-                                              r (ns-rename! session (str nsx) new-ns
-                                                            :prompt why :agent agent)]
-                                          (if (:error r)
-                                            {:error (str "renaming " nsx ": " (:error r))}
-                                            (update acc :renamed-namespaces conj
-                                                    [nsx (symbol new-ns)])))))
-                                    {:renamed-namespaces []}
-                                    (sort nses)))]
+            ;; reports what they would be instead
+            nsr  (if dry-run
+                   {:renamed-namespaces
+                    (mapv (fn [nsx]
+                            [nsx (symbol (str/replace (str nsx) pat to))])
+                          (sort nses))}
+                   (reduce (fn [acc nsx]
+                             (if (:error acc)
+                               acc
+                               (let [new-ns (str/replace (str nsx) pat to)
+                                     r (ns-rename! session (str nsx) new-ns
+                                                   :prompt why :agent agent)]
+                                 (if (:error r)
+                                   {:error (str "renaming " nsx ": " (:error r))}
+                                   (update acc :renamed-namespaces conj
+                                           [nsx (symbol new-ns)])))))
+                           {:renamed-namespaces []}
+                           (sort nses)))]
         (if (:error nsr)
           nsr
           (let [st      (:store @session)
@@ -4611,14 +4603,10 @@
                                    e   (store/forms st nsx)
                                    :when (:name e)
                                    :let [src  (n/string (:node e))
-                                         txt0 (str/replace src pat to)
+                                         txt0 (sweep src)
                                          ;; the ESCAPED-dot spelling, which a
                                          ;; regex literal uses and the text pass
-                                         ;; above shares no literal text with —
-                                         ;; reported and left alone until
-                                         ;; d32361, and the residue is what once
-                                         ;; made a rule refuse every declared
-                                         ;; auth group as unknown
+                                         ;; above shares no literal text with
                                          txt  (refactor/rewrite-patterns txt0 from to)
                                          src' (if (and requal?
                                                        (str/includes? txt from-k)
@@ -4627,12 +4615,30 @@
                                                  txt kname from-ns to-ns)
                                                 txt)]
                                    :when (not= src src')]
-                               {:ns nsx :name (:name e) :source src'
+                               {:ns nsx :name (:name e) :source src' :orig src
                                 :patterns? (not= txt0 txt)
                                 :requalified? (not= txt src')}))
                 steps   (mapv #(-> (select-keys % [:ns :name :source])
                                    (assoc :action :replace))
                               rows)
+                ;; tracked TEXT files that name it — a README, a config;
+                ;; binary entries are content-address maps and have no text
+                fline   (fn [s] (when-let [l (first (filter #(re-find pat* %) (str/split-lines s)))]
+                                  (let [t (str/trim l)]
+                                    (if (> (count t) 120) (str (subs t 0 117) "…") t))))
+                file-hits (vec (for [[p e] (sort-by key (:files st))
+                                     :when (string? e)
+                                     :let [e' (sweep e)]
+                                     :when (not= e e')]
+                                 {:path p :content e' :orig e :match (fline e)}))
+                hit?    (fn [s v] (re-find (re-pattern (str "(?<![" cls "])"
+                                                            (java.util.regex.Pattern/quote (:from v))
+                                                            "(?![" cls "])"))
+                                           s))
+                variants-hit (vec (for [v variants
+                                        :when (or (some #(hit? (:orig %) v) rows)
+                                                  (some #(hit? (:orig %) v) file-hits))]
+                                    v))
                 requal  (vec (for [r rows :when (:requalified? r)]
                                {:ns (:ns r) :form (:name r)}))
                 ;; REPORTED even though it is now done for you, and for the
@@ -4640,9 +4646,19 @@
                 ;; semantic change, and a rename's diff must not contain one
                 ;; without naming it
                 pats    (vec (for [r rows :when (:patterns? r)]
-                               {:ns (:ns r) :form (:name r)}))]
+                               {:ns (:ns r) :form (:name r)}))
+                ;; the census, read off the store AFTER the writes: what still
+                ;; names `from`, in any case, in code or a tracked file
+                census  (fn [st*]
+                          {:forms (vec (for [nsx (sort (keys (:namespaces st*)))
+                                             e   (store/forms st* nsx)
+                                             :when (and (:name e) (re-find pat-i (n/string (:node e))))]
+                                         (symbol (str nsx) (str (:name e)))))
+                           :files (vec (for [[p e] (sort-by key (:files st*))
+                                             :when (and (string? e) (re-find pat-i e))]
+                                         p))})]
             (cond
-              (and (empty? steps) (empty? (:renamed-namespaces nsr)))
+              (and (empty? steps) (empty? file-hits) (empty? (:renamed-namespaces nsr)))
               {:error (str "nothing named " from
                            " in the store — query_search shows what exists")}
 
@@ -4654,26 +4670,15 @@
               (let [classify (fn [{:keys [ns name]}]
                                (let [src (n/string (:node (store/form-named
                                                            (:store @session) ns name)))
-                                     s?  (refactor/match-in-strings? src pat)
+                                     s?  (refactor/match-in-strings? src pat*)
                                      ;; SHOW the matched text, not just the form
-                                     ;; name. This is the one bucket a sweep asks
+                                     ;; name: this is the one bucket a sweep asks
                                      ;; a human to read, and a list of names
-                                     ;; cannot be triaged — reviewing it meant
-                                     ;; opening each form, so on a wave with
-                                     ;; thirty hits it was read as a count and
-                                     ;; approved. A frozen manifest went through
-                                     ;; that review and was rewritten into a claim
-                                     ;; about a past that never happened. One line
-                                     ;; separates "prose describing the name",
-                                     ;; which should move, from a dated artifact,
-                                     ;; which must not.
-                                     line (when s?
-                                            (when-let [l (first (filter #(re-find pat %)
-                                                                        (str/split-lines src)))]
-                                              (let [t (str/trim l)]
-                                                (if (> (count t) 120)
-                                                  (str (subs t 0 117) "…")
-                                                  t))))]
+                                     ;; cannot be triaged — a frozen manifest once
+                                     ;; went through a name-only review and was
+                                     ;; rewritten into a claim about a past that
+                                     ;; never happened
+                                     line (when s? (fline src))]
                                  (cond-> {:form (symbol (str ns) (str name))
                                           :strings? s?}
                                    line (assoc :match line))))
@@ -4686,27 +4691,26 @@
                         :forms (count steps)
                         :in-code (filterv (complement :strings?) rows')
                         :in-strings (filterv :strings? rows')}
+                       (when (seq file-hits) {:in-files (mapv #(select-keys % [:path :match]) file-hits)})
+                       (when (seq variants-hit) {:case-variants variants-hit})
                        (when (seq requal) {:requalified requal})
                        (when (seq left) {:left-behind left})
                        (when note {:note note})))
 
-              (empty? steps)
-              (assoc nsr :forms 0)
-
               :else
-              (let [r (edit-group-once! session steps :prompt why :agent agent)]
+              (let [r (if (seq steps)
+                        (edit-group-once! session steps :prompt why :agent agent)
+                        {:ok true})]
                 (if (:error r)
                   ;; THE TEXT ROLLED BACK; THE NAMESPACE RENAMES DID NOT.
                   ;; They ran above as ordinary writes, one per namespace, and
                   ;; the atomic group covers only the form rewrites — so a
                   ;; refusal here leaves a store that LOOKS renamed and is not:
-                  ;; `:export "old.prefix"` strings name a subtree that no
+                  ;; `:export \"old.prefix\"` strings name a subtree that no
                   ;; longer exists, and the module rules inherit from the NAME.
-                  ;;
-                  ;; This used to return the refusal bare, with
-                  ;; `:renamed-namespaces` computed and then discarded. A bare
-                  ;; refusal reads as "the sweep did nothing" — it was read that
-                  ;; way, and reported that way, while 24 namespaces had moved.
+                  ;; A bare refusal reads as \"the sweep did nothing\" — it was
+                  ;; read that way, and reported that way, while 24 namespaces
+                  ;; had moved.
                   (cond-> r
                     (seq (:renamed-namespaces nsr))
                     (-> (merge nsr)
@@ -4719,18 +4723,38 @@
                                     " you back where the branch is. Or fix the refusal"
                                     " above and run the same sweep again: it is a no-op"
                                     " for the namespaces and applies only the text."))))
-                  ;; read off the store AFTER the write, over the OLD token:
-                  ;; whatever still names it was, by construction, not rewritten
-                  (let [st*  (:store @session)
-                        left (vec (concat (when kw?
-                                            (sweep-left-behind st* kname from-ns))
-                                          (sweep-patterns-left-behind st* from pat)))
-                        note (sweep-note from left false)]
-                    (cond-> (merge r (assoc nsr :forms (count steps)))
-                      (seq requal) (assoc :requalified requal)
-                      (seq pats)   (assoc :patterns-rewritten pats)
-                      (seq left)   (assoc :left-behind left)
-                      note         (assoc :note note))))))))))))
+                  (do
+                    ;; the tracked files, after the code landed: one file-put
+                    ;; delta each, carrying the sweep's own prompt
+                    (doseq [{:keys [path content]} file-hits]
+                      (engine/commit-appended!
+                       session
+                       #(first (store/record-file-put % path content :prompt why :agent agent))
+                       []))
+                    ;; read off the store AFTER the writes, over the OLD token:
+                    ;; whatever still names it was, by construction, not rewritten
+                    (let [st*  (:store @session)
+                          left (vec (concat (when kw?
+                                              (sweep-left-behind st* kname from-ns))
+                                            (sweep-patterns-left-behind st* from pat)))
+                          rem  (census st*)
+                          n-rem (+ (count (:forms rem)) (count (:files rem)))
+                          note (str/join " "
+                                         (remove nil?
+                                                 [(sweep-note from left false)
+                                                  (if (zero? n-rem)
+                                                    (str "nothing named " from " remains — code,"
+                                                         " strings, docstrings and tracked files,"
+                                                         " in any case; there is nothing left to grep for.")
+                                                    (str n-rem " mention(s) of " from " remain (:remaining)"
+                                                         " — a spelling the boundary rule kept, or prose"
+                                                         " no case rule covers; read them."))]))]
+                      (cond-> (merge r (assoc nsr :forms (count steps)) {:remaining rem :note note})
+                        (seq file-hits)    (assoc :files (mapv :path file-hits))
+                        (seq variants-hit) (assoc :case-variants variants-hit)
+                        (seq requal)       (assoc :requalified requal)
+                        (seq pats)         (assoc :patterns-rewritten pats)
+                        (seq left)         (assoc :left-behind left)))))))))))))
 
 (defn revert-episode!
   "Scrap the agent's episode: roll every form it changed since its last
@@ -5045,6 +5069,106 @@
     {:steps (into reqs (:steps out))
      :canonicalized (vec (:rewrites out))
      :requires (mapv (fn [[nsx spec]] {:added spec :ns nsx}) (distinct (:owed out)))}))
+
+(defn- purpose-doc
+  "The ns docstring a `prompt` becomes when a namespace is born without one:
+  the ask, first paragraph, capped at 300 chars — or nil for a blank prompt.
+  The ask says why the namespace exists, which is exactly what the
+  namespace-purpose rule asks for and what no tool can derive."
+  [prompt]
+  (let [p (some-> prompt str str/trim)]
+    (when (and p (not (str/blank? p)))
+      (let [para (str/trim (first (str/split p #"\n\s*\n")))]
+        (if (> (count para) 300) (str (subs para 0 297) "…") para)))))
+
+(defn- with-purpose
+  "`source` (a whole namespace's text) with `prompt` inserted as the ns
+  form's docstring when the ns form has none and the prompt says something;
+  unchanged otherwise. Textual on purpose: the ns form is the first form
+  and its docstring, when present, is the string right after the name."
+  [source ns-sym prompt]
+  (let [d (purpose-doc prompt)
+        m (re-matcher (re-pattern (str "^\\s*\\(ns\\s+" (java.util.regex.Pattern/quote (str ns-sym)) "(?![^\\s)])")) (str source))]
+    (if (and d (.find m))
+      (let [end  (.end m)
+            rest (subs (str source) end)]
+        (if (re-find #"^\s*\"" rest)
+          source
+          (str (subs (str source) 0 end) "\n  " (pr-str d) rest)))
+      source)))
+
+(defn create-ns!
+  "F4: bring a brand-new namespace into being — two modes (mutually exclusive):
+   - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
+     build an empty `(ns …)` to grow form-by-form with red-first TDD. The default.
+   - **content** (`:source`, the whole namespace text incl. its own `(ns …)`):
+     land the entire namespace in one verified call — forward refs within the
+     file resolve as a unit, like a real `.clj` load. For ported/reference/data
+     code that isn't subject to red→green.
+   `:platform` (:jvm/:cljc/:cljs) declares the namespace's target platform
+   (module_platform grain = this namespace) BEFORE the source lands, so a
+   client ns is BORN :cljs — its first js/* form defers to the cljs compiler
+   instead of failing to load into the JVM oracle (the inherited-default
+   footgun). A bad platform refuses the whole create.
+
+   **A scaffold may require a namespace that does not exist yet**, which is how
+   red-first works across a namespace boundary: each such require is created
+   EMPTY and reported in `:also-created`. Without it a spec-first write does not
+   land red, it fails to load — a refusal, not a failing test. `unwritten-requires`
+   holds the rule for which requires qualify and why a library never does.
+
+   Delegates to `ingest!` (the shared engine); overwrite is refused there.
+   `:prompt` — the ask — rides every ingest it delegates, so the namespace's
+   birth answers \"why does this exist\"."
+  [session ns-sym & {:keys [requires source agent platform prompt]}]
+  (if (and source (seq requires))
+    {:error (str ":source and :requires are mutually exclusive — put requires "
+                 "inside the source's ns form")}
+    ;; platform must be declared FIRST: ingest reads it to decide whether to
+    ;; hot-load, so a :cljs source with js/* would fail to load otherwise
+    (let [perr (when platform
+                 (:error (module-platform! session (str ns-sym) platform
+                                           :prompt (or prompt "platform declared at namespace creation")
+                                           :agent agent)))
+          ;; computed BEFORE the write, while the store still lacks the name
+          shadow (shadow-warning (:store @session) ns-sym)
+          also   (when-not perr
+                   (unwritten-requires (:store @session) ns-sym requires))]
+      (cond
+        perr {:error perr}
+
+        :else
+        (let [;; the subjects come into being BEFORE the spec that requires
+              ;; them, or the spec's own load is the failure again
+              sub-err (some (fn [n]
+                              (:error (ingest! session n (str "(ns " n ")\n")
+                                               :agent agent :prompt prompt)))
+                            also)
+              r (if sub-err
+                  {:error sub-err}
+                  (if source
+                    ;; a whole namespace is the write most likely to cross a
+                    ;; boundary for the first time; declare its edges as a
+                    ;; single form's write would
+                    (let [source (with-purpose source ns-sym prompt)
+                          once   #(ingest! session ns-sym source :agent agent :prompt prompt)]
+                      (auto-module-dep-retry! session (once) once :agent agent))
+                    (ingest! session ns-sym
+                             (str "(ns " ns-sym
+                                  ;; the ask IS the purpose — the docstring the
+                                  ;; namespace-purpose advisory would otherwise
+                                  ;; ask for at the done (eval24 opus: a change
+                                  ;; and a second done per created namespace)
+                                  (when-let [d (purpose-doc prompt)]
+                                    (str "\n  " (pr-str d)))
+                                  (when (seq requires)
+                                    (str "\n  (:require " (str/join "\n            " requires) ")"))
+                                  ")\n")
+                             :agent agent :prompt prompt)))]
+          (cond-> r
+            (seq also) (assoc :also-created (vec also))
+            (and shadow (not (:error r)))
+            (update :warnings (fnil conj []) shadow)))))))
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):

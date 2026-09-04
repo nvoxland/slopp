@@ -2657,3 +2657,69 @@
               (is (pos? (rows c-line)) "its view — its work — is untouched")))
           (finally (ops/close! c))))
       (finally (ops/close! b) (ops/close! a)))))
+
+(deftest ^:external a-standing-verdict-carries-what-the-fresh-one-did
+  ;; eval24 opus, every cell: full_check (green, terse) → full_check {verbose}
+  ;; answered the STANDING verdict, which had neither :checked nor a test
+  ;; count — so the model went to test_run for the number. The recorded
+  ;; verdict keeps the populations and the counts, and hands them back.
+  (let [sess (external/open!)]
+    (try
+      (ops/create-ns! sess 'sv.core :source "(ns sv.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n(deftest f-t (is (= 1 (f 1))))\n" :prompt "seed")
+      (let [fresh    (external/full-check! sess)
+            standing (external/full-check! sess)]
+        (is (= :green (:status fresh)) (pr-str (dissoc fresh :rules)))
+        (is (:standing standing) (pr-str (keys standing)))
+        (is (= (:checked fresh) (:checked standing)) "the populations it examined")
+        (is (= (select-keys (:test fresh) [:test :pass :fail :error])
+               (select-keys (:test standing) [:test :pass :fail :error]))
+            "and the in-image counts")
+        (is (= :green (:status standing))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-report-carries-each-ask-whole-with-its-deltas-and-the-suite-command
+  ;; eval24 opus step 5: \"the report truncated [the ask texts]\" — eight
+  ;; history calls to recover four asks, and test_run twice for a number
+  ;; the last verdict already held. The handoff quotes the ask, cites the
+  ;; deltas under it, and hands over the suite's counts with the command.
+  (let [sess (external/open!)
+        ask  (str "Back again, two things. First, a question before you change anything: why is"
+                  " the fuel surcharge computed off the weight price rather than the whole quote? "
+                  (apply str (repeat 12 "I want what this project's own records say, not a guess. ")))]
+    (try
+      (ops/turn-begin! sess :intent ask)
+      (ops/ingest! sess 'rh.core "(ns rh.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n(deftest f-t (is (= 1 (f 1))))\n")
+      (ops/edit-replace! sess 'rh.core 'f "(defn f \"F!\" [x] x)" :prompt "f, again")
+      (external/done! sess :label "rh")
+      (let [r   (ops/report sess)
+            row (first (filter #(re-find #"Back again" (str (:ask %))) (:by-ask r)))
+            ids (into #{} (map :id) (ops/journal sess))]
+        (is (some? row) (pr-str (:by-ask r)))
+        (is (= ask (:ask row)) "the ask arrives WHOLE — a handoff quotes what was asked")
+        (is (seq (:deltas row)) (pr-str row))
+        (is (every? ids (:deltas row)) "and cites the change deltas under it")
+        (is (number? (get-in r [:suite :tests])) (pr-str (:suite r)))
+        (is (re-find #"full_check" (str (get-in r [:suite :command]))) (pr-str (:suite r)))
+        (is (= (map :ask (:by-ask r)) (map :ask (:by-ask (ops/report sess :since "start"))))
+            "since \"start\" is the lifetime, not a refusal"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external advisories-carried-unchanged-from-the-previous-done-compress
+  ;; eval24 opus: the same namespace-purpose rows, each with the same 300
+  ;; chars of teaching, on every done of the lifetime — and a model that
+  ;; obeys spent a change and a second done per step on them. The first
+  ;; done teaches; a row the previous done already carried, unchanged, is a
+  ;; count.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ca.core "(ns ca.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+      (let [d1 (external/done! sess :label "one")
+            rows1 (get-in d1 [:findings :namespace-purpose])]
+        (is (= ['ca.core] (mapv :ns rows1)) (pr-str (:findings d1)))
+        (is (string? (:teach (first rows1))) "the first time, the teaching rides")
+        (ops/edit-replace! sess 'ca.core 'f "(defn ^:unused-ok f \"F!\" [x] x)" :prompt "again")
+        (let [d2 (external/done! sess :label "two")]
+          (is (nil? (get-in d2 [:findings :namespace-purpose])) (pr-str (:findings d2)))
+          (is (= 1 (get-in d2 [:findings :carried-advisories :namespace-purpose])) (pr-str (:findings d2)))
+          (is (not (re-find #"states no purpose" (pr-str d2))) "and no teaching rides the second time")))
+      (finally (ops/close! sess)))))

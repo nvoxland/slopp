@@ -359,3 +359,16 @@
           (is (nil? (:origin (second vs))) (pr-str (second vs)))
           (is (= "triple" (:prompt (second vs))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-report-names-the-seeded-version
+  ;; eval24 opus: \"everything that has changed since the original seeded
+  ;; version\" sent the model to `git diff` against the seed sha — four
+  ;; turns — when the store records where it was imported from.
+  (let [sess (external/open!)]
+    (try
+      (db/set-meta! (:db @sess) "git-base-sha" "0123456789abcdef0123456789abcdef01234567")
+      (ops/ingest! sess 'og.core "(ns og.core)\n(defn ^:unused-ok f [x] x)\n")
+      (let [r (ops/report sess)]
+        (is (= "0123456789abcdef0123456789abcdef01234567" (get-in r [:origin :sha])) (pr-str (:origin r)))
+        (is (re-find #"(?i)import" (str (get-in r [:origin :note]))) (pr-str (:origin r))))
+      (finally (ops/close! sess)))))

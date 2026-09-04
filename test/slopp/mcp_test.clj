@@ -3249,6 +3249,8 @@
   ;; query_detail — 76k chars of result for a verdict that fits in one line.
   ;; Same rule as `terse-done`: green means the verdict, the populations
   ;; checked, and anything that is NOT bookkeeping; red keeps the full map.
+  ;; eval24 opus: the COUNTS are not bookkeeping — a handoff quotes \"52
+  ;; tests, 145 assertions\", and a verdict without them cost test_run twice.
   (let [green {:status :green :namespaces 244 :lint-errors 0 :lint-warnings 0
                :checked {:lint 244 :rule-sweep 3402} :ms 300000
                :rules {:swept [:a :b] :not-swept [{:rule :c :why "…"}] :forms 3402
@@ -3259,20 +3261,27 @@
                :external {:status :green :ran 1475 :failures 0 :errors 0 :ns-ms {'x 1} :cost {:shards 4}}
                :alias-drift [{:ns 'a :lib 'b :as 'c}] :alias-drift-note "16 require(s) …"
                :modules {:auto-declared 0}
+               :empty-namespaces ['a.husk 'b.husk] :empty-namespaces-note "2 namespace(s) …"
+               :crossings {:note (apply str (repeat 9000 "x"))
+                           :unchecked (vec (repeat 40 {:kind :db :to 'x :blind "…" :at ['a/f]}))
+                           :unclassified [{:marker :foo}]}
                :bundle {:sha "abc" :behind 1 :note "…"}}
         t     (#'mcp/terse-full-check green)]
     (testing "green: the verdict, what was checked, and the facts a reader branches on"
       (is (= :green (:status t)))
       (is (= {:lint 244 :rule-sweep 3402} (:checked t)))
       (is (= {:ran 1475 :status :green} (:external t)))
+      (is (= {:test 838 :pass 5591 :fail 0 :error 0} (:test t)) "the counts a handoff quotes ride the terse verdict")
       (is (= {:auto-declared 0} (:modules t)))
       (is (= {:http-dangling-route-refs {:info 1 :rows "full_check {verbose true}"}} (:findings t))
           "standing findings survive, folded; their scaffolding does not")
       (is (= 1 (get-in t [:bundle :behind])) "an artifact behind the store is news")
       (is (= 1 (:alias-drift t)) "a count, not the rows and a paragraph")
+      (is (= 2 (:empty-namespaces t)) "a count")
+      (is (= {:unchecked 40 :unclassified 1 :rows "full_check {verbose true}"} (:crossings t))
+          "a section that alone would not fit the gate is summarized in place, never cut")
       (is (not (contains? t :rules-note)))
-      (is (not (contains? t :test)))
-      (is (< (count (pr-str t)) 600) (pr-str t)))
+      (is (< (count (pr-str t)) 700) (pr-str t)))
     (testing "red keeps the full map"
       (is (= (assoc green :status :red) (#'mcp/terse-full-check (assoc green :status :red)))))
     (testing "verbose keeps the full map"
@@ -4164,15 +4173,19 @@
   ;; ritual after done — each a whole-store re-run plus a fat payload that
   ;; compounds as rent. The two facts that make it redundant exist at done
   ;; time; done now states them. Answer-shaped, never instructive — and
-  ;; only when a GREEN whole-store verdict exists to cite.
+  ;; only when a GREEN whole-store verdict exists to cite. eval24 opus: the
+  ;; third fact is the COUNT — \"every test stays green\" wants a number to
+  ;; quote, and without one the model ran test_run {all} after the done.
   (let [sess (external/open!)]
     (try
-      (call! sess "ns_create" {:ns "ws.core" :source "(ns ws.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
-      (testing "no whole-store verdict yet — done claims nothing about one"
-        (is (not (re-find #":whole-store" (call! sess "done" {:label "first"})))))
+      (call! sess "ns_create" {:ns "ws.core" :source "(ns ws.core (:require [clojure.test :refer [deftest is]]))\n(defn f \"F.\" [x] x)\n(deftest f-t (is (= 1 (f 1))))\n"})
+      (testing "no whole-store verdict yet — done claims nothing about one, and carries its own suite counts"
+        (let [r (call! sess "done" {:label "first"})]
+          (is (not (re-find #":whole-store" r)))
+          (is (re-find #":suite \{:tests 1, :pass \d+" r) r)))
       (call! sess "full_check" {})
       (call! sess "edit_replace_form" {:ns "ws.core" :name "f"
-                                       :source "(defn ^:unused-ok f \"F!\" [x] x)"
+                                       :source "(defn f \"F!\" [x] x)"
                                        :prompt "a change after the whole-store check"})
       (testing "after a green full_check, done carries the two facts"
         (let [r (call! sess "done" {:label "second"})]
@@ -4562,7 +4575,10 @@
   ;; at p50 485k context. And what a trimmed map KEPT was hash-map
   ;; iteration order, so the useful key was cut as often as not, which is
   ;; why the re-buy was near-certain. A green result wearing the note
-  ;; provoked verbose re-runs (s18).
+  ;; provoked verbose re-runs (s18). eval24 opus: a green full_check
+  ;; carrying \":withheld {:keys 1 :of 5}\" provoked the same re-run — a
+  ;; COUNT of missing keys is a question; the NAME of the key is an answer
+  ;; the reader can dismiss.
   (with-bindings {#'mcp/*spool-session* (atom {})}
     (let [big  (apply str (repeat 20000 "x"))
           m    {:a 1 :b 2 :c 3 :d 4 :huge big}
@@ -4577,11 +4593,11 @@
           (is (re-find #":d 4" out) out)
           (is (not (re-find #"xxxxx" out)) "the one big value is what went to the spool")
           (is (re-find #"4 of 5 keys shown" out) out)))
-      (testing "a GREEN result never carries the note that invited a re-run"
+      (testing "a GREEN result never carries the note that invited a re-run, and NAMES what it withheld"
         (let [out (text (assoc m :status :green))]
           (is (not (re-find #"keys shown" out)) out)
           (is (re-find #":status :green" out) out)
-          (is (re-find #":withheld \{:keys 1, :of 6\}" out) "the fact rides in-band, without the invitation"))))))
+          (is (re-find #":withheld \[:huge\]" out) "the fact rides in-band as the key's name, without the invitation"))))))
 
 (deftest ^:external a-multi-namespace-tests-group-stubs-both-red-first-sources
   ;; eval22 step 2: ONE change carrying tests in several namespaces — one
@@ -4821,3 +4837,52 @@
         (is (re-find #":status :green" r) r))
       (is (re-find #"\(ns nx\.discount" (call! sess "query_source" {:ns "nx.discount" :full true})))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-namespace-born-with-a-prompt-states-its-purpose
+  ;; eval24 opus, steps 1 and 4 of every cell: ns_create {ns requires prompt}
+  ;; and then, at the done, \"logi.oversize states no purpose\" — a change
+  ;; and a second done to write a docstring that says what the prompt said.
+  (let [sess (external/open!)]
+    (try
+      (testing "a scaffold carries the prompt as its docstring"
+        (call! sess "ns_create" {:ns "np.scaffold" :requires ["[clojure.string :as str]"]
+                                 :prompt "Oversize parcels are their own pricing concept, like fuel: the rule lives here."})
+        (is (re-find #"\(ns np\.scaffold\s+\"Oversize parcels are their own pricing concept" (call! sess "query_source" {:ns "np.scaffold" :full true}))))
+      (testing "a whole-source namespace without a docstring gets the prompt too"
+        (call! sess "ns_create" {:ns "np.src" :source "(ns np.src)\n(defn ^:unused-ok g \"G.\" [] 1)\n"
+                                 :prompt "The :eco class discount rule, in one place."})
+        (is (re-find #"\(ns np\.src\s+\"The :eco class discount rule, in one place\.\"" (call! sess "query_source" {:ns "np.src" :full true}))))
+      (testing "one that states its own purpose is left alone"
+        (call! sess "ns_create" {:ns "np.own" :source "(ns np.own \"Its own words.\")\n(defn ^:unused-ok h \"H.\" [] 1)\n"
+                                 :prompt "not this"})
+        (is (re-find #"Its own words" (call! sess "query_source" {:ns "np.own" :full true})))
+        (is (not (re-find #"not this" (call! sess "query_source" {:ns "np.own" :full true})))))
+      (testing "and the done has no purpose to nag about"
+        (is (not (re-find #"namespace-purpose" (call! sess "done" {:label "born"})))))
+      (finally (ops/close! sess)))))
+
+(deftest the-shapes-eval24-measured-are-repaired-not-refused
+  ;; eval24 opus, one turn per refusal: `reach` on query_depends (it is
+  ;; query_flow's), `sym` for `on`, a sibling op's key (`collapse` from
+  ;; query_history on query_changes, `format` from query_changes on report),
+  ;; query_brief with a namespace and no name (the namespace read), an
+  ;; explore entry carrying `op_note`. Spellings are repaired; rules refuse.
+  (is (= {:name "query_flow" :arguments {:on "a/f" :reach 2} :repaired {:routed "query_flow"}}
+         (tools/remap-arguments "query_depends" {:on "a/f" :reach 2})))
+  (is (= {:name "query_depends" :arguments {:on "a/f"} :repaired {:renamed {:sym :on}}}
+         (tools/remap-arguments "query_depends" {:sym "a/f"})))
+  (is (= {:name "query_changes" :arguments {:from "start" :format "text"} :repaired {:dropped [:collapse]}}
+         (tools/remap-arguments "query_changes" {:from "start" :collapse true :format "text"})))
+  (is (= {:name "report" :arguments {:verbose true} :repaired {:dropped [:format]}}
+         (tools/remap-arguments "report" {:format "text" :verbose true})))
+  (is (= {:name "query_source" :arguments {:ns "a"} :repaired {:routed "query_source"}}
+         (tools/remap-arguments "query_brief" {:ns "a"})))
+  (is (= {:name "query_brief" :arguments {:ns "a" :name "b"}}
+         (tools/remap-arguments "query_brief" {:ns "a" :name "b"}))
+      "a form brief is untouched")
+  (is (= {:name "query_depends" :arguments {:on "a/f"} :repaired {:dropped [:op_note]}}
+         (tools/remap-arguments "query_depends" {:on "a/f" :op_note "why I ask"}))
+      "a note key is the caller's own annotation, not an argument")
+  (is (= {:name "query_source" :arguments {:ns "a"}}
+         (tools/remap-arguments "query_source" {:ns "a"}))
+      "nothing to repair, nothing reported"))

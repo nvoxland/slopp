@@ -940,3 +940,23 @@
     (is (some (fn [[id _]] (= id (:id (store/form-named st 'logi.booking 'book!)))) (:sent r)) "whole namespaces enter the ledger")
     (testing "a delta bundle sends no namespace whole"
       (is (not (re-find #"names, whole" (:text (orient/bundle sess "quoting first, then booking, billing and invoices" :whole-ns? false))))))))
+
+(deftest fit-report-drops-the-duplicates-before-it-snips-an-ask
+  ;; eval24 opus step 5: the asks were snipped to 200 chars while :changes
+  ;; (one row per form, the same asks again) and :intents (the asks a third
+  ;; time) rode whole — and the model spent eight calls recovering the ask
+  ;; texts. The duplicates go first; an ask is the last thing cut.
+  (let [ask  (fn [i] (str "ask " i " " (apply str (repeat 900 "w"))))
+        fat  {:commit-points [{:commit "d9" :description "m"}]
+              :intents (mapv ask (range 4))
+              :by-ask (vec (for [i (range 4)] {:ask (ask i) :turn (str "t" i) :changed ['a.b/c]}))
+              :changes (vec (for [i (range 80)]
+                              {:ns (symbol (str "big.ns" (mod i 8))) :form (symbol (str "fn" i))
+                               :ops [:replace] :asks [(ask (mod i 4))]}))
+              :suite {:status :green} :verify "test_run"}
+        r    (#'orient/fit-report fat)]
+    (is (<= (count (pr-str r)) 6500) (str (count (pr-str r))))
+    (is (every? #(= (:ask %) (ask (Integer/parseInt (subs (:turn %) 1)))) (:by-ask r))
+        "every ask survives whole")
+    (is (not (contains? r :intents)) "the asks' duplicate went first")
+    (is (re-find #"rolled up|narrows" (str (:note r))) (pr-str (:note r)))))

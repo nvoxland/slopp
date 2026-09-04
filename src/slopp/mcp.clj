@@ -164,7 +164,16 @@
                     ;; wants to say what was cut IN-BAND rather than in prose
                     ;; (a green result: the fact without the invitation)
                     :kept-map (into {} kept)
-                    :withheld {:keys (- (count x) (count kept)) :of (count x)}}
+                    ;; NAMED, not counted: a count of missing keys is a question
+                    ;; the reader has to re-fetch to answer; the key's name is
+                    ;; a fact it can dismiss (eval24 opus: \"withheld part of
+                    ;; its result; let me see the whole thing\")
+                    :withheld (let [gone (vec (remove (set (map first kept)) (keys x)))]
+                                ;; … up to a handful; hundreds of names would
+                                ;; outgrow the gate they were cut for
+                                (if (<= (count gone) 8)
+                                  gone
+                                  {:keys (count gone) :of (count x)}))}
              (< (count kept) (count x))
              (assoc :dropped
                     (str ";; the REMAINDER — the keys the trimmed response lacked\n"
@@ -937,6 +946,11 @@
             info-only? (every? #(= :info (:severity %)) (:http-dangling-route-refs f))]
         (cond-> {:done (:done r) :status :green}
           (:landed (:land r))            (assoc :landed (:landed (:land r)))
+          ;; the number a handoff quotes, on the answer it reads first
+          ;; (eval24 opus: without it, test_run {all} after every green done)
+          (:test r)                      (assoc :suite (let [s (:test r)]
+                                                         {:tests (:test s) :pass (:pass s)
+                                                          :fail (:fail s) :error (:error s)}))
           (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
           (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
           (pos? (get-in f [:host-stale :oracle-drift-count] 0))
@@ -1175,18 +1189,25 @@
 (defn- terse-full-check
   "A GREEN whole-store check as the reader needs it: the verdict, the
   populations it examined (`:checked` — a read that ran on zero is visibly
-  broken), the external tier's count and status, and every fact a reader
-  branches on — standing findings (folded), the auto-declared edge count,
-  alias drift as a count, an artifact behind the store, a standing verdict.
-  The scaffolding goes: notes, per-namespace timings, the sweep plan, the
-  in-image summary. Red keeps the full map, and so does `verbose`.
+  broken), the in-image COUNTS and the external tier's count and status,
+  and every fact a reader branches on — standing findings (folded), the
+  auto-declared edge count, alias drift as a count, an artifact behind the
+  store, a standing verdict. The scaffolding goes: notes, per-namespace
+  timings, the sweep plan, the test run's timing. Red keeps the full map,
+  and so does `verbose`.
 
   eval10 s2: two green checks of ~19k chars each were trimmed at the gate
-  and re-fetched whole through query_detail — 76k chars for a verdict."
+  and re-fetched whole through query_detail — 76k chars for a verdict.
+  eval24 opus: the counts had been dropped as scaffolding, and a verdict
+  without a number to quote cost `test_run` twice after every green;
+  `:crossings`, a section with a paragraph per exit kind, alone outgrew
+  the gate and was CUT, which read as \"part of the result withheld\" and
+  cost the verbose re-run. A section is summarized in place, never cut."
   [r & {:keys [verbose?]}]
   (if (or verbose? (not= :green (:status r)))
     r
     (cond-> {:status :green :namespaces (:namespaces r) :checked (:checked r)}
+      (:test r)            (assoc :test (select-keys (:test r) [:test :pass :fail :error]))
       (:external r)        (assoc :external (select-keys (:external r) [:ran :status]))
       (:modules r)         (assoc :modules (dissoc (:modules r) :edges))
       (seq (get-in r [:rules :findings])) (assoc :findings (get-in r [:rules :findings]))
@@ -1196,8 +1217,10 @@
       (:standing r)        (assoc :standing (:standing r))
       (:scope r)           (assoc :scope (:scope r))
       (:currency-broken r) (assoc :currency-broken (:currency-broken r))
-      (:empty-namespaces r) (assoc :empty-namespaces (:empty-namespaces r))
-      (:crossings r)       (assoc :crossings (:crossings r)))))
+      (seq (:empty-namespaces r)) (assoc :empty-namespaces (count (:empty-namespaces r)))
+      (:crossings r)       (assoc :crossings {:unchecked (count (:unchecked (:crossings r)))
+                                              :unclassified (count (:unclassified (:crossings r)))
+                                              :rows "full_check {verbose true}"}))))
 
 (defn- ledger-held?
   "Is this `[form-id text-hash]` held by the reader of the CURRENT ask? The
