@@ -6268,6 +6268,46 @@ this decision: `:v` on every card and body row, `query_flow`, versioned
 in its body under its old name, and the orient-test pin carries its own
 reversal in its name.
 
+### D-answers-carry-their-counts — a green answer never withholds the number it will be asked for (2026-09-03)
+
+**Decision.** A green verdict carries its counts on the answer the reader
+sees first: `full_check` (terse) keeps `:test` and `:external` counts and
+summarizes a section that would not fit the gate (`:crossings` as counts,
+`:empty-namespaces` as a count) rather than cutting it; a standing verdict
+carries the same keys as a fresh one (the recorded verify delta keeps
+`:checked`, `:test`, `:external`); a green `done` carries `:suite`. When a
+size gate does cut a green map it NAMES the keys (`:withheld [:crossings]`),
+falling back to a count only past eight. `report` is the whole handoff:
+asks whole with their deltas, `:origin`, `:suite` with the command; its diet
+drops the duplicates (`:intents`, per-form `:changes`) before it touches an
+ask. `rename_sweep` reaches tracked text files and the case variants of a
+bare word, and ends with `:remaining`, the census the reader would otherwise
+grep for. An advisory row carried unchanged from the previous done compresses
+to a count without its teaching; a namespace born through `ns_create` with a
+prompt stores the prompt as its purpose.
+
+**Why.** eval24 Part 2: opus-5 under slopp took 67 turns to plain's 55, and
+the cells' transcripts named the sinks in the model's own words. A green
+`full_check` with `:withheld {:keys 1 :of 5}` and no test count cost four
+calls for one verdict in every cell ("withheld part of its result; let me
+see the whole thing" → verbose → the standing verdict, which had neither
+`:checked` nor a count → `test_run` twice). A report with asks snipped to
+200 chars cost eight history calls ("the report truncated [the ask
+texts]") while the same asks rode whole twice under `:changes` and
+`:intents`. The sweep walked past the README and five turns of grep,
+`file_get`, `cat`, `sed`, `file_put` followed in all three cells. Three
+identical namespace-purpose rows with 300 chars of teaching each rode every
+done, and the model that obeys them paid a change and a second done per
+step — for a namespace it had created with a prompt that was the purpose.
+Opus follows what the answers tell it; the answers were what cost the turns.
+
+**What it does not license.** Not a wider gate: the trim stays, it names
+what it cut. Not silence on a NEW advisory: only a row the previous done
+already carried, byte-identical minus its teaching, compresses. Not a
+sweep of mixed-case identifiers: the case variants are the Capitalized and
+UPPER spellings of a bare lowercase word, for prose; a keyword or a dotted
+name has none.
+
 ### D-canonical-refs — qualified in, alias on store; the loader hole closed (2026-09-03)
 
 **Decision.** A form may name a lib fully qualified (`logi.fuel/eco-fuel`).

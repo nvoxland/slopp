@@ -92,7 +92,7 @@ turn; never call `turn_begin`.
 | new form(s) | `change` — one `:add` step per form (order never matters; definitions-before-callers is derived) |
 | a change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry swaps one exact subform — or a CONTIGUOUS RUN of siblings (two body forms, a whole pair, three clauses), which is usually the unit you mean; inside a map/binding vector/case/cond a run must cover whole pairs. The match must PARSE on its own: complete forms, never a fragment that opens a delimiter it doesn't close. `text: true` for strings/docstrings; `where: {key value}` for a registry row. Deltas, never a whole-form retype |
 | rename a var (callers follow) | `edit_rename {ns from to}` |
-| rename a concept store-wide (vars, keywords, prose) | `rename_sweep {from to dry_run true}` first, then without |
+| rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first (`:in-code`, `:in-strings`, `:in-files`), then without — the result's `:remaining` is the case-insensitive census of what still names it, so there is nothing to grep for afterwards |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
 | new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold |
 | require / module edge | usually automatic; else `ns_add_require {ns require}`, `module_dep {from to}` (a refusal names the edge) |
@@ -142,10 +142,10 @@ text replace; say `text: true` next time.
 | what matters for this ask, with source for what it names | `orient {ask}` |
 | how forms connect — the path between two, or the reach around one | `depends {op query_flow from "x.a/f" to "x.b/g"}` or `{op query_flow on "x.a/f" reach 2}` — the bodies on the way ride along, across namespaces. A small namespace (`read {op query_source ns "x.a"}`) comes back whole in one read; a big one as cards (name, sig, first doc sentence, `:v`, one example test) — either way it is a filing unit, not the question |
 | the bodies you will edit | `read {op query_source targets ["x.a/f" "x.b/g"]}` — several in one call; each row carries `:v`, and a form you already hold at that version comes back as a reference |
-| what changed here, why, and what was asked — a handoff | `history {op report}` (`{contains "x"}` narrows; `query_changes` for per-form diffs) |
+| what changed here, why, and what was asked — a handoff | `history {op report}` — every ask WHOLE under `:by-ask` with the `:deltas` it made (the citations), `:origin` (the seeded version), `:suite` with the counts and the command to hand over; `{contains "x"}` narrows, `{since "start"}` is the lifetime. One call IS the handoff; `query_history`/`query_changes` add nothing it lacks |
 | who calls X / what X reaches / the module graph | `depends {op query_depends on "ns/x"}` (`modules true`) |
 | what a fn really does with real inputs | `eval {op query_observe ns name code}` |
-| is the whole store green, and what artifact is behind | `verify {op full_check}` — the human's grain, not the loop's |
+| is the whole store green, and what artifact is behind | `verify {op full_check}` — the human's grain, not the loop's. A green answer carries `:test` and `:external` counts: quote them, never `test_run` after a green. `done`'s `:suite` is the same number for the episode |
 | how the teammate runs the suite | `slopp --call test_run '{"external":true}'` from the project dir |
 
 ## Refusals teach

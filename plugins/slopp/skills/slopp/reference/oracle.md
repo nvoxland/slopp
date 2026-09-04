@@ -33,7 +33,7 @@ that IS the recorded reasoning when no ask preceded it ·
 {ns name at} time-travel · {ns name effort true} what that form COST to get
 green · {at} was-green-at · {contains} which asks
 touched X · {dead_ends true} the SCRAPPED explorations, {dead_ends "some.ns"}
-those that touched it); `report {since, contains}` for summaries and handoffs.
+those that touched it); `report {since, contains}` for summaries and handoffs — `since "start"` is the lifetime, and the asks arrive whole with their deltas.
 The number to read in `effort` is `:cycles` — red→green RECOVERIES, i.e. things
 that had to be fixed. A form with two versions and two cycles was harder than
 one with twenty and none, and nothing else tells you that. It carries

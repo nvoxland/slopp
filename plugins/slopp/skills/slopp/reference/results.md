@@ -99,7 +99,23 @@ full map.
   calling `done`.
 - `:manual` (change_signature) — references it could NOT rewrite (higher-order
   uses); handle those with a `:patch` step.
-- `:dry-run` (rename_sweep) — `:in-code` / `:in-strings`, nothing written.
+- `:dry-run` (rename_sweep) — `:in-code` / `:in-strings` / `:in-files` (tracked
+  text files the sweep will rewrite, with the matching line), nothing written.
+- `:files` (rename_sweep) — the tracked files it rewrote; `:case-variants` — the
+  `Zone`/`ZONE` spellings of a bare word it swept too; `:remaining {:forms :files}`
+  — the case-insensitive census of what still names the old word after the
+  run, and the `:note` says when that is nothing.
+- `:withheld [:key …]` on a GREEN map — the keys a size gate cut, by NAME (a
+  handful; hundreds fall back to `{:keys n :of m}`); nothing to re-fetch unless
+  a named key is the one you asked for. A green `full_check` carries `:test`
+  and `:external` counts and summarizes its big sections (`:crossings` as
+  counts) rather than cutting them; a standing verdict carries the same keys.
+- `:suite` (done) — `{:tests :pass :fail :error}` of the done's own run: the
+  number a handoff quotes. `:carried-advisories {rule n}` — advisory rows the
+  previous done already reported, unchanged, compressed without their teaching.
+- `report` — `:by-ask` rows carry the ask WHOLE and `:deltas` (the change ids
+  under it); `:origin {:sha :remote}` when the store was imported; `:suite`
+  with counts, `:scope`, and `:command`.
 - `:left-behind` (ns_rename, rename_sweep, ns_realias) — occurrences no rewrite
   reaches, grouped by how each was found. Under `ns_rename` the `:alias` rows
   are the callers whose `:as` still spells the old name, each with a `:suggest`

@@ -173,6 +173,21 @@ write time, instead of a fresh JVM catching it later.
   store namespace the ns form never requires (a fresh boot's failure,
   caught at the write); `missing-alias-require` answers a dotted
   `No such namespace: a.b.c` with the bare `[a.b.c]`.
+- Answers carry their counts (2026-09-03, the opus wave): `mcp/terse-full-check`
+  keeps `:test`/`:external` counts and summarizes `:crossings` /
+  `:empty-namespaces`; `mcp/fit-payload` names withheld keys (≤ 8);
+  `external/record-full-check!` stores `:checked`/`:test`/`:external` so the
+  standing verdict re-emits them; `mcp/terse-done` adds `:suite`.
+  `ops/report` adds `:origin`, a fuller `:suite`, `since "start"`;
+  `ops/by-ask-rows` keeps asks whole (1200) with `:deltas`;
+  `orient/fit-report` diets `:intents` → per-form asks → rollup (80-char
+  pointers) → by-ask snip → amputate. `ops/rename-sweep!` sweeps tracked
+  text files (`:in-files`/`:files`), case variants of a bare word
+  (`:case-variants`), and ends with `:remaining`. `external/done!` compresses
+  advisory rows carried unchanged from the previous done into
+  `:carried-advisories`; `ops/create-ns!` stores the prompt as the ns
+  docstring (`purpose-doc`, `with-purpose`). `tools/remap-arguments` gains
+  the eval24 shapes.
 - Reads (2026-09-03): `query_source {ns}` is the whole source when ≤ 6k
   chars (with `orient/ns-cards`' hint riding along), else `ns-cards` (cards
   with `:v`, one example deftest, the hint) — cards by default measured as
