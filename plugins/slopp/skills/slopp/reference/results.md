@@ -162,4 +162,11 @@ full map.
   require of a namespace of yours that did not exist yet; `:replaced` /
   `:upgraded` / `:merged-refer` — how an existing clause for the same lib
   was rewritten rather than refused.
+- `query_cost {by "model"}` — `{:by :model :rows [{:model :requests :input :output
+  :cache-read :cache-creation :tokens :cost-usd :context} …]}`, dearest first;
+  `{by "ask"}` — `{:by :ask :rows [{:ask :agent :intent :at :ms :requests
+  :prompts :model} …]}` newest first, plus `:unattributed` (requests in no
+  turn bracket) and `:undated`; `{by "commit-point"}` the series across
+  landed changes. Telemetry is what the harness exported to the store's
+  listener; no telemetry is no rows, never a zeroed one.
 

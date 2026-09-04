@@ -2777,3 +2777,47 @@ db7c68ece2e1b is the cleanest: `telemetry/cost-by-model`,
 `telemetry/cost-by-ask`, `query-turn-cost :by`, the descriptor, five
 tests). It is not in this store; landing it here is a separate decision.
 
+## 2026-09-04 — where slopp stands against plain Claude Code (the state after evals 21–32)
+
+**The matched lifetime (task B: five features on a 41-namespace store, three
+interleaved pairs, medium effort, pre-registered rules).** Last run per model:
+
+| model | turns | cost | wall | acceptance |
+|---|---|---|---|---|
+| sonnet-5 (eval29) | 24 vs 94 (−74%) | $0.86 vs $1.38 (−38%) | 290 vs 413 s (−30%) | 6/6 |
+| opus-5 (eval30) | 30 vs 57 (−47%) | $2.23 vs $2.55 (−13%) | 360 vs 487 s (−26%) | 6/6 |
+| opus-5 (eval29) | 28 vs 68 (−59%) | $1.85 vs $2.71 (−32%) | 305 vs 469 s (−35%) | 6/6 |
+| haiku-4.5 (eval24) | no verdict: the task is above the model in both cohorts | | | 0/6 both |
+
+Where it came from, opus: eval24 +22% turns / +32% cost / +24% wall against
+plain; the waves in between were named turn by turn from the transcripts
+(a green verdict that withheld its counts, a report that snipped its asks,
+a sweep that missed the README, done advisories obeyed, the three-call
+close, the require ops' two vocabularies, the help topic each fresh
+session read). Slopp opus lifetimes: 67 → 49 → 43 → 41 → 30 → 28 → 30.
+Cell-to-cell variance (22–33) is now larger than what one cut moves.
+
+**On slopp's own codebase (247 namespaces, read-heavy; opus-5).** eval31,
+three asks: 48 vs 107 turns (−55%), $3.72 vs $4.87 (−24%), 700 vs 1,461 s
+(−52%); both cohorts answered the two whole-codebase questions correctly.
+eval32, one real backlog item (`query_cost {by "model"}` and per-ask
+attribution): 26 vs 64 turns (against the two plain cells that finished;
+one hit the 30-minute ceiling), $2.17 vs $4.74 (−40%), 442 vs 1,384 s
+(−68%). The difference on this codebase is reads (targeted against
+grep-and-cat over 243 files) and verification (per write and in the
+close, against the whole suite through the CLI).
+
+**Where the remaining cost is.** The plugin's fixed prefix: 19.4k cached
+tokens at the first turn of every step against plain's 10.0k, measured
+from transcripts and by an on/off probe; cutting our own descriptions by
+3k chars moved it 150 tokens — the rent is the harness's per-tool
+rendering, and it bounds how far opus's cost can fall below plain on a
+short task. Long-session rent (this store's median context is 489k) is
+what no eval here has measured.
+
+**What acceptance found on the way.** Two stranded threads (a tests-only
+close ignored; the async Stop hook losing the race with a one-shot
+session's exit; then the harness's SIGTERM beating the stdio finally on a
+big store) — the landing floor is in the server now, twice over, and every
+cell store since shows nothing un-landed.
+
