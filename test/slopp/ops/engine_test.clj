@@ -19,43 +19,6 @@
             [slopp.edit :as edit]
             [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc]))
 
-(deftest ^:external heal-replays-a-new-namespace-this-call-did-not-touch
-  ;; The MERGE shape, and the gap the sibling test below does not cover.
-  ;; merge-into-session! hot-loads each namespace in its OWN hot-load-all!
-  ;; call, so a namespace the merge created EARLIER is not among this call's
-  ;; form-ids. The heal boots from the COMMITTED store — which predates the
-  ;; whole merge, nothing having been committed yet — so every namespace the
-  ;; merge already loaded is gone, and replaying only THIS call's nses leaves
-  ;; the new one missing. The dependent's :require then dies with
-  ;; FileNotFound: an error the heal MANUFACTURED. It names a classpath
-  ;; problem that never existed and buries the real first failure, which is
-  ;; how a merge refusal reads as a merge-ordering bug for hours.
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'hp2.core "(ns hp2.core)\n\n(defn top \"T.\" [x] x)\n")
-      (let [st   (:store @sess)
-            st1  (store/ingest st 'hp2.newdep
-                               "(ns hp2.newdep)\n\n(defn helper \"H.\" [x] (inc x))\n")
-            [st2 _] (store/replace-node
-                     st1 'hp2.core 'hp2.core
-                     (:node (edit/parse-form
-                             "(ns hp2.core (:require [hp2.newdep :as newdep]))")))
-            [st3 _] (store/replace-node
-                     st2 'hp2.core 'top
-                     (:node (edit/parse-form
-                             "(defn top \"T.\" [x] (newdep/helper x))")))
-            ;; ONLY hp2.core's ids. hp2.newdep is in the candidate but belongs
-            ;; to a different call — the one thing that differs from the
-            ;; sibling test, and the whole bug.
-            ids  [(:id (store/form-named st3 'hp2.core 'hp2.core))
-                  (:id (store/form-named st3 'hp2.core 'top))]
-            r    (#'engine/hot-load-all! sess st3 ids)]
-        (is (not (re-find #"Could not locate" (str (:err r))))
-            (str "the heal manufactured a classpath error: " (pr-str r)))
-        (is (:healed r) (pr-str r))
-        (is (= [3] (ops/query-eval sess "(hp2.core/top 2)"))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external heal-path-replays-candidate-namespaces
   ;; the extract_ns live failure: hot-load-all!'s heal boots a FRESH image
   ;; from the COMMITTED store, so a candidate that CREATES a namespace lost
@@ -136,23 +99,6 @@
       (is (= '[z.core-test/slow-t] (engine/impacted-external sess st [gid]))))
     (testing "mixed: the union, still never nil"
       (is (= '[z.core-test/slow-t] (engine/impacted-external sess st [fid gid]))))))
-
-(deftest affected-tests-adds-declared-coverage-to-the-narrowed-set
-  ;; ^{:covers} declares a test that reaches a form through a dispatch/data
-  ;; path the tracer can't see. Such a test leaves NO trace evidence, so a
-  ;; trace-narrowed result would drop it. Declared coverage is ADDED to any
-  ;; non-nil narrowing (never narrows on its own — a declaration is a floor,
-  ;; not a ceiling; nil already runs everything, declared included).
-  (let [st (-> (store/empty-store)
-               (store/ingest 'f.core "(ns f.core)\n(defn f [x] x)\n")
-               (store/ingest 'f.t
-                             (str "(ns f.t (:require [clojure.test :refer [deftest is]]))\n"
-                                  "(deftest traced (is (= 1 (f.core/f 1))))\n"
-                                  "(deftest ^{:covers \"f.core/f — dispatch path\"} declared-cover (is true))\n")))
-        sess (atom {:store st :test-map {'f.t/traced #{'f.core/f}}})]
-    (testing "the declared-coverage test is unioned into the trace-narrowed set"
-      (is (= '[f.t/declared-cover f.t/traced]
-             (vec (sort (engine/affected-tests sess 'f.core 'f))))))))
 
 (deftest affected-tests-consults-every-name-and-refuses-opaque-bodies
   ;; Two consequences of D8 land here. (1) Evidence arrives keyed by the VAR
@@ -257,6 +203,60 @@
                         :test-map '{shop.api-test/unrelated #{shop.api/todos}}})]
         (is (= '[shop.api-test/unrelated]
                (engine/affected-tests sess 'shop.api 'todos)))))))
+
+(deftest affected-tests-adds-declared-coverage-to-the-narrowed-set
+  ;; ^{:covers} declares a test that reaches a form through a dispatch/data
+  ;; path the tracer can't see. Such a test leaves NO trace evidence, so a
+  ;; trace-narrowed result would drop it. Declared coverage is ADDED to any
+  ;; non-nil narrowing (never narrows on its own — a declaration is a floor,
+  ;; not a ceiling; nil already runs everything, declared included).
+  (let [st (-> (store/empty-store)
+               (store/ingest 'f.core "(ns f.core)\n(defn f [x] x)\n")
+               (store/ingest 'f.t
+                             (str "(ns f.t (:require [clojure.test :refer [deftest is]]))\n"
+                                  "(deftest traced (is (= 1 (f.core/f 1))))\n"
+                                  "(deftest ^{:covers \"f.core/f — dispatch path\"} declared-cover (is true))\n")))
+        sess (atom {:store st :test-map {'f.t/traced #{'f.core/f}}})]
+    (testing "the declared-coverage test is unioned into the trace-narrowed set"
+      (is (= '[f.t/declared-cover f.t/traced]
+             (vec (sort (engine/affected-tests sess 'f.core 'f))))))))
+
+(deftest ^:external heal-replays-a-new-namespace-this-call-did-not-touch
+  ;; The MERGE shape, and the gap the sibling test below does not cover.
+  ;; merge-into-session! hot-loads each namespace in its OWN hot-load-all!
+  ;; call, so a namespace the merge created EARLIER is not among this call's
+  ;; form-ids. The heal boots from the COMMITTED store — which predates the
+  ;; whole merge, nothing having been committed yet — so every namespace the
+  ;; merge already loaded is gone, and replaying only THIS call's nses leaves
+  ;; the new one missing. The dependent's :require then dies with
+  ;; FileNotFound: an error the heal MANUFACTURED. It names a classpath
+  ;; problem that never existed and buries the real first failure, which is
+  ;; how a merge refusal reads as a merge-ordering bug for hours.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'hp2.core "(ns hp2.core)\n\n(defn top \"T.\" [x] x)\n")
+      (let [st   (:store @sess)
+            st1  (store/ingest st 'hp2.newdep
+                               "(ns hp2.newdep)\n\n(defn helper \"H.\" [x] (inc x))\n")
+            [st2 _] (store/replace-node
+                     st1 'hp2.core 'hp2.core
+                     (:node (edit/parse-form
+                             "(ns hp2.core (:require [hp2.newdep :as newdep]))")))
+            [st3 _] (store/replace-node
+                     st2 'hp2.core 'top
+                     (:node (edit/parse-form
+                             "(defn top \"T.\" [x] (newdep/helper x))")))
+            ;; ONLY hp2.core's ids. hp2.newdep is in the candidate but belongs
+            ;; to a different call — the one thing that differs from the
+            ;; sibling test, and the whole bug.
+            ids  [(:id (store/form-named st3 'hp2.core 'hp2.core))
+                  (:id (store/form-named st3 'hp2.core 'top))]
+            r    (#'engine/hot-load-all! sess st3 ids)]
+        (is (not (re-find #"Could not locate" (str (:err r))))
+            (str "the heal manufactured a classpath error: " (pr-str r)))
+        (is (:healed r) (pr-str r))
+        (is (= [3] (ops/query-eval sess "(hp2.core/top 2)"))))
+      (finally (ops/close! sess)))))
 
 (deftest a-heal-that-changed-the-error-reports-both
   ;; D-surface-honesty: when the heal's retry fails DIFFERENTLY from the

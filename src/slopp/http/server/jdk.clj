@@ -50,6 +50,13 @@
                (try (json/parse-string body true)
                     (catch Exception _ body)))})))
 
+(defn ^{:export "slopp.http"} stop!
+  "Stop a `start!` return immediately. The handle is OPAQUE (a live
+  HttpServer) — read in the body, not destructured: it is not a
+  schema-shaped boundary map."
+  [srv]
+  (.stop ^HttpServer (:server srv) 0))
+
 (defn- respond-raw!
   [^HttpExchange ex status content-type body]
   (let [^bytes bs (if (bytes? body)
@@ -89,10 +96,3 @@
                                               {:error "internal server error"})))))))
     (.start server)
     {:server server :port (.getPort (.getAddress server))}))
-
-(defn ^{:export "slopp.http"} stop!
-  "Stop a `start!` return immediately. The handle is OPAQUE (a live
-  HttpServer) — read in the body, not destructured: it is not a
-  schema-shaped boundary map."
-  [srv]
-  (.stop ^HttpServer (:server srv) 0))
