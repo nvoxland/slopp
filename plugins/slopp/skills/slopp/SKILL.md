@@ -103,7 +103,7 @@ turn; never call `turn_begin`.
 | rename a var (callers follow) | `edit_rename {ns from to}` |
 | rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first (`:in-code`, `:in-strings`, `:in-files`), then without — the result's `:remaining` is the case-insensitive census of what still names it, so there is nothing to grep for afterwards |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
-| new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold |
+| new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold (both together merge; on an existing namespace `requires` alone adds them). A change step `{ns requires}` or `{action ns_create …}` is the same creation, inside the change |
 | require / module edge | usually automatic; else `ns_add_require {ns require}` (`lib` works too; a clause without brackets is wrapped; a different spelling of a lib already required REPLACES it; a namespace of yours that does not exist yet is created empty), `ns_remove_require {ns lib}`, `module_dep {from to}` (a refusal names the edge) |
 | delete | `change` — a `:delete` step; callers first: a delete with a live caller is refused and names it |
 | undo my last writes | `undo {deltas n}` |
