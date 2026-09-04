@@ -2748,3 +2748,32 @@ wall) is the same shape: reads are the characters, verification is the
 wall. What this eval could not test is the long-session rent — three
 one-shot sessions never reach a 489k context.
 
+## 2026-09-04 — eval32: a real backlog item on slopp itself, slopp vs plain, opus-5
+
+**The task.** `query_cost {by "model"}` (per-model requests, tokens by
+kind, cost, context distribution) and per-ask attribution of the
+telemetry requests the store already records — a genuine gap found while
+answering "do we know how opus works on this repo". Same seeds as eval31.
+Records: `projects/eval32-bymodel/RUNS.md`.
+
+**Result.** slopp 26 / 20 / 31 turns, $2.17 / 1.69 / 2.54, 442 / 353 /
+468 s — every cell landed, committed, and passed the in-process probe
+with a test present. plain 64 / — / 53 turns, $4.74 / — / 3.13, 1,190 /
+1,800 / 1,384 s — one cell hit the harness's 30-minute ceiling with its
+work unfinished. Against the two plain cells that finished: turns −52%,
+cost −40%, wall −68%.
+
+**As a development-performance comparison this shape works.** A backlog
+item that spans four namespaces and needs tests, graded by an in-process
+probe both trees can run, separates the cohorts on the things that
+matter here: the reads (slopp's targeted reads against grep-and-cat over
+243 files) and the verification (per-write and in the close, against the
+whole suite through the CLI). Its weakness is the same as eval31's: three
+one-shot sessions never reach the long-session rent the dogfooding record
+shows (median context 489k).
+
+**The feature itself** exists now in three cell stores (e32o1's commit
+db7c68ece2e1b is the cleanest: `telemetry/cost-by-model`,
+`telemetry/cost-by-ask`, `query-turn-cost :by`, the descriptor, five
+tests). It is not in this store; landing it here is a separate decision.
+
