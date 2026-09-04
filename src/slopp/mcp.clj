@@ -2100,6 +2100,21 @@
       (.println System/err ^String (str "slopp: landing at exit failed — " (ex-message e)))
       nil)))
 
+(defn exit-landing-hook!
+  "Install (once per session) a JVM shutdown hook that runs `land-on-exit!`,
+  and return the hook thread. The stdio loop's `finally` runs the same
+  landing when stdin closes; a harness that SIGTERMs the server the instant
+  the session ends never lets that finally finish — eval31 e31o3 lost
+  fourteen green writes to it on a store whose landing runs an 880-test
+  suite. Both paths call one idempotent function: whichever runs first
+  lands, the other finds an empty thread and returns nil."
+  [session]
+  (or (::exit-hook @session)
+      (let [t (Thread. ^Runnable (fn [] (land-on-exit! session)) "slopp-exit-landing")]
+        (.addShutdownHook (Runtime/getRuntime) t)
+        (swap! session assoc ::exit-hook t)
+        t)))
+
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
   door, and explore's recursive entries — so it is where a shape is
@@ -2279,7 +2294,10 @@
                                      ;; host's answer wins over the defaults.
                                      (host-image-options #(System/getenv %)))
                              dir (assoc :slopp.ops/dir dir)))]
-    (swap! session assoc :require-turns? true)   ; real servers enforce turns
+    (swap! session assoc :require-turns? true)
+    ;; the landing floor survives a SIGTERM (eval31: the harness's kill beat
+    ;; the stdio loop's finally on a big store)
+    (exit-landing-hook! session)   ; real servers enforce turns
     ;; the reviewer UI comes up with the server, always. It serves the LIVE
     ;; session and therefore dies with it — that is the trade that keeps its
     ;; warranty numbers honest — so nothing ever brought it back, and a human

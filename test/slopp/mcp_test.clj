@@ -5134,3 +5134,27 @@
         (is (re-find #"\(ns nd\.core\s+\"Owns the eco discount rule\.\"" src) src)
         (is (not (re-find #"add the discount namespace" src)) "the doc wins over the prompt"))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-exit-landing-is-idempotent-so-a-shutdown-hook-can-share-it
+  ;; eval31 e31o3: the harness SIGTERMed the server while the stdio loop's
+  ;; finally was still landing, and fourteen green writes stayed on the
+  ;; thread. The landing runs from a JVM shutdown hook too; the two share
+  ;; one idempotent function.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-hook-" (System/nanoTime))
+        _    (.mkdirs (java.io.File. dir))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (call! sess "ns_create" {:ns "hk.core" :source "(ns hk.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (let [first-run (mcp/land-on-exit! sess)
+            second    (mcp/land-on-exit! sess)]
+        (is (= "main" (get-in first-run [:land :landed])) (pr-str first-run))
+        (is (nil? second) "nothing left to land the second time"))
+      (testing "the hook installs once and is a thread that runs the same landing"
+        (let [t (mcp/exit-landing-hook! sess)]
+          (is (instance? Thread t))
+          (is (identical? t (mcp/exit-landing-hook! sess)) "installed once per session")
+          (.run t)
+          (is (true? (Runtime/.removeShutdownHook (Runtime/getRuntime) t)))))
+      (finally
+        (try (ops/close! sess) (catch Exception _ nil))
+        (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
