@@ -2634,3 +2634,31 @@ plain that ranges 51–66; slopp sonnet 71 → 56 → 52 → 33 → 32 against
 prefix rent (the plugin's ~7–9k tokens a turn), which bounds how far cost
 can fall below plain for opus, and steps 1–3's remaining reads.
 
+## 2026-09-04 — eval28: opus at 30 turns (−47%), the floor in sight
+
+**eval28 (jar d9ca25e8a659a; the sweep preview rides in explore, string
+hits carry their forms and the run its rewrites, the bundle's whole-ns
+caps at 8k/14k, the close carries :verify, the records rank on the
+question's sentences and add the pre-import git log, four descriptions
+cut).** opus-5: TURNS 30 vs 57 (−47%), WALL 339 vs 452 s (−25%), COST
+$2.10 vs $2.54 (−17%), ACCEPT 6/6 — every rule and the ≤ 38 target.
+sonnet-5: TURNS 32 vs 96 (−67%), COST $0.87 vs $1.34 (−35%), WALL 296 vs
+354 s (−16%), ACCEPT 6/6. No un-landed thread on any cell store. Records:
+`projects/eval28-cut/RUNS.md`.
+
+**Per step, opus (medians): 5 / 7 / 7 / 7 / 4** — eval24 was 12 / 12 / 18
+/ 8 / 17. Step 2 no longer goes to git: the records section names the
+imported form, its docstring-only reasoning and the one pre-import commit,
+and the model quotes it. Step 3 is the sweep's two calls, a search, the
+renamed namespace read once, the fee change and close. What is left:
+`help change` once a step in most cells (seven calls over three cells) —
+the dieted family description points at the help topic and the op card
+names arguments but not the step shape, so each new session reads it;
+and the read-then-write habit (one explore, one or two changes) that IS
+the floor.
+
+**The prefix rent is not ours.** After cutting the four longest
+descriptions (~3k chars) the on/off probe moved from +6.9k to +6.8k
+tokens; the harness's per-tool rendering is the rent, and the fourteen
+families are already the smallest surface that names every op.
+
