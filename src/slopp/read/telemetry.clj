@@ -389,6 +389,23 @@
                               (double (/ (count hits) withheld)))
        :by-tool             rows})))
 
+(defn- model-requests
+  "The window's model-side request records: the `:otel` deltas still in the
+  journal, then the batches `otel` handed in. Oldest first.
+
+  Both halves, and neither is vestigial. Telemetry lives in the
+  `measurements` table because writing it as a delta moved the head every few
+  seconds and made the store unwritable — but real `:otel` deltas were
+  written during the hour before that move, and dropping them would silently
+  shorten the history of the very measurement they record. `otel` is PASSED
+  IN because this namespace folds over a store VALUE and a table is not in
+  one; `slopp.ops/otel-measurements` is the reader, beside the writer."
+  [store since otel]
+  (let [deltas (:deltas store)
+        window (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)]
+    (into (vec (mapcat :requests (filter #(= :otel (:op %)) window)))
+          (mapcat :requests otel))))
+
 (defn ^:export turn-cost
   "Where this store's wall clock went, folded READ-ONLY over the delta log —
   no new instrumentation: `call-timing` has been writing `:timing` onto every
@@ -465,8 +482,7 @@
         ;; `:otel` deltas were written during the hour before the move, and
         ;; dropping them would silently shorten the history of the very
         ;; measurement this section reports.
-        model   (into (vec (mapcat :requests (filter #(= :otel (:op %)) window)))
-                      (mapcat :requests otel))]
+        model   (model-requests store since otel)]
     (cond->
      {:window  {:turns (count ts) :since (or since :all)}
       :wall    {:elapsed-ms elapsed
@@ -648,3 +664,124 @@
                       :refused     (select-keys (:refused c) [:count :pct :retried])
                       :rent        (select-keys (:rent c) [:carried-chars])}))
                  segs)}))
+
+(defn- request-at-ms
+  "One request's wall-clock instant in MILLISECONDS, or nil.
+
+  OTLP timestamps are nanoseconds since the epoch, and int64 is JSON's one
+  weak spot: the spec permits it encoded as a string, and Claude Code has
+  been observed sending both. A reader written to one encoding places every
+  request on the other at nil — and a nil instant here does not read as an
+  error, it reads as an ask that cost nothing."
+  [r]
+  (when-let [n (:at-ns r)]
+    (some-> (if (number? n) (long n) (parse-long (str n)))
+            (quot 1000000))))
+
+(defn ^:export cost-by-model
+  "[[turn-cost]]'s `:model` block split by the model NAME each request already
+  records: `{:by :model :rows [{:model :requests :input :output :cache-read
+  :cache-creation :tokens :cost-usd :context} …]}`, dearest first.
+
+  The same facts the single block carries, and that is the point — folded
+  together they answer what the window cost and nothing else. A session that
+  ran a cheap model for its greps and an expensive one for its reasoning
+  reads identically to one that ran the expensive model throughout, and only
+  one of those has a lever in it. `model` is an attribute on every request,
+  so this needed no new measurement — only a fold that stops discarding the
+  name.
+
+  `:context` stays a DISTRIBUTION per row for [[model-summary]]'s reason:
+  every request ships the whole conversation, so summing it counts the same
+  tokens once per round trip. Per model it is also the more useful number —
+  the limit that forces a compaction belongs to the model, not to the
+  session.
+
+  A request whose `model` attribute is missing rows under `:model nil` rather
+  than being dropped or bucketed into a neighbour: its tokens were paid for
+  either way, and a name nobody sent is not a name to invent.
+
+  No telemetry is NO ROWS, never a zeroed one — a zero would say *this model
+  cost nothing* where the truth is *nobody was measuring*."
+  [store & {:keys [since otel]}]
+  {:by   :model
+   :rows (->> (model-requests store since otel)
+              (group-by :model)
+              (map (fn [[m rs]] (assoc (model-summary rs) :model m)))
+              (sort-by (juxt (comp - #(or % 0) :cost-usd) (comp str :model)))
+              vec)})
+
+(defn ^:export cost-by-ask
+  "What each ASK cost on the model side: `{:by :ask :rows [{:ask :agent
+  :intent :at :ms :requests :prompts :model} …]}`, newest first.
+
+  This join needed no new correlation either, which is why it is worth
+  having. Every ask brackets itself in the journal — `turn-begin` records the
+  verbatim intent, `turn-end` closes it — and every request carries its own
+  timestamp, so a request belongs to the ask whose bracket contains it. What
+  one ask cost was previously read by eye off a whole-session total.
+
+  `:prompts` is the harness's own `prompt.id` for the requests that landed,
+  carried through as EVIDENCE rather than used as the join: the journal has
+  no prompt id to match against, so the clock places the request and the id
+  corroborates it. One id per row is the reading to expect; two mean the
+  bracket spans more than one harness prompt, which is worth seeing.
+
+  An ask whose `turn-end` never landed runs to the next `turn-begin`, and the
+  last one runs on to now. That is not a fallback: `turn-begin!` supersedes an
+  unclosed turn for exactly this reason, so the next ask's opening IS the
+  honest end of this one. Such a row carries no `:ms` — the duration was not
+  measured, which is a different fact from its being zero.
+
+  `:unattributed` is the requests falling in no bracket — before the first
+  ask in the window, or between one ending and the next beginning (a
+  compaction, a background summary). Reported rather than distributed: they
+  were paid for, and handing them to a neighbouring ask would be a guess
+  dressed as a measurement. `:undated` counts requests carrying no timestamp
+  at all, which no rule can place. Both are absent when there are none."
+  [store & {:keys [since otel limit] :or {limit 20}}]
+  (let [deltas  (:deltas store)
+        window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
+        opened  (reduce (fn [acc d]
+                          (case (:op d)
+                            :turn-begin (conj acc {:ask (:id d) :agent (:agent d)
+                                                   :intent (:intent d) :at (:at d)})
+                            ;; only an OPEN bracket can be closed; a stray
+                            ;; turn-end (a superseded turn closed by the next
+                            ;; begin, whose begin is outside the window) must
+                            ;; not retroactively shorten the ask before it
+                            :turn-end   (if (and (seq acc) (not (:end (peek acc))))
+                                          (assoc-in acc [(dec (count acc)) :end] (:at d))
+                                          acc)
+                            acc))
+                        [] window)
+        asks    (vec (map-indexed
+                      (fn [i a]
+                        (assoc a :until (or (:end a)
+                                            (:at (get opened (inc i)))
+                                            Long/MAX_VALUE)))
+                      opened))
+        dated   (into [] (keep (fn [r] (when-let [t (request-at-ms r)] [t r])))
+                      (model-requests store since otel))
+        undated (- (count (model-requests store since otel)) (count dated))
+        in?     (fn [a [t _]]
+                  (let [b (:at a)] (and b (<= b t) (< t (:until a)))))
+        block   (fn [rs] {:requests (count rs)
+                          :prompts  (vec (sort (distinct (keep :prompt rs))))
+                          :model    (model-summary rs)})
+        rows    (mapv (fn [a]
+                        (let [rs (mapv second (filter #(in? a %) dated))
+                              d  (str (:intent a))]
+                          (cond-> {:ask      (:ask a)
+                                   :agent    (:agent a)
+                                   :intent   (subs d 0 (min 120 (count d)))
+                                   :at       (:at a)
+                                   :requests (count rs)}
+                            (:end a) (assoc :ms (- (:end a) (:at a)))
+                            (seq rs) (merge (dissoc (block rs) :requests)))))
+                      asks)
+        placed  (into #{} (mapcat (fn [a] (filter #(in? a %) dated))) asks)
+        left    (mapv second (remove placed dated))]
+    (cond-> {:by :ask :rows (vec (take limit (reverse rows)))}
+      (seq left)     (assoc :unattributed (block left))
+      (pos? undated) (assoc :undated undated))))

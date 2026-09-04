@@ -613,3 +613,133 @@
       (let [r (telemetry/turn-cost {:deltas []})]
         (is (nil? (get-in r [:refetched :rate])))
         (is (re-find #"unmeasured" (str (get-in r [:refetched :note]))) (pr-str (:refetched r)))))))
+
+(deftest cost-by-model-splits-the-model-block-by-the-name-each-request-records
+  ;; The `:model` block folds every request together, so a session that ran a
+  ;; cheap model for its greps and an expensive one for its reasoning reads
+  ;; exactly like one that ran the expensive model throughout — and only one
+  ;; of those has a lever in it. `model` is already an attribute on every
+  ;; request, so the split needed no new measurement, only a fold that stops
+  ;; throwing the name away.
+  (let [otel {:op :otel :id "d1"
+              :requests [{:model "claude-opus-5" :input 2 :output 4
+                          :cache-read 100 :cache-creation 10 :context 116
+                          :cost-usd 0.08}
+                         {:model "claude-opus-5" :input 8 :output 6
+                          :cache-read 200 :cache-creation 0 :context 214
+                          :cost-usd 0.02}
+                         {:model "claude-haiku-4-5" :input 1 :output 1
+                          :cache-read 0 :cache-creation 0 :context 2
+                          :cost-usd 0.001}]}
+        r    (telemetry/cost-by-model {:deltas [otel]})
+        rows (:rows r)]
+
+    (is (= :model (:by r)))
+    (is (= ["claude-opus-5" "claude-haiku-4-5"] (mapv :model rows))
+        "dearest first — the row worth acting on is the expensive one")
+
+    (testing "a row carries the same facts the single :model block does"
+      (let [o (first rows)]
+        (is (= 2 (:requests o)) (pr-str o))
+        (is (= 10 (:input o)))
+        (is (= 10 (:output o)))
+        (is (= 300 (:cache-read o)))
+        (is (= 10 (:cache-creation o)))
+        (is (= (+ 10 10 300 10) (:tokens o)) "every token this model was paid for")
+        ;; in CENTS: 0.08 + 0.02 is not exactly 0.10 in a double, and a test
+        ;; asserting otherwise fails on arithmetic rather than on behaviour
+        (is (= 10 (Math/round (* 100.0 (:cost-usd o)))) (pr-str (:cost-usd o)))
+        (is (= 214 (:max (:context o)))
+            "context stays a DISTRIBUTION per model — every request ships the whole conversation, so a sum counts the same tokens once per round trip")))
+
+    (testing "a request with no model name rows under nil rather than joining a neighbour"
+      ;; its tokens were paid for either way, and a name nobody sent is not a
+      ;; name to invent
+      (let [rs (:rows (telemetry/cost-by-model
+                       {:deltas [{:op :otel :id "d1"
+                                  :requests [{:input 5 :output 1 :cost-usd 0.5}]}]}))]
+        (is (= [nil] (mapv :model rs)))
+        (is (= 6 (:tokens (first rs))))))
+
+    (testing "no telemetry is NO ROWS, never a zeroed one"
+      ;; a zeroed row would say *this model cost nothing* where the truth is
+      ;; *nobody was measuring*
+      (is (= [] (:rows (telemetry/cost-by-model {:deltas []})))))
+
+    (testing "handed-in batches count beside the journal's own :otel deltas"
+      (is (= 2 (count (:rows (telemetry/cost-by-model
+                              {:deltas []}
+                              :otel [{:requests (:requests otel)}]))))))
+
+    (testing "and it is WINDOWED by :since like the rest of the fold"
+      (is (= [] (:rows (telemetry/cost-by-model {:deltas [otel]} :since "d1")))))))
+
+(deftest cost-by-ask-attributes-requests-to-the-turn-they-were-made-in
+  ;; Both halves of this join already existed and nothing read them together:
+  ;; every request carries its own timestamp, and every ask brackets itself in
+  ;; the journal with turn-begin/turn-end. "What did that ask cost" was being
+  ;; answered by eye off a whole-session total.
+  (let [nanos (fn [ms] (str (* 1000000 ms)))  ; as the CLI sends them: int64 as a string
+        req   (fn [ms prompt cost]
+                {:at-ns (nanos ms) :prompt prompt :model "claude-opus-5"
+                 :input 1 :output 1 :cache-read 8 :cache-creation 0
+                 :context 10 :cost-usd cost})
+        store {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a" :intent "first ask"}
+                        {:op :turn-end   :id "d2" :at 2000 :agent "a"}
+                        {:op :turn-begin :id "d3" :at 3000 :agent "a" :intent "second ask"}
+                        {:op :turn-end   :id "d4" :at 4000 :agent "a"}]}
+        otel  [{:requests [(req 1500 "p1" 0.1)
+                           (req 1600 "p1" 0.2)
+                           (req 3500 "p2" 0.5)
+                           (req 2500 "p9" 0.9)               ; between the brackets
+                           {:prompt "p0" :cost-usd 1.0}]}]   ; no timestamp at all
+        r     (telemetry/cost-by-ask store :otel otel)
+        rows  (:rows r)]
+
+    (is (= :ask (:by r)))
+    (is (= ["d3" "d1"] (mapv :ask rows)) "newest ask first")
+
+    (testing "a row says what ONE ask cost, and names the ask"
+      (let [a (second rows)]
+        (is (= "first ask" (:intent a)) "the verbatim ask, so the row is readable")
+        (is (= 1000 (:ms a)) "and how long the bracket was open")
+        (is (= 2 (:requests a)) (pr-str a))
+        (is (= 30 (Math/round (* 100.0 (:cost-usd (:model a))))) (pr-str (:model a)))
+        (is (= 20 (:tokens (:model a))) "the model block, folded over this ask's requests only")))
+
+    (testing "the prompt id is carried as EVIDENCE — the clock is the join"
+      ;; the journal has no prompt id to match against, so the bracket places
+      ;; the request and the id corroborates it. One id per row is the reading
+      ;; to expect; two mean the bracket spans more than one harness prompt,
+      ;; which is worth seeing rather than worth hiding.
+      (is (= ["p1"] (:prompts (second rows))))
+      (is (= ["p2"] (:prompts (first rows)))))
+
+    (testing "requests in NO bracket are reported, not distributed"
+      ;; between one ask ending and the next beginning: a compaction, a
+      ;; background summary. They were paid for, and handing them to a
+      ;; neighbouring ask would be a guess dressed as a measurement.
+      (is (= 1 (:requests (:unattributed r))) (pr-str (:unattributed r)))
+      (is (= ["p9"] (:prompts (:unattributed r))))
+      (is (= 90 (Math/round (* 100.0 (:cost-usd (:model (:unattributed r))))))))
+
+    (testing "a request carrying no timestamp cannot be placed by any rule, and says so"
+      (is (= 1 (:undated r))))
+
+    (testing "an ask whose turn-end never landed runs to the NEXT ask's opening"
+      ;; turn-begin! supersedes an unclosed turn for exactly this reason, so
+      ;; the next ask's opening is the honest end of this one
+      (let [r2 (telemetry/cost-by-ask
+                {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a" :intent "unclosed"}
+                          {:op :turn-begin :id "d3" :at 3000 :agent "a" :intent "next"}]}
+                :otel [{:requests [(req 2500 "p9" 0.9) (req 9999 "p3" 0.1)]}])
+            [newest oldest] (:rows r2)]
+        (is (= 1 (:requests oldest)) "the stray now belongs to the ask it was made in")
+        (is (not (contains? oldest :ms)) "no turn-end, so no duration — absent, not zero")
+        (is (= 1 (:requests newest)) "and the last ask runs on to now")
+        (is (nil? (:unattributed r2)))))
+
+    (testing "an ask with no telemetry carries NO model block, which is not zero"
+      (let [a (first (:rows (telemetry/cost-by-ask store)))]
+        (is (= 0 (:requests a)))
+        (is (not (contains? a :model)))))))

@@ -594,9 +594,25 @@
    (a refusal is a whole round trip that produced nothing), and `:repeats` —
    tools run more than once inside ONE ask, ranked by what the extra runs
    cost. Read-only analysis over the delta log; no instrumentation. `:since`
-   (a delta or commit-point id from `query_commits`) windows it, and
-   `:by \"commit-point\"` splits it per commit-point instead — the series that says
-   whether a landed change moved the numbers.
+   (a delta or commit-point id from `query_commits`) windows it.
+
+   `:by` splits that window instead of totalling it, and every split is over
+   facts already recorded:
+
+   - `\"model\"` — per model NAME, the same facts the `:model` block carries.
+     A session that ran a cheap model for its greps and an expensive one for
+     its reasoning is indistinguishable from one that ran the expensive model
+     throughout, until you split.
+   - `\"ask\"` — per `turn-begin`/`turn-end` bracket, joining each request's
+     timestamp to the ask it was made in, so a row says what ONE ask cost
+     and names it with the verbatim intent.
+   - `\"commit-point\"` — the series across landed changes, which says whether
+     a change MOVED the numbers rather than what they are.
+
+   An unrecognized `:by` is REFUSED. Falling through to the whole-window fold
+   would answer a mistyped split with a plausible-looking total — the wrong
+   answer arriving silently, which is the failure this whole surface exists
+   to make impossible.
 
    `:otel` is the model-side half — the harness telemetry batches, which live
    in the `measurements` table rather than the journal because a statistic
@@ -610,10 +626,19 @@
    passed it, so every reading came from the turn-top path the tool's own
    description calls a lower bound (s19)."
   [session & {:keys [since otel tool-calls by]}]
-  (if (= "commit-point" (str by))
-    (telemetry/cost-by-commit-point (:store @session))
-    (telemetry/turn-cost (:store @session)
-                         :since since :otel otel :tool-calls tool-calls)))
+  (let [store (:store @session)]
+    (case (str by)
+      ""             (telemetry/turn-cost store :since since :otel otel
+                                          :tool-calls tool-calls)
+      "commit-point" (telemetry/cost-by-commit-point store)
+      "model"        (telemetry/cost-by-model store :since since :otel otel)
+      "ask"          (telemetry/cost-by-ask store :since since :otel otel)
+      (throw (ex-info (str "unknown :by " (pr-str by) " for query_cost — the"
+                           " splits are \"model\" (per model name), \"ask\" (per"
+                           " turn bracket, what one ask cost) and"
+                           " \"commit-point\" (the series across landed changes)."
+                           " Omit :by for the whole window.")
+                      {:by by})))))
 
 (defn ^:export flow-view
   "The answer behind `query_flow`. `{from to}`: the call path between two

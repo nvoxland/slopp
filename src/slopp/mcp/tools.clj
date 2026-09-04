@@ -158,10 +158,9 @@
    {:name "query_rule_telemetry"
     :description "The D9 rules' FIRE-RATE + DISCHARGE signal for this store — the demand signal the severity dial is set by. Per rule: how often it fires (dones/instances), whether findings get :discharged (fixed) or :persisted (keep recurring = ignored/friction); plus escape-marker density (agents opting out via ^:unsafe/^:reads/^:unused-ok) and the current dials. Read-only history analysis over the delta log. Optional since (a delta/commit id from query_commits) windows it."
     :inputSchema {:type "object" :properties {:since {:type "string"}}}}
-   {:name "query_cost" :image-free true :read-only true
-    :description "WHERE THE WALL CLOCK WENT, folded over the per-turn records every turn already writes. Three-way and exhaustive: :slopp-ms inside a tool, :idle-ms for the session nobody was in, :outside-ms for agent reasoning plus every non-slopp tool — which the server cannot tell apart and does not pretend to. :slopp-share is taken against ACTIVE time, so a human going to bed is not counted as time slopp failed to use. Also :tools ranked by total cost, :refused with its per-tool breakdown (each refusal is a whole round trip that produced nothing), and :repeats — a tool run more than once inside ONE ask, ranked by what the extra runs cost, which is how an ordinary second read is told apart from a second whole-store check. :tools is a LOWER BOUND: only the five costliest tools per turn are recorded, so a cheap tool's absence is not evidence it was not called. Read-only over the delta log; optional since (a delta/commit id from query_commits) windows it."
-    :inputSchema {:type "object" :properties {:since {:type "string"}
-                                              :by {:type "string" :enum ["commit-point"]}}}}])
+   :inputSchema {:type "object" :properties {:since {:type "string"}
+                                              :by {:type "string" :enum ["commit-point" "model" "ask"]
+                                                   :description "split the window instead of totalling it: model = one row per model name (requests, tokens by kind, cost, context distribution); ask = what each ask cost, requests joined to their turn-begin/turn-end bracket; commit-point = the series across landed changes"}}}])
 
 (def history-tools
   "Provenance tool descriptors: history, time-travel, change queries. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"

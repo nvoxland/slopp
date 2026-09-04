@@ -108,3 +108,37 @@
       (is (= '[x] (:sig (first hits))))
       (is (= "Price in cents." (:doc (first hits))))
       (is (= "Twice the price." (:doc (second hits)))))))
+
+(deftest query-cost-splits-by-model-and-by-ask-and-refuses-an-unknown-split
+  ;; The front door stays PURE: the measurements are read beside their writer
+  ;; (slopp.ops/otel-measurements) and handed in, so every split here is a
+  ;; fold over a store VALUE and an argument. Opening the journal here is what
+  ;; made this namespace's :pure tier a claim it had not earned, once.
+  (let [store   {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a" :intent "the ask"}
+                          {:op :turn-end   :id "d2" :at 2000 :agent "a"}]}
+        session (atom {:store store})
+        otel    [{:requests [{:at-ns "1500000000" :prompt "p1" :model "claude-opus-5"
+                              :input 1 :output 1 :cache-read 8 :cache-creation 0
+                              :context 10 :cost-usd 0.25}]}]]
+
+    (testing "by model"
+      (let [r (query/query-turn-cost session :by "model" :otel otel)]
+        (is (= :model (:by r)))
+        (is (= ["claude-opus-5"] (mapv :model (:rows r))))))
+
+    (testing "by ask"
+      (let [r (query/query-turn-cost session :by "ask" :otel otel)]
+        (is (= :ask (:by r)))
+        (is (= ["the ask"] (mapv :intent (:rows r))))
+        (is (= 1 (:requests (first (:rows r)))) (pr-str (:rows r)))))
+
+    (testing "no :by is still the whole window"
+      (is (contains? (query/query-turn-cost session :otel otel) :wall)))
+
+    (testing "an unrecognized split is REFUSED, not silently the default"
+      ;; a mistyped `by` that quietly answered the whole-window fold reads as
+      ;; "there is nothing to split by" — the wrong answer arriving silently,
+      ;; which is the failure every reader of someone else's schema here is
+      ;; written to avoid
+      (is (thrown-with-msg? Exception #"unknown :by"
+                            (query/query-turn-cost session :by "modle"))))))
