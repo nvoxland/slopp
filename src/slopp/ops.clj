@@ -5173,7 +5173,7 @@
    `:prompt` — the ask — rides every ingest it delegates, so the namespace's
    birth answers \"why does this exist\"; a namespace born without a docstring
    stores the prompt as one."
-  [session ns-sym & {:keys [requires source agent platform prompt]}]
+  [session ns-sym & {:keys [requires source agent platform prompt doc]}]
   (let [requires (mapv bracketed-require requires)
         exists?  (contains? (:namespaces (:store @session)) ns-sym)]
     (if (and exists? (seq requires) (nil? source))
@@ -5218,7 +5218,7 @@
                       ;; a whole namespace is the write most likely to cross a
                       ;; boundary for the first time; declare its edges as a
                       ;; single form's write would
-                      (let [source (with-purpose source ns-sym prompt)
+                      (let [source (with-purpose source ns-sym (or doc prompt))
                             once   #(ingest! session ns-sym source :agent agent :prompt prompt)]
                         (auto-module-dep-retry! session (once) once :agent agent))
                       (ingest! session ns-sym
@@ -5227,7 +5227,7 @@
                                     ;; namespace-purpose advisory would otherwise
                                     ;; ask for at the done (eval24 opus: a change
                                     ;; and a second done per created namespace)
-                                    (when-let [d (purpose-doc prompt)]
+                                    (when-let [d (purpose-doc (or doc prompt))]
                                       (str "\n  " (pr-str d)))
                                     (when (seq requires)
                                       (str "\n  (:require " (str/join "\n            " requires) ")"))

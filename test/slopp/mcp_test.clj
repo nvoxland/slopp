@@ -5121,3 +5121,16 @@
       (testing "a sweep without dry_run is still a write and still refused there"
         (is (re-find #"is a write" (call! sess "explore" {:ops [{:op "rename_sweep" :from "zone" :to "region"}]}))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external ns-create-takes-a-doc
+  ;; eval28 opus e28o2 step 4: the purpose sentence went into the requires
+  ;; list — the op had no argument for it — and the namespace failed to
+  ;; load. `doc` is that argument; the prompt stays the fallback.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "nd.core" :requires ["[clojure.string :as str]"]
+                               :doc "Owns the eco discount rule." :prompt "add the discount namespace"})
+      (let [src (call! sess "query_source" {:ns "nd.core" :full true})]
+        (is (re-find #"\(ns nd\.core\s+\"Owns the eco discount rule\.\"" src) src)
+        (is (not (re-find #"add the discount namespace" src)) "the doc wins over the prompt"))
+      (finally (ops/close! sess)))))

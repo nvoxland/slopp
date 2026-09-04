@@ -2740,6 +2740,7 @@
                                                 :requires (:requires a)
                                                 :source (:source a)
                                                 :platform (:platform a)
+                                                :doc (:doc a)
                                                 :prompt (:prompt a)
                                                 :agent (:agent a)))
       "ns_add_require" (text! (let [r (ops/add-require! session (sym :ns) (:require a)

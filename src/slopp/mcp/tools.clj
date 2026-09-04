@@ -202,6 +202,8 @@
                                :requires {:type "array" :items {:type "string"}}
                                :source {:type "string"}
                                :platform {:type "string" :enum ["jvm" "cljc" "cljs"]}
+                               :doc {:type "string"
+                                     :description "the namespace's purpose, stored as its docstring (else the prompt is)"}
                                :prompt {:type "string"}}
                   :required ["ns"]}}
    {:name "ns_add_require"

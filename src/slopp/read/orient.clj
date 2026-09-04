@@ -1064,11 +1064,11 @@
   budget, so a project of two hundred namespaces gets the same ceiling as
   one of ten. Six, because the step-2 ask names seven and all but the big
   one fit; the earlier four, in mention order, dropped exactly the three
-  the model then read by hand. 8k a namespace and 14k in all (eval27): the
-  2k cap excluded the central 7.7k namespace the ask named, and every opus
-  cell read it whole — a namespace the model will read anyway costs the same
-  rent carried as fetched, and one turn less."
-  {:max-chars 8000 :max-nses 6 :max-total 14000})
+  the model then read by hand. 9k a namespace and 22k in all (eval27/28):
+  the 2k cap, then the 14k total, excluded the central 7.7k namespace the
+  ask named, and every opus cell read it whole — a namespace the model will
+  read anyway costs the same rent carried as fetched, and one turn less."
+  {:max-chars 9000 :max-nses 6 :max-total 22000})
 
 (defn ^:export bundle
   "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.

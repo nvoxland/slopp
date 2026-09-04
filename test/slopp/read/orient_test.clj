@@ -918,10 +918,10 @@
   ;; cards-then-fetch (24/29 turns against 19). What survives of the retirement:
   ;; the SMALLEST named namespaces go first, up to six, under a chars cap —
   ;; mention order dropped exactly the three the model then read by hand —
-  ;; and the header names query_flow. eval27: the cap grew from 2k to 8k a
-  ;; namespace, because the central 7.7k namespace the ask named was excluded
-  ;; and read whole in every cell.
-  (let [big (apply str (repeat 8500 "x"))
+  ;; and the header names query_flow. eval27/28: the cap grew to 9k a
+  ;; namespace and 22k in all, because the central 7.7k namespace the ask
+  ;; named was excluded and read whole in every cell.
+  (let [big (apply str (repeat 9500 "x"))
         st  (-> (store/empty-store)
                 (store/ingest 'logi.quoting (str "(ns logi.quoting)\n(defn quote-cents \"" big "\" [p] p)\n"))
                 (store/ingest 'logi.booking "(ns logi.booking)\n(defn book! \"B.\" [p] p)\n")
