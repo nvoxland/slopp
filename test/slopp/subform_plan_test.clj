@@ -64,17 +64,17 @@
     (is (nil? (:error plan)) (pr-str plan))
     (is (= "(def xs [:a :b :c])" (:new-form-src plan)))))
 
-(deftest ambiguity-still-errors
-  (let [plan (refactor/subform-replace-plan
-              (st "(ns sp.core)\n(defn f [x] (+ (inc x) (inc x)))\n")
-              'sp.core 'f "(inc x)" "(dec x)")]
-    (is (re-find #"2 times" (str (:error plan))))))
-
 (deftest fn-literal-ambiguity-counts-both-matchers
   ;; two textually-identical fn literals: the text fallback must count both
   (let [plan (refactor/subform-replace-plan
               (st "(ns sp.core)\n(defn f [xs] [(mapv #(inc %) xs) (filterv #(inc %) xs)])\n")
               'sp.core 'f "#(inc %)" "#(dec %)")]
+    (is (re-find #"2 times" (str (:error plan))))))
+
+(deftest ambiguity-still-errors
+  (let [plan (refactor/subform-replace-plan
+              (st "(ns sp.core)\n(defn f [x] (+ (inc x) (inc x)))\n")
+              'sp.core 'f "(inc x)" "(dec x)")]
     (is (re-find #"2 times" (str (:error plan))))))
 
 (deftest text-mode-reaches-string-content

@@ -23,6 +23,22 @@
             [cheshire.core :as json]
             [slopp.project.capabilities :as capabilities] [slopp.http.client :as http.client]))
 
+(def default-beat-ms
+  "How often to check in when the hub has not said otherwise.
+
+  A FALLBACK, not the interval. The hub owns the number — it is the thing
+  deciding how long a silent project may go on looking alive — and it sends
+  it back with every registration. This is what to do before the first
+  answer arrives, and when talking to a hub too old to say."
+  10000)
+
+(defn ^:export hub-url
+  "The hub's base url from its `port` — loopback, because a hub registry is a
+  list of processes on THIS machine and nothing about it should be reachable
+  from another one."
+  [port]
+  (str "http://127.0.0.1:" port "/"))
+
 (defn ^:export payload
   "The check-in a project sends: who it is, where it answers, and what it is
   doing — [[project-beat]].
@@ -44,6 +60,39 @@
    :pid     (.pid (java.lang.ProcessHandle/current))
    :version (capabilities/effective store "app.version")
    :status  "idle"})
+
+(defn ^:export refused?
+  "Did the hub REFUSE this beat, as opposed to not being there?
+
+  Three outcomes cross this seam and only two used to be distinguishable. A hub
+  that is not running is the ORDINARY case — nobody has to start one — and
+  answers nil. A hub that answers normally hands back `{:slug … :beat-ms …}`. A
+  hub that rejects what we SENT is a bug we own, and it used to answer nil too,
+  which made it present as a project that mysteriously never appears in the
+  picker.
+
+  It became reachable when the hub started validating the beat: the beat is the
+  one contract crossing the split by COPY rather than generation, so a 400 from
+  the hub IS the drift signal, and swallowing it leaves no signal at all."
+  [answer]
+  (boolean (:hub/refused answer)))
+
+(defn interval-from
+  "The beat interval `response` asks for, or [[default-beat-ms]].
+
+  The hub answers every registration with `{:slug … :beat-ms …}`, so the two
+  processes need no compiled-in agreement about timing — which is just as
+  well, since they are separate projects on separate release cycles and a
+  shared constant would be a promise neither could check.
+
+  Anything that is not a POSITIVE INTEGER falls back. A hub one version older
+  sends no `:beat-ms` at all; a broken one could send a string, or a zero.
+  Trusting that would turn the keepalive into a busy loop against a hub
+  already misbehaving — the failure mode where the response says to hammer
+  the thing that sent it."
+  [response]
+  (let [ms (:beat-ms response)]
+    (if (and (int? ms) (pos? ms)) ms default-beat-ms)))
 
 (defn- post!
   "POST `body` as JSON through `requester` to `url`; the hub's parsed answer, a
@@ -106,57 +155,6 @@
           {:hub/refused status
            :hub/explain (or parsed
                             (not-empty (str/trim (str (:http/body resp)))))})))))
-
-(defn ^:export stop!
-  "Stop the beat and tell the hub we are going, returning nil.
-
-  The deregistration is a courtesy, not a guarantee: a killed or crashed
-  process never reaches this, which is exactly why the hub ages entries out
-  on its own. What it buys is that an ORDERLY shutdown removes the row now
-  instead of leaving a project looking alive for half a minute."
-  [hb]
-  (when hb
-    (reset! (:running hb) false)
-    (.interrupt ^Thread (:thread hb))
-    (try
-      (post! (:requester hb)
-             (str (:hub-url hb) "api/deregister")
-             {:dir (:dir ((:payload-fn hb)))})
-      (catch Throwable _ nil)))
-  nil)
-
-(defn ^:export hub-url
-  "The hub's base url from its `port` — loopback, because a hub registry is a
-  list of processes on THIS machine and nothing about it should be reachable
-  from another one."
-  [port]
-  (str "http://127.0.0.1:" port "/"))
-
-(def default-beat-ms
-  "How often to check in when the hub has not said otherwise.
-
-  A FALLBACK, not the interval. The hub owns the number — it is the thing
-  deciding how long a silent project may go on looking alive — and it sends
-  it back with every registration. This is what to do before the first
-  answer arrives, and when talking to a hub too old to say."
-  10000)
-
-(defn interval-from
-  "The beat interval `response` asks for, or [[default-beat-ms]].
-
-  The hub answers every registration with `{:slug … :beat-ms …}`, so the two
-  processes need no compiled-in agreement about timing — which is just as
-  well, since they are separate projects on separate release cycles and a
-  shared constant would be a promise neither could check.
-
-  Anything that is not a POSITIVE INTEGER falls back. A hub one version older
-  sends no `:beat-ms` at all; a broken one could send a string, or a zero.
-  Trusting that would turn the keepalive into a busy loop against a hub
-  already misbehaving — the failure mode where the response says to hammer
-  the thing that sent it."
-  [response]
-  (let [ms (:beat-ms response)]
-    (if (and (int? ms) (pos? ms)) ms default-beat-ms)))
 
 (defn ^:export start!
   "Begin beating `(payload-fn)` to the hub at `hub-url`, and return a handle
@@ -230,6 +228,24 @@
      {:thread thread :running running :hub-url hub-url :payload-fn payload-fn
       :requester requester})))
 
+(defn ^:export stop!
+  "Stop the beat and tell the hub we are going, returning nil.
+
+  The deregistration is a courtesy, not a guarantee: a killed or crashed
+  process never reaches this, which is exactly why the hub ages entries out
+  on its own. What it buys is that an ORDERLY shutdown removes the row now
+  instead of leaving a project looking alive for half a minute."
+  [hb]
+  (when hb
+    (reset! (:running hb) false)
+    (.interrupt ^Thread (:thread hb))
+    (try
+      (post! (:requester hb)
+             (str (:hub-url hb) "api/deregister")
+             {:dir (:dir ((:payload-fn hb)))})
+      (catch Throwable _ nil)))
+  nil)
+
 (defn ^:export hub-address
   "The address to hand a HUMAN for this project — `hub-url` plus the slug the
   hub minted for us — or nil when no hub has answered.
@@ -248,22 +264,6 @@
   (let [slug (str/trim (str (:slug answer)))]
     (when (seq slug)
       (str hub-url "p/" slug))))
-
-(defn ^:export refused?
-  "Did the hub REFUSE this beat, as opposed to not being there?
-
-  Three outcomes cross this seam and only two used to be distinguishable. A hub
-  that is not running is the ORDINARY case — nobody has to start one — and
-  answers nil. A hub that answers normally hands back `{:slug … :beat-ms …}`. A
-  hub that rejects what we SENT is a bug we own, and it used to answer nil too,
-  which made it present as a project that mysteriously never appears in the
-  picker.
-
-  It became reachable when the hub started validating the beat: the beat is the
-  one contract crossing the split by COPY rather than generation, so a 400 from
-  the hub IS the drift signal, and swallowing it leaves no signal at all."
-  [answer]
-  (boolean (:hub/refused answer)))
 
 (def project-beat
   "`POST /api/register` — one project's check-in.

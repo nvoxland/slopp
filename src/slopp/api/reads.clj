@@ -78,6 +78,31 @@
   [{:keys [session]} _]
   (model/module-index session))
 
+(defn ^:export app-namespaces
+  "The namespaces of `store` that DECLARE endpoints — this application's own
+  API surface, whoever happens to be serving it.
+
+  **Serving and declaring are different questions**, and the reviewer listener
+  is where they come apart. It runs slopp's own API namespaces, so a contract
+  built from what it serves describes the MCP SERVER rather than the project
+  being reviewed. That is true on every store: the endpoints screen was 100%
+  infrastructure and 0% application, and it read as correct because on slopp's
+  own store the two answers coincide — `slopp.api.endpoints` is a form in
+  slopp's store and framework everywhere else. A feature that works on exactly
+  the store it was developed on.
+
+  It also removes a symptom rather than papering it: every handler named by a
+  document built from this list IS a form in the store the document describes,
+  so the reviewer UI's `read its source` link resolves by construction. It used
+  to 404 on every endpoint of every project, and the honest reading of that 404
+  was that those endpoints were never the application's.
+
+  Built on `web-endpoint-rows`, the single route traversal the write gates also
+  use, so what is documented is what was enforced — and TEST namespaces are
+  excluded there, which is right here too: a fixture endpoint is not surface."
+  [store]
+  (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
+
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the
   only thing that knows when index 2 is a docstring and when it is a `def`'s
@@ -199,31 +224,6 @@
   (let [limit (when (re-matches #"\d+" (str (:limit query-params)))
                 (parse-long (str (:limit query-params))))]
     (model/search (:store @session) (:q query-params) limit)))
-
-(defn ^:export app-namespaces
-  "The namespaces of `store` that DECLARE endpoints — this application's own
-  API surface, whoever happens to be serving it.
-
-  **Serving and declaring are different questions**, and the reviewer listener
-  is where they come apart. It runs slopp's own API namespaces, so a contract
-  built from what it serves describes the MCP SERVER rather than the project
-  being reviewed. That is true on every store: the endpoints screen was 100%
-  infrastructure and 0% application, and it read as correct because on slopp's
-  own store the two answers coincide — `slopp.api.endpoints` is a form in
-  slopp's store and framework everywhere else. A feature that works on exactly
-  the store it was developed on.
-
-  It also removes a symptom rather than papering it: every handler named by a
-  document built from this list IS a form in the store the document describes,
-  so the reviewer UI's `read its source` link resolves by construction. It used
-  to 404 on every endpoint of every project, and the honest reading of that 404
-  was that those endpoints were never the application's.
-
-  Built on `web-endpoint-rows`, the single route traversal the write gates also
-  use, so what is documented is what was enforced — and TEST namespaces are
-  excluded there, which is right here too: a fixture endpoint is not surface."
-  [store]
-  (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
 
 (defn ^{:http/read :ui/rest-paths} rest-paths-read
   "The typed API surface of the project under review, for a consumer that

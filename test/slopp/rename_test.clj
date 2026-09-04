@@ -1113,3 +1113,28 @@
         (is (some? rw) (pr-str (:rewritten r)))
         (is (re-find #"\"  region      \"" (str (:source rw))) "the rewritten text, so the alignment fix needs no read"))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-run-carries-every-rewritten-form-and-rewrites-the-disk-twin
+  ;; eval29 opus step 3: query_source of the renamed namespace to patch a fee
+  ;; inside a form the sweep had just rewritten, and a grep of the working
+  ;; tree for the README twin, every cell. The run hands over every
+  ;; rewritten form, and rewrites the twin on disk when it still names the
+  ;; word.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-twin-" (System/nanoTime))
+        _    (.mkdirs (java.io.File. dir))
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! sess 'tw.zone "(ns tw.zone)\n(def ^:unused-ok zone-fees \"Fees.\" {1 500 3 1400})\n(defn ^:unused-ok zone-fee \"A fee.\" [z] (get zone-fees z 0))\n")
+      (ops/file-put! sess "README.md" "# logi\nfuel/insurance/zone pricing\n" :prompt "readme")
+      (spit (java.io.File. dir "README.md") "# logi\nfuel/insurance/zone pricing — the human branch's copy\n")
+      (let [r (ops/rename-sweep! sess "zone" "region" :prompt "rename")]
+        (is (nil? (:error r)) (pr-str r))
+        (testing "every rewritten form rides, not only the string hits"
+          (is (= '#{tw.region/region-fees tw.region/region-fee} (set (map :form (:rewritten r)))) (pr-str (:rewritten r)))
+          (is (re-find #"3 1400" (str (:source (first (filter #(= 'tw.region/region-fees (:form %)) (:rewritten r))))))))
+        (testing "the working-tree twin is rewritten in place and reported"
+          (is (= ["README.md"] (:files-on-disk r)) (pr-str r))
+          (is (= "# logi\nfuel/insurance/region pricing — the human branch's copy\n" (slurp (java.io.File. dir "README.md"))))))
+      (finally
+        (ops/close! sess)
+        (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
