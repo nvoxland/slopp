@@ -2662,3 +2662,31 @@ descriptions (~3k chars) the on/off probe moved from +6.9k to +6.8k
 tokens; the harness's per-tool rendering is the rent, and the fourteen
 families are already the smallest surface that names every op.
 
+## 2026-09-04 — eval29: opus at 28 turns (−59%), sonnet at 24 (−74%)
+
+**eval29 (jar d121278eab9c4; the change card carries the step shape,
+ns_create takes doc, the whole-ns caps at 9k/22k).** opus-5: TURNS 28 vs
+68 (−59%), WALL 305 vs 469 s (−35%), COST $1.85 vs $2.71 (−32%), ACCEPT
+6/6 — the ≤ 27 target missed by one; e29o1's 22 is the lowest lifetime on
+record. sonnet-5: TURNS 24 vs 94 (−74%), COST $0.86 vs $1.38 (−38%), WALL
+290 vs 413 s (−30%), ACCEPT 6/6. No un-landed thread anywhere. `help`
+calls 0 (was 2–3 a cell), separate `ns_create` calls 0. Records:
+`projects/eval29-card/RUNS.md`.
+
+**What the card did.** Seven `help change` turns over three cells came from
+a card that named the change's arguments and not the step shape; every
+fresh session read the topic. The card now carries the shape, and says a
+`{ns requires doc}` step creates the namespace inside the change — which
+also retired the separate `ns_create` call in every step that creates one.
+
+**What is left, opus per step 5 / 6 / 8 / 4 / 4.** Step 3 (the rename):
+after the sweep the model read the renamed namespace to patch a value in a
+form the sweep had just rewritten, and grepped the working tree for the
+README twin (the store's copy was rewritten; the disk copy is the human
+branch's). Landed after the run: the run's `:rewritten` carries EVERY
+rewritten form (cap twelve, 10k chars), and a tracked file's disk twin
+that still names the word is rewritten in place (`:files-on-disk`) — the
+rename means everything named that, and the model was applying sed to it
+by hand. Steps 1, 2, 4, 5 are at the floor: one explore, one or two
+changes, the answer.
+
