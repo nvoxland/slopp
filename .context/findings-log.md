@@ -2520,3 +2520,46 @@ cell name they `cd` nowhere and score the project directory (every check
 fails with a nil connection). `compare21.py`'s ACCEPT rule wants the word
 `PASS` in the accept column. `query_cost {since <turn delta>}` is the
 per-step census; `report`'s `:by-ask` gives the turn ids.
+
+## 2026-09-03 — eval25: the opus wave lands turns and wall; cost is prefix rent
+
+**What was measured first.** The eval24 opus cells' transcripts
+(`~/.claude-metabase.com/projects/-private-tmp-slopp-eval18-B-slopp-claude-opus-5-medium-e24o*/*.jsonl`),
+turn by turn, with the model's own text between calls. Four sinks, in its
+words: a green `full_check` that "withheld part of its result" and "neither
+call reported test counts" (four calls per verdict, every cell); a report
+that "truncated" the ask texts (eight history calls, two argument refusals
+on the way); the sweep that walked past the README (five turns of grep,
+file_get, cat, sed, file_put in all three cells); and done advisories
+repeated with their teaching every step, which opus obeys at a change and a
+second done each. Fixes: D-answers-carry-their-counts.
+
+**eval25 (jar df81b38f9f4f8, three pairs per model, records in
+`projects/eval25-opus/RUNS.md`).** opus-5: TURNS 49 vs 59 (−17%; eval24
++22%), WALL 417 vs 449 s (−7%; eval24 +24%), ACCEPT 6/6, COST $2.92 vs
+$2.54 (+15%; eval24 +32%) — MISS on cost. Per step 12 / 10 / 14 / 5 / 9
+(eval24 12 / 12 / 18 / 8 / 17). sonnet-5: TURNS 52 vs 99 (−47%), COST $1.14
+vs $1.27 (−10%), ACCEPT 6/6, WALL 375 vs 330 s (+14%) — MISS on wall, and
+$1.14 misses the pre-registered $1.04 no-regression bar while 52 turns
+holds the 56.
+
+**The opus cost is rent.** Usage fields at the first turn of every step:
+19,365 cached prefix tokens under slopp, 10,005 under plain — +9.4k on
+every turn of 49. A one-shot probe (empty dir, plugin on/off) shows +6.9k.
+Neither cohort carries a CLAUDE.md. The plugin's fixed prefix — how Claude
+Code renders the fourteen family schemas, the skill listings — is the next
+lever, and turns can no longer pay for it: opus is already 17% under plain.
+
+**Residue seen on the new jar.** Two cells grepped the WORKING TREE after
+the sweep rewrote the store's README and sed'd the human branch's copy; the
+sweep's note now says which copy it rewrote (landed after the run). Opus
+still calls `full_check` once a step (3–5 a cell) and sends a write through
+`explore` once a cell. Sonnet wrote more output per turn (26–35k against
+25–30k) and its per-turn wall rose from 6.1 to 7.2 s; unmeasured which
+answer grew.
+
+**Method.** `accept24.sh` scores by cell PATH; the transcript ledger script
+(python over the jsonl, per assistant message) is the census tool now — the
+store's `query_cost` counts calls, the transcript counts TURNS and shows
+what the model said between them, which is what named every sink here.
+
