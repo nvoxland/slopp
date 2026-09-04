@@ -158,9 +158,13 @@
    {:name "query_rule_telemetry"
     :description "The D9 rules' FIRE-RATE + DISCHARGE signal for this store — the demand signal the severity dial is set by. Per rule: how often it fires (dones/instances), whether findings get :discharged (fixed) or :persisted (keep recurring = ignored/friction); plus escape-marker density (agents opting out via ^:unsafe/^:reads/^:unused-ok) and the current dials. Read-only history analysis over the delta log. Optional since (a delta/commit id from query_commits) windows it."
     :inputSchema {:type "object" :properties {:since {:type "string"}}}}
-   :inputSchema {:type "object" :properties {:since {:type "string"}
+   {:name "query_cost"
+    :description "WHERE THE WALL CLOCK WENT, folded over the per-turn records every turn already writes. Three-way and exhaustive: :slopp-ms inside a tool, :idle-ms for the session nobody was in, :outside-ms for agent reasoning plus every non-slopp tool — which the server cannot tell apart and does not pretend to. :slopp-share is taken against ACTIVE time, so a human going to bed is not counted as time slopp failed to use. Also :tools ranked by total cost, :refused with its per-tool breakdown (each refusal is a whole round trip that produced nothing), and :repeats — a tool run more than once inside ONE ask, ranked by what the extra runs cost, which is how an ordinary second read is told apart from a second whole-store check. :tools names its own basis in :calls :basis — a CENSUS (every call, with :chars, what its answer put on the wire) when the per-call rows are there, and the five-costliest-per-turn ring otherwise, which is a lower bound where a cheap tool's absence is not evidence it was not called. An unknown since is refused rather than answered with an all-time total under a windowed header. Read-only over the delta log; optional since (a delta/commit id from query_commits) windows it."
+    :inputSchema {:type "object" :properties {:since {:type "string"}
                                               :by {:type "string" :enum ["commit-point" "model" "ask"]
-                                                   :description "split the window instead of totalling it: model = one row per model name (requests, tokens by kind, cost, context distribution); ask = what each ask cost, requests joined to their turn-begin/turn-end bracket; commit-point = the series across landed changes"}}}])
+                                                   :description "split the window instead of totalling it: model = one row per model name (requests, tokens by kind, cost, context distribution); ask = what each ask cost, requests joined to their turn-begin/turn-end bracket; commit-point = the series across landed changes"}
+                                              :limit {:type "integer"
+                                                      :description "rows per page for the splits that page (ask, commit-point); 20 when omitted"}}}}])
 
 (def history-tools
   "Provenance tool descriptors: history, time-travel, change queries. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
@@ -714,8 +718,14 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   one operation returns. What they did instead was lose things: `:dry-run`'s
   payload, `:drift`, `:external-pending` and a `:fix` hint have each been
   built, tested and correct one layer down while the agent saw the old
-  behaviour. `summarize`'s docstring has recorded that happening three times;
-  the fourth is what produced this.
+  behaviour. `summarize`'s docstring has recorded that happening three times; the fourth is what produced this.
+
+  The FIFTH is why the image-currency keys are here. A write whose
+  derived-value repair fails records `:image-reload-failed`, and the agent
+  saw a clean green write instead: the namespace could no longer load, the
+  verification image went on answering from the value it already held, and a
+  commit-point was recorded green over a store nothing could boot from. A
+  dropped hint costs a round trip; a dropped doubt costs the verdict.
 
   Measured before consolidating: 14 lists, 39 distinct keys, and exactly TWO
   (`:error`, `:test`) appearing in all of them.
@@ -734,6 +744,10 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :sites :lib :left-behind :also-created :replaced :upgraded :merged-refer :closed :whole-store :commit :repaired
     ;; what it cost and whether to believe it
     :test :ms :untested :image-healed :red-first :red-first-arity :carried-errors
+    ;; whether the image that produced :test is still the store's code:
+    ;; what the write RELOADED to repair a captured value, what that repair
+    ;; FAILED to load, what it could not reach, and a rebuilt image
+    :image-reloaded :image-reload-failed :stale-in-image :image-rebuilt
     :warnings :existing-warnings :advisories :drift :manual
     ;; a preview's whole point
     :dry-run :in-code :in-strings :in-files :files :files-on-disk :remaining :case-variants :rewritten :verify})

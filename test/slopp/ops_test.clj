@@ -2735,3 +2735,32 @@
   (is (= "[clojure.set :as set]" (#'ops/bracketed-require "[clojure.set :as set]")))
   (is (= "^:side-effect [pz.reg :as r]" (#'ops/bracketed-require "^:side-effect [pz.reg :as r]")))
   (is (= "(quote x)" (#'ops/bracketed-require "(quote x)"))))
+
+(deftest ^:external a-measurement-window-refuses-a-since-the-journal-does-not-carry
+  ;; A measurement is not IN the journal and has no position in it, so these
+  ;; readers window by the row's timestamp against the named delta's `:at`.
+  ;; When the id matched nothing, `delta-by-id` returned nil, the floor went
+  ;; nil, and `(or (nil? floor) …)` read that as "no floor" — every row.
+  ;;
+  ;; Silent and plausible: the journal half of the same call windows to
+  ;; nothing, so the reply says zero turns next to an all-time bill, and
+  ;; nothing in it looks wrong. "Unknown id" and "no window asked for" are
+  ;; different facts and only one of them means everything.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-window-" (System/nanoTime))
+        conn (db/open! dir)
+        sess (atom {:store (store/empty-store) :db conn})]
+    (try
+      (is (= 1 (ops/record-otel! sess [{:model "claude-opus-5" :input 2 :output 4}]))
+          "fixture: one batch recorded")
+      (testing "no :since reads everything, as before"
+        (is (= 1 (count (ops/otel-measurements sess)))))
+      (testing "an id the journal does not carry is REFUSED, not silently unwindowed"
+        (is (thrown-with-msg? Exception #"unknown :since"
+                              (ops/otel-measurements sess :since "nope")))
+        (is (thrown-with-msg? Exception #"unknown :since"
+                              (ops/tool-call-measurements sess :since "nope"))))
+      (testing "a session with no journal still simply has none"
+        ;; nothing to window against, so nothing to be wrong about
+        (is (empty? (ops/otel-measurements (atom {:store (store/empty-store)})
+                                           :since "nope"))))
+      (finally (.close conn)))))

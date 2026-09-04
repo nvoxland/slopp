@@ -3008,6 +3008,7 @@
                                                ;; hydrated for this call only
                                                (ops/with-history session) :since (:since a)
                                                :by (:by a)
+                                               :limit (:limit a)
                                                :otel (ops/otel-measurements session :since (:since a))
                                                ;; the per-call rows make :tools a
                                                ;; census with chars-out, not the

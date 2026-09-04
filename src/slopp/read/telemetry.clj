@@ -391,7 +391,8 @@
 
 (defn- model-requests
   "The window's model-side request records: the `:otel` deltas still in the
-  journal, then the batches `otel` handed in. Oldest first.
+  journal, then the batches `otel` handed in — each batch counted ONCE.
+  Oldest first.
 
   Both halves, and neither is vestigial. Telemetry lives in the
   `measurements` table because writing it as a delta moved the head every few
@@ -399,12 +400,26 @@
   written during the hour before that move, and dropping them would silently
   shorten the history of the very measurement they record. `otel` is PASSED
   IN because this namespace folds over a store VALUE and a table is not in
-  one; `slopp.ops/otel-measurements` is the reader, beside the writer."
+  one; `slopp.ops/otel-measurements` is the reader, beside the writer.
+
+  **Read from two places, so the two can overlap** — and nothing checked.
+  A batch sitting in the journal AND arriving again in `otel` was folded
+  twice, counting every token and every dollar in it once per copy. The
+  identity is the BATCH: it is the grain the exporter posts at and the grain
+  both halves store. Two separate posts carrying byte-identical requests,
+  timestamps and prompt ids included, is not something an exporter does; the
+  same batch reached from two tables is. Requests are NOT de-duplicated
+  within a batch — two identical requests really were two round trips, and
+  both were paid for."
   [store since otel]
-  (let [deltas (:deltas store)
-        window (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)]
-    (into (vec (mapcat :requests (filter #(= :otel (:op %)) window)))
-          (mapcat :requests otel))))
+  (let [deltas  (:deltas store)
+        window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
+        journal (filterv #(= :otel (:op %)) window)
+        seen    (into #{} (map :requests) journal)]
+    (into (vec (mapcat :requests journal))
+          (comp (remove #(contains? seen (:requests %)))
+                (mapcat :requests))
+          otel)))
 
 (defn ^:export turn-cost
   "Where this store's wall clock went, folded READ-ONLY over the delta log —
@@ -721,17 +736,31 @@
   timestamp, so a request belongs to the ask whose bracket contains it. What
   one ask cost was previously read by eye off a whole-session total.
 
+  **Brackets belong to AGENTS.** `turn-begin!` supersedes an unclosed turn
+  for the same agent and no other, so that is the rule this fold has to read
+  the journal by: a `turn-end` closes ITS OWN agent's open bracket, and an
+  unclosed bracket runs to that agent's next begin. Reading an end as
+  closing whichever bracket opened last is correct only while one agent is
+  working — the moment two interleave, an outer ask's own end lands on the
+  inner bracket, and the outer row loses its duration and every request made
+  after the inner ask opened.
+
+  A request inside two brackets belongs to the INNERMOST — the latest one
+  that still contains it. Both answers are true and the specific one is the
+  useful one; the outer ask keeps everything outside its sub-ask.
+
   `:prompts` is the harness's own `prompt.id` for the requests that landed,
   carried through as EVIDENCE rather than used as the join: the journal has
   no prompt id to match against, so the clock places the request and the id
-  corroborates it. One id per row is the reading to expect; two mean the
-  bracket spans more than one harness prompt, which is worth seeing.
+  corroborates it.
 
-  An ask whose `turn-end` never landed runs to the next `turn-begin`, and the
-  last one runs on to now. That is not a fallback: `turn-begin!` supersedes an
-  unclosed turn for exactly this reason, so the next ask's opening IS the
-  honest end of this one. Such a row carries no `:ms` — the duration was not
-  measured, which is a different fact from its being zero.
+  An ask whose `turn-end` never landed runs to the next begin BY THAT AGENT,
+  and the last one runs on to now. That is not a fallback: `turn-begin!`
+  supersedes an unclosed turn for exactly this reason, so the next ask's
+  opening IS the honest end of this one. Such a row carries no `:ms` — the
+  duration was not measured, which is a different fact from its being zero.
+  Neither does one whose end PRECEDES its begin: a negative duration is not a
+  measurement, and clock skew must not be reported as one.
 
   `:unattributed` is the requests falling in no bracket — before the first
   ask in the window, or between one ending and the next beginning (a
@@ -742,46 +771,60 @@
   [store & {:keys [since otel limit] :or {limit 20}}]
   (let [deltas  (:deltas store)
         window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
+        ;; a turn-end closes the open bracket belonging to ITS OWN agent
         opened  (reduce (fn [acc d]
                           (case (:op d)
                             :turn-begin (conj acc {:ask (:id d) :agent (:agent d)
                                                    :intent (:intent d) :at (:at d)})
-                            ;; only an OPEN bracket can be closed; a stray
-                            ;; turn-end (a superseded turn closed by the next
-                            ;; begin, whose begin is outside the window) must
-                            ;; not retroactively shorten the ask before it
-                            :turn-end   (if (and (seq acc) (not (:end (peek acc))))
-                                          (assoc-in acc [(dec (count acc)) :end] (:at d))
+                            :turn-end   (if-let [i (last (keep-indexed
+                                                          (fn [i a]
+                                                            (when (and (= (:agent a) (:agent d))
+                                                                       (not (:end a)))
+                                                              i))
+                                                          acc))]
+                                          (assoc-in acc [i :end] (:at d))
+                                          ;; an end with no open bracket of its
+                                          ;; own: a superseded turn whose begin
+                                          ;; is outside the window. It must not
+                                          ;; retroactively shorten anyone else
                                           acc)
                             acc))
                         [] window)
         asks    (vec (map-indexed
                       (fn [i a]
-                        (assoc a :until (or (:end a)
-                                            (:at (get opened (inc i)))
-                                            Long/MAX_VALUE)))
+                        (let [end (when (and (:end a) (>= (:end a) (:at a))) (:end a))]
+                          (assoc a
+                                 :ms    end
+                                 :until (or end
+                                            (some (fn [b] (when (and (= (:agent b) (:agent a))
+                                                                     (> (:at b) (:at a)))
+                                                            (:at b)))
+                                                  (drop (inc i) opened))
+                                            Long/MAX_VALUE))))
                       opened))
         dated   (into [] (keep (fn [r] (when-let [t (request-at-ms r)] [t r])))
                       (model-requests store since otel))
         undated (- (count (model-requests store since otel)) (count dated))
         in?     (fn [a [t _]]
                   (let [b (:at a)] (and b (<= b t) (< t (:until a)))))
+        ;; the INNERMOST bracket holding it — the latest to have opened
+        owner   (fn [tr] (:ask (last (sort-by :at (filterv #(in? % tr) asks)))))
+        by-ask  (group-by owner dated)
         block   (fn [rs] {:requests (count rs)
                           :prompts  (vec (sort (distinct (keep :prompt rs))))
                           :model    (model-summary rs)})
         rows    (mapv (fn [a]
-                        (let [rs (mapv second (filter #(in? a %) dated))
+                        (let [rs (mapv second (get by-ask (:ask a) []))
                               d  (str (:intent a))]
                           (cond-> {:ask      (:ask a)
                                    :agent    (:agent a)
                                    :intent   (subs d 0 (min 120 (count d)))
                                    :at       (:at a)
                                    :requests (count rs)}
-                            (:end a) (assoc :ms (- (:end a) (:at a)))
+                            (:ms a) (assoc :ms (- (:ms a) (:at a)))
                             (seq rs) (merge (dissoc (block rs) :requests)))))
                       asks)
-        placed  (into #{} (mapcat (fn [a] (filter #(in? a %) dated))) asks)
-        left    (mapv second (remove placed dated))]
+        left    (mapv second (get by-ask nil []))]
     (cond-> {:by :ask :rows (vec (take limit (reverse rows)))}
       (seq left)     (assoc :unattributed (block left))
       (pos? undated) (assoc :undated undated))))

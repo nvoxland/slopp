@@ -743,3 +743,87 @@
       (let [a (first (:rows (telemetry/cost-by-ask store)))]
         (is (= 0 (:requests a)))
         (is (not (contains? a :model)))))))
+
+(deftest cost-by-ask-brackets-per-AGENT-and-attributes-to-the-innermost
+  ;; `turn-begin!` supersedes an unclosed turn for the SAME agent — that is
+  ;; the rule the journal is written by, and the fold has to read it the same
+  ;; way. Reading a turn-end as closing whichever bracket opened last is only
+  ;; correct while one agent is working: the moment two interleave, the outer
+  ;; ask's own turn-end lands on the inner bracket, so the outer row loses
+  ;; its duration and every request made after the inner ask opened falls out
+  ;; of the window entirely and reads as unattributed.
+  (let [nanos (fn [ms] (str (* 1000000 ms)))
+        req   (fn [ms prompt cost]
+                {:at-ns (nanos ms) :prompt prompt :model "claude-opus-5"
+                 :input 1 :output 1 :cache-read 8 :cache-creation 0
+                 :context 10 :cost-usd cost})
+        store {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a"     :intent "the outer ask"}
+                        {:op :turn-begin :id "d2" :at 1500 :agent "a/sub" :intent "the inner ask"}
+                        {:op :turn-end   :id "d3" :at 1800 :agent "a/sub"}
+                        {:op :turn-end   :id "d4" :at 3000 :agent "a"}]}
+        otel  [{:requests [(req 1200 "p1" 0.1)
+                           (req 1600 "p2" 0.2)
+                           (req 2500 "p3" 0.4)]}]
+        r     (telemetry/cost-by-ask store :otel otel)
+        [inner outer] (:rows r)]
+
+    (testing "each agent's turn-end closes ITS OWN bracket"
+      (is (= ["d2" "d1"] (mapv :ask (:rows r))) "newest ask first")
+      (is (= 2000 (:ms outer)) "the outer ask ran 1000-3000, and its own end says so")
+      (is (= 300 (:ms inner))))
+
+    (testing "a request belongs to the INNERMOST bracket holding it"
+      ;; both brackets contain the 1600 request; the more specific one is the
+      ;; answer, and the outer ask keeps everything outside the inner one
+      (is (= 1 (:requests inner)) (pr-str inner))
+      (is (= ["p2"] (:prompts inner)))
+      (is (= 2 (:requests outer)) (pr-str outer))
+      (is (= ["p1" "p3"] (:prompts outer))))
+
+    (testing "so nothing inside a bracket reads as unattributed"
+      (is (nil? (:unattributed r)) (pr-str (:unattributed r))))
+
+    (testing "a turn-end EARLIER than its begin measures nothing, rather than a negative duration"
+      ;; clock skew, or a stray end — either way \"how long did it take\" was
+      ;; not measured, which is a different fact from a negative answer
+      (let [r2 (telemetry/cost-by-ask
+                {:deltas [{:op :turn-begin :id "d1" :at 2000 :agent "a" :intent "backwards"}
+                          {:op :turn-end   :id "d2" :at 1000 :agent "a"}]})]
+        (is (not (contains? (first (:rows r2)) :ms))
+            (pr-str (first (:rows r2))))))))
+
+(deftest model-requests-counts-a-batch-once-even-when-it-arrives-twice
+  ;; Telemetry moved out of the journal into the measurements table, and both
+  ;; halves are read — the `:otel` deltas written during the hour before the
+  ;; move are real history and dropping them would silently shorten it. But
+  ;; the two halves are read from different places and nothing checked they
+  ;; were disjoint, so a batch present in BOTH was folded twice: every token
+  ;; and every dollar in it counted once per copy.
+  ;;
+  ;; The identity is the BATCH — the grain the exporter posts at, and the
+  ;; grain both halves store. Two genuinely separate posts carrying
+  ;; byte-identical requests, timestamps and prompt ids included, is not a
+  ;; thing an exporter does; the same batch read from two tables is.
+  (let [batch {:requests [{:model "m" :input 1 :output 1 :cost-usd 1.0}
+                          {:model "m" :input 2 :output 2 :cost-usd 2.0}]}
+        store {:deltas [(assoc batch :op :otel :id "d1")]}]
+
+    (testing "the journal's own copy counts once"
+      (let [r (telemetry/cost-by-model store)]
+        (is (= 2 (:requests (first (:rows r)))) (pr-str r))
+        (is (= 3.0 (:cost-usd (first (:rows r)))) (pr-str r))))
+
+    (testing "and handing the SAME batch in again does not count it twice"
+      (let [r (telemetry/cost-by-model store :otel [batch])]
+        (is (= 2 (:requests (first (:rows r)))) (pr-str r))
+        (is (= 3.0 (:cost-usd (first (:rows r)))) (pr-str r))))
+
+    (testing "a DIFFERENT batch still adds"
+      (let [r (telemetry/cost-by-model
+               store :otel [{:requests [{:model "m" :input 9 :output 9 :cost-usd 9.0}]}])]
+        (is (= 3 (:requests (first (:rows r)))) (pr-str r))
+        (is (= 12.0 (:cost-usd (first (:rows r)))) (pr-str r))))
+
+    (testing "and a handed-in batch on its own is unaffected"
+      (let [r (telemetry/cost-by-model {:deltas []} :otel [batch])]
+        (is (= 2 (:requests (first (:rows r)))) (pr-str r))))))

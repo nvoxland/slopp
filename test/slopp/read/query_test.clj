@@ -142,3 +142,43 @@
       ;; written to avoid
       (is (thrown-with-msg? Exception #"unknown :by"
                             (query/query-turn-cost session :by "modle"))))))
+
+(deftest query-cost-refuses-a-window-nothing-matches-and-pages-what-it-is-asked
+  ;; The refusal on an unknown `:by` was written because a mistyped split that
+  ;; quietly answered the whole-window fold reads as "there is nothing to
+  ;; split by" — the wrong answer arriving silently. `:since` had the same
+  ;; hole and it was worse: an id nothing matches left the measurement
+  ;; readers with no floor at all, so the reply paired a windowed header
+  ;; ("0 turns") with every request and every tool call the store has ever
+  ;; recorded. A plausible bill for a window that does not exist.
+  (let [store   {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a" :intent "one"}
+                          {:op :turn-end   :id "d2" :at 2000 :agent "a"}
+                          {:op :turn-begin :id "d3" :at 3000 :agent "a" :intent "two"}
+                          {:op :turn-begin :id "d5" :at 4000 :agent "a" :intent "three"}]}
+        session (atom {:store store})]
+
+    (testing "an id the journal carries windows normally"
+      (is (contains? (query/query-turn-cost session :since "d1") :wall)))
+
+    (testing "an id NOTHING in the journal carries is refused"
+      (is (thrown-with-msg? Exception #"unknown :since"
+                            (query/query-turn-cost session :since "nope"))))
+
+    (testing "an EMPTY :by is refused rather than silently the whole window"
+      ;; (str nil) and (str "") are the same string, which is how a blank
+      ;; slipped through to the default
+      (is (thrown-with-msg? Exception #"unknown :by"
+                            (query/query-turn-cost session :by "")))
+      (is (contains? (query/query-turn-cost session) :wall)
+          "omitting :by is still the whole window"))
+
+    (testing "a split is taken in the spelling the caller used"
+      ;; the wire sends strings; a direct caller reaches for a keyword, and
+      ;; refusing :model while accepting \"model\" is a refusal about nothing
+      (is (= :model (:by (query/query-turn-cost session :by :model))))
+      (is (= :ask (:by (query/query-turn-cost session :by "ask")))))
+
+    (testing ":limit reaches the split that pages"
+      (is (= 3 (count (:rows (query/query-turn-cost session :by "ask")))))
+      (is (= 1 (count (:rows (query/query-turn-cost session :by "ask" :limit 1))))
+          "the default of 20 was the only page anyone could ask for"))))

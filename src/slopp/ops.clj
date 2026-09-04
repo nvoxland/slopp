@@ -3119,6 +3119,11 @@
   delta, by the row's timestamp against the delta's `:at` — a measurement
   has no position in the journal.
 
+  An id the journal does not carry is REFUSED. It used to leave the floor
+  nil, and a nil floor reads as no-window-asked-for — every batch in the
+  store. The journal half of the same call windows to nothing, so the reply
+  said zero turns beside an all-time bill and nothing in it looked wrong.
+
   The read TWIN of the writer, and it lives here for the same reason the
   writer does: measurements are beside the journal rather than in it, and
   opening the journal is IO. `slopp.read.query` is the `query_*` front door
@@ -3128,7 +3133,13 @@
   said so."
   [session & {:keys [since]}]
   (if-let [conn (:db @session)]
-    (let [floor (when since (:at (db/delta-by-id conn since)))]
+    (let [floor (when since
+                  (:at (or (db/delta-by-id conn since)
+                           (throw (ex-info (str "unknown :since " (pr-str since)
+                                                " — no delta in this journal carries"
+                                                " that id, and an unknown window is"
+                                                " not the same fact as no window")
+                                           {:since since})))))]
       (into []
             (comp (filter #(or (nil? floor) (> (:at %) floor)))
                   (map :payload))
@@ -3177,12 +3188,22 @@
   turns and read records and sat a windowed header over all-time tool
   totals).
 
+  An id the journal does not carry is REFUSED, for the same reason and after
+  the same bug one layer down: a nil floor reads as no-window-asked-for,
+  which is every row ever recorded.
+
   The read twin of the writer, here rather than in `slopp.read.query` for
   the reason [[otel-measurements]] is: the front door is declared `:pure`,
   and reading a table is IO."
   [session & {:keys [since]}]
   (if-let [conn (:db @session)]
-    (let [floor (when since (:at (db/delta-by-id conn since)))]
+    (let [floor (when since
+                  (:at (or (db/delta-by-id conn since)
+                           (throw (ex-info (str "unknown :since " (pr-str since)
+                                                " — no delta in this journal carries"
+                                                " that id, and an unknown window is"
+                                                " not the same fact as no window")
+                                           {:since since})))))]
       (into []
             (comp (filter #(or (nil? floor) (> (:at %) floor)))
                   (map #(assoc (:payload %) :at (:at %))))

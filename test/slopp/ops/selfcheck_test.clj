@@ -287,3 +287,56 @@
       (is (nil? (get (:namespaces st) 'slopp.webapp.dom.cljs))
           "stripping the extension has to know about .cljs too, or the ns is
            named after its own file suffix"))))
+
+(deftest ^:external
+  ^{:correspondence "the descriptor vectors slopp.mcp.tools/classified composes vs the shape its classifier requires — related by nothing but the assumption that every entry is a map, and the load failure it causes is invisible to a running image"}
+  every-tool-descriptor-is-a-map-with-a-name
+  ;; `classified` resolves a classification onto EVERY entry of the descriptor
+  ;; groups, so an entry that is not a map takes the whole namespace down at
+  ;; load — and the failure hides exactly where it matters most. A live host
+  ;; keeps serving the value it already holds, the verification image keeps
+  ;; the value IT already holds, and every test about the advertised surface
+  ;; goes on passing while a FRESH boot cannot start the server at all.
+  ;;
+  ;; Not hypothetical. A descriptor edit dropped one entry's `{:name …` head
+  ;; and left its `:inputSchema` keyword and schema map loose in the vector;
+  ;; the store carried a commit-point marked green while nothing could boot
+  ;; from it, and the reload had been failing on every poll for hours.
+  ;;
+  ;; Read from the STORE rather than from the loaded vars — the stale var is
+  ;; the thing that hid it — and take the groups from `classified`'s own
+  ;; source, so a seventh group added later is covered without being listed.
+  (let [st     (external/built-store)
+        forms  (store/forms st 'slopp.mcp.tools)
+        sexpr  (fn [nm] (some (fn [e] (when (= nm (store/form-symbol (:node e)))
+                                        (store/form-sexpr (:node e))))
+                              forms))
+        walk   (fn walk [x] (cond (coll? x)   (mapcat walk x)
+                                  (symbol? x) [x]
+                                  :else       []))
+        groups (vec (distinct (filter #(str/ends-with? (str %) "-tools")
+                                      (walk (sexpr 'classified)))))
+        defs   (vec (for [g groups
+                          :let [s (sexpr g)
+                                v (when (seq? s) (last s))]]
+                      {:form g :rows (if (vector? v) v [])}))
+        bad    (vec (for [{:keys [form rows]} defs
+                          [i row] (map-indexed vector rows)
+                          :when (not (and (map? row) (:name row)))]
+                      {:form form :index i :entry (pr-str row)}))]
+    (testing "there is a population — the scan reached the descriptor groups"
+      (is (<= 6 (count groups)) (pr-str groups))
+      (is (some #{'orientation-tools} groups) (pr-str groups))
+      (is (< 50 (reduce + 0 (map (comp count :rows) defs)))
+          (pr-str (mapv (juxt :form (comp count :rows)) defs))))
+    (testing "the detector bites, on both shapes"
+      (is (not (map? :inputSchema)) "a loose keyword is not a descriptor")
+      (is (nil? (:name {:type "object"})) "a headless schema map is not one either")
+      (is (:name {:name "query_cost"})))
+    (is (= [] bad)
+        (str "tool descriptor entr(ies) that are not a map with a :name: "
+             (pr-str bad)
+             " — the classifier assoc's onto every entry, so a loose keyword"
+             " or a headless schema map makes slopp.mcp.tools unloadable on a"
+             " fresh boot while a running image keeps serving the value it"
+             " already has"))))

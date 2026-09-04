@@ -5158,3 +5158,63 @@
       (finally
         (try (ops/close! sess) (catch Exception _ nil))
         (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
+
+(deftest
+  ^{:correspondence "the image-currency keys slopp.ops' write paths produce vs the wire-keys allowlist that lets a key reach the agent — a key built one layer down and dropped here is invisible, and the result LOOKS green"}
+  a-failed-image-repair-reaches-the-agent
+  ;; A per-form hot-load is only equivalent to loading the form when the
+  ;; form's whole contribution is its own var binding. When something
+  ;; CAPTURED a value from it, `edit-replace!` repairs by reloading the
+  ;; capturing namespace — and when that reload FAILS, it says so:
+  ;; `:image-reload-failed` names the namespace and the error,
+  ;; `:stale-in-image` names what the repair could not reach.
+  ;;
+  ;; Both were built, tested and correct while the wire dropped them. The
+  ;; consequence is the worst shape available: the write reports GREEN, the
+  ;; verification image keeps answering from the value it already holds, and
+  ;; the store is left in a state no fresh process can load. A commit-point
+  ;; was recorded green over exactly that, and the reload had been failing
+  ;; every poll for hours with nothing on any result saying so.
+  ;;
+  ;; `wire-keys` exists because fourteen hand-kept allowlists kept losing
+  ;; findings this way, and its docstring names three. This is the fourth,
+  ;; and it is the one that could invalidate a verdict rather than merely
+  ;; hide a hint.
+  (testing "the keys a write uses to doubt its own image are on the wire"
+    (doseq [k [:image-reloaded :image-reload-failed :stale-in-image :image-rebuilt]]
+      (is (contains? tools/wire-keys k)
+          (str k " is produced by slopp.ops' write paths and would be dropped"
+               " before the agent sees it"))))
+  (testing "so a result carrying them survives the allowlist whole"
+    (let [r {:delta "d1" :test {:pass 1}
+             :image-reloaded '[app.core]
+             :image-reload-failed '{app.core "Syntax error"}
+             :stale-in-image '[app.core/tools]}]
+      (is (= r (select-keys r tools/wire-keys))
+          "a write that repaired nothing and knows it must not read as a clean write"))))
+
+(deftest
+  ^{:correspondence "the arguments query_cost's handler passes to query-turn-cost vs the inputSchema the dispatch validates against — an argument missing from the schema is REFUSED before the handler could use it, so the two must agree"}
+  query-cost-takes-the-page-size-it-pages-by
+  ;; `cost-by-ask` and `cost-by-commit-point` both take `:limit` and default
+  ;; it to 20. The front door destructured it away and the schema never
+  ;; advertised it, so the argument was refused on arrival — and 20 rows was
+  ;; not a default anyone chose, it was the only answer reachable.
+  ;;
+  ;; Schema and handler are related by nothing but agreement here: an
+  ;; argument absent from `:inputSchema` never reaches the handler at all,
+  ;; because strict validation refuses the whole call first.
+  (testing "the schema advertises it"
+    (is (contains? (tools/accepted-arg-keys "query_cost") :limit)))
+  (testing "so the dispatch does not refuse it"
+    ;; asked in the spelling the dispatch actually holds — arguments are
+    ;; keywordized before validation, so a string-keyed question here would
+    ;; test the keywordizer and pass whatever the schema said
+    (is (nil? (tools/unknown-arg-keys "query_cost" {:limit 5 :by "ask"})))
+    (is (= '("nonsense") (tools/unknown-arg-keys "query_cost" {"nonsense" 1}))
+        "and the check still bites for a key the schema really lacks"))
+  (testing "and the splits it pages are still the advertised ones"
+    (let [d (first (filter #(= "query_cost" (:name %)) tools/registry))]
+      (is (= ["commit-point" "model" "ask"]
+             (get-in d [:inputSchema :properties :by :enum])))
+      (is (= "integer" (get-in d [:inputSchema :properties :limit :type]))))))
