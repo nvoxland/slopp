@@ -2716,3 +2716,35 @@ opus-5: turns −47% to −59%, cost −13% to −32%, wall −26% to −35%; so
 turns −74%, cost −38%, wall −30%; acceptance 6/6 in every run since the
 landing floor moved into the server.
 
+## 2026-09-04 — eval31: slopp on its own codebase (read-heavy), opus-5
+
+**Design.** Three asks on THIS store (247 namespaces, 3,629 forms; 243
+files / 8.6 MB as the plain seed, from the projection's main tree with its
+test alias): how a `done` lands work (six checkable facts), make
+`query_cost {turns N}` work with a test (a probe through the wire), and
+the tool-result size gate (six facts). Three interleaved pairs.
+Records: `projects/eval31-self/RUNS.md`.
+
+**Result.** slopp 48 turns / $3.72 / 700 s (medians) against plain 107 /
+$4.87 / 1,461 s — turns −55%, cost −24%, wall −52%. Read questions: both
+cohorts correct in every cell; slopp 14–23 turns against plain 28–40 for
+the path question, 6 against 6–9 for the numbers question. The change:
+slopp 19–30 turns and 5–9 minutes; plain 60–73 turns and 15–29 minutes,
+almost all of it running the whole suite through the CLI.
+
+**Two harness facts worth keeping.** A plain cell's background test run
+was terminated at the harness's ceiling and its JSON undercounts that
+step's turns; and a slopp cell died on "the model's tool call could not
+be parsed (retry also failed)" with its tests landed red — a red episode
+correctly left on the thread, scored as a miss. The landing floor was
+also found to lose a race on a big store: the harness kills the server as
+the session ends, and the exit landing runs an 880-test suite. It runs as
+a JVM shutdown hook now as well (`mcp/exit-landing-hook!`), idempotent
+with the stdio loop's finally.
+
+**Against the dogfooding record.** The store's own census (352 asks, $2,980,
+median context 489k, 39% re-fetch on trimmed reads, `verify` 3.1 h of
+wall) is the same shape: reads are the characters, verification is the
+wall. What this eval could not test is the long-session rent — three
+one-shot sessions never reach a 489k context.
+
