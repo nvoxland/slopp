@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.store.db :as db] [clojure.edn :as edn]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -430,6 +430,28 @@
       (str "--- the records the ask asks about — each form's versions (op, when, the ask that made it); this IS the record, quote it ---\n"
            (str/join "\n" lines)))))
 
+(defn ^:export records-section
+  "`records-text` plus what git had BEFORE the import, from the `git-log`
+  meta a clone records (`git/recent-commits`): one line naming the count and
+  the newest commits, so the pre-import record is in the answer too — the
+  model went to `git log` for it after the store said \"imported, no ask
+  recorded\" (eval27 opus, every cell). `hsess` is a session hydrated by
+  `ops/with-history`."
+  [hsess forms]
+  (let [conn (:db @hsess)
+        log  (when conn
+               (try (some-> (db/get-meta conn "git-log") edn/read-string)
+                    (catch Exception _ nil)))
+        text (records-text hsess forms)]
+    (when (or text (seq log))
+      (str (or text "--- the records the ask asks about ---")
+           (when (seq log)
+             (str "\n  git before the import: " (count log) " commit" (when (not= 1 (count log)) "s")
+                  " — "
+                  (str/join "; " (for [c (take 5 log)] (str (:sha c) " " (:at c) " \"" (:subject c) "\"")))
+                  (when (< 5 (count log)) " …")
+                  ". Nothing before the import is recorded anywhere else."))))))
+
 (defn ^{:http/read :orient/bundle} bundle-read!
   "Read performer: the ask bundle — `orient/bundle` over the live session,
   the ask from `?ask=` (blank is the plain ranking). `?session-id=` is the
@@ -490,7 +512,7 @@
                                       top    (->> (:rows (orient/orient-map session :ask q-text :tokens 400))
                                                   (map :form) (take 3) vec)]
                                   (when (seq top)
-                                    (records-text (ops/with-history session) top))))]
+                                    (records-section (ops/with-history session) top))))]
                    (str text "\n" rec)
                    text)
         ;; the project's aliases, once: the first map carries them, the delta

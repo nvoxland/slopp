@@ -5099,3 +5099,20 @@
           (is (re-find #"(?i)imported" sec) "the origin rides: imported, no ask recorded")
           (is (re-find #"0123456789ab" sec) "with the sha")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-sweep-preview-is-a-read-and-rides-in-explore
+  ;; eval27 opus step 3, every cell: explore [{query_search zone} {rename_sweep dry_run}]
+  ;; refused as a write, then the two calls made one by one. A preview
+  ;; writes nothing; it is a read.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "pe.zone" :source "(ns pe.zone)\n(def ^:unused-ok zone-fees \"The zone table.\" {1 500})\n"})
+      (let [before (count (ops/journal sess))
+            r      (call! sess "explore" {:ops [{:op "query_search" :pattern "zone"}
+                                               {:op "rename_sweep" :from "zone" :to "region" :dry_run true}]})]
+        (is (re-find #":dry-run true" r) r)
+        (is (re-find #":mentions" r) r)
+        (is (= before (count (ops/journal sess))) "nothing written"))
+      (testing "a sweep without dry_run is still a write and still refused there"
+        (is (re-find #"is a write" (call! sess "explore" {:ops [{:op "rename_sweep" :from "zone" :to "region"}]}))))
+      (finally (ops/close! sess)))))

@@ -7,7 +7,7 @@
             [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.mcp]
-            [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db]))
+            [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db] [slopp.api.reads :as api.reads]))
 
 (deftest ^:external form-history-is-reconstructible
   (let [sess (external/open!)]
@@ -371,4 +371,20 @@
       (let [r (ops/report sess)]
         (is (= "0123456789abcdef0123456789abcdef01234567" (get-in r [:origin :sha])) (pr-str (:origin r)))
         (is (re-find #"(?i)import" (str (get-in r [:origin :note]))) (pr-str (:origin r))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-records-say-what-git-had-before-the-import
+  ;; eval27 opus step 2: \"the store's own history has only the :ingest delta
+  ;; — checking the pre-slopp git record\" → git log twice, a search, a
+  ;; file_list. The import keeps the branch's recent commits; the records
+  ;; section hands them over.
+  (let [sess (external/open!)]
+    (try
+      (db/set-meta! (:db @sess) "git-base-sha" "0123456789abcdef0123456789abcdef01234567")
+      (db/set-meta! (:db @sess) "git-log" (pr-str [{:sha "0123456789ab" :at "2026-07-14" :subject "seed: 41-namespace logi domain, all tests green"}]))
+      (ops/ingest! sess 'gl.core "(ns gl.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+      (let [txt (api.reads/records-section (ops/with-history sess) ['gl.core/f])]
+        (is (re-find #"git before the import" txt) txt)
+        (is (re-find #"seed: 41-namespace" txt) txt)
+        (is (re-find #"1 commit " txt) txt))
       (finally (ops/close! sess)))))

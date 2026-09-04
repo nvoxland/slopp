@@ -23,7 +23,7 @@ slopp.git-client: slopp.git slopp.read slopp.ops (test)
 slopp.git-concurrency: slopp.git slopp.ops (test)
 slopp.git-projection: slopp.git slopp.read slopp.store slopp.ops (test)
 slopp.gitauthor: slopp.git
-slopp.history: slopp.mcp slopp.read slopp.store slopp.ops (test)
+slopp.history: slopp.api slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.http: slopp.lang slopp.rest (test) slopp.webapp (test)
 slopp.hub: slopp.http slopp.project slopp.store (test)
 slopp.image: slopp.kernel slopp.store

@@ -1090,3 +1090,26 @@
         (is (= {:forms 2 :files 1} (select-keys (:mentions r) [:forms :files])) (pr-str (:mentions r)))
         (is (re-find #"every mention" (str (:note (:mentions r)))) (pr-str (:mentions r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-string-hit-carries-its-form-and-the-run-carries-the-rewrite
+  ;; eval27 opus step 3: the preview named logi.invoice/invoice-lines as a
+  ;; string hit; the model read the whole namespace (6.5k) to judge it, ran
+  ;; the sweep, then read the form again to fix the column alignment the
+  ;; longer word broke. The hit carries its form; the run carries the
+  ;; rewritten form.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'sh.invoice
+                   (str "(ns sh.invoice)\n\n"
+                        "(defn ^:unused-ok lines \"Invoice lines.\" [b]\n"
+                        "  [(str \"  zone      \" (:zone-fee b))])\n\n"
+                        "(defn ^:unused-ok other \"O.\" [] 1)\n"))
+      (let [r (ops/rename-sweep! sess "zone" "region" :dry-run true)
+            hit (first (:in-strings r))]
+        (is (= 'sh.invoice/lines (:form hit)) (pr-str r))
+        (is (re-find #"\(defn \^:unused-ok lines" (str (:source hit))) "the hit carries its form's source"))
+      (let [r  (ops/rename-sweep! sess "zone" "region" :prompt "rename")
+            rw (first (filter #(= 'sh.invoice/lines (:form %)) (:rewritten r)))]
+        (is (some? rw) (pr-str (:rewritten r)))
+        (is (re-find #"\"  region      \"" (str (:source rw))) "the rewritten text, so the alignment fix needs no read"))
+      (finally (ops/close! sess)))))

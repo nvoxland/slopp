@@ -737,3 +737,24 @@
           (set-branch-ref! repo nm sha))
         {:refs refs
          :via  (into {} (map (fn [[nm r]] [nm (:via r)])) results)}))))
+
+^:reads (defn ^:export recent-commits
+  "The newest `n` commits reachable from `sha` in `repo`, newest first, as
+  `[{:sha (12 chars) :at \"yyyy-MM-dd\" :subject} …]` — the shape a records
+  answer quotes. Empty when the repo lacks the object (an in-memory
+  projection routinely does). A clone keeps this as the `git-log` meta, so
+  \"what did git have before the import\" is answered from the store rather
+  than by a shell (eval27 opus: git log twice per cell for it)."
+  [^Repository repo sha n]
+  (if-not (and repo sha)
+    []
+    (let [id (ObjectId/fromString sha)]
+      (if-not (.has (.getObjectDatabase repo) id)
+        []
+        (with-open [rw (RevWalk. repo)]
+          (.markStart rw (.parseCommit rw id))
+          (vec (for [^org.eclipse.jgit.revwalk.RevCommit c (take n (iterator-seq (.iterator rw)))]
+                 {:sha (subs (.getName c) 0 12)
+                  :at (.format (java.text.SimpleDateFormat. "yyyy-MM-dd")
+                               (java.util.Date. (* 1000 (long (.getCommitTime c)))))
+                  :subject (.getShortMessage c)})))))))

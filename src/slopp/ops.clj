@@ -4684,7 +4684,11 @@
                                      line (when s? (fline src))]
                                  (cond-> {:form (symbol (str ns) (str name))
                                           :strings? s?}
-                                   line (assoc :match line))))
+                                   line (assoc :match line)
+                                   ;; the form itself, for the one bucket a reader
+                                   ;; has to judge — or the whole namespace gets
+                                   ;; read for it (eval27 opus, 6.5k, every cell)
+                                   s?   (assoc :source src))))
                     rows'    (mapv classify steps)
                     left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
                                           (sweep-patterns-left-behind st from pat)))
@@ -4770,6 +4774,16 @@
                                                          " — a spelling the boundary rule kept, or prose"
                                                          " no case rule covers; read them."))]))]
                       (cond-> (merge r (assoc nsr :forms (count steps)) {:remaining rem :note note})
+                        ;; the string-hit forms AS REWRITTEN: a longer word can
+                        ;; break a column a string was aligning, and the fix
+                        ;; should need no read (eval27 opus)
+                        (seq rows)         (assoc :rewritten
+                                                  (vec (for [row (take 6 (filter #(refactor/match-in-strings? (:orig %) pat*) rows))
+                                                             :let [nsx (symbol (str/replace (str (:ns row)) pat to))
+                                                                   e   (store/form-named st* nsx (:name row))]
+                                                             :when e]
+                                                         {:form (symbol (str nsx) (str (:name row)))
+                                                          :source (n/string (:node e))})))
                         (seq file-hits)    (assoc :files (mapv :path file-hits))
                         (seq variants-hit) (assoc :case-variants variants-hit)
                         (seq requal)       (assoc :requalified requal)

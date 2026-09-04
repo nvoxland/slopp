@@ -11,7 +11,7 @@
             [slopp.store.db :as db]
             [slopp.git :as git]
             [slopp.store :as store]
-            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history])
+            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
@@ -980,6 +980,33 @@
               (is (re-find #"^imported from git [0-9a-f]{7,} \(" (str (:prompt v1))) (pr-str v1))
               (is (= (:pushed p1) (get-in v1 [:origin :git-sha])) (pr-str v1))
               (is (= (str bare) (get-in v1 [:origin :remote])) (pr-str v1)))
+            (finally (ops/close! sb)))))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest ^:external a-clone-keeps-the-branch-s-recent-commits-as-the-git-log-meta
+  ;; eval27 opus: the pre-import git record is what the model shelled out for
+  ;; after the store said \"imported, no ask recorded\". The clone keeps it.
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sess  (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (ops/ingest! sess 'gc.core seed)
+      (external/commit-point! sess "v1: f ships" :agent "alice")
+      (let [p1 (sync/push! dir-a :url bare)]
+        (is (nil? (:error p1)) (pr-str p1))
+        (let [c (sync/clone! bare dir-b :agent "bob")]
+          (is (nil? (:error c)) (pr-str c)))
+        (let [sb (external/open! {:slopp.ops/dir dir-b})]
+          (try
+            (let [log (edn/read-string (db/get-meta (:db @sb) "git-log"))]
+              (is (= 1 (count log)) (pr-str log))
+              (is (re-find #"v1: f ships" (str (:subject (first log)))) (pr-str log))
+              (is (= 12 (count (:sha (first log))))))
             (finally (ops/close! sb)))))
       (finally
         (ops/close! sess)

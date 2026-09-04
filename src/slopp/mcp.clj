@@ -1864,7 +1864,9 @@
                              (:commit a)
                              (or (:label a) (:done a) (:prompt a) "commit point"))]
                    (external/commit-point! session lbl :agent (:agent a))))]
-    (cond-> {}
+    (cond-> {;; how a teammate re-runs it — the line the model went to the
+             ;; README for (eval27 opus step 1)
+             :verify "slopp --call full_check '{}' from a shell in this directory runs everything, every tier; in a session, verify {op full_check}"}
       ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
       cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale])))))
 
@@ -2767,7 +2769,10 @@
                           (cond
                             (nil? nm) {:error "every explore entry needs :op — a read op name"}
                             (and (not (contains? tools/read-only-tools nm))
-                                 (not= "test_run" nm))
+                                 (not= "test_run" nm)
+                                 ;; a PREVIEW writes nothing: it is a read (eval27
+                                 ;; opus: refused in every cell, then made alone)
+                                 (not (and (= "rename_sweep" nm) (:dry_run o))))
                             {:error (str nm " is a write — explore is READ questions only;"
                                          " writes have their own grain (change)")}
                             :else nil)))

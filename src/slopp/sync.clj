@@ -887,6 +887,9 @@
                         (ops/file-put! sess path text :agent agent
                                        :prompt (str "clone: file from " url)))
                       (db/set-meta! conn "git-base-sha" tip)
+                      ;; what git had before the import — the records answer
+                      ;; an agent otherwise shells out for (eval27 opus)
+                      (db/set-meta! conn "git-log" (pr-str (git/recent-commits repo tip 20)))
                       ;; A clone establishes the PROJECT, so it lands on the
                       ;; branch. Everything above went through the ordinary
                       ;; verified write path, which means it went to this
