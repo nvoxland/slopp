@@ -62,15 +62,21 @@ turn; never call `turn_begin`.
    runs assertion code in the image and answers `{:value :pass :fail
    :assertions}` with NOTHING written — when a test would be a QUESTION,
    ask it here and read the red before you write anything.
-2. **ONE `change` carries the write**: `change {prompt tests? impl?
-   accept?}` — `tests` land first and the result says which went RED
-   (watched failing); `impl` lands; `accept ["ns/test" …]` names the
-   tests whose literal expectations your change is MEANT to move, and
-   their shifts finish in the same call; one verification, one result.
-   `{prompt impl}` alone is the ordinary write — a docstring, a comment, a
-   one-form fix. `{prompt tests}` alone lands the spec red and waits: the
-   impl is the next change. Say the WHY in `prompt`; it is the recorded
-   intent forever.
+2. **ONE `change` carries the write — and closes the unit when it is the
+   last one**: `change {prompt tests? impl? accept? done? commit?}` —
+   `tests` land first and the result says which went RED (watched
+   failing); `impl` lands; `accept ["ns/test" …]` names the tests whose
+   literal expectations your change is MEANT to move, and their shifts
+   finish in the same call; one verification, one result. `done "label"`
+   says this change FINISHES the unit: it is closed in the same call
+   (`:closed {:done :landed :suite :whole-store}`); `commit true` (or a
+   label) takes the commit point there too. The write that finishes an
+   ask is ONE turn — never `done`, `full_check`, `commit_point` after it.
+   A red change closes nothing (`:closed {:closed false}`), fix forward
+   and close again. `{prompt impl}` alone is the ordinary write — a
+   docstring, a comment, a one-form fix. `{prompt tests}` alone lands the
+   spec red and waits: the impl is the next change. Say the WHY in
+   `prompt`; it is the recorded intent forever.
 3. **The result is the verdict.** `:test {:ran :pass :status}` — the
    covering tests by name; `:finisher {:applied …}` — the expectation
    shifts you declared, already applied and re-verified; requires and
@@ -78,11 +84,14 @@ turn; never call `turn_begin`.
    A red change lands NOTHING and loses nothing — `:test-src` carries the
    failing test's source; fix forward from the result. Do not re-read what
    you wrote; do not `restart` or `test_run` after a green.
-4. **Iterate, then `done` when the UNIT is finished.** A unit may span
-   change → explore → change. `done {label}` is YOUR move at every point
-   you believe a unit of work is complete — and it runs itself when your
-   session stops, so forgetting costs nothing. `full_check` and
-   `commit_point` are the human's grain — not the loop's.
+4. **Iterate, then close when the UNIT is finished.** A unit may span
+   change → explore → change; the LAST change carries `done` (and
+   `commit`), or `done {label commit?}` stands alone after a read. A green
+   close carries `:suite` (the episode's counts) and, on a store where the
+   whole-store check is cheap, `:whole-store {:status :test :external}` —
+   the numbers to quote. `done` also runs itself when your session stops,
+   so forgetting costs nothing. `full_check` is the human's grain, for a
+   store too big to check in a close; `commit_point` is `commit true`.
 
 ## Which write
 
@@ -95,7 +104,7 @@ turn; never call `turn_begin`.
 | rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first (`:in-code`, `:in-strings`, `:in-files`), then without — the result's `:remaining` is the case-insensitive census of what still names it, so there is nothing to grep for afterwards |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
 | new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold |
-| require / module edge | usually automatic; else `ns_add_require {ns require}`, `module_dep {from to}` (a refusal names the edge) |
+| require / module edge | usually automatic; else `ns_add_require {ns require}` (`lib` works too; a clause without brackets is wrapped; a different spelling of a lib already required REPLACES it; a namespace of yours that does not exist yet is created empty), `ns_remove_require {ns lib}`, `module_dep {from to}` (a refusal names the edge) |
 | delete | `change` — a `:delete` step; callers first: a delete with a live caller is refused and names it |
 | undo my last writes | `undo {deltas n}` |
 | a tracked non-code file (README, config) | `slopp {op file_get path}` / `slopp {op file_put path content prompt}` — the store tracks it; an edit made with `sed` on the projection is drift |
@@ -145,7 +154,7 @@ text replace; say `text: true` next time.
 | what changed here, why, and what was asked — a handoff | `history {op report}` — every ask WHOLE under `:by-ask` with the `:deltas` it made (the citations), `:origin` (the seeded version), `:suite` with the counts and the command to hand over; `{contains "x"}` narrows, `{since "start"}` is the lifetime. One call IS the handoff; `query_history`/`query_changes` add nothing it lacks |
 | who calls X / what X reaches / the module graph | `depends {op query_depends on "ns/x"}` (`modules true`) |
 | what a fn really does with real inputs | `eval {op query_observe ns name code}` |
-| is the whole store green, and what artifact is behind | `verify {op full_check}` — the human's grain, not the loop's. A green answer carries `:test` and `:external` counts: quote them, never `test_run` after a green. `done`'s `:suite` is the same number for the episode |
+| is the whole store green, and what artifact is behind | a close already says (`:whole-store` on done / a closing change) when the store is small; `verify {op full_check}` is for a store too big to check in a close. A green answer carries `:test` and `:external` counts: quote them, never `test_run` after a green |
 | how the teammate runs the suite | `slopp --call test_run '{"external":true}'` from the project dir |
 
 ## Refusals teach

@@ -6308,6 +6308,31 @@ sweep of mixed-case identifiers: the case variants are the Capitalized and
 UPPER spellings of a bare lowercase word, for prose; a keyword or a dotted
 name has none.
 
+### D-one-call-unit — the write that finishes an ask closes it (2026-09-03)
+
+**Decision.** `change` accepts `done` (a label) and `commit` (true or a
+label): a GREEN change carrying either runs the done, lands, takes the
+commit point, and — when the whole-store check is cheap (last run under
+8 s, or under sixty namespaces) — runs that too, all in the same call,
+under `:closed`. A red change closes nothing and says so. `done` takes
+`commit` as well, and carries the cheap whole-store verdict as counts. The
+skill's loop ends with the closing change; `full_check` is for a store too
+big to check in a close; `commit_point` is `commit true`.
+
+**Why.** eval25 opus: every step ended `done` → `full_check` →
+`commit_point`, three turns for one unit, ten a lifetime — 20% of a
+49-turn cell — for facts that exist at done time. Cost tracks turns times
+context; each of those turns re-paid a 33k-token context. The floor per
+step is five turns (read, write, close, answer, slack) and the best cell
+reached it once; this collapses the close to zero turns of its own.
+
+**What it does not license.** Not an automatic commit point on every done:
+`commit` is asked for, by the call that finishes the ask, so the projection
+grain stays the author's. Not a whole-store check on a big store inside a
+close: the cheapness test decides, and a store that fails it gets the note
+naming the last green `full_check`, as before. Not closing on red: a red
+change lands nothing, whatever it asked for.
+
 ### D-canonical-refs — qualified in, alias on store; the loader hole closed (2026-09-03)
 
 **Decision.** A form may name a lib fully qualified (`logi.fuel/eco-fuel`).

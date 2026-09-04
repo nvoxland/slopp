@@ -147,4 +147,19 @@ full map.
 - `:source-now` — your match missed or was ambiguous. Correct from it and
   resend; no read needed.
 - `:hint` — a one-line workflow nudge, at most once per session.
+- `:closed` (change with `done`/`commit`) — `{:done :status :landed :suite
+  [:whole-store] [:commit]}` when the write was green and the unit closed in
+  the same call; `{:closed false :why …}` on a red write (nothing landed).
+- `:whole-store` (done, a closing change) — a MAP `{:status :test :external
+  [:standing]}` when the whole-store check was cheap enough to run inside the
+  close (last run under 8 s, or under sixty namespaces); otherwise the note
+  naming the last green full_check. `:commit {:commit :status}` when the
+  close took a commit point.
+- `:mentions` (rename_sweep dry run) — `{:forms n :files n :note}`: the
+  case-insensitive census of every mention BEFORE the run; the preview is
+  complete, nothing outside it to search for.
+- `:also-created` (ns_add_require) — the empty namespace it created for a
+  require of a namespace of yours that did not exist yet; `:replaced` /
+  `:upgraded` / `:merged-refer` — how an existing clause for the same lib
+  was rewritten rather than refused.
 
