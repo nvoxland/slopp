@@ -36,32 +36,6 @@
   thing `slopp.webdev.live` has to exist to do for a server."
   (:require [slopp.cli.spec :as spec]))
 
-(defn ^:export commands-in
-  "Every command declared in `ns-syms`, as `{name command-map}`.
-
-  The vocabulary is DERIVED from `:cli/command` markers on vars, never
-  registered — the same choice `slopp.http.routes/performers-from-namespaces`
-  makes for effect kinds, down to a namespace that is not loaded contributing
-  nothing rather than throwing. Adding a command is writing one `defn`; there
-  is no list to also remember, which removes this codebase's most frequent bug
-  class by construction rather than by discipline.
-
-  The whole declaration travels WITH the handler, so nothing downstream re-reads
-  the var: `run`, `help-text` and the surface report all read one map. A
-  consumer that went back to the var would be a second reader of the same
-  metadata, free to disagree about what it found."
-  [ns-syms]
-  (into {}
-        (for [ns-sym ns-syms
-              :let   [nsx (find-ns (symbol (str ns-sym)))]
-              :when  nsx
-              v      (vals (ns-publics nsx))
-              :let   [m (meta v)]
-              :when  (:cli/command m)]
-          [(str (:cli/command m))
-           (assoc (select-keys m [:cli/command :cli/doc :cli/args :cli/opts])
-                  :cli/handler @v)])))
-
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map
@@ -220,3 +194,29 @@
             (.flush ^java.io.Writer out)
             (.flush ^java.io.Writer err)
             (done (if (integer? status) status 0))))))))
+
+(defn ^:export commands-in
+  "Every command declared in `ns-syms`, as `{name command-map}`.
+
+  The vocabulary is DERIVED from `:cli/command` markers on vars, never
+  registered — the same choice `slopp.http.routes/performers-from-namespaces`
+  makes for effect kinds, down to a namespace that is not loaded contributing
+  nothing rather than throwing. Adding a command is writing one `defn`; there
+  is no list to also remember, which removes this codebase's most frequent bug
+  class by construction rather than by discipline.
+
+  The whole declaration travels WITH the handler, so nothing downstream re-reads
+  the var: `run`, `help-text` and the surface report all read one map. A
+  consumer that went back to the var would be a second reader of the same
+  metadata, free to disagree about what it found."
+  [ns-syms]
+  (into {}
+        (for [ns-sym ns-syms
+              :let   [nsx (find-ns (symbol (str ns-sym)))]
+              :when  nsx
+              v      (vals (ns-publics nsx))
+              :let   [m (meta v)]
+              :when  (:cli/command m)]
+          [(str (:cli/command m))
+           (assoc (select-keys m [:cli/command :cli/doc :cli/args :cli/opts])
+                  :cli/handler @v)])))

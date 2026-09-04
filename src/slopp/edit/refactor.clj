@@ -101,113 +101,6 @@
              [(str (subs (ls (dec sr)) 0 (dec sc)) repl (subs (ls (dec er)) (dec ec)))]
              (subvec ls er)))))
 
-(defn- under-meta
-  "Apply `f` to the form node beneath any form-level meta wrappers
-  (`^:reads (defn- ...)` parses as a :meta node around the list) —
-  the wrapper survives, the transform sees the defn."
-  [node f]
-  (if (= :meta (n/tag node))
-    (let [kids (vec (n/children node))
-          i    (last (keep-indexed
-                      (fn [i k] (when-not (#{:whitespace :comment} (n/tag k)) i))
-                      kids))]
-      (n/replace-children node (assoc kids i (under-meta (kids i) f))))
-    (f node)))
-
-(defn publicize
-  "The form node with its top-level privacy stripped: the `defn-` operator
-  becomes `defn`, and a `^:private` marker on the def symbol is removed.
-  A form moved to another namespace must be PUBLIC for its old neighbors'
-  rewritten calls to compile — when the new home is a deep ns, the module
-  system still keeps it package-private at the module grain (the right
-  boundary). Only the form's immediate children are touched; a map-meta
-  `^{:private true}` is left alone (rare; the load fails honestly)."
-  [node]
-  (n/replace-children
-   node
-   (map (fn [k]
-          (case (n/tag k)
-            :token (if (= 'defn- (n/sexpr k)) (n/token-node 'defn) k)
-            :meta  (let [kids (remove #(#{:whitespace :comment} (n/tag %))
-                                      (n/children k))]
-                     (if (and (= 2 (count kids))
-                              (= :private (n/sexpr (first kids))))
-                       (second kids)
-                       k))
-            k))
-        (n/children node))))
-
-(defn- quoted-loc?
-  "Is this zipper location inside a QUOTE — `'x` or `` `x ``?
-
-  A quoted symbol is a NAME being passed as DATA: a `store/late-ref` target,
-  a `requiring-resolve` argument, an `ns-unmap` name. The reader never
-  resolves it, so an alias is meaningless in one and a missing namespace is
-  fatal — and neither shows up at write time, because the form compiles and a
-  late-bound target only resolves at its first CALL."
-  [zl]
-  (loop [up (z/up zl)]
-    (cond (nil? up)                            false
-          (#{:quote :syntax-quote} (z/tag up)) true
-          :else                                (recur (z/up up)))))
-
-(defn- unwrap-forms
-  "`root` with a `z/root` `:forms` wrapper removed — the single form it holds.
-
-  **Every zipper rewrite that returns a NODE owes this.** `z/root` wraps its
-  result in a `:forms` node, and `store/form-symbol` refuses a `:forms` wrapper
-  deliberately (a wrapper may hold several top-level forms, so the name is
-  genuinely ambiguous). A pass that forgets to unwrap therefore hands back a
-  form the store keeps the SOURCE of and loses the NAME of — anonymous, and
-  silent, because the rendered text is identical.
-
-  It was written inline in [[rewrite-symbols]] and missing from
-  [[qualified-mention-changeset]], which is the prose pass. slopp's own
-  `rules.catalog/rule-catalog` names a namespace in a `:teach` string, so
-  renaming that family anonymised the catalog; `export-level` looks a var up BY
-  NAME, returned nil, and every caller of it read as calling a package-private
-  var. A whole-store rename then died on a visibility refusal naming a rule
-  that was never the problem."
-  [root]
-  (if (= :forms (n/tag root))
-    (or (first (filter n/sexpr-able? (n/children root))) root)
-    root))
-
-(defn rewrite-symbols
-  "Zipper-walk `node`, replacing symbol tokens via `f` (sym → sym|nil).
-  Returns the (possibly identical) node. z/root wraps its result in a
-  :forms node — unwrapped here, or every changeset-rewritten form would
-  lose its :name downstream (apply-changeset recomputes names via
-  form-symbol, which rightly refuses :forms wrappers; found via Q14's
-  sweep when a consumer's rewritten ns decl broke image load order).
-
-  `opts` selects WHICH symbols the walk visits, `'…`/`` `… `` being the
-  axis: `{:skip-quoted true}` visits only unquoted ones, `{:only-quoted
-  true}` only quoted ones, and neither visits everything. Opt IN, because
-  the callers want different things about the same token — a RENAME
-  rewrites a quoted name to another fully-qualified name and is right to,
-  while a MOVE must dequalify the CALL and give the quoted name its new
-  home's full name instead, which is two passes with the same predicate.
-  See [[quoted-loc?]] for why getting it wrong shows up at neither write
-  time nor test time."
-  ([node f] (rewrite-symbols node f nil))
-  ([node f {:keys [skip-quoted only-quoted]}]
-   (loop [zl (z/of-node node)]
-     (let [visit? (and (= :token (z/tag zl))
-                       (symbol? (z/sexpr zl))
-                       (cond skip-quoted (not (quoted-loc? zl))
-                             only-quoted (quoted-loc? zl)
-                             :else       true))
-           zl (if visit?
-                (if-let [s' (f (z/sexpr zl))]
-                  (z/replace zl s')
-                  zl)
-                zl)
-           nxt (z/next zl)]
-       (if (z/end? nxt)
-         (unwrap-forms (z/root zl))
-         (recur nxt))))))
-
 (defn ns-sym-mapper
   "Symbol rewriter old-ns → new-ns: the ns name itself, and any
   old-ns/qualified symbol."
@@ -222,17 +115,23 @@
         (symbol (str n (subs (str sym) (count o))))
         :else nil))))
 
-(defn ^:export ns-rename-changeset
-  "Every form in the STORE mentioning `old` as a namespace — its own ns decl,
-  require clauses, fully-qualified refs — rewritten to `new`. {form-id node}."
-  [store old new]
-  (let [mapper (ns-sym-mapper old new)]
-    (into {}
-          (for [ns-sym (keys (:namespaces store))
-                e (store/forms store ns-sym)
-                :let [node' (rewrite-symbols (:node e) mapper)]
-                :when (not= (n/string node') (n/string (:node e)))]
-            [(:id e) node']))))
+(defn ^:export rename-changeset
+  "Compute {form-id new-node} renaming `def-ns/old-name` to `new-name` across
+  every store namespace."
+  [store def-ns old-name new-name]
+  (into {}
+        (mapcat (fn [ns-sym]
+                  (let [an      (analyze/analyze (store.render/render-ns store ns-sym))
+                        sites   (sites-in-analysis an def-ns old-name (= ns-sym def-ns))
+                        offsets (store.render/element-offsets store ns-sym)
+                        elems   (store/elements store ns-sym)]
+                    (for [[idx ss] (group-by #(owner-idx offsets %) sites)
+                          :let [e (nth elems idx)]]
+                      [(:id e)
+                       (rewrite-form (:node e)
+                                     (map #(relative (nth offsets idx) %) ss)
+                                     old-name new-name)]))))
+        (keys (:namespaces store))))
 
 (defn- norm-src
   "Whitespace-insensitive comparison key for source text: outside string
@@ -316,6 +215,85 @@
                      :else false))
          false)))))
 
+(defn publicize
+  "The form node with its top-level privacy stripped: the `defn-` operator
+  becomes `defn`, and a `^:private` marker on the def symbol is removed.
+  A form moved to another namespace must be PUBLIC for its old neighbors'
+  rewritten calls to compile — when the new home is a deep ns, the module
+  system still keeps it package-private at the module grain (the right
+  boundary). Only the form's immediate children are touched; a map-meta
+  `^{:private true}` is left alone (rare; the load fails honestly)."
+  [node]
+  (n/replace-children
+   node
+   (map (fn [k]
+          (case (n/tag k)
+            :token (if (= 'defn- (n/sexpr k)) (n/token-node 'defn) k)
+            :meta  (let [kids (remove #(#{:whitespace :comment} (n/tag %))
+                                      (n/children k))]
+                     (if (and (= 2 (count kids))
+                              (= :private (n/sexpr (first kids))))
+                       (second kids)
+                       k))
+            k))
+        (n/children node))))
+
+(defn- require-specs
+  "`ns-sym`'s :require clauses as [{:lib sym :alias sym|nil :refers #{sym}
+  :spec str}] — the planner's resolution context (aliases to rewrite through,
+  specs to copy into a move target verbatim)."
+  [store ns-sym]
+  (let [decl (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
+                      (when (and (seq? s) (= 'ns (first s))) s))
+                   (store/elements store ns-sym))]
+    (vec (for [clause (drop 2 (or decl ()))
+               :when  (and (seq? clause) (= :require (first clause)))
+               spec   (rest clause)
+               :let   [[lib alias refers]
+                       (cond
+                         (vector? spec) [(first spec)
+                                         (second (drop-while #(not= :as %) spec))
+                                         (set (second (drop-while #(not= :refer %) spec)))]
+                         (symbol? spec) [spec nil #{}])]
+               :when  lib]
+           {:lib lib :alias alias :refers (or refers #{})
+            :spec (pr-str spec)}))))
+
+(defn- alias-for
+  "The alias a namespace should call `to-ns` by: its existing alias when
+  already required, else the last segment, else the last two joined —
+  nil when both collide with other libs (the caller refuses)."
+  [specs to-ns]
+  (or (some #(when (= (:lib %) to-ns) (or (:alias %) to-ns)) specs)
+      (let [taken (set (keep :alias specs))
+            segs  (clojure.string/split (str to-ns) #"\.")
+            c1    (symbol (last segs))
+            c2    (symbol (clojure.string/join "." (take-last 2 segs)))]
+        (cond (not (taken c1)) c1
+              (not (taken c2)) c2
+              :else nil))))
+
+(defn- private-form?
+  "Is this def form private (defn- operator or ^:private on the name)?"
+  [node]
+  (let [s (try (n/sexpr node) (catch Exception _ nil))]
+    (and (seq? s)
+         (or (= 'defn- (first s))
+             (boolean (:private (meta (second s))))))))
+
+(defn- under-meta
+  "Apply `f` to the form node beneath any form-level meta wrappers
+  (`^:reads (defn- ...)` parses as a :meta node around the list) —
+  the wrapper survives, the transform sees the defn."
+  [node f]
+  (if (= :meta (n/tag node))
+    (let [kids (vec (n/children node))
+          i    (last (keep-indexed
+                      (fn [i k] (when-not (#{:whitespace :comment} (n/tag k)) i))
+                      kids))]
+      (n/replace-children node (assoc kids i (under-meta (kids i) f))))
+    (f node)))
+
 (defn- fuzzy-spans
   "[[start end] ...] where `text` matches `src` with whitespace runs
   treated as equivalent (any run matches any run) — the tolerance text
@@ -331,102 +309,103 @@
             (recur (conj acc [(.start mt) (.end mt)]))
             acc))))))
 
-(defn- answers-to
-  "The spelling `x` ANSWERS TO when a caller addresses it.
-
-  `where` names a row; it does not assert a value. The wire it arrives over
-  has no keyword, so `:stored-name`, `'stored-name`, `\"stored-name\"` and
-  `\":stored-name\"` are four spellings of one name and all four must reach
-  the same row. Namespaces survive — `:webapp/client-routes` answers to `\"web/client-routes\"`."
-  [x]
-  (let [s (if (and (seq? x) (= 'quote (first x)))
-            (str (second x))
-            (str x))]
-    (if (= \: (first s)) (subs s 1) s)))
-
-(defn- up-to
-  "Up to `n` distinct `xs`, printed, with the true count when the list is cut."
-  [n xs]
-  (let [ds    (distinct xs)
-        total (count ds)]
-    (str (clojure.string/join ", " (map pr-str (take n ds)))
-         (when (< n total) (str ", … (" total " total)")))))
-
-(defn- carries-entries?
-  "Does map `m` carry every entry of `where`, compared by what each side
-  ANSWERS TO rather than by identity? Keys are matched the same way as
-  values: the wire keywordizes every key it carries, so a map stored with
-  string keys would otherwise be unaddressable."
-  [m where]
-  (let [idx (into {} (map (fn [[k v]] [(answers-to k) (answers-to v)])) m)]
-    (every? (fn [[k v]] (= (answers-to v) (get idx (answers-to k) ::absent)))
-            where)))
-
-(defn- where-diagnosis
-  "What `maps` say about the keys of `where` — the values each key DOES take.
-
-  A refusal that echoes the caller's own input reads as \"no such row\" when
-  it means \"wrong value\", so the answer names what is there instead. When a
-  key is on no map at all, the keys that ARE there is the useful answer."
-  [maps where]
-  (if (empty? maps)
-    "this form contains no maps"
-    (clojure.string/join
-     "; "
-     (for [[k _] where
-           :let [ak (answers-to k)
-                 vs (for [m maps
-                          [mk mv] m
-                          :when (= ak (answers-to mk))]
-                      mv)]]
-       (if (seq vs)
-         (str (pr-str k) " takes " (up-to 12 vs))
-         (str "no map here carries " (pr-str k) "; keys seen: "
-              (up-to 12 (mapcat keys maps))))))))
-
-(defn ^:export keyed-replace-plan
-  "Plan replacing the UNIQUE map inside `form-name` that contains every
-  entry of `where` (e.g. {:name \"query_history\"} addresses one tool
-  descriptor in a registry vector) with `new-src` — first-person friction:
-  registry-style edits shouldn't need the exact current text, just a key.
-
-  `where` ADDRESSES a row; it does not assert a value. Both sides are matched
-  by the spelling they answer to, so `\"stored-name\"` reaches a row stored as
-  `:stored-name` — registry rows are keyed by keywords and the wire `where`
-  arrives over has none. When nothing matches, the answer names the values
-  that key DOES take rather than restating what was asked for.
-
-  Returns {:new-form-src s} or {:error msg}."
-  [store ns-sym form-name where new-src]
+(defn ^:export text-replace-plan
+  "Plan a RAW-TEXT replace inside form `form-name`: `match-text` must occur
+  exactly ONCE in the form's source — exactly, or failing that under
+  whitespace-fuzzy matching (runs of whitespace are equivalent, so a
+  reflowed docstring still matches) — and the spliced result must still
+  parse to ONE form. The escape hatch for content no structural match can
+  address — string literals, docstrings. Misses carry :source-now (the
+  form's current text) so the retry needs no read.
+  Returns {:new-form-src s} or {:error msg [:source-now s]}."
+  [store ns-sym form-name match-text new-text]
   (try
     (if-let [e (store/form-named store ns-sym form-name)]
-      (let [form-src (n/string (:node e))
-            maps     (->> (iterate z/next (z/of-string form-src
-                                                       {:track-position? true}))
-                          (take-while (complement z/end?))
-                          (filter #(= :map (z/tag %)))
-                          (keep (fn [zloc]
-                                  (let [s (try (z/sexpr zloc) (catch Exception _ nil))]
-                                    (when (map? s) [zloc s]))))
-                          vec)
-            matches  (filterv #(carries-entries? (second %) where) maps)]
-        (cond
-          (empty? matches)
-          {:error (str "no map containing " (pr-str where) " in " form-name
-                       " — " (where-diagnosis (mapv second maps) where))}
+      (let [src ^String (n/string (:node e))
+            m   ^String (str match-text)]
+        (if (str/blank? m)
+          {:error "text mode needs a non-empty match"}
+          (let [i     (.indexOf src m)
+                dup?  (and (>= i 0) (>= (.indexOf src m (inc i)) 0))
+                spans (when (neg? i) (fuzzy-spans src m))
+                [start len] (cond
+                              (and (>= i 0) (not dup?)) [i (count m)]
+                              (= 1 (count spans)) (let [[s e] (first spans)]
+                                                    [s (- e s)])
+                              :else nil)]
+            (cond
+              dup?
+              {:error (str "text occurs more than once in " form-name
+                           " — give a longer unique snippet (:source-now is"
+                           " the form's current text)")
+               :source-now src}
 
-          (< 1 (count matches))
-          {:error (str (count matches) " maps contain " (pr-str where) " in "
-                       form-name " — add entries to `where` until unique")}
+              (nil? start)
+              {:error (str (if (seq spans)
+                             (str "text matches " (count spans) " places in "
+                                  form-name)
+                             (str "text not found in " form-name))
+                           " — :source-now is the form's CURRENT text; correct"
+                           " the match against it and resend, no read needed")
+               :source-now src}
 
-          :else
-          (let [m       (ffirst matches)
-                [r c]   (z/position m)
-                [er ec] (node-span (z/position m) (n/string (z/node m)))]
-            {:new-form-src (replace-span form-src [r c] [er ec] new-src)})))
+              :else
+              (let [out   (str (subs src 0 start) new-text
+                               (subs src (+ start len)))
+                    nodes (filter n/sexpr-able?
+                                  (n/children (p/parse-string-all out)))]
+                (if (= 1 (count nodes))
+                  {:new-form-src out}
+                  {:error (str "the replacement does not leave ONE valid form ("
+                               (count nodes) " forms parsed)")}))))))
       {:error (str "no form named " form-name " in " ns-sym)})
     (catch Exception ex
-      {:error (str "keyed edit failed: " (ex-message ex))})))
+      {:error (str "text replace failed: " (ex-message ex))})))
+
+(defn- imports-for
+  "The (:import ...) clause text the moved `nodes` need from `ns-sym`'s
+  declaration — entries filtered to the SIMPLE class names the moved code
+  references (static calls `C/member`, ctors `C.`, bare `C`, `^C` type
+  hints, via refs/walk-pruned), grouped and sorted; nil when nothing
+  matches."
+  [store ns-sym nodes]
+  (let [decl    (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
+                         (when (and (seq? s) (= 'ns (first s))) s))
+                      (store/elements store ns-sym))
+        entries (for [clause (drop 2 (or decl ()))
+                      :when (and (seq? clause) (= :import (first clause)))
+                      spec  (rest clause)]
+                  (cond
+                    (vector? spec) {:pkg (first spec) :classes (set (map str (rest spec)))}
+                    (symbol? spec) (let [parts (str/split (str spec) #"\.")]
+                                     {:pkg (symbol (str/join "." (butlast parts)))
+                                      :classes #{(last parts)}})))
+        used    (set
+                 (for [node nodes
+                       s (refs/walk-pruned
+                          (fn [f]
+                            (concat (when (symbol? f) [f])
+                                    (when-let [t (:tag (meta f))]
+                                      (when (symbol? t) [t]))))
+                          (try (n/sexpr node) (catch Exception _ nil)))
+                       :let [nm (name s) nsp (namespace s)]
+                       c [(when (and nsp (Character/isUpperCase (char (first nsp))))
+                            nsp)
+                          (when (and (nil? nsp) (str/ends-with? nm ".")
+                                     (Character/isUpperCase (char (first nm))))
+                            (subs nm 0 (dec (count nm))))
+                          (when (and (nil? nsp)
+                                     (Character/isUpperCase (char (first nm))))
+                            nm)]
+                       :when c]
+                   c))
+        kept    (sort (keep (fn [{:keys [pkg classes]}]
+                              (let [hit (sort (filter used classes))]
+                                (when (seq hit)
+                                  (str "[" pkg " " (str/join " " hit) "]"))))
+                            entries))]
+    (when (seq kept)
+      (str "(:import " (str/join " " kept) ")"))))
 
 (defn anchor-subform-src
   "The source of the unique subform of `form-src` that the ANCHOR heads — the
@@ -465,6 +444,166 @@
         {:src cand}
         {:error (str "no complete form in " what " contains that anchor")
          :source-now form-src}))))
+
+(defn ^:export match-in-strings?
+  "True when `pat` matches inside a STRING LITERAL of `src` — as opposed to
+  matching code.
+
+  A sweep rewrites prose and string contents deliberately (a docs-team rename
+  means everything named that). But a string literal is not always prose: a
+  test FIXTURE is data, and rewriting a keyword inside one while leaving the
+  `{:keys [...]}` in that same string alone makes the fixture silently
+  self-inconsistent. Separating the two is what lets a preview say which hits
+  need a human eye."
+  [src pat]
+  (boolean
+   (some (fn [zl]
+           (let [nd (z/node zl)]
+             (and (= :token (n/tag nd))
+                  (string? (try (n/sexpr nd) (catch Exception _ nil)))
+                  (re-find pat (str (try (n/sexpr nd) (catch Exception _ "")))))))
+         (->> (iterate z/next (z/of-string src))
+              (take-while (complement z/end?))))))
+
+(defn ^:export requalify-call-args
+  "Qualify key `key-name` with `to-ns` in the map LITERAL passed as argument 1
+  to calls of the target fn in `src`. `heads` is the SET of head spellings that
+  resolve to that fn in this source's namespace — `#{\"slopp.ops.external/open!\"
+  \"external/open!\"}`, plus the bare name only inside the defining ns.
+
+  Matching on the bare NAME instead was the bug this signature exists to
+  prevent: `slopp.db/open!` and `slopp.ops.external/open!` share a name, and a name-only
+  match rewrote calls to both. It showed up only because a dry-run reported 62
+  forms where the caller graph said 60.
+
+  The scope is otherwise the point. A store-wide keyword sweep cannot do this
+  safely whenever the key means more than one thing: `:dir` names a session
+  directory, a git context's directory and a repl cwd. Inside a call to ONE fn
+  it unambiguously means that fn's option, and nothing else is touched — not
+  another fn's identically-spelled key, not a bare map that is nobody's
+  argument.
+
+  Only KEY positions change, so `{:a :dir}` keeps its value. A call passing a
+  non-literal (`(open! opts)`) or nothing is left exactly as it is: this reader
+  cannot see through a binding and must not pretend to.
+
+  Pure: source string in, source string out; untouched when nothing matches."
+  [src heads key-name to-ns]
+  (if (or (str/blank? (str to-ns)) (empty? heads))
+    src
+    (let [kw    (keyword (str key-name))
+          qkw   (keyword (str to-ns) (str key-name))
+          sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
+          kids  (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
+          call? (fn [nd]
+                  (and (= :list (n/tag nd))
+                       (let [c (kids nd)
+                             h (sx (first c))]
+                         (and (symbol? h)
+                              (contains? (set heads) (str h))
+                              (= :map (some-> (second c) n/tag))))))
+          requal (fn [m]
+                   (n/map-node
+                    (interpose (n/spaces 1)
+                               (mapcat (fn [[k v]]
+                                         [(if (= kw (sx k)) (n/keyword-node qkw) k) v])
+                                       (partition 2 (kids m))))))]
+      (loop [z (z/of-string src)]
+        (cond
+          (z/end? z) (z/root-string z)
+
+          (call? (z/node z))
+          (let [nd  (z/node z)
+                tgt (second (kids nd))
+                ch  (mapv #(if (identical? % tgt) (requal %) %) (n/children nd))]
+            (recur (z/next (z/replace z (n/list-node ch)))))
+
+          :else (recur (z/next z)))))))
+
+(defn ^:export module-extract-plan
+  "PLAN pulling `ns-syms` (each with its subtree and `-test` siblings) under
+  `to-prefix` — the module-grain regroup, analysed before anything is
+  written. A namespace that moves from two segments to three becomes
+  PACKAGE-PRIVATE, so every caller outside the new parent silently becomes a
+  module violation; `ns-rename-changeset` rewrites references faithfully and
+  leaves exactly those behind. This names them first.
+
+  Returns {:renames {old new} :exports [{:ns :name :forced-by [qsym…]}…]
+  :edges-add [[from-mod to-mod]…] :edges-retire [[from-mod to-mod]…]}, or
+  {:error msg} when the regroup would leave a module dependency CYCLE.
+
+  Two rules are borrowed rather than restated: visibility is decided by
+  `edit.modules/module-violations` (the same predicate the write gate
+  enforces), and cycles are computed over PRODUCTION edges only, the way
+  `store/module-layers` does — a `-test` namespace folds into its subject's
+  module, so its fixture deps would manufacture cycles that do not exist in
+  production (slopp.api ↔ slopp.db is exactly such a pair today)."
+  [store ns-syms to-prefix]
+  (let [all      (keys (:namespaces store))
+        test-ns? (fn [n] (str/ends-with? (str n) "-test"))
+        moving   (fn [n] (some (fn [s] (or (= (str n) (str s))
+                                           (= (str n) (str s "-test"))
+                                           (str/starts-with? (str n) (str s "."))))
+                               ns-syms))
+        renames  (into {} (for [n all :when (moving n)]
+                            [n (symbol (str to-prefix "."
+                                            (str/join "." (rest (str/split (str n) #"\.")))))]))
+        rn       (fn [n] (get renames n n))
+        manifest (or (edit.modules/modules-manifest store) {})
+        internal (set (map str all))
+        rs       (for [r (refs/refs store)
+                       :let [from (:from-ns r) to (:to-ns r)]
+                       :when (and (symbol? from) (symbol? to)
+                                  (internal (str to))
+                                  (not= (str from) (str to)))]
+                   (assoc r :from-ns' (rn from) :to-ns' (rn to)))
+        edge-of  (fn [k1 k2] (fn [r] [(edit.modules/module-of (k1 r))
+                                      (edit.modules/module-of (k2 r))]))
+        edges-of (fn [xs f] (into #{} (comp (map f) (remove (fn [[a b]] (= a b)))) xs))
+        after    (edges-of rs (edge-of :from-ns' :to-ns'))
+        before   (edges-of rs (edge-of :from-ns :to-ns))
+        prod     (edges-of (remove #(test-ns? (:from-ns %)) rs)
+                           (edge-of :from-ns' :to-ns'))
+        g        (reduce (fn [m [a b]] (update m a (fnil conj #{}) b)) {} prod)
+        cyclic   (vec (for [[a b] (sort prod)
+                            :when (store/module-path (update g a disj b) b a)]
+                        [a b]))
+        touched  (into #{} (map edit.modules/module-of)
+                       (concat (keys renames) (vals renames)))
+        cands    (filter #(or (renames (:from-ns %)) (renames (:to-ns %))) rs)
+        viol     (fn [r] (first (edit.modules/module-violations
+                                 manifest
+                                 [{:from-ns (:from-ns' r) :from-var (:from-var r)
+                                   :to (:to-ns' r)
+                                   :to-name (:to-name r)
+                                   :to-export (edit.modules/export-level
+                                               store (:to-ns r) (:to-name r))}])))
+        exports  (->> cands
+                      (keep (fn [r] (when (= :visibility (:rule (viol r))) r)))
+                      (group-by (juxt :to-ns' :to-name))
+                      (sort-by first)
+                      (mapv (fn [[[nsx nm] rs*]]
+                              {:ns nsx :name nm
+                               :forced-by (->> rs*
+                                               (keep (fn [r]
+                                                       (when (:from-var r)
+                                                         (symbol (str (:from-ns' r))
+                                                                 (str (:from-var r))))))
+                                               distinct sort vec)})))]
+    (if (seq cyclic)
+      {:error (str "the regroup would leave a module dependency cycle ("
+                   (str/join ", " (map (fn [[a b]] (str a " → " b)) cyclic))
+                   ") — extract the shared piece the other way, or restructure"
+                   " the callers first")}
+      {:renames renames
+       :exports exports
+       :edges-add (vec (sort (remove (fn [[a b]] (contains? (get manifest a #{}) b))
+                                     after)))
+       :edges-retire (vec (sort (for [[a bs] manifest b bs
+                                      :when (and (or (touched a) (touched b))
+                                                 (before [a b])
+                                                 (not (after [a b])))]
+                                  [a b])))})))
 
 (defn ^:export fill-template
   "`template` with each `$n` replaced by the nth of `args` (1-based).
@@ -609,120 +748,6 @@
     (catch Exception ex
       {:error (str "change-signature plan failed: " (ex-message ex))})))
 
-(defn ^:export rename-changeset
-  "Compute {form-id new-node} renaming `def-ns/old-name` to `new-name` across
-  every store namespace."
-  [store def-ns old-name new-name]
-  (into {}
-        (mapcat (fn [ns-sym]
-                  (let [an      (analyze/analyze (store.render/render-ns store ns-sym))
-                        sites   (sites-in-analysis an def-ns old-name (= ns-sym def-ns))
-                        offsets (store.render/element-offsets store ns-sym)
-                        elems   (store/elements store ns-sym)]
-                    (for [[idx ss] (group-by #(owner-idx offsets %) sites)
-                          :let [e (nth elems idx)]]
-                      [(:id e)
-                       (rewrite-form (:node e)
-                                     (map #(relative (nth offsets idx) %) ss)
-                                     old-name new-name)]))))
-        (keys (:namespaces store))))
-
-(defn ^:export text-replace-plan
-  "Plan a RAW-TEXT replace inside form `form-name`: `match-text` must occur
-  exactly ONCE in the form's source — exactly, or failing that under
-  whitespace-fuzzy matching (runs of whitespace are equivalent, so a
-  reflowed docstring still matches) — and the spliced result must still
-  parse to ONE form. The escape hatch for content no structural match can
-  address — string literals, docstrings. Misses carry :source-now (the
-  form's current text) so the retry needs no read.
-  Returns {:new-form-src s} or {:error msg [:source-now s]}."
-  [store ns-sym form-name match-text new-text]
-  (try
-    (if-let [e (store/form-named store ns-sym form-name)]
-      (let [src ^String (n/string (:node e))
-            m   ^String (str match-text)]
-        (if (str/blank? m)
-          {:error "text mode needs a non-empty match"}
-          (let [i     (.indexOf src m)
-                dup?  (and (>= i 0) (>= (.indexOf src m (inc i)) 0))
-                spans (when (neg? i) (fuzzy-spans src m))
-                [start len] (cond
-                              (and (>= i 0) (not dup?)) [i (count m)]
-                              (= 1 (count spans)) (let [[s e] (first spans)]
-                                                    [s (- e s)])
-                              :else nil)]
-            (cond
-              dup?
-              {:error (str "text occurs more than once in " form-name
-                           " — give a longer unique snippet (:source-now is"
-                           " the form's current text)")
-               :source-now src}
-
-              (nil? start)
-              {:error (str (if (seq spans)
-                             (str "text matches " (count spans) " places in "
-                                  form-name)
-                             (str "text not found in " form-name))
-                           " — :source-now is the form's CURRENT text; correct"
-                           " the match against it and resend, no read needed")
-               :source-now src}
-
-              :else
-              (let [out   (str (subs src 0 start) new-text
-                               (subs src (+ start len)))
-                    nodes (filter n/sexpr-able?
-                                  (n/children (p/parse-string-all out)))]
-                (if (= 1 (count nodes))
-                  {:new-form-src out}
-                  {:error (str "the replacement does not leave ONE valid form ("
-                               (count nodes) " forms parsed)")}))))))
-      {:error (str "no form named " form-name " in " ns-sym)})
-    (catch Exception ex
-      {:error (str "text replace failed: " (ex-message ex))})))
-
-(defn- require-specs
-  "`ns-sym`'s :require clauses as [{:lib sym :alias sym|nil :refers #{sym}
-  :spec str}] — the planner's resolution context (aliases to rewrite through,
-  specs to copy into a move target verbatim)."
-  [store ns-sym]
-  (let [decl (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
-                      (when (and (seq? s) (= 'ns (first s))) s))
-                   (store/elements store ns-sym))]
-    (vec (for [clause (drop 2 (or decl ()))
-               :when  (and (seq? clause) (= :require (first clause)))
-               spec   (rest clause)
-               :let   [[lib alias refers]
-                       (cond
-                         (vector? spec) [(first spec)
-                                         (second (drop-while #(not= :as %) spec))
-                                         (set (second (drop-while #(not= :refer %) spec)))]
-                         (symbol? spec) [spec nil #{}])]
-               :when  lib]
-           {:lib lib :alias alias :refers (or refers #{})
-            :spec (pr-str spec)}))))
-
-(defn- alias-for
-  "The alias a namespace should call `to-ns` by: its existing alias when
-  already required, else the last segment, else the last two joined —
-  nil when both collide with other libs (the caller refuses)."
-  [specs to-ns]
-  (or (some #(when (= (:lib %) to-ns) (or (:alias %) to-ns)) specs)
-      (let [taken (set (keep :alias specs))
-            segs  (clojure.string/split (str to-ns) #"\.")
-            c1    (symbol (last segs))
-            c2    (symbol (clojure.string/join "." (take-last 2 segs)))]
-        (cond (not (taken c1)) c1
-              (not (taken c2)) c2
-              :else nil))))
-
-(defn- private-form?
-  "Is this def form private (defn- operator or ^:private on the name)?"
-  [node]
-  (let [s (try (n/sexpr node) (catch Exception _ nil))]
-    (and (seq? s)
-         (or (= 'defn- (first s))
-             (boolean (:private (meta (second s))))))))
-
 (defn- name-export-level
   "The `:export` level a def's NAME node ALREADY declares — `true`, a prefix
    string, or nil for none.
@@ -785,50 +810,639 @@
          (map-indexed (fn [i k] (if (= i nami) (n/meta-node mark k) k)) kids))
         node))))
 
-(defn- imports-for
-  "The (:import ...) clause text the moved `nodes` need from `ns-sym`'s
-  declaration — entries filtered to the SIMPLE class names the moved code
-  references (static calls `C/member`, ctors `C.`, bare `C`, `^C` type
-  hints, via refs/walk-pruned), grouped and sorted; nil when nothing
-  matches."
-  [store ns-sym nodes]
-  (let [decl    (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
-                         (when (and (seq? s) (= 'ns (first s))) s))
-                      (store/elements store ns-sym))
-        entries (for [clause (drop 2 (or decl ()))
-                      :when (and (seq? clause) (= :import (first clause)))
-                      spec  (rest clause)]
-                  (cond
-                    (vector? spec) {:pkg (first spec) :classes (set (map str (rest spec)))}
-                    (symbol? spec) (let [parts (str/split (str spec) #"\.")]
-                                     {:pkg (symbol (str/join "." (butlast parts)))
-                                      :classes #{(last parts)}})))
-        used    (set
-                 (for [node nodes
-                       s (refs/walk-pruned
-                          (fn [f]
-                            (concat (when (symbol? f) [f])
-                                    (when-let [t (:tag (meta f))]
-                                      (when (symbol? t) [t]))))
-                          (try (n/sexpr node) (catch Exception _ nil)))
-                       :let [nm (name s) nsp (namespace s)]
-                       c [(when (and nsp (Character/isUpperCase (char (first nsp))))
-                            nsp)
-                          (when (and (nil? nsp) (str/ends-with? nm ".")
-                                     (Character/isUpperCase (char (first nm))))
-                            (subs nm 0 (dec (count nm))))
-                          (when (and (nil? nsp)
-                                     (Character/isUpperCase (char (first nm))))
-                            nm)]
-                       :when c]
-                   c))
-        kept    (sort (keep (fn [{:keys [pkg classes]}]
-                              (let [hit (sort (filter used classes))]
-                                (when (seq hit)
-                                  (str "[" pkg " " (str/join " " hit) "]"))))
-                            entries))]
-    (when (seq kept)
-      (str "(:import " (str/join " " kept) ")"))))
+(defn ^:export export-changeset
+  "Changeset hoisting each `{:ns :name}` in `targets` onto its module's world
+  surface — `^:export` on the defn name, via the same `export-mark` a
+  deep-target move uses. `level` (default true) may be a namespace-prefix
+  string for subtree-only widening.
+
+  Addressed at the store AS IT IS, so a regroup exports BEFORE it renames:
+  the marker has to be in place by the time the namespace goes deep, or the
+  intermediate store is one the module gate refuses. A var that already
+  carries the marker contributes nothing — a re-run is a no-op, not churn."
+  ([store targets] (export-changeset store targets true))
+  ([store targets level]
+   (into {}
+         (keep (fn [{:keys [ns name]}]
+                 (let [nsx (symbol (str ns)) nm (symbol (str name))]
+                   (when-let [e (store/form-named store nsx nm)]
+                     (when-not (edit.modules/export-level store nsx nm)
+                       [(:id e) (export-mark (:node e) level)])))))
+         targets)))
+
+(defn- keys-binding
+  "Map node `mnode`'s `{k [… sym …]}` destructuring entry as
+  `{:pairs :entry :vector :sym}`, or nil when this map does not bind `sym`
+  through `k`.
+
+  THE definition of \"this destructuring names that key\", in one place
+  because its absence broke a keyword sweep in both directions at once. A
+  `:keys` vector names its key as a SYMBOL, with the qualifier written only in
+  the entry beside it — so a pass that matches the symbol alone both skips
+  `{:a/keys [x]}` while renaming `:a/x` and rewrites `{:keys [x]}`, which
+  names `:x` and has nothing to do with the rename. The entry keyword is the
+  whole of the missing check.
+
+  `k` is `:keys` for an unqualified key and `:<ns>/keys` for a qualified one —
+  see `keys-entry`."
+  [mnode k sym]
+  (let [sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
+        kids  (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
+        pairs (vec (partition 2 (kids mnode)))
+        entry (first (filter #(= k (sx (first %))) pairs))
+        vec-n (second entry)]
+    (when (and entry (= :vector (n/tag vec-n)))
+      (when-let [tgt (first (filter #(= sym (sx %)) (kids vec-n)))]
+        {:pairs pairs :entry entry :vector vec-n :sym tgt}))))
+
+(defn ^:export keys-entry
+  "The destructuring entry a key qualified by `ns-part` is bound through:
+  `:keys` when `ns-part` is blank, `:<ns-part>/keys` otherwise.
+
+  Small, and named because it is the join between a KEYWORD (`:a/x`, what a
+  rename is given) and a DESTRUCTURING (`{:a/keys [x]}`, where the same key is
+  spelled with its qualifier one position to the left)."
+  [ns-part]
+  (if (str/blank? (str ns-part))
+    :keys
+    (keyword (str ns-part) "keys")))
+
+(defn ^:export requalify-keys
+  "Move the single key named `key-name` from the `from-ns`-qualified
+  destructuring entry to the `to-ns`-qualified one, leaving every other key in
+  the vector where it is. Either side may be blank, which is the unqualified
+  `{:keys [x]}` entry.
+
+  The half a textual keyword sweep cannot do. A map destructuring names its
+  keys as SYMBOLS inside a `:keys` vector, so renaming the keyword LITERAL
+  `:a/x` to `:b/x` everywhere leaves `{:a/keys [x]}` still asking for `:a/x` —
+  code that compiles, passes every gate, and reads nil at runtime.
+
+  **Which entry is matched is the entire correctness question**, and it is
+  `from-ns` that answers it, never the symbol. `{:keys [x]}` names `:x`; a
+  rename of `:a/x` must not touch it. That check's absence broke both
+  directions of one sweep at once — the qualified destructurings were skipped
+  and the unqualified ones were rewritten to read a key they had never named.
+  See `keys-binding`.
+
+  Rebuilds the destructuring map by MOVING the symbol's node, never by
+  round-tripping through `sexpr`: a rebuild from sexpr silently drops type
+  hints (`^Repository repo`), turning direct interop into reflection. Any
+  other entry — `:as`, `:or`, another `:ns/keys` — is carried through
+  untouched; the source entry disappears when its last member leaves, and an
+  existing destination entry absorbs the symbol, so sweeping several keys of
+  one handle converges on a single entry.
+
+  Pure: source string in, source string out; untouched when nothing matches,
+  and a no-op when the two qualifications are the same."
+  [src key-name from-ns to-ns]
+  (let [from-k (keys-entry from-ns)
+        to-k   (keys-entry to-ns)]
+    (if (= from-k to-k)
+      src
+      (let [wanted (symbol (str key-name))
+            kids   (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
+            vnode  (fn [ns] (n/vector-node (interpose (n/spaces 1) ns)))
+            sx     (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
+            rebuild
+            (fn [mnode]
+              (when-let [b (keys-binding mnode from-k wanted)]
+                (let [tgt    (:sym b)
+                      pairs  (:pairs b)
+                      kept   (vec (remove #(= % tgt) (kids (:vector b))))
+                      dest   (first (filter #(= to-k (sx (first %))) pairs))
+                      others (remove #(or (= % (:entry b)) (= % dest)) pairs)
+                      moved  (if dest (conj (kids (second dest)) tgt) [tgt])
+                      new    (concat
+                              (when (seq kept)
+                                [[(n/keyword-node from-k) (vnode kept)]])
+                              [[(n/keyword-node to-k) (vnode moved)]]
+                              others)]
+                  (n/map-node
+                   (interpose (n/spaces 1) (apply concat new))))))]
+        (loop [z (z/of-string src)]
+          (cond
+            (z/end? z) (z/root-string z)
+
+            (= :map (n/tag (z/node z)))
+            (if-let [m' (rebuild (z/node z))]
+              (recur (z/next (z/replace z m')))
+              (recur (z/next z)))
+
+            :else (recur (z/next z))))))))
+
+(defn ^:export destructures-key?
+  "True when `src` binds `key-name` through a `{:from-ns/keys [key-name]}`
+  destructuring (`{:keys [key-name]}` when `from-ns` is blank).
+
+  The question `requalify-keys` answers by rewriting, asked without
+  rewriting — for the case it must DECLINE. A sweep that changes a key's
+  NAME rather than its qualifier cannot move the symbol, because the symbol
+  is a LOCAL BINDING the body still reads; renaming it here would rename a
+  binding on the strength of a keyword. So the sweep leaves those alone and
+  reports them, which is only possible if it can see them."
+  [src key-name from-ns]
+  (let [k      (keys-entry from-ns)
+        wanted (symbol (str key-name))]
+    (loop [z (z/of-string src)]
+      (cond
+        (z/end? z) false
+
+        (and (= :map (n/tag (z/node z)))
+             (keys-binding (z/node z) k wanted))
+        true
+
+        :else (recur (z/next z))))))
+
+(def ^:private symbol-constituents
+  "The characters that can sit INSIDE a Clojure symbol token, as a regex
+  character-class body. Shared by the mention regexes below, which differ only
+  in which side they bound — a second copy would drift the moment one of them
+  learned about a character the other did not.
+
+  `-` is last on purpose: anywhere else in a class it reads as a range."
+  "A-Za-z0-9*+!_'?<>=/.&%$:#-")
+
+(defn ^:export symbol-mention-re
+  "A regex matching `nm` as a whole SYMBOL token in prose or a string — bounded
+  by symbol-constituent characters rather than `\\b`, which is a word boundary
+  and so never fires at a name's punctuation edge (`valid?`, `->row`). Used to
+  surface leftover prose/string mentions after a rename."
+  [nm]
+  (let [q (java.util.regex.Pattern/quote (str nm))]
+    (re-pattern (str "(?<![" symbol-constituents "])" q
+                     "(?![" symbol-constituents "])"))))
+
+(defn- qualifier-mention-re
+  "A regex matching `alias` used as a QUALIFIER (`alias/…`) inside prose or a
+  string. Bounded on the left only: the right side is the qualified name, which
+  is symbol-constituent by definition, so [[symbol-mention-re]]'s trailing
+  guard would refuse every real hit."
+  [alias]
+  (re-pattern (str "(?<![" symbol-constituents "])"
+                   (java.util.regex.Pattern/quote (str alias)) "/")))
+
+(defn- zlocs
+  "Every zipper location of `node`, in walk order."
+  [node]
+  (->> (iterate z/next (z/of-node node))
+       (take-while (complement z/end?))))
+
+(defn- alias-declaration
+  "`node` (an `ns` form) with the ONE alias token in `:as` position rewritten
+  `old` → `new`, or nil when there is none.
+
+  Found STRUCTURALLY — by the `:as` immediately to its left — never by symbol
+  identity. The same spelling elsewhere in an `ns` form means something else
+  entirely: a `:refer`red var, a lib whose last segment happens to match, a
+  word in the docstring."
+  [node old new]
+  (loop [zl (z/of-node node) hit? false]
+    (let [as? (boolean (and (= :token (z/tag zl))
+                            (= old (safe-sexpr zl))
+                            (when-let [l (z/left zl)]
+                              (= :as (safe-sexpr l)))))
+          zl  (if as? (z/replace zl new) zl)
+          nxt (z/next zl)]
+      (if (z/end? nxt)
+        (when (or hit? as?)
+          (let [root (z/root zl)]
+            (if (= :forms (n/tag root))
+              (or (first (filter n/sexpr-able? (n/children root))) root)
+              root)))
+        (recur nxt (or hit? as?))))))
+
+(defn- qualified-site-count
+  "How many symbol tokens in `node` are qualified by `alias` — counted with the
+  same predicate the rewrite uses, so the number reported cannot drift from the
+  number changed."
+  [node alias]
+  (let [a (str alias)]
+    (count (for [zl    (zlocs node)
+                 :when (= :token (z/tag zl))
+                 :let  [s (safe-sexpr zl)]
+                 :when (and (symbol? s) (= a (namespace s)))]
+             s))))
+
+(defn- strings-mentioning
+  "The distinct STRING LITERALS of `src` that `pat` matches — the text a symbol
+  rewriter cannot reach, so the caller can be shown it instead."
+  [src pat]
+  (->> (iterate z/next (z/of-string src))
+       (take-while (complement z/end?))
+       (keep (fn [zl]
+               (let [nd (z/node zl)]
+                 (when (= :token (n/tag nd))
+                   (let [s (try (n/sexpr nd) (catch Exception _ nil))]
+                     (when (and (string? s) (re-find pat s)) s))))))
+       distinct
+       vec))
+
+(defn ^:export stranded-aliases
+  "The callers whose require alias for `new` is still spelled from `old` — the
+  residue an ns rename leaves, and the one relationship none of its rewrites
+  can reach.
+
+  A rename rewrites the LIB in every require clause and walks straight past the
+  `:as` beside it, so `[old.thing :as thing]` becomes `[new.other :as thing]`:
+  syntactically perfect, and every call site in that namespace goes on reading
+  `thing/f` for a namespace called `other`. Harmless while the old name means
+  nothing — and when it is REUSED, as `slopp.api` was, the alias starts naming a
+  real and different module, which is both the worse failure and the quiet one.
+
+  An alias is DERIVED from a name when its dot-separated segments are a
+  contiguous run of that name's. A row is reported when the alias is derived
+  from `old` and not from `new`, and that second half is what keeps an ordinary
+  rename quiet: a namespace moving between modules under the same last segment
+  (`x.api.query` → `x.read.query`, aliased `query`) is derived from both and
+  says nothing false. Measured over slopp's own store — 52 rows for
+  `slopp.api` → `slopp.ops`, and zero across four real renames of that shape,
+  each of which has callers that do alias it.
+
+  `:suggest` is the same-length SUFFIX of the new name, the alias the convention
+  would have produced, and is OMITTED when that spelling is already taken in
+  that caller: [[realias-plan]] refuses a taken alias, and a remedy the reader
+  cannot run costs exactly what no remedy costs.
+
+  An abbreviation (`caps` for `…capabilities`) is derived from nothing readable
+  and is invisible here. Stated rather than papered over — this reports the
+  aliases it can prove stale, not every alias a rename made questionable.
+
+  Not folded into [[slopp.index.refs/occurrences-of]] with the other
+  unrewritable residue, because it is the one member of that set needing BOTH
+  names: an alias is stale relative to what replaced it, and the one-sided
+  version — any alias spelled from `old` pointing elsewhere — fires on every
+  unrelated lib that happens to share a segment."
+  [store old new]
+  (let [segs (fn [s] (vec (str/split (str s) #"\.")))
+        o    (segs old)
+        w    (segs new)
+        run? (fn [a b] (boolean (some #(= a (subvec b % (+ % (count a))))
+                                      (range 0 (inc (- (count b) (count a)))))))
+        drv? (fn [alias name-segs]
+               (let [a (segs alias)]
+                 (and (<= (count a) (count name-segs)) (run? a name-segs))))]
+    (vec
+     (for [ns-sym (sort (keys (:namespaces store)))
+           :let   [specs (require-specs store ns-sym)]
+           s      specs
+           :when  (and (:alias s)
+                       (= (str new) (str (:lib s)))
+                       (drv? (:alias s) o)
+                       (not (drv? (:alias s) w)))
+           :let   [n     (count (segs (:alias s)))
+                   sugg  (when (<= n (count w))
+                           (symbol (str/join "." (subvec w (- (count w) n)))))
+                   taken (some #(= sugg (:alias %)) specs)]]
+       (cond-> {:ns ns-sym :form ns-sym :via :alias :rewritable false
+                :alias (:alias s)}
+         (and sugg (not taken)) (assoc :suggest sugg))))))
+
+(defn- quoted-loc?
+  "Is this zipper location inside a QUOTE — `'x` or `` `x ``?
+
+  A quoted symbol is a NAME being passed as DATA: a `store/late-ref` target,
+  a `requiring-resolve` argument, an `ns-unmap` name. The reader never
+  resolves it, so an alias is meaningless in one and a missing namespace is
+  fatal — and neither shows up at write time, because the form compiles and a
+  late-bound target only resolves at its first CALL."
+  [zl]
+  (loop [up (z/up zl)]
+    (cond (nil? up)                            false
+          (#{:quote :syntax-quote} (z/tag up)) true
+          :else                                (recur (z/up up)))))
+
+(defn- answers-to
+  "The spelling `x` ANSWERS TO when a caller addresses it.
+
+  `where` names a row; it does not assert a value. The wire it arrives over
+  has no keyword, so `:stored-name`, `'stored-name`, `\"stored-name\"` and
+  `\":stored-name\"` are four spellings of one name and all four must reach
+  the same row. Namespaces survive — `:webapp/client-routes` answers to `\"web/client-routes\"`."
+  [x]
+  (let [s (if (and (seq? x) (= 'quote (first x)))
+            (str (second x))
+            (str x))]
+    (if (= \: (first s)) (subs s 1) s)))
+
+(defn- up-to
+  "Up to `n` distinct `xs`, printed, with the true count when the list is cut."
+  [n xs]
+  (let [ds    (distinct xs)
+        total (count ds)]
+    (str (clojure.string/join ", " (map pr-str (take n ds)))
+         (when (< n total) (str ", … (" total " total)")))))
+
+(defn- carries-entries?
+  "Does map `m` carry every entry of `where`, compared by what each side
+  ANSWERS TO rather than by identity? Keys are matched the same way as
+  values: the wire keywordizes every key it carries, so a map stored with
+  string keys would otherwise be unaddressable."
+  [m where]
+  (let [idx (into {} (map (fn [[k v]] [(answers-to k) (answers-to v)])) m)]
+    (every? (fn [[k v]] (= (answers-to v) (get idx (answers-to k) ::absent)))
+            where)))
+
+(defn- where-diagnosis
+  "What `maps` say about the keys of `where` — the values each key DOES take.
+
+  A refusal that echoes the caller's own input reads as \"no such row\" when
+  it means \"wrong value\", so the answer names what is there instead. When a
+  key is on no map at all, the keys that ARE there is the useful answer."
+  [maps where]
+  (if (empty? maps)
+    "this form contains no maps"
+    (clojure.string/join
+     "; "
+     (for [[k _] where
+           :let [ak (answers-to k)
+                 vs (for [m maps
+                          [mk mv] m
+                          :when (= ak (answers-to mk))]
+                      mv)]]
+       (if (seq vs)
+         (str (pr-str k) " takes " (up-to 12 vs))
+         (str "no map here carries " (pr-str k) "; keys seen: "
+              (up-to 12 (mapcat keys maps))))))))
+
+(defn ^:export keyed-replace-plan
+  "Plan replacing the UNIQUE map inside `form-name` that contains every
+  entry of `where` (e.g. {:name \"query_history\"} addresses one tool
+  descriptor in a registry vector) with `new-src` — first-person friction:
+  registry-style edits shouldn't need the exact current text, just a key.
+
+  `where` ADDRESSES a row; it does not assert a value. Both sides are matched
+  by the spelling they answer to, so `\"stored-name\"` reaches a row stored as
+  `:stored-name` — registry rows are keyed by keywords and the wire `where`
+  arrives over has none. When nothing matches, the answer names the values
+  that key DOES take rather than restating what was asked for.
+
+  Returns {:new-form-src s} or {:error msg}."
+  [store ns-sym form-name where new-src]
+  (try
+    (if-let [e (store/form-named store ns-sym form-name)]
+      (let [form-src (n/string (:node e))
+            maps     (->> (iterate z/next (z/of-string form-src
+                                                       {:track-position? true}))
+                          (take-while (complement z/end?))
+                          (filter #(= :map (z/tag %)))
+                          (keep (fn [zloc]
+                                  (let [s (try (z/sexpr zloc) (catch Exception _ nil))]
+                                    (when (map? s) [zloc s]))))
+                          vec)
+            matches  (filterv #(carries-entries? (second %) where) maps)]
+        (cond
+          (empty? matches)
+          {:error (str "no map containing " (pr-str where) " in " form-name
+                       " — " (where-diagnosis (mapv second maps) where))}
+
+          (< 1 (count matches))
+          {:error (str (count matches) " maps contain " (pr-str where) " in "
+                       form-name " — add entries to `where` until unique")}
+
+          :else
+          (let [m       (ffirst matches)
+                [r c]   (z/position m)
+                [er ec] (node-span (z/position m) (n/string (z/node m)))]
+            {:new-form-src (replace-span form-src [r c] [er ec] new-src)})))
+      {:error (str "no form named " form-name " in " ns-sym)})
+    (catch Exception ex
+      {:error (str "keyed edit failed: " (ex-message ex))})))
+
+(defn- escape-literal
+  "`s` as it must be written INSIDE a Clojure string literal — backslashes and
+  quotes escaped.
+
+  `rewrite-clj.node/string-node` takes a VALUE and emits it between quotes,
+  escaping nothing. So any pass that edits a string by reading its value,
+  changing it, and building a fresh node has to put the escaping back, or the
+  literal ends at its first inner quote and everything after it is read as code.
+
+  **Measured, because it shipped.** One namespace rename took a tool descriptor
+  from 21450 characters to 21423 — 5 for the shorter name, and 22 for the
+  backslashes of its eleven escaped-quote pairs. The form stopped reading while
+  every check stayed green: the damaged form was re-evaluated into an image
+  that already held the good definition, so nothing re-read the source, and
+  in-image verification structurally cannot. It surfaced days later as a git
+  projection that would not run, because replay re-reads history as it stood.
+
+  **Backslashes first.** Escaping quotes first would then double the backslash
+  that step had just introduced.
+
+  Written with char codes rather than escape sequences deliberately: this is the
+  one function whose subject is escaping, and a reader checking it should not
+  have to count backslashes through two levels of literal to do so."
+  [s]
+  (let [bs (str (char 92))
+        q  (str (char 34))]
+    (-> s
+        (str/replace bs (str bs bs))
+        (str/replace q (str bs q)))))
+
+(defn ^:export name-boundary-class
+  "The character class that ENDS `from` for a sweep — the chars that, adjacent
+  to a match, mean this is a longer name rather than the one being swept.
+
+  Two answers, because a sweep means two different things:
+
+  - **A KEYWORD is a complete token.** `:web/client-routes` is not
+    `:web/client` followed by `-routes`; it is a different marker, usually
+    read by a different rule. So `-`, digits and `_` end the name. Getting
+    this wrong is SILENT and was: sweeping `:web/client` also rewrote
+    `:web/client-routes`, into a marker nothing defines.
+  - **A BARE NAME is a concept, and compounds are part of it.** Sweeping
+    `zone` → `region` is meant to carry `zone-fee`, `zone-fees` and `zone-t`
+    with it — that is what makes a sweep one intent rather than a list of
+    renames, and it is pinned by
+    `mcp-test/rename-sweep-is-one-intent`. So only letters end the name.
+
+  A DOT ends nothing in either case, and that is deliberate: a family rename
+  has to reach through it, so `slopp.http` → `slopp.http` moves
+  `slopp.http.dispatch` while `slopp.webapp` is already safe on the letter."
+  [from]
+  (if (str/starts-with? (str from) ":") "A-Za-z0-9_-" "A-Za-z"))
+
+(defn ^:export patterns-not-swept
+  "The regex LITERALS in `src` that name `from` in a spelling a textual sweep
+  cannot see — an ESCAPED DOT. Returns their source text.
+
+  A sweep matches `web.static` and rewrites it wherever it appears, prose and
+  string literals included. A regex writes the same name `web\\.static`, which
+  shares no literal text with it, so the sweep walks past every one. Measured:
+  seven in a single wave, all config-key patterns, two of them surviving every
+  write and three green done-points to be caught by the external tier.
+
+  The costs were not cosmetic. One rule refused EVERY declared auth group as
+  unknown — it read groups under the retired spelling, found none, and taught
+  the author to configure the key it was already reading past. Another reported
+  every asset link in an app as dangling. A third had prose and pattern split
+  inside ONE form, its docstring naming the new spelling beside a pattern
+  naming the old.
+
+  **This is the RESIDUE now, not the answer.** Reporting rather than rewriting
+  was the decision, on the reasoning that a regex is an INTENT rather than a
+  name — whether a `.` in it is a separator or a wildcard is a question about
+  what the author meant. That was too broad: slopp owns the dialect, so a dot
+  in a dotted name it governs is a separator, and [[rewrite-patterns]] moves
+  these mechanically. What this function returns is therefore what the rewrite
+  did NOT reach, and a non-empty answer is a finding rather than a chore.
+
+  `pat` — the sweep's own exact pattern — excludes the literals the text pass
+  DID rewrite, so this reports only what that pass could not see.
+
+  Dots only, deliberately: every measured instance was a dot, and widening to
+  every regex metacharacter would report literals that merely mention the
+  token."
+  [src from pat]
+  (let [;; bounded exactly like the sweep that produced `pat`, via the one
+        ;; function that decides it — otherwise this reports a longer name
+        ;; merely starting with `from` as residue the rewrite missed, sending
+        ;; the author to hand-fix a literal that is already right
+        cls   (name-boundary-class from)
+        loose (re-pattern
+               (str "(?<![" cls "])"
+                    (str/join "\\\\?\\."
+                              (map #(java.util.regex.Pattern/quote %)
+                                   (str/split (str from) #"\.")))
+                    "(?![" cls "])"))]
+    (vec (for [zl (->> (iterate z/next (z/of-string src))
+                       (take-while (complement z/end?)))
+               :let [nd (z/node zl)]
+               :when (= :regex (n/tag nd))
+               :let [txt (n/string nd)]
+               :when (and (re-find loose txt) (not (re-find pat txt)))]
+           txt))))
+
+(defn ^:export rewrite-patterns
+  "`src` with every ESCAPED-DOT spelling of `from` rewritten to `to` — the
+  spelling a regex literal uses and a textual pass cannot see. Returns `src'`,
+  unchanged when there is nothing to move.
+
+  **This used to be reported and not done**, on the reasoning that a regex is
+  an INTENT rather than a name: whether a `.` in one separates or matches
+  anything is a question about what the author meant. That reasoning is sound
+  and its conclusion was too broad, for a reason that is slopp's to STATE
+  rather than to discover — **slopp owns the dialect, and a dot in a namespace
+  name is a separator.** No pattern legitimately means `acme<any>billing`, so
+  there is no intent to guess at and the name can move mechanically.
+
+      #\"acme\\.billing\\..+\"   ->   #\"acme\\.invoice\\..+\"
+
+  **Only the escaped spelling, and only the NAME.** The unescaped spelling
+  shares its literal text with the name, so every caller's ordinary text pass
+  has already rewritten it; matching it again here would be a second producer
+  of one behaviour. And the rest of the pattern is the author's own matching —
+  the trailing `\\..+` above means nothing to a rename and is left alone.
+
+  **A plain text replacement, deliberately, rather than a walk over `:regex`
+  nodes.** The escaped spelling is bounded the same way the name is, and prose
+  that writes `acme\\.billing` while discussing the pattern wants moving too.
+  Two backslashes cannot be caught by one: `\\\\.` contains `\\.` only where the
+  character before it is a backslash rather than the name's last letter, so the
+  boundary guard excludes it.
+
+  Why it is worth doing at all: measured at seven literals in one wave, all
+  config-key patterns, two surviving every write and three green done-points.
+  One rule then refused EVERY declared auth group as unknown — it read groups
+  under the retired spelling, found none, and taught the author to configure
+  the key it was already reading past. A stale pattern fails in the direction
+  where a predicate quietly matches nothing: a presence assertion turns red,
+  while an ABSENCE assertion becomes permanently true and guards nothing."
+  [src from to]
+  (let [bs    (str (char 92))
+        esc   (fn [nm] (str/join (str bs ".") (str/split (str nm) #"\.")))
+        from* (esc from)]
+    (if (= from* (str from))
+      ;; NO DOT, so there is no escaped spelling: `esc` returned the name
+      ;; unchanged, and matching it here would rewrite the PLAIN spelling a
+      ;; second time — the exact "second producer of one behaviour" this
+      ;; docstring rules out, reached whenever the name has no dot to escape.
+      ;;
+      ;; It was not harmless. The caller's text pass bounds a name by
+      ;; `[A-Za-z0-9_-]`; this pass bounded it by letters ALONE, so the second
+      ;; rewrite reached further than the first and undid its protection:
+      ;; sweeping `:web/client` rewrote `:web/client-routes` too, silently,
+      ;; into a marker nothing defines. Every keyword marker is dotless, so
+      ;; every marker sweep went through here.
+      src
+      (let [cls (name-boundary-class from)
+            ;; backslash FIRST: `cls` ends in a literal `-`, and appending
+            ;; anything after it makes that hyphen a RANGE — `[_-\\]` is
+            ;; `_`(0x5F) to `\`(0x5C), reversed, and the pattern refuses to
+            ;; compile at all
+            pat (re-pattern (str "(?<![\\\\" cls "])"
+                                 (java.util.regex.Pattern/quote from*)
+                                 "(?![" cls "])"))]
+        (str/replace src pat (str/re-quote-replacement (esc to)))))))
+
+(defn- unwrap-forms
+  "`root` with a `z/root` `:forms` wrapper removed — the single form it holds.
+
+  **Every zipper rewrite that returns a NODE owes this.** `z/root` wraps its
+  result in a `:forms` node, and `store/form-symbol` refuses a `:forms` wrapper
+  deliberately (a wrapper may hold several top-level forms, so the name is
+  genuinely ambiguous). A pass that forgets to unwrap therefore hands back a
+  form the store keeps the SOURCE of and loses the NAME of — anonymous, and
+  silent, because the rendered text is identical.
+
+  It was written inline in [[rewrite-symbols]] and missing from
+  [[qualified-mention-changeset]], which is the prose pass. slopp's own
+  `rules.catalog/rule-catalog` names a namespace in a `:teach` string, so
+  renaming that family anonymised the catalog; `export-level` looks a var up BY
+  NAME, returned nil, and every caller of it read as calling a package-private
+  var. A whole-store rename then died on a visibility refusal naming a rule
+  that was never the problem."
+  [root]
+  (if (= :forms (n/tag root))
+    (or (first (filter n/sexpr-able? (n/children root))) root)
+    root))
+
+(defn rewrite-symbols
+  "Zipper-walk `node`, replacing symbol tokens via `f` (sym → sym|nil).
+  Returns the (possibly identical) node. z/root wraps its result in a
+  :forms node — unwrapped here, or every changeset-rewritten form would
+  lose its :name downstream (apply-changeset recomputes names via
+  form-symbol, which rightly refuses :forms wrappers; found via Q14's
+  sweep when a consumer's rewritten ns decl broke image load order).
+
+  `opts` selects WHICH symbols the walk visits, `'…`/`` `… `` being the
+  axis: `{:skip-quoted true}` visits only unquoted ones, `{:only-quoted
+  true}` only quoted ones, and neither visits everything. Opt IN, because
+  the callers want different things about the same token — a RENAME
+  rewrites a quoted name to another fully-qualified name and is right to,
+  while a MOVE must dequalify the CALL and give the quoted name its new
+  home's full name instead, which is two passes with the same predicate.
+  See [[quoted-loc?]] for why getting it wrong shows up at neither write
+  time nor test time."
+  ([node f] (rewrite-symbols node f nil))
+  ([node f {:keys [skip-quoted only-quoted]}]
+   (loop [zl (z/of-node node)]
+     (let [visit? (and (= :token (z/tag zl))
+                       (symbol? (z/sexpr zl))
+                       (cond skip-quoted (not (quoted-loc? zl))
+                             only-quoted (quoted-loc? zl)
+                             :else       true))
+           zl (if visit?
+                (if-let [s' (f (z/sexpr zl))]
+                  (z/replace zl s')
+                  zl)
+                zl)
+           nxt (z/next zl)]
+       (if (z/end? nxt)
+         (unwrap-forms (z/root zl))
+         (recur nxt))))))
+
+(defn ^:export ns-rename-changeset
+  "Every form in the STORE mentioning `old` as a namespace — its own ns decl,
+  require clauses, fully-qualified refs — rewritten to `new`. {form-id node}."
+  [store old new]
+  (let [mapper (ns-sym-mapper old new)]
+    (into {}
+          (for [ns-sym (keys (:namespaces store))
+                e (store/forms store ns-sym)
+                :let [node' (rewrite-symbols (:node e) mapper)]
+                :when (not= (n/string node') (n/string (:node e)))]
+            [(:id e) node']))))
 
 (defn ^:export move-plan
   "PLAN moving `moved-names` from `from-ns` into `to-ns` (new or existing) —
@@ -1232,263 +1846,6 @@
                    (let [have (set (map :lib (require-specs store to-ns)))]
                      (vec (sort (map :spec (remove #(have (:lib %)) to-specs))))))))))))
 
-(defn ^:export match-in-strings?
-  "True when `pat` matches inside a STRING LITERAL of `src` — as opposed to
-  matching code.
-
-  A sweep rewrites prose and string contents deliberately (a docs-team rename
-  means everything named that). But a string literal is not always prose: a
-  test FIXTURE is data, and rewriting a keyword inside one while leaving the
-  `{:keys [...]}` in that same string alone makes the fixture silently
-  self-inconsistent. Separating the two is what lets a preview say which hits
-  need a human eye."
-  [src pat]
-  (boolean
-   (some (fn [zl]
-           (let [nd (z/node zl)]
-             (and (= :token (n/tag nd))
-                  (string? (try (n/sexpr nd) (catch Exception _ nil)))
-                  (re-find pat (str (try (n/sexpr nd) (catch Exception _ "")))))))
-         (->> (iterate z/next (z/of-string src))
-              (take-while (complement z/end?))))))
-
-(defn ^:export requalify-call-args
-  "Qualify key `key-name` with `to-ns` in the map LITERAL passed as argument 1
-  to calls of the target fn in `src`. `heads` is the SET of head spellings that
-  resolve to that fn in this source's namespace — `#{\"slopp.ops.external/open!\"
-  \"external/open!\"}`, plus the bare name only inside the defining ns.
-
-  Matching on the bare NAME instead was the bug this signature exists to
-  prevent: `slopp.db/open!` and `slopp.ops.external/open!` share a name, and a name-only
-  match rewrote calls to both. It showed up only because a dry-run reported 62
-  forms where the caller graph said 60.
-
-  The scope is otherwise the point. A store-wide keyword sweep cannot do this
-  safely whenever the key means more than one thing: `:dir` names a session
-  directory, a git context's directory and a repl cwd. Inside a call to ONE fn
-  it unambiguously means that fn's option, and nothing else is touched — not
-  another fn's identically-spelled key, not a bare map that is nobody's
-  argument.
-
-  Only KEY positions change, so `{:a :dir}` keeps its value. A call passing a
-  non-literal (`(open! opts)`) or nothing is left exactly as it is: this reader
-  cannot see through a binding and must not pretend to.
-
-  Pure: source string in, source string out; untouched when nothing matches."
-  [src heads key-name to-ns]
-  (if (or (str/blank? (str to-ns)) (empty? heads))
-    src
-    (let [kw    (keyword (str key-name))
-          qkw   (keyword (str to-ns) (str key-name))
-          sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
-          kids  (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
-          call? (fn [nd]
-                  (and (= :list (n/tag nd))
-                       (let [c (kids nd)
-                             h (sx (first c))]
-                         (and (symbol? h)
-                              (contains? (set heads) (str h))
-                              (= :map (some-> (second c) n/tag))))))
-          requal (fn [m]
-                   (n/map-node
-                    (interpose (n/spaces 1)
-                               (mapcat (fn [[k v]]
-                                         [(if (= kw (sx k)) (n/keyword-node qkw) k) v])
-                                       (partition 2 (kids m))))))]
-      (loop [z (z/of-string src)]
-        (cond
-          (z/end? z) (z/root-string z)
-
-          (call? (z/node z))
-          (let [nd  (z/node z)
-                tgt (second (kids nd))
-                ch  (mapv #(if (identical? % tgt) (requal %) %) (n/children nd))]
-            (recur (z/next (z/replace z (n/list-node ch)))))
-
-          :else (recur (z/next z)))))))
-
-(defn ^:export keys-entry
-  "The destructuring entry a key qualified by `ns-part` is bound through:
-  `:keys` when `ns-part` is blank, `:<ns-part>/keys` otherwise.
-
-  Small, and named because it is the join between a KEYWORD (`:a/x`, what a
-  rename is given) and a DESTRUCTURING (`{:a/keys [x]}`, where the same key is
-  spelled with its qualifier one position to the left)."
-  [ns-part]
-  (if (str/blank? (str ns-part))
-    :keys
-    (keyword (str ns-part) "keys")))
-
-(defn- keys-binding
-  "Map node `mnode`'s `{k [… sym …]}` destructuring entry as
-  `{:pairs :entry :vector :sym}`, or nil when this map does not bind `sym`
-  through `k`.
-
-  THE definition of \"this destructuring names that key\", in one place
-  because its absence broke a keyword sweep in both directions at once. A
-  `:keys` vector names its key as a SYMBOL, with the qualifier written only in
-  the entry beside it — so a pass that matches the symbol alone both skips
-  `{:a/keys [x]}` while renaming `:a/x` and rewrites `{:keys [x]}`, which
-  names `:x` and has nothing to do with the rename. The entry keyword is the
-  whole of the missing check.
-
-  `k` is `:keys` for an unqualified key and `:<ns>/keys` for a qualified one —
-  see `keys-entry`."
-  [mnode k sym]
-  (let [sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
-        kids  (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
-        pairs (vec (partition 2 (kids mnode)))
-        entry (first (filter #(= k (sx (first %))) pairs))
-        vec-n (second entry)]
-    (when (and entry (= :vector (n/tag vec-n)))
-      (when-let [tgt (first (filter #(= sym (sx %)) (kids vec-n)))]
-        {:pairs pairs :entry entry :vector vec-n :sym tgt}))))
-
-(defn ^:export destructures-key?
-  "True when `src` binds `key-name` through a `{:from-ns/keys [key-name]}`
-  destructuring (`{:keys [key-name]}` when `from-ns` is blank).
-
-  The question `requalify-keys` answers by rewriting, asked without
-  rewriting — for the case it must DECLINE. A sweep that changes a key's
-  NAME rather than its qualifier cannot move the symbol, because the symbol
-  is a LOCAL BINDING the body still reads; renaming it here would rename a
-  binding on the strength of a keyword. So the sweep leaves those alone and
-  reports them, which is only possible if it can see them."
-  [src key-name from-ns]
-  (let [k      (keys-entry from-ns)
-        wanted (symbol (str key-name))]
-    (loop [z (z/of-string src)]
-      (cond
-        (z/end? z) false
-
-        (and (= :map (n/tag (z/node z)))
-             (keys-binding (z/node z) k wanted))
-        true
-
-        :else (recur (z/next z))))))
-
-(defn ^:export requalify-keys
-  "Move the single key named `key-name` from the `from-ns`-qualified
-  destructuring entry to the `to-ns`-qualified one, leaving every other key in
-  the vector where it is. Either side may be blank, which is the unqualified
-  `{:keys [x]}` entry.
-
-  The half a textual keyword sweep cannot do. A map destructuring names its
-  keys as SYMBOLS inside a `:keys` vector, so renaming the keyword LITERAL
-  `:a/x` to `:b/x` everywhere leaves `{:a/keys [x]}` still asking for `:a/x` —
-  code that compiles, passes every gate, and reads nil at runtime.
-
-  **Which entry is matched is the entire correctness question**, and it is
-  `from-ns` that answers it, never the symbol. `{:keys [x]}` names `:x`; a
-  rename of `:a/x` must not touch it. That check's absence broke both
-  directions of one sweep at once — the qualified destructurings were skipped
-  and the unqualified ones were rewritten to read a key they had never named.
-  See `keys-binding`.
-
-  Rebuilds the destructuring map by MOVING the symbol's node, never by
-  round-tripping through `sexpr`: a rebuild from sexpr silently drops type
-  hints (`^Repository repo`), turning direct interop into reflection. Any
-  other entry — `:as`, `:or`, another `:ns/keys` — is carried through
-  untouched; the source entry disappears when its last member leaves, and an
-  existing destination entry absorbs the symbol, so sweeping several keys of
-  one handle converges on a single entry.
-
-  Pure: source string in, source string out; untouched when nothing matches,
-  and a no-op when the two qualifications are the same."
-  [src key-name from-ns to-ns]
-  (let [from-k (keys-entry from-ns)
-        to-k   (keys-entry to-ns)]
-    (if (= from-k to-k)
-      src
-      (let [wanted (symbol (str key-name))
-            kids   (fn [nd] (vec (filter n/sexpr-able? (n/children nd))))
-            vnode  (fn [ns] (n/vector-node (interpose (n/spaces 1) ns)))
-            sx     (fn [nd] (try (n/sexpr nd) (catch Exception _ ::none)))
-            rebuild
-            (fn [mnode]
-              (when-let [b (keys-binding mnode from-k wanted)]
-                (let [tgt    (:sym b)
-                      pairs  (:pairs b)
-                      kept   (vec (remove #(= % tgt) (kids (:vector b))))
-                      dest   (first (filter #(= to-k (sx (first %))) pairs))
-                      others (remove #(or (= % (:entry b)) (= % dest)) pairs)
-                      moved  (if dest (conj (kids (second dest)) tgt) [tgt])
-                      new    (concat
-                              (when (seq kept)
-                                [[(n/keyword-node from-k) (vnode kept)]])
-                              [[(n/keyword-node to-k) (vnode moved)]]
-                              others)]
-                  (n/map-node
-                   (interpose (n/spaces 1) (apply concat new))))))]
-        (loop [z (z/of-string src)]
-          (cond
-            (z/end? z) (z/root-string z)
-
-            (= :map (n/tag (z/node z)))
-            (if-let [m' (rebuild (z/node z))]
-              (recur (z/next (z/replace z m')))
-              (recur (z/next z)))
-
-            :else (recur (z/next z))))))))
-
-(def ^:private symbol-constituents
-  "The characters that can sit INSIDE a Clojure symbol token, as a regex
-  character-class body. Shared by the mention regexes below, which differ only
-  in which side they bound — a second copy would drift the moment one of them
-  learned about a character the other did not.
-
-  `-` is last on purpose: anywhere else in a class it reads as a range."
-  "A-Za-z0-9*+!_'?<>=/.&%$:#-")
-
-(defn- qualifier-mention-re
-  "A regex matching `alias` used as a QUALIFIER (`alias/…`) inside prose or a
-  string. Bounded on the left only: the right side is the qualified name, which
-  is symbol-constituent by definition, so [[symbol-mention-re]]'s trailing
-  guard would refuse every real hit."
-  [alias]
-  (re-pattern (str "(?<![" symbol-constituents "])"
-                   (java.util.regex.Pattern/quote (str alias)) "/")))
-
-(defn ^:export symbol-mention-re
-  "A regex matching `nm` as a whole SYMBOL token in prose or a string — bounded
-  by symbol-constituent characters rather than `\\b`, which is a word boundary
-  and so never fires at a name's punctuation edge (`valid?`, `->row`). Used to
-  surface leftover prose/string mentions after a rename."
-  [nm]
-  (let [q (java.util.regex.Pattern/quote (str nm))]
-    (re-pattern (str "(?<![" symbol-constituents "])" q
-                     "(?![" symbol-constituents "])"))))
-
-(defn- escape-literal
-  "`s` as it must be written INSIDE a Clojure string literal — backslashes and
-  quotes escaped.
-
-  `rewrite-clj.node/string-node` takes a VALUE and emits it between quotes,
-  escaping nothing. So any pass that edits a string by reading its value,
-  changing it, and building a fresh node has to put the escaping back, or the
-  literal ends at its first inner quote and everything after it is read as code.
-
-  **Measured, because it shipped.** One namespace rename took a tool descriptor
-  from 21450 characters to 21423 — 5 for the shorter name, and 22 for the
-  backslashes of its eleven escaped-quote pairs. The form stopped reading while
-  every check stayed green: the damaged form was re-evaluated into an image
-  that already held the good definition, so nothing re-read the source, and
-  in-image verification structurally cannot. It surfaced days later as a git
-  projection that would not run, because replay re-reads history as it stood.
-
-  **Backslashes first.** Escaping quotes first would then double the backslash
-  that step had just introduced.
-
-  Written with char codes rather than escape sequences deliberately: this is the
-  one function whose subject is escaping, and a reader checking it should not
-  have to count backslashes through two levels of literal to do so."
-  [s]
-  (let [bs (str (char 92))
-        q  (str (char 34))]
-    (-> s
-        (str/replace bs (str bs bs))
-        (str/replace q (str bs q)))))
-
 (defn ^:export qualified-mention-changeset
   "{form-id new-node} rewriting QUALIFIED references inside STRING LITERALS
   across the store, given `renames` as `{old-qsym new-qsym …}` — docstrings,
@@ -1532,227 +1889,6 @@
                                 unwrap-forms)]
                 :when  (not= (n/string out) (n/string node))]
             [(:id e) out]))))
-
-(defn ^:export module-extract-plan
-  "PLAN pulling `ns-syms` (each with its subtree and `-test` siblings) under
-  `to-prefix` — the module-grain regroup, analysed before anything is
-  written. A namespace that moves from two segments to three becomes
-  PACKAGE-PRIVATE, so every caller outside the new parent silently becomes a
-  module violation; `ns-rename-changeset` rewrites references faithfully and
-  leaves exactly those behind. This names them first.
-
-  Returns {:renames {old new} :exports [{:ns :name :forced-by [qsym…]}…]
-  :edges-add [[from-mod to-mod]…] :edges-retire [[from-mod to-mod]…]}, or
-  {:error msg} when the regroup would leave a module dependency CYCLE.
-
-  Two rules are borrowed rather than restated: visibility is decided by
-  `edit.modules/module-violations` (the same predicate the write gate
-  enforces), and cycles are computed over PRODUCTION edges only, the way
-  `store/module-layers` does — a `-test` namespace folds into its subject's
-  module, so its fixture deps would manufacture cycles that do not exist in
-  production (slopp.api ↔ slopp.db is exactly such a pair today)."
-  [store ns-syms to-prefix]
-  (let [all      (keys (:namespaces store))
-        test-ns? (fn [n] (str/ends-with? (str n) "-test"))
-        moving   (fn [n] (some (fn [s] (or (= (str n) (str s))
-                                           (= (str n) (str s "-test"))
-                                           (str/starts-with? (str n) (str s "."))))
-                               ns-syms))
-        renames  (into {} (for [n all :when (moving n)]
-                            [n (symbol (str to-prefix "."
-                                            (str/join "." (rest (str/split (str n) #"\.")))))]))
-        rn       (fn [n] (get renames n n))
-        manifest (or (edit.modules/modules-manifest store) {})
-        internal (set (map str all))
-        rs       (for [r (refs/refs store)
-                       :let [from (:from-ns r) to (:to-ns r)]
-                       :when (and (symbol? from) (symbol? to)
-                                  (internal (str to))
-                                  (not= (str from) (str to)))]
-                   (assoc r :from-ns' (rn from) :to-ns' (rn to)))
-        edge-of  (fn [k1 k2] (fn [r] [(edit.modules/module-of (k1 r))
-                                      (edit.modules/module-of (k2 r))]))
-        edges-of (fn [xs f] (into #{} (comp (map f) (remove (fn [[a b]] (= a b)))) xs))
-        after    (edges-of rs (edge-of :from-ns' :to-ns'))
-        before   (edges-of rs (edge-of :from-ns :to-ns))
-        prod     (edges-of (remove #(test-ns? (:from-ns %)) rs)
-                           (edge-of :from-ns' :to-ns'))
-        g        (reduce (fn [m [a b]] (update m a (fnil conj #{}) b)) {} prod)
-        cyclic   (vec (for [[a b] (sort prod)
-                            :when (store/module-path (update g a disj b) b a)]
-                        [a b]))
-        touched  (into #{} (map edit.modules/module-of)
-                       (concat (keys renames) (vals renames)))
-        cands    (filter #(or (renames (:from-ns %)) (renames (:to-ns %))) rs)
-        viol     (fn [r] (first (edit.modules/module-violations
-                                 manifest
-                                 [{:from-ns (:from-ns' r) :from-var (:from-var r)
-                                   :to (:to-ns' r)
-                                   :to-name (:to-name r)
-                                   :to-export (edit.modules/export-level
-                                               store (:to-ns r) (:to-name r))}])))
-        exports  (->> cands
-                      (keep (fn [r] (when (= :visibility (:rule (viol r))) r)))
-                      (group-by (juxt :to-ns' :to-name))
-                      (sort-by first)
-                      (mapv (fn [[[nsx nm] rs*]]
-                              {:ns nsx :name nm
-                               :forced-by (->> rs*
-                                               (keep (fn [r]
-                                                       (when (:from-var r)
-                                                         (symbol (str (:from-ns' r))
-                                                                 (str (:from-var r))))))
-                                               distinct sort vec)})))]
-    (if (seq cyclic)
-      {:error (str "the regroup would leave a module dependency cycle ("
-                   (str/join ", " (map (fn [[a b]] (str a " → " b)) cyclic))
-                   ") — extract the shared piece the other way, or restructure"
-                   " the callers first")}
-      {:renames renames
-       :exports exports
-       :edges-add (vec (sort (remove (fn [[a b]] (contains? (get manifest a #{}) b))
-                                     after)))
-       :edges-retire (vec (sort (for [[a bs] manifest b bs
-                                      :when (and (or (touched a) (touched b))
-                                                 (before [a b])
-                                                 (not (after [a b])))]
-                                  [a b])))})))
-
-(defn ^:export export-changeset
-  "Changeset hoisting each `{:ns :name}` in `targets` onto its module's world
-  surface — `^:export` on the defn name, via the same `export-mark` a
-  deep-target move uses. `level` (default true) may be a namespace-prefix
-  string for subtree-only widening.
-
-  Addressed at the store AS IT IS, so a regroup exports BEFORE it renames:
-  the marker has to be in place by the time the namespace goes deep, or the
-  intermediate store is one the module gate refuses. A var that already
-  carries the marker contributes nothing — a re-run is a no-op, not churn."
-  ([store targets] (export-changeset store targets true))
-  ([store targets level]
-   (into {}
-         (keep (fn [{:keys [ns name]}]
-                 (let [nsx (symbol (str ns)) nm (symbol (str name))]
-                   (when-let [e (store/form-named store nsx nm)]
-                     (when-not (edit.modules/export-level store nsx nm)
-                       [(:id e) (export-mark (:node e) level)])))))
-         targets)))
-
-(defn- zlocs
-  "Every zipper location of `node`, in walk order."
-  [node]
-  (->> (iterate z/next (z/of-node node))
-       (take-while (complement z/end?))))
-
-(defn- alias-declaration
-  "`node` (an `ns` form) with the ONE alias token in `:as` position rewritten
-  `old` → `new`, or nil when there is none.
-
-  Found STRUCTURALLY — by the `:as` immediately to its left — never by symbol
-  identity. The same spelling elsewhere in an `ns` form means something else
-  entirely: a `:refer`red var, a lib whose last segment happens to match, a
-  word in the docstring."
-  [node old new]
-  (loop [zl (z/of-node node) hit? false]
-    (let [as? (boolean (and (= :token (z/tag zl))
-                            (= old (safe-sexpr zl))
-                            (when-let [l (z/left zl)]
-                              (= :as (safe-sexpr l)))))
-          zl  (if as? (z/replace zl new) zl)
-          nxt (z/next zl)]
-      (if (z/end? nxt)
-        (when (or hit? as?)
-          (let [root (z/root zl)]
-            (if (= :forms (n/tag root))
-              (or (first (filter n/sexpr-able? (n/children root))) root)
-              root)))
-        (recur nxt (or hit? as?))))))
-
-(defn- qualified-site-count
-  "How many symbol tokens in `node` are qualified by `alias` — counted with the
-  same predicate the rewrite uses, so the number reported cannot drift from the
-  number changed."
-  [node alias]
-  (let [a (str alias)]
-    (count (for [zl    (zlocs node)
-                 :when (= :token (z/tag zl))
-                 :let  [s (safe-sexpr zl)]
-                 :when (and (symbol? s) (= a (namespace s)))]
-             s))))
-
-(defn- strings-mentioning
-  "The distinct STRING LITERALS of `src` that `pat` matches — the text a symbol
-  rewriter cannot reach, so the caller can be shown it instead."
-  [src pat]
-  (->> (iterate z/next (z/of-string src))
-       (take-while (complement z/end?))
-       (keep (fn [zl]
-               (let [nd (z/node zl)]
-                 (when (= :token (n/tag nd))
-                   (let [s (try (n/sexpr nd) (catch Exception _ nil))]
-                     (when (and (string? s) (re-find pat s)) s))))))
-       distinct
-       vec))
-
-(defn ^:export stranded-aliases
-  "The callers whose require alias for `new` is still spelled from `old` — the
-  residue an ns rename leaves, and the one relationship none of its rewrites
-  can reach.
-
-  A rename rewrites the LIB in every require clause and walks straight past the
-  `:as` beside it, so `[old.thing :as thing]` becomes `[new.other :as thing]`:
-  syntactically perfect, and every call site in that namespace goes on reading
-  `thing/f` for a namespace called `other`. Harmless while the old name means
-  nothing — and when it is REUSED, as `slopp.api` was, the alias starts naming a
-  real and different module, which is both the worse failure and the quiet one.
-
-  An alias is DERIVED from a name when its dot-separated segments are a
-  contiguous run of that name's. A row is reported when the alias is derived
-  from `old` and not from `new`, and that second half is what keeps an ordinary
-  rename quiet: a namespace moving between modules under the same last segment
-  (`x.api.query` → `x.read.query`, aliased `query`) is derived from both and
-  says nothing false. Measured over slopp's own store — 52 rows for
-  `slopp.api` → `slopp.ops`, and zero across four real renames of that shape,
-  each of which has callers that do alias it.
-
-  `:suggest` is the same-length SUFFIX of the new name, the alias the convention
-  would have produced, and is OMITTED when that spelling is already taken in
-  that caller: [[realias-plan]] refuses a taken alias, and a remedy the reader
-  cannot run costs exactly what no remedy costs.
-
-  An abbreviation (`caps` for `…capabilities`) is derived from nothing readable
-  and is invisible here. Stated rather than papered over — this reports the
-  aliases it can prove stale, not every alias a rename made questionable.
-
-  Not folded into [[slopp.index.refs/occurrences-of]] with the other
-  unrewritable residue, because it is the one member of that set needing BOTH
-  names: an alias is stale relative to what replaced it, and the one-sided
-  version — any alias spelled from `old` pointing elsewhere — fires on every
-  unrelated lib that happens to share a segment."
-  [store old new]
-  (let [segs (fn [s] (vec (str/split (str s) #"\.")))
-        o    (segs old)
-        w    (segs new)
-        run? (fn [a b] (boolean (some #(= a (subvec b % (+ % (count a))))
-                                      (range 0 (inc (- (count b) (count a)))))))
-        drv? (fn [alias name-segs]
-               (let [a (segs alias)]
-                 (and (<= (count a) (count name-segs)) (run? a name-segs))))]
-    (vec
-     (for [ns-sym (sort (keys (:namespaces store)))
-           :let   [specs (require-specs store ns-sym)]
-           s      specs
-           :when  (and (:alias s)
-                       (= (str new) (str (:lib s)))
-                       (drv? (:alias s) o)
-                       (not (drv? (:alias s) w)))
-           :let   [n     (count (segs (:alias s)))
-                   sugg  (when (<= n (count w))
-                           (symbol (str/join "." (subvec w (- (count w) n)))))
-                   taken (some #(= sugg (:alias %)) specs)]]
-       (cond-> {:ns ns-sym :form ns-sym :via :alias :rewritable false
-                :alias (:alias s)}
-         (and sugg (not taken)) (assoc :suggest sugg))))))
 
 (defn ^:export realias-plan
   "Plan renaming ONE namespace's require alias `old` → `new`: the `:as` in its
@@ -1826,142 +1962,6 @@
                                    {:ns ns-sym :name (:name e) :text s}))})))))
     (catch Exception ex
       {:error (str "realias plan failed: " (ex-message ex))})))
-
-(defn ^:export name-boundary-class
-  "The character class that ENDS `from` for a sweep — the chars that, adjacent
-  to a match, mean this is a longer name rather than the one being swept.
-
-  Two answers, because a sweep means two different things:
-
-  - **A KEYWORD is a complete token.** `:web/client-routes` is not
-    `:web/client` followed by `-routes`; it is a different marker, usually
-    read by a different rule. So `-`, digits and `_` end the name. Getting
-    this wrong is SILENT and was: sweeping `:web/client` also rewrote
-    `:web/client-routes`, into a marker nothing defines.
-  - **A BARE NAME is a concept, and compounds are part of it.** Sweeping
-    `zone` → `region` is meant to carry `zone-fee`, `zone-fees` and `zone-t`
-    with it — that is what makes a sweep one intent rather than a list of
-    renames, and it is pinned by
-    `mcp-test/rename-sweep-is-one-intent`. So only letters end the name.
-
-  A DOT ends nothing in either case, and that is deliberate: a family rename
-  has to reach through it, so `slopp.http` → `slopp.http` moves
-  `slopp.http.dispatch` while `slopp.webapp` is already safe on the letter."
-  [from]
-  (if (str/starts-with? (str from) ":") "A-Za-z0-9_-" "A-Za-z"))
-
-(defn ^:export rewrite-patterns
-  "`src` with every ESCAPED-DOT spelling of `from` rewritten to `to` — the
-  spelling a regex literal uses and a textual pass cannot see. Returns `src'`,
-  unchanged when there is nothing to move.
-
-  **This used to be reported and not done**, on the reasoning that a regex is
-  an INTENT rather than a name: whether a `.` in one separates or matches
-  anything is a question about what the author meant. That reasoning is sound
-  and its conclusion was too broad, for a reason that is slopp's to STATE
-  rather than to discover — **slopp owns the dialect, and a dot in a namespace
-  name is a separator.** No pattern legitimately means `acme<any>billing`, so
-  there is no intent to guess at and the name can move mechanically.
-
-      #\"acme\\.billing\\..+\"   ->   #\"acme\\.invoice\\..+\"
-
-  **Only the escaped spelling, and only the NAME.** The unescaped spelling
-  shares its literal text with the name, so every caller's ordinary text pass
-  has already rewritten it; matching it again here would be a second producer
-  of one behaviour. And the rest of the pattern is the author's own matching —
-  the trailing `\\..+` above means nothing to a rename and is left alone.
-
-  **A plain text replacement, deliberately, rather than a walk over `:regex`
-  nodes.** The escaped spelling is bounded the same way the name is, and prose
-  that writes `acme\\.billing` while discussing the pattern wants moving too.
-  Two backslashes cannot be caught by one: `\\\\.` contains `\\.` only where the
-  character before it is a backslash rather than the name's last letter, so the
-  boundary guard excludes it.
-
-  Why it is worth doing at all: measured at seven literals in one wave, all
-  config-key patterns, two surviving every write and three green done-points.
-  One rule then refused EVERY declared auth group as unknown — it read groups
-  under the retired spelling, found none, and taught the author to configure
-  the key it was already reading past. A stale pattern fails in the direction
-  where a predicate quietly matches nothing: a presence assertion turns red,
-  while an ABSENCE assertion becomes permanently true and guards nothing."
-  [src from to]
-  (let [bs    (str (char 92))
-        esc   (fn [nm] (str/join (str bs ".") (str/split (str nm) #"\.")))
-        from* (esc from)]
-    (if (= from* (str from))
-      ;; NO DOT, so there is no escaped spelling: `esc` returned the name
-      ;; unchanged, and matching it here would rewrite the PLAIN spelling a
-      ;; second time — the exact "second producer of one behaviour" this
-      ;; docstring rules out, reached whenever the name has no dot to escape.
-      ;;
-      ;; It was not harmless. The caller's text pass bounds a name by
-      ;; `[A-Za-z0-9_-]`; this pass bounded it by letters ALONE, so the second
-      ;; rewrite reached further than the first and undid its protection:
-      ;; sweeping `:web/client` rewrote `:web/client-routes` too, silently,
-      ;; into a marker nothing defines. Every keyword marker is dotless, so
-      ;; every marker sweep went through here.
-      src
-      (let [cls (name-boundary-class from)
-            ;; backslash FIRST: `cls` ends in a literal `-`, and appending
-            ;; anything after it makes that hyphen a RANGE — `[_-\\]` is
-            ;; `_`(0x5F) to `\`(0x5C), reversed, and the pattern refuses to
-            ;; compile at all
-            pat (re-pattern (str "(?<![\\\\" cls "])"
-                                 (java.util.regex.Pattern/quote from*)
-                                 "(?![" cls "])"))]
-        (str/replace src pat (str/re-quote-replacement (esc to)))))))
-
-(defn ^:export patterns-not-swept
-  "The regex LITERALS in `src` that name `from` in a spelling a textual sweep
-  cannot see — an ESCAPED DOT. Returns their source text.
-
-  A sweep matches `web.static` and rewrites it wherever it appears, prose and
-  string literals included. A regex writes the same name `web\\.static`, which
-  shares no literal text with it, so the sweep walks past every one. Measured:
-  seven in a single wave, all config-key patterns, two of them surviving every
-  write and three green done-points to be caught by the external tier.
-
-  The costs were not cosmetic. One rule refused EVERY declared auth group as
-  unknown — it read groups under the retired spelling, found none, and taught
-  the author to configure the key it was already reading past. Another reported
-  every asset link in an app as dangling. A third had prose and pattern split
-  inside ONE form, its docstring naming the new spelling beside a pattern
-  naming the old.
-
-  **This is the RESIDUE now, not the answer.** Reporting rather than rewriting
-  was the decision, on the reasoning that a regex is an INTENT rather than a
-  name — whether a `.` in it is a separator or a wildcard is a question about
-  what the author meant. That was too broad: slopp owns the dialect, so a dot
-  in a dotted name it governs is a separator, and [[rewrite-patterns]] moves
-  these mechanically. What this function returns is therefore what the rewrite
-  did NOT reach, and a non-empty answer is a finding rather than a chore.
-
-  `pat` — the sweep's own exact pattern — excludes the literals the text pass
-  DID rewrite, so this reports only what that pass could not see.
-
-  Dots only, deliberately: every measured instance was a dot, and widening to
-  every regex metacharacter would report literals that merely mention the
-  token."
-  [src from pat]
-  (let [;; bounded exactly like the sweep that produced `pat`, via the one
-        ;; function that decides it — otherwise this reports a longer name
-        ;; merely starting with `from` as residue the rewrite missed, sending
-        ;; the author to hand-fix a literal that is already right
-        cls   (name-boundary-class from)
-        loose (re-pattern
-               (str "(?<![" cls "])"
-                    (str/join "\\\\?\\."
-                              (map #(java.util.regex.Pattern/quote %)
-                                   (str/split (str from) #"\.")))
-                    "(?![" cls "])"))]
-    (vec (for [zl (->> (iterate z/next (z/of-string src))
-                       (take-while (complement z/end?)))
-               :let [nd (z/node zl)]
-               :when (= :regex (n/tag nd))
-               :let [txt (n/string nd)]
-               :when (and (re-find loose txt) (not (re-find pat txt)))]
-           txt))))
 
 (defn- paired-container?
   "Is `zl`'s parent a container whose children are PAIRS — a map literal, a
@@ -2098,6 +2098,53 @@
 
               :else {:zloc (first usable)})))))))
 
+(defn ^:export subform-replace-plan
+  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
+  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
+  addressed: siblings are never re-transcribed). A pair match (P1) replaces
+  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
+
+  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
+  match actually found — so the matched form ends up NESTED inside it. That is
+  the third transformation shape: the verbs expressed replace-in-place and
+  insert-beside, and introducing `(let [x …] <the thing that was there>)`
+  around existing code was neither. Matching a fragment that opens a delimiter
+  it does not close is correctly refused, so the only way to express it was to
+  restate the whole enclosing form — measured at ~40 lines a time.
+
+  `$1` is filled from the FOUND text, not from `match-src`: matching is
+  whitespace-insensitive, so the two can differ and the source is what should
+  survive. A template with no `$1` is refused rather than treated as a plain
+  replace, because that would DELETE the matched form — a different operation
+  than the one asked for."
+  ([store ns-sym form-name match-src new-src]
+   (subform-replace-plan store ns-sym form-name match-src new-src false))
+  ([store ns-sym form-name match-src new-src wrap?]
+   (try
+     (if (and wrap? (not (re-find #"\$1" (str new-src))))
+       {:error (str "a wrap template must contain $1 — the place the matched form"
+                    " goes. Without it the match would be DELETED, which is"
+                    " edit_subform without wrap")}
+       (if-let [e (store/form-named store ns-sym form-name)]
+         (let [form-src (n/string (:node e))
+               found    (find-unique-subform form-src match-src form-name)]
+           (if (:error found)
+             found
+             (let [m       (:zloc found)
+                   e2      (or (:end-zloc found) m)
+                   [r c]   (z/position m)
+                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
+                   ;; the source the match actually FOUND, not what the caller
+                   ;; typed: matching is whitespace-insensitive, so the two can
+                   ;; differ and it is the source that should survive the wrap
+                   src     (if wrap?
+                             (fill-template new-src [(n/string (z/node m))])
+                             new-src)]
+               {:new-form-src (replace-span form-src [r c] [er ec] src)})))
+         {:error (str "no form named " form-name " in " ns-sym)}))
+     (catch Exception ex
+       {:error (str "subform edit failed: " (ex-message ex))}))))
+
 (defn ^:export extract-plan
   "Plan extracting the unique occurrence of `subform-src` inside `from-name`
   into a new fn `new-name`: params = the free locals (bound outside the
@@ -2149,53 +2196,6 @@
       {:error (str "no form named " from-name " in " ns-sym)})
     (catch Exception ex
       {:error (str "extract failed: " (ex-message ex))})))
-
-(defn ^:export subform-replace-plan
-  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
-  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
-  addressed: siblings are never re-transcribed). A pair match (P1) replaces
-  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
-
-  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
-  match actually found — so the matched form ends up NESTED inside it. That is
-  the third transformation shape: the verbs expressed replace-in-place and
-  insert-beside, and introducing `(let [x …] <the thing that was there>)`
-  around existing code was neither. Matching a fragment that opens a delimiter
-  it does not close is correctly refused, so the only way to express it was to
-  restate the whole enclosing form — measured at ~40 lines a time.
-
-  `$1` is filled from the FOUND text, not from `match-src`: matching is
-  whitespace-insensitive, so the two can differ and the source is what should
-  survive. A template with no `$1` is refused rather than treated as a plain
-  replace, because that would DELETE the matched form — a different operation
-  than the one asked for."
-  ([store ns-sym form-name match-src new-src]
-   (subform-replace-plan store ns-sym form-name match-src new-src false))
-  ([store ns-sym form-name match-src new-src wrap?]
-   (try
-     (if (and wrap? (not (re-find #"\$1" (str new-src))))
-       {:error (str "a wrap template must contain $1 — the place the matched form"
-                    " goes. Without it the match would be DELETED, which is"
-                    " edit_subform without wrap")}
-       (if-let [e (store/form-named store ns-sym form-name)]
-         (let [form-src (n/string (:node e))
-               found    (find-unique-subform form-src match-src form-name)]
-           (if (:error found)
-             found
-             (let [m       (:zloc found)
-                   e2      (or (:end-zloc found) m)
-                   [r c]   (z/position m)
-                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
-                   ;; the source the match actually FOUND, not what the caller
-                   ;; typed: matching is whitespace-insensitive, so the two can
-                   ;; differ and it is the source that should survive the wrap
-                   src     (if wrap?
-                             (fill-template new-src [(n/string (z/node m))])
-                             new-src)]
-               {:new-form-src (replace-span form-src [r c] [er ec] src)})))
-         {:error (str "no form named " form-name " in " ns-sym)}))
-     (catch Exception ex
-       {:error (str "subform edit failed: " (ex-message ex))}))))
 
 (defn ^:export canonicalize-refs
   "Rewrite the fully-qualified references in `node` (a form of `ns-sym`) to

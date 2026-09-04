@@ -67,6 +67,27 @@
           (apply (get performers kind) perform-ctx args))
         nil)))
 
+(defn bounded-body-string
+  "Read up to `max-bytes` from InputStream `in` as a UTF-8 string. Returns
+  {:body s-or-nil} within the cap, or {:too-large true} the moment the
+  stream exceeds it — the request-body DoS guard both adapters share
+  (review W8: an unbounded slurp is bounded only by heap). A nil stream is
+  an empty body."
+  [in max-bytes]
+  (if (nil? in)
+    {:body nil}
+    (let [buf (java.io.ByteArrayOutputStream.)
+          arr (byte-array 8192)
+          lim (long max-bytes)]
+      (with-open [^java.io.InputStream in in]
+        (loop []
+          (let [n (.read in arr)]
+            (cond
+              (neg? n) {:body (when (pos? (.size buf))
+                                (String. (.toByteArray buf) "UTF-8"))}
+              (> (+ (.size buf) n) lim) {:too-large true}
+              :else (do (.write buf arr 0 n) (recur)))))))))
+
 (defn- decoded-input
   "Everything the caller SENT, as the handler should receive it —
   `{:value {:path-params … :query-params … :body …}}` with each carrier decoded
@@ -319,24 +340,3 @@
                                             (ex-message e)))
                              {:status 500 :body {:error "internal server error"}})))))]
         resp))))
-
-(defn bounded-body-string
-  "Read up to `max-bytes` from InputStream `in` as a UTF-8 string. Returns
-  {:body s-or-nil} within the cap, or {:too-large true} the moment the
-  stream exceeds it — the request-body DoS guard both adapters share
-  (review W8: an unbounded slurp is bounded only by heap). A nil stream is
-  an empty body."
-  [in max-bytes]
-  (if (nil? in)
-    {:body nil}
-    (let [buf (java.io.ByteArrayOutputStream.)
-          arr (byte-array 8192)
-          lim (long max-bytes)]
-      (with-open [^java.io.InputStream in in]
-        (loop []
-          (let [n (.read in arr)]
-            (cond
-              (neg? n) {:body (when (pos? (.size buf))
-                                (String. (.toByteArray buf) "UTF-8"))}
-              (> (+ (.size buf) n) lim) {:too-large true}
-              :else (do (.write buf arr 0 n) (recur)))))))))
