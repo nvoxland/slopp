@@ -2483,3 +2483,40 @@ revisit re-runs as e24u under the same rules before Part 2 (all models).
 **Method note.** The external runner's `only` takes qualified names
 (`ns/test`); a bare name fails with `Could not resolve var`, naming one of
 them, whether or not it exists.
+
+## 2026-09-03 — eval24: whole-when-small passes on sonnet, opus pays the ritual floor, haiku is below the task
+
+**Canary e24u** (jar df7a7c9287e82: `query_source {ns}` whole when ≤ 6k
+with the flow hint, cards above; the bundle's whole-namespace section back,
+smallest named namespaces first under a cap of six): step 2 in 15 / 11 / 11
+turns against eval23's 19 / 20 / 17 and e24t's 24 / 29 / 18, ONE namespace
+read per cell against eval23's 6 / 3 / 6, acceptance 3/3, zero `query_flow`.
+The bundle carried every namespace the ask named, so the reads collapsed
+and the flow read had nothing left to answer.
+
+**Part 2, the matched lifetime (task B, n=3 pairs per model, medium):**
+
+- **sonnet-5: PASS every rule.** WALL 340 vs 342 s (−1%), COST $1.04 vs
+  $1.29 (−19%), TURNS 56 vs 89 (−37%), 6/6 cells 11/11. Better than eval22
+  this morning on every axis (slopp 71 / $1.21 / 362 s → 56 / $1.04 /
+  340 s). Wall is the rule slopp barely holds: a third fewer turns bought
+  one percent of wall, so a slopp turn is still slower than a plain one.
+- **opus-5: MISS on wall (+24%), cost (+32%), turns (+22%); 6/6 accept.**
+  Plain opus finishes the lifetime in 54–60 turns; slopp opus in 61–71.
+  Per step (plain → slopp medians) 12 → 12, 19 → 12, 9 → 18, 7 → 8,
+  9 → 17. Census of a slopp cell's last step: 21 calls — `report` ×5,
+  `query_changes` ×3, `explore` ×3, `full_check` ×2, `done` ×2,
+  `test_run` ×2. Opus follows every ritual the skill names, every step,
+  and the floor that adds is above its plain habit. The reads change
+  holds for opus (step 2: 19 → 12); the next lever for opus is the
+  ritual floor — how many verification calls a step is told to make.
+- **haiku-4.5: no verdict.** 1/11 in every plain cell and two of three
+  slopp cells (the rename step never happened; the tree would not load
+  afterwards); one slopp cell reached 9/11. The task is above the model
+  in both cohorts.
+
+**Method notes.** `accept23.sh`/`accept9.sh` take a cell PATH; handed a
+cell name they `cd` nowhere and score the project directory (every check
+fails with a nil connection). `compare21.py`'s ACCEPT rule wants the word
+`PASS` in the accept column. `query_cost {since <turn delta>}` is the
+per-step census; `report`'s `:by-ask` gives the turn ids.
