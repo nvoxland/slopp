@@ -105,7 +105,7 @@ turn; never call `turn_begin`.
 | rename a var (callers follow) | `edit_rename {ns from to}` |
 | rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first — a READ, it rides in `explore` beside a search — (`:in-code`, `:in-strings` each with its form's source, `:in-files`, `:mentions`: every mention, any case), then without: `:rewritten` carries the string-hit forms as they now read (fix an alignment from it, no re-read), `:remaining` is what still names the old word |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
-| new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold (both together merge; on an existing namespace `requires` alone adds them). A change step `{ns requires}` or `{action ns_create …}` is the same creation, inside the change |
+| new namespace | usually a change step `{ns requires doc?}` — the creation inside the change that fills it; standalone, `ns_create {ns source}` (whole source) or `{ns requires doc}` (a scaffold; `doc` is its purpose, stored as the docstring; both together merge; on an existing namespace `requires` alone adds them) |
 | require / module edge | usually automatic; else `ns_add_require {ns require}` (`lib` works too; a clause without brackets is wrapped; a different spelling of a lib already required REPLACES it; a namespace of yours that does not exist yet is created empty), `ns_remove_require {ns lib}`, `module_dep {from to}` (a refusal names the edge) |
 | delete | `change` — a `:delete` step; callers first: a delete with a live caller is refused and names it |
 | undo my last writes | `undo {deltas n}` |
