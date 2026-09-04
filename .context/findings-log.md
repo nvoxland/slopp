@@ -2563,3 +2563,46 @@ answer grew.
 store's `query_cost` counts calls, the transcript counts TURNS and shows
 what the model said between them, which is what named every sink here.
 
+## 2026-09-04 — eval26: the one-call unit; opus passes every rule; a stranded thread
+
+**eval26 (jar dc4e2614c8fab; `change {done commit}` closes the unit,
+cheap whole-store inside the close, forgiving require ops, a report that
+never snips an ask). opus-5: TURNS 43 vs 63 (−32%), WALL 401 vs 452 s
+(−11%), COST $2.45 vs $2.57 (−5%), ACCEPT 6/6 — every rule, for the first
+time.** Slopp opus across the waves: 67 → 49 → 43. The ≤ 35 target was
+missed; what is left is step 1 (11–14 turns, first-touch exploration and
+two changes before the close) and step 2 (the records question sends the
+model to bash/git and the README beside the report). Closes in one call
+4–5 a cell, almost all `done {commit}`; `full_check` after a close fell
+from 3–5 to 2; `commit_point` calls to 0; step-5 history reads after the
+report from 14 to 0–2.
+
+**sonnet-5: TURNS 33 vs 97 (−66%), COST $0.94 vs $1.31 (−28%), WALL 310
+vs 360 s (−14%) — and ACCEPT MISS, e26s1 9/11.** Not a wrong
+implementation: the cell's step-2 work never reached the branch. The
+closing change was red on a wrong expectation and closed nothing (right);
+the fix was a tests-only change carrying `done` and `commit`, which the
+tests-only path ignored; the model ran `full_check` (green on its
+thread), answered, and the one-shot session exited with sixteen writes on
+its thread. The plugin's Stop hook — an async `slopp --call done` in a
+separate process — landed nothing: the session it would have reached had
+exited. Steps 3–5 started from a branch without the eco work.
+
+**Two fixes, landed after the run.** A tests-only change closes too when it
+is green (and says the impl is next when red). The landing floor moves
+into the server: `mcp/land-on-exit!` runs the done for a thread that
+still holds green content writes when the stdio loop ends, before the
+teardown. The Stop hook stays as a second chance for an editor session.
+The mechanism that hid this for three evals: every earlier cell called
+`done` explicitly; the one-call unit made the close implicit, and an
+implicit close needs a floor that is in the process that owns the thread.
+
+**Residual refusal shapes (opus, 3–7 a cell), for the next wave:** a change
+step with `action ns_create` or `{ns requires}` and no source (a namespace
+creation sent as a step), `ns_create` with both `source` and `requires`
+(refused as exclusive), `ns_create` on an existing namespace when the
+model wanted its requires, `full_check {run_in_background}`, `query_git
+{limit}`; and a bundle that answers a records question ("why is X
+computed this way — what do the records say") with the seed's version
+story, so step 2 stops going to git.
+

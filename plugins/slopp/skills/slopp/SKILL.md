@@ -89,8 +89,8 @@ turn; never call `turn_begin`.
    `commit`), or `done {label commit?}` stands alone after a read. A green
    close carries `:suite` (the episode's counts) and, on a store where the
    whole-store check is cheap, `:whole-store {:status :test :external}` —
-   the numbers to quote. `done` also runs itself when your session stops,
-   so forgetting costs nothing. `full_check` is the human's grain, for a
+   the numbers to quote. The server lands what you left green on your
+   thread when the session ends, so forgetting costs nothing. `full_check` is the human's grain, for a
    store too big to check in a close; `commit_point` is `commit true`.
 
 ## Which write
