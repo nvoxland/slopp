@@ -4742,6 +4742,16 @@
                           note (str/join " "
                                          (remove nil?
                                                  [(sweep-note from left false)
+                                                  ;; WHICH copy: a grep of the working tree finds
+                                                  ;; the human branch's file untouched and reads
+                                                  ;; it as a sweep that missed (eval25 opus)
+                                                  (when (seq file-hits)
+                                                    (str (count file-hits) " tracked file(s) rewritten in the STORE ("
+                                                         (str/join ", " (map :path file-hits))
+                                                         "); file_get shows the new text. The working-tree"
+                                                         " copy is the human branch's until a commit_point"
+                                                         " projects it — a sed on the disk copy is drift,"
+                                                         " not a fix."))
                                                   (if (zero? n-rem)
                                                     (str "nothing named " from " remains — code,"
                                                          " strings, docstrings and tracked files,"
