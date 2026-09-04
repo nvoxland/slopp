@@ -2606,3 +2606,31 @@ model wanted its requires, `full_check {run_in_background}`, `query_git
 computed this way — what do the records say") with the seed's version
 story, so step 2 stops going to git.
 
+## 2026-09-04 — eval27: both models pass every rule; no thread stranded
+
+**eval27 (jar d22a663d292de; a tests-only change closes, the server lands
+its thread at exit, creation shapes repaired, the records in the bundle).**
+opus-5: TURNS 41 vs 59 (−31%), WALL 390 vs 433 s (−10%), COST $2.41 vs
+$2.50 (−4%), ACCEPT 6/6. sonnet-5: TURNS 32 vs 96 (−67%), COST $0.83 vs
+$1.30 (−36%), WALL 295 vs 343 s (−14%), ACCEPT 6/6. `thread_list` on all
+six slopp cell stores: nothing un-landed. Records:
+`projects/eval27-floor/RUNS.md`.
+
+**Where opus's remaining turns are.** Steps 4 and 5 sit at the floor
+(5 and 3–7). Step 1 is 8–10 (first touch: one or two explores, a
+namespace, two changes, the close). Step 2 is 10–12 and still opened with
+file_list / file_get / git log for the records question — the bundle's
+records section ranked the WHOLE two-topic ask and told the eco-carrier
+forms' story instead of the fuel surcharge's; fixed after the run (ranked
+on the sentences that ask the question). Step 3 is 11–15: the sweep's two
+calls, reads around its string hits, the fee change, and in one cell three
+bash calls and a file_get around the README again. Refusals 2–3 a cell
+(was 3–7). Each step ends in a one-call close now (4 a cell).
+
+**The trend, four waves.** slopp opus 67 → 49 → 43 → 41 turns against a
+plain that ranges 51–66; slopp sonnet 71 → 56 → 52 → 33 → 32 against
+88–109. Cost followed turns once the rent stopped growing: opus +32% →
++15% → −5% → −4%, sonnet −19% → −10% → −28% → −36%. What is NOT done: the
+prefix rent (the plugin's ~7–9k tokens a turn), which bounds how far cost
+can fall below plain for opus, and steps 1–3's remaining reads.
+
