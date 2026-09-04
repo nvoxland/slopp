@@ -90,7 +90,9 @@ turn; never call `turn_begin`.
    close carries `:suite` (the episode's counts) and, on a store where the
    whole-store check is cheap, `:whole-store {:status :test :external}` —
    the numbers to quote. The server lands what you left green on your
-   thread when the session ends, so forgetting costs nothing. `full_check` is the human's grain, for a
+   thread when the session ends, so forgetting costs nothing. A close
+   carries `:verify`, the command a teammate runs — quote it, do not read
+   the README for it. `full_check` is the human's grain, for a
    store too big to check in a close; `commit_point` is `commit true`.
 
 ## Which write
@@ -101,7 +103,7 @@ turn; never call `turn_begin`.
 | new form(s) | `change` — one `:add` step per form (order never matters; definitions-before-callers is derived) |
 | a change INSIDE a big form | a `:patch` step — `{action patch, ns, name, replace [{match source} …]}`: each entry swaps one exact subform — or a CONTIGUOUS RUN of siblings (two body forms, a whole pair, three clauses), which is usually the unit you mean; inside a map/binding vector/case/cond a run must cover whole pairs. The match must PARSE on its own: complete forms, never a fragment that opens a delimiter it doesn't close. `text: true` for strings/docstrings; `where: {key value}` for a registry row. Deltas, never a whole-form retype |
 | rename a var (callers follow) | `edit_rename {ns from to}` |
-| rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first (`:in-code`, `:in-strings`, `:in-files`), then without — the result's `:remaining` is the case-insensitive census of what still names it, so there is nothing to grep for afterwards |
+| rename a concept store-wide (vars, keywords, prose, tracked files, `Zone`/`ZONE` too) | `rename_sweep {from to dry_run true}` first — a READ, it rides in `explore` beside a search — (`:in-code`, `:in-strings` each with its form's source, `:in-files`, `:mentions`: every mention, any case), then without: `:rewritten` carries the string-hit forms as they now read (fix an alignment from it, no re-read), `:remaining` is what still names the old word |
 | extract a subform into a fn | `edit_extract {ns from name match}` (or `at` for a large one) |
 | new namespace | `ns_create {ns source}` — whole source, or `requires` to scaffold (both together merge; on an existing namespace `requires` alone adds them). A change step `{ns requires}` or `{action ns_create …}` is the same creation, inside the change |
 | require / module edge | usually automatic; else `ns_add_require {ns require}` (`lib` works too; a clause without brackets is wrapped; a different spelling of a lib already required REPLACES it; a namespace of yours that does not exist yet is created empty), `ns_remove_require {ns lib}`, `module_dep {from to}` (a refusal names the edge) |
