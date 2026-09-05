@@ -19,7 +19,7 @@
   a rename rebuilds the image, so it needs a real session."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn] [clojure.string])
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn] [clojure.string :as str] [slopp.edit.refactor :as refactor])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1078,17 +1078,28 @@
           (is (not (contains? r :case-variants)) (pr-str r))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-preview-carries-the-census-so-nothing-is-left-to-search
+(deftest ^:external a-preview-says-which-spellings-it-will-leave-behind
   ;; eval25 opus step 3, every cell: dry run, then a case-insensitive search
   ;; for the same word to check the preview's coverage. The preview counts
-  ;; every mention itself.
+  ;; every mention itself — but counting them is not rewriting them, and it
+  ;; used to say "every mention … nothing outside it to search for", which
+  ;; told the agent that the search it was about to run was pointless.
+  ;; slopp-ui measured the consequence: two previews of one concept, 190 forms
+  ;; and 54, over different sets, each certifying totality.
   (let [sess (external/open!)]
     (try
-      (ops/ingest! sess 'pv.zone "(ns pv.zone)\n(def zone-fees \"The Zone fee table.\" {1 500})\n(defn ^:unused-ok zone-fee \"A fee.\" [z] (get zone-fees z 0))\n")
+      (ops/ingest! sess 'pv.zone "(ns pv.zone)\n(def zone-fees \"The Zone fee table.\" {1 500})\n(defn ^:unused-ok zone-fee \"A fee.\" [z] (get zone-fees z 0))\n(def ^:unused-ok zoneless \"Outside every zone.\" true)\n")
       (ops/file-put! sess "README.md" "zone pricing\n" :prompt "readme")
-      (let [r (ops/rename-sweep! sess "zone" "region" :dry-run true)]
-        (is (= {:forms 2 :files 1} (select-keys (:mentions r) [:forms :files])) (pr-str (:mentions r)))
-        (is (re-find #"every mention" (str (:note (:mentions r)))) (pr-str (:mentions r))))
+      (let [r (ops/rename-sweep! sess "zone" "region" :dry-run true)
+            m (:mentions r)]
+        (testing "the census still counts every form and file that names the concept"
+          (is (= {:forms 3 :files 1} (select-keys m [:forms :files])) (pr-str m)))
+        (testing "and it NAMES the spelling it is going to leave behind"
+          (is (= ["zoneless"] (:not-swept m)) (pr-str m)))
+        (testing "the note points at that list rather than certifying coverage"
+          (is (re-find #":not-swept" (str (:note m))) (pr-str m))
+          (is (not (re-find #"nothing outside it to search for" (str (:note m))))
+              (str "the preview is claiming a coverage it does not have: " (pr-str m)))))
       (finally (ops/close! sess)))))
 
 (deftest ^:external a-string-hit-carries-its-form-and-the-run-carries-the-rewrite
@@ -1138,3 +1149,101 @@
       (finally
         (ops/close! sess)
         (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
+
+(deftest the-regular-plural-of-a-swept-word-is-derivable
+  ;; A bare name's boundary is `(?<![A-Za-z])…(?![A-Za-z])`, which is what lets
+  ;; a sweep of `zone` carry `zone-fee` — a `-` is not a letter. The plural is
+  ;; the one compound the same rule EXCLUDES, because `s` is a letter. So the
+  ;; plural has to be swept as its own spelling or not at all.
+  (testing "the ordinary case is a bare s"
+    (is (= "zones" (refactor/plural-of "zone")))
+    (is (= "commit-points" (refactor/plural-of "commit-point")))
+    (is (= "regions" (refactor/plural-of "region"))))
+  (testing "a sibilant takes es, because box+s is not a word anyone writes"
+    (is (= "boxes" (refactor/plural-of "box")))
+    (is (= "batches" (refactor/plural-of "batch")))
+    (is (= "dishes" (refactor/plural-of "dish"))))
+  (testing "consonant+y becomes ies, and vowel+y does not"
+    (is (= "policies" (refactor/plural-of "policy")))
+    (is (= "entries" (refactor/plural-of "entry")))
+    (is (= "keys" (refactor/plural-of "key")))
+    (is (= "days" (refactor/plural-of "day"))))
+  (testing "a compound pluralizes on its head, which in Clojure naming is the last segment"
+    (is (= "commit-policies" (refactor/plural-of "commit-policy")))
+    (is (= "read-boxes" (refactor/plural-of "read-box"))))
+  (testing "a word ending in s is read as ALREADY PLURAL, and that is a choice"
+    ;; `bus`→`buses` and `zones`→`zones` are the same input shape to any rule.
+    ;; Guessing the first writes `zoneses` into a store when the caller swept
+    ;; a plural word; guessing the second leaves `bus` un-pluralized, which
+    ;; the caller SEES in :plural-variants and can sweep by hand. The visible
+    ;; miss beats the silent corruption.
+    (is (= "zones" (refactor/plural-of "zones")))
+    (is (= "commit-points" (refactor/plural-of "commit-points")))
+    (is (= "bus" (refactor/plural-of "bus")))))
+
+(deftest a-preview-can-name-the-spellings-it-will-NOT-rewrite
+  ;; The bug this pins: a sweep of `zone` rewrites `zone` and `zone-fee` (a `-`
+  ;; is not a letter, so the compound is part of the concept) and CANNOT touch
+  ;; `zones` or `zoned` (an `s` and a `d` are letters, so the matcher reads a
+  ;; longer name). Before this, the preview said "every mention … nothing
+  ;; outside it to search for" while leaving both behind.
+  (let [cls  "A-Za-z"
+        ;; the sweep's own pattern: the bare word plus its case spellings
+        pat* (re-pattern (str "(?<![" cls "])(?:zone|Zone|ZONE)(?![" cls "])"))
+        f    #(refactor/unswept-spellings % "zone" cls pat*)]
+    (testing "a spelling the sweep DOES rewrite is not reported as missed"
+      (is (= [] (f ["(def zone 1)"])))
+      (is (= [] (f ["the Zone table" "ZONE"])))
+      (testing "including the hyphen compounds the boundary deliberately allows"
+        (is (= [] (f ["(def zone-fee 1) (def zone-fees 2)"])))))
+    (testing "the PLURAL is reported, which is the whole bug"
+      (is (= ["zones"] (f ["(def zones [])"]))))
+    (testing "any other letter continuation is reported too"
+      (is (= ["zoneless"] (f ["zoneless regions"])))
+      (is (= ["zoned" "zones"] (f ["zoned and zones"]))))
+    (testing "a spelling that MUTATES the stem is out of reach, and honestly so"
+      ;; `zoning` does not contain `zone` — the `e` is gone. No prefix census
+      ;; can find it, this one included, and pretending otherwise would be the
+      ;; same overclaim this whole change exists to remove. An inflection that
+      ;; changes the stem is a job for the reader, not for a boundary rule.
+      (is (= [] (f ["zoning rules"]))))
+    (testing "reported spellings are DISTINCT and sorted, so the list is a set to act on"
+      (is (= ["zones"] (f ["zones" "more zones" "zones again"]))))
+    (testing "case is preserved in what is reported, because that is what to grep for"
+      (is (= ["Zones" "zones"] (f ["Zones and zones"]))))
+    (testing "a word that merely CONTAINS the concept mid-word is not ours to claim"
+      ;; the lookbehind still applies: `rezone` is not a mention of `zone`
+      (is (= [] (f ["(def rezone 1)"]))))))
+
+(deftest ^:external a-sweep-rewrites-the-plural-and-says-that-it-did
+  ;; The half of the plural fix that pure tests cannot reach: that the variant
+  ;; actually rides `pat*` into the rewrite, AND that the caller is told which
+  ;; axis carried it. The two fail independently — a sweep can rewrite the
+  ;; plural correctly and still report nothing about it, which is how a caller
+  ;; reading :case-variants concludes the plural was left alone.
+  ;;
+  ;; The namespace deliberately does NOT contain the word: a dot ends nothing,
+  ;; so `pl.zone` would itself be renamed and reading it back would fail for a
+  ;; reason with nothing to do with the plural.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pl.core "(ns pl.core)\n(def zones \"Every zone, and the Zones index.\" [])\n(defn ^:unused-ok zone-of \"One zone.\" [i] (get zones i))\n")
+      (testing "the PREVIEW names the plural axis — it is what a caller reads before deciding"
+        (let [p (ops/rename-sweep! sess "zone" "region" :dry-run true)]
+          (is (some #(= {:from "zones" :to "regions"} %) (:plural-variants p))
+              (str "the preview will rewrite the plural and does not say so: "
+                   (pr-str (select-keys p [:case-variants :plural-variants]))))))
+      (let [r (ops/rename-sweep! sess "zone" "region" :prompt "sweep the concept")]
+        (is (nil? (:error r)) (pr-str r))
+        (testing "the plural is REWRITTEN, not left behind as a longer name"
+          (let [src (query/query-source sess 'pl.core)]
+            (is (str/includes? src "regions") src)
+            (is (not (str/includes? src "zones")) src)
+            (testing "and the singular's hyphen compound went too"
+              (is (str/includes? src "region-of") src)
+              (is (not (str/includes? src "zone-of")) src))))
+        (testing "and the run's report names it the same way the preview did"
+          (is (some #(= {:from "zones" :to "regions"} %) (:plural-variants r))
+              (str "the sweep rewrote the plural and did not say so: "
+                   (pr-str (select-keys r [:case-variants :plural-variants]))))))
+      (finally (ops/close! sess)))))

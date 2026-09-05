@@ -4465,19 +4465,39 @@
                               "(?![" cls "])"))
         ;; the case variants of a BARE word — prose spells a concept every way
         word?    (fn [s] (boolean (re-matches #"[a-z][a-z0-9-]*" s)))
-        variants (when (and (word? from) (word? to))
-                   [{:from (str/capitalize from) :to (str/capitalize to)}
-                    {:from (str/upper-case from) :to (str/upper-case to)}])
+                bare?    (and (word? from) (word? to))
+        ;; the PLURAL is the one compound the boundary class cannot express:
+        ;; `-` is not a letter so `zone-fee` rides along, `s` IS one so `zones`
+        ;; does not. Swept as its own spelling or left behind entirely.
+        from-pl  (when bare? (refactor/plural-of from))
+        to-pl    (when bare? (refactor/plural-of to))
+        variants (when bare?
+                   (cond-> [{:from (str/capitalize from) :to (str/capitalize to) :axis :case}
+                            {:from (str/upper-case from) :to (str/upper-case to) :axis :case}]
+                     (and (not= from-pl from) (not= to-pl to))
+                     (into [{:from from-pl :to to-pl :axis :plural}
+                            {:from (str/capitalize from-pl) :to (str/capitalize to-pl) :axis :plural}
+                            {:from (str/upper-case from-pl) :to (str/upper-case to-pl) :axis :plural}])))
         to-of    (into {from to} (map (juxt :from :to)) variants)
-        pat*     (re-pattern (str "(?<![" cls "])(?:"
+                pat*     (re-pattern (str "(?<![" cls "])(?:"
                                   (str/join "|" (map #(java.util.regex.Pattern/quote %)
-                                                     (cons from (map :from variants))))
+                                                     ;; LONGEST first: `commit-points` must be
+                                                     ;; offered before `commit-point`, which is
+                                                     ;; its own prefix
+                                                     (sort-by (comp - count)
+                                                              (cons from (map :from variants)))))
                                   ")(?![" cls "])"))
         sweep    (fn [s] (str/replace s pat* (fn [m] (get to-of m m))))
         ;; the census pattern: the same boundary, any case
-        pat-i    (re-pattern (str "(?i)(?<![" cls "])"
+                pat-i    (re-pattern (str "(?i)(?<![" cls "])"
                                   (java.util.regex.Pattern/quote from)
-                                  "(?![" cls "])"))
+                                  ;; for a BARE word this deliberately does NOT
+                                  ;; close at the end: a census reusing the
+                                  ;; sweep's own boundary could only ever find
+                                  ;; what the sweep already rewrites, which is
+                                  ;; how :mentions came to certify its own
+                                  ;; blind spot. It must see what the sweep cannot
+                                  (if bare? "" (str "(?![" cls "])"))))
         why  (or prompt (str "sweep " from " -> " to))]
     (cond
       (or (str/blank? from) (str/blank? to))
@@ -4562,10 +4582,27 @@
                                                             (java.util.regex.Pattern/quote (:from v))
                                                             "(?![" cls "])"))
                                            s))
-                variants-hit (vec (for [v variants
+                                variants-hit (vec (for [v variants
                                         :when (or (some #(hit? (:orig %) v) rows)
                                                   (some #(hit? (:orig %) v) file-hits))]
                                     v))
+                ;; two AXES, reported apart because they fail apart: the case
+                ;; axis was always swept, the plural axis never was
+                axis-hits (fn [ax] (vec (for [v variants-hit :when (= ax (:axis v))]
+                                          (dissoc v :axis))))
+                case-hits (axis-hits :case)
+                plur-hits (axis-hits :plural)
+                ;; every spelling of the concept in the store the sweep will
+                ;; NOT rewrite — the answer to the grep a caller would
+                ;; otherwise run by hand, and used to have no reason to
+                unswept (fn [st*]
+                          (refactor/unswept-spellings
+                           (concat (for [nsx (keys (:namespaces st*))
+                                         e   (store/forms st* nsx)
+                                         :when (:name e)]
+                                     (n/string (:node e)))
+                                   (for [[_ e] (:files st*) :when (string? e)] e))
+                           from cls pat*))
                 requal  (vec (for [r rows :when (:requalified? r)]
                                {:ns (:ns r) :form (:name r)}))
                 ;; REPORTED even though it is now done for you, and for the
@@ -4628,12 +4665,29 @@
                         ;; the census BEFORE the run: every form and tracked
                         ;; file that names it, in any case — the coverage
                         ;; search the model ran beside the preview, answered
-                        :mentions (let [c (census st)]
-                                    {:forms (count (:forms c)) :files (count (:files c))
-                                     :note (str "every mention of " from ", any case, is in"
-                                                " this preview — nothing outside it to search for")})}
+                                                :mentions (let [c (census st)
+                                        miss (unswept st)]
+                                    (cond-> {:forms (count (:forms c))
+                                             :files (count (:files c))
+                                             :note (if (seq miss)
+                                                     (str "every form and file naming " from
+                                                          " in any case — but this sweep rewrites only"
+                                                          " the spellings under :case-variants and"
+                                                          " :plural-variants. :not-swept lists the ones"
+                                                          " it will LEAVE; those are what to grep for"
+                                                          " afterwards.")
+                                                     (str "every form and file naming " from
+                                                          " in any case, and every spelling of it here"
+                                                          " is one this sweep rewrites."))}
+                                      ;; a preview may not certify a coverage it
+                                      ;; does not have: two previews of one
+                                      ;; concept, 190 forms and 54, over
+                                      ;; different sets, both said nothing lay
+                                      ;; outside them
+                                      (seq miss) (assoc :not-swept miss)))}
                        (when (seq file-hits) {:in-files (mapv #(select-keys % [:path :match]) file-hits)})
-                       (when (seq variants-hit) {:case-variants variants-hit})
+                                              (when (seq case-hits) {:case-variants case-hits})
+                       (when (seq plur-hits) {:plural-variants plur-hits})
                        (when (seq requal) {:requalified requal})
                        (when (seq left) {:left-behind left})
                        (when note {:note note})))
@@ -4678,7 +4732,8 @@
                           left (vec (concat (when kw?
                                               (sweep-left-behind st* kname from-ns))
                                             (sweep-patterns-left-behind st* from pat)))
-                          rem  (census st*)
+                                                    rem  (census st*)
+                          miss-after (unswept st*)
                           disk-twins (when-let [dir (:dir @session)]
                                        (vec (for [{:keys [path]} file-hits
                                                   :let [f (java.io.File. ^String dir ^String path)]
@@ -4705,13 +4760,20 @@
                                                            (str " The working-tree copy is the human branch's until a"
                                                                 " commit_point projects it — a sed on the disk copy is"
                                                                 " drift, not a fix."))))
-                                                  (if (zero? n-rem)
+                                                                                                    (if (zero? n-rem)
                                                     (str "nothing named " from " remains — code,"
                                                          " strings, docstrings and tracked files,"
                                                          " in any case; there is nothing left to grep for.")
                                                     (str n-rem " mention(s) of " from " remain (:remaining)"
-                                                         " — a spelling the boundary rule kept, or prose"
-                                                         " no case rule covers; read them."))]))]
+                                                         (if (seq miss-after)
+                                                           (str " — as the spelling(s) "
+                                                                (str/join ", " miss-after)
+                                                                ", which this sweep does not rewrite."
+                                                                " Sweep them as their own concept if they"
+                                                                " are the same one.")
+                                                           (str " — a spelling the boundary rule kept,"
+                                                                " or prose no case rule covers;"
+                                                                " read them."))))]))]
                       (cond-> (merge r (assoc nsr :forms (count steps)) {:remaining rem :note note})
                         ;; the string-hit forms AS REWRITTEN: a longer word can
                         ;; break a column a string was aligning, and the fix
@@ -4742,7 +4804,9 @@
                         ;; hand with sed after a grep (eval27–29, every cell)
                         (seq disk-twins)   (assoc :files-on-disk disk-twins)
                         (seq file-hits)    (assoc :files (mapv :path file-hits))
-                        (seq variants-hit) (assoc :case-variants variants-hit)
+                                                (seq case-hits)    (assoc :case-variants case-hits)
+                        (seq plur-hits)    (assoc :plural-variants plur-hits)
+                        (seq miss-after)   (assoc :not-swept miss-after)
                         (seq requal)       (assoc :requalified requal)
                         (seq pats)         (assoc :patterns-rewritten pats)
                         (seq left)         (assoc :left-behind left)))))))))))))

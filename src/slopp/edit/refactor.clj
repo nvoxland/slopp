@@ -2256,3 +2256,62 @@
                      node)
          :requires (vec (distinct (keep :require decided)))
          :rewrites (vec (for [d decided :when (:to d)] (select-keys d [:from :to])))}))))
+
+(defn ^:export plural-of
+  "The regular English plural of the bare word `word` — the ONE spelling a
+  concept sweep cannot reach on its own.
+
+  A bare name's boundary class is `A-Za-z`, chosen so that sweeping `zone`
+  carries `zone-fee` and `zone-t` with it: a `-` is not a letter, so the
+  compound is part of the concept. The plural is the exception that rule
+  cannot express, because `s` IS a letter — to the matcher `zones` reads as a
+  longer name, exactly as `zoning` does. So the plural must be swept as a
+  spelling of its own or left behind entirely, and left behind is how a
+  half-renamed store stays internally consistent and green: the view and its
+  fixtures agree on the old key, and every test passes over a screen that
+  renders nothing.
+
+  Regular morphology only, deliberately. `mouse`/`mice` is not derivable from
+  a rule, and guessing would rewrite words that were never the concept. What
+  this does not cover is REPORTED by the caller rather than silently skipped.
+
+  Idempotent on a word already ending in `s`, so pluralizing a plural is not
+  an error a caller has to guard against."
+  [word]
+  (let [w (str word)]
+    (cond
+      (str/ends-with? w "s")          w
+      (re-find #"(?:x|z|ch|sh)$" w)   (str w "es")
+      (re-find #"[^aeiou]y$" w)       (str (subs w 0 (dec (count w))) "ies")
+      :else                           (str w "s"))))
+
+(defn ^:export unswept-spellings
+  "The distinct spellings of the concept `from` occurring in `texts` that
+  `sweep-pat` will NOT rewrite — sorted, so the answer is a set to act on
+  rather than a count to worry about.
+
+  This exists because a concept sweep is bounded by [[name-boundary-class]],
+  and for a bare name that class is `A-Za-z`. The boundary is what lets
+  `zone`→`region` carry `zone-fee` with it — a `-` is not a letter — and it is
+  equally what stops it reaching `zones` or `zoning`, because `s` and `i` are.
+  Both halves are the same rule working as designed; only one of them is
+  visible to the caller, and the invisible half is how a half-renamed store
+  stays internally consistent and green.
+
+  So the preview reports what it is about to leave behind. A gap a caller can
+  see is a decision; a gap it cannot see is a defect that reports `:ok true`.
+
+  `cls` is the boundary class and `sweep-pat` the pattern the sweep will
+  actually apply, both passed in rather than re-derived, so this can never
+  disagree with the sweep it is describing."
+  [texts from cls sweep-pat]
+  (let [wide (re-pattern (str "(?i)(?<![" cls "])"
+                             (java.util.regex.Pattern/quote from)
+                             "[" cls "]*"))]
+    (->> texts
+         (filter string?)
+         (mapcat #(re-seq wide %))
+         distinct
+         (remove #(re-matches sweep-pat %))
+         sort
+         vec)))
