@@ -60,6 +60,38 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    `query_changes {from "start"}` — every form's `:was`/`:now` across the
    lifetime, `format: "text"` for line diffs — never `git diff`, and never
    raw `store.db`.
+   **The tree is FILELESS, and that changes what a filesystem answer MEANS.**
+   Code lives in the store; the files you can `ls` are a PROJECTION,
+   materialized on demand when something needs real files (a jar, a linter, a
+   fresh JVM) and otherwise absent, partial or stale. So the filesystem stops
+   being the source and becomes a cache — and every inference you have
+   calibrated on ordinary repos is now reading a cache as the source. It goes
+   wrong in both directions:
+
+   - **Absence on disk is not absence in the system.** *"The generator writes
+     into a build tree; I have no build tree; therefore it cannot reach me"* is
+     valid modus tollens and a wrong answer — the generator MATERIALIZES that
+     tree every time it runs. The hidden premise is that artifacts persist,
+     which is true in every other repo and false here, which is exactly why it
+     is never noticed. **"No artifact on disk" and "no build" are different
+     facts, and `ls` can only see the first.**
+   - **Presence on disk is not the current truth.** A projected file is
+     readable, plausible and possibly days old, and a hand-edit to one is
+     discarded at the next materialization — a symptom indistinguishable from
+     a stale build.
+
+   So: **ask the PRODUCER, not the product.** *Does this generator reach me?*
+   is answered by reading the generator — `query_search`, `query_source` — and
+   never by looking for its output. `ls` answers *is it here right now*; it
+   cannot answer *does this exist* or *does this happen*. Route by which
+   question you are actually asking: what the code IS goes to the store, what
+   is on disk goes to the filesystem, and a claim about which files are real
+   is worth the one `ls` it costs — that check is the cheapest in any repo and
+   is the one that goes unrun for months.
+
+   The rule outlives slopp: *no `node_modules`, so this doesn't use npm*; *no
+   `.o` files, so nothing compiles these*; *no logs, so it never ran*. Every
+   cache, tmpdir, container and ephemeral CI workspace has this shape.
 3. **Write with intent; trust the verification.** Every write takes a
    one-line `prompt`: ONE logical change per write, and say WHY — history
    quality is intent quality. The response carries the affected tests' result —
