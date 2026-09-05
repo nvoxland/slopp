@@ -298,7 +298,7 @@
       ;; to itself and pass however wrong both were.
       (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
                "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search" "/api/bundle"
+               "/api/search" "/api/bundle" "/api/cost"
                "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
                  "/api/config"}
              (set (keys by-path)))))
@@ -391,7 +391,7 @@
           ;; what deletes the request paths a consumer hand-writes for exactly
           ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
-                   "modules" "module" "search" "bundle"
+                   "modules" "module" "search" "bundle" "cost"
                    "rest-paths" "http-paths" "webapp-paths" "config"}
                  (set (:wrappers out)))
               (pr-str out)))
@@ -1041,6 +1041,10 @@
                     "/api/config"
                     "/api/modules"
                     "/api/timeline"
+                    "/api/cost"
+                    ;; a second split as well: the default proves nothing about
+                    ;; the model rows, whose keys are entirely different ones
+                    "/api/cost?by=model"
                     "/api/search?q=hello"
                     "/api/bundle?ask=hello"
                     (str "/api/form/" hello-id)
@@ -1068,7 +1072,8 @@
       (let [tested (set (map #(first (str/split % #"\?"))
                             ["/api/namespaces" "/api/ns/demo.core" "/api/rest/paths"
                              "/api/http/paths" "/api/webapp/paths" "/api/config"
-                             "/api/modules" "/api/timeline" "/api/search"
+                             "/api/modules" "/api/timeline" "/api/cost"
+                             "/api/search"
                              "/api/bundle"
                              "/api/form" "/api/source" "/api/module"]))
             plain  (for [row (:http/routes ctx)
@@ -1389,3 +1394,94 @@
     (is (re-find #"fuel=ab\.fuel" full) full)
     (is (re-find #"str=clojure\.string" full) "the well-known ones ride too")
     (is (not (re-find #"aliases" delta)) delta)))
+
+(deftest the-cost-endpoint-publishes-the-series-the-tool-already-computes
+  ;; slopp-ui can build a dashboard of SNAPSHOTS today — namespace counts, the
+  ;; module manifest, commit-point cadence. What no endpoint carries is a
+  ;; series: /api/timeline gives the time axis and nothing plots against it.
+  ;; `query_cost` already folds all three splits, so this is publishing.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'demo.core "(ns demo.core)\n\n(defn hello [] 1)\n"))
+        ctx (server/context (atom {:store st}))
+        ;; :uri and :query-string are separate keys — splitting a \"?\" is the
+        ;; transport's job, which is why `slopp.rest/call` does it and
+        ;; `handle!` does not
+        GET (fn [uri & [qs]]
+              (slopp.http/handle! ctx (cond-> {:request-method :get :uri uri}
+                                        qs (assoc :query-string qs))))]
+    (testing "the default split is the commit-point series — the one with a time axis"
+      (let [res (GET "/api/cost")]
+        (is (= 200 (:status res)))
+        (is (= "commit-point" (:by (:body res))))
+        (is (vector? (:rows (:body res))))))
+    (testing "?by= selects the split, and the three the tool has are the three published"
+      (is (= "model" (:by (:body (GET "/api/cost" "by=model")))))
+      (is (= "ask" (:by (:body (GET "/api/cost" "by=ask"))))))
+    (testing "no telemetry is NO ROWS rather than a zeroed one"
+      ;; the distinction a dashboard needs in order to say \"not recorded\"
+      ;; instead of drawing a zero, which is a different and false claim
+      (is (= [] (:rows (:body (GET "/api/cost" "by=model"))))))
+    (testing "a split the tool does not have is REFUSED, not silently defaulted"
+      ;; defaulting would answer a question nobody asked and label it as the
+      ;; one they did ask
+      (is (= 400 (:status (GET "/api/cost" "by=phase")))))))
+
+(deftest the-cost-contract-accepts-the-shape-cost-by-ask-documents
+  ;; `/api/cost` publishes three splits through ONE contract, and the splits do
+  ;; not merely carry different keys — they give the SAME key different types.
+  ;; `:model` is the model name on a by=model row and the whole model-summary
+  ;; block on a by=ask row, because `cost-by-ask` merges `(block rs)` into each
+  ;; row. A contract declaring it `:string` passes every empty-store test and
+  ;; 500s on the first store that has telemetry — which is the only store
+  ;; anyone builds this panel for.
+  (let [block {:requests 3 :input 235 :output 19199
+               :cache-read 1597325 :cache-creation 8617
+               :tokens 1625376 :cost-usd 1.557
+               :context {:p50 532277 :max 879321}}
+        by-ask {:by "ask"
+                :rows [{:ask "d1" :agent "a" :intent "do the thing" :at 1787934262964
+                        :ms 359725 :requests 3
+                        :prompts ["p1" "p2"]
+                        :model block}]
+                :unattributed {:requests 3 :prompts ["p3"] :model block}
+                ;; a COUNT, not a block: with no clock there is nothing to
+                ;; attribute, only something to disclose
+                :undated 2}
+        by-model {:by "model"
+                  :rows [(assoc block :model "claude-opus-5")
+                         ;; a request that sent no model name rows under null
+                         ;; rather than being dropped — it was paid for either way
+                         (assoc block :model nil)]}]
+    (testing "the by=ask shape, whose :model is a BLOCK"
+      (is (m/validate contracts/cost by-ask)
+          (pr-str (m/explain contracts/cost by-ask))))
+    (testing "and the by=model shape, whose :model is a NAME, through the same contract"
+      (is (m/validate contracts/cost by-model)
+          (pr-str (m/explain contracts/cost by-model))))
+    (testing "a :undated block rather than a count is REFUSED"
+      ;; the error I actually shipped for a few minutes
+      (is (not (m/validate contracts/cost (assoc by-ask :undated {:requests 2})))))))
+
+(deftest ^:external the-cost-series-carries-the-store-shape-at-each-commit-point
+  ;; The counts panel needs namespaces and forms AS OF each commit point.
+  ;; /api/namespaces is a snapshot of now and /api/change/:range counts forms
+  ;; CHANGED, which does not sum to a total — so the only route open to a
+  ;; consumer was one request per commit point, and it still would not answer.
+  ;;
+  ;; Carried on the cost rows rather than the timeline: /api/timeline is the
+  ;; reviewer's landing page and is hit on every load, and this fold walks the
+  ;; whole log.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shc.a "(ns shc.a)\n\n(defn ^:unused-ok one [] 1)\n")
+      (external/commit-point! sess "a commit point to plot" :agent "a")
+      (let [ctx (server/context sess)
+            res (slopp.rest/call ctx {:method :get :path "/api/cost?by=commit-point"})
+            row (first (:rows (:body res)))]
+        (testing "the response still honours its declared contract once serialized"
+          (is (= 200 (:status res)) (pr-str (:body res))))
+        (testing "and each row says what the store LOOKED LIKE at that point"
+          (is (some? row) (pr-str (:body res)))
+          (is (= 1 (:namespaces row)) (pr-str row))
+          (is (pos? (:forms row)) (pr-str row))))
+      (finally (ops/close! sess)))))

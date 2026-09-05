@@ -376,3 +376,25 @@
   the plain ranking, exactly as /api/search answers a blank query."
   [req]
   {:status 200 :body {:bundle (:bundle (:http/reads req))}})
+
+(defn ^{:http/method :get :rest/path "/api/cost" :http/auth :public
+        :rest/request contracts/cost-request
+        :rest/response contracts/cost
+        :http/reads {:cost [:ui/cost []]}}
+  cost
+  "GET /api/cost?by= — where this store's wall clock and model spend went, as
+  a SERIES.
+
+  Every other read here answers a question about the store as it stands. This
+  is the one that answers it over TIME, which is what a dashboard needs and
+  what `/api/timeline` could not supply on its own: the timeline gives an axis
+  and, until this, there was nothing to plot against it.
+
+  A projection of `query_cost`, not new logic — the three splits were already
+  folded for the tool. What is new is that a consumer can reach them.
+
+  **An empty `:rows` under `by=model` is not zero.** The model side is
+  harness-supplied through the OTLP intake, so empty means telemetry is not
+  reaching this store. Rendering it as zero would state that the work was free."
+  [req]
+  {:status 200 :body (:cost (:http/reads req))})

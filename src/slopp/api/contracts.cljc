@@ -209,7 +209,15 @@
                     " fail is a test nobody has evidence for")}
     [:sequential [:map
                   [:delta {:doc "the delta that verification ran at"} :string]
-                  [:fail {:doc "failures and errors, summed — zero is green"} :int]]]]])
+                  [:fail {:doc "failures and errors, summed — zero is green"} :int]
+                  [:tests {:optional true
+                           :doc (str "how many tests that run covered — the DENOMINATOR."
+                                     " Without it a failure count cannot be read: 3 of 12"
+                                     " and 3 of 2001 are the same number and different"
+                                     " news. Absent on entries recorded before it was"
+                                     " carried, which is not the same as a suite of zero")} :int]
+                  [:pass {:optional true :doc "assertions that passed in that run"} :int]
+                  [:ms {:optional true :doc "what the run cost in wall time"} :int]]]]])
 
 (def form-source
   "`GET /api/source/:ns/:name` — one form's source text.
@@ -894,3 +902,147 @@
    [:bundle {:doc (str "the whole bundle as prompt-ready text: a header that"
                        " orients, the ask's ranked forms as one-line cards,"
                        " and the seeds' full sources — inject verbatim")} :string]])
+
+(def cost-request
+  "`GET /api/cost` — what a caller SENDS.
+
+  Declared for the reason `search-request` is: without it the generated client
+  takes a params map nothing reads from, so `?by=` answers on the wire and is
+  unreachable through the typed client.
+
+  The enum is the whole validation. An unknown split would otherwise throw out
+  of the fold as a 500; refusing it here makes it a 400, which is what a
+  malformed request is."
+  [:map
+   [:by {:optional true
+         :doc (str "which split to return. Omitted is \"commit-point\" — the"
+                   " series with a time axis, and the only one that plots"
+                   " directly against /api/timeline")}
+    [:enum "commit-point" "model" "ask"]]])
+
+(def cost-model-block
+  "The model-side summary `GET /api/cost` reports for any grouping of requests
+  — a `by=model` row, and the `:unattributed` / `:undated` buckets under
+  `by=ask`.
+
+  Declared once and referenced, because the three are the SAME fold over the
+  same records. Two copies would drift, and the one that drifted would be the
+  bucket nobody looks at until the numbers stop adding up."
+  [:map
+   [:requests {:doc "round trips — a batch arriving twice is counted once"} :int]
+   [:input {:doc "input tokens billed"} :int]
+   [:output {:doc "output tokens billed"} :int]
+   [:cache-read {:doc "tokens served from the prompt cache"} :int]
+   [:cache-creation {:doc "tokens written INTO the prompt cache"} :int]
+   [:tokens {:doc "every token above, summed — the one number to plot"} :int]
+   [:cost-usd {:doc "what those tokens cost, in dollars"} :double]
+   [:context {:doc (str "how full the conversation got. A DISTRIBUTION, never a"
+                        " sum: every request ships the whole conversation, so"
+                        " summing counts the same tokens once per round trip")}
+    [:map
+     [:p50 {:doc "median context size across the window's requests"} :int]
+     [:max {:doc "the largest — the number that forces a compaction"} :int]]]])
+
+(def cost
+  "`GET /api/cost` — where this store's wall clock and model spend went, as a
+  SERIES rather than a snapshot.
+
+  Three splits over one fold, and the rows differ by split, so every key each
+  can send is declared here and marked optional. An open map would have been
+  shorter and would have broken this API's standing promise that a response
+  sends nothing its contract does not declare.
+
+  **No telemetry is NO ROWS, never a zeroed one.** A zero would say *this cost
+  nothing* where the truth is *nobody was measuring*, and a consumer cannot
+  tell those apart after the fact. The model side is harness-supplied through
+  the OTLP intake, so an empty `:rows` under `by=model` means telemetry is not
+  reaching this store rather than that the work was free."
+  [:map
+   [:by {:doc "the split these rows are — \"commit-point\", \"model\" or \"ask\""} :string]
+   [:rows {:doc "newest first for commit-point and ask; dearest first for model"}
+    [:sequential
+     [:map
+      ;; by=commit-point
+      [:commit {:optional true :doc "by=commit-point: the delta id this segment follows"} :string]
+      [:description {:optional true :doc "by=commit-point: what that commit point was recorded as achieving"} :string]
+      [:forms {:optional true
+               :doc (str "by=commit-point: how many forms the store held AT that"
+                         " point — LIVE forms, so a sweep that deleted a hundred"
+                         " reads as the fall it was. Absent for a commit point older"
+                         " than the fold")} :int]
+      [:namespaces {:optional true
+                    :doc (str "by=commit-point: how many namespaces the store held at"
+                              " that point. A namespace is live while any of its forms"
+                              " is, so the two counts never disagree about one store")} :int]
+      [:at {:optional true :doc "by=commit-point and by=ask: when, epoch millis — the x axis"} :int]
+      [:turns {:optional true :doc "by=commit-point: turns recorded in the segment"} :int]
+      [:calls {:optional true :doc "by=commit-point: slopp tool calls in the segment"} :int]
+      [:wall {:optional true :doc "by=commit-point: the three-way wall-clock split"}
+       [:map
+        [:active-ms {:optional true :doc "elapsed minus idle — time somebody was actually here"} :int]
+        [:slopp-ms {:optional true :doc "time inside a slopp tool call"} :int]
+        [:outside-ms {:optional true
+                      :doc (str "agent reasoning plus every non-slopp tool, which the"
+                                " server cannot tell apart and does not pretend to")} :int]
+        [:idle-ms {:optional true :doc "gaps where nobody was in the session at all"} :int]
+        [:elapsed-ms {:optional true :doc "wall clock end to end, idle included"} :int]
+        [:slopp-share {:optional true
+                       :doc (str "slopp-ms as a percentage of ACTIVE time, so a human"
+                                 " going to bed is not counted as time slopp failed"
+                                 " to use")} :string]]]
+      [:refused {:optional true :doc "by=commit-point: round trips that produced nothing — a quality series"}
+       [:map
+        [:count {:optional true :doc "refused calls in the segment"} :int]
+        [:pct {:optional true :doc "what share of all calls that was"} :int]]]
+      [:rent {:optional true
+              :doc (str "by=commit-point: CONTEXT RENT in characters, not tokens —"
+                        " an answer's size times the calls that follow it, because"
+                        " every one of them re-reads it. A within-turn LOWER BOUND:"
+                        " the payload keeps riding until a compaction the server"
+                        " never sees")}
+       [:map
+        [:carried-chars {:optional true :doc "every answer's size times the calls that followed it"} :int]
+        [:by-tool {:optional true :doc "the dearest tools by carried characters"}
+         [:sequential [:map
+                       [:tool {:doc "the tool, as it is ranked — e.g. \"read/query_source\""} :string]
+                       [:carried {:doc "characters this tool's answers carried"} :int]]]]]]
+      ;; by=model — the only rows carrying tokens and dollars
+      [:model {:optional true
+               :doc (str "TWO SHAPES, one per split, and a consumer must branch."
+                         " by=model: the model NAME each request records — null when a"
+                         " request sent none, since those tokens were paid for either"
+                         " way and a name nobody sent is not a name to invent."
+                         " by=ask: the model-side SUMMARY of that ask's requests, the"
+                         " same block :unattributed carries")}
+       [:or [:maybe :string] cost-model-block]]
+      [:requests {:optional true :doc "by=model: round trips, a batch counted once"} :int]
+      [:input {:optional true :doc "by=model: input tokens billed"} :int]
+      [:output {:optional true :doc "by=model: output tokens billed"} :int]
+      [:cache-read {:optional true :doc "by=model: tokens served from the prompt cache"} :int]
+      [:cache-creation {:optional true :doc "by=model: tokens written into the prompt cache"} :int]
+      [:tokens {:optional true :doc "by=model: every token above, summed"} :int]
+      [:cost-usd {:optional true :doc "by=model: what those tokens cost, in dollars"} :double]
+      [:context {:optional true :doc "by=model: conversation size, as a distribution rather than a sum"}
+       [:map
+        [:p50 {:optional true :doc "median context size"} :int]
+        [:max {:optional true :doc "the largest — what forces a compaction"} :int]]]
+      ;; by=ask
+      [:ask {:optional true :doc "by=ask: the recorded ask, verbatim"} :string]
+      [:agent {:optional true :doc "by=ask: which agent's turn it was"} :string]
+      [:intent {:optional true :doc "by=ask: the turn's recorded intent"} :string]
+      [:ms {:optional true :doc "by=ask: the turn's wall time"} :int]
+      [:prompts {:optional true :doc "by=ask: the prompt ids the turn's requests carried"}
+       [:sequential :string]]]]]
+   [:unattributed {:optional true
+                   :doc (str "by=ask only: requests that fell in no turn bracket."
+                             " Present rather than folded in, because attributing them"
+                             " to a neighbouring ask would invent a fact")}
+    [:map
+     [:requests {:doc "how many requests could not be attributed"} :int]
+     [:prompts {:doc "their prompt ids, so they can be chased"} [:sequential :string]]
+     [:model {:doc "what they cost, folded the same way a by=model row is"} cost-model-block]]]
+   [:undated {:optional true
+              :doc (str "by=ask only: HOW MANY requests carried no timestamp at all,"
+                        " which no rule can place in a bracket. A count rather than a"
+                        " block — with no clock there is nothing to attribute, only"
+                        " something to disclose. Absent when there are none")} :int]])

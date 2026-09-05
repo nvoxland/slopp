@@ -388,3 +388,67 @@
         (is (re-find #"seed: 41-namespace" txt) txt)
         (is (re-find #"1 commit " txt) txt))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-arc-carries-the-DENOMINATOR-not-only-the-failures
+  ;; The arc was {:delta :fail}. A bare failure count cannot be read: 3 out of
+  ;; 12 and 3 out of 2001 are the same number and different news, and a
+  ;; consumer plotting the first shape draws a chart that says nothing about
+  ;; whether the suite grew, shrank, or got slower underneath it.
+  ;;
+  ;; Every :verify delta already records the whole run summary, so the
+  ;; denominator and the wall time were recorded and simply not carried.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'hi.core seed)
+      (ops/edit-replace! sess 'hi.core 'f "(defn f [x] (inc x))"
+                         :prompt "touch it so the episode has a second verify"
+                         :agent "a")
+      (let [c   (history/query-changes (ops/with-history sess))
+            arc (:verification-arc c)]
+        (is (seq arc) "no verify deltas in the episode — this check would be vacuous")
+        (testing "the failure count stays exactly what it was"
+          (is (every? #(number? (:fail %)) arc) (pr-str arc)))
+        (testing "beside how long the run took"
+          (is (every? #(number? (:ms %)) arc) (pr-str arc)))
+        (testing "and the denominator that makes the failure count readable"
+          (is (every? #(number? (:tests %)) arc) (pr-str arc))
+          (is (every? #(number? (:pass %)) arc) (pr-str arc))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-store-SHAPE-is-a-series-not-only-a-snapshot
+  ;; /api/namespaces is a snapshot of NOW, and /api/change/:range's :count is
+  ;; forms CHANGED in a range — which does not sum to a total. So there was no
+  ;; route to "how many namespaces did this store have then" at any price
+  ;; except one request per commit point, and even that would not answer it.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shp.a "(ns shp.a)\n\n(defn ^:unused-ok one [] 1)\n")
+      (external/commit-point! sess "first" :agent "a")
+      (ops/ingest! sess 'shp.b "(ns shp.b)\n\n(defn ^:unused-ok two [] 2)\n")
+      (external/commit-point! sess "second" :agent "a")
+      (let [series  (history/shape-series (ops/with-history sess))
+            by-desc (into {} (map (juxt :description identity)) series)
+            row1    (get by-desc "first")
+            row2    (get by-desc "second")]
+        (is (<= 2 (count series)) (pr-str series))
+        (testing "every row addresses its own commit point and carries the time axis"
+          (is (every? #(string? (:commit %)) series) (pr-str series))
+          (is (every? #(number? (:at %)) series) (pr-str series)))
+        (testing "the shape AS OF each commit point, not the shape now"
+          (is (= 1 (:namespaces row1)) (pr-str row1))
+          (is (= 2 (:namespaces row2)) (pr-str row2))
+          (is (< (:forms row1) (:forms row2))
+              (str "forms did not grow between the two commit points: "
+                   (pr-str [row1 row2]))))
+        (testing "and it counts what is LIVE — a deleted form leaves the count"
+          ;; the half a naive fold gets wrong: adding every touched form id
+          ;; makes a delete look like growth
+          (ops/delete-form! sess 'shp.b 'two :prompt "drop it" :agent "a")
+          (external/commit-point! sess "third" :agent "a")
+          (let [row3 (get (into {} (map (juxt :description identity))
+                                (history/shape-series (ops/with-history sess)))
+                          "third")]
+            (is (< (:forms row3) (:forms row2))
+                (str "a delete did not reduce the live form count: "
+                     (pr-str [row2 row3]))))))
+      (finally (ops/close! sess)))))

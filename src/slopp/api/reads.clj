@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.store.db :as db] [clojure.edn :as edn]))
+            [slopp.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.store.db :as db] [clojure.edn :as edn] [slopp.read.query :as query]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -542,3 +542,38 @@
     (when sid
       (swap! session assoc :bundled-sid sid))
     text))
+
+(defn ^{:http/read :ui/cost} cost-read!
+  "Read performer: where this store's wall clock and model spend went, split
+  by `?by=` — `commit-point` (the default, and the only split with a time
+  axis), `model`, or `ask`.
+
+  `!`-named for [[bundle-read!]]'s reason: the model side lives in the
+  `measurements` table rather than the journal, so answering this opens the db.
+  That is also why `otel` is passed IN rather than folded from the store value
+  — a table is not in one.
+
+  `:by` is converted to a STRING here. A keyword value reaches a consumer as a
+  string and nothing converts it back, which is the same reason the timeline
+  model does it to `:status`.
+
+  **The commit-point split carries the store's SHAPE too**, joined on the
+  commit id. It rides here rather than on `/api/timeline` because that is the
+  reviewer's landing page, hit on every load, and the shape fold walks the
+  whole log — a consumer plotting counts asks for them, and one reading a
+  timeline does not pay. The other two splits skip the fold entirely."
+  [{:keys [session]} {:keys [query-params]}]
+  (let [by  (or (get query-params "by") (get query-params :by) "commit-point")
+        out (-> (query/query-turn-cost (ops/with-history session)
+                                       :by by
+                                       :otel (ops/otel-measurements session)
+                                       :tool-calls (ops/tool-call-measurements session))
+                (update :by name))]
+    (if (= "commit-point" by)
+      (let [shape (into {} (map (juxt :commit identity))
+                       (history/shape-series (ops/with-history session)))]
+        (update out :rows
+                (fn [rows]
+                  (mapv #(merge (select-keys (get shape (:commit %)) [:forms :namespaces]) %)
+                        rows))))
+      out)))

@@ -915,8 +915,23 @@
         arc      (vec (for [d span
                             :when (= :verify (:op d))
                             :let [r (:result d)]]
-                        {:delta (:id d)
-                         :fail  (+ (:fail r 0) (:error r 0))}))]
+                        ;; the DENOMINATOR rides along with the failure count,
+                        ;; because a bare failure count cannot be read: 3 out
+                        ;; of 12 and 3 out of 2001 are the same number and
+                        ;; different news. Both halves were already recorded
+                        ;; in the result and simply not carried.
+                        ;;
+                        ;; ABSENT rather than zeroed when the result did not
+                        ;; hold them — a zeroed denominator reads as a suite
+                        ;; with no tests in it, which is a claim, and an old
+                        ;; delta recorded before this carried nothing to claim
+                        ;; it with. Published as :tests, the name `done`
+                        ;; already uses in its :suite block.
+                        (cond-> {:delta (:id d)
+                                 :fail  (+ (:fail r 0) (:error r 0))}
+                          (number? (:test r)) (assoc :tests (:test r))
+                          (number? (:pass r)) (assoc :pass (:pass r))
+                          (number? (:ms r))   (assoc :ms (:ms r)))))]
     (cond-> {:agent agent
              :since (or boundary :log-start)
              :steps (mapv #(select-keys % [:id :op :ns :prompt]) mine)
@@ -969,3 +984,52 @@
           {:ns ns-sym :name nm :at rid :source (get srcs fid)
            :status (status-at st rid)}
           {:error (str nm " was not present in " ns-sym " at " rid)})))))
+
+(defn ^:export shape-series
+  "The store's SHAPE at each commit point, newest first:
+  `[{:commit :description :at :forms :namespaces} …]`.
+
+  The series `/api/namespaces` cannot give. That endpoint is a snapshot of
+  NOW, and `/api/change/:range`'s `:count` is forms CHANGED in a range, which
+  does not sum to a total — so \"how many namespaces did this store have
+  then\" had no route at any price, and a consumer plotting growth had nothing
+  to plot.
+
+  **ONE pass, carrying a live set.** The obvious implementation asks
+  [[slopp.store/sources-at]] once per commit point, which replays the log each
+  time — O(commits × deltas) on a path a dashboard hits on every load. This
+  walks the log once and snapshots the counts whenever it passes a `:commit`.
+
+  **It counts what is LIVE, which is the half a naive fold gets wrong.**
+  Accumulating every touched form id makes a `:delete` read as growth: the
+  count only ever rises, and the one moment a reader most wants to see — a
+  sweep that removed a hundred forms — renders as its opposite.
+
+  A namespace is live while any of its forms is, rather than while a delta
+  ever named it, for the same reason: a deleted namespace that kept its row
+  would make the two counts disagree about the same store."
+  [session]
+  (let [st (with-log session)]
+    (loop [ds     (store/deltas st)
+           live   #{}
+           ns-of  {}
+           rows   []]
+      (if-let [d (first ds)]
+        (let [fids (delta-fids d)
+              op   (:op d)
+              live (cond
+                     (= :delete op)       (reduce disj live fids)
+                     (content-ops op)     (into live fids)
+                     :else                live)
+              ns-of (if (and (:ns d) (seq fids))
+                      (reduce #(assoc %1 %2 (:ns d)) ns-of fids)
+                      ns-of)]
+          (recur (rest ds) live ns-of
+                 (if (= :commit op)
+                   (conj rows {:commit      (:id d)
+                               :description (str (:description d))
+                               :at          (:at d)
+                               :forms       (count live)
+                               :namespaces  (count (into #{} (keep ns-of) live))})
+                   rows)))
+        (vec (reverse rows))))))
