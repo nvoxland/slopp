@@ -1094,8 +1094,13 @@
             m (:mentions r)]
         (testing "the census still counts every form and file that names the concept"
           (is (= {:forms 3 :files 1} (select-keys m [:forms :files])) (pr-str m)))
-        (testing "and it NAMES the spelling it is going to leave behind"
-          (is (= ["zoneless"] (:not-swept m)) (pr-str m)))
+        (testing "and the result NAMES the spelling it is going to leave behind"
+          (is (= ["zoneless"] (:not-swept r)) (pr-str (select-keys r [:not-swept :mentions]))))
+        (testing "at TOP level, the one place the run also puts it"
+          ;; it lived under :mentions in the preview and at top level in the
+          ;; run — the same key in two places depending on which call you made
+          (is (nil? (:not-swept m))
+              (str "a second copy under :mentions is the ambiguity this move removed: " (pr-str m))))
         (testing "the note points at that list rather than certifying coverage"
           (is (re-find #":not-swept" (str (:note m))) (pr-str m))
           (is (not (re-find #"nothing outside it to search for" (str (:note m))))
@@ -1246,4 +1251,63 @@
           (is (some #(= {:from "zones" :to "regions"} %) (:plural-variants r))
               (str "the sweep rewrote the plural and did not say so: "
                    (pr-str (select-keys r [:case-variants :plural-variants]))))))
+      (finally (ops/close! sess)))))
+
+(deftest the-singular-behind-a-regular-plural-is-derivable
+  ;; The census is a PREFIX scan: from `zone` it can see `zones`, because the
+  ;; plural is the singular plus letters. It can never see the reverse, and the
+  ;; reverse is the direction that matters for a WIRE KEY — keys are plural
+  ;; (:milestones, :commit-points, :endpoints), so renaming one you type the
+  ;; plural and the singular is what gets left behind.
+  (testing "the ordinary case drops the s"
+    (is (= "zone" (refactor/singular-of "zones")))
+    (is (= "commit-point" (refactor/singular-of "commit-points")))
+    (is (= "endpoint" (refactor/singular-of "endpoints"))))
+  (testing "ies goes back to y"
+    (is (= "policy" (refactor/singular-of "policies")))
+    (is (= "entry" (refactor/singular-of "entries"))))
+  (testing "a sibilant es drops the whole es"
+    (is (= "box" (refactor/singular-of "boxes")))
+    (is (= "batch" (refactor/singular-of "batches")))
+    (is (= "dish" (refactor/singular-of "dishes"))))
+  (testing "a word that is not a regular plural answers nil, not itself"
+    ;; nil is what the caller reads to decide whether there is a SECOND stem
+    ;; worth censusing at all; a word answering itself would census twice.
+    (is (nil? (refactor/singular-of "zone")))
+    (is (nil? (refactor/singular-of "commit-point")))
+    (is (nil? (refactor/singular-of "status"))))
+  (testing "it inverts plural-of for the words plural-of actually handles"
+    (doseq [w ["zone" "commit-point" "policy" "entry" "box" "batch" "dish" "key" "day"]]
+      (is (= w (refactor/singular-of (refactor/plural-of w)))
+          (str w " -> " (refactor/plural-of w) " -> "
+               (refactor/singular-of (refactor/plural-of w)))))))
+
+(deftest ^:external sweeping-a-plural-reports-the-singular-it-leaves
+  ;; The census is a PREFIX scan, so from `zone` it sees `zones` and from
+  ;; `zones` it sees nothing at all. That asymmetry is not academic: a wire KEY
+  ;; is plural, so renaming one you type the plural, and the singular — the
+  ;; prose spelling, the docstring, the contract text — is what gets left.
+  ;;
+  ;; Asking to rename `zones` should NOT rewrite `zone`: renaming a token and
+  ;; having a different token move is its own bug. The promise is only that
+  ;; the reader is TOLD.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'sg.core "(ns sg.core)\n(def zones \"The zones index.\" [])\n(defn ^:unused-ok pick \"Pick one zone from the index.\" [i] (get zones i))\n")
+      (let [p (ops/rename-sweep! sess "zones" "regions" :dry-run true)]
+        (testing "the singular it will leave is NAMED"
+          (is (some #{"zone"} (:not-swept p))
+              (str "forms carry the singular and the preview does not say so: "
+                   (pr-str (select-keys p [:not-swept :mentions])))))
+        (testing "and the note points at that list instead of reading as coverage"
+          (is (re-find #":not-swept" (str (:note (:mentions p))))
+              (pr-str (:mentions p)))))
+      (let [r (ops/rename-sweep! sess "zones" "regions" :prompt "rename the key")
+            src (query/query-source sess 'sg.core)]
+        (testing "the plural moved"
+          (is (str/includes? src "regions") src))
+        (testing "the singular did NOT — a different token is not ours to move"
+          (is (str/includes? src "one zone from") src))
+        (testing "and the run says what it left, rather than reporting a clean sweep"
+          (is (some #{"zone"} (:not-swept r)) (pr-str (select-keys r [:not-swept :remaining])))))
       (finally (ops/close! sess)))))

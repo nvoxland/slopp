@@ -2285,6 +2285,38 @@
       (re-find #"[^aeiou]y$" w)       (str (subs w 0 (dec (count w))) "ies")
       :else                           (str w "s"))))
 
+(defn ^:export singular-of
+  "The singular behind the regular English plural `word` — or **nil** when it
+  is not one.
+
+  The inverse of [[plural-of]], and it exists for a direction the census
+  cannot otherwise reach. That census is a PREFIX scan: from `zone` it finds
+  `zones`, because a plural is the singular plus letters. Nothing in a prefix
+  scan can run the other way, so sweeping `zones` left every `zone` behind and
+  reported nothing — the same silence the plural axis was added to end, with
+  the arguments reversed.
+
+  **And that is the direction that matters in practice.** A concept's noun is
+  what you sweep when renaming prose, but a WIRE KEY is plural — `:endpoints`,
+  `:commit-points`, `:milestones`. Renaming a key, you type the plural.
+
+  nil rather than the word itself, because the caller reads it to decide
+  whether there is a SECOND stem worth censusing; a word answering itself
+  would census the same thing twice.
+
+  A singular ending in `s` cannot be told from a plural by any rule, so the
+  endings that are reliably not plural suffixes are excluded rather than
+  guessed at: `ss` (`class`), `us` (`status`), `is` (`basis`). An eager rule
+  would census `statu` — a stem that is not the concept and appears nowhere."
+  [word]
+  (let [w (str word)]
+    (cond
+      (re-find #"[^aeiou]ies$" w)     (str (subs w 0 (- (count w) 3)) "y")
+      (re-find #"(?:x|z|ch|sh)es$" w) (subs w 0 (- (count w) 2))
+      (re-find #"(?:ss|us|is)$" w)    nil
+      (re-find #"[^s]s$" w)           (subs w 0 (dec (count w)))
+      :else                           nil)))
+
 (defn ^:export unswept-spellings
   "The distinct spellings of the concept `from` occurring in `texts` that
   `sweep-pat` will NOT rewrite — sorted, so the answer is a set to act on
@@ -2293,24 +2325,33 @@
   This exists because a concept sweep is bounded by [[name-boundary-class]],
   and for a bare name that class is `A-Za-z`. The boundary is what lets
   `zone`→`region` carry `zone-fee` with it — a `-` is not a letter — and it is
-  equally what stops it reaching `zones` or `zoning`, because `s` and `i` are.
-  Both halves are the same rule working as designed; only one of them is
+  equally what stops it reaching `zones` or `zoneless`, because `s` and `l`
+  are. Both halves are the same rule working as designed; only one of them is
   visible to the caller, and the invisible half is how a half-renamed store
   stays internally consistent and green.
 
   So the preview reports what it is about to leave behind. A gap a caller can
   see is a decision; a gap it cannot see is a defect that reports `:ok true`.
 
+  **Two stems, because the scan is a PREFIX scan and that is asymmetric.**
+  From `zone` it finds `zones`; from `zones` it finds nothing, since `zone` is
+  a truncation rather than a continuation. That asymmetry runs the wrong way
+  for the commonest real rename: a wire KEY is plural, so renaming one you
+  type `:commit-points` and every prose `commit-point` is what stays. When
+  `from` is a regular plural its singular is scanned as well.
+
   `cls` is the boundary class and `sweep-pat` the pattern the sweep will
   actually apply, both passed in rather than re-derived, so this can never
   disagree with the sweep it is describing."
   [texts from cls sweep-pat]
-  (let [wide (re-pattern (str "(?i)(?<![" cls "])"
-                             (java.util.regex.Pattern/quote from)
-                             "[" cls "]*"))]
-    (->> texts
-         (filter string?)
-         (mapcat #(re-seq wide %))
+  (let [stems (cond-> [from]
+                (singular-of from) (conj (singular-of from)))
+        wides (mapv #(re-pattern (str "(?i)(?<![" cls "])"
+                                      (java.util.regex.Pattern/quote %)
+                                      "[" cls "]*"))
+                    stems)
+        texts (filterv string? texts)]
+    (->> (for [w wides, t texts, m (re-seq w t)] m)
          distinct
          (remove #(re-matches sweep-pat %))
          sort

@@ -4656,7 +4656,8 @@
                     rows'    (mapv classify steps)
                     left     (vec (concat (when kw? (sweep-left-behind st kname from-ns))
                                           (sweep-patterns-left-behind st from pat)))
-                    note     (sweep-note from left (some :strings? rows'))]
+                    note     (sweep-note from left (some :strings? rows'))
+                    miss     (unswept st)]
                 (merge nsr
                        {:dry-run true
                         :forms (count steps)
@@ -4665,26 +4666,24 @@
                         ;; the census BEFORE the run: every form and tracked
                         ;; file that names it, in any case — the coverage
                         ;; search the model ran beside the preview, answered
-                                                :mentions (let [c (census st)
-                                        miss (unswept st)]
-                                    (cond-> {:forms (count (:forms c))
-                                             :files (count (:files c))
-                                             :note (if (seq miss)
-                                                     (str "every form and file naming " from
-                                                          " in any case — but this sweep rewrites only"
-                                                          " the spellings under :case-variants and"
-                                                          " :plural-variants. :not-swept lists the ones"
-                                                          " it will LEAVE; those are what to grep for"
-                                                          " afterwards.")
-                                                     (str "every form and file naming " from
-                                                          " in any case, and every spelling of it here"
-                                                          " is one this sweep rewrites."))}
-                                      ;; a preview may not certify a coverage it
-                                      ;; does not have: two previews of one
-                                      ;; concept, 190 forms and 54, over
-                                      ;; different sets, both said nothing lay
-                                      ;; outside them
-                                      (seq miss) (assoc :not-swept miss)))}
+                                                :mentions (let [c (census st)]
+                                    ;; a preview may not certify a coverage it does
+                                    ;; not have: two previews of one concept, 190
+                                    ;; forms and 54, over different sets, both said
+                                    ;; nothing lay outside them
+                                    {:forms (count (:forms c))
+                                     :files (count (:files c))
+                                     :note (if (seq miss)
+                                             (str "every form and file naming " from
+                                                  " in any case — but this sweep rewrites only"
+                                                  " the spellings under :case-variants and"
+                                                  " :plural-variants. :not-swept lists the ones"
+                                                  " it will LEAVE; those are what to grep for"
+                                                  " afterwards.")
+                                             (str "every form and file naming " from
+                                                  " in any case, and every spelling of it here"
+                                                  " is one this sweep rewrites."))})}
+                                              (when (seq miss) {:not-swept miss})
                        (when (seq file-hits) {:in-files (mapv #(select-keys % [:path :match]) file-hits)})
                                               (when (seq case-hits) {:case-variants case-hits})
                        (when (seq plur-hits) {:plural-variants plur-hits})
