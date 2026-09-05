@@ -926,6 +926,36 @@ can pin without retyping it as a call chain:
 (cljnx/redirects s)                ; [{:from … :status … :to …}]
 ```
 
+**The method — five rules, each of which cost somebody a week.** The tool is
+easy; asserting well on what it returns is not, and these are the habits that
+separate a suite that catches bugs from one that agrees with them.
+
+1. **Read the screen before writing assertions about it.** An assertion checks
+   what you thought of; a screen shows all of it. Of seven bugs that got past
+   one consuming project's suite in a week, five were plainly wrong sentences
+   visible in a single look.
+
+2. **A control's CONTENTS are a STRUCTURED fact; adjacency is a PROSE fact —
+   and neither mode is the default answer.** Prose renders a `<select>` as its
+   chosen option alone, so every other option vanishes from the text. Structured
+   output puts a closing tag between two words, so "these read as one phrase" is
+   invisible. Assertions going opposite ways on the same screen are correct, not
+   inconsistent; say in each why it reads the mode it reads.
+
+3. **Scope an assertion to the region it names.** A whole-page
+   `str/includes?` is one keystroke from asserting nothing. One that meant to
+   check a diagram matched the same word in a summary LIST and stayed green
+   with the layout torn out.
+
+4. **Scope with `:within` rather than by pane where you can.** It turns a
+   regex over a pane into an `=` on a row. A whole-pane match is right for
+   exactly one shape: a NEGATIVE.
+
+5. **Spacing belongs in the markup, not only in the stylesheet.** Two elements
+   separated by a CSS margin have nothing between them in the text — and the
+   reader without CSS is this tool. If a gap carries meaning, put it where a
+   reader without a rendering engine can see it.
+
 **Assert a status with `status`, never by searching the page.** A non-hiccup
 body renders as `HTTP 404` on the screen — a reader needs to see that — so it
 is tempting to write `(str/includes? (text s) "404")`. Don't: a whole-page

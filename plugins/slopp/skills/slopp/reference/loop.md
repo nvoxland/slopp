@@ -211,6 +211,16 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    test that exercises one. The axis is what decides how a thing is TESTED —
    external needs a separate JVM and temp dirs, internal needs a cache reset,
    pure needs nothing.
+   **For anything with a JOINT, put one assertion on the far side of it.**
+   The tiers are two different worlds and the crossing between them is what
+   goes untested: the in-image suite runs where the WHOLE store is loaded, and
+   the `^:external` tier runs in a fresh JVM that loads only what it is told
+   to. A require that was load-bearing while calling nothing is green in the
+   first and wrong in the second — both sides covered, the crossing not. The
+   same shape appears wherever your code hands work to something that does not
+   share its image: a subprocess, a socket, a child JVM, a browser. Cover the
+   two sides and you have tested two halves; cover the crossing and you have
+   tested the thing.
 6. **`full_check` when the episode's scope isn't the question.** Every
    namespace linted, dead surface store-wide, every test in every tier.
    NOTHING forces it — not `done`, not `commit_point`. Reach for it when a

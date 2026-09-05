@@ -49,6 +49,28 @@ entry gets the server slopp derives, exactly as before. Declare one and slopp
 stops generating that call — otherwise the reader would get two servers, one
 at an address nobody gave them.
 
+**What actually re-serves, and when nothing does.** The refresh runs at each
+`done` point — that grain is deliberate, because mid-episode the store is
+intentionally incomplete and a browser reloading into a half-written red state
+teaches its reader to ignore it. But it runs only for a store slopp MANAGES,
+and that is two conditions, not one:
+
+- the project declares `http.enabled`, and
+- this process does not ALREADY serve everything the store would.
+
+Fail either and `done` does not re-serve — it STOPS a managed server it had
+started, on purpose, and says so. So a browser-only project that never
+declared `http.enabled` is never managed, and no number of `done` calls will
+move what a browser is showing.
+
+**The consequence to recognise: a counter that only rises.** If you are
+reading a `:behind` figure after a `done` and it went UP, you are not looking
+at a refresh that failed — you are looking at a store slopp is not managing,
+where the counter is measuring drift nobody has undertaken to close. A restart
+zeroes it because a restart re-serves from scratch. Reach for `self-served?`
+and `http.enabled` before you debug the refresh; the second `done` is not
+going to work either.
+
 **Starting is not health.** A declared entry reports `:started` once its
 namespace loads and its thread spawns. An entry that throws on its second line
 reports `:started` and is dead. Do not read it as "the app is up"; open the
