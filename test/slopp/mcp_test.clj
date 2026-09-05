@@ -5218,3 +5218,18 @@
       (is (= ["commit-point" "model" "ask"]
              (get-in d [:inputSchema :properties :by :enum])))
       (is (= "integer" (get-in d [:inputSchema :properties :limit :type]))))))
+
+(deftest a-sweeps-variant-reports-reach-the-agent
+  ;; wire-keys is an ALLOWLIST, so a new result key is invisible until it is
+  ;; added — the failure mode its own docstring records three times, and this
+  ;; is the next one. The plural sweep emitted :plural-variants and :not-swept
+  ;; correctly from the first landing; the wire dropped both, so a store-wide
+  ;; dry run looked exactly like a sweep that had done nothing about plurals.
+  ;;
+  ;; The two keys are the halves of one promise — what the sweep DID rewrite
+  ;; beyond the case axis, and what it will LEAVE — and a preview that drops
+  ;; either is back to certifying a coverage it does not have.
+  (testing "the axis the sweep carried"
+    (is (contains? tools/wire-keys :plural-variants)))
+  (testing "and the spellings it is leaving behind"
+    (is (contains? tools/wire-keys :not-swept))))

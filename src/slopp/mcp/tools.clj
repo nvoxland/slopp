@@ -750,7 +750,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :image-reloaded :image-reload-failed :stale-in-image :image-rebuilt
     :warnings :existing-warnings :advisories :drift :manual
     ;; a preview's whole point
-    :dry-run :in-code :in-strings :in-files :files :files-on-disk :remaining :case-variants :rewritten :verify})
+    :dry-run :in-code :in-strings :in-files :files :files-on-disk :remaining :case-variants :plural-variants :not-swept :rewritten :verify})
 
 (defn classify
   "`entries` with `k` resolved — `default?` unless an entry already states its
