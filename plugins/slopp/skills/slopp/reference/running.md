@@ -63,13 +63,28 @@ started, on purpose, and says so. So a browser-only project that never
 declared `http.enabled` is never managed, and no number of `done` calls will
 move what a browser is showing.
 
-**The consequence to recognise: a counter that only rises.** If you are
-reading a `:behind` figure after a `done` and it went UP, you are not looking
-at a refresh that failed — you are looking at a store slopp is not managing,
-where the counter is measuring drift nobody has undertaken to close. A restart
-zeroes it because a restart re-serves from scratch. Reach for `self-served?`
-and `http.enabled` before you debug the refresh; the second `done` is not
-going to work either.
+**A server is only ever STARTED for a store slopp manages**, because the first
+serve goes through the same call as every later one — deliberately, so a start
+that differed from a swap could not drift where nobody looks. That has a
+consequence worth reasoning from: **if a server is running and slopp started
+it, the store was managed at boot.** "It starts one and then declines to keep
+it current" is not a state this code can reach.
+
+**So a `:behind` figure that only rises has two possible causes, and they are
+told apart by whether a server is running at all:**
+
+- **Nothing is serving** (or it was stopped and said so): the store is not
+  managed. Check `http.enabled` and `self-served?`. No number of `done` calls
+  will move a browser, and the second one is not going to work either.
+- **Something IS serving and is stale**: the store is managed and the refresh
+  is FAILING. Do not reach for the managed-ness question — it is already
+  answered by the running process. Look for a re-serve that could not
+  complete: a bind clash with an orphaned child from a previous session
+  holding the port, an image that would not reload, or the 20s wait expiring.
+  `done` reports each of those; `session_brief` carries the number.
+
+A restart zeroes the counter in BOTH cases, which is why it proves nothing
+about which one you had.
 
 **Starting is not health.** A declared entry reports `:started` once its
 namespace loads and its thread spawns. An entry that throws on its second line
