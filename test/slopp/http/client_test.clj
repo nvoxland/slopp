@@ -160,3 +160,36 @@
             :base-url  (str "http://127.0.0.1:" (:port s) "/")
             :dead-url  (str "http://127.0.0.1:" dead "/")})))
       (finally (some-> @srv slopp.http/stop!)))))
+
+(deftest ^:external the-transport-does-not-leak-a-thread-per-request
+  ;; Every `java.net.http.HttpClient` starts a SelectorManager daemon thread,
+  ;; and building one per call leaks one per REQUEST. Measured on this store's
+  ;; own `--live` server before the fix: 4138 of 4186 threads were
+  ;; `HttpClient-N-SelectorManager`, accumulated over two days of hub
+  ;; heartbeats — a leak whose rate is \"however often slopp talks to anything\".
+  ;;
+  ;; Asserted as a THREAD COUNT rather than by reaching for the client, because
+  ;; the thread is the actual cost and an identity check would pass against any
+  ;; caching scheme that still spawned selectors.
+  (let [srv (slopp.http/serve!
+             {:http/namespaces []
+              :http/routes [{:method :get :path "/ping" :auth :public
+                             :handler (fn [_] {:status 200 :body "ok"})}]
+              :http/host "127.0.0.1" :http/port 0})
+        selectors (fn []
+                    (count (filter #(str/includes? (.getName ^Thread %)
+                                                              "SelectorManager")
+                                   (keys (Thread/getAllStackTraces)))))]
+    (try
+      (let [url (str "http://127.0.0.1:" (:port srv) "/ping")
+            _   (http.client/request {:http/url url})   ; warm: the first client is not a leak
+            before (selectors)
+            n   30]
+        (dotimes [_ n]
+          (is (= 200 (:http/status (http.client/request {:http/url url})))))
+        (let [after (selectors)]
+          (is (< (- after before) 5)
+              (str n " requests added " (- after before) " SelectorManager threads"
+                   " — one per request means the client is being rebuilt per call,"
+                   " and a long-lived server accumulates them until it dies"))))
+      (finally (slopp.http/stop! srv)))))
