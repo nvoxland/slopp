@@ -1235,3 +1235,15 @@
             (is (not (str/includes? body "console.log('v1')"))
                 (str "the child is still serving the bytes it booted with: " body)))))
       (finally (live/stop! r)))))
+
+(deftest a-declared-entry-is-reason-enough-to-be-managed
+  ;; `managed?` gated on http.enabled alone, so a store whose dev instance
+  ;; is a declared entry — a worker, a daemon, a main — was never started
+  ;; by slopp at all: `serve-plan` knew the entry was reason enough and the
+  ;; gate in front of it did not. slopp's own store is the case: its HTTP
+  ;; surface is self-served, and its dev instance is a daemon.
+  (let [st (first (store/record-config-put (store/empty-store) "dev" :manifest
+                                            "run.worker.main" "w.core/-main"))]
+    (is (live/managed? st []) "a declared entry, no HTTP: managed")
+    (is (live/managed? st ['w.core]) "self-served HTTP does not silence a declared entry")
+    (is (not (live/managed? (store/empty-store) [])) "nothing declared, no HTTP: not managed")))

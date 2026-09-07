@@ -426,3 +426,11 @@
                    (finally (ops/close! e) (ops/close! f)))))))
           (finally (ops/close! a) (ops/close! b))))
       (finally (ops/close! w)))))
+
+(deftest a-daemon-on-another-port-records-itself-under-its-own-file
+  ;; `~/.slopp/daemon.json` names THE daemon of the machine — what every
+  ;; pipe and the CLI route to. A dev daemon (slopp's own dev instance,
+  ;; run from its store on 7358) must not take that over on boot.
+  (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port))))
+  (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358))))
+  (is (= (daemon/daemon-file) (daemon/daemon-file daemon/default-port))))

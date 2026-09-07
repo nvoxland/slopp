@@ -1842,6 +1842,36 @@
                           :foreign (vec (remove mine all))})
       attribution)))
 
+(defn arrange-replayed
+  "`st` with every namespace the replayed `suffix` deltas touched re-arranged
+  in its derived order — the ns form, declares, then definitions before
+  callers, exactly what the write pipeline arranges on every write.
+
+  Replay APPENDS an added form (`store/replay-delta` ignores the recorded
+  anchor, since order is derived) and rendering follows the elements
+  vector, so without this a session that absorbs another's writes by
+  replay rendered a helper after its caller while the writer rendered it
+  before: every warm check green, and a fresh boot from that value refused
+  the namespace. The daemon's reader is such a session, and its value is
+  what the dev instance boots from.
+
+  Touched means named by a delta (`:ns`) or owning a form its rewrite
+  carried (`:sources`); a namespace the value no longer holds is skipped."
+  [st suffix]
+  (let [touched (into #{}
+                      (concat (keep #(let [n (:ns %)] (when (symbol? n) n)) suffix)
+                              (for [d suffix
+                                    fid (keys (:sources d))
+                                    :let [n (store/ns-of-form-id st fid)]
+                                    :when n]
+                                n)))]
+    (reduce (fn [s nsx]
+              (if (contains? (:namespaces s) nsx)
+                (refs/arrange s nsx)
+                s))
+            st
+            touched)))
+
 (defn ^{:export "slopp.mcp"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
   durable session): INCREMENTALLY when every foreign delta in the suffix
@@ -1849,6 +1879,12 @@
   load-store otherwise (:ingest/:move/unknown ops). Advance-only — the
   cache can never regress, and \"ahead\" is read off `:line-pos`, the
   position along the line `record-delta` maintains.
+
+  An incremental advance RE-ARRANGES the namespaces the suffix touched
+  ([[arrange-replayed]]): replay appends an added form, the writer
+  arranged it before its callers, and rendering follows the vector — so
+  without this the replaying session rendered bytes no fresh process could
+  load, while every warm check agreed with the writer.
 
   When the suffix is EMPTY something still committed, and it is not always
   bookkeeping: `elements` is the journal materialized, and a migration, a
@@ -1897,7 +1933,9 @@
               ;; every commit-point landed during this server's life would add one
               ;; back, undoing at runtime what load-store does at open. The
               ;; full-load fallback thins itself.
-              fresh (or incr (db/load-store conn line))]
+              fresh (if incr
+                      (arrange-replayed incr suffix)
+                      (db/load-store conn line))]
           (when fresh
             (swap! session
                    (fn [s]

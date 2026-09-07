@@ -723,3 +723,76 @@
         (is (nil? (engine/affected-tests sess 'hf.core-test 'reader))
             "no evidence about the test form itself: nil, so the caller runs the namespace"))
       (finally (.close (:db @sess))))))
+
+(deftest ^:external a-replayed-add-renders-in-the-derived-order-not-at-the-end
+  ;; The writer arranges definitions before callers at every write. A session
+  ;; that absorbs those writes by INCREMENTAL REPLAY appends the added form
+  ;; and trusts the derived order at render time — and rendered the helper
+  ;; AFTER its caller three times tonight, each found by the dev daemon's
+  ;; cold boot, which renders from a foreign session's value: `Unable to
+  ;; resolve symbol`. Both sessions must render the same bytes; a fresh open
+  ;; (from rows) is the control.
+  (let [dir (str (java.nio.file.Files/createTempDirectory
+                  "slopp-replay" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "a"})]
+    (try
+      (ops/ingest! a 'ro.core "(ns ro.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (external/done! a :label "seed" :agent "a")
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "b"})]
+        (try
+          ;; B is open and current; A now adds a helper and makes f call it
+          (let [r1 (ops/add-form! a 'ro.core "(defn- h \"H.\" [] 2)" :prompt "helper" :agent "a")
+                r2 (ops/edit-replace! a 'ro.core 'f "(defn ^:unused-ok f \"F, via h.\" [] (h))" :prompt "call it" :agent "a")]
+            (is (nil? (:error r1)) (pr-str r1))
+            (is (nil? (:error r2)) (pr-str r2)))
+          (external/done! a :label "land" :agent "a")
+          (ops/sync-with-journal! b)
+          (let [names  (fn [sess] (mapv :name (store/forms (:store @sess) 'ro.core)))
+                render (fn [sess] (store.render/render-ns (:store @sess) 'ro.core))
+                c      (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "c"})]
+            (try
+              (is (= (render a) (render c)) "the writer and a fresh open render the same bytes")
+              (is (< (.indexOf ^java.util.List (names c) 'h) (.indexOf ^java.util.List (names c) 'f))
+                  (str "rows: " (pr-str (names c))))
+              (is (= (render a) (render b))
+                  (str "replayed: " (pr-str (names b)) " vs written: " (pr-str (names a))))
+              (finally (ops/close! c))))
+          (finally (ops/close! b))))
+      (finally (ops/close! a)))))
+
+(deftest ^:external a-group-that-adds-a-helper-and-calls-it-persists-the-arranged-order
+  ;; Three times in one evening a `change` group added a private helper and
+  ;; replaced an earlier form to call it; the writer's own value arranged
+  ;; the helper first, every warm check was green, and a fresh boot of the
+  ;; namespace from the daemon's READER — a session on the branch line, the
+  ;; one shape that absorbs a landing by incremental REPLAY rather than by
+  ;; re-forking and reloading from rows — found the helper after its caller:
+  ;; `Unable to resolve symbol`. The writer, the replaying reader, and a
+  ;; fresh open must render the same bytes, helper first.
+  (let [dir (str (java.nio.file.Files/createTempDirectory
+                  "slopp-group-order" (make-array java.nio.file.attribute.FileAttribute 0)))
+        a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "a"})]
+    (try
+      (ops/ingest! a 'go.core "(ns go.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n(defn ^:unused-ok g \"G.\" [] 3)\n")
+      (external/done! a :label "seed" :agent "a")
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/read-only? true :slopp.ops/lazy-image? true})]
+        (try
+          (let [r (ops/edit-group! a [{:ns 'go.core :source "(defn- h \"H.\" [] 2)"}
+                                      {:action :replace :ns 'go.core :name 'f
+                                       :source "(defn ^:unused-ok f \"F, via h.\" [] (h))"}]
+                                   :prompt "helper and caller in one group" :agent "a")]
+            (is (nil? (:error r)) (pr-str r)))
+          (external/done! a :label "land" :agent "a")
+          (ops/sync-with-journal! b)
+          (let [names  (fn [sess] (mapv :name (store/forms (:store @sess) 'go.core)))
+                render (fn [sess] (store.render/render-ns (:store @sess) 'go.core))
+                before (fn [ns* x y] (< (.indexOf ^java.util.List ns* x) (.indexOf ^java.util.List ns* y)))
+                c      (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "c"})]
+            (try
+              (is (before (names a) 'h 'f) (str "writer: " (pr-str (names a))))
+              (is (before (names c) 'h 'f) (str "rows: " (pr-str (names c))))
+              (is (= (render a) (render c)) "the writer and a fresh open render the same bytes")
+              (is (= (render a) (render b)) (str "replayed by the reader: " (pr-str (names b))))
+              (finally (ops/close! c))))
+          (finally (ops/close! b))))
+      (finally (ops/close! a)))))

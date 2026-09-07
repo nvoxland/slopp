@@ -100,12 +100,19 @@
   {:status 200 :body (projects)})
 
 (defn ^:export daemon-file
-  "Where a daemon records itself for the machine: `~/.slopp/daemon.json`,
-  `{url port pid started}` — one writer by construction, since there is one
-  daemon. What the plugin reads to find it and what a second daemon reads
-  to name the first."
-  []
-  (java.io.File. (System/getProperty "user.home") ".slopp/daemon.json"))
+  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
+  pid started}`, THE daemon of the machine, what every pipe and the CLI
+  route to — for the default port; `~/.slopp/daemon-<port>.json` for any
+  other. A daemon on another port is a DEV instance (slopp's own, run from
+  its store on 7358 by the same machinery every project's dev instance
+  gets), and it must not take the machine's file over on boot. One writer
+  per file by construction."
+  ([] (daemon-file default-port))
+  ([port]
+   (java.io.File. (System/getProperty "user.home")
+                  (if (= (long port) (long default-port))
+                    ".slopp/daemon.json"
+                    (str ".slopp/daemon-" port ".json")))))
 
 (defn- store-file?
   "Whether `dir` has a store yet — a project's first durable write creates
@@ -573,11 +580,17 @@
   "Run the daemon: `slopp daemon [port]` — which is `slopp <dir> [--live]
   --main slopp.daemon/-main [port]`. The dir is what the kernel loads
   slopp's OWN code from, every namespace of that dir's store, so it is a
-  NEUTRAL dir (`~/.slopp`, no store) in use and slopp's own checkout with
-  `--live` in development, where the daemon's tooling hot-reloads; never a
-  user's project, whose store would be loaded as if it were slopp. The
-  projects it serves are whatever attaches. Records itself — address, pid,
-  the write door's token — in [[daemon-file]] and blocks.
+  NEUTRAL dir (`~/.slopp`, no store) in use; never a user's project, whose
+  store would be loaded as if it were slopp. The projects it serves are
+  whatever attaches. Records itself — address, pid, the write door's token
+  — in [[daemon-file]] for its port and blocks.
+
+  slopp's own DEV instance is this same fn on another port (7358),
+  declared in its store's dev config as `run.daemon.main` and run from the
+  store by the machinery every project's dev instance gets: booted in a
+  child image on first attach, refreshed at every done, replaced by
+  `restart {app true}`. It records itself under its own file and leaves
+  the machine's alone.
 
   A second daemon on the port refuses and names the live one from that
   file, so two never race for one machine's projects."
@@ -585,7 +598,7 @@
   (let [p (long (or (some-> port str Long/parseLong)
                     (some-> (System/getenv "SLOPP_DAEMON_PORT") Long/parseLong)
                     default-port))
-        f (daemon-file)]
+        f (daemon-file p)]
     (try
       (let [r (start! p)]
         (.mkdirs (.getParentFile f))

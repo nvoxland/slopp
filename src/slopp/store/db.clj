@@ -2109,6 +2109,51 @@
                  SUM(LENGTH(source)) src, SUM(LENGTH(COALESCE(comment,''))) cmt
           FROM elements WHERE line = ?" (view-line! conn line-id)]))
 
+^:reads (defn ^:export
+  
+  load-elements
+  "The `:namespaces` map for ONE LINE, rebuilt from its materialized
+  `elements` rows — its own, or its branch's while it is a rowless thread
+  ([[view-line!]]: fork on write).
+
+  Split out of `load-store` because it is the half a foreign write can
+  invalidate ALONE: `elements` is the journal materialized, and a migration or
+  repair that rewrites rows without appending a delta leaves the journal
+  correct and this stale. Measured on slopp's own store (2678 rows): ~410 ms
+  here against ~4 s for `load-store`, whose cost is parsing 23k delta
+  payloads — none of which changed in that case.
+
+  `line-id` is what lets many lines share one file: every line that has
+  written keeps its own materialization, and a read that omitted the
+  predicate would fold every agent's private work into one incoherent
+  namespace map.
+
+  SHARED across sessions at one content. The map is immutable and it is
+  most of a store value's weight — every session attached to a project
+  under the daemon loaded its own copy (~450 MB each on slopp's store) of
+  the same rows. The latest materialization per (file, view line) is kept,
+  keyed by that line's head and its elements digest, so two idle threads
+  at one branch head hold one map and a write (a new head) or a row
+  rewrite (a new digest) loads fresh. One entry per view line, never a
+  history of heads. The file is what keys it across connections, since
+  every session opens its own; the JDBC url names it."
+  [conn line-id]
+  (let [vline (view-line! conn line-id)
+        path  (try (.getURL (.getMetaData ^java.sql.Connection conn))
+                   (catch Exception _ (str (System/identityHashCode conn))))]
+    (cache/cached-latest
+     :store-elements [path vline]
+     [path vline (line-head conn vline) (elements-digest conn vline)]
+     (fn []
+       (update-vals
+        (reduce (fn [m row]
+                  (update-in m [(symbol (:elements/ns row)) :elements]
+                             (fnil conj []) (row->element row)))
+                {}
+                (jdbc/execute! conn ["SELECT * FROM elements WHERE line = ?
+                                      ORDER BY ns, pos" vline]))
+        (fn [nsm] (update nsm :elements store/fold-comments)))))))
+
 ^:reads (defn ^:export load-refs
   "ONE LINE's persisted reference index, in the shape the value carries:
   `{ns-sym {:key refs-key :rows [record …]}}`, rows in the order they were
@@ -2136,6 +2181,88 @@
     (into {}
           (map (fn [[nsx k]] [nsx {:key k :rows (mapv :row (get rows nsx))}]))
           keys-of)))
+
+^:reads (defn ^:export load-store
+  "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
+  empty. Every registry meta row loads through ONE loop (default from :init
+  unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
+  here, so an old db stops re-minting it into fold state); only the bespoke
+  element/delta/blob storage is hand-read.
+
+  `line-id` selects BOTH halves: the materialization comes from that line's
+  `elements` rows, and `:deltas` is that line's ANCESTRY rather than the file's
+  journal. History is shared and a line is a POINTER into it, so the deltas are
+  not copied — they are the ones reachable from this line's head, ordered by
+  seq, which is a valid causal order because a parent is always inserted before
+  its child.
+
+  Scoping the journal is not tidiness. `try-commit!` takes its CAS head from
+  the line's head, so a store value carrying another line's deltas yields a
+  head that can never match again — a line nobody can write to.
+
+  What `record-delta` keeps current on every append is rebuilt here BY INDEX,
+  so a loaded value answers exactly what a written one would: `:head`,
+  `:line-pos`, the author's `:prompts` per form the materialization holds, and
+  `:last-write` per namespace. None of it folds the payloads — that fold is
+  the cost this layer is shedding.
+
+  There is deliberately no line-less arity. A default would answer for the
+  trunk without saying so, which is the failure this whole layer exists to
+  prevent; every caller resolves its line where a reader can see it.
+
+  **No id counter is loaded.** \"Or nil if empty\" used to be decided by the
+  presence of the `next-id` meta row, which was quietly doing two jobs: it
+  carried the counter AND marked the store as having been persisted at all.
+  Ids are random names now, so the counter is gone and the marker is stated
+  directly — ANY meta row means `write-snapshot!` has run against this file,
+  because it writes the whole field registry on every persist."
+  [conn line-id]
+  (when (seq (jdbc/execute! conn ["SELECT 1 FROM meta LIMIT 1"]))
+    (let [nss  (load-elements conn line-id)
+          fids (into [] (comp (mapcat :elements) (keep :id)) (vals nss))]
+      (into
+       {:namespaces nss
+        ;; …and having named the columns, drop the one that is still huge: every
+        ;; commit-point's `:files` snapshot but the newest. See thin-commit-manifests
+        ;; — measured at 70.8 MB of 73.7 MB of commit payload on slopp's own store.
+        ;; NO delta list. It was 94% of the value (111 MB of 118 on one store,
+        ;; ~162 MB live) and 4.5 s of every 7.6 s open — EDN-parsing every
+        ;; payload the line had ever written to carry a history the value
+        ;; read for two scalars and a bounded window. Those are the keys
+        ;; below; the views that walk the whole log read `line-deltas`
+        ;; when asked.
+
+        ;; NOT loaded at open. :blobs is a partial cache by design — file-content
+        ;; documents the miss and the db fallback owns it, and put-blobs! is
+        ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
+        ;; bytes here cost a compiled JS bundle (~1.8MB) on every session open.
+        :blobs      {}
+        :head       (line-head conn line-id)
+        :pending    []
+        :head-at    (:at (head-delta conn line-id))
+        :recent     (recent-window conn line-id)
+        :line-pos   (line-length conn line-id)
+        :prompts    (prompt-for-forms conn line-id fids
+                                      :ignoring #{fields/auto-reorder-prompt})
+        :last-write (last-write-per-ns conn line-id)
+        ;; the reference graph, as it was persisted — never recomputed here
+        :refs       (load-refs conn line-id)}
+       (map (fn [{:keys [field meta-key init absent-nil? normalize]}]
+              (let [raw (some-> (jdbc/execute-one!
+                                 conn ["SELECT v FROM meta WHERE k = ?" meta-key])
+                                :meta/v edn/read-string)
+                    v   (if (and (nil? raw) (not absent-nil?)) init raw)]
+                [field (if (and normalize (some? v)) (normalize v) v)])))
+       (fields/meta-fields)))))
+
+^:reads (defn ^:export load-store-with-history
+          "`load-store` plus the line's whole journal as `:deltas` — the shape the
+  merge needs for the side it is merging from, read at merge time. Nothing
+  keeps a value like this: the merge's result is committed through
+  `store/committed`, which drops the list again."
+          [conn line-id]
+          (some-> (load-store conn line-id)
+                  (assoc :deltas (line-deltas conn line-id))))
 
 (defn ^:export refork-thread!
   "Re-point a thread WITHOUT WORK at its branch's current head: base and head
@@ -2279,135 +2406,3 @@
                                (:pid owner) (:started owner) mine])
           (catch java.sql.SQLException _ nil))
      mine)))
-
-(defn- db-path
-  "The file behind `conn`, as the JDBC url names it — what keys a cache
-  across connections to one store, since every session opens its own."
-  [^java.sql.Connection conn]
-  (try (.getURL (.getMetaData conn))
-       (catch Exception _ (str (System/identityHashCode conn)))))
-
-^:reads (defn ^:export
-  
-  load-elements
-  "The `:namespaces` map for ONE LINE, rebuilt from its materialized
-  `elements` rows — its own, or its branch's while it is a rowless thread
-  ([[view-line!]]: fork on write).
-
-  Split out of `load-store` because it is the half a foreign write can
-  invalidate ALONE: `elements` is the journal materialized, and a migration or
-  repair that rewrites rows without appending a delta leaves the journal
-  correct and this stale. Measured on slopp's own store (2678 rows): ~410 ms
-  here against ~4 s for `load-store`, whose cost is parsing 23k delta
-  payloads — none of which changed in that case.
-
-  `line-id` is what lets many lines share one file: every line that has
-  written keeps its own materialization, and a read that omitted the
-  predicate would fold every agent's private work into one incoherent
-  namespace map.
-
-  SHARED across sessions at one content. The map is immutable and it is
-  most of a store value's weight — every session attached to a project
-  under the daemon loaded its own copy (~450 MB each on slopp's store) of
-  the same rows. The latest materialization per (file, view line) is kept,
-  keyed by that line's head and its elements digest, so two idle threads
-  at one branch head hold one map and a write (a new head) or a row
-  rewrite (a new digest) loads fresh. One entry per view line, never a
-  history of heads."
-  [conn line-id]
-  (let [vline (view-line! conn line-id)
-        path  (db-path conn)]
-    (cache/cached-latest
-     :store-elements [path vline]
-     [path vline (line-head conn vline) (elements-digest conn vline)]
-     (fn []
-       (update-vals
-        (reduce (fn [m row]
-                  (update-in m [(symbol (:elements/ns row)) :elements]
-                             (fnil conj []) (row->element row)))
-                {}
-                (jdbc/execute! conn ["SELECT * FROM elements WHERE line = ?
-                                      ORDER BY ns, pos" vline]))
-        (fn [nsm] (update nsm :elements store/fold-comments)))))))
-
-^:reads (defn ^:export load-store
-  "Reconstruct the full in-memory store from ONE LINE of the db, or nil if
-  empty. Every registry meta row loads through ONE loop (default from :init
-  unless :absent-nil?, :normalize applied — retired vocabulary canonicalizes
-  here, so an old db stops re-minting it into fold state); only the bespoke
-  element/delta/blob storage is hand-read.
-
-  `line-id` selects BOTH halves: the materialization comes from that line's
-  `elements` rows, and `:deltas` is that line's ANCESTRY rather than the file's
-  journal. History is shared and a line is a POINTER into it, so the deltas are
-  not copied — they are the ones reachable from this line's head, ordered by
-  seq, which is a valid causal order because a parent is always inserted before
-  its child.
-
-  Scoping the journal is not tidiness. `try-commit!` takes its CAS head from
-  the line's head, so a store value carrying another line's deltas yields a
-  head that can never match again — a line nobody can write to.
-
-  What `record-delta` keeps current on every append is rebuilt here BY INDEX,
-  so a loaded value answers exactly what a written one would: `:head`,
-  `:line-pos`, the author's `:prompts` per form the materialization holds, and
-  `:last-write` per namespace. None of it folds the payloads — that fold is
-  the cost this layer is shedding.
-
-  There is deliberately no line-less arity. A default would answer for the
-  trunk without saying so, which is the failure this whole layer exists to
-  prevent; every caller resolves its line where a reader can see it.
-
-  **No id counter is loaded.** \"Or nil if empty\" used to be decided by the
-  presence of the `next-id` meta row, which was quietly doing two jobs: it
-  carried the counter AND marked the store as having been persisted at all.
-  Ids are random names now, so the counter is gone and the marker is stated
-  directly — ANY meta row means `write-snapshot!` has run against this file,
-  because it writes the whole field registry on every persist."
-  [conn line-id]
-  (when (seq (jdbc/execute! conn ["SELECT 1 FROM meta LIMIT 1"]))
-    (let [nss  (load-elements conn line-id)
-          fids (into [] (comp (mapcat :elements) (keep :id)) (vals nss))]
-      (into
-       {:namespaces nss
-        ;; …and having named the columns, drop the one that is still huge: every
-        ;; commit-point's `:files` snapshot but the newest. See thin-commit-manifests
-        ;; — measured at 70.8 MB of 73.7 MB of commit payload on slopp's own store.
-        ;; NO delta list. It was 94% of the value (111 MB of 118 on one store,
-        ;; ~162 MB live) and 4.5 s of every 7.6 s open — EDN-parsing every
-        ;; payload the line had ever written to carry a history the value
-        ;; read for two scalars and a bounded window. Those are the keys
-        ;; below; the views that walk the whole log read `line-deltas`
-        ;; when asked.
-
-        ;; NOT loaded at open. :blobs is a partial cache by design — file-content
-        ;; documents the miss and the db fallback owns it, and put-blobs! is
-        ;; INSERT OR IGNORE so an empty cache never prunes. Reading every blob's
-        ;; bytes here cost a compiled JS bundle (~1.8MB) on every session open.
-        :blobs      {}
-        :head       (line-head conn line-id)
-        :pending    []
-        :head-at    (:at (head-delta conn line-id))
-        :recent     (recent-window conn line-id)
-        :line-pos   (line-length conn line-id)
-        :prompts    (prompt-for-forms conn line-id fids
-                                      :ignoring #{fields/auto-reorder-prompt})
-        :last-write (last-write-per-ns conn line-id)
-        ;; the reference graph, as it was persisted — never recomputed here
-        :refs       (load-refs conn line-id)}
-       (map (fn [{:keys [field meta-key init absent-nil? normalize]}]
-              (let [raw (some-> (jdbc/execute-one!
-                                 conn ["SELECT v FROM meta WHERE k = ?" meta-key])
-                                :meta/v edn/read-string)
-                    v   (if (and (nil? raw) (not absent-nil?)) init raw)]
-                [field (if (and normalize (some? v)) (normalize v) v)])))
-       (fields/meta-fields)))))
-
-^:reads (defn ^:export load-store-with-history
-          "`load-store` plus the line's whole journal as `:deltas` — the shape the
-  merge needs for the side it is merging from, read at merge time. Nothing
-  keeps a value like this: the merge's result is committed through
-  `store/committed`, which drops the list again."
-          [conn line-id]
-          (some-> (load-store conn line-id)
-                  (assoc :deltas (line-deltas conn line-id))))

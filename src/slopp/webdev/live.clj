@@ -57,13 +57,17 @@
                   (every? (set already-served) nses)))))
 
 (defn ^:export managed?
-  "Whether slopp should run this store's app server while someone works on
+  "Whether slopp should run this store's dev instance while someone works on
   it — `already-served` being what the calling process has mounted itself.
 
-  Two questions, and only one of them is the project's. `http.enabled` says
-  the project SERVES HTTP — that is what makes the web rules and
-  `query_surface` exist, and production reads it. The second used to be the
-  `dev.server` capability and is now [[self-served?]], computed: a store
+  Two reasons, either sufficient. A DECLARED entry (`run.<name>.main` in
+  the dev config, enabled) is the project saying what its dev instance is
+  — a worker, a daemon, a main — and that is reason enough whatever its
+  HTTP surface: `serve-plan` already knew so, and the gate in front of it
+  did not, so such a store was never started at all. Otherwise
+  `http.enabled` says the project SERVES HTTP — that is what makes the web
+  rules and `query_surface` exist, and production reads it — unless this
+  process already serves that surface itself ([[self-served?]]): a store
   whose surface this process already serves must not get a second, staler
   copy of it.
 
@@ -79,8 +83,9 @@
   store serve, and where\", which production asks too, and a dev-only
   exemption in it would be an answer to a question it was not asked."
   [store already-served]
-  (boolean (and (capabilities/effective store "http.enabled")
-                (not (self-served? store already-served)))))
+  (boolean (or (some (comp :enabled? val) (dev/runnables store))
+               (and (capabilities/effective store "http.enabled")
+                    (not (self-served? store already-served))))))
 
 (defn derived-port
   "A localhost port DERIVED from the store dir for this project's APP server —
