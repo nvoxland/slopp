@@ -20,6 +20,22 @@
             [slopp.ops :as ops]
             [cheshire.core :as json]))
 
+(defn ^:export decode
+  "An OTLP/HTTP JSON export body as `{:ok payload}` or `{:bad why}` —
+  whatever shape the transport handed the body in (parsed data, a string,
+  a stream, nothing). The one decision every sink shares: a body that
+  parses is a batch, one that does not is the exporter's fault."
+  [body]
+  (let [parse (fn [s] (try {:ok (json/parse-string s true)}
+                           (catch Exception e {:bad (or (ex-message e) "unparseable")})))]
+    (cond
+      (map? body)    {:ok body}
+      (nil? body)    {:ok nil}
+      (string? body) (parse body)
+      ;; a server may hand the body over as a stream rather than a
+      ;; string, and which one is the transport's business
+      :else          (parse (slurp body)))))
+
 (defn ^:export logs
   "Handle one OTLP/HTTP JSON log export — `POST /v1/logs`.
 
@@ -49,16 +65,7 @@
   version of a broken test."
   [req]
   (let [session (:session (:http/deps req))
-        body    (:body req)
-        decode  (fn [s] (try {:ok (json/parse-string s true)}
-                             (catch Exception e {:bad (or (ex-message e) "unparseable")})))
-        r       (cond
-                  (map? body)    {:ok body}
-                  (nil? body)    {:ok nil}
-                  (string? body) (decode body)
-                  ;; a server may hand the body over as a stream rather than a
-                  ;; string, and which one is the transport's business
-                  :else          (decode (slurp body)))]
+        r       (decode (:body req))]
     (if (:bad r)
       {:status 400
        :http/raw true

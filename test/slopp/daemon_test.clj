@@ -80,3 +80,120 @@
             (is (= 200 (:status r)) (pr-str r)))
           (is (empty? (projects! ctx)) (pr-str (projects! ctx)))))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-projects-api-and-telemetry-are-served-under-the-one-prefix
+  ;; One surface: the project's typed read API answers under its own prefix
+  ;; (the contract paths, un-prefixed, are what a client is generated from);
+  ;; the machine's one OTLP sink routes a batch by session id — which is the
+  ;; THREAD id since Phase 0 — to the project holding that thread, and says
+  ;; what it could not place.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [slug sid msg]
+               (http/handle! ctx {:request-method :post
+                                  :uri (str "/slopp/projects/" slug "/mcp")
+                                  :headers (cond-> {"x-slopp-dir" d}
+                                             sid (assoc "mcp-session-id" sid))
+                                  :body (json/generate-string msg)}))
+        rec  (fn [sid] {:body {:stringValue "claude_code.api_request"} :timeUnixNano "1"
+                        :attributes [{:key "session.id" :value {:stringValue sid}}
+                                     {:key "model" :value {:stringValue "m"}}
+                                     {:key "input_tokens" :value {:intValue "10"}}
+                                     {:key "output_tokens" :value {:intValue "5"}}]})]
+    (try
+      (let [r   (post "one" nil {:jsonrpc "2.0" :id 1 :method "initialize"
+                                 :params {:protocolVersion "2025-03-26" :capabilities {}
+                                          :clientInfo {:name "t" :version "0"}}})
+            sid (get-in r [:headers "Mcp-Session-Id"])]
+        ;; a write, so the project has a store and an open thread
+        (let [w (post "one" sid {:jsonrpc "2.0" :id 2 :method "tools/call"
+                                 :params {:name "ns_create"
+                                          :arguments {:ns "ot.core" :thread "t-tel" :prompt "telemetry fixture"
+                                                      :source "(ns ot.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"}}})]
+          (is (= 200 (:status w)) (pr-str w)))
+        (testing "the read API answers under the project's prefix"
+          (let [r (http/handle! ctx {:request-method :get :uri "/slopp/projects/one/api/namespaces"})]
+            (is (= 200 (:status r)) (pr-str r))))
+        (testing "an unknown project is a 404, not a 500"
+          (let [r (http/handle! ctx {:request-method :get :uri "/slopp/projects/nope/api/namespaces"})]
+            (is (= 404 (:status r)) (pr-str r))))
+        (testing "an OTLP batch routes by session id to the project holding that thread"
+          (let [batch {:resourceLogs [{:scopeLogs [{:logRecords [(rec "t-tel") (rec "nobody")]}]}]}
+                r     (http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs"
+                                         :body (json/generate-string batch)})
+                st    (:body (http/handle! ctx {:request-method :get :uri "/slopp/status"}))]
+            (is (= 200 (:status r)) (pr-str r))
+            (is (= 1 (get-in st [:otel :routed])) (pr-str st))
+            (is (= 1 (get-in st [:otel :dropped])) (pr-str st))))
+        (testing "garbage is 400, the non-retryable answer"
+          (let [r (http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs" :body "{not json"})]
+            (is (= 400 (:status r)) (pr-str r)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external every-session-on-a-project-shares-its-one-app-owner
+  ;; Two agents on one project: one app server, owned by the project's
+  ;; reader, which both sessions name as their `:app-owner` — so a done in
+  ;; either refreshes the same server. Different projects, different owners.
+  (let [d1   (tmp-dir!)
+        d2   (tmp-dir!)
+        ctx  (daemon/context)
+        init (fn [dir slug]
+               (get-in (http/handle! ctx {:request-method :post
+                                          :uri (str "/slopp/projects/" slug "/mcp")
+                                          :headers {"x-slopp-dir" dir}
+                                          :body (json/generate-string
+                                                 {:jsonrpc "2.0" :id 1 :method "initialize"
+                                                  :params {:protocolVersion "2025-03-26" :capabilities {}
+                                                           :clientInfo {:name "t" :version "0"}}})})
+                       [:headers "Mcp-Session-Id"]))]
+    (try
+      (let [a (daemon/lookup! (init d1 "one"))
+            b (daemon/lookup! (init d1 "one"))
+            c (daemon/lookup! (init d2 "two"))]
+        (is (some? (:app-owner @a)) (pr-str (keys @a)))
+        (is (identical? (:app-owner @a) (:app-owner @b)) "one project, one owner")
+        (is (not (identical? (:app-owner @a) (:app-owner @c))) "another project, another owner")
+        (testing "the registry says what each project serves"
+          (let [ps (projects! ctx)]
+            (is (every? #(contains? % :app) ps) (pr-str ps)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-call-door-opens-a-project-on-demand-and-reaps-it-when-idle
+  ;; `slopp <op>` from a shell routes here: the project is named by dir
+  ;; (the CLI knows its cwd and no slug), opened if nobody is attached, and
+  ;; the call runs on a CLI session the daemon keeps for it. The token is
+  ;; the daemon's; a write with no thread is refused at the door exactly as
+  ;; a one-shot is — as an ANSWER (200, isError), because a 4xx reads to the
+  ;; CLI as a failed route and it falls back to booting a JVM to be refused
+  ;; again; and a CLI session nobody uses is reaped, closing the project.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        call  (fn [body]
+                (http/handle! ctx {:request-method :post
+                                   :uri "/slopp/projects/_/call"
+                                   :headers {"x-slopp-dir" d}
+                                   :body (json/generate-string body)}))]
+    (try
+      (testing "a call with the token runs on a project nobody attached, which opens it"
+        (let [r (call {:tool "thread_open" :arguments {:thread "t-cli"} :token token})
+              b (json/parse-string (:body r) true)]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"t-cli" (str (:text b))) (pr-str b))
+          (let [ps (projects! ctx)]
+            (is (= [d] (mapv :dir ps)) (pr-str ps))
+            (is (:cli (first ps)) (pr-str ps)))))
+      (testing "without the token, nothing runs"
+        (let [r (call {:tool "thread_list" :arguments {}})]
+          (is (= 403 (:status r)) (pr-str r))))
+      (testing "a write naming no thread is refused as an answer, naming the door"
+        (let [r (call {:tool "ns_create" :arguments {:ns "x.y" :source "(ns x.y)" :prompt "p"}
+                       :token token})
+              b (json/parse-string (:body r) true)]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (:isError b) (pr-str b))
+          (is (re-find #"thread_open" (str (:text b))) (pr-str b))))
+      (testing "idle, the CLI session is reaped and the project closes"
+        (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))
+        (is (empty? (projects! ctx)) (pr-str (projects! ctx))))
+      (finally (daemon/reset-all!)))))

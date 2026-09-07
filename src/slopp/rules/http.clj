@@ -143,66 +143,6 @@
            :when sx]
        [(symbol (str nsx) (str (:name e))) (request-literals sx)]))))
 
-(defn ^:export serving-namespaces
-  "Every namespace that must be scanned to serve this store's web surface —
-  the derived answer to `serve!`'s `:http/namespaces`, sorted.
-
-  The union of two things the store already knows: the namespaces owning
-  endpoint rows (`endpoints`), and the namespaces of the performer vars
-  behind the effect/read vocabularies (`performers`). `-test` namespaces are
-  excluded on both sides, the same rule `routes-report` applies — a test's
-  endpoint-shaped form is a fixture, and serving it would mount a fake
-  endpoint on the real app.
-
-  Why derived rather than declared: `:http/namespaces` is the one REQUIRED
-  opt on `serve!`, and `web/context`'s own docstring warns that \"a
-  `:http/namespaces` list missing half the app assembles happily and
-  answers\". A hand-kept list of what to serve IS that defect, held by every
-  app that serves. The forgettable entry is a PERFORMER-only namespace: a
-  route promising `:http/reads {:user [:user/by-id …]}` whose performer lives
-  next door assembles into a context that throws `:http/missing-performers`,
-  and the list is the only place that could have been wrong.
-
-  Store-side on purpose. `slopp.http` requires nothing but `slopp.http.*` and
-  must stay that way — it is what gets vendored into an app. So this is
-  computed HERE and handed to the framework as data: directly by the dev
-  server, and baked into the main `build!` emits."
-  [store]
-  (->> (concat (map :ns (endpoints store))
-               (->> [:http/effect :http/read]
-                    (mapcat #(vals (performers store %)))
-                    (keep namespace)
-                    (map symbol)))
-       (remove nil?)
-       (remove #(str/ends-with? (str %) "-test"))
-       distinct
-       sort
-       vec))
-
-(defn store-reader
-  "The LIVE-store reader for `static/mount-routes`: resolve `path` through the
-  store's manifest (text) or its content-addressed artifacts (bytes), falling
-  back to `get-blob` for a sha the in-memory cache does not hold.
-
-  `get-store` is a THUNK, not a store value, and that is the point of the
-  seam: it is re-read per request, so under `--live` an edited asset serves
-  without a rebuild. A store value captured once would freeze the tree at
-  server start.
-
-  The counterpart adapter is `static/file-or-resource-reader`, and the two
-  answer the same port. They have diverged before — a mount prefix written
-  `public/` asks for `public//app.css`, which a filesystem normalises away and
-  a manifest lookup does not — so both are held to one suite,
-  `slopp.http-test/reader-contract`. This existed as an anonymous fn inside
-  `start-server!` and was therefore reachable only by booting a session and
-  binding a port, which is why it had never been tested at all."
-  [get-store get-blob]
-  (fn [path]
-    (let [{:keys [content content-type sha]} (store/file-content (get-store) path)]
-      (when (or content sha)
-        {:content (or content (get-blob sha))
-         :content-type content-type}))))
-
 (defn ^:export context-builder
   "The qsym of this store's `^{:http/context true}` fn — the zero-arg builder
   of `:http/perform-ctx` — or nil when the app declares none.
@@ -246,6 +186,42 @@
                         {:http/context-builders (vec found)})))
       (first found))))
 
+(defn ^:export serving-namespaces
+  "Every namespace that must be scanned to serve this store's web surface —
+  the derived answer to `serve!`'s `:http/namespaces`, sorted.
+
+  The union of two things the store already knows: the namespaces owning
+  endpoint rows (`endpoints`), and the namespaces of the performer vars
+  behind the effect/read vocabularies (`performers`). `-test` namespaces are
+  excluded on both sides, the same rule `routes-report` applies — a test's
+  endpoint-shaped form is a fixture, and serving it would mount a fake
+  endpoint on the real app.
+
+  Why derived rather than declared: `:http/namespaces` is the one REQUIRED
+  opt on `serve!`, and `web/context`'s own docstring warns that \"a
+  `:http/namespaces` list missing half the app assembles happily and
+  answers\". A hand-kept list of what to serve IS that defect, held by every
+  app that serves. The forgettable entry is a PERFORMER-only namespace: a
+  route promising `:http/reads {:user [:user/by-id …]}` whose performer lives
+  next door assembles into a context that throws `:http/missing-performers`,
+  and the list is the only place that could have been wrong.
+
+  Store-side on purpose. `slopp.http` requires nothing but `slopp.http.*` and
+  must stay that way — it is what gets vendored into an app. So this is
+  computed HERE and handed to the framework as data: directly by the dev
+  server, and baked into the main `build!` emits."
+  [store]
+  (->> (concat (map :ns (endpoints store))
+               (->> [:http/effect :http/read]
+                    (mapcat #(vals (performers store %)))
+                    (keep namespace)
+                    (map symbol)))
+       (remove nil?)
+       (remove #(str/ends-with? (str %) "-test"))
+       distinct
+       sort
+       vec))
+
 (defn ^:export static-mounts
   "This store's `http.static.*` mounts as `{url-prefix manifest-prefix}`.
 
@@ -271,6 +247,30 @@
               :when (re-matches #"http\.static\..+" (str k))]
           [(str/replace (subs (str k) (count "http.static.")) #"/$" "")
            (str/replace (str v) #"/$" "")])))
+
+(defn store-reader
+  "The LIVE-store reader for `static/mount-routes`: resolve `path` through the
+  store's manifest (text) or its content-addressed artifacts (bytes), falling
+  back to `get-blob` for a sha the in-memory cache does not hold.
+
+  `get-store` is a THUNK, not a store value, and that is the point of the
+  seam: it is re-read per request, so under `--live` an edited asset serves
+  without a rebuild. A store value captured once would freeze the tree at
+  server start.
+
+  The counterpart adapter is `static/file-or-resource-reader`, and the two
+  answer the same port. They have diverged before — a mount prefix written
+  `public/` asks for `public//app.css`, which a filesystem normalises away and
+  a manifest lookup does not — so both are held to one suite,
+  `slopp.http-test/reader-contract`. This existed as an anonymous fn inside
+  `start-server!` and was therefore reachable only by booting a session and
+  binding a port, which is why it had never been tested at all."
+  [get-store get-blob]
+  (fn [path]
+    (let [{:keys [content content-type sha]} (store/file-content (get-store) path)]
+      (when (or content sha)
+        {:content (or content (get-blob sha))
+         :content-type content-type}))))
 
 (defn http-public-mutation-check
   "Done-advisory (D-web): a CHANGED endpoint whose policy is :public and

@@ -205,7 +205,7 @@
         (let [r (ops/module-tier! sess "ly.core" :pure :prompt "core, for now")]
           (is (nil? (:error r)) (pr-str r))))
       (testing "but full_check names the core→shell edge effect-reachability missed"
-        (let [r (external/run-full-check! sess)
+        (let [r (external/full-check! sess)
               v (:tier-layering r)]
           (is (some #(and (= 'ly.core (:ns %)) (= 'ly.shell (:requires %))) v)
               (pr-str v))
@@ -258,7 +258,7 @@
                         "                              [clojure.test :refer [deftest is]]))\n\n"
                         "(deftest reads (is (nil? (try (io/read-cfg \"/nope\") (catch Exception _ nil)))))\n"))
       (testing "the nested test's fixture require does not appear as a layering violation"
-        (let [r (external/run-full-check! sess)
+        (let [r (external/full-check! sess)
               v (:tier-layering r)]
           (is (not-any? #(= 'pl.core.io-test (:ns %)) v)
               (str "a -test namespace was flagged by the layer loop: " (pr-str v)))))
@@ -312,7 +312,7 @@
                    (str "(ns lu.core (:require [lu.helper :as h]))\n"
                         "(defn ^:unused-ok go \"P.\" [x] (h/calc x))\n"))
       (is (nil? (:error (ops/module-tier! sess "lu.core" :pure :prompt "core"))))
-      (let [r (external/run-full-check! sess)
+      (let [r (external/full-check! sess)
             v (first (filter #(= 'lu.core (:ns %)) (:tier-layering r)))]
         (is (some? v) (pr-str (:tier-layering r)))
         (is (= 'lu.helper (:requires v)) (pr-str v))

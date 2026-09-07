@@ -15,6 +15,49 @@
   that into a 401."
   (:require [clojure.string :as str] [clojure.edn :as edn] [cheshire.core :as json]))
 
+(defn- pbkdf2
+  "PBKDF2WithHmacSHA256 of `password` with `salt` bytes over `iterations`,
+  256-bit output — JDK-only, native-image safe, deterministic."
+  [password ^bytes salt iterations]
+  (let [spec (javax.crypto.spec.PBEKeySpec.
+              (.toCharArray (str password)) salt (int iterations) 256)
+        skf  (javax.crypto.SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")]
+    (.getEncoded (.generateSecret skf spec))))
+
+(defn verify-password
+  "True if `password` matches the encoded `stored` PBKDF2 hash
+  (`pbkdf2$<iterations>$<salt-b64>$<hash-b64>`): parse, recompute, and
+  compare in CONSTANT TIME (MessageDigest/isEqual). A malformed or nil
+  `stored` returns false, never throws (review W6)."
+  [password stored]
+  (boolean
+   (try
+     (let [[algo iters salt-b64 hash-b64] (str/split (str stored) #"\$")]
+       (when (and (= "pbkdf2" algo) salt-b64 hash-b64)
+         (let [dec  (java.util.Base64/getDecoder)
+               salt (.decode dec ^String salt-b64)
+               want (.decode dec ^String hash-b64)
+               got  (pbkdf2 password salt (Long/parseLong iters))]
+           (java.security.MessageDigest/isEqual want got))))
+     (catch Exception _ false))))
+
+(def ^:private pbkdf2-iterations 210000)
+
+(defn hash-password
+  "A salted, iterated PBKDF2 hash of `password`, encoded
+  `pbkdf2$<iterations>$<salt-b64>$<hash-b64>` — the static provider's stored
+  password-hash, generated with a fresh random 16-byte salt per call. The
+  capabilities config is git-projected, so the stored hash must resist
+  offline cracking; unsalted SHA-256 did not (review W6)."
+  [password]
+  (let [salt (byte-array 16)
+        _    (.nextBytes (java.security.SecureRandom.) salt)
+        enc  (.withoutPadding (java.util.Base64/getEncoder))
+        hash (pbkdf2 password salt pbkdf2-iterations)]
+    (str "pbkdf2$" pbkdf2-iterations "$"
+         (.encodeToString enc salt) "$"
+         (.encodeToString enc hash))))
+
 (defn- secret-value
   "Resolve a configured secret: \"env:NAME\" reads through `getenv` (a map
   or fn — the seam that keeps resolution testable and the config free of
@@ -52,6 +95,23 @@
                   {:http/sub nm :http/groups (set groups)
                    :http/provider :bearer}))
               (:auth/bearer config))))))
+
+(defn- static-identity
+  "Authorization: Basic base64(user:pass) against `:auth/static`
+  ({user {:password-hash :groups}}). nil = no claim. The stored
+  password-hash is a salted PBKDF2 digest, verified in constant time
+  (review W6)."
+  [config req _opts]
+  (let [h (get-in req [:headers "authorization"] "")]
+    (when (str/starts-with? h "Basic ")
+      (let [decoded (try (String. (.decode (java.util.Base64/getDecoder)
+                                           (subs h 6)) "UTF-8")
+                         (catch Exception _ nil))
+            [user pass] (when decoded (str/split decoded #":" 2))
+            {:keys [password-hash groups]} (get (:auth/static config) user)]
+        (when (and password-hash pass (verify-password pass password-hash))
+          {:http/sub user :http/groups (set groups)
+           :http/provider :static})))))
 
 (defn- proxy-identity
   "Identity headers from a TRUSTED upstream only (`:auth/proxy` {:trusted
@@ -222,49 +282,6 @@
                                                       "groups"))))
            :http/provider :oidc})))))
 
-(defn- pbkdf2
-  "PBKDF2WithHmacSHA256 of `password` with `salt` bytes over `iterations`,
-  256-bit output — JDK-only, native-image safe, deterministic."
-  [password ^bytes salt iterations]
-  (let [spec (javax.crypto.spec.PBEKeySpec.
-              (.toCharArray (str password)) salt (int iterations) 256)
-        skf  (javax.crypto.SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")]
-    (.getEncoded (.generateSecret skf spec))))
-
-(defn verify-password
-  "True if `password` matches the encoded `stored` PBKDF2 hash
-  (`pbkdf2$<iterations>$<salt-b64>$<hash-b64>`): parse, recompute, and
-  compare in CONSTANT TIME (MessageDigest/isEqual). A malformed or nil
-  `stored` returns false, never throws (review W6)."
-  [password stored]
-  (boolean
-   (try
-     (let [[algo iters salt-b64 hash-b64] (str/split (str stored) #"\$")]
-       (when (and (= "pbkdf2" algo) salt-b64 hash-b64)
-         (let [dec  (java.util.Base64/getDecoder)
-               salt (.decode dec ^String salt-b64)
-               want (.decode dec ^String hash-b64)
-               got  (pbkdf2 password salt (Long/parseLong iters))]
-           (java.security.MessageDigest/isEqual want got))))
-     (catch Exception _ false))))
-
-(defn- static-identity
-  "Authorization: Basic base64(user:pass) against `:auth/static`
-  ({user {:password-hash :groups}}). nil = no claim. The stored
-  password-hash is a salted PBKDF2 digest, verified in constant time
-  (review W6)."
-  [config req _opts]
-  (let [h (get-in req [:headers "authorization"] "")]
-    (when (str/starts-with? h "Basic ")
-      (let [decoded (try (String. (.decode (java.util.Base64/getDecoder)
-                                           (subs h 6)) "UTF-8")
-                         (catch Exception _ nil))
-            [user pass] (when decoded (str/split decoded #":" 2))
-            {:keys [password-hash groups]} (get (:auth/static config) user)]
-        (when (and password-hash pass (verify-password pass password-hash))
-          {:http/sub user :http/groups (set groups)
-           :http/provider :static})))))
-
 (defn ^:export resolve-identity
   "Resolve a request into `{:http/sub :http/groups :http/provider}` or nil
   (anonymous — the policy layer's default-deny takes it from there). Walks
@@ -284,20 +301,3 @@
                       (f config req opts)))
                   (:auth/providers config))
             (augment-groups (:auth/groups config)))))
-
-(def ^:private pbkdf2-iterations 210000)
-
-(defn hash-password
-  "A salted, iterated PBKDF2 hash of `password`, encoded
-  `pbkdf2$<iterations>$<salt-b64>$<hash-b64>` — the static provider's stored
-  password-hash, generated with a fresh random 16-byte salt per call. The
-  capabilities config is git-projected, so the stored hash must resist
-  offline cracking; unsalted SHA-256 did not (review W6)."
-  [password]
-  (let [salt (byte-array 16)
-        _    (.nextBytes (java.security.SecureRandom.) salt)
-        enc  (.withoutPadding (java.util.Base64/getEncoder))
-        hash (pbkdf2 password salt pbkdf2-iterations)]
-    (str "pbkdf2$" pbkdf2-iterations "$"
-         (.encodeToString enc salt) "$"
-         (.encodeToString enc hash))))

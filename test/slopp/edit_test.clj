@@ -55,6 +55,24 @@
       (is (= (:id (store/form-named s 'demo 'add))
              (:id (store/form-named (:store r) 'demo 'add)))))))
 
+(deftest metadata-mutation-is-banned
+  ;; D3: runtime metadata mutation defeats analysis — slopp reads markers
+  ;; (^:export, ^:unsafe, ^:reads, :malli/schema, ^:auto-declare) straight off
+  ;; the STORED node, so metadata must be SOURCE-only truth. with-meta/vary-meta
+  ;; return NEW values (no reference is mutated) and stay legal; only the
+  ;; in-place mutators alter-meta!/reset-meta! are cut.
+  (testing "alter-meta! is rejected (D3)"
+    (let [err (:error (edit/parse-form "(defn f [] (alter-meta! #'x assoc :foo 1))"))]
+      (is err)
+      (is (re-find #"metadata" (str err)) "the refusal teaches SOURCE-only metadata")))
+  (testing "reset-meta! is rejected (D3)"
+    (is (:error (edit/parse-form "(defn f [] (reset-meta! #'x {:foo 1}))"))))
+  (testing "with-meta / vary-meta return new values and are NOT banned"
+    (is (nil? (:error (edit/parse-form "(defn f [x] (with-meta x {:foo 1}))"))))
+    (is (nil? (:error (edit/parse-form "(defn f [x] (vary-meta x assoc :foo 1))")))))
+  (testing "^:unsafe bypasses the metadata-mutation ban"
+    (is (nil? (:error (edit/parse-form "^:unsafe (defn f [] (alter-meta! #'x assoc :foo 1))"))))))
+
 (deftest replace-form-rejects-non-dialect
   (let [s (ingest)]
     (testing "D4: user macros banned"
@@ -147,24 +165,6 @@
                                   "form failed to compile: ")]
         (is (nil? (:form r)))
         (is (= "form failed to compile: something broke, no location" (:error r)))))))
-
-(deftest metadata-mutation-is-banned
-  ;; D3: runtime metadata mutation defeats analysis — slopp reads markers
-  ;; (^:export, ^:unsafe, ^:reads, :malli/schema, ^:auto-declare) straight off
-  ;; the STORED node, so metadata must be SOURCE-only truth. with-meta/vary-meta
-  ;; return NEW values (no reference is mutated) and stay legal; only the
-  ;; in-place mutators alter-meta!/reset-meta! are cut.
-  (testing "alter-meta! is rejected (D3)"
-    (let [err (:error (edit/parse-form "(defn f [] (alter-meta! #'x assoc :foo 1))"))]
-      (is err)
-      (is (re-find #"metadata" (str err)) "the refusal teaches SOURCE-only metadata")))
-  (testing "reset-meta! is rejected (D3)"
-    (is (:error (edit/parse-form "(defn f [] (reset-meta! #'x {:foo 1}))"))))
-  (testing "with-meta / vary-meta return new values and are NOT banned"
-    (is (nil? (:error (edit/parse-form "(defn f [x] (with-meta x {:foo 1}))"))))
-    (is (nil? (:error (edit/parse-form "(defn f [x] (vary-meta x assoc :foo 1))")))))
-  (testing "^:unsafe bypasses the metadata-mutation ban"
-    (is (nil? (:error (edit/parse-form "^:unsafe (defn f [] (alter-meta! #'x assoc :foo 1))"))))))
 
 (deftest keyword-refs-see-literals-and-destructuring
   ;; Keywords are the last "N point-fixes standing in for one abstraction".

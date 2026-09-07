@@ -23,707 +23,6 @@
   Exported to the contention specs that bind it; package-private otherwise."
   nil)
 
-^:reads
-(defn session-identity
-  "The identity a fresh session starts with when the caller names none: a
-  generated unique id.
-
-  **The harness's conversation id is NOT read here, deliberately.** Identity
-  keys a THREAD, so it must belong to a conversation — and most sessions are
-  not one. Hundreds of tests call `open!` with no agent, and every image and
-  test-runner JVM inherits its parent's environment, so a conversation id
-  read at this depth is adopted by every subprocess slopp spawns: each one
-  claims the driving agent's thread and stamps its deltas. That was measured,
-  not feared — four mcp-tests went red the moment this function read the
-  environment, every one of them because a test session had become the
-  developer's own session.
-
-  So the read lives at the MCP server's entry point, which is the only place
-  that genuinely knows a harness is driving it, and it arrives here as an
-  explicit `:slopp.ops/agent-id`. What is left is the honest default for
-  everyone else: this session is nobody's continuation, and it says so
-  instead of borrowing a name."
-  []
-  (str "s-" (subs (str (java.util.UUID/randomUUID)) 0 8)))
-
-(defn load-trace
-  "The persisted trace map, pruned to tests/forms that still exist in `store`
-  (names move between sessions — including renames that never re-persisted —
-  so stale entries drop out and narrowing stays conservative)."
-  [conn store]
-  (when conn
-    (let [raw   (try (some-> (db/get-meta conn "trace-map") edn/read-string)
-                     (catch Exception _ nil))
-          live? (fn [qsym]
-                  (let [n (some-> (namespace qsym) symbol)]
-                    (boolean (and n (store/form-named store n (symbol (name qsym)))))))]
-      (into {}
-            (keep (fn [[t forms]]
-                    (when (live? t)
-                      (let [fs (into #{} (filter live?) forms)]
-                        (when (seq fs) [t fs])))))
-            raw))))
-
-(defn stub-missing-test-vars!
-  "The GENERIC red-first seam (command-agnostic — every write path that
-  compiles through the image inherits it, including future ops): when a
-  namespace with TESTS fails to load, intern a throwing stub in `image` for
-  every store var its tests reference but nothing defines — aliased and
-  qualified calls via kondo rows, :refer'd names via the ns form (stubs
-  precede the require, so the refer check passes) — then the caller retries
-  the load and the spec lands as an honest RED naming the stub. Never
-  touches the store; the real implementation redefines the var. Returns the
-  stubbed qsyms (nil when none — the failure wasn't red-first).
-
-  A `-test` namespace counts whole. A namespace that keeps its deftests
-  beside its code counts too — eval10's terrain does, and a test-first
-  `ns_create` there failed to load instead of landing red, so the agent
-  wrote the stubs by hand — but only usages FROM its deftest forms are
-  stubbed there: a production form's genuine unresolved symbol stays the
-  compile error it is."
-  [image candidate ns-syms]
-  (let [nses    (set (keys (:namespaces candidate)))
-        head    (fn [e] (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
-                          (when (seq? s) (first s))))
-        deftests (fn [t] (into #{} (comp (filter #(= 'deftest (head %))) (keep :name))
-                               (store/forms candidate t)))
-        test-ns? (fn [t] (str/ends-with? (str t) "-test"))
-        tests   (filter #(or (test-ns? %) (seq (deftests %))) ns-syms)
-        ns-form (fn [t]
-                  (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
-                           (when (and (seq? s) (= 'ns (first s))) s))
-                        (store/forms candidate t)))
-        missing (vec (distinct
-                      (concat
-                       (for [t tests
-                             :let [from-tests (when-not (test-ns? t) (deftests t))]
-                             u (:var-usages (analyze/analyze (store.render/render-ns candidate t)))
-                             :when (and (contains? nses (:to u)) (:name u)
-                                        (or (nil? from-tests) (contains? from-tests (:from-var u)))
-                                        (not (store/form-named candidate (:to u) (:name u))))]
-                         (symbol (str (:to u)) (str (:name u))))
-                       (for [t tests
-                             :when (test-ns? t)
-                             :let [form (ns-form t)]
-                             clause (when form
-                                      (mapcat rest
-                                              (filter #(and (seq? %) (= :require (first %)))
-                                                      form)))
-                             :when (and (vector? clause)
-                                        (contains? nses (first clause)))
-                             [k v] (partition 2 (rest clause))
-                             :when (and (= :refer k) (vector? v))
-                             sym v
-                             :when (not (store/form-named candidate (first clause) sym))]
-                         (symbol (str (first clause)) (str sym))))))]
-    (doseq [q missing]
-      (repl/eval! image
-                  (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
-                          (namespace q) (name q) q q)))
-    (when (seq missing) missing)))
-
-(defn persist-trace!
-  "Q3: the trace map survives the session — written to store meta so the NEXT
-  session (or a CLI one-shot) starts with narrowing warm instead of
-  {:ran 0 :affected :all}. Last writer wins; load-trace prunes stale names."
-  [session]
-  (when-let [conn (:db @session)]
-    (db/set-meta! conn "trace-map" (pr-str (:test-map @session)))))
-
-(defn with-ms
-  "Attach total op wall time (item 2 observability)."
-  [m t0]
-  (if (map? m)
-    (assoc m :ms (quot (- (System/nanoTime) t0) 1000000))
-    m))
-
-(defn green? [summary]
-  (zero? (+ (:fail summary 0) (:error summary 0))))
-
-(def reload-signature-res
-  "Failure texts that smell like hot-reload staleness rather than logic bugs."
-  [#"Unable to resolve symbol"
-   #"Attempting to call unbound fn"
-   #"No implementation of method"
-   #"Var .* is unbound"])
-
-(defn reload-signature? [failure]
-  (let [s (str (:actual failure) " " (:message failure))]
-    (or (boolean (some #(re-find % s) reload-signature-res))
-        ;; same-named classes cast-failing against each other = redefined type
-        (boolean
-         (when-let [[_ c1 c2] (re-find #"class (\S+) cannot be cast to class (\S+)" s)]
-           (= (last (str/split c1 #"\.")) (last (str/split c2 #"\."))))))))
-
-(defn suspicious-red?
-  "Could this red plausibly be image staleness rather than a genuine failure
-  (D5.1)? Yes iff: no edit context; a truncated failure list; a
-  reload-signature failure; or an UNEXPLAINED FLIP — a failing test whose
-  traced form-set doesn't intersect the just-edited forms and which wasn't
-  itself edited (this also catches value-capture staleness, since captured
-  calls bypass the trace)."
-  [session edited summary]
-  (let [tmap       (:test-map @session)
-        failures   (:failures summary)
-        truncated? (> (+ (:fail summary 0) (:error summary 0)) (count failures))]
-    (or (nil? edited)
-        truncated?
-        (boolean (some reload-signature? failures))
-        (boolean
-         (some (fn [f]
-                 (let [t       (:test f)
-                       touched (get tmap t)]
-                   (or (nil? touched)
-                       (and (not (contains? edited t))
-                            (empty? (set/intersection touched edited))))))
-               failures)))))
-
-(defn implicate
-  "Rock 2: annotate each failure with the just-changed forms that failing
-  test actually exercises (trace map ∩ edited) — the correlation agents
-  otherwise re-derive from raw expected/actual on every red.
-
-  Each failure also carries `:attribution`, because that intersection has
-  THREE outcomes and reporting only the hits collapsed the last two:
-
-  - `:mine`     the test exercises a form this episode changed, or IS one
-                — `:implicated` names which
-  - `:foreign`  the test IS traced and its trace is disjoint from this
-                episode's edits — somebody else's red
-  - `:untraced` no trace for this test, so nothing was intersected and
-                neither answer is available
-
-  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
-  key, leaving 'assume it is mine' as the only safe reading — which is how
-  one agent's red comes to freeze every other agent's thread. Only
-  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
-  evidence and must never be read as the presence of it, which is why an
-  empty trace counts as untraced rather than as a disjoint one.
-
-  The test's OWN name is checked against `edited` before its trace is,
-  because the trace maps a test to the source forms it exercises and so can
-  never name the test itself. Writing a failing test against code you did
-  not touch is the ordinary red-first move, and reading its trace alone
-  called it somebody else's."
-  [summary tmap edited]
-  (if-not (and (seq (:failures summary)) (seq edited))
-    summary
-    (let [edited (set edited)]
-      (update summary :failures
-              (fn [fs]
-                (mapv (fn [f]
-                        (let [own    (when (contains? edited (:test f)) [(:test f)])
-                              traced (seq (get tmap (:test f)))
-                              hits   (some->> traced set (set/intersection edited) seq)]
-                          (cond
-                            (or own hits)
-                            (assoc f :attribution :mine
-                                   :implicated (vec (sort (distinct (concat own hits)))))
-                            traced (assoc f :attribution :foreign)
-                            :else  (assoc f :attribution :untraced))))
-                      fs))))))
-
-(defn shape-episode-reds!
-  "Mid-episode response diet (direction over repetition): full failure
-  detail rides ONLY for tests newly red on THIS write; tests already
-  reported red this episode compress to :still-red names; previously-red
-  tests that ran clean report :went-green. The ledger lives on the
-  session (:episode-reds) and the done-point (`boundary?` true) bypasses
-  compression — the boundary always reports every standing red in full —
-  and resets the ledger. Explicit test_run bypasses this shaping too
-  (spot-checks get everything).
-
-  **`:went-green` is derived from `:failed-tests` — the summary's complete
-  list of failing test names — and never from the failure BLOCKS.** The
-  blocks are capped for response size, so on a run with more failing
-  assertions than the cap allows, a still-failing test simply has no block,
-  which is indistinguishable here from having passed. Measured: a write
-  announced a test green while an immediate re-run showed it failing with the
-  message it had before the write. A false green is the worst direction for
-  this signal — it is the one an agent reads to decide it is FINISHED — and it
-  misfires only on large red runs, which is when the reader most needs it.
-
-  When a summary carries no `:failed-tests` and its detail was demonstrably
-  capped, no green is claimed and `:reds-uncertain` says why. That is not a
-  hypothetical: the injected runtime is read off the reading process's own
-  classpath, so a jar older than the store produces exactly this summary.
-  Absence with a stated cause can be acted on; absence alone reads as \"nothing
-  went green\", which is a different and wrong claim."
-  [session summary affected scope boundary?]
-  (let [prev     (or (:episode-reds @session) #{})
-        blocks   (vec (:failures summary))
-        named    (:failed-tests summary)
-        capped?  (< (count blocks) (+ (:fail summary 0) (:error summary 0)))
-        now-red  (if named
-                   (set named)
-                   (into #{} (keep :test) blocks))
-        scope-ns (into #{} (map str) (if (sequential? scope) scope [scope]))
-        ran      (if (seq affected)
-                   (set affected)
-                   (into #{} (filter #(contains? scope-ns (namespace %))) prev))
-        blind?   (and (nil? named) capped?)
-        greens   (if blind?
-                   []
-                   (vec (sort (remove now-red (filter ran prev)))))
-        ;; a test the shaper could not observe stays on the ledger: dropping it
-        ;; would report it as newly red next time, in full, having never left
-        ledger   (-> prev (set/difference (set greens)) (into now-red))]
-    (swap! session assoc :episode-reds (if boundary? now-red ledger))
-    (if boundary?
-      summary
-      (let [new-blocks (vec (remove #(contains? prev (:test %)) blocks))
-            stills     (vec (sort (filter prev now-red)))]
-        (cond-> (assoc summary :failures new-blocks)
-          (empty? new-blocks) (dissoc :failures)
-          (seq stills)        (assoc :still-red stills)
-          (seq greens)        (assoc :went-green greens)
-          blind?              (assoc :reds-uncertain
-                                     (str "the failure detail was capped at "
-                                          (count blocks) " of " (+ (:fail summary 0)
-                                                                   (:error summary 0))
-                                          ", and this runner did not report the"
-                                          " failing test names — so no test can"
-                                          " be shown to have gone green on this"
-                                          " run. Rebuild the jar to restore the"
-                                          " signal; until then read :still-red"
-                                          " as a floor, not a list"))
-          blind?              (dissoc :went-green))))))
-
-(defn test-ns?
-  "Does `nsx` hold any deftest? (Inline tests count — Q13.)"
-  [store nsx]
-  (some #(str/starts-with? (str/triml (n/string (:node %))) "(deftest")
-        (store/forms store nsx)))
-
-(defn test-nses-reaching
-  "Test namespaces (any ns holding a deftest) whose require-closure
-  reaches one of `changed-nses` — the PROVABLE set of tests a change can
-  affect (a test only exercises code it can load). The honest fallback
-  scope when the trace map is silent."
-  [store changed-nses]
-  (let [changed (set changed-nses)]
-    (vec (sort (for [t (keys (:namespaces store))
-                     :when (and (test-ns? store t)
-                                (seq (set/intersection
-                                      (store/ns-closure store t)
-                                      changed)))]
-                 t)))))
-
-(defn rename-in-trace
-  "Carry the observed test→form map across a rename (old qsym → new qsym)."
-  [tmap qold qnew]
-  (into {}
-        (map (fn [[t forms]]
-               [(if (= t qold) qnew t)
-                (into #{} (map #(if (= % qold) qnew %)) forms)]))
-        tmap))
-
-(defn external-test-nses
-  "Of `nses`, those defining at least one ^:external deftest — tests only
-  the EXTERNAL tier can execute (they spawn sessions/images; in-image runs
-  skip them). The done-point uses this to route impacted tests to the
-  right tier without the agent choosing tiers."
-  [store nses]
-  (vec (for [nsx nses
-             :when (some (fn [e]
-                           (let [s (try (n/sexpr (:node e))
-                                        (catch Exception _ nil))]
-                             (and (seq? s)
-                                  (= 'deftest (first s))
-                                  (boolean (:external (meta (second s)))))))
-                         (store/forms store nsx))]
-         nsx)))
-
-(defn test-var-tiers
-  "Plain deftest names of `ns-sym` split by execution tier:
-   {:image [...] :external [...]}. `^:external` tests spawn images / recurse,
-   so the IN-IMAGE runner must skip them (they only behave in the external
-   tier) — this is what lets `traced-run!` defer them as :external-pending
-   instead of running (and false-greening) them in-image."
-  [store ns-sym]
-  (reduce (fn [m e]
-            (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
-              (if (and (seq? s) (= 'deftest (first s)))
-                (update m (if (:external (meta (second s))) :external :image)
-                        (fnil conj []) (second s))
-                m)))
-          {:image [] :external []}
-          (store/forms store ns-sym)))
-
-(defn absorb-trace!
-  "Merge an EXTERNAL-tier trace (#121) into the session's test-map and persist
-  it (Q3), exactly as `traced-run!` does for the in-image tier — one test-map,
-  one shape, whichever tier observed it. No-op on nil/empty: `read-traces`
-  returns nil when the build carried no trace runner, and 'not traced' must
-  never overwrite what another tier observed.
-
-  Plain `merge`, not `merge-with into`: a fresh run of a test is the
-  AUTHORITATIVE current set for that test — unioning would accumulate forms it
-  no longer touches and quietly rot the narrowing."
-  [session trace]
-  (when (seq trace)
-    (swap! session update :test-map merge trace)
-    (persist-trace! session)))
-
-(defn external-among
-  "Of qualified test syms `tests`, those tagged ^:external — the ones only the
-  EXTERNAL tier can execute.
-
-  The routing half of affected-test selection (#127). `affected-tests` names the
-  tests a change reaches; this says which of them the in-image runner had to
-  defer, so `done!` can hand exactly those to the external tier instead of
-  re-deriving a set from the require-closure. That closure selects a median 43
-  of 46 external test namespaces (measured over every source ns 2026-07-17) —
-  it is not narrowing, it is 'everything' with rounding.
-
-  Empty is NOT the same as a silent trace: it means the evidence names tests and
-  none of them are external, so the external tier has nothing to do. A silent
-  trace is `affected-tests` returning nil, and that must still fall back to the
-  closure."
-  [store tests]
-  (vec (sort (mapcat (fn [[nsx syms]]
-                       (let [iso (set (:external (test-var-tiers store nsx)))]
-                         (filter #(iso (symbol (name %))) syms)))
-                     (group-by (comp symbol namespace) tests)))))
-
-(defn covering-test-nses
-  "Test namespaces whose requires REACH any of `ns-syms` — the verification
-  scope to fall back on when trace evidence is missing.
-
-  The old fallback ran tests IN the touched PRODUCTION namespaces, which
-  contain none: on slopp's own store `test_run {ns \"slopp.git\"}` runs zero
-  tests while five test namespaces cover it. So a write without trace evidence
-  verified NOTHING while still reporting a result — and a multi-form refactor,
-  least likely to carry complete evidence, was the most exposed of all.
-
-  Naming cannot answer this. `slopp.git` is covered by
-  `slopp.git-projection-test`, not `slopp.git-test`, so an `x` → `x-test`
-  heuristic finds nothing here. Only the require graph knows, and it is
-  walked TRANSITIVELY so a test reaching the change through one hop counts.
-
-  Returns a sorted vector, empty when genuinely nothing covers `ns-syms` —
-  which is a real answer, and the caller reports it as such rather than as a
-  pass."
-  [store ns-syms]
-  (let [known   (set (keys (:namespaces store)))
-        targets (set ns-syms)
-        reqs    (memoize (fn [n] (filter known (store/ns-requires store n))))
-        reaches? (fn [t]
-                   (loop [seen #{}, queue [t]]
-                     (if-let [n (first queue)]
-                       (cond
-                         (seen n)    (recur seen (rest queue))
-                         (targets n) true
-                         :else       (recur (conj seen n)
-                                            (into (vec (rest queue)) (reqs n))))
-                       false)))]
-    (->> known
-         (filter store.render/test-ns?)
-         (filter reaches?)
-         sort
-         vec)))
-
-(defn load-observations
-  "Every persisted observation, `{meta-key raw-edn}`, or `{}` without a db —
-  the sibling of `load-trace`. Observations are durable (written by
-  `remember-observation!`) but READ constantly by the card view, so they load
-  once into session state rather than making every card a db query. That is
-  what lets `slopp.read.orient` stay off `slopp.store.db`."
-  [conn]
-  (if conn
-    (or (db/meta-with-prefix conn "observed/") {})
-    {}))
-
-(defn- ensure-db!
-  "The session's journal connection, CREATING the store on first use when the
-  session has a dir but no store yet.
-
-  This is the only place a directory becomes slopp-managed implicitly, and
-  it is deliberately on the WRITE path: `external/open!` no longer creates a
-  store just because the MCP server was launched somewhere, so a session on
-  an unadopted dir runs cache-only until real work arrives. Returns nil for
-  a dirless session, which stays ephemeral forever."
-  [session]
-  (or (:db @session)
-      (when-let [dir (:dir @session)]
-        (let [conn (db/open! dir)
-              s    (swap! session update :db #(or % conn))]
-          ;; a concurrent writer may have won the race — keep the winner's
-          ;; connection and release ours rather than leaking it
-          (when-not (identical? conn (:db s))
-            (.close ^java.sql.Connection conn))
-          (:db s)))))
-
-(defn inert-ns-require-change?
-  "True when an ns-form edit only ADDED require specs that cannot change the
-  resolution or load behaviour of anything already compiled: alias-only
-  vectors (`[lib :as a]`) naming IN-STORE namespaces whose require-CLOSURE
-  registers no methods. Everything else — :refer (resolution can shift),
-  removals or renames, out-of-store libs (load effects unknown), a required
-  ns whose closure LOADS defmethods, ANY metadata change on the ns form, any
-  non-require edit — is not inert. Conservative: an unreadable or absent
-  baseline answers false.
-
-  `old-src` is the ns form's source at the baseline to diff against, and the
-  caller names it: the write path hands the delta immediately prior
-  (`prior-source`, one edit); the done path hands the LAST-DONE source so a
-  multi-edit episode where an earlier edit added a :refer isn't masked by a
-  later alias-only edit (review V-F3). A pure question over a value and a
-  string — the journal read that finds the baseline stays with the caller.
-
-  frictions #2: ns_add_require on slopp.api invalidated 331 external tests
-  for an edit whose blast radius is zero — the require-closure fallback
-  treated a require-list touch as a code change to the whole namespace."
-  [store fid old-src]
-  (let [read* (fn [s] (try (n/sexpr (p/parse-string (str s)))
-                           (catch Exception _ nil)))
-        e     (store/form-by-id store fid)
-        new   (some-> e :node n/sexpr)
-        old   (read* old-src)
-        req?  (fn [c] (and (seq? c) (= :require (first c))))
-        reqs  (fn [form] (set (mapcat rest (filter req? (drop 2 form)))))
-        ;; the ns form with its require clauses stripped — everything whose
-        ;; change is NOT a plain require add: name, docstring, :import,
-        ;; :require-macros, :gen-class …
-        non-req (fn [form] (cons (second form) (remove req? (drop 2 form))))
-        ;; metadata is invisible to = (on symbols and colls alike), and a
-        ;; test-selector tag / load hint on the ns name is behaviourally
-        ;; live — compare the metadata of every node explicitly (V-F2)
-        metas   (fn [form] (mapv meta (tree-seq coll? seq form)))
-        ;; a required ns is quiet only if its WHOLE in-store closure
-        ;; registers no methods — loading it loads them all (V-F1)
-        quiet?  (fn [lib]
-                  (not-any? store/method-carrying?
-                            (mapcat #(store/forms store %)
-                                    (store/ns-closure store lib))))]
-    (boolean
-     (and (seq? old) (seq? new)
-          (= 'ns (first old) (first new))
-          (= (non-req old) (non-req new))
-          (= (metas (non-req old)) (metas (non-req new)))
-          (set/subset? (reqs old) (reqs new))
-          (let [added (set/difference (reqs new) (reqs old))]
-            (and (seq added)
-                 (every? (fn [spec]
-                           (and (vector? spec)
-                                (symbol? (first spec))
-                                (even? (count (rest spec)))
-                                (every? #(= :as %) (take-nth 2 (rest spec)))
-                                (contains? (:namespaces store) (first spec))
-                                (quiet? (first spec))))
-                         added)))))))
-
-(def cljs-deferred-summary
-  "Verification summary for a write to a :cljs (non-jvm-loadable) namespace.
-  Such code references js/* / the DOM and never loads into the JVM oracle, so
-  there is nothing to run here — its red/green comes from the ClojureScript
-  compiler (compile_client), not the test suite. Reported :unverified with a
-  reason that says the check is DEFERRED, distinct from :no-covering-tests (a
-  coverage gap the agent should close). D-web-cljs."
-  {:test 0 :pass 0 :status :unverified :reason :cljs-deferred-to-compile})
-
-(defn- ran-nothing
-  "The summary for an in-image run that did not HAPPEN, carrying what the runner
-  said instead.
-
-  `image/traced-test-run` answers `{:summary … :trace …}`, and answers something
-  else when the eval threw — the exception arrives as printed text. Destructuring
-  that gave nil, and nil flowed on to callers whose `cond->` dressed it as a map
-  with no counts in it. Counts-of-zero is the one shape that must never come
-  back, because every caller reads it as a clean run: `full_check` reported its
-  in-image tier green having run nothing at all.
-
-  So `:error 1` — every status check in the codebase sums `:fail` and `:error`,
-  which makes this red everywhere without a new convention — and the runner's
-  own words ride along, bounded, because the next cause will be a different one
-  and undiagnosable without them."
-  [result]
-  (let [said (str result)]
-    {:test 0 :pass 0 :fail 0 :error 1 :type :summary
-     :failures [{:test     'slopp.image/traced-test-run
-                 :type     :error
-                 :message  (str "the in-image runner returned no summary — the"
-                                " run did not happen, so this is not a green")
-                 :expected "{:summary {...} :trace {...}}"
-                 :actual   (subs said 0 (min 400 (count said)))}]}))
-
-(defn traced-run!
-  "Run `test-ns`'s tests (all, or `only` names) with form-tracing; absorb the
-  observed test→form map into the session (persisted — Q3); return the summary.
-  `skip-integration?` drops `^:integration` tests (M5, the fast-path default).
-  The in-image tier NEVER runs `^:external` tests (they spawn images / recurse
-  and only behave in the external tier): any in scope are filtered OUT of the
-  run and reported as `:external-pending` on the summary — never executed
-  in-image (which would false-green/false-red them). The done-point / merge
-  gate runs them for real in the external tier.
-
-  A result carrying no `:summary` becomes [[ran-nothing]] rather than nil: the
-  runner threw, and a run that did not happen has to read as red, not as a run
-  that found nothing."
-  [session test-ns only & [skip-integration?]]
-  (let [{:keys [image store]} @session
-        nses     (if (coll? test-ns) test-ns [test-ns])
-        external (into #{} (mapcat #(:external (test-var-tiers store %))) nses)
-        run!     (fn [only']
-                   (let [res (image/traced-test-run
-                              image store test-ns :only only'
-                              :skip-integration? skip-integration?)
-                         {:keys [summary trace]} (when (map? res) res)]
-                     (swap! session update :test-map merge trace)
-                     (persist-trace! session)
-                     (or summary (ran-nothing res))))]
-    (if (empty? external)
-      ;; no ^:external tests in scope — original path, untouched
-      (run! only)
-      ;; some are external — run only the in-image tier, defer the rest
-      (let [pending (if only (filterv external only) (vec external))
-            only'   (if only
-                      (vec (remove external only))
-                      (vec (mapcat #(:image (test-var-tiers store %)) nses)))
-            summary (if (empty? only')
-                      ;; every impacted test is external — nothing to run here
-                      {:test 0 :pass 0 :fail 0 :error 0 :type :summary}
-                      (run! only'))]
-        (cond-> summary
-          (seq pending)
-          (assoc :external-pending
-                 (cond-> {:count (count pending)
-                          :tests (vec (take 5 (sort pending)))}
-                   (> (count pending) 5)
-                   (assoc :note (str "first 5 shown — the done-point / merge gate"
-                                     " runs them all in the external tier")))))))))
-
-(defn load-error-message
-  "The message to report for a `hot-load-all!` result — nil when it loaded.
-
-  When the heal's retry failed DIFFERENTLY from the first attempt, the
-  post-heal error is an artifact of the RECOVERY and the pre-heal one is the
-  fault. Reporting only `:err` is how a merge refusal pointed at a classpath
-  that was never the problem, hiding the compile error underneath it for
-  hours. Both, labelled, or the surface is lying about which is which."
-  [r]
-  (when-let [e (:err r)]
-    (if-let [f (:first-err r)]
-      (str e "\n\nNOTE: the image was refreshed mid-load and the retry failed"
-           " differently. The error BEFORE the refresh — the one to fix — was:\n"
-           f)
-      e)))
-
-(defmulti ^:export after-write!
-  "Follow-up once a write to `ns-sym` has LANDED, dispatched on that
-  namespace's platform (`:jvm` / `:cljc` / `:cljs`). Whatever a method returns
-  is merged into the write's result map; nil adds nothing, and `:default` is
-  nil — so the ordinary JVM write pays one platform lookup and a dispatch.
-
-  This exists so the write engine does not have to know which app types exist
-  (R6). It used to know: four forms of ClojureScript bundle machinery lived
-  here, called from every generic write verb, and they could only reach the
-  compiler through `store/late-ref` — an ^:unsafe escape hatch whose entire job
-  was to break a cycle the misplacement itself created, since the client build
-  requires the operation surface that calls this engine.
-
-  Registering inverts that edge: the app type depends on the engine, never the
-  reverse, and app type #2 arrives as another `defmethod` rather than another
-  branch in here. Dispatching on PLATFORM rather than on \"is this web?\" is the
-  same discipline one level down — the engine asks a question the store can
-  answer about any namespace, not a question only one app type has."
-  (fn [session ns-sym] (store/platform-for (:store @session) ns-sym)))
-
-(defmethod after-write! :default [_ _] nil)
-
-(defn load-all-namespaces!
-  "Load every store namespace into `image` (dependency order, red-first test
-  specs stubbed and retried), returning `[{:ns sym :why err} …]` for the ones
-  that FAILED — empty when the whole store loaded.
-
-  Collect-and-continue, never throw-on-first: the kernel HOST boot has worked
-  this way since frictions 3b/3f/19 (\"ONE namespace that no longer compiles
-  took down every tool in every process — including the edit_add_form that
-  would have put the missing form back\"), and its boot note promises the
-  store stayed open so the broken namespace can be FIXED. The ORACLE boots
-  (session open, restart) were the only loops still refusing outright — the
-  refusal parked a Throwable in :image-ready and `await-image!` rethrew it in
-  front of every non-read tool, wedging a real consumer's store with no
-  repair available from inside (slopp-ui, 2026-08-06). The wedge population
-  is code verified-good at write time and invalidated from OUTSIDE — a
-  framework rename, a dependency bump, a platform declaration stranding a
-  JVM caller; per-write verification means nothing inside a store creates it.
-
-  Callers record the result on the session as `:image-load-failures`, where
-  the write path reconciles it ([[hot-load-all!]]) and `done!` subtracts and
-  reports it."
-  [image store]
-  (vec (keep (fn [ns-sym]
-               (when-let [err (image/load-ns! image store ns-sym)]
-                 (when-not (and (stub-missing-test-vars! image store [ns-sym])
-                                (nil? (image/load-ns! image store ns-sym)))
-                   {:ns ns-sym :why err})))
-             (store/ns-dependency-order store))))
-
-(defn- sha256
-  "Hex SHA-256 of a string. A REAL digest rather than [[slopp.image.currency/hash-of]],
-  which says in its own docstring that it is in-process only because its
-  registry is never persisted — this one is written into the journal and
-  compared by a later process, so the guarantee has to hold across JVMs."
-  [^String s]
-  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256")
-                (.getBytes s "UTF-8"))
-       (map #(format "%02x" %))
-       (apply str)))
-
-(defn ^:export closure-hashes
-  "For each namespace in `scope`, the CONTENT IDENTITY of everything a verdict
-  for it depends on: its own source, the source of every namespace its
-  require-closure reaches, and the dependency manifest.
-
-  This is what makes a verdict reusable in principle — *this test was green
-  against exactly this content* — and it is recorded on the `:observe` delta so
-  the question can be asked later, by a different process, from the journal
-  alone. Two properties decide soundness and pull opposite ways: it must change
-  when anything the test can LOAD changes (or a stale green outlives a real
-  edit), and it must NOT change when unrelated code moves (or it is merely a
-  store version and nothing is ever reusable).
-
-  Reach is the require closure — [[slopp.store/ns-closure]], the same producer
-  `test-nses-reaching` selects with, so the set a verdict is keyed to and the
-  set a change is routed to cannot disagree. That closure is a conservative
-  OVER-approximation of what a test executes, which is the safe direction here:
-  it can only ever invalidate a verdict that would still have been valid.
-
-  Each namespace is digested ONCE and the closures are combined from those
-  digests, so asking about a hundred test namespaces renders each source once
-  rather than once per closure that contains it."
-  [store scope]
-  (let [needed (into #{} (mapcat #(store/ns-closure store %)) scope)
-        per-ns (into {} (map (juxt identity #(sha256 (str (store.render/render-ns store %))))) needed)
-        deps   (sha256 (pr-str (:deps store)))]
-    (into {} (for [n scope]
-               [n (sha256 (str/join "|" (cons deps (map #(get per-ns % "?")
-                                                        (sort (store/ns-closure store n))))))]))))
-
-^:reads (defn ^:export session-branch-line
-  "The BRANCH line this session's work belongs to — its id, or nil for a
-  session that has neither a journal nor a branch identity yet.
-
-  Distinct from [[session-line]], which is where writes GO. They are the same
-  line until a session adopts a thread, and the land is the first caller that
-  needs them apart: it moves one onto the other.
-
-  Resolved from the branch NAME rather than kept in the session, because the
-  name is what a checkout changes and a stored id would be a second copy of
-  the same fact. The trunk falls out without a special case — a store whose
-  `main` row does not exist yet has it minted here, which is the same lazy
-  resolution [[session-line]] does and for the same reason.
-
-  An EPHEMERAL session takes its line as-is. It has no journal, so it has no
-  threads either, and its line is its branch by construction — `branch!`
-  mints a bare id there precisely so a nameless branch still has an identity."
-  [session]
-  (if-let [conn (:db @session)]
-    (or (db/line-id-by-name conn (:branch @session))
-        (db/trunk-line-id! conn))
-    (:line @session)))
-
 (defn ^:export used-families
   "The capabilities whose framework family `store` USES — the set both the
   vendored FILES and the supplied DEPS are derived from.
@@ -888,6 +187,30 @@
           (spit f v)))
       written)))
 
+(defn image-deps
+  "The dep map an image for `store` should carry: the store's own manifest plus
+  what the vendored framework requires.
+
+  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
+  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
+  — all of which used to arrive transitively through the coord's pom, and all of
+  which vanished with it. The files landed and then failed inside themselves.
+
+  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
+  keeps it. slopp supplies what the framework needs, never what the app chose.
+
+  **Only the families this store USES**, from the same `used-families`
+  derivation the vendoring reads. `framework-deps` is keyed by capability for
+  this reason: merging all of it would hand a web app cli's malli and a cli app
+  garden, so every store would pay for every capability — the opt-in not
+  holding in the one place a consumer notices it, their dependency list."
+  [store]
+  (let [used (used-families store)
+        fw   (boot/framework-deps)]
+    (if (and (seq used) (seq (boot/framework-files)))
+      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
+      (:deps store))))
+
 (defn framework-dir!
   "The dir to launch an image for `store` in — one per session, created and
   filled on demand — or nil when that store needs no framework.
@@ -941,30 +264,6 @@
       (swap! session assoc :spare
              (future (repl/start! (cond-> {}
                                     dir (assoc :slopp.image.repl/dir dir))))))))
-
-(defn image-deps
-  "The dep map an image for `store` should carry: the store's own manifest plus
-  what the vendored framework requires.
-
-  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
-  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
-  — all of which used to arrive transitively through the coord's pom, and all of
-  which vanished with it. The files landed and then failed inside themselves.
-
-  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
-  keeps it. slopp supplies what the framework needs, never what the app chose.
-
-  **Only the families this store USES**, from the same `used-families`
-  derivation the vendoring reads. `framework-deps` is keyed by capability for
-  this reason: merging all of it would hand a web app cli's malli and a cli app
-  garden, so every store would pay for every capability — the opt-in not
-  holding in the one place a consumer notices it, their dependency list."
-  [store]
-  (let [used (used-families store)
-        fw   (boot/framework-deps)]
-    (if (and (seq used) (seq (boot/framework-files)))
-      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
-      (:deps store))))
 
 (defn ^:export start-image!
   "THE door: every owned image is launched here, for `store`.
@@ -1029,6 +328,206 @@
       (do (when spare (repl/stop! @spare))
           (start-image! session store)))))
 
+^:reads
+(defn session-identity
+  "The identity a fresh session starts with when the caller names none: a
+  generated unique id.
+
+  **The harness's conversation id is NOT read here, deliberately.** Identity
+  keys a THREAD, so it must belong to a conversation — and most sessions are
+  not one. Hundreds of tests call `open!` with no agent, and every image and
+  test-runner JVM inherits its parent's environment, so a conversation id
+  read at this depth is adopted by every subprocess slopp spawns: each one
+  claims the driving agent's thread and stamps its deltas. That was measured,
+  not feared — four mcp-tests went red the moment this function read the
+  environment, every one of them because a test session had become the
+  developer's own session.
+
+  So the read lives at the MCP server's entry point, which is the only place
+  that genuinely knows a harness is driving it, and it arrives here as an
+  explicit `:slopp.ops/agent-id`. What is left is the honest default for
+  everyone else: this session is nobody's continuation, and it says so
+  instead of borrowing a name."
+  []
+  (str "s-" (subs (str (java.util.UUID/randomUUID)) 0 8)))
+
+(defn load-observations
+  "Every persisted observation, `{meta-key raw-edn}`, or `{}` without a db —
+  the sibling of `load-trace`. Observations are durable (written by
+  `remember-observation!`) but READ constantly by the card view, so they load
+  once into session state rather than making every card a db query. That is
+  what lets `slopp.read.orient` stay off `slopp.store.db`."
+  [conn]
+  (if conn
+    (or (db/meta-with-prefix conn "observed/") {})
+    {}))
+
+(defn load-trace
+  "The persisted trace map, pruned to tests/forms that still exist in `store`
+  (names move between sessions — including renames that never re-persisted —
+  so stale entries drop out and narrowing stays conservative)."
+  [conn store]
+  (when conn
+    (let [raw   (try (some-> (db/get-meta conn "trace-map") edn/read-string)
+                     (catch Exception _ nil))
+          live? (fn [qsym]
+                  (let [n (some-> (namespace qsym) symbol)]
+                    (boolean (and n (store/form-named store n (symbol (name qsym)))))))]
+      (into {}
+            (keep (fn [[t forms]]
+                    (when (live? t)
+                      (let [fs (into #{} (filter live?) forms)]
+                        (when (seq fs) [t fs])))))
+            raw))))
+
+(defn stub-missing-test-vars!
+  "The GENERIC red-first seam (command-agnostic — every write path that
+  compiles through the image inherits it, including future ops): when a
+  namespace with TESTS fails to load, intern a throwing stub in `image` for
+  every store var its tests reference but nothing defines — aliased and
+  qualified calls via kondo rows, :refer'd names via the ns form (stubs
+  precede the require, so the refer check passes) — then the caller retries
+  the load and the spec lands as an honest RED naming the stub. Never
+  touches the store; the real implementation redefines the var. Returns the
+  stubbed qsyms (nil when none — the failure wasn't red-first).
+
+  A `-test` namespace counts whole. A namespace that keeps its deftests
+  beside its code counts too — eval10's terrain does, and a test-first
+  `ns_create` there failed to load instead of landing red, so the agent
+  wrote the stubs by hand — but only usages FROM its deftest forms are
+  stubbed there: a production form's genuine unresolved symbol stays the
+  compile error it is."
+  [image candidate ns-syms]
+  (let [nses    (set (keys (:namespaces candidate)))
+        head    (fn [e] (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+                          (when (seq? s) (first s))))
+        deftests (fn [t] (into #{} (comp (filter #(= 'deftest (head %))) (keep :name))
+                               (store/forms candidate t)))
+        test-ns? (fn [t] (str/ends-with? (str t) "-test"))
+        tests   (filter #(or (test-ns? %) (seq (deftests %))) ns-syms)
+        ns-form (fn [t]
+                  (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
+                           (when (and (seq? s) (= 'ns (first s))) s))
+                        (store/forms candidate t)))
+        missing (vec (distinct
+                      (concat
+                       (for [t tests
+                             :let [from-tests (when-not (test-ns? t) (deftests t))]
+                             u (:var-usages (analyze/analyze (store.render/render-ns candidate t)))
+                             :when (and (contains? nses (:to u)) (:name u)
+                                        (or (nil? from-tests) (contains? from-tests (:from-var u)))
+                                        (not (store/form-named candidate (:to u) (:name u))))]
+                         (symbol (str (:to u)) (str (:name u))))
+                       (for [t tests
+                             :when (test-ns? t)
+                             :let [form (ns-form t)]
+                             clause (when form
+                                      (mapcat rest
+                                              (filter #(and (seq? %) (= :require (first %)))
+                                                      form)))
+                             :when (and (vector? clause)
+                                        (contains? nses (first clause)))
+                             [k v] (partition 2 (rest clause))
+                             :when (and (= :refer k) (vector? v))
+                             sym v
+                             :when (not (store/form-named candidate (first clause) sym))]
+                         (symbol (str (first clause)) (str sym))))))]
+    (doseq [q missing]
+      (repl/eval! image
+                  (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
+                          (namespace q) (name q) q q)))
+    (when (seq missing) missing)))
+
+(defn- ensure-db!
+  "The session's journal connection, CREATING the store on first use when the
+  session has a dir but no store yet.
+
+  This is the only place a directory becomes slopp-managed implicitly, and
+  it is deliberately on the WRITE path: `external/open!` no longer creates a
+  store just because the MCP server was launched somewhere, so a session on
+  an unadopted dir runs cache-only until real work arrives. Returns nil for
+  a dirless session, which stays ephemeral forever."
+  [session]
+  (or (:db @session)
+      (when-let [dir (:dir @session)]
+        (let [conn (db/open! dir)
+              s    (swap! session update :db #(or % conn))]
+          ;; a concurrent writer may have won the race — keep the winner's
+          ;; connection and release ours rather than leaking it
+          (when-not (identical? conn (:db s))
+            (.close ^java.sql.Connection conn))
+          (:db s)))))
+
+^:reads (defn ^:export session-branch-line
+  "The BRANCH line this session's work belongs to — its id, or nil for a
+  session that has neither a journal nor a branch identity yet.
+
+  Distinct from [[session-line]], which is where writes GO. They are the same
+  line until a session adopts a thread, and the land is the first caller that
+  needs them apart: it moves one onto the other.
+
+  Resolved from the branch NAME rather than kept in the session, because the
+  name is what a checkout changes and a stored id would be a second copy of
+  the same fact. The trunk falls out without a special case — a store whose
+  `main` row does not exist yet has it minted here, which is the same lazy
+  resolution [[session-line]] does and for the same reason.
+
+  An EPHEMERAL session takes its line as-is. It has no journal, so it has no
+  threads either, and its line is its branch by construction — `branch!`
+  mints a bare id there precisely so a nameless branch still has an identity."
+  [session]
+  (if-let [conn (:db @session)]
+    (or (db/line-id-by-name conn (:branch @session))
+        (db/trunk-line-id! conn))
+    (:line @session)))
+
+(defn persist-trace!
+  "Q3: the trace map survives the session — written to store meta so the NEXT
+  session (or a CLI one-shot) starts with narrowing warm instead of
+  {:ran 0 :affected :all}. Last writer wins; load-trace prunes stale names."
+  [session]
+  (when-let [conn (:db @session)]
+    (db/set-meta! conn "trace-map" (pr-str (:test-map @session)))))
+
+(defn with-ms
+  "Attach total op wall time (item 2 observability)."
+  [m t0]
+  (if (map? m)
+    (assoc m :ms (quot (- (System/nanoTime) t0) 1000000))
+    m))
+
+(defn green? [summary]
+  (zero? (+ (:fail summary 0) (:error summary 0))))
+
+(defn load-all-namespaces!
+  "Load every store namespace into `image` (dependency order, red-first test
+  specs stubbed and retried), returning `[{:ns sym :why err} …]` for the ones
+  that FAILED — empty when the whole store loaded.
+
+  Collect-and-continue, never throw-on-first: the kernel HOST boot has worked
+  this way since frictions 3b/3f/19 (\"ONE namespace that no longer compiles
+  took down every tool in every process — including the edit_add_form that
+  would have put the missing form back\"), and its boot note promises the
+  store stayed open so the broken namespace can be FIXED. The ORACLE boots
+  (session open, restart) were the only loops still refusing outright — the
+  refusal parked a Throwable in :image-ready and `await-image!` rethrew it in
+  front of every non-read tool, wedging a real consumer's store with no
+  repair available from inside (slopp-ui, 2026-08-06). The wedge population
+  is code verified-good at write time and invalidated from OUTSIDE — a
+  framework rename, a dependency bump, a platform declaration stranding a
+  JVM caller; per-write verification means nothing inside a store creates it.
+
+  Callers record the result on the session as `:image-load-failures`, where
+  the write path reconciles it ([[hot-load-all!]]) and `done!` subtracts and
+  reports it."
+  [image store]
+  (vec (keep (fn [ns-sym]
+               (when-let [err (image/load-ns! image store ns-sym)]
+                 (when-not (and (stub-missing-test-vars! image store [ns-sym])
+                                (nil? (image/load-ns! image store ns-sym)))
+                   {:ns ns-sym :why err})))
+             (store/ns-dependency-order store))))
+
 (defn fresh-image!
   "Replace the image with a fresh process reloaded from the store — faithful by
   construction (the D5 backstop). With a warm spare, the swap avoids a JVM boot
@@ -1063,6 +562,378 @@
       ;; whole store as never-loaded.
       (image.currency/arm! image))))
 
+(defn load-error-message
+  "The message to report for a `hot-load-all!` result — nil when it loaded.
+
+  When the heal's retry failed DIFFERENTLY from the first attempt, the
+  post-heal error is an artifact of the RECOVERY and the pre-heal one is the
+  fault. Reporting only `:err` is how a merge refusal pointed at a classpath
+  that was never the problem, hiding the compile error underneath it for
+  hours. Both, labelled, or the surface is lying about which is which."
+  [r]
+  (when-let [e (:err r)]
+    (if-let [f (:first-err r)]
+      (str e "\n\nNOTE: the image was refreshed mid-load and the retry failed"
+           " differently. The error BEFORE the refresh — the one to fix — was:\n"
+           f)
+      e)))
+
+(def reload-signature-res
+  "Failure texts that smell like hot-reload staleness rather than logic bugs."
+  [#"Unable to resolve symbol"
+   #"Attempting to call unbound fn"
+   #"No implementation of method"
+   #"Var .* is unbound"])
+
+(defn reload-signature? [failure]
+  (let [s (str (:actual failure) " " (:message failure))]
+    (or (boolean (some #(re-find % s) reload-signature-res))
+        ;; same-named classes cast-failing against each other = redefined type
+        (boolean
+         (when-let [[_ c1 c2] (re-find #"class (\S+) cannot be cast to class (\S+)" s)]
+           (= (last (str/split c1 #"\.")) (last (str/split c2 #"\."))))))))
+
+(defn suspicious-red?
+  "Could this red plausibly be image staleness rather than a genuine failure
+  (D5.1)? Yes iff: no edit context; a truncated failure list; a
+  reload-signature failure; or an UNEXPLAINED FLIP — a failing test whose
+  traced form-set doesn't intersect the just-edited forms and which wasn't
+  itself edited (this also catches value-capture staleness, since captured
+  calls bypass the trace)."
+  [session edited summary]
+  (let [tmap       (:test-map @session)
+        failures   (:failures summary)
+        truncated? (> (+ (:fail summary 0) (:error summary 0)) (count failures))]
+    (or (nil? edited)
+        truncated?
+        (boolean (some reload-signature? failures))
+        (boolean
+         (some (fn [f]
+                 (let [t       (:test f)
+                       touched (get tmap t)]
+                   (or (nil? touched)
+                       (and (not (contains? edited t))
+                            (empty? (set/intersection touched edited))))))
+               failures)))))
+
+(defn covering-test-nses
+  "Test namespaces whose requires REACH any of `ns-syms` — the verification
+  scope to fall back on when trace evidence is missing.
+
+  The old fallback ran tests IN the touched PRODUCTION namespaces, which
+  contain none: on slopp's own store `test_run {ns \"slopp.git\"}` runs zero
+  tests while five test namespaces cover it. So a write without trace evidence
+  verified NOTHING while still reporting a result — and a multi-form refactor,
+  least likely to carry complete evidence, was the most exposed of all.
+
+  Naming cannot answer this. `slopp.git` is covered by
+  `slopp.git-projection-test`, not `slopp.git-test`, so an `x` → `x-test`
+  heuristic finds nothing here. Only the require graph knows, and it is
+  walked TRANSITIVELY so a test reaching the change through one hop counts.
+
+  Returns a sorted vector, empty when genuinely nothing covers `ns-syms` —
+  which is a real answer, and the caller reports it as such rather than as a
+  pass."
+  [store ns-syms]
+  (let [known   (set (keys (:namespaces store)))
+        targets (set ns-syms)
+        reqs    (memoize (fn [n] (filter known (store/ns-requires store n))))
+        reaches? (fn [t]
+                   (loop [seen #{}, queue [t]]
+                     (if-let [n (first queue)]
+                       (cond
+                         (seen n)    (recur seen (rest queue))
+                         (targets n) true
+                         :else       (recur (conj seen n)
+                                            (into (vec (rest queue)) (reqs n))))
+                       false)))]
+    (->> known
+         (filter store.render/test-ns?)
+         (filter reaches?)
+         sort
+         vec)))
+
+(defn implicate
+  "Rock 2: annotate each failure with the just-changed forms that failing
+  test actually exercises (trace map ∩ edited) — the correlation agents
+  otherwise re-derive from raw expected/actual on every red.
+
+  Each failure also carries `:attribution`, because that intersection has
+  THREE outcomes and reporting only the hits collapsed the last two:
+
+  - `:mine`     the test exercises a form this episode changed, or IS one
+                — `:implicated` names which
+  - `:foreign`  the test IS traced and its trace is disjoint from this
+                episode's edits — somebody else's red
+  - `:untraced` no trace for this test, so nothing was intersected and
+                neither answer is available
+
+  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
+  key, leaving 'assume it is mine' as the only safe reading — which is how
+  one agent's red comes to freeze every other agent's thread. Only
+  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
+  evidence and must never be read as the presence of it, which is why an
+  empty trace counts as untraced rather than as a disjoint one.
+
+  The test's OWN name is checked against `edited` before its trace is,
+  because the trace maps a test to the source forms it exercises and so can
+  never name the test itself. Writing a failing test against code you did
+  not touch is the ordinary red-first move, and reading its trace alone
+  called it somebody else's."
+  [summary tmap edited]
+  (if-not (and (seq (:failures summary)) (seq edited))
+    summary
+    (let [edited (set edited)]
+      (update summary :failures
+              (fn [fs]
+                (mapv (fn [f]
+                        (let [own    (when (contains? edited (:test f)) [(:test f)])
+                              traced (seq (get tmap (:test f)))
+                              hits   (some->> traced set (set/intersection edited) seq)]
+                          (cond
+                            (or own hits)
+                            (assoc f :attribution :mine
+                                   :implicated (vec (sort (distinct (concat own hits)))))
+                            traced (assoc f :attribution :foreign)
+                            :else  (assoc f :attribution :untraced))))
+                      fs))))))
+
+(defn red-attribution
+  "Whose red is this? Splits a verification summary's failing tests by the
+  three-way `:attribution` [[implicate]] put on each one, and returns nil
+  when nothing is red.
+
+  {:mine [...] :foreign [...] :untraced [...] :unseen n} — non-empty
+  entries only. `:mine` and `:foreign` are claims; `:untraced` and
+  `:unseen` are the two ways of having no claim to make, and they are kept
+  because the whole point of the split is that a caller may act on
+  innocence and must never infer it from silence:
+
+  - `:untraced` — the run produced no trace for this failing test
+  - `:unseen`   — the summary counts MORE failures than it carries blocks
+                  for, so some red is not represented here at all. Failure
+                  detail is capped for response size, and attributing only
+                  what survived the cap would read a truncation as a clean
+                  bill of health.
+
+  A caller wanting \"none of this red is mine\" needs all three of `:mine`,
+  `:untraced` and `:unseen` to be absent."
+  [summary]
+  (let [total (+ (:fail summary 0) (:error summary 0))]
+    (when (pos? total)
+      (let [blocks (vec (:failures summary))
+            named  (into #{} (keep :test) blocks)
+            ;; a test the run NAMED as failing but carried no block for is a
+            ;; red we cannot attribute — same standing as an untraced one
+            capped (vec (sort (remove named (:failed-tests summary))))
+            by     (group-by #(or (:attribution %) :untraced) blocks)
+            bucket (fn [k] (vec (sort (distinct (keep :test (get by k))))))
+            unseen (max 0 (- total (count blocks) (count capped)))]
+        (cond-> {}
+          (seq (get by :mine))    (assoc :mine (bucket :mine))
+          (seq (get by :foreign)) (assoc :foreign (bucket :foreign))
+          (or (seq (get by :untraced)) (seq capped))
+          (assoc :untraced (vec (sort (distinct (concat (bucket :untraced) capped)))))
+          (pos? unseen)           (assoc :unseen unseen))))))
+
+(defn shape-episode-reds!
+  "Mid-episode response diet (direction over repetition): full failure
+  detail rides ONLY for tests newly red on THIS write; tests already
+  reported red this episode compress to :still-red names; previously-red
+  tests that ran clean report :went-green. The ledger lives on the
+  session (:episode-reds) and the done-point (`boundary?` true) bypasses
+  compression — the boundary always reports every standing red in full —
+  and resets the ledger. Explicit test_run bypasses this shaping too
+  (spot-checks get everything).
+
+  **`:went-green` is derived from `:failed-tests` — the summary's complete
+  list of failing test names — and never from the failure BLOCKS.** The
+  blocks are capped for response size, so on a run with more failing
+  assertions than the cap allows, a still-failing test simply has no block,
+  which is indistinguishable here from having passed. Measured: a write
+  announced a test green while an immediate re-run showed it failing with the
+  message it had before the write. A false green is the worst direction for
+  this signal — it is the one an agent reads to decide it is FINISHED — and it
+  misfires only on large red runs, which is when the reader most needs it.
+
+  When a summary carries no `:failed-tests` and its detail was demonstrably
+  capped, no green is claimed and `:reds-uncertain` says why. That is not a
+  hypothetical: the injected runtime is read off the reading process's own
+  classpath, so a jar older than the store produces exactly this summary.
+  Absence with a stated cause can be acted on; absence alone reads as \"nothing
+  went green\", which is a different and wrong claim."
+  [session summary affected scope boundary?]
+  (let [prev     (or (:episode-reds @session) #{})
+        blocks   (vec (:failures summary))
+        named    (:failed-tests summary)
+        capped?  (< (count blocks) (+ (:fail summary 0) (:error summary 0)))
+        now-red  (if named
+                   (set named)
+                   (into #{} (keep :test) blocks))
+        scope-ns (into #{} (map str) (if (sequential? scope) scope [scope]))
+        ran      (if (seq affected)
+                   (set affected)
+                   (into #{} (filter #(contains? scope-ns (namespace %))) prev))
+        blind?   (and (nil? named) capped?)
+        greens   (if blind?
+                   []
+                   (vec (sort (remove now-red (filter ran prev)))))
+        ;; a test the shaper could not observe stays on the ledger: dropping it
+        ;; would report it as newly red next time, in full, having never left
+        ledger   (-> prev (set/difference (set greens)) (into now-red))]
+    (swap! session assoc :episode-reds (if boundary? now-red ledger))
+    (if boundary?
+      summary
+      (let [new-blocks (vec (remove #(contains? prev (:test %)) blocks))
+            stills     (vec (sort (filter prev now-red)))]
+        (cond-> (assoc summary :failures new-blocks)
+          (empty? new-blocks) (dissoc :failures)
+          (seq stills)        (assoc :still-red stills)
+          (seq greens)        (assoc :went-green greens)
+          blind?              (assoc :reds-uncertain
+                                     (str "the failure detail was capped at "
+                                          (count blocks) " of " (+ (:fail summary 0)
+                                                                   (:error summary 0))
+                                          ", and this runner did not report the"
+                                          " failing test names — so no test can"
+                                          " be shown to have gone green on this"
+                                          " run. Rebuild the jar to restore the"
+                                          " signal; until then read :still-red"
+                                          " as a floor, not a list"))
+          blind?              (dissoc :went-green))))))
+
+(defn test-ns?
+  "Does `nsx` hold any deftest? (Inline tests count — Q13.)"
+  [store nsx]
+  (some #(str/starts-with? (str/triml (n/string (:node %))) "(deftest")
+        (store/forms store nsx)))
+
+(defn external-test-nses
+  "Of `nses`, those defining at least one ^:external deftest — tests only
+  the EXTERNAL tier can execute (they spawn sessions/images; in-image runs
+  skip them). The done-point uses this to route impacted tests to the
+  right tier without the agent choosing tiers."
+  [store nses]
+  (vec (for [nsx nses
+             :when (some (fn [e]
+                           (let [s (try (n/sexpr (:node e))
+                                        (catch Exception _ nil))]
+                             (and (seq? s)
+                                  (= 'deftest (first s))
+                                  (boolean (:external (meta (second s)))))))
+                         (store/forms store nsx))]
+         nsx)))
+
+(defn test-nses-reaching
+  "Test namespaces (any ns holding a deftest) whose require-closure
+  reaches one of `changed-nses` — the PROVABLE set of tests a change can
+  affect (a test only exercises code it can load). The honest fallback
+  scope when the trace map is silent."
+  [store changed-nses]
+  (let [changed (set changed-nses)]
+    (vec (sort (for [t (keys (:namespaces store))
+                     :when (and (test-ns? store t)
+                                (seq (set/intersection
+                                      (store/ns-closure store t)
+                                      changed)))]
+                 t)))))
+
+(defn rename-in-trace
+  "Carry the observed test→form map across a rename (old qsym → new qsym)."
+  [tmap qold qnew]
+  (into {}
+        (map (fn [[t forms]]
+               [(if (= t qold) qnew t)
+                (into #{} (map #(if (= % qold) qnew %)) forms)]))
+        tmap))
+
+(defn test-var-tiers
+  "Plain deftest names of `ns-sym` split by execution tier:
+   {:image [...] :external [...]}. `^:external` tests spawn images / recurse,
+   so the IN-IMAGE runner must skip them (they only behave in the external
+   tier) — this is what lets `traced-run!` defer them as :external-pending
+   instead of running (and false-greening) them in-image."
+  [store ns-sym]
+  (reduce (fn [m e]
+            (let [s (try (n/sexpr (:node e)) (catch Exception _ nil))]
+              (if (and (seq? s) (= 'deftest (first s)))
+                (update m (if (:external (meta (second s))) :external :image)
+                        (fnil conj []) (second s))
+                m)))
+          {:image [] :external []}
+          (store/forms store ns-sym)))
+
+(defn- ran-nothing
+  "The summary for an in-image run that did not HAPPEN, carrying what the runner
+  said instead.
+
+  `image/traced-test-run` answers `{:summary … :trace …}`, and answers something
+  else when the eval threw — the exception arrives as printed text. Destructuring
+  that gave nil, and nil flowed on to callers whose `cond->` dressed it as a map
+  with no counts in it. Counts-of-zero is the one shape that must never come
+  back, because every caller reads it as a clean run: `full_check` reported its
+  in-image tier green having run nothing at all.
+
+  So `:error 1` — every status check in the codebase sums `:fail` and `:error`,
+  which makes this red everywhere without a new convention — and the runner's
+  own words ride along, bounded, because the next cause will be a different one
+  and undiagnosable without them."
+  [result]
+  (let [said (str result)]
+    {:test 0 :pass 0 :fail 0 :error 1 :type :summary
+     :failures [{:test     'slopp.image/traced-test-run
+                 :type     :error
+                 :message  (str "the in-image runner returned no summary — the"
+                                " run did not happen, so this is not a green")
+                 :expected "{:summary {...} :trace {...}}"
+                 :actual   (subs said 0 (min 400 (count said)))}]}))
+
+(defn traced-run!
+  "Run `test-ns`'s tests (all, or `only` names) with form-tracing; absorb the
+  observed test→form map into the session (persisted — Q3); return the summary.
+  `skip-integration?` drops `^:integration` tests (M5, the fast-path default).
+  The in-image tier NEVER runs `^:external` tests (they spawn images / recurse
+  and only behave in the external tier): any in scope are filtered OUT of the
+  run and reported as `:external-pending` on the summary — never executed
+  in-image (which would false-green/false-red them). The done-point / merge
+  gate runs them for real in the external tier.
+
+  A result carrying no `:summary` becomes [[ran-nothing]] rather than nil: the
+  runner threw, and a run that did not happen has to read as red, not as a run
+  that found nothing."
+  [session test-ns only & [skip-integration?]]
+  (let [{:keys [image store]} @session
+        nses     (if (coll? test-ns) test-ns [test-ns])
+        external (into #{} (mapcat #(:external (test-var-tiers store %))) nses)
+        run!     (fn [only']
+                   (let [res (image/traced-test-run
+                              image store test-ns :only only'
+                              :skip-integration? skip-integration?)
+                         {:keys [summary trace]} (when (map? res) res)]
+                     (swap! session update :test-map merge trace)
+                     (persist-trace! session)
+                     (or summary (ran-nothing res))))]
+    (if (empty? external)
+      ;; no ^:external tests in scope — original path, untouched
+      (run! only)
+      ;; some are external — run only the in-image tier, defer the rest
+      (let [pending (if only (filterv external only) (vec external))
+            only'   (if only
+                      (vec (remove external only))
+                      (vec (mapcat #(:image (test-var-tiers store %)) nses)))
+            summary (if (empty? only')
+                      ;; every impacted test is external — nothing to run here
+                      {:test 0 :pass 0 :fail 0 :error 0 :type :summary}
+                      (run! only'))]
+        (cond-> summary
+          (seq pending)
+          (assoc :external-pending
+                 (cond-> {:count (count pending)
+                          :tests (vec (take 5 (sort pending)))}
+                   (> (count pending) 5)
+                   (assoc :note (str "first 5 shown — the done-point / merge gate"
+                                     " runs them all in the external tier")))))))))
+
 (defn diagnosed-run!
   "Run tests. Reds cross-check on a fresh image ONLY when staleness is
   plausible (D5.1: reload signatures, unexplained flips, missing provenance);
@@ -1086,6 +957,35 @@
               (assoc r2 :fresh-confirmed true))))
 
       :else (assoc r1 :diagnosis :genuine))))
+
+(def cljs-deferred-summary
+  "Verification summary for a write to a :cljs (non-jvm-loadable) namespace.
+  Such code references js/* / the DOM and never loads into the JVM oracle, so
+  there is nothing to run here — its red/green comes from the ClojureScript
+  compiler (compile_client), not the test suite. Reported :unverified with a
+  reason that says the check is DEFERRED, distinct from :no-covering-tests (a
+  coverage gap the agent should close). D-web-cljs."
+  {:test 0 :pass 0 :status :unverified :reason :cljs-deferred-to-compile})
+
+(defmulti ^:export after-write!
+  "Follow-up once a write to `ns-sym` has LANDED, dispatched on that
+  namespace's platform (`:jvm` / `:cljc` / `:cljs`). Whatever a method returns
+  is merged into the write's result map; nil adds nothing, and `:default` is
+  nil — so the ordinary JVM write pays one platform lookup and a dispatch.
+
+  This exists so the write engine does not have to know which app types exist
+  (R6). It used to know: four forms of ClojureScript bundle machinery lived
+  here, called from every generic write verb, and they could only reach the
+  compiler through `store/late-ref` — an ^:unsafe escape hatch whose entire job
+  was to break a cycle the misplacement itself created, since the client build
+  requires the operation surface that calls this engine.
+
+  Registering inverts that edge: the app type depends on the engine, never the
+  reverse, and app type #2 arrives as another `defmethod` rather than another
+  branch in here. Dispatching on PLATFORM rather than on \"is this web?\" is the
+  same discipline one level down — the engine asks a question the store can
+  answer about any namespace, not a question only one app type has."
+  (fn [session ns-sym] (store/platform-for (:store @session) ns-sym)))
 
 (defn run-verification!
   "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
@@ -1153,6 +1053,142 @@
              boundary? (dissoc :external-pending))]
     (assoc r :ms (- (System/currentTimeMillis) t0))))
 
+(defn absorb-trace!
+  "Merge an EXTERNAL-tier trace (#121) into the session's test-map and persist
+  it (Q3), exactly as `traced-run!` does for the in-image tier — one test-map,
+  one shape, whichever tier observed it. No-op on nil/empty: `read-traces`
+  returns nil when the build carried no trace runner, and 'not traced' must
+  never overwrite what another tier observed.
+
+  Plain `merge`, not `merge-with into`: a fresh run of a test is the
+  AUTHORITATIVE current set for that test — unioning would accumulate forms it
+  no longer touches and quietly rot the narrowing."
+  [session trace]
+  (when (seq trace)
+    (swap! session update :test-map merge trace)
+    (persist-trace! session)))
+
+(defn external-among
+  "Of qualified test syms `tests`, those tagged ^:external — the ones only the
+  EXTERNAL tier can execute.
+
+  The routing half of affected-test selection (#127). `affected-tests` names the
+  tests a change reaches; this says which of them the in-image runner had to
+  defer, so `done!` can hand exactly those to the external tier instead of
+  re-deriving a set from the require-closure. That closure selects a median 43
+  of 46 external test namespaces (measured over every source ns 2026-07-17) —
+  it is not narrowing, it is 'everything' with rounding.
+
+  Empty is NOT the same as a silent trace: it means the evidence names tests and
+  none of them are external, so the external tier has nothing to do. A silent
+  trace is `affected-tests` returning nil, and that must still fall back to the
+  closure."
+  [store tests]
+  (vec (sort (mapcat (fn [[nsx syms]]
+                       (let [iso (set (:external (test-var-tiers store nsx)))]
+                         (filter #(iso (symbol (name %))) syms)))
+                     (group-by (comp symbol namespace) tests)))))
+
+(defn inert-ns-require-change?
+  "True when an ns-form edit only ADDED require specs that cannot change the
+  resolution or load behaviour of anything already compiled: alias-only
+  vectors (`[lib :as a]`) naming IN-STORE namespaces whose require-CLOSURE
+  registers no methods. Everything else — :refer (resolution can shift),
+  removals or renames, out-of-store libs (load effects unknown), a required
+  ns whose closure LOADS defmethods, ANY metadata change on the ns form, any
+  non-require edit — is not inert. Conservative: an unreadable or absent
+  baseline answers false.
+
+  `old-src` is the ns form's source at the baseline to diff against, and the
+  caller names it: the write path hands the delta immediately prior
+  (`prior-source`, one edit); the done path hands the LAST-DONE source so a
+  multi-edit episode where an earlier edit added a :refer isn't masked by a
+  later alias-only edit (review V-F3). A pure question over a value and a
+  string — the journal read that finds the baseline stays with the caller.
+
+  frictions #2: ns_add_require on slopp.api invalidated 331 external tests
+  for an edit whose blast radius is zero — the require-closure fallback
+  treated a require-list touch as a code change to the whole namespace."
+  [store fid old-src]
+  (let [read* (fn [s] (try (n/sexpr (p/parse-string (str s)))
+                           (catch Exception _ nil)))
+        e     (store/form-by-id store fid)
+        new   (some-> e :node n/sexpr)
+        old   (read* old-src)
+        req?  (fn [c] (and (seq? c) (= :require (first c))))
+        reqs  (fn [form] (set (mapcat rest (filter req? (drop 2 form)))))
+        ;; the ns form with its require clauses stripped — everything whose
+        ;; change is NOT a plain require add: name, docstring, :import,
+        ;; :require-macros, :gen-class …
+        non-req (fn [form] (cons (second form) (remove req? (drop 2 form))))
+        ;; metadata is invisible to = (on symbols and colls alike), and a
+        ;; test-selector tag / load hint on the ns name is behaviourally
+        ;; live — compare the metadata of every node explicitly (V-F2)
+        metas   (fn [form] (mapv meta (tree-seq coll? seq form)))
+        ;; a required ns is quiet only if its WHOLE in-store closure
+        ;; registers no methods — loading it loads them all (V-F1)
+        quiet?  (fn [lib]
+                  (not-any? store/method-carrying?
+                            (mapcat #(store/forms store %)
+                                    (store/ns-closure store lib))))]
+    (boolean
+     (and (seq? old) (seq? new)
+          (= 'ns (first old) (first new))
+          (= (non-req old) (non-req new))
+          (= (metas (non-req old)) (metas (non-req new)))
+          (set/subset? (reqs old) (reqs new))
+          (let [added (set/difference (reqs new) (reqs old))]
+            (and (seq added)
+                 (every? (fn [spec]
+                           (and (vector? spec)
+                                (symbol? (first spec))
+                                (even? (count (rest spec)))
+                                (every? #(= :as %) (take-nth 2 (rest spec)))
+                                (contains? (:namespaces store) (first spec))
+                                (quiet? (first spec))))
+                         added)))))))
+
+(defn- sha256
+  "Hex SHA-256 of a string. A REAL digest rather than [[slopp.image.currency/hash-of]],
+  which says in its own docstring that it is in-process only because its
+  registry is never persisted — this one is written into the journal and
+  compared by a later process, so the guarantee has to hold across JVMs."
+  [^String s]
+  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                (.getBytes s "UTF-8"))
+       (map #(format "%02x" %))
+       (apply str)))
+
+(defn ^:export closure-hashes
+  "For each namespace in `scope`, the CONTENT IDENTITY of everything a verdict
+  for it depends on: its own source, the source of every namespace its
+  require-closure reaches, and the dependency manifest.
+
+  This is what makes a verdict reusable in principle — *this test was green
+  against exactly this content* — and it is recorded on the `:observe` delta so
+  the question can be asked later, by a different process, from the journal
+  alone. Two properties decide soundness and pull opposite ways: it must change
+  when anything the test can LOAD changes (or a stale green outlives a real
+  edit), and it must NOT change when unrelated code moves (or it is merely a
+  store version and nothing is ever reusable).
+
+  Reach is the require closure — [[slopp.store/ns-closure]], the same producer
+  `test-nses-reaching` selects with, so the set a verdict is keyed to and the
+  set a change is routed to cannot disagree. That closure is a conservative
+  OVER-approximation of what a test executes, which is the safe direction here:
+  it can only ever invalidate a verdict that would still have been valid.
+
+  Each namespace is digested ONCE and the closures are combined from those
+  digests, so asking about a hundred test namespaces renders each source once
+  rather than once per closure that contains it."
+  [store scope]
+  (let [needed (into #{} (mapcat #(store/ns-closure store %)) scope)
+        per-ns (into {} (map (juxt identity #(sha256 (str (store.render/render-ns store %))))) needed)
+        deps   (sha256 (pr-str (:deps store)))]
+    (into {} (for [n scope]
+               [n (sha256 (str/join "|" (cons deps (map #(get per-ns % "?")
+                                                        (sort (store/ns-closure store n))))))]))))
+
 (defn marker-readers
   "Test forms that READ a marker `ns-sym/nm` carries — the tests whose subject is
   a declaration rather than a call.
@@ -1219,44 +1255,6 @@
                        :when (and (reads-meta? src)
                                   (some #(str/includes? src (str %)) marks))]
                    (symbol (str nsx) (str (:name t)))))))))
-
-(defn red-attribution
-  "Whose red is this? Splits a verification summary's failing tests by the
-  three-way `:attribution` [[implicate]] put on each one, and returns nil
-  when nothing is red.
-
-  {:mine [...] :foreign [...] :untraced [...] :unseen n} — non-empty
-  entries only. `:mine` and `:foreign` are claims; `:untraced` and
-  `:unseen` are the two ways of having no claim to make, and they are kept
-  because the whole point of the split is that a caller may act on
-  innocence and must never infer it from silence:
-
-  - `:untraced` — the run produced no trace for this failing test
-  - `:unseen`   — the summary counts MORE failures than it carries blocks
-                  for, so some red is not represented here at all. Failure
-                  detail is capped for response size, and attributing only
-                  what survived the cap would read a truncation as a clean
-                  bill of health.
-
-  A caller wanting \"none of this red is mine\" needs all three of `:mine`,
-  `:untraced` and `:unseen` to be absent."
-  [summary]
-  (let [total (+ (:fail summary 0) (:error summary 0))]
-    (when (pos? total)
-      (let [blocks (vec (:failures summary))
-            named  (into #{} (keep :test) blocks)
-            ;; a test the run NAMED as failing but carried no block for is a
-            ;; red we cannot attribute — same standing as an untraced one
-            capped (vec (sort (remove named (:failed-tests summary))))
-            by     (group-by #(or (:attribution %) :untraced) blocks)
-            bucket (fn [k] (vec (sort (distinct (keep :test (get by k))))))
-            unseen (max 0 (- total (count blocks) (count capped)))]
-        (cond-> {}
-          (seq (get by :mine))    (assoc :mine (bucket :mine))
-          (seq (get by :foreign)) (assoc :foreign (bucket :foreign))
-          (or (seq (get by :untraced)) (seq capped))
-          (assoc :untraced (vec (sort (distinct (concat (bucket :untraced) capped)))))
-          (pos? unseen)           (assoc :unseen unseen))))))
 
 (defn red-history
   "The tests that went red in episodes where `ns-sym/nm` changed, from the
@@ -1780,7 +1778,7 @@
             (into #{} (comp (filter #(= line (:parent %))) (keep :agent))
                   (db/lines conn))))))
 
-(defn refresh-cache!
+(defn ^{:export "slopp.mcp"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
   durable session): INCREMENTALLY when every foreign delta in the suffix
   replays (the common case — no full re-parse), falling back to a full
@@ -1806,7 +1804,12 @@
   The LINE is resolved once and shared by all three reads. Digesting one line
   and rebuilding from another would advance the cache from a view it never
   graded — and once a session sits on its own thread rather than the trunk,
-  that is not a hypothetical."
+  that is not a hypothetical.
+
+  Exposed to `slopp.mcp` for one caller: a project's app OWNER under the
+  daemon has to hold the branch's current value before its server is
+  re-served from it, and `sync-with-journal!` is gated on an image the
+  owner may still be booting."
   [session]
   (when-let [conn (:db @session)]
     (let [line   (session-line session)
@@ -1843,34 +1846,6 @@
         (when (not= digest (:elements-digest @session))
           (swap! session update :store assoc :namespaces (db/load-elements conn line))))
       (swap! session assoc :elements-digest digest))))
-
-(defn ^:export commit-appended!
-  "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
-  retrying across journal/cache races. Returns the committed store'.
-
-  **The retry is a race now, not a livelock.** It used to be possible for
-  every attempt to be identical: two sessions drawing ids from one shared
-  counter re-derived the same id each pass and collided twelve times in a row.
-  Ids are random names minted per call, so a losing attempt genuinely differs
-  from the one before it — which is what makes retrying a strategy rather than
-  a ritual.
-
-  Exhausting the retries therefore means one thing, and the throw says it:
-  the branch head moved under every attempt because another writer is landing
-  continuously."
-  [session f nses]
-  (loop [n 0]
-    (let [base (:store @session)
-          st'  (f base)]
-      (cond
-        (try-commit! session base st' nses) st'
-        (< n 12) (do (refresh-cache! session) (recur (inc n)))
-        :else
-        (throw (ex-info
-                (str "the branch head moved under all 12 attempts — another"
-                     " writer is landing continuously. Ordinary contention on a"
-                     " busy branch: call again.")
-                {:retryable true}))))))
 
 (defn rebased-write!
   "Run a single-form write with an atomic rebasing commit (item 4, the
@@ -2045,6 +2020,36 @@
         (swap! session assoc :store (db/load-store conn line))
         (when (:image @session) (fresh-image! session)))
       line)))
+
+(defn ^:export commit-appended!
+  "Commit a pure APPEND `f` (store → store', deltas only unless `nses`),
+  retrying across journal/cache races. Returns the committed store'.
+
+  **The retry is a race now, not a livelock.** It used to be possible for
+  every attempt to be identical: two sessions drawing ids from one shared
+  counter re-derived the same id each pass and collided twelve times in a row.
+  Ids are random names minted per call, so a losing attempt genuinely differs
+  from the one before it — which is what makes retrying a strategy rather than
+  a ritual.
+
+  Exhausting the retries therefore means one thing, and the throw says it:
+  the branch head moved under every attempt because another writer is landing
+  continuously."
+  [session f nses]
+  (loop [n 0]
+    (let [base (:store @session)
+          st'  (f base)]
+      (cond
+        (try-commit! session base st' nses) st'
+        (< n 12) (do (refresh-cache! session) (recur (inc n)))
+        :else
+        (throw (ex-info
+                (str "the branch head moved under all 12 attempts — another"
+                     " writer is landing continuously. Ordinary contention on a"
+                     " busy branch: call again.")
+                {:retryable true}))))))
+
+(defmethod after-write! :default [_ _] nil)
 
 (defn ^:export follow-branch-if-idle!
   "Re-fork the session's thread at its branch's head when it has NOTHING TO
