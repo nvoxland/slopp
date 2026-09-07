@@ -4,10 +4,10 @@
   itself stays up with nothing loaded. It is the registry (`/slopp/projects`)
   and the owner of every surface under `/slopp/`."
   (:require [clojure.string :as str]
-            [slopp.http :as http]
+            [slopp.http :as slopp.http]
             [slopp.mcp.http :as mcp.http]
             [slopp.ops :as ops]
-            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as otel] [slopp.store.db :as db] [slopp.api.server :as api.server] [slopp.mcp :as mcp]))
+            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -136,7 +136,7 @@
                 ;; a server the old reader held carries over: the store
                 ;; appearing is no reason to drop what is serving
                 _      (when app (swap! reader assoc :app-server app))
-                ctx    (http/context (api.server/serving-opts reader))
+                ctx    (slopp.http/context (server/serving-opts reader))
                 api    {:reader reader :ctx ctx}]
             (swap! state assoc-in [:projects dir :api] api)
             api))))))
@@ -159,7 +159,7 @@
                  (when-let [dir (:dir (project-dir req))]
                    (get-in @state [:projects dir])))]
     (if p
-      (http/handle! (:ctx (api! (:dir p)))
+      (slopp.http/handle! (:ctx (api! (:dir p)))
                     (-> req
                         (assoc :uri (str "/api/" (get-in req [:path-params :*] "")))
                         (dissoc :path-params :query-params :http/deps :http/reads)))
@@ -198,7 +198,7 @@
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string
               {:partialSuccess {:errorMessage (str "could not parse this export: " (:bad r))}})}
-      (do (doseq [[thread recs] (group-by :session (otel/api-requests (:ok r)))]
+      (do (doseq [[thread recs] (group-by :session (slopp.otel/api-requests (:ok r)))]
             (if-let [s (session-holding thread)]
               (do (ops/record-otel! s recs)
                   (swap! state update-in [:otel :routed] + (count recs)))
@@ -301,7 +301,7 @@
     (doseq [dir (keys (:projects @state))]
       (close-project! dir))
     (when-let [srv (:server @state)]
-      (try (http/stop! srv) (catch Throwable _ nil)))
+      (try (slopp.http/stop! srv) (catch Throwable _ nil)))
     (swap! state (constantly {:projects {} :sessions {} :server nil :token nil :reaper nil
                               :otel {:routed 0 :dropped 0}}))
     nil))
@@ -400,12 +400,14 @@
   thread, a line, a store value and a read ledger, and a write naming a
   different thread reloads all of it — which is one agent's business, not
   every agent's on the project. What the project shares lives on the
-  project record: its registry row, its reader, the reader's app server —
-  which every session names as its `:app-owner`, so a done in any of them
-  refreshes the one server — and its check queue, so two whole-store checks
-  at one content are one run. The FIRST attach starts the app server,
-  backgrounded, on the branch the project opened on: one per project, the
-  first branch started, as decided.
+  project record: its registry row, its check queue (so two whole-store
+  checks at one content are one run), and its READER — the session the
+  read API answers from and the app server's owner, which every session
+  names as its `:app-owner` as a DELAY: a project whose app nobody serves
+  and whose API nobody reads never opens it, and a large store is not
+  loaded twice for nothing. The FIRST attach starts the app server,
+  backgrounded, when the store runs one at all: one per project, on the
+  branch the project opened on, as decided.
 
   The session's oracle is LAZY: nothing boots until a call needs an image,
   so a session that only reads — most of them — costs no child JVM; and
@@ -419,14 +421,14 @@
     (let [now     (System/currentTimeMillis)
           sid     (str (java.util.UUID/randomUUID))
           [proj first?] (ensure-project! dir slug)
-          owner   (:reader (api! dir))
+          owner   (delay (:reader (api! dir)))
           session (external/open! {:slopp.ops/dir         dir
                                    :slopp.ops/lazy-image? true
                                    ;; the session's own label; the THREAD an
                                    ;; agent writes on is what it passes
                                    :slopp.ops/agent-id    (str "mcp-" (subs sid 0 8))})]
       (swap! session assoc :require-turns? true :daemon? true
-             :app-owner owner :app-server (:app-server @owner)
+             :app-owner owner
              :check-queue (:check-queue proj)
              :image-permit image-permit
              :on-landed (fn [land] (announce-landing! dir sid land)))
@@ -434,8 +436,8 @@
                         (update-in [:projects dir :sessions] conj sid)
                         (assoc-in [:sessions sid] {:dir dir :session session
                                                    :started now :last-seen now})))
-      (when first?
-        (future (mcp/start-app! owner)))
+      (when (and first? (mcp/app-managed? session))
+        (future (mcp/start-app! @owner)))
       {:sid sid :session session})))
 
 ^:unsafe (defn- mcp-endpoint
@@ -455,9 +457,9 @@
   first use — opening the project under `slug` if nothing is attached —
   and touched on every call so the reaper knows it is in use. Writable,
   turn-gated like every real session, carrying the daemon's token as its
-  `:call-token`, the project's reader as its app owner and the project's
-  check queue; its oracle is lazy and budgeted, like every daemon
-  session's, and what it lands is announced."
+  `:call-token`, the project's reader as its app owner (a delay, like every
+  session's) and the project's check queue; its oracle is lazy and
+  budgeted, like every daemon session's, and what it lands is announced."
   [dir slug]
   (locking state
     (let [now (System/currentTimeMillis)
@@ -465,13 +467,12 @@
       (if-let [s (get-in @state [:projects dir :cli :session])]
         (do (swap! state assoc-in [:projects dir :cli :last-seen] now)
             s)
-        (let [owner   (:reader (api! dir))
-              session (external/open! {:slopp.ops/dir         dir
+        (let [session (external/open! {:slopp.ops/dir         dir
                                        :slopp.ops/lazy-image? true
                                        :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
           (swap! session assoc :require-turns? true :daemon? true
                  :call-token (token)
-                 :app-owner owner :app-server (:app-server @owner)
+                 :app-owner (delay (:reader (api! dir)))
                  :check-queue (:check-queue proj)
                  :image-permit image-permit
                  :on-landed (fn [land] (announce-landing! dir :cli land)))
@@ -541,7 +542,7 @@
   "The assembled dispatch context for every route under `/slopp/` — what the
   listener serves, and what a test drives without a port."
   []
-  (http/context {:http/namespaces [] :http/routes (routes)}))
+  (slopp.http/context {:http/namespaces [] :http/routes (routes)}))
 
 (defn ^:export start!
   "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])
@@ -554,7 +555,7 @@
   (locking state
     (when (:server @state)
       (throw (ex-info "this process already runs a daemon" {:port (:port (:server @state))})))
-    (let [srv    (http/serve! {:http/namespaces [] :http/routes (routes)
+    (let [srv    (slopp.http/serve! {:http/namespaces [] :http/routes (routes)
                                :http/host "127.0.0.1" :http/port (or port default-port)})
           reaper (doto (Thread. ^Runnable
                                (fn []
@@ -603,3 +604,10 @@
                            (str "a daemon is already live at " (:url live) " (pid " (:pid live) ")")
                            (ex-message e))))
           (System/exit 1))))))
+
+^:reads (defn ^:export reader-open?
+  "Whether the project at `dir` has opened its reader — the second session
+  on its store that the read API and the app server share. Attaching alone
+  does not open one; the first API request or app refresh does."
+  [dir]
+  (some? (get-in @state [:projects dir :api :reader])))

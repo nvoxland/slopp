@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as http] [slopp.ops.external :as external] [slopp.ops :as ops]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -20,7 +20,7 @@
 (defn- projects!
   "What /slopp/projects lists, as data."
   [ctx]
-  (:body (http/handle! ctx {:request-method :get :uri "/slopp/projects"})))
+  (:body (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects"})))
 
 (deftest ^:external an-agent-attaches-by-dir-and-the-daemon-serves-its-project
   ;; The client names its project by DIR (a header written into .mcp.json
@@ -31,7 +31,7 @@
         d2   (tmp-dir!)
         ctx  (daemon/context)
         post (fn [dir slug sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri (str "/slopp/projects/" slug "/mcp")
                                   :headers (cond-> {"x-slopp-dir" dir}
                                              sid (assoc "mcp-session-id" sid))
@@ -71,11 +71,11 @@
           (let [r (post d1 "one" "nope" {:jsonrpc "2.0" :id 3 :method "ping"})]
             (is (= 404 (:status r)) (pr-str r))))
         (testing "a standalone stream is declined, not broken"
-          (let [r (http/handle! ctx {:request-method :get :uri "/slopp/projects/one/mcp"
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/one/mcp"
                                      :headers {"mcp-session-id" sid}})]
             (is (= 405 (:status r)) (pr-str r))))
         (testing "DELETE detaches, and the last detach closes the project"
-          (let [r (http/handle! ctx {:request-method :delete :uri "/slopp/projects/one/mcp"
+          (let [r (slopp.http/handle! ctx {:request-method :delete :uri "/slopp/projects/one/mcp"
                                      :headers {"mcp-session-id" sid}})]
             (is (= 200 (:status r)) (pr-str r)))
           (is (empty? (projects! ctx)) (pr-str (projects! ctx)))))
@@ -90,7 +90,7 @@
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [slug sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri (str "/slopp/projects/" slug "/mcp")
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
@@ -112,47 +112,48 @@
                                                       :source "(ns ot.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"}}})]
           (is (= 200 (:status w)) (pr-str w)))
         (testing "the read API answers under the project's prefix"
-          (let [r (http/handle! ctx {:request-method :get :uri "/slopp/projects/one/api/namespaces"})]
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/one/api/namespaces"})]
             (is (= 200 (:status r)) (pr-str r))))
         (testing "an unknown project is a 404, not a 500"
-          (let [r (http/handle! ctx {:request-method :get :uri "/slopp/projects/nope/api/namespaces"})]
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/nope/api/namespaces"})]
             (is (= 404 (:status r)) (pr-str r))))
         (testing "an OTLP batch routes by session id to the project holding that thread"
           (let [batch {:resourceLogs [{:scopeLogs [{:logRecords [(rec "t-tel") (rec "nobody")]}]}]}
-                r     (http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs"
+                r     (slopp.http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs"
                                          :body (json/generate-string batch)})
-                st    (:body (http/handle! ctx {:request-method :get :uri "/slopp/status"}))]
+                st    (:body (slopp.http/handle! ctx {:request-method :get :uri "/slopp/status"}))]
             (is (= 200 (:status r)) (pr-str r))
             (is (= 1 (get-in st [:otel :routed])) (pr-str st))
             (is (= 1 (get-in st [:otel :dropped])) (pr-str st))))
         (testing "garbage is 400, the non-retryable answer"
-          (let [r (http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs" :body "{not json"})]
+          (let [r (slopp.http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs" :body "{not json"})]
             (is (= 400 (:status r)) (pr-str r)))))
       (finally (daemon/reset-all!)))))
 
 (deftest ^:external every-session-on-a-project-shares-its-one-app-owner
   ;; Two agents on one project: one app server, owned by the project's
-  ;; reader, which both sessions name as their `:app-owner` — so a done in
-  ;; either refreshes the same server. Different projects, different owners.
+  ;; reader, which both sessions reach through their `:app-owner` — a delay
+  ;; each, onto the one reader — so a done in either refreshes the same
+  ;; server. Different projects, different owners.
   (let [d1   (tmp-dir!)
         d2   (tmp-dir!)
         ctx  (daemon/context)
         init (fn [dir slug]
-               (get-in (http/handle! ctx {:request-method :post
-                                          :uri (str "/slopp/projects/" slug "/mcp")
-                                          :headers {"x-slopp-dir" dir}
-                                          :body (json/generate-string
-                                                 {:jsonrpc "2.0" :id 1 :method "initialize"
-                                                  :params {:protocolVersion "2025-03-26" :capabilities {}
-                                                           :clientInfo {:name "t" :version "0"}}})})
+               (get-in (slopp.http/handle! ctx {:request-method :post
+                                                :uri (str "/slopp/projects/" slug "/mcp")
+                                                :headers {"x-slopp-dir" dir}
+                                                :body (json/generate-string
+                                                       {:jsonrpc "2.0" :id 1 :method "initialize"
+                                                        :params {:protocolVersion "2025-03-26" :capabilities {}
+                                                                 :clientInfo {:name "t" :version "0"}}})})
                        [:headers "Mcp-Session-Id"]))]
     (try
       (let [a (daemon/lookup! (init d1 "one"))
             b (daemon/lookup! (init d1 "one"))
             c (daemon/lookup! (init d2 "two"))]
         (is (some? (:app-owner @a)) (pr-str (keys @a)))
-        (is (identical? (:app-owner @a) (:app-owner @b)) "one project, one owner")
-        (is (not (identical? (:app-owner @a) (:app-owner @c))) "another project, another owner")
+        (is (identical? (force (:app-owner @a)) (force (:app-owner @b))) "one project, one owner")
+        (is (not (identical? (force (:app-owner @a)) (force (:app-owner @c)))) "another project, another owner")
         (testing "the registry says what each project serves"
           (let [ps (projects! ctx)]
             (is (every? #(contains? % :app) ps) (pr-str ps)))))
@@ -170,7 +171,7 @@
         ctx   (daemon/context)
         token (daemon/token)
         call  (fn [body]
-                (http/handle! ctx {:request-method :post
+                (slopp.http/handle! ctx {:request-method :post
                                    :uri "/slopp/projects/_/call"
                                    :headers {"x-slopp-dir" d}
                                    :body (json/generate-string body)}))]
@@ -207,7 +208,7 @@
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri "/slopp/projects/one/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
@@ -255,7 +256,7 @@
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri "/slopp/projects/one/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
@@ -302,7 +303,7 @@
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri "/slopp/projects/one/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
@@ -337,7 +338,7 @@
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [sid msg]
-               (http/handle! ctx {:request-method :post
+               (slopp.http/handle! ctx {:request-method :post
                                   :uri "/slopp/projects/one/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
@@ -362,3 +363,26 @@
           (is (re-find #"SLOPP_DAEMON_MAX_IMAGES" r) r)
           (is (nil? (:image @(daemon/lookup! b))) "nothing booted past the cap")))
       (finally (reset! daemon/image-cap was) (daemon/reset-all!)))))
+
+(deftest ^:external attaching-opens-no-reader-until-something-reads-through-it
+  ;; The reader is a second full session on the project's store — a second
+  ;; copy of a large store's value — and it exists for two consumers: the
+  ;; read API and the app server. A project that has neither in play pays
+  ;; for neither: attaching opens no reader; the first API request does.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (slopp.http/handle! ctx {:request-method :post
+                                        :uri "/slopp/projects/one/mcp"
+                                        :headers (cond-> {"x-slopp-dir" d}
+                                                   sid (assoc "mcp-session-id" sid))
+                                        :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}]
+    (try
+      (post nil init)
+      (is (not (daemon/reader-open? d)) "attaching alone opens no reader")
+      (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/one/api/namespaces"})
+      (is (daemon/reader-open? d) "the first API request opens it")
+      (finally (daemon/reset-all!)))))
