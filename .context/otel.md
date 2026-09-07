@@ -116,7 +116,7 @@ clock.
 
 ## Receiving it into the store
 
-The daemon accepts OTLP log exports at **`/slopp/otel/v1/logs`** — the base
+The daemon accepts OTLP log exports at **`/api/otel/v1/logs`** — the base
 is ours, the `/v1/logs` tail is OTLP's standard path, so the standard
 variable works with no per-signal override:
 
@@ -124,7 +124,7 @@ variable works with no per-signal override:
 CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 OTEL_LOGS_EXPORTER=otlp \
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/slopp/otel
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel
 ```
 
 One endpoint per machine. The daemon routes each record by its harness

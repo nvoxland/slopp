@@ -108,12 +108,12 @@ prefix:
 
 | path | what |
 |---|---|
-| `GET /slopp/projects` | the registry: every open project — slug, dir, sessions, `:app {:url :branch}` |
-| `GET /slopp/status` | the daemon about itself |
-| `POST /slopp/projects/<slug>/mcp` | MCP over streamable HTTP; `X-Slopp-Dir: <absolute dir>` names the project on `initialize` |
-| `POST /slopp/projects/<slug>/call` | the write door `slopp <op>` uses: `{tool arguments token}`; slug `_` + `X-Slopp-Dir` resolves by dir |
-| `/slopp/projects/<slug>/api/…` | the project's typed read API, exactly as its contract declares under `/api` |
-| `POST /slopp/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/slopp/otel` |
+| `GET /api/projects` | the registry: every open project — slug, dir, sessions, `:app {:url :branch}` |
+| `GET /api/status` | the daemon about itself |
+| `POST /api/projects/<slug>/mcp` | MCP over streamable HTTP; `X-Slopp-Dir: <absolute dir>` names the project on `initialize` |
+| `POST /api/projects/<slug>/call` | the write door `slopp <op>` uses: `{tool arguments token}`; slug `_` + `X-Slopp-Dir` resolves by dir |
+| `GET /api/projects/<slug>/<resource>` | the project's typed read API, mounted: `/api/<resource>` in its own contract, with the mount replacing that prefix rather than nesting under it |
+| `POST /api/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel` |
 
 It records itself in `~/.slopp/daemon.json` (`url pid token`); `slopp
 <op>` and the prompt hook route there when that pid is alive, and fall

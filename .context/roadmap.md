@@ -705,9 +705,10 @@ cannot tell them apart.
   read with/without `thread`.
 - **P5-1 — the daemon.** `slopp daemon`: binds and answers `initialize`/
   `tools/list` before opening anything (Claude Code's startup retry window
-  is ~7 s); one prefix `/slopp/…` — `/slopp/projects` (the registry, which
-  is `replica-model`'s design finally triggered), `/slopp/projects/<p>/
-  {mcp,call,<resource>}`, `/slopp/otel` (+ the spec's `/v1/logs`). A project
+  is ~7 s); one root `/api/…` (was `/slopp/…` until 2026-09-08) —
+  `/api/projects` (the registry, which is `replica-model`'s design finally
+  triggered), `/api/projects/<p>/{mcp,call,<resource>}`, `/api/otel` (+ the
+  spec's `/v1/logs`); every daemon route a declared rest endpoint. A project
   opens on first attach and closes on last detach. Oracle pools per
   (project, branch) shared by readers; shared standing verdict + one check
   queue per project; push events on the MCP stream; dev app servers owned

@@ -6988,3 +6988,28 @@ run against the daemon.
   halves have plainer names now — the REGISTRY is the daemon's, the PAGES
   are slopp-ui's. It survives only in the D-hub record and in docstrings
   citing a bug the beat once had.
+- **One root, `/api/`, and the daemon's own surface is declared (Nathan,
+  2026-09-08: "the daemon's own routes should be typed rest endpoints
+  through the normal rest component… a single root API pattern").** The
+  daemon is slopp entire, not a framework beside a project, so its root is
+  the store's own `rest.prefix`: `/api/projects` (the registry),
+  `/api/status`, `/api/projects/<slug>/{mcp,call}`, `/api/otel/v1/logs`,
+  and each project's API MOUNTED at `/api/projects/<slug>/<resource>` —
+  the `/api/<resource>` of the project's contract with the mount
+  REPLACING that prefix, never nesting a second `/api`. Every daemon route
+  is a public var carrying `:rest/path`, one method each, assembled by
+  `slopp.http/context` from `slopp.daemon`'s publics under
+  `slopp.rest/validating`, exactly as `slopp.api.endpoints` is for a
+  project; the project mount is a GET whose whole answer is a declared
+  `:http/read` performer (`delegate!`), so the handler is pure and the
+  GET-safety gate is met, not dodged. `/slopp/…` is gone. What moving onto
+  the component surfaced: (1) `decode-request` threw on a non-object JSON
+  body — any typed POST handed an array or unparseable text answered a
+  500; it is a 400 now; (2) a declared route may not read `:http/deps` on
+  a store with no context builder, which is right, so `http-call!` takes
+  its session as an argument; (3) a response contract says `:sequential`,
+  never `:vector`, because it judges what the client receives. Accepted:
+  MCP over the daemon takes ONE JSON-RPC message per POST (the 2025-06-18
+  spec dropped batching; the pipe never sent one), and a batch is the
+  contract's 400. Ruling 9 above (keep `/api` in project contracts) stands
+  and is what makes the mount rule mechanical.

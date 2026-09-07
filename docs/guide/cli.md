@@ -20,7 +20,7 @@ slopp --doctor                          # self-check the wiring end to end
 The **pages** — the one address to remember when you run more than one slopp
 project — are **slopp-ui**'s, a separate application built with slopp rather
 than inside it. `slopp daemon` serves every open project's `/api/*` under
-`/slopp/projects/<slug>/`, and slopp-ui reads that registry and renders the
+`/api/projects/<slug>/`, and slopp-ui reads that registry and renders the
 screens. The split is deliberate: slopp-ui is the worked example of an app
 that consumes a slopp project's published API over HTTP without ever opening
 its store. **It is not yet packaged for installation**, so there is no

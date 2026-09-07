@@ -49,7 +49,7 @@ its blast radius), form permalinks by ID with callers above and callees
 inlined below, and the namespace index.
 
 **What `session_brief` reports is `:api`** — this project's own read API on
-the daemon, `http://127.0.0.1:7357/slopp/projects/<slug>/api`. It serves
+the daemon, `http://127.0.0.1:7357/api/projects/<slug>`. It serves
 JSON, plus the project's own surface as EDN, one document per capability:
 `/rest/paths`, `/http/paths` and `/webapp/paths` under that base (the last
 two are usually empty). It has no pages in it: a human opening it sees JSON,
@@ -57,8 +57,8 @@ so it is the address to hand a PROGRAM (a client generator, a script,
 slopp-ui itself), never a person.
 
 **One daemon, every project.** The daemon (`slopp daemon`, port 7357) serves
-every open project under one prefix — `/slopp/projects` lists them, and each
-answers under `/slopp/projects/<slug>/…` from the moment an agent attaches
+every open project under one root — `/api/projects` lists them, and each
+answers under `/api/projects/<slug>/…` from the moment an agent attaches
 until the last one detaches. There is no per-project listener and no port to
 collect: slopp-ui reads that registry directly and fronts each project by
 slug. Nothing registers, nothing beats and nothing goes stale — the daemon

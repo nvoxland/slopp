@@ -47,7 +47,7 @@ case "${1:-}" in
   daemon)
     # `slopp daemon stop` / `status`: the daemon records itself in
     # ~/.slopp/daemon.json; stop sends SIGTERM to that pid and clears the
-    # file, status prints /slopp/status. Everything else is a start.
+    # file, status prints /api/status. Everything else is a start.
     if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
       python3 - "$2" <<'PYEOF'
 import json, os, signal, sys, time, urllib.request

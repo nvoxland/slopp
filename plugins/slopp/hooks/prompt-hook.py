@@ -60,12 +60,12 @@ except Exception:
 def listener():
     """Where this project's read API answers: the DAEMON, one per machine,
     every project by dir — a project it holds answers under
-    /slopp/projects/_/api with the dir in a header. (base url, extra
+    /api/projects/_ with the dir in a header. (base url, extra
     headers), or None when no live daemon is recorded."""
     try:
         info = json.load(open(os.path.expanduser("~/.slopp/daemon.json")))
         os.kill(int(info["pid"]), 0)  # raises if that process is gone
-        return (info["url"].rstrip("/") + "/projects/_/api",
+        return (info["url"].rstrip("/") + "/projects/_",
                 {"X-Slopp-Dir": os.getcwd()})
     except Exception:
         return None

@@ -10,7 +10,7 @@
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_METRICS_EXPORTER": "none",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:7357/slopp/otel",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:7357/api/otel",
     "OTEL_LOGS_EXPORT_INTERVAL": "10000"
   }
 }

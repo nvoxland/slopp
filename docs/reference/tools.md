@@ -41,10 +41,14 @@ were deferred by the client and cost a search turn each to find.
 ### The daemon, and where the pages are
 
 One `slopp daemon` per machine (port 7357) serves every open project under
-one prefix. `/slopp/projects` lists the projects agents are attached to;
-each answers under `/slopp/projects/<slug>/…` -- its MCP endpoint, its write
-door for the CLI, and its **read API** at `/slopp/projects/<slug>/api/*`:
-JSON, plus the shape of that API as EDN at `…/api/rest/paths`. `session_brief`
+one root, `/api/`. `/api/projects` lists the projects agents are attached to;
+each answers under `/api/projects/<slug>/…` -- its MCP endpoint, its write
+door for the CLI, and its **read API** at `/api/projects/<slug>/<resource>`:
+the `/api/<resource>` its own contract declares, with the mount replacing
+that prefix rather than nesting under it. JSON, plus the shape of that API
+as EDN at `…/rest/paths`. The daemon's own endpoints are declared the same
+way a project's are -- typed, under the same root, through the same rest
+component. `session_brief`
 reports the read API's base as `:api`. Ask it for a page and you get JSON.
 
 The API answers about the project's landed branch, from the daemon's own
