@@ -6909,3 +6909,41 @@ current stdio servers, as their own unit — independently valuable, and they
 de-risk the transport change. `slopp <dir>` (stdio, self-contained) stays
 working as fallback and baseline until the memory and concurrency evals have
 run against the daemon.
+
+**Amendments, 2026-09-06/07 (from building it):**
+
+- **The client is a stdio PIPE, not an HTTP entry (Nathan, 2026-09-07:
+  "Is a stdio plugin the safest and best option then?" — yes).** A
+  plugin-level HTTP `.mcp.json` entry cannot name the project: its
+  `headersHelper` runs with the plugin root as cwd and receives no
+  project-dir variable, and `${VAR}` expansion in headers is unreliable. A
+  stdio server is launched in the project dir, so `bin/slopp-pipe.py` knows
+  the project for free, needs no per-project `.mcp.json` and no approval
+  prompt, and can wait for a daemon to bind past the HTTP client's ~7 s
+  startup window (it starts a dead one itself). The daemon still speaks MCP
+  over HTTP directly (ruling 1); the pipe is a transport adapter that
+  implements none of it. Harnesses that can set a header get the direct URL.
+- **Push is a line on the next answer, not a notification (ruling 7,
+  revised).** An MCP notification reaches the client's log and never the
+  model's conversation, in Claude Code. What another session landed rides
+  the next tool answer as one leading `;; since your last call:` line, from
+  a per-session event queue; the GET stream answers 405. `tools/list_changed`
+  keeps its stdio path.
+- **The pool is LAZY images first (ruling 6, narrowed).** A session boots
+  its image on the first call that needs one, at the head as of then; that
+  alone removed the idle JVM that was the per-agent cost (census:
+  `findings-log.md` 2026-09-06). Sharing one image among several sessions'
+  evals waits for a workload that shows image-backed reads dominating,
+  because the write path dirties an image and test runs instrument it — a
+  shared image is reads-only under a lock, and nothing yet says that is
+  worth having.
+- **Endpoints keep `/api` in their declarations (ruling 9, deferred).** The
+  daemon mounts each project's API by DELEGATION under
+  `/slopp/projects/<p>/api/…`, so contracts and validators apply unchanged
+  and the one prefix holds; dropping `/api` is a rename across the contract
+  tests and slopp-ui's generated client, and delegation made it unnecessary
+  for a working surface.
+- **The check queue keys on content, not head.** Two idle threads on one
+  branch have different heads (markers) and the same elements digest; the
+  digest is what two `full_check`s share. A joiner records the verdict on
+  its own line so it stands there too.
