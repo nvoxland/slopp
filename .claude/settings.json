@@ -1,6 +1,8 @@
 {
   "permissions": {
-    "allow": ["mcp__plugin_slopp_slopp"]
+    "allow": [
+      "mcp__plugin_slopp_slopp"
+    ]
   },
   "env": {
     "SLOPP_LIVE": "1",
@@ -8,7 +10,7 @@
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_METRICS_EXPORTER": "none",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:53610",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:7357/slopp/otel",
     "OTEL_LOGS_EXPORT_INTERVAL": "10000"
   }
 }
