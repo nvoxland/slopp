@@ -31,11 +31,18 @@ HTTP_BUDGET_S = 6.5
 
 prompt = ""
 SID = ""
+# a system continuation (a task notification, a hook wake-up) fires this hook
+# too. It is not an ask, and it must not reach the mailbox: it used to
+# overwrite the human's ask there, so the next write opened its turn under a
+# notification's text (found by slopp-ui, 2026-09-04). Decided BEFORE the
+# write, which is the only place the decision can matter.
+SYSTEM_TURN = False
 try:
     d = json.load(sys.stdin)
     prompt = d.get("prompt", "") or ""
     SID = d.get("session_id", "") or ""
-    if os.path.exists(".slopp/store.db"):
+    SYSTEM_TURN = prompt.lstrip().startswith("<") or "task-notification" in prompt
+    if os.path.exists(".slopp/store.db") and not SYSTEM_TURN:
         sid = d.get("session_id", "")
         payload = {"session-id": sid, "prompt": prompt}
         # Two mailboxes: the unscoped legacy slot and this session's own, so
@@ -154,6 +161,16 @@ def tail_context(c):
         bits.append("[slopp] live store here: %d namespaces; last commit point: %s."
                     " Work through the slopp tools — the store is the source,"
                     " not the files." % (n, desc))
+        # YOUR THREAD, on every prompt (D-daemon P5-0). The id an agent carries
+        # on its writes is the harness session id — the key its un-landed work
+        # is already filed under — so nothing migrates and a resumed session
+        # finds its own line. Printed every ask rather than once, because a
+        # compaction keeps whatever it keeps and this is the one line that
+        # must survive it.
+        if SID:
+            bits.append("thread: %s — pass {thread \"%s\"} on every write; a read"
+                        " passing it sees your un-landed work; thread_open mints"
+                        " another for a subagent or a second line of work." % (SID, SID))
         asks = c.execute("SELECT payload FROM deltas WHERE op='turn-begin' "
                          "ORDER BY seq DESC LIMIT 8").fetchall()
         seen = []
@@ -199,8 +216,6 @@ def tail_context(c):
         pass
     return bits
 
-
-SYSTEM_TURN = prompt.lstrip().startswith("<") or "task-notification" in prompt
 
 try:
     if os.path.exists(".slopp/store.db"):
