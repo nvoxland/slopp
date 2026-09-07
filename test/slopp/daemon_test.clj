@@ -32,10 +32,10 @@
         ctx  (daemon/context)
         post (fn [dir slug sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri (str "/slopp/projects/" slug "/mcp")
-                                  :headers (cond-> {"x-slopp-dir" dir}
-                                             sid (assoc "mcp-session-id" sid))
-                                  :body (json/generate-string msg)}))
+                                        :uri (str "/slopp/projects/" slug "/mcp")
+                                        :headers (cond-> {"x-slopp-dir" dir}
+                                                   sid (assoc "mcp-session-id" sid))
+                                        :body (json/generate-string msg)}))
         body (fn [r] (json/parse-string (:body r) true))
         init {:jsonrpc "2.0" :id 1 :method "initialize"
               :params {:protocolVersion "2025-03-26" :capabilities {}
@@ -67,16 +67,19 @@
             (is (= 200 (:status r2)) (pr-str r2))
             (is (= #{d1 d2} (set (map :dir ps))) (pr-str ps))
             (daemon/detach! (get-in r2 [:headers "Mcp-Session-Id"]))))
-        (testing "an unknown session is told to initialize again"
-          (let [r (post d1 "one" "nope" {:jsonrpc "2.0" :id 3 :method "ping"})]
-            (is (= 404 (:status r)) (pr-str r))))
+        (testing "an unknown session that names its dir is re-attached under a new id"
+          (let [r (post d1 "one" "nope" {:jsonrpc "2.0" :id 3 :method "ping"})
+                new (get-in r [:headers "Mcp-Session-Id"])]
+            (is (= 200 (:status r)) (pr-str r))
+            (is (and (string? new) (not= "nope" new)) (pr-str (:headers r)))
+            (daemon/detach! new)))
         (testing "a standalone stream is declined, not broken"
           (let [r (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/one/mcp"
-                                     :headers {"mcp-session-id" sid}})]
+                                           :headers {"mcp-session-id" sid}})]
             (is (= 405 (:status r)) (pr-str r))))
         (testing "DELETE detaches, and the last detach closes the project"
           (let [r (slopp.http/handle! ctx {:request-method :delete :uri "/slopp/projects/one/mcp"
-                                     :headers {"mcp-session-id" sid}})]
+                                           :headers {"mcp-session-id" sid}})]
             (is (= 200 (:status r)) (pr-str r)))
           (is (empty? (projects! ctx)) (pr-str (projects! ctx)))))
       (finally (daemon/reset-all!)))))
@@ -434,3 +437,45 @@
   (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port))))
   (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358))))
   (is (= (daemon/daemon-file) (daemon/daemon-file daemon/default-port))))
+
+(deftest ^:external a-stale-session-id-is-re-attached-not-refused
+  ;; A stdio client never re-initializes on its own: after the daemon
+  ;; restarts or reaps an idle session, the pipe's next request carries an
+  ;; id the daemon does not hold, and a 404 there is a dead session until a
+  ;; human reconnects. A request that names its dir can be re-attached
+  ;; where it stands — the answer carries the NEW id, which the pipe
+  ;; adopts, and the agent sees one late answer.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (slopp.http/handle! ctx {:request-method :post
+                                        :uri "/slopp/projects/one/mcp"
+                                        :headers (cond-> {"x-slopp-dir" d}
+                                                   sid (assoc "mcp-session-id" sid))
+                                        :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}]
+    (try
+      (let [sid (get-in (post nil init) [:headers "Mcp-Session-Id"])]
+        (daemon/detach! sid)
+        (is (empty? (projects! ctx)) "the project closed with its last session")
+        (let [r (post sid {:jsonrpc "2.0" :id 2 :method "tools/call"
+                           :params {:name "thread_open" :arguments {:thread "t-back"}}})
+              new (get-in r [:headers "Mcp-Session-Id"])]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (and (string? new) (not= sid new)) (pr-str (:headers r)))
+          (is (re-find #"t-back" (str (:body r))) (pr-str r))
+          (is (= [d] (mapv :dir (projects! ctx))) "re-attached, the project is open again")))
+      (testing "no id at all, but a dir: attached where it stands"
+        (let [r (post nil {:jsonrpc "2.0" :id 4 :method "tools/call"
+                           :params {:name "thread_list" :arguments {}}})]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (string? (get-in r [:headers "Mcp-Session-Id"])) (pr-str (:headers r)))))
+      (testing "a stale id with no dir to re-attach by is still a 404"
+        (let [r (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/slopp/projects/nowhere/mcp"
+                                         :headers {"mcp-session-id" "nope"}
+                                         :body (json/generate-string {:jsonrpc "2.0" :id 3 :method "ping"})})]
+          (is (= 404 (:status r)) (pr-str r))))
+      (finally (daemon/reset-all!)))))

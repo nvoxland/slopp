@@ -2086,10 +2086,20 @@
   
   elements-digest
   "A cheap CHANGE DETECTOR over ONE LINE's materialized `elements` rows —
-  counts and sizes, deliberately NOT a checksum. A same-length substitution
-  slips past it, and that is the accepted floor for something on the path of
-  every foreign commit. Resolves through [[view-line!]]: a rowless thread's
-  digest is its branch's, so the branch moving is what changes it.
+  counts, positions, RANKS and sizes, deliberately NOT a checksum. A
+  same-length substitution slips past it, and that is the accepted floor for
+  something on the path of every foreign commit. Resolves through
+  [[view-line!]]: a rowless thread's digest is its branch's, so the branch
+  moving is what changes it.
+
+  Rank joined the terms when the shared materialization ([[load-elements]])
+  started keying on this digest: a repair that rewrites ranks alone — the
+  rank-column backfill, a positional re-rank — changes what a fresh load
+  answers and moved nothing here, so the shared map served yesterday's
+  ranks to a connection that had just rewritten them. The rank term is
+  weighted by position and the size term too, because a PERMUTATION keeps
+  every plain sum: ranks (0 2 1) and (0 1 2) add to the same three, and
+  the backfill is exactly that permutation.
 
   It exists because `data_version` answers a different question than anyone
   wants. SQLite moves it when ANY other connection commits, and in ordinary
@@ -2106,6 +2116,8 @@
   [conn line-id]
   (jdbc/execute-one!
    conn ["SELECT COUNT(*) n, COUNT(DISTINCT ns) nss, SUM(pos) p,
+                 SUM((pos + 1) * (COALESCE(rank, -1) + 2)) r,
+                 SUM((pos + 1) * LENGTH(source)) ps,
                  SUM(LENGTH(source)) src, SUM(LENGTH(COALESCE(comment,''))) cmt
           FROM elements WHERE line = ?" (view-line! conn line-id)]))
 

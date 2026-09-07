@@ -5,7 +5,7 @@
   is what the daemon counts as an attachment. The dispatch is
   `slopp.mcp/handle!`, unchanged."
   (:require [cheshire.core :as json]
-            [slopp.mcp :as mcp]))
+            [slopp.mcp :as mcp] [clojure.string :as str]))
 
 (defn- parse-body
   "The JSON-RPC message(s) in a request body — a map, or a vector for a
@@ -57,8 +57,13 @@
   is `405`, which the client tolerates: push arrives with the daemon's
   stream later, and nothing here pretends to it. DELETE ends the session.
 
-  A request naming a session this daemon does not hold is `404`, the signal
-  a client re-initializes on; one naming none at all, `400`."
+  A request naming a session this daemon does not hold — or naming none —
+  is ATTACHED when it names its project (`X-Slopp-Dir`): the daemon
+  restarted or reaped an idle session, and the spec's answer — 404, client
+  re-initializes — is one a stdio client behind the pipe can never give,
+  so a 404 was a dead session until a human reconnected. The answer carries
+  the NEW id, which the pipe adopts; the agent sees one late answer. With
+  no dir to attach by, a stale id is still `404` and no id at all `400`."
   [{:slopp.mcp.http/keys [lookup attach! detach!]} req]
   (let [sid (get-in req [:headers "mcp-session-id"])]
     (case (:request-method req)
@@ -76,13 +81,23 @@
                 ms     (if batch? msgs [msgs])
                 id     (:id (first ms))
                 init?  (boolean (some #(= "initialize" (:method %)) ms))
-                a      (when init? (attach! req))
-                [sid session] (if init?
+                named? (not (str/blank? (str (get-in req [:headers "x-slopp-dir"]))))
+                a      (cond
+                         init? (attach! req)
+                         ;; a session this daemon does not hold — or none at all
+                         ;; — from a client that names its dir: attach where it
+                         ;; stands. A pipe that lost its session after a restart
+                         ;; may send nothing, and that is the same trust as an
+                         ;; initialize from the same dir.
+                         (and named? (or (nil? sid) (nil? (lookup sid))))
+                         (attach! req)
+                         :else nil)
+                [sid session] (if a
                                 [(:sid a) (:session a)]
                                 [sid (when sid (lookup sid))])]
             (cond
               (:error a)
-              (rpc-error 400 {} id -32000 (:error a))
+              (rpc-error (if init? 400 404) {} id -32000 (:error a))
 
               (nil? session)
               (rpc-error (if sid 404 400) {} id -32000
