@@ -387,7 +387,7 @@
         (let [conn    (:db @session)
               thread  (when conn
                         (db/adopt-thread! conn (db/line-id-by-name conn nm)
-                                          (:agent-id @session)))
+                                          (engine/thread-key session)))
               same?   (or (nil? conn) (= thread (:id target)))
               store   (if same? (:store target) (db/load-store conn thread))
               adopted (when same? (:image target))
@@ -484,8 +484,8 @@
         ;; shape of a done with nothing to land.
         lost (boolean (and conn line (nil? row)))]
     (when (or lost (= "thread" (:kind row)))
-      (let [branch-id (engine/session-branch-line session)
-            branch-nm (:branch @session)]
+      (let [branch-id (engine/session-fork-line session)
+            branch-nm (engine/line-label session branch-id)]
         (loop [reconciled nil, tries 0, rebase nil]
           (let [bh (db/line-head conn branch-id)
                 th (db/line-head conn line)]
@@ -510,7 +510,7 @@
 
               (or (= bh (:base row)) (= bh reconciled))
               (if (db/land-thread! conn line branch-id bh)
-                (let [fresh (db/adopt-thread! conn branch-id (:agent-id @session))]
+                (let [fresh (db/adopt-thread! conn branch-id (engine/thread-key session))]
                   (swap! session assoc :line fresh)
                   (cond-> {:landed branch-nm :head th :thread fresh}
                     rebase (assoc :rebased rebase)))
@@ -578,12 +578,13 @@
 ^:reads (defn ^:export thread-list
   "The live threads on this session's branch — who holds one, how much they
   have written since forking, and how long it has been since anybody touched
-  it. The session's own is marked `:mine`.
+  it. The session's own is marked `:mine`; a CHILD thread carries `:parent`,
+  the id of the thread it lands into.
 
-  Across ALL agents on purpose. The question a listing answers is \"is there
-  work here nobody is going to finish\", and an idle thread is by definition
-  somebody else's — an agent-scoped version could only ever say yes about
-  itself.
+  Across ALL agents on purpose. The question a listing answers is whether
+  there is work here nobody is going to finish, and an idle thread is by
+  definition somebody else's — an agent-scoped version could only ever say
+  yes about itself.
 
   `:idle-ms` is age, not a verdict. Nothing reaps a thread automatically: a
   line holding un-landed work is the one thing in this system that no rule
@@ -600,11 +601,15 @@
   (if-let [conn (:db @session)]
     (let [branch (engine/session-branch-line session)
           mine   (:line @session)
-          now    (System/currentTimeMillis)]
+          now    (System/currentTimeMillis)
+          by-id  (into {} (map (juxt :id identity)) (db/lines conn))]
       {:branch  (:branch @session)
        :threads (mapv (fn [t]
                         (cond-> {:id       (:id t)
                                  :agent    (:agent t)
+                                 ;; the same column, named for what it IS now:
+                                 ;; the THREAD a caller passes to write here
+                                 :thread   (:agent t)
                                  :unlanded (db/unlanded-count conn (:id t)
                                                               history/content-ops)
                                  :idle-ms  (- now (or (:used-at t) now))
@@ -614,7 +619,11 @@
                                  ;; lately, held says somebody still could.
                                  :held     (db/process-live? (:owner-pid t)
                                                              (:owner-started t))}
-                          (= (:id t) mine) (assoc :mine true)))
+                          (= (:id t) mine) (assoc :mine true)
+                          ;; a CHILD, named by the thread it lands into — the
+                          ;; id a caller passes, not a line uuid
+                          (not= branch (:parent t))
+                          (assoc :parent (:agent (by-id (:parent t))))))
                       (db/open-threads conn branch))})
     {:threads [] :note "an ephemeral session has no journal, so it holds no threads"}))
 
@@ -660,7 +669,10 @@
         {:error (str id " is the branch \"" (:name row) "\", not a thread"
                      " — branch_delete removes a branch")}
 
-        (not= branch (:parent row))
+        (not (or (= branch (:parent row))
+                 ;; a CHILD thread is on this branch through its parent
+                 (= branch (:parent (first (filter #(= (:parent row) (:id %))
+                                                   (db/lines conn)))))))
         {:error (str "thread " id " is not on " (:branch @session)
                      " — switch to its branch to drop it")}
 
@@ -678,3 +690,80 @@
                             " The deltas are still in the journal")})
             {:dropped id :unlanded n :agent (:agent row)}))))
     {:error "an ephemeral session has no threads to drop"}))
+
+(defn ^:export thread-open!
+  "Put this session on a thread — a NAMED one, adopted (the same id is the
+  same line, every time), or a freshly MINTED one when no id is given — and
+  answer `{:thread :line :unlanded}` so the caller can carry the id.
+
+  The prompt hook mints a thread for a hooked ask and prints it every prompt.
+  Everything else needs a door: a script driving `--call`, another harness
+  with no hook, a subagent whose parent hands it an id in its prompt. The
+  one-shot write refusal names this op as the way, so it has to be the way.
+
+  Adopting is IDEMPOTENT and that is the whole value of an id: carry it
+  across restarts, resumes and compactions and you are back on your own
+  line with your own un-landed work. Minting answers with the id rather
+  than hiding it in the session, for the same reason.
+
+  With `parent`, the thread is a CHILD: it forks from the parent thread's
+  head, and its done lands into the parent's line rather than the branch, so
+  the parent's own done grades and lands the lot as one unit. This is the
+  subagent story — a subagent shares its parent's MCP connection, so a
+  thread of its own is the only isolation it can have, and an orchestrator
+  hands each one a child id in its prompt. One level: a child's parent is a
+  thread on the branch, never another child. An id already open here under
+  a different parent (or none) is refused rather than shadowed — two open
+  lines for one id is exactly how work goes missing with nobody told.
+
+  Appends no delta and opens no turn. A thread is where writes GO; the turn
+  that brackets them opens on the first write, as it always has."
+  [session & {:keys [thread parent]}]
+  (let [id     (some-> (or thread
+                           (str "t-" (subs (str (java.util.UUID/randomUUID)) 0 8)))
+                       str)
+        parent (some-> parent str)
+        conn   (:db @session)]
+    (if (and conn parent)
+      (let [branch (engine/session-branch-line session)
+            rows   (db/lines conn)
+            by-id  (into {} (map (juxt :id identity)) rows)
+            ;; on THIS branch — top-level, or a child through its parent
+            here?  (fn [r] (or (= branch (:parent r))
+                               (= branch (:parent (by-id (:parent r))))))
+            open   (fn [k] (first (filter #(and (= "thread" (:kind %))
+                                                (= "open" (:status %))
+                                                (= k (:agent %))
+                                                (here? %))
+                                          rows)))
+            p-row  (open parent)
+            c-row  (open id)]
+        (cond
+          (= id parent)
+          {:error "a thread cannot be its own parent"}
+
+          (and p-row (not= branch (:parent p-row)))
+          {:error (str parent " is itself a child thread — one level only: a"
+                       " child lands into a thread that lands into the branch")}
+
+          (and c-row (not= (:id p-row) (:parent c-row)))
+          {:error (str id " is already open on " (:branch @session)
+                       (if (= branch (:parent c-row))
+                         " as a top-level thread"
+                         (str " under " (:agent (by-id (:parent c-row)))))
+                       " — land or drop it there, or pick another id")}
+
+          :else
+          (let [pline (or (:id p-row) (db/adopt-thread! conn branch parent))]
+            (db/adopt-thread! conn pline id)
+            (swap! session assoc :thread id)
+            (let [line (engine/adopt-line! session)]
+              {:thread id :parent parent :line line
+               :unlanded (db/unlanded-count conn line history/content-ops)}))))
+      (do (swap! session assoc :thread id)
+          (let [line (engine/adopt-line! session)]
+            (cond-> {:thread id :line line
+                     :unlanded (if (and conn line)
+                                 (db/unlanded-count conn line history/content-ops)
+                                 0)}
+              (nil? conn) (assoc :note "an ephemeral session has no journal: the id is yours to carry, but nothing here persists it")))))))

@@ -411,10 +411,12 @@
          (.contains m "deltas.id"))))
 
 ^:reads (defn ^:export open-threads
-  "Every open thread on `branch-line-id`, most-recently-used first.
+  "Every open thread on `branch-line-id`, most-recently-used first — the
+  CHILDREN of those threads included, since a child (`thread_open {parent}`)
+  is on the branch one level down and its work is somebody's too.
 
-  Across ALL agents, deliberately: the question this answers is \"who is
-  working here, and what has been sitting untouched\", and an agent-scoped
+  Across ALL agents, deliberately: the question this answers is who is
+  working here and what has been sitting untouched, and an agent-scoped
   version could only ever say yes about itself. `used_at` is the age, so an
   idle thread is a row near the end of this list rather than a separate
   concept.
@@ -425,8 +427,11 @@
   [conn branch-line-id]
   (mapv row->line
         (jdbc/execute! conn ["SELECT * FROM lines
-                               WHERE kind = 'thread' AND parent = ? AND status = 'open'
-                             ORDER BY used_at DESC" branch-line-id])))
+                               WHERE kind = 'thread' AND status = 'open'
+                                 AND (parent = ?
+                                      OR parent IN (SELECT id FROM lines
+                                                     WHERE kind = 'thread' AND parent = ?))
+                             ORDER BY used_at DESC" branch-line-id branch-line-id])))
 
 ^:reads (defn ^:export line-id-by-name
   "The id of the line named `nm`, or nil if nothing answers to that name.
@@ -2272,6 +2277,22 @@
   [conn line-id]
   (one-col (jdbc/execute-one! conn ["SELECT base FROM lines WHERE id = ?" line-id])))
 
+^:reads (defn ^:export thread-fork-line
+  "The line `thread-line-id` forks from and lands into: its parent when that
+  parent is an OPEN thread — a CHILD thread, minted by `thread_open {parent}`
+  for a subagent — else `branch-line-id`.
+
+  A child whose parent has settled falls back to the branch on purpose. The
+  parent's work is on the branch now (a land) or discarded (a drop), and
+  either way there is no open line for the child's work to fan into; landing
+  onto a settled line would file it where nothing reads."
+  [conn thread-line-id branch-line-id]
+  (or (one-col (jdbc/execute-one!
+                conn ["SELECT p.id FROM lines c JOIN lines p ON c.parent = p.id
+                        WHERE c.id = ? AND p.kind = 'thread' AND p.status = 'open'"
+                      thread-line-id]))
+      branch-line-id))
+
 (defn ^:export adopt-thread!
   "The thread `agent` is working in on `branch-line-id`, minting one at the
   branch's HEAD when the agent has none open here.
@@ -2282,6 +2303,13 @@
   not either, or switching branches would drag un-done work across with it.
   The key is also why nothing needs remembering between sessions: a returning
   agent asks the same question and gets the same row back.
+
+  A CHILD thread — `parent` naming an open thread on the branch rather than
+  the branch itself, minted by `thread_open {parent}` — is on the branch
+  too, one level down, and the same question finds it: the id a subagent
+  carries resolves to its own line whether the caller names the branch or
+  the parent. It forks from and lands into the parent ([[thread-fork-line]]),
+  which is what makes the parent's done the one that stands behind the lot.
 
   It forks at the branch's HEAD, not at the agent's last one, so a thread
   opened after the branch moved starts from what the branch says NOW. That
@@ -2329,26 +2357,27 @@
    (adopt-thread! conn branch-line-id agent (this-process)))
   ([conn branch-line-id agent owner]
    (let [id   (one-col (jdbc/execute-one!
-                        conn ["SELECT id FROM lines
-                                 WHERE kind = 'thread' AND parent = ? AND agent = ?
-                                   AND status = 'open'
-                               ORDER BY used_at DESC LIMIT 1"
-                              branch-line-id agent]))
+                        conn ["SELECT c.id FROM lines c LEFT JOIN lines p ON c.parent = p.id
+                                 WHERE c.kind = 'thread' AND c.agent = ? AND c.status = 'open'
+                                   AND (c.parent = ? OR (p.kind = 'thread' AND p.parent = ?))
+                               ORDER BY c.used_at DESC LIMIT 1"
+                              agent branch-line-id branch-line-id]))
          mine (if id
-                (do (jdbc/execute!
-                     conn ["UPDATE lines SET used_at = ? WHERE id = ?"
-                           (System/currentTimeMillis) id])
-                    ;; a ROWLESS thread has nothing to pin (fork on write): if
-                    ;; the branch moved since it was minted, it re-forks here,
-                    ;; where a fresh one would start
-                    (when (and (not (line-has-view? conn id))
-                               ;; nothing of its own at all — not even a turn marker
-                               ;; (a thread with markers is the engine's to re-fork,
-                               ;; carrying its open turn across)
-                               (= (line-head conn id) (line-base conn id))
-                               (not= (line-base conn id) (line-head conn branch-line-id)))
-                      (refork-thread! conn id branch-line-id))
-                    id)
+                (let [fork (thread-fork-line conn id branch-line-id)]
+                  (jdbc/execute!
+                   conn ["UPDATE lines SET used_at = ? WHERE id = ?"
+                         (System/currentTimeMillis) id])
+                  ;; a ROWLESS thread has nothing to pin (fork on write): if
+                  ;; the line it forks from moved since it was minted, it
+                  ;; re-forks here, where a fresh one would start
+                  (when (and (not (line-has-view? conn id))
+                             ;; nothing of its own at all — not even a turn marker
+                             ;; (a thread with markers is the engine's to re-fork,
+                             ;; carrying its open turn across)
+                             (= (line-head conn id) (line-base conn id))
+                             (not= (line-base conn id) (line-head conn fork)))
+                    (refork-thread! conn id fork))
+                  id)
                 (create-line! conn {:kind   "thread"
                                     :base   (line-head conn branch-line-id)
                                     :parent branch-line-id

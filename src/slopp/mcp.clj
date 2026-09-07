@@ -1135,6 +1135,9 @@
    "thread_drop"
    (fn [session a _sym]
      (text! (branch/thread-drop! session (:id a))))
+   "thread_open"
+   (fn [session a _sym]
+     (text! (branch/thread-open! session :thread (:thread a) :parent (:parent a))))
    "query_branches"
    (fn [session _a _sym]
      (text! (branch/query-branches session)))
@@ -2149,6 +2152,62 @@
         (swap! session assoc ::exit-hook t)
         t)))
 
+(defn- view-session!
+  "The session a READ answers from when it names a `branch`, or a `thread`
+  that is not this session's own: a throwaway copy whose `:store` is that
+  line's value — the branch's landed head, or the thread's un-landed view —
+  with no image, so nothing it does moves this session. The value is cached
+  on the real session by line, and a second look at a line whose head has
+  not moved loads nothing.
+
+  Reads are scoped by BRANCH and writes by THREAD. This session's own thread
+  is where its store already sits, so naming it is the identity case and
+  costs nothing; naming anything else is a view. A read that needs the image
+  — an eval, an observe, a test run — cannot be served from a value alone and
+  refuses, naming the verb that moves the session THERE rather than looks.
+
+  A WRITE naming a thread is not a view but routing: `call-op-1!` switches
+  the session onto it, and this returns the session untouched."
+  [session name arguments]
+  (let [conn       (:db @session)
+        branch     (some-> (:branch arguments) str)
+        thread     (some-> (:thread arguments) str)
+        own-branch (:branch @session)
+        wanted     (cond (and branch (not= branch own-branch))               [:branch branch]
+                         (and thread (not= thread (engine/thread-key session))) [:thread thread])]
+    (if-not (and conn wanted (contains? tools/read-only-tools name))
+      session
+      (let [[kind id] wanted]
+        (when-not (contains? tools/image-free-tools name)
+          (throw (ex-info (str name " answers from this session's image, which holds its"
+                               " own line — a branch or thread on a read is a VIEW of"
+                               " the store value only. To be there: "
+                               (if (= :branch kind)
+                                 (str "branch_switch {name \"" id "\"}")
+                                 (str "thread_open {thread \"" id "\"}")))
+                          {:tool name kind id})))
+        (let [line (if (= :branch kind)
+                     (db/line-id-by-name conn id)
+                     (:id (first (filter #(= id (:agent %))
+                                         (db/open-threads conn (engine/session-branch-line session))))))
+              _    (when-not line
+                     (throw (ex-info (if (= :branch kind)
+                                       (str "no branch " id " — query_branches lists them")
+                                       (str "no open thread " id " on " own-branch
+                                            " — thread_list shows what is here"))
+                                     {:tool name kind id})))
+              head (db/line-head conn line)
+              st   (or (let [c (get-in @session [::views line])]
+                         (when (= head (:head c)) c))
+                       (let [st (or (db/load-store conn line)
+                                    (throw (ex-info (str id " has no persisted value yet") {})))]
+                         ;; a few lines, not a history: a view is a look, and
+                         ;; the values are whole stores
+                         (swap! session update ::views
+                                #(assoc (into {} (take 3 %)) line st))
+                         st))]
+          (atom (assoc @session :store st :line line :image nil ::view wanted)))))))
+
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
   door, and explore's recursive entries — so it is where a shape is
@@ -2170,7 +2229,12 @@
                                            ")))"))
                          (assoc (or repaired {}) :ns-bound (str (:ns a')))]
                         [a' repaired])
-        r (call-op-1! session (assoc req :name n' :arguments a'))]
+        r (let [s' (view-session! session n' a')
+                r  (call-op-1! s' (assoc req :name n' :arguments a'))]
+            ;; a stub or a trim spooled on the view must stay openable here
+            (when-not (identical? s' session)
+              (swap! session assoc ::spool (::spool @s')))
+            r)]
     (if (and (seq repaired) (get-in r [:content 0 :text]))
       (update-in r [:content 0 :text] #(str ";; repaired " (pr-str repaired) "\n" %))
       r)))
@@ -2400,6 +2464,15 @@
   from the branch and adopts no thread (s16 probes: every one-shot read
   minted a line it would never write to).
 
+  **A one-shot WRITE must name its thread, or it is refused here** — before a
+  session opens, so nothing is minted. A one-shot process exits without
+  landing; a write made under a generated identity sits on a line no
+  process holds and none will ever land: `{:ok true}`, green, and gone.
+  That is the stranded-thread bug (2026-09-04, twice) and D-daemon's rule is
+  that it never becomes policy. `thread` is the argument; `agent` still
+  routes here as well, because the installed Stop hook passes it and a
+  label that names a line is not the anonymous case.
+
   Writes stay TURN-GATED here, deliberately: provenance is not optional just
   because the caller is a script. Turns are DURABLE across one-shot processes,
   so the scripted shape is `--call turn_begin` once, then the writes, then
@@ -2410,41 +2483,49 @@
   file:line coordinate, so emitting frames replaced the real diagnostic with a
   guard exception."
   [dir tool arguments]
-  (let [session (external/open!
-                 (cond-> {:slopp.ops/dir (str dir)}
-                   ;; a one-shot names its agent in the call, and that name is
-                   ;; the SESSION's identity, not merely the delta's. Turns are
-                   ;; durable across processes and so is the LINE one was opened
-                   ;; on — a fresh identity per process would open a fresh
-                   ;; thread per call, and the turn would be unfindable by the
-                   ;; very write it was opened for.
-                   (:agent arguments)
-                   (assoc :slopp.ops/agent-id (str (:agent arguments)))
-                   ;; a read-only one-shot answers from the branch and mints
-                   ;; no thread — decided before open! boots, which is when
-                   ;; the session line is first resolved
-                   (or (contains? tools/read-only-tools (str tool))
-                       (contains? tools/read-only-tools (str (:op arguments))))
-                   (assoc :slopp.ops/read-only? true)))]
-    (swap! session assoc :require-turns? true)
-    (try
-      (let [r (try (call-tool! session {:name tool :arguments arguments})
-                   (catch Exception e
-                     (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                           msgs  (into [] (comp (take-while some?)
-                                                (map #(str (.getSimpleName (class %))
-                                                           ": " (ex-message %))))
-                                       chain)]
-                       (assoc (text! (str "error: " (str/join " <- " msgs)))
-                              :isError true))))]
-        ;; ...and say what this process could not see. See
-        ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-        ;; somebody's thread holds un-landed work that is a different store from
-        ;; the one an MCP session answers from.
-        (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-          (update r :content (fnil conj []) {:type "text" :text note})
-          r))
-      (finally (ops/close! session)))))
+  (let [read? (or (contains? tools/read-only-tools (str tool))
+                  (contains? tools/read-only-tools (str (:op arguments))))
+        write? (or (contains? tools/write-tools (str tool))
+                   (contains? tools/write-tools (str (:op arguments))))
+        ;; the one-shot's IDENTITY: the thread it names, else the label it
+        ;; names. Turns are durable across processes and so is the LINE one
+        ;; was opened on — a fresh identity per process would open a fresh
+        ;; thread per call, and the turn would be unfindable by the very
+        ;; write it was opened for.
+        who   (some-> (or (:thread arguments) (:agent arguments)) str)]
+    (if (and write? (not read?) (nil? who))
+      (assoc (text! (str "error: a one-shot write names no thread — it would land on a"
+                         " line no process holds and none will ever land. Pass"
+                         " {thread \"…\"}: a hooked ask names yours in the [slopp]"
+                         " block at its top; a script or another harness gets one"
+                         " from thread_open {} and passes it on every write."))
+             :isError true)
+      (let [session (external/open!
+                     (cond-> {:slopp.ops/dir (str dir)}
+                       who   (assoc :slopp.ops/agent-id who)
+                       ;; a read-only one-shot answers from the branch and mints
+                       ;; no thread — decided before open! boots, which is when
+                       ;; the session line is first resolved
+                       read? (assoc :slopp.ops/read-only? true)))]
+        (swap! session assoc :require-turns? true)
+        (try
+          (let [r (try (call-tool! session {:name tool :arguments arguments})
+                       (catch Exception e
+                         (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                               msgs  (into [] (comp (take-while some?)
+                                                    (map #(str (.getSimpleName (class %))
+                                                               ": " (ex-message %))))
+                                           chain)]
+                           (assoc (text! (str "error: " (str/join " <- " msgs)))
+                                  :isError true))))]
+            ;; ...and say what this process could not see. See
+            ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+            ;; somebody's thread holds un-landed work that is a different store from
+            ;; the one an MCP session answers from.
+            (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+              (update r :content (fnil conj []) {:type "text" :text note})
+              r))
+          (finally (ops/close! session)))))))
 
 ^:unsafe
 (defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
@@ -2685,6 +2766,22 @@
   ;; wall-clock timing, which rides turn-end and therefore never landed, and
   ;; worse, EVERY ASK AFTER THE FIRST, which never reached the journal at all.
   ;; Rotating costs two marker deltas per ask.
+  ;; THREAD ROUTING (D-daemon P5-0): a call naming a `thread` writes on THAT
+  ;; line. The session's identity stays what the harness said; the thread is
+  ;; the routing key and defaults to it. Switching re-adopts the line and
+  ;; reloads the store and image when its head differs — correct, and the
+  ;; expensive way; a daemon keeps a session per thread instead.
+  (when-let [t (:thread arguments)]
+    (when (and (:db @session)
+               (not= (str t) (engine/thread-key session))
+               ;; thread_open adopts for ITSELF, under a parent when asked.
+               ;; Adopting here first minted the id top-level, and the op
+               ;; then refused its own id as already open.
+               (not= "thread_open" name)
+               ;; a READ naming a thread is a VIEW (`view-session!`), not a move
+               (not (contains? tools/read-only-tools name)))
+      (swap! session assoc :thread (str t))
+      (engine/adopt-line! session)))
   (when (and (:pending-intent @session)
              (:require-turns? @session)
              (contains? tools/write-tools name)
@@ -2751,6 +2848,10 @@
                                  " and this refusal repeats verbatim.")
                             {:dir (:dir @session) :agent ag})))))))
   (let [a   (assoc arguments :agent (or (:agent arguments)
+                                        ;; the label defaults to the THREAD, so
+                                        ;; a write routed somewhere is credited
+                                        ;; there unless it says otherwise
+                                        (some-> (:thread arguments) str)
                                         (:agent-id @session)))
         sym (fn [k]
               (if-let [v (get a k)]

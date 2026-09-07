@@ -5255,3 +5255,148 @@
   (testing "the one-argument report is unchanged"
     (is (nil? (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:1/"})))
     (is (string? (#'mcp/app-note-for {:serving? false :reason "port 7 is taken"})))))
+
+(deftest ^:external a-write-names-its-thread-and-that-is-where-it-lands
+  ;; Identity used to be INFERRED — the harness session id, read once at
+  ;; process start — and every write in a session landed on that one line.
+  ;; A `thread` the caller CARRIES has no seam: it works over any transport,
+  ;; it survives resume and compaction (the hook re-prints it every ask), and
+  ;; it is the only way a subagent sharing its parent's MCP connection can
+  ;; have work of its own. `agent` stays as the label of who wrote it.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "tr.one" :thread "t-one" :prompt "first thread"
+                               :source "(ns tr.one)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+      (call! sess "ns_create" {:ns "tr.two" :thread "t-two" :prompt "second thread"
+                               :source "(ns tr.two)\n(defn ^:unused-ok g \"G.\" [] 2)\n"})
+      (let [rows  (:threads (edn/read-string (call! sess "thread_list" {})))
+            by-id (into {} (map (juxt :thread identity)) rows)]
+        (testing "one session, two threads — each write went where it said"
+          (is (contains? by-id "t-one") (pr-str rows))
+          (is (contains? by-id "t-two") (pr-str rows)))
+        (testing "and neither line holds the other's work"
+          (is (= 1 (:unlanded (by-id "t-one"))) (pr-str (by-id "t-one")))
+          (is (= 1 (:unlanded (by-id "t-two"))) (pr-str (by-id "t-two")))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-one-shot-write-must-name-its-thread
+  ;; A one-shot process exits without landing. A write it makes under a
+  ;; generated identity therefore sits on a line no process holds and none
+  ;; will ever land — `{:ok true}`, green, and gone. That happened twice on
+  ;; 2026-09-04, and the recovery was thread_drop by hand. So the door refuses
+  ;; the write outright and names BOTH ways to get a thread: the [slopp] block
+  ;; at the top of a hooked ask, and thread_open for a script or another
+  ;; harness — which is exactly the caller this door exists for.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-oneshot" (make-array java.nio.file.attribute.FileAttribute 0)))
+        seed (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! seed 'os.core "(ns os.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (finally (ops/close! seed)))
+    (let [text (fn [r] (str (:text (first (:content r)))))]
+      (testing "a write naming neither thread nor agent is REFUSED"
+        (let [r (mcp/call! dir "ns_create"
+                           {:ns "os.two" :prompt "no thread"
+                            :source "(ns os.two)\n(defn ^:unused-ok g \"G.\" [] 2)\n"})]
+          (is (:isError r) (text r))
+          (testing "and the refusal names the argument and the door that mints one"
+            (is (re-find #"thread" (text r)) (text r))
+            (is (re-find #"thread_open" (text r)) (text r)))))
+      (testing "a write naming its thread lands on that thread"
+        (let [r (mcp/call! dir "ns_create"
+                           {:ns "os.two" :thread "t-script" :prompt "scripted"
+                            :source "(ns os.two)\n(defn ^:unused-ok g \"G.\" [] 2)\n"})]
+          (is (not (:isError r)) (text r))
+          (let [rows (:threads (edn/read-string (text (mcp/call! dir "thread_list" {}))))]
+            (is (some #(= "t-script" (:thread %)) rows) (pr-str rows)))))
+      (testing "a read one-shot needs nothing — it answers from the branch and mints no thread"
+        (let [r (mcp/call! dir "query_project" {})]
+          (is (not (:isError r)) (text r)))))))
+
+(deftest ^:external thread-open-mints-or-adopts-a-line-to-write-on
+  ;; The prompt hook mints a thread for a hooked ask. Everything else — a
+  ;; script, another harness, a subagent whose parent hands it an id — needs a
+  ;; door, and the one-shot refusal names this one. Minting answers with the
+  ;; id so the caller can carry it; adopting a named id is idempotent, because
+  ;; the same id twice is the same line, which is what makes an id worth
+  ;; carrying at all.
+  (let [sess (external/open!)]
+    (try
+      (testing "with no id it MINTS one and says what it minted"
+        (let [r (edn/read-string (call! sess "thread_open" {}))]
+          (is (string? (:thread r)) (pr-str r))
+          (is (re-find #"^t-" (:thread r)) (pr-str r))
+          (is (= 0 (:unlanded r)) (pr-str r))))
+      (testing "with an id it ADOPTS that thread — the same line twice"
+        (let [a (edn/read-string (call! sess "thread_open" {:thread "t-mine"}))
+              _ (call! sess "ns_create" {:ns "to.core" :thread "t-mine" :prompt "on it"
+                                         :source "(ns to.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+              b (edn/read-string (call! sess "thread_open" {:thread "t-mine"}))]
+          (is (= "t-mine" (:thread a) (:thread b)) (pr-str [a b]))
+          (is (= (:line a) (:line b)) "adopt, not mint: one id, one line")
+          (is (= 1 (:unlanded b)) (pr-str b))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-child-thread-lands-into-its-parent-and-the-parent-lands-the-lot
+  ;; A subagent shares its parent's MCP connection, so a thread of its own is
+  ;; the only isolation it can have — and the fan-in that keeps a branch
+  ;; holding only DONE work is for that thread to land into its PARENT, not
+  ;; the branch: the orchestrator's done then grades the lot and lands it as
+  ;; one unit. thread_open {parent} mints the child; two dones do the rest.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "thread_open" {:thread "t-parent"})
+      (let [c (edn/read-string (call! sess "thread_open" {:thread "t-kid" :parent "t-parent"}))]
+        (is (= "t-parent" (:parent c)) (pr-str c))
+        (is (= "t-kid" (:thread c)) (pr-str c)))
+      (call! sess "ns_create" {:ns "ch.kid" :thread "t-kid" :prompt "child work"
+                               :source "(ns ch.kid)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+      (let [by (fn [] (into {} (map (juxt :thread identity))
+                            (:threads (edn/read-string (call! sess "thread_list" {})))))]
+        (testing "the child is listed under its parent, holding its own work"
+          (let [rows (by)]
+            (is (= "t-parent" (:parent (rows "t-kid"))) (pr-str rows))
+            (is (= 1 (:unlanded (rows "t-kid"))) (pr-str rows))
+            (is (= 0 (:unlanded (rows "t-parent"))) (pr-str rows))))
+        (testing "the child's done lands into the parent, not the branch"
+          (let [d    (call! sess "done" {:thread "t-kid" :label "child done"})
+                rows (by)]
+            (is (re-find #":landed \"thread t-parent\"" d) d)
+            (is (= 1 (:unlanded (rows "t-parent"))) (pr-str rows))
+            (is (= 0 (:unlanded (rows "t-kid"))) (pr-str rows))))
+        (testing "and the parent's done grades and lands the lot onto the branch"
+          (let [d    (call! sess "done" {:thread "t-parent" :label "parent done"})
+                rows (by)]
+            (is (re-find #":landed \"main\"" d) d)
+            (is (= 0 (:unlanded (rows "t-parent"))) (pr-str rows)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-read-names-its-view-and-moves-nothing
+  ;; Reads are scoped by BRANCH, writes by THREAD. A read naming a branch
+  ;; answers from that branch's landed head; naming a thread answers from its
+  ;; un-landed view; neither moves the session, which is what makes a look
+  ;; cheap enough to take. An image-backed read cannot be a view of a value
+  ;; and says which verb IS the way to be there.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rv.core" :thread "t-writer" :prompt "un-landed work"
+                               :source "(ns rv.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+      ;; a second thread, fresh at the branch head: the session is on it now
+      (call! sess "thread_open" {:thread "t-looker"})
+      (let [hits (fn [args] (call! sess "query_search" (assoc args :pattern "unused-ok f")))]
+        (testing "the session's own view has no such form"
+          (is (not (re-find #"rv\.core" (hits {}))) (hits {})))
+        (testing "the branch's landed head has none either"
+          (is (not (re-find #"rv\.core" (hits {:branch "main"}))) (hits {:branch "main"})))
+        (testing "the thread that wrote it shows it"
+          (is (re-find #"rv\.core" (hits {:thread "t-writer"})) (hits {:thread "t-writer"})))
+        (testing "and looking moved nothing: the session is still on its own thread"
+          (let [rows (:threads (edn/read-string (call! sess "thread_list" {})))
+                mine (first (filter :mine rows))]
+            (is (= "t-looker" (:thread mine)) (pr-str rows))))
+        (testing "an image-backed read cannot be a view, and says what is"
+          (let [r (call! sess "query_eval" {:code "1" :thread "t-writer"})]
+            (is (re-find #"thread_open" r) r)))
+        (testing "a branch nobody has is named as such"
+          (is (re-find #"no branch nope" (hits {:branch "nope"})) (hits {:branch "nope"}))))
+      (finally (ops/close! sess)))))

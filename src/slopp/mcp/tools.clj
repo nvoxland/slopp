@@ -593,6 +593,9 @@
    {:name "thread_drop"
     :description "START OVER: abandon a thread and take its work off your store and image. NO ARGUMENT means your own — reach for this when you have gone down a wrong path and want to be back where the branch is. Not undo/episode_revert: those are forward-only (they append revert deltas, so the work stays in your history) and episode-bounded, while this settles the LINE and covers everything since the last thing that LANDED — several red done points, which is when start-over gets asked. The deltas stay walkable either way. Pass {id} from thread_list to drop somebody else's."
     :inputSchema {:type "object" :properties {:id {:type "string"}}}}
+   {:name "thread_open"
+    :description "Get a THREAD to write on: {thread \"id\"} adopts that thread (the same id is the same line, every time — carry it across restarts and compactions); no argument MINTS one (t-xxxxxxxx) and answers with it. Answers {:thread :line :unlanded}. A hooked ask already has its thread printed in the [slopp] block at its top; this is the door for a script, another harness, or a subagent handed an id by its parent. {parent \"id\"} makes a CHILD: it forks from that thread's head and its done lands INTO that thread rather than the branch, so the parent's done grades and lands the lot — hand each subagent its own child id in its prompt. One level. Appends nothing and opens no turn — the first write does."
+    :inputSchema {:type "object" :properties {:thread {:type "string"} :parent {:type "string"}}}}
    {:name "merge_from"
     :description "Merge a diverged COPY of this project (absolute dir). Same-form divergence = :conflicts, ours kept."
     :inputSchema {:type "object"
@@ -862,7 +865,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
    refusing every key."
   [name]
   (when-let [d (some #(when (= name (:name %)) %) registry)]
-    (into #{:agent :prompt :verbose}
+    (into #{:agent :prompt :verbose :thread :branch}
           (keys (get-in d [:inputSchema :properties])))))
 
 (defn unknown-arg-keys
@@ -907,7 +910,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
    {:name "verify" :blurb "A bigger question than one write answers: chosen tests, the whole store, a fresh image, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "restart" "review_scan" "draft_test" "screen"]}
    {:name "build" :blurb "Artifacts: the jar's sources, the browser bundle, a generated client, the dev server." :ops ["build" "compile_client" "generate_client" "ui_serve"]}
    {:name "store" :blurb "The store itself: health, doctor, compaction, config, and what it declares (capabilities, rules, vocabulary, surface, telemetry, cost)." :ops ["store_health" "store_doctor" "store_compact" "config" "config_file" "query_capabilities" "query_rules" "query_vocabulary" "query_surface" "query_rule_telemetry" "query_cost"]}
-   {:name "slopp" :blurb "The remainder, named as such: git, branches, threads, files, turns, help." :ops ["git_push" "git_clone" "git_pull" "git_conflicts" "git_resolve" "import_dir" "branch_create" "branch_switch" "branch_merge" "branch_delete" "thread_list" "thread_drop" "merge_from" "file_put" "file_get" "file_list" "file_remove" "turn_begin" "turn_end" "help"]}
+   {:name "slopp" :blurb "The remainder, named as such: git, branches, threads, files, turns, help." :ops ["git_push" "git_clone" "git_pull" "git_conflicts" "git_resolve" "import_dir" "branch_create" "branch_switch" "branch_merge" "branch_delete" "thread_list" "thread_drop" "thread_open" "merge_from" "file_put" "file_get" "file_list" "file_remove" "turn_begin" "turn_end" "help"]}
    {:name "done" :ops ["done"]}
    {:name "commit_point" :ops ["commit_point"]}])
 

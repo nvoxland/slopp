@@ -724,145 +724,6 @@
         (db/trunk-line-id! conn))
     (:line @session)))
 
-^:reads (defn ^:export session-line
-  "The LINE this session reads and writes — its own THREAD, or nil for an
-  ephemeral session, which has no journal for a line to point into.
-
-  A session's writes are private until `done` lands them, and this is where
-  that becomes true: everything below — the write CAS, the cache refresh, the
-  materialization — resolves through here, so the thread is not a mode the
-  rest of the system has to know about. It is simply which line the answer
-  names.
-
-  ADOPT-OR-CREATE, keyed by (agent, branch). The db owns that decision
-  (`db/adopt-thread!`), and the result is cached on the session so the row is
-  touched once per session rather than once per call.
-
-  Resolved LAZILY, and it matters twice over. A session can acquire its store
-  after opening — `ensure-db!` materializes one on the first durable write —
-  so an id read eagerly at open would name a store that did not exist yet.
-  And a session's IDENTITY can arrive after opening too: the harness session
-  id comes in on the first prompt, so adopting before then would key the
-  thread to a placeholder."
-  [session]
-  (if-let [conn (:db @session)]
-    (let [cached (:line @session)
-          status (when cached (db/line-status conn cached))]
-      ;; The cache is CHECKED, not trusted, and that is the whole of this
-      ;; change. Another process can settle this line underneath us: the
-      ;; plugin's Stop hook runs `done` through a one-shot carrying this
-      ;; session's own agent id, so every session pause adopts this line,
-      ;; lands it, and settles it while this server holds the id it cached at
-      ;; first use.
-      ;;
-      ;; Writing to a settled line is silent and total. Every write reports
-      ;; success, none of them can land — settled lines are not landable — and
-      ;; the thread cannot be dropped to recover, because settled lines are
-      ;; not droppable either. Observed live: `session_brief` reporting 20
-      ;; un-landed while `thread_list` reported 0 for the line it named and
-      ;; `thread_drop` refused with "already landed". Work that could go
-      ;; neither forward nor back, and the only exit was restarting the server.
-      ;;
-      ;; The cost is a primary-key lookup per resolution, against a write that
-      ;; is about to open a transaction. The docstring's "touched once per
-      ;; session" was protecting adoption's UPDATE, which this still does once.
-      (cond
-        ;; still ours to write to
-        (= "open" status) cached
-
-        ;; ABSENT from the registry: a broken invariant, NOT a settled line,
-        ;; and re-adopting here would heal it silently. `land-thread!` reports
-        ;; this case on purpose — it names the thread, says the writes are in
-        ;; the journal but not on the branch, and tells the agent to restart
-        ;; and re-apply. Taking that away by quietly issuing a new line is how
-        ;; work goes missing with nobody told.
-        (and cached (nil? status)) cached
-
-        ;; SETTLED under us — the Stop hook case. Move to a fresh line so the
-        ;; next write goes somewhere that can land.
-        ;; a session that only READS (a one-shot `--call query_…`) answers from
-        ;; the branch and adopts nothing — every such call used to mint a
-        ;; thread it would never write to (s16 probes: five per probe)
-        (:read-only-line? @session)
-        (session-branch-line session)
-
-        :else
-        (let [id (db/adopt-thread! conn (session-branch-line session)
-                                   (:agent-id @session))]
-          (swap! session assoc :line id)
-          id)))
-    ;; ephemeral: no journal, so no registry to disagree with
-    (:line @session)))
-
-(defn try-commit!
-  "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
-  inversion): st's `:pending` deltas + the full element rows of `nses` land
-  in ONE conditional db transaction (iff the journal head still equals base's
-  `:head`), then the cache follows; the cache is only ever behind the
-  journal, never ahead. Ephemeral sessions commit to the cache alone
-  (identity CAS). True iff committed; false = the head/cache moved — caller
-  refreshes and rebases, or surfaces contention.
-
-  What this reads off the value is exactly what `record-delta` maintains:
-  `:head` for the CAS, `:pending` for the suffix, `:line-pos` to decide
-  whether the cache advanced. It used to recover all three from two whole
-  delta lists — the base's count dropped off the candidate's — which is the
-  reason the lists had to be in RAM at all.
-
-  The REFERENCE INDEX is refreshed here for `nses` — the namespaces whose
-  elements this commit rewrites — before anything lands, so the committed
-  value's `:refs` entries for them are current and `write-snapshot!` persists
-  them beside the elements. This is the one chokepoint every write passes,
-  which is why the refresh lives here and not in each operation: the graph
-  after a write costs one namespace's analysis rather than the store's.
-
-  What lands in the session carries NO delta list: `store/committed` clears
-  the suffix and the list is dropped here. A candidate that carries one — a
-  merge folds a hydrated value — is committed like any other, and the live
-  value stays the journal's facts, not the journal."
-  [session base st' nses]
-  (let [;; then ARRANGED: every namespace this commit rewrites takes its
-        ;; derived order (definitions before callers, ties by creation
-        ;; rank) here, at the one chokepoint — so a revert, an extract, an
-        ;; ingest and a merge are arranged by the same rule a plain write
-        ;; is, and the positions `write-snapshot!` persists are the ones a
-        ;; fold of the journal derives. The refresh comes first because the
-        ;; arrangement is derived FROM the index (which is order-insensitive)
-        st'    (let [st' (refs/refresh st' nses)]
-                 (reduce refs/arrange st'
-                         (filter #(get-in st' [:namespaces %]) nses)))
-        landed (dissoc (store/committed st') :deltas)]
-    (if-let [conn (ensure-db! session)]
-      (if (db/append! conn st' (:pending st') (vec nses)
-                      (session-line session) (:head base))
-        (do (swap! session
-                   (fn [s]
-                     (if (< (:line-pos (:store s) 0) (:line-pos st' 0))
-                       (assoc s :store landed)
-                       s)))
-            true)
-        false)
-      (let [[old _] (swap-vals! session
-                                (fn [s]
-                                  (if (identical? (:store s) base)
-                                    (assoc s :store landed)
-                                    s)))]
-        (identical? (:store old) base)))))
-
-(defn prior-source
-  "The source `fid` held immediately BEFORE the newest delta that touched it,
-  read from the journal — nil when unknown (created by ingest, or touched
-  only once), which callers treat conservatively. One indexed read over the
-  deltas that touched this form (`db/deltas-touching`), newest first. Takes
-  the SESSION, not the store value: the value no longer carries its log, and
-  this is the write path's one baseline read between dones."
-  [session fid]
-  (->> (db/deltas-touching (:db @session) (session-line session) [fid])
-       reverse
-       (keep #(get (:sources %) fid))
-       (drop 1)
-       first))
-
 (defn ^:export used-families
   "The capabilities whose framework family `store` USES — the set both the
   vendored FILES and the supplied DEPS are derived from.
@@ -1508,74 +1369,6 @@
                             distinct sort vec)]
               (if (seq hits) hits (via-routes)))))))))
 
-(defn impacted-tests
-  "Every test var the changed form-ids can affect, decided PER FORM (#132):
-  a form with trace evidence contributes exactly its observed tests; a form
-  without contributes every test in the namespaces whose require-closure
-  reaches ITS namespace. Never nil — [] means nothing reaches.
-
-  Replaces the all-or-nothing collapse, where ONE untraced form discarded
-  every other form's evidence and reverted the whole done to closure runs.
-  Measured on the journal (2026-07-17): 54.4% of real episodes touched a form
-  the tracer can never see — 43.2% an NS FORM (ns_add_require edits one),
-  28% a data def — so the collapse was the common case, not the corner.
-
-  The dominant untraced form is the ns form, and its commonest edit is an
-  alias-only require addition — SEMANTICALLY inert, so it contributes
-  NOTHING instead of its whole closure (inert-ns-require-change?,
-  frictions #2). Inertness is judged against the LAST-DONE baseline (the
-  episode's start), so a multi-edit episode where an earlier edit added a
-  :refer isn't masked by a later alias-only edit (review V-F3). Every other
-  untraced shape keeps the closure fallback: `test-nses-reaching` over a
-  union of namespaces IS the union of the per-namespace calls (the closure
-  intersection distributes), so untraced forms select exactly what the
-  global fallback selected for them, while traced forms keep their narrow
-  sets."
-  [session store changed]
-  (let [baseline (->> (:recent store) (filter #(= :done (:op %))) last :id)
-        ;; the baseline sources of the CHANGED forms only — a fold over the
-        ;; deltas that touched them, not the whole log from the root
-        base-src (when baseline
-                   (db/sources-at (:db @session) (session-line session) baseline changed))
-        reach (memoize
-               (fn [ns-sym]
-                 (vec (for [tns (test-nses-reaching store [ns-sym])
-                            :let [tiers (test-var-tiers store tns)]
-                            nm (concat (:image tiers) (:external tiers))]
-                        (symbol (str tns) (str nm))))))]
-    (vec (sort (distinct
-                (mapcat (fn [fid]
-                          (if-let [e (store/form-by-id store fid)]
-                            (let [ns-sym (store/ns-of-form-id store fid)]
-                              (cond
-                                (and (= (:name e) ns-sym)
-                                     (inert-ns-require-change?
-                                      store fid
-                                      (if baseline
-                                        (get base-src fid)
-                                        (prior-source session fid))))
-                                []
-
-                                :else
-                                (or (affected-tests session ns-sym
-                                                    (or (:name e) (symbol (:id e))))
-                                    (reach ns-sym))))
-                            []))
-                        changed))))))
-
-(defn impacted-external
-  "The ^:external test vars the changed form-ids can affect, for the
-  done-point to route to the external tier — `impacted-tests` filtered to the
-  tier only the external runner can execute.
-
-  Never nil (#132): an untraced form expands to its own namespace's reach
-  instead of collapsing the whole answer, so [] genuinely means no external
-  test can be affected. The #127 version returned nil on ANY untraced form and
-  done! fell back to the require-closure of everything — which selects a
-  median 43 of 46 external test namespaces and deferred 84.6% of changes."
-  [session store changed]
-  (external-among store (impacted-tests session store changed)))
-
 (defn stub-unresolved-test-symbol!
   "The red-first seam's second source. `stub-missing-test-vars!` reads the
   reference graph, and an UNQUALIFIED symbol a deftest names in its own
@@ -1716,6 +1509,276 @@
         (when-not (:err result)
           (reconcile!))
         result))))
+
+(defn ^:export thread-key
+  "The key this session's THREAD is adopted under: an explicit `:thread` when
+  a call named one, else the session's identity.
+
+  Two things that used to be one. `:agent-id` is WHO — what the harness said
+  at start, what the intent mailbox is claimed by, what a delta is labelled
+  with when nothing else is. The thread is WHERE the work goes, and it
+  defaults to the identity so a session that never names one behaves exactly
+  as before: one conversation, one line. A call that does name one — a
+  subagent sharing its parent's connection, an orchestrator multiplexing —
+  routes there without changing who it is.
+
+  Every adoption resolves through here (`session-line`, `adopt-line!`, a
+  branch switch, the re-fork after a land), because two adopt sites that
+  disagreed about the key would put one session's writes on two lines."
+  [session]
+  (or (some-> (:thread @session) str) (:agent-id @session)))
+
+^:reads (defn ^:export session-line
+  "The LINE this session reads and writes — its own THREAD, or nil for an
+  ephemeral session, which has no journal for a line to point into.
+
+  A session's writes are private until `done` lands them, and this is where
+  that becomes true: everything below — the write CAS, the cache refresh, the
+  materialization — resolves through here, so the thread is not a mode the
+  rest of the system has to know about. It is simply which line the answer
+  names.
+
+  ADOPT-OR-CREATE, keyed by (agent, branch). The db owns that decision
+  (`db/adopt-thread!`), and the result is cached on the session so the row is
+  touched once per session rather than once per call.
+
+  Resolved LAZILY, and it matters twice over. A session can acquire its store
+  after opening — `ensure-db!` materializes one on the first durable write —
+  so an id read eagerly at open would name a store that did not exist yet.
+  And a session's IDENTITY can arrive after opening too: the harness session
+  id comes in on the first prompt, so adopting before then would key the
+  thread to a placeholder."
+  [session]
+  (if-let [conn (:db @session)]
+    (let [cached (:line @session)
+          status (when cached (db/line-status conn cached))]
+      ;; The cache is CHECKED, not trusted, and that is the whole of this
+      ;; change. Another process can settle this line underneath us: the
+      ;; plugin's Stop hook runs `done` through a one-shot carrying this
+      ;; session's own agent id, so every session pause adopts this line,
+      ;; lands it, and settles it while this server holds the id it cached at
+      ;; first use.
+      ;;
+      ;; Writing to a settled line is silent and total. Every write reports
+      ;; success, none of them can land — settled lines are not landable — and
+      ;; the thread cannot be dropped to recover, because settled lines are
+      ;; not droppable either. Observed live: `session_brief` reporting 20
+      ;; un-landed while `thread_list` reported 0 for the line it named and
+      ;; `thread_drop` refused with "already landed". Work that could go
+      ;; neither forward nor back, and the only exit was restarting the server.
+      ;;
+      ;; The cost is a primary-key lookup per resolution, against a write that
+      ;; is about to open a transaction. The docstring's "touched once per
+      ;; session" was protecting adoption's UPDATE, which this still does once.
+      (cond
+        ;; still ours to write to
+        (= "open" status) cached
+
+        ;; ABSENT from the registry: a broken invariant, NOT a settled line,
+        ;; and re-adopting here would heal it silently. `land-thread!` reports
+        ;; this case on purpose — it names the thread, says the writes are in
+        ;; the journal but not on the branch, and tells the agent to restart
+        ;; and re-apply. Taking that away by quietly issuing a new line is how
+        ;; work goes missing with nobody told.
+        (and cached (nil? status)) cached
+
+        ;; SETTLED under us — the Stop hook case. Move to a fresh line so the
+        ;; next write goes somewhere that can land.
+        ;; a session that only READS (a one-shot `--call query_…`) answers from
+        ;; the branch and adopts nothing — every such call used to mint a
+        ;; thread it would never write to (s16 probes: five per probe)
+        (:read-only-line? @session)
+        (session-branch-line session)
+
+        :else
+        (let [id (db/adopt-thread! conn (session-branch-line session)
+                                   (thread-key session))]
+          (swap! session assoc :line id)
+          id)))
+    ;; ephemeral: no journal, so no registry to disagree with
+    (:line @session)))
+
+(defn try-commit!
+  "Commit base→st' — JOURNAL-FIRST for durable sessions (m5a storage
+  inversion): st's `:pending` deltas + the full element rows of `nses` land
+  in ONE conditional db transaction (iff the journal head still equals base's
+  `:head`), then the cache follows; the cache is only ever behind the
+  journal, never ahead. Ephemeral sessions commit to the cache alone
+  (identity CAS). True iff committed; false = the head/cache moved — caller
+  refreshes and rebases, or surfaces contention.
+
+  What this reads off the value is exactly what `record-delta` maintains:
+  `:head` for the CAS, `:pending` for the suffix, `:line-pos` to decide
+  whether the cache advanced. It used to recover all three from two whole
+  delta lists — the base's count dropped off the candidate's — which is the
+  reason the lists had to be in RAM at all.
+
+  The REFERENCE INDEX is refreshed here for `nses` — the namespaces whose
+  elements this commit rewrites — before anything lands, so the committed
+  value's `:refs` entries for them are current and `write-snapshot!` persists
+  them beside the elements. This is the one chokepoint every write passes,
+  which is why the refresh lives here and not in each operation: the graph
+  after a write costs one namespace's analysis rather than the store's.
+
+  What lands in the session carries NO delta list: `store/committed` clears
+  the suffix and the list is dropped here. A candidate that carries one — a
+  merge folds a hydrated value — is committed like any other, and the live
+  value stays the journal's facts, not the journal."
+  [session base st' nses]
+  (let [;; then ARRANGED: every namespace this commit rewrites takes its
+        ;; derived order (definitions before callers, ties by creation
+        ;; rank) here, at the one chokepoint — so a revert, an extract, an
+        ;; ingest and a merge are arranged by the same rule a plain write
+        ;; is, and the positions `write-snapshot!` persists are the ones a
+        ;; fold of the journal derives. The refresh comes first because the
+        ;; arrangement is derived FROM the index (which is order-insensitive)
+        st'    (let [st' (refs/refresh st' nses)]
+                 (reduce refs/arrange st'
+                         (filter #(get-in st' [:namespaces %]) nses)))
+        landed (dissoc (store/committed st') :deltas)]
+    (if-let [conn (ensure-db! session)]
+      (if (db/append! conn st' (:pending st') (vec nses)
+                      (session-line session) (:head base))
+        (do (swap! session
+                   (fn [s]
+                     (if (< (:line-pos (:store s) 0) (:line-pos st' 0))
+                       (assoc s :store landed)
+                       s)))
+            true)
+        false)
+      (let [[old _] (swap-vals! session
+                                (fn [s]
+                                  (if (identical? (:store s) base)
+                                    (assoc s :store landed)
+                                    s)))]
+        (identical? (:store old) base)))))
+
+(defn prior-source
+  "The source `fid` held immediately BEFORE the newest delta that touched it,
+  read from the journal — nil when unknown (created by ingest, or touched
+  only once), which callers treat conservatively. One indexed read over the
+  deltas that touched this form (`db/deltas-touching`), newest first. Takes
+  the SESSION, not the store value: the value no longer carries its log, and
+  this is the write path's one baseline read between dones."
+  [session fid]
+  (->> (db/deltas-touching (:db @session) (session-line session) [fid])
+       reverse
+       (keep #(get (:sources %) fid))
+       (drop 1)
+       first))
+
+(defn impacted-tests
+  "Every test var the changed form-ids can affect, decided PER FORM (#132):
+  a form with trace evidence contributes exactly its observed tests; a form
+  without contributes every test in the namespaces whose require-closure
+  reaches ITS namespace. Never nil — [] means nothing reaches.
+
+  Replaces the all-or-nothing collapse, where ONE untraced form discarded
+  every other form's evidence and reverted the whole done to closure runs.
+  Measured on the journal (2026-07-17): 54.4% of real episodes touched a form
+  the tracer can never see — 43.2% an NS FORM (ns_add_require edits one),
+  28% a data def — so the collapse was the common case, not the corner.
+
+  The dominant untraced form is the ns form, and its commonest edit is an
+  alias-only require addition — SEMANTICALLY inert, so it contributes
+  NOTHING instead of its whole closure (inert-ns-require-change?,
+  frictions #2). Inertness is judged against the LAST-DONE baseline (the
+  episode's start), so a multi-edit episode where an earlier edit added a
+  :refer isn't masked by a later alias-only edit (review V-F3). Every other
+  untraced shape keeps the closure fallback: `test-nses-reaching` over a
+  union of namespaces IS the union of the per-namespace calls (the closure
+  intersection distributes), so untraced forms select exactly what the
+  global fallback selected for them, while traced forms keep their narrow
+  sets."
+  [session store changed]
+  (let [baseline (->> (:recent store) (filter #(= :done (:op %))) last :id)
+        ;; the baseline sources of the CHANGED forms only — a fold over the
+        ;; deltas that touched them, not the whole log from the root
+        base-src (when baseline
+                   (db/sources-at (:db @session) (session-line session) baseline changed))
+        reach (memoize
+               (fn [ns-sym]
+                 (vec (for [tns (test-nses-reaching store [ns-sym])
+                            :let [tiers (test-var-tiers store tns)]
+                            nm (concat (:image tiers) (:external tiers))]
+                        (symbol (str tns) (str nm))))))]
+    (vec (sort (distinct
+                (mapcat (fn [fid]
+                          (if-let [e (store/form-by-id store fid)]
+                            (let [ns-sym (store/ns-of-form-id store fid)]
+                              (cond
+                                (and (= (:name e) ns-sym)
+                                     (inert-ns-require-change?
+                                      store fid
+                                      (if baseline
+                                        (get base-src fid)
+                                        (prior-source session fid))))
+                                []
+
+                                :else
+                                (or (affected-tests session ns-sym
+                                                    (or (:name e) (symbol (:id e))))
+                                    (reach ns-sym))))
+                            []))
+                        changed))))))
+
+(defn impacted-external
+  "The ^:external test vars the changed form-ids can affect, for the
+  done-point to route to the external tier — `impacted-tests` filtered to the
+  tier only the external runner can execute.
+
+  Never nil (#132): an untraced form expands to its own namespace's reach
+  instead of collapsing the whole answer, so [] genuinely means no external
+  test can be affected. The #127 version returned nil on ANY untraced form and
+  done! fell back to the require-closure of everything — which selects a
+  median 43 of 46 external test namespaces and deferred 84.6% of changes."
+  [session store changed]
+  (external-among store (impacted-tests session store changed)))
+
+^:reads (defn ^:export session-fork-line
+  "The line this session's thread forks from and LANDS INTO: its parent
+  thread when it is a child (`thread_open {parent}`), else its branch.
+
+  Distinct from [[session-branch-line]], which every caller used to mean by
+  this: a child's branch is still the branch, but the line it follows when
+  idle and moves onto at a done is its parent. The land, the idle-follow and
+  the post-land gap check all want THIS answer; the branch listing and the
+  drop want the branch. Reads `:line` as held rather than resolving it, so
+  asking never adopts."
+  [session]
+  (let [branch (session-branch-line session)
+        conn   (:db @session)
+        line   (:line @session)]
+    (if (and conn line)
+      (db/thread-fork-line conn line branch)
+      branch)))
+
+^:reads (defn ^:export line-label
+  "What a land's report CALLS `line-id`: the branch's name when it is this
+  session's branch, else `thread <id>` in the id the caller passes — a child
+  lands into its parent, and saying so in a line uuid would name nothing the
+  caller has ever seen."
+  [session line-id]
+  (if (= line-id (session-branch-line session))
+    (:branch @session)
+    (let [row (when-let [conn (:db @session)]
+                (first (filter #(= line-id (:id %)) (db/lines conn))))]
+      (str "thread " (or (:agent row) line-id)))))
+
+^:reads (defn ^:export episode-agents
+  "Whose deltas an episode on this session's line GRADES: `agent`'s own, and
+  those of every CHILD thread that has landed into this line. A child
+  (`thread_open {parent}`) lands into its parent rather than the branch, so
+  the parent's done is what stands behind that work when the parent lands —
+  a done that graded only its own agent's deltas would land a subagent's
+  work unjudged. Read from the registry, not the session: a child's row
+  survives its land with `parent` still naming this line."
+  [session agent]
+  (into #{agent}
+        (when-let [conn (:db @session)]
+          (when-let [line (:line @session)]
+            (into #{} (comp (filter #(= line (:parent %))) (keep :agent))
+                  (db/lines conn))))))
 
 (defn refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
@@ -1972,7 +2035,7 @@
   [session]
   (when-let [conn (:db @session)]
     (let [line (db/adopt-thread! conn (session-branch-line session)
-                                 (:agent-id @session))]
+                                 (thread-key session))]
       (swap! session assoc :line line)
       ;; a thread with nothing to pin follows the branch before anything is
       ;; read from it (2026-09-03: a stale copy served as the branch)
@@ -2006,7 +2069,7 @@
   [session]
   (when-let [conn (:db @session)]
     (let [line   (:line @session)
-          branch (session-branch-line session)]
+          branch (session-fork-line session)]
       (when (and line branch (not= line branch)
                  (zero? (db/unlanded-count conn line history/content-ops))
                  ;; MOVED means the thread's BASE is behind the branch — not its

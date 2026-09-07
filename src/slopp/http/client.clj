@@ -108,16 +108,8 @@
   10000)
 
 (defonce ^{:private true
-           :adapter (str "http — this IS the reaching. It is the one sanctioned"
-                         " place in the store that builds an HttpClient; every other"
-                         " caller takes a requester as a parameter and gets"
-                         " `fake-requester` plus `requester-contract` for free.")
-           :ambient-ok (str "process-global by necessity: a java.net.http.HttpClient"
-                            " owns an OS-level selector thread and a connection pool,"
-                            " and the JDK intends one per application. Threading it"
-                            " through every caller would put a resource handle in the"
-                            " signature of a port whose whole point is that callers"
-                            " take a REQUESTER and never a transport")}
+           :adapter "http — this IS the reaching. It is the one sanctioned place in the store that builds an HttpClient; every other caller takes a requester as a parameter and gets `fake-requester` plus `requester-contract` for free."
+           :ambient-ok "process-global by necessity: a java.net.http.HttpClient owns an OS-level selector thread and a connection pool, and the JDK intends one per application. Threading it through every caller would put a resource handle in the signature of a port whose whole point is that callers take a REQUESTER and never a transport"}
   shared-client
   ;; ONE client for the process. Every `java.net.http.HttpClient` starts a
   ;; SelectorManager daemon thread, and nothing closes it — so building one per
@@ -133,6 +125,10 @@
   ;; the old client and its thread — slopp reloads its own namespaces
   ;; constantly, and a plain `def` would trade a leak per request for a leak
   ;; per reload rather than removing it.
+  ;;
+  ;; The two markers are string LITERALS on purpose: the rule that reads them
+  ;; reads a literal, and a (str …) form there declared nothing — this form
+  ;; was flagged as reaching the network undeclared from the day it landed.
   (delay (java.net.http.HttpClient/newHttpClient)))
 
 (defn ^{:malli/schema

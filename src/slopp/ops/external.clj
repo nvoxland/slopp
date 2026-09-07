@@ -366,8 +366,8 @@
   others just did: the agent, the plugin's Stop hook, and `commit-point!`, which
   runs `done!` itself because the commit-point has no gates of its own. Measured on
   slopp's own store, that left five `:done` deltas in the last eight, every one
-  recording `:test-status :none` — the representation that means \"this judged
-  nothing\". A log of markers asserting nothing is worse than quiet: it is what
+  recording `:test-status :none` — the representation that means this judged
+  nothing. A log of markers asserting nothing is worse than quiet: it is what
   `session_brief`'s `:last-done` reads, so a `:none` can surface while a real
   verdict sits behind it.
 
@@ -376,17 +376,23 @@
   places reasoning about verdict freshness, which is the second-bar shape
   `commit-point!`'s own docstring warns about.
 
-  The condition is NOT \"the previous delta is a done\": `:turn-begin`,
+  The condition is NOT that the previous delta is a done: `:turn-begin`,
   `:turn-end` and `:verify` markers interleave, so that test misses the ordinary
   case. It is that every delta since the last done is [[bookkeeping-ops]] — an
   allow-list, for the reason recorded there. `:normalize` is emitted by done
   itself but lands BEFORE the boundary marker, so a done that rewrote something
-  is correctly not seen as unchanged."
-  [st]
+  is correctly not seen as unchanged.
+
+  And the done has to be `agent`'s OWN. A child thread's done marker lands into
+  its parent's line with the work it graded, and the parent's next done is the
+  one that has to grade that work as a whole — a marker some other agent left
+  cannot stand for this one."
+  [st agent]
   (let [back  (reverse (:recent st))
         tail  (take-while #(not= :done (:op %)) back)
         prior (first (drop-while #(not= :done (:op %)) back))]
     (when (and prior
+               (= agent (:agent prior))
                (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
       {:done     (:id prior)
        :normalized 0
@@ -1531,10 +1537,12 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; already a no-op in this case (`changed` is empty, so normalize,
         ;; declare/require hygiene, the suite and the external slice all skip),
         ;; which is why the guard only has to stop the RECORDING.
-        standing (unchanged-since-done st)
+        standing (unchanged-since-done st agent)
         changed  (->> (history/episode-span st agent)
-                      (filter #(and (contains? history/content-ops (:op %))
-                                    (= agent (:agent %))))
+                      (filter (let [agents (engine/episode-agents session agent)]
+                                ;; mine, and what my CHILD threads landed here
+                                #(and (contains? history/content-ops (:op %))
+                                      (contains? agents (:agent %)))))
                       (mapcat history/delta-fids)
                       distinct
                       (filter #(store/ns-of-form-id st %)))
@@ -1890,7 +1898,7 @@ client-deps (merge (:client-deps st) (:client provided))
               (done/landed-gap
                (into #{} (map (fn [q] [(symbol (namespace q)) (name q)])) touched-q)
                (db/load-elements (:db @session)
-                                 (engine/session-branch-line session))))
+                                 (engine/session-fork-line session))))
         ;; the DECLARATION twin. A `module_dep` is not a form — it is a
         ;; `:module-edge` delta folded into the manifest — so the check above
         ;; cannot see one go missing, and one going missing is measured rather
@@ -1913,7 +1921,7 @@ client-deps (merge (:client-deps st) (:client provided))
                          (history/episode-span st agent)))
         edge-gap (when (seq declared)
                    (let [branch (db/load-store (:db @session)
-                                               (engine/session-branch-line session))]
+                                               (engine/session-fork-line session))]
                      (done/declared-edge-gap
                       declared
                       (edit.modules/modules-manifest branch)
