@@ -47,9 +47,11 @@ and records your stated intent (`prompt`). Form ORDER is derived
 one goes. Write a call as `lib/fn` fully qualified when you do not know the
 alias: the store keeps the project's alias and adds the require
 (`:canonicalized`, `:auto-require` say so) — you never read a namespace for
-its ns form. Turns and identity are automatic: the
-prompt hook records your ask, and a write carrying `prompt` opens its own
-turn; never call `turn_begin`.
+its ns form. Turns are automatic: the prompt hook
+records your ask, and a write carrying `prompt` opens its own turn; never
+call `turn_begin`. Your THREAD is the id the `[slopp]` block prints — pass
+`{thread}` on every write; a read takes `{branch}` or `{thread}` to look
+elsewhere without moving (`help {topic "threads"}`).
 
 ## The loop — explore, change, iterate, done
 
@@ -181,7 +183,10 @@ is the longest session, not the sum. When the rebase CONFLICTS, the
 done says so with each form's both sides under `:conflicts`: REWRITE
 each conflicted form to the version you intend (usually a merge of
 both), then call `done` again — your rewrite IS the resolution. Never
-`thread_drop` over a conflict; that discards your side.
+`thread_drop` over a conflict; that discards your side. A SUBAGENT shares
+your MCP connection, so give it a thread of its own — `thread_open {thread
+"t-kid" parent "<your thread>"}` — and hand the id over in its prompt; its
+`done` lands into your thread, and yours lands the lot.
 
 ## When you need more
 

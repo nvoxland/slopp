@@ -41,18 +41,34 @@ because each part surprises somebody:
   back `:status :unlanded` and carries the refusal in `:land`, because the one
   thing worse than a refused commit point is a green one naming a branch that
   does not hold the work. Resolve what `:land` names and call it again.
-- **Identity comes from your harness, before your first write.** Your thread
-  is keyed by `(agent, branch)`, and the agent id is the CONVERSATION your
-  harness is driving — read once when the server starts. So two agents on one
-  store get separate threads without either of them arranging it, and you
-  need set nothing. A harness slopp does not recognise falls back to a
-  generated id, which is correct rather than degraded: that session is
-  nobody's continuation and says so.
-- **Your thread survives the process.** Come back with the same agent
-  identity and you resume the same thread, un-landed work and all. Come back
-  as somebody else and you correctly see only what has landed. What persists
-  is the IDENTITY, not the id: landing settles one thread and opens another,
-  so the id changes every time and nothing should be keyed on it.
+- **Your thread is an id you CARRY.** The `[slopp]` block at the top of every
+  ask prints it (`thread: …`); pass `{thread "…"}` on every write and the
+  write goes to that line. The id is keyed to your harness conversation, so
+  two agents on one store get separate threads without arranging it, and a
+  resumed or compacted conversation is back on its own line the moment it
+  passes the same id. A write that names no thread and has no hooked session
+  behind it — a one-shot `slopp --call` from a script — is REFUSED and names
+  the door: `thread_open {}` mints an id (`t-xxxxxxxx`), `thread_open {thread
+  "id"}` adopts one, and either is yours to carry.
+- **Reads are scoped by BRANCH; writes by thread.** A read answers from your
+  own line by default — your un-landed work included. Pass `{branch "main"}`
+  to see a branch's landed head, or `{thread "t-…"}` to see another thread's
+  un-landed view; neither moves your session (a look, not a switch). Reads
+  that need the image (`query_eval`, `query_observe`, `test_run`) cannot be a
+  view of a value and refuse: `branch_switch` or `thread_open` is how to be
+  THERE.
+- **A subagent gets a CHILD thread.** A subagent shares your MCP connection,
+  so a thread of its own is the only isolation it can have: `thread_open
+  {thread "t-kid" parent "<your thread>"}` mints one; hand the id over in its
+  prompt. Its `done` lands into YOUR thread rather than the branch (`:landed
+  "thread <yours>"`), and your `done` then grades and lands the lot as one
+  unit. One level — a child's parent is a thread on the branch, never another
+  child. `thread_list` shows children under `:parent`.
+- **Your thread survives the process.** Come back with the same id and you
+  resume the same thread, un-landed work and all. Come back as somebody else
+  and you correctly see only what has landed. Landing settles one line and
+  opens another under the same id, so the id is what to keep; the line uuid
+  is nothing to key on.
 - **`:unlanded` counts WORK, not deltas.** A verification or a done boundary
   is a delta on your thread and not something anyone would call pending, so
   they do not count. It is the same set `query_changes` reports on, which is

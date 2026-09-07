@@ -173,15 +173,18 @@ ordinary git.
 
 `slopp --call <tool> [args]` runs ONE tool call against the store in the
 current directory and prints the result — args as JSON, EDN, or `@file`.
-Pass `agent` to give a script one identity across invocations (turn state
-lives in the store, so a `turn_begin` under that agent covers later calls;
-omit it and each invocation is its own session). Every tool takes it, and a
-script that means to finish what it started must pass the SAME one to each
-call. Useful shapes:
+A READ needs nothing more. A WRITE needs a `thread` — the line it goes to —
+and a one-shot write that names none is REFUSED, naming the door:
+`slopp --call thread_open '{}'` mints an id (`t-xxxxxxxx`), and a script
+passes that SAME id on every later call, so its writes share one line and
+its `done` lands them (turn state lives in the store too, so the thread
+covers later calls). `agent` is an optional label and defaults to the
+thread. Useful shapes:
 
 ```sh
 slopp --call query_project
-slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
+slopp --call thread_open '{"thread":"ci"}'
+slopp --call commit_point '{"description":"release 1.2","thread":"ci"}'
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 ```
 

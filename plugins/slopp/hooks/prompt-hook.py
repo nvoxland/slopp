@@ -197,8 +197,12 @@ def tail_context(c):
                 "('verify','done','commit','turn-begin','turn-end',"
                 "'observe','read-cost')", (fc[0],)).fetchone()[0]
             if moved == 0:
-                color = ("GREEN" if ":status :green" in fc[1]
-                         else "RED" if ":status :red" in fc[1] else "recorded")
+                # RED first: a red check carries green SUB-statuses (its
+                # external tier, its suite), so testing for green first
+                # reported a red whole-store check as GREEN in the one line
+                # an agent reads before deciding whether to check again
+                color = ("RED" if ":status :red" in fc[1]
+                         else "GREEN" if ":status :green" in fc[1] else "recorded")
                 bits.append("standing verdict: the whole-store full_check is "
                             + color + " and STANDS — nothing has changed since."
                             " done re-verifies your episode itself; no closing"
