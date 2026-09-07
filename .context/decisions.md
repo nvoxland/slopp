@@ -6943,6 +6943,20 @@ run against the daemon.
   and the one prefix holds; dropping `/api` is a rename across the contract
   tests and slopp-ui's generated client, and delegation made it unnecessary
   for a working surface.
+- **Whose code the stable daemon runs (Nathan, 2026-09-07: "Do mode a").**
+  The daemon every session attaches to loads slopp's code from the slopp2
+  store under `--live` and hot-reloads each landed change (`SLOPP_LIVE=1`,
+  `SLOPP_DAEMON_DIR=<checkout>` in `.claude/settings.local.json`): a landed
+  tooling change is live for the developer within seconds, no build, no
+  restart. The alternative — the jar's snapshot on the stable daemon and a
+  rebuild + `slopp daemon stop` to pick up a change — was declined for the
+  ceremony it adds. What makes the choice safe enough: slopp's dev instance
+  is now a SECOND daemon on 7358, booted from the store by the standard run
+  machinery at attach and refreshed at every done, and its cold boot is the
+  oracle a live host cannot be (it found the replay-order defect three times
+  in one evening); and `done` refuses to land a namespace that no longer
+  loads. The accepted residual: a land that loads but misbehaves degrades
+  every project on the box until the next land, not one session.
 - **The check queue keys on content, not head.** Two idle threads on one
   branch have different heads (markers) and the same elements digest; the
   digest is what two `full_check`s share. A joiner records the verdict on
