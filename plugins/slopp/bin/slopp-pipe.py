@@ -135,7 +135,14 @@ def main():
                 body = e.read().decode("utf-8")
                 if e.code == 404 and session and attempt < 3:
                     # the daemon forgot us (a restart, an idle reap): mint a
-                    # new session on the client's behalf and send again
+                    # new session on the client's behalf and send again. The
+                    # daemon that came back may answer at a DIFFERENT base
+                    # (measured 2026-09-08: the root moved from /slopp/ to
+                    # /api/ under a live pipe, and replaying initialize at
+                    # the old endpoint was a 404 forever), so the base is
+                    # re-read from its file first, not assumed.
+                    base = ensure_daemon()
+                    endpoint = f"{base}/projects/{SLUG}/mcp"
                     session = reinitialize()
                     if session:
                         req = post(line, session)
