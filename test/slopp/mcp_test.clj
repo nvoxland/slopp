@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.http.client :as http.client] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http]))
+            [slopp.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp.mcp.smells :as smells] [slopp.api.server :as server] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -1505,28 +1505,6 @@
                             {:namespaces ["mx.helper"] :to "mx.core" :dryrun true}))))
       (finally (ops/close! sess)))))
 
-(deftest ^:external ui-serve-rides-the-wire-and-is-not-read-only
-  (let [sess (external/open!)]
-    (try
-      (testing "advertised, and NOT read-only — it binds a port"
-        (is (some #(= "ui_serve" (:name %)) tools/registry))
-        (is (not (contains? tools/read-only-tools "ui_serve"))
-            "a readOnlyHint would let plan mode auto-permit binding a port"))
-      (testing "it answers with the bound port and a url that serves this session's API"
-        (call! sess "ns_create" {:ns "us.only" :source "(ns us.only)\n(defn f \"F.\" [x] x)\n"})
-        (let [r (edn/read-string (call! sess "ui_serve" {:port 0}))]
-          (is (pos? (:port r)) (pr-str r))
-          (is (= (str "http://127.0.0.1:" (:port r) "/") (:url r)))
-          (is (re-find #"us\.only" (:http/body (http.client/request
-                                    {:http/url (str (:url r) "api/namespaces")})))
-              "the served session is THIS one — a fresh session would not have
-               us.only. Asserted against the API rather than the document,
-               because the document is now an empty mount point and carries
-               no store content at all.")))
-      (finally
-        (call! sess "ui_serve" {:stop true})
-        (ops/close! sess)))))
-
 (deftest ^:external a-turn-records-where-its-wall-clock-went
   ;; slopp measured what its own verification cost and nothing else, so a
   ;; session's wall clock had no producer: 1,703s elapsed against 390s
@@ -1641,90 +1619,6 @@
           (is (some #(= "edit_add_form" (:tool %)) (get-in t [:refused :by-tool]))
               (pr-str t))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external the-ui-comes-up-with-the-server-and-never-blocks-it
-  ;; The reviewer UI died with every server restart and nothing brought it
-  ;; back, so a human who wanted it had to know to ask for it. It should just
-  ;; be there.
-  ;;
-  ;; The constraint that shapes this: the UI is OPTIONAL and the MCP server is
-  ;; not. An optional listener starts beside the server, and a failure prints
-  ;; a sentence to stderr and is otherwise ignored. A UI that threw on a busy
-  ;; port would take the whole server down over a browser page.
-  (let [sess (external/open!)]
-    (try
-      (testing "a port someone else holds FALLS BACK rather than costing this
-                project its UI — the autostart's port is a preference derived
-                from the dir, not an address anyone asked for (D-hub), and
-                the url it reports is whatever was actually bound"
-        (let [;; 127.0.0.1 EXPLICITLY, not the wildcard: a ServerSocket on 0.0.0.0
-              ;; does not stop http-kit binding 127.0.0.1 on the same port, so
-              ;; a wildcard occupier makes this pass while proving nothing —
-              ;; which is exactly what it did on the first run.
-              sock (java.net.ServerSocket.
-                    0 50 (java.net.InetAddress/getByName "127.0.0.1"))
-              busy (.getLocalPort sock)]
-          (try
-            (let [r (mcp/start-ui! sess busy)]
-              (is (some? (:url r)) (pr-str r))
-              (is (not= busy (:port r)) (pr-str r)))
-            (finally (.close sock) (server/stop!)))))
-      (testing "a free port comes up and reports where it is"
-        ;; The port is picked by opening an ephemeral socket and CLOSING it, so
-        ;; between that close and start-ui!'s bind anything on the machine may
-        ;; take it — and under the 4-shard external run something regularly
-        ;; does (observed 2026-08-02: asked 52361, bound 52363, so both
-        ;; intervening ports went in the window too). That race is in the
-        ;; SETUP, not in the behaviour under test, so it is RETRIED rather
-        ;; than asserted around: relaxing this to "some port came up" would
-        ;; pass just as well on a start-ui! that ignored its argument
-        ;; entirely, which is the one thing this block exists to rule out.
-        (let [attempt (fn []
-                        (let [p (let [s (java.net.ServerSocket. 0)
-                                      p (.getLocalPort s)]
-                                  (.close s) p)]
-                          [p (mcp/start-ui! sess p)]))
-              [free r] (loop [tries 4
-                              [p res] (attempt)]
-                         (if (or (= p (:port res)) (zero? tries))
-                           [p res]
-                           (do (server/stop!)
-                               (recur (dec tries) (attempt)))))]
-          (is (= free (:port r)) (pr-str r))
-          (is (re-find (re-pattern (str ":" free "/")) (str (:url r))) (pr-str r))
-          (testing "and the url reaches the HUMAN, not just the server's log"
-            ;; the stderr banner goes to the MCP server's log, which most
-            ;; clients never show anyone — so without this, autostart is a
-            ;; feature that cannot be found
-            (is (= (:url r) (:ui-url @sess)))
-            (is (= (:url r) (:ui (ops/session-brief sess)))))
-          (testing "starting the UI does NOT make the brief claim a hub — a
-                    :hub in the brief is a claim that something ANSWERS
-                    there. This assertion used to be `(swap! sess assoc
-                    :hub …)` followed by reading it back, which proved only
-                    that assoc works; the claim it stood in for was false,
-                    because `:hub` was set from the CONFIGURED port whether
-                    or not anything answered. It then asserted `nil`, which
-                    is only true on a machine with no hub up — and a hub
-                    running here (slopp-ui's, most days) turned every
-                    whole-store check red for a fact about the machine. So:
-                    absent, or answering."
-            (let [b (ops/session-brief sess)
-                  h (:hub b)
-                  answers? (fn [url]
-                             (let [u (java.net.URI. (str url))]
-                               (with-open [s (java.net.Socket.)]
-                                 (try (.connect s (java.net.InetSocketAddress.
-                                                   (.getHost u) (.getPort u)) 500)
-                                      true
-                                      (catch java.io.IOException _ false)))))]
-              (is (or (nil? h) (answers? h))
-                  (str "the brief claims a hub nothing answers at: "
-                       (pr-str (select-keys b [:ui :hub]))))))
-          (server/stop!)))
-      (finally
-        (server/stop!)
-        (ops/close! sess)))))
 
 (deftest targets-accepts-the-shapes-a-reader-would-try
   ;; The reporting half of a boundary crossing: a refusal must speak the
@@ -1933,40 +1827,6 @@
     (testing "and the registry is not empty, which would pass vacuously"
       (is (< 20 (count tools/wire-keys)))
       (is (contains? tools/wire-keys :error)))))
-
-(deftest ^:external the-project-listeners-description-promises-only-what-it-serves
-  ;; ui_serve's description outlived the surface it described. It said "a
-  ;; browsable HTML view of THIS store for a human: the namespace index, form
-  ;; source, and … the commit-point timeline and per-commit-point change review",
-  ;; and told the caller to hand that url to a human — for a listener that
-  ;; answers 404 {"error":"no route"} at `/`. The pages moved to the hub with
-  ;; D-hub part 4 and the description did not follow.
-  ;;
-  ;; Sibling of slopp-prose-never-names-a-tool-that-does-not-exist, and the
-  ;; same class: a gate sees var references, never a promise made in prose.
-  ;; Anchored to the FACT rather than to a wording, so the day a page endpoint
-  ;; comes back this guard stops firing instead of having to be argued with.
-  (doseq [n server/served-namespaces] (require n))
-  (let [paths   (->> server/served-namespaces
-                     (mapcat (comp vals ns-publics))
-                     (keep (comp #(or (:rest/path %) (:http/path %)) meta))
-                     sort vec)
-        non-api (remove #(str/starts-with? % "/api") paths)
-        desc    (:description (first (filter #(= "ui_serve" (:name %)) tools/registry)))]
-    (testing "the FACT this rests on: the listener serves /api and nothing else"
-      (is (seq paths) "served-namespaces declared no endpoints at all")
-      (is (empty? non-api)
-          (str "a non-/api route means the listener DOES serve a page again,"
-               " and then this guard should be DELETED rather than satisfied: "
-               (pr-str non-api))))
-    (testing "so the description may not promise a human a page"
-      (is (some? desc) "ui_serve is not in the registry")
-      (is (empty? (re-seq #"(?i)HTML view|browsable|namespace index|form source|commit-point timeline|change review"
-                          desc))
-          (str "ui_serve's description promises pages this listener does not"
-               " serve: " (pr-str desc)))
-      (is (re-find #"(?i)hub" desc)
-          "and it must name the hub, which is where those pages actually are"))))
 
 (deftest the-terse-path-drops-nothing-the-registry-routed
   ;; The sibling of no-tool-keeps-its-own-result-key-allowlist, one layer
@@ -2208,7 +2068,7 @@
     (is (= 37 (count tools/read-only-tools)))
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
-    (is (not (contains? tools/read-only-tools "ui_serve")))
+    (is (not (contains? tools/read-only-tools "build")))
     (is (not (contains? tools/read-only-tools "edit_add_form")))))
 
 (deftest a-tool-declares-whether-it-needs-the-image-where-it-is-DEFINED
@@ -2772,30 +2632,6 @@
       (finally
         (.destroyForcibly proc)
         (sh/sh "rm" "-rf" dir)))))
-
-(deftest ^:external ui-serve-keeps-the-address-session-brief-reports-TRUE
-  ;; `session_brief` reads `:ui-url` off the session, and only `start-ui!` ever
-  ;; wrote it — so re-serving moved the listener and left the brief announcing
-  ;; the port it came up on at boot. Measured live: the brief said 49283 while
-  ;; the listener held 53610 and 49283 was bound by nobody.
-  ;;
-  ;; It is the same defect as a host announcing a url it never binds, one layer
-  ;; up, and it lands on whoever is trying to find the port — which is exactly
-  ;; what the brief is for.
-  (let [sess (external/open!)]
-    (try
-      (let [r   (call! sess "ui_serve" {})
-            url (second (re-find #"(http://127\.0\.0\.1:\d+/)" (str r)))]
-        (testing "the tool reports an address"
-          (is (some? url) (str r)))
-        (testing "and the SESSION carries the one just served"
-          (is (= url (:ui-url @sess))
-              (str "session_brief would announce " (pr-str (:ui-url @sess))
-                   " while the listener is on " (pr-str url))))
-        (call! sess "ui_serve" {:stop true})
-        (testing "stopping CLEARS it rather than leaving an address nothing binds"
-          (is (nil? (:ui-url @sess)) (pr-str (:ui-url @sess)))))
-      (finally (ops/close! sess)))))
 
 (deftest a-host-can-turn-down-the-idle-images-a-server-holds
   ;; A writer does not cost one JVM. It costs the active image, a warm spare
@@ -3870,42 +3706,6 @@
             (is (re-find #"unknown tool" t) t))))
       (finally (ops/close! sess)))))
 
-(deftest ^{:external true
-           :adapter "http — stands in for the shim's python urllib: the proof is that a FOREIGN client opens the door with nothing but .slopp/ui-port and raw HTTP, no slopp facade in the loop"}
-  the-cli-door-is-mounted-with-its-token
-  ;; the mount half of the routed door: start-ui! passes the /api/call row
-  ;; down as data, mints the per-boot token, and writes it into
-  ;; .slopp/ui-port beside the address — the file the shim (and the prompt
-  ;; hook before it) already trusts. A real POST through the bound port
-  ;; answers a routed op from the WARM image — the s12c cold path took
-  ;; silent minutes; this asserts the routed one is interactive.
-  (let [sess (external/open!)]
-    (try
-      (let [r (mcp/start-ui! sess 0)]
-        (is (:url r) (pr-str r))
-        (let [pf    (slurp (str (:dir @sess) "/.slopp/ui-port"))
-              token (second (re-find #"\"token\":\"([^\"]+)\"" pf))
-              url   (second (re-find #"\"url\":\"([^\"]+)\"" pf))]
-          (is (some? token) pf)
-          (let [client (java.net.http.HttpClient/newHttpClient)
-                post!  (fn [body]
-                         (.send client
-                                (-> (java.net.http.HttpRequest/newBuilder
-                                     (java.net.URI/create (str url "api/call")))
-                                    (.header "Content-Type" "application/json")
-                                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString body))
-                                    (.build))
-                                (java.net.http.HttpResponse$BodyHandlers/ofString)))
-                t0     (System/nanoTime)
-                resp   (post! (str "{\"tool\":\"query_project\",\"arguments\":{},\"token\":\"" token "\"}"))
-                ms     (quot (- (System/nanoTime) t0) 1000000)]
-            (is (= 200 (.statusCode resp)))
-            (is (re-find #"\"isError\":false" (.body resp)) (.body resp))
-            (is (< ms 2000) (str "routed call took " ms "ms — the warm image must answer interactively"))
-            (testing "and the token in the file is the ONLY key that opens it"
-              (is (= 403 (.statusCode (post! "{\"tool\":\"query_project\",\"arguments\":{},\"token\":\"wrong\"}"))))))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external a-step-carrying-several-forms-splits-and-infers
   ;; opus's native write grain is the whole blob — 8 heredoc FILES per plain
   ;; lifetime — and the one-form-per-step rule fragmented that into 22
@@ -4012,26 +3812,6 @@
         (is (re-find #":went-red \[rs.core/triple-t\]" r)
             (str "the spec was WATCHED failing — the whole point of red-first: " r))
         (is (re-find #":status :green" r) r))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external a-live-listeners-address-is-never-clobbered
-  ;; s13 cell autopsy: `slopp --help` fell through to serve mode, whose
-  ;; start-ui! overwrote the REAL server's .slopp/ui-port with its own pid,
-  ;; then died on stdin EOF — 31 dead-pid fallbacks followed, each a silent
-  ;; JVM boot. A live listener's file belongs to the process that is alive.
-  (let [sess (external/open!)
-        pf   (str (:dir @sess) "/.slopp/ui-port")]
-    (try
-      (clojure.java.io/make-parents pf)
-      (testing "a file naming a LIVE pid survives a second server's start-ui!"
-        (spit pf "{\"port\":1,\"url\":\"http://127.0.0.1:1/\",\"pid\":1,\"started\":1,\"token\":\"keep-me\"}")
-        (mcp/start-ui! sess 0)
-        (is (re-find #"keep-me" (slurp pf))
-            "the live owner's address stayed; the newcomer must not clobber"))
-      (testing "a file naming a DEAD pid is stale and is replaced"
-        (spit pf "{\"port\":1,\"url\":\"http://127.0.0.1:1/\",\"pid\":999999999,\"started\":1,\"token\":\"stale\"}")
-        (mcp/start-ui! sess 0)
-        (is (not (re-find #"stale" (slurp pf))) (slurp pf)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external the-cli-door-speaks-both-vocabularies

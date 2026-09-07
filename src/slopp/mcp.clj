@@ -9,10 +9,10 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.project.capabilities :as capabilities] [slopp.rules.doctor :as doctor] [slopp.hub :as hub] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp.mcp.tools :as tools] [slopp.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp.api.server :as server] [slopp.rules.doctor :as doctor] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.project.harness :as harness] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate]))
 
-^{:auto-declare "mutual recursion: -main, call!, call-main!, call-op!, call-op-1!, call-tool!, handle!, http-call!, serve!, start-ui!"}
-(declare -main call! call-main! call-op! call-op-1! call-tool! handle! http-call! serve! start-ui!)
+^{:auto-declare "mutual recursion: -main, call!, call-main!, call-op!, call-op-1!, call-tool!, handle!, http-call!, serve!"}
+(declare -main call! call-main! call-op! call-op-1! call-tool! handle! http-call! serve!)
 
 (def ^:private protocol-version "2024-11-05")
 
@@ -566,60 +566,6 @@
       (and t (str/starts-with? t "{:error ")) t
       (:isError r) (or t "error")
       :else nil)))
-
-^:unsafe (defn start-heartbeat!
-  "Start this project checking in with a hub, and record the handle on
-  the session. Never throws; returns the hub url it beats to, or nil.
-
-  `slopp.hub.port` 0 means \"no hub\", and a hub that simply is not running is the
-  ordinary case rather than a failure — the beat retries forever and costs
-  nothing, so the project appears in the picker within one interval of a hub
-  starting later. Registering and keeping alive are the same call, deliberately
-  (D-hub).
-
-  Two session keys, and the split between them is the point.
-  `:hub-configured` is where we BEAT — known immediately, true whether or
-  not anyone is listening. `:hub` is this project's own page on the hub, and
-  it exists only while a hub is answering, because the slug in it comes back on
-  the reply and cannot be fabricated. Every beat rewrites it, so a hub that
-  goes away takes the claim with it.
-
-  One key used to carry both meanings: `:hub` was set here, once, from the
-  configured port. Orientation then advertised an address nobody was serving —
-  and the skill tells an agent to hand that address to a human, so the cost
-  landed on the human every time. The reply had the answer all along; nothing
-  was reading it.
-
-  The banner names the HUB's address, not this project's derived port, because
-  the hub url is the one a human is meant to remember and the derived one is an
-  implementation detail they should never have to type."
-  [session dir url]
-  (try
-    (let [port (capabilities/effective (:store @session) "slopp.hub.port")]
-      (when (and dir port (pos? (long port)))
-        (let [hub    (hub/hub-url port)
-              handle (hub/start! hub
-                                #(hub/payload (:store @session) dir url)
-                                #(let [at (hub/hub-address hub %)]
-                                   (cond
-                                     at (swap! session assoc :hub at
-                                               :hub-refused nil)
-                                     ;; a hub that answered and said NO is the
-                                     ;; drift alarm — keep it, or the brief
-                                     ;; reports absence about a running hub
-                                     (hub/refused? %)
-                                     (swap! session assoc :hub-refused %
-                                            :hub nil)
-                                     :else (swap! session assoc :hub nil
-                                                  :hub-refused nil))))]
-          (swap! session assoc :hub-heartbeat handle :hub-configured hub)
-          (.println System/err ^String (str "slopp hub: " hub
-                                            " (open this to switch projects)"))
-          hub)))
-    (catch Throwable t
-      (.println System/err ^String (str "slopp hub registration unavailable: "
-                                        (.getMessage t)))
-      nil)))
 
 (defn- app-note-for
   "The line `done` should carry about the app server it just re-served, given
@@ -1915,7 +1861,9 @@
       r)))
 
 (def ^:private env-handlers!
-  "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
+  "call-tool dispatch — deps/branches/build/help (Q4: the stable dispatch tail lives in
+  per-group handler maps of (fn [session a sym]); call-tool keeps only the
+  hot query/edit clauses)."
   {"deps_add"
    (fn [session a sym]
      (text! (ops/deps-add! session (sym :lib)
@@ -1940,29 +1888,7 @@
    "store_compact"
    (fn [session _a _sym]
      (text! (external/compact-store! session)))
-   "ui_serve"
-   ;; `:ui-url` is what session_brief announces, and until this only
-   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
-   ;; brief naming the port it came up on at BOOT. Observed live: the brief
-   ;; said 49283 while the listener held 53610 and nobody held 49283. The
-   ;; address a reader is handed has to be the one that was bound, and
-   ;; stopping has to clear it rather than leave an address nothing answers.
-   (fn [session a _sym]
-     (text! (if (:stop a)
-              (let [stopped (boolean (server/stop!))]
-                (swap! session dissoc :ui-url :ui-stamp)
-                {:stopped stopped})
-              (let [r (server/serve! session
-                                     (server/preferred-port (:dir @session) (:port a)))]
-                ;; the stamp rides the SESSION beside the url, because the
-                ;; brief is where a reader finds out anything about this
-                ;; listener and slopp.ops cannot ask slopp.api — that edge
-                ;; runs the other way.
-                (when (:url r)
-                  (swap! session assoc :ui-url (:url r)
-                         :ui-stamp (:derived-from r)))
-                r))))
-"screen"
+   "screen"
    (fn [session a _sym]
      (text! (webdev.screen/screen! session
                              :steps (:steps a)
@@ -2292,87 +2218,12 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
-^:unsafe (defn start-ui!
-  "Bring this project's UI listener up beside the MCP server and start its
-  heartbeat to the hub. Returns `ui/serve!`'s map — `{:url :port}`, or
-  `{:error …}` — and NEVER throws.
-
-  The listener still serves the LIVE session and still dies with the server.
-  `:test-map` and `:observed` are persisted and reloaded, so a fresh session is
-  not blank — it is STALE, showing the warranty as of the last verified run
-  rather than the one being changed, and it would boot a second image to show
-  it. That accuracy is what forces the whole hub design (D-hub): a hub
-  cannot answer for a store, so every project answers for itself and the hub
-  proxies.
-
-  What changed is the ADDRESS. The port is derived from the store dir instead
-  of defaulting to a fixed 7359, so projects on one machine never collide, and
-  a taken port falls back to an ephemeral one — the registered url carries
-  whatever was actually bound. Nobody needs to know this number; the address a
-  human remembers is the hub's.
-
-  The stance every optional listener here takes: the UI is OPTIONAL and MCP
-  is not. A busy port, a missing hub, anything at all — it
-  reports a sentence on stderr (stdout is the JSON-RPC channel) and the server
-  carries on. Nothing about a browser page should be able to stop the thing the
-  editor is talking to."
-  ([session] (start-ui! session nil))
-  ([session explicit-port]
-   (let [dir  (:dir @session)
-         ;; the CLI door's per-boot secret: written into ui-port below,
-         ;; required by /api/call — loopback alone is not authorization
-         token (str (java.util.UUID/randomUUID))
-         want (server/preferred-port dir explicit-port)
-         try! (fn [p] (try (server/serve! session p
-                                          :routes [{:method :post :path "/api/call"
-                                                    :auth :public :handler #'http-call!}])
-                           (catch Throwable t {:error (or (.getMessage t) (str t))})))
-         r0   (try! want)
-         ;; a derived port is a PREFERENCE: something else already holding it
-         ;; must not cost this project its UI, so fall back to whatever is free.
-         r    (if (and (:error r0) (not (zero? (long want)))) (try! 0) r0)]
-     ;; ON THE SESSION, so a reader can find it. The stderr
-     ;; banner below goes to the MCP server's log, which most clients never
-     ;; show a human — so autostart without this is a feature nobody can find.
-     ;; session_brief surfaces it, which is where an agent looks and how the
-     ;; human gets told.
-     (when (:url r) (swap! session assoc :ui-url (:url r) :call-token token
-                          ;; the bundle's argument-teaching block, handed DOWN
-                          ;; as session data (no api->mcp edge — the route-row
-                          ;; trick); bundle-read! serves it under ?diet=1
-                          :op-cards tools/op-cards))
-     ;; …and on DISK, for a process that is not this one: the prompt hook
-     ;; fetches the ask bundle over HTTP and has ~2 s, so it reads the port
-     ;; from a file instead of asking the hub. pid + started let it tell a
-     ;; live listener from a dead session's leftover. Best-effort, silent —
-     ;; nothing about the optional UI may cost the MCP loop anything.
-     (when (:url r)
-       (try (let [ph (java.lang.ProcessHandle/current)
-                  pf (str (:dir @session) "/.slopp/ui-port")
-                  ;; NEVER clobber a LIVE listener's file: a stray serve-mode
-                  ;; launch in this dir (a --help that fell through, measured
-                  ;; s13) overwrote the real address with its own transient
-                  ;; pid and poisoned every routed call that followed. The
-                  ;; file belongs to whoever is alive; a dead pid is stale.
-                  live? (try (let [txt (slurp pf)
-                                   [_ p] (re-find #"\"pid\":(\d+)" txt)
-                                   pid (some-> p parse-long)]
-                               (and pid (not= pid (.pid ph))
-                                    (some-> (java.lang.ProcessHandle/of pid)
-                                            (.orElse nil) (.isAlive))))
-                             (catch Throwable _ false))]
-              (when-not live?
-                (spit pf
-                      (format "{\"port\":%d,\"url\":\"%s\",\"pid\":%d,\"started\":%d,\"token\":\"%s\"}"
-                              (long (:port r)) (:url r) (.pid ph)
-                              (System/currentTimeMillis) token))))
-            (catch Throwable _ nil)))
-     (.println System/err
-               ^String (if (:url r)
-                         (str "slopp UI: " (:url r))
-                         (str "slopp UI unavailable: " (:error r))))
-     (when (:url r) (start-heartbeat! session dir (:url r)))
-     r)))
+(def op-cards
+  "The tools' argument-teaching cards, as SESSION data: every session the
+  daemon opens carries them under `:op-cards`, and the ask bundle's `?diet=1`
+  reads them off the session there — the read API cannot require this
+  namespace (that edge runs the other way), so what it needs is handed down."
+  tools/op-cards)
 
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
@@ -2621,6 +2472,12 @@
   be something you do, not something that happens to you. The store is
   created by the first real write (`slopp.ops.engine/ensure-db!`).
 
+  This is the SELF-CONTAINED server — one JVM, one session, no listener. A
+  project's read API, its write door and the telemetry sink are the
+  daemon's (`slopp.daemon`), which serves every project on the machine from
+  one process; a stdio server serves nothing over HTTP, and a human who
+  wants the pages runs a daemon.
+
   Git is push/pull to a remote slopp does not own: `git_push` publishes the
   projection, `git_clone` rebuilds a fileless store from one (slopp.sync).
   Serving the store to a git client AS a remote was removed — it forced
@@ -2657,50 +2514,38 @@
                                      ;; host's answer wins over the defaults.
                                      (host-image-options #(System/getenv %)))
                              dir (assoc :slopp.ops/dir dir)))]
-    (swap! session assoc :require-turns? true)
+    (swap! session assoc :require-turns? true
+           ;; the argument cards ride the session so the ask bundle's diet
+           ;; form can serve them without an api->mcp edge
+           :op-cards op-cards)
     ;; the landing floor survives a SIGTERM (eval31: the harness's kill beat
     ;; the stdio loop's finally on a big store)
     (exit-landing-hook! session)   ; real servers enforce turns
-    ;; the reviewer UI comes up with the server, always. It serves the LIVE
-    ;; session and therefore dies with it — that is the trade that keeps its
-    ;; warranty numbers honest — so nothing ever brought it back, and a human
-    ;; who wanted it had to know to ask again after every restart.
-    ;; start-ui! never throws: MCP must serve even when the UI cannot.
-    (start-ui! session)
-    ;; the app server comes up beside the UI, for a store that asked for it.
-    ;; BACKGROUNDED: it boots a whole second JVM and loads the app's web
-    ;; surface into it, and nothing about that should sit between the editor
-    ;; and a completed MCP handshake — the same reason the oracle's own boot
-    ;; is async here.
+    ;; the app server comes up beside the MCP loop, for a store that asked
+    ;; for it. BACKGROUNDED: it boots a whole second JVM and loads the app's
+    ;; web surface into it, and nothing about that should sit between the
+    ;; editor and a completed MCP handshake — the same reason the oracle's
+    ;; own boot is async here.
     (future (start-app! session))
     (try
       (serve! session (io/reader System/in) (io/writer System/out))
       (finally
-        ;; SAY IT FIRST. The teardown below is deliberate and correct — a UI
-        ;; belongs to the MCP session and must not outlive it — but boot
-        ;; printed `slopp UI: <url>` a moment ago and that url is about to stop
-        ;; working. Saying nothing is what made this expensive: a manual launch
-        ;; (stdin from /dev/null, a finished pipe, any non-tty) reaches EOF
-        ;; immediately, so the last thing a launcher reads is a url that is
-        ;; already dead, with a live process behind it. Three agents spent an
-        ;; evening diagnosing that, twice concluding the code was broken and
-        ;; once that a jar had not shipped.
+        ;; SAY IT FIRST. A manual launch (stdin from /dev/null, a finished
+        ;; pipe, any non-tty) reaches EOF immediately, and a process that
+        ;; exits without a word looks like a crash. Three agents spent an
+        ;; evening diagnosing exactly that when this server also carried a
+        ;; listener whose url it had just printed.
         ;;
         ;; stderr, because stdout is the JSON-RPC channel.
         (.println System/err
-                  ^String (str "slopp: no MCP client on stdin — withdrawing the"
-                               " UI listener and exiting. The UI belongs to the"
-                               " MCP session and does not outlive it, so a url"
-                               " printed above has stopped working. To keep one"
-                               " alive, run slopp from an editor (which holds"
-                               " stdin open) rather than launching it manually."))
-        ;; deregister BEFORE the listener goes: the hub should learn we are
-        ;; leaving from us, not by ageing us out thirty seconds later.
+                  ^String (str "slopp: no MCP client on stdin — exiting. The"
+                               " session belongs to the MCP client and does not"
+                               " outlive it. To keep one alive, run slopp from an"
+                               " editor (which holds stdin open) rather than"
+                               " launching it manually."))
         ;; the landing floor, before anything is torn down: what the
         ;; agent left green on its thread reaches the branch (eval26)
         (land-on-exit! session)
-        (hub/stop! (:hub-heartbeat @session))
-        (server/stop!)
         ;; the app image is a CHILD JVM. Its watchdog would reap it when we
         ;; die anyway, but leaving that to a watchdog means the port stays
         ;; bound for as long as the reap takes — and the next server to start
@@ -2752,30 +2597,28 @@
     (call-op! session req)))
 
 ^:unsafe (defn ^:export http-call!
-  "`POST /api/call` on a session's listener, and `POST
-  /slopp/projects/<slug>/call` on the daemon — the CLI door onto a RUNNING
-  slopp. Body: `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<secret>\"}`.
+  "`POST /slopp/projects/<slug>/call` on the daemon — the CLI door onto a
+  RUNNING slopp. Body: `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<secret>\"}`.
   Invokes [[call-op!]] on the session in `:http/deps` — the same dispatch,
   turn gating, ledger and anticipation MCP calls get — and answers
   `{\"isError\" bool \"text\" \"…\"}` with the joined content text, the shape
   `--call` already prints. A thrown refusal crosses as isError text, never a
   stack trace: the caller is a terminal.
 
-  The token is a per-boot secret — written into `.slopp/ui-port` beside a
-  session listener's address, into `~/.slopp/daemon.json` beside a daemon's
-  — and it is the session's `:call-token`. Loopback binding alone must not
-  grant every local process write access to the store — 403 without it,
-  and nothing runs. Why this exists (s12c, measured): the one-shot `--call`
-  path boots a JVM and loads the whole store in silence; an agent reached
-  for it unprompted, waited on the cold path for minutes, and spent eight
-  turns babysitting the process — while this process held the warm image
-  the whole time.
+  The token is a per-boot secret — written into `~/.slopp/daemon.json`
+  beside the daemon's address — and it is the session's `:call-token`.
+  Loopback binding alone must not grant every local process write access
+  to the store — 403 without it, and nothing runs. Why this exists (s12c,
+  measured): the one-shot `--call` path boots a JVM and loads the whole
+  store in silence; an agent reached for it unprompted, waited on the cold
+  path for minutes, and spent eight turns babysitting the process — while
+  a live process held the warm image the whole time.
 
-  FOR ANYONE PROXYING A SLOPP LISTENER: this write door shares the listener
-  with the read endpoints — it differs by path and method, not by port. A
-  reverse proxy MUST NOT forward it unless it means to hand the store's
-  editing surface to everything that can reach the proxy (slopp-ui's hub
-  verified its GET-only stance at the wire, 2026-09-01)."
+  FOR ANYONE PROXYING THE DAEMON: this write door shares the port with the
+  read endpoints — it differs by path and method, not by port. A reverse
+  proxy MUST NOT forward it unless it means to hand the store's editing
+  surface to everything that can reach the proxy (slopp-ui's hub verified
+  its GET-only stance at the wire, 2026-09-01)."
   [req]
   (let [session (:session (:http/deps req))
         body    (:body req)
@@ -2796,7 +2639,7 @@
       (raw 503 {:error "no live session behind this listener"})
 
       (or (nil? want) (not= (str (:token b)) (str want)))
-      (raw 403 {:error "bad or missing token — read it from .slopp/ui-port, or ~/.slopp/daemon.json under a daemon"})
+      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
 
       (not (string? (:tool b)))
       (raw 400 {:error "call needs {tool arguments} — tool is the op name"})

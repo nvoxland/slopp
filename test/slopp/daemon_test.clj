@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -490,4 +490,29 @@
                                          :headers {"mcp-session-id" "nope"}
                                          :body (json/generate-string {:jsonrpc "2.0" :id 3 :method "ping"})})]
           (is (= 404 (:status r)) (pr-str r))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-daemon-session-carries-the-tools-argument-cards
+  ;; Only the retired start-ui! ever set :op-cards on a session, and the
+  ;; ask bundle's ?diet=1 reads it off the session (there is no api->mcp
+  ;; edge). Under the daemon every session has to carry it, or the diet
+  ;; bundle silently sheds the argument-teaching block.
+  (let [d (tmp-dir!)]
+    (try
+      (let [{:keys [session]} (daemon/attach! d "cards")]
+        (is (= mcp/op-cards (:op-cards @session)))
+        (is (seq (:op-cards @session))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-brief-names-the-projects-read-api-on-the-daemon
+  ;; :ui used to be a per-session listener's address; the daemon serves
+  ;; every project's API under /slopp/projects/<slug>/api, and the brief
+  ;; is where an agent finds that address to hand to a program.
+  (let [d (tmp-dir!)]
+    (try
+      (let [{:keys [port]} (daemon/start! 0)
+            {:keys [session]} (daemon/attach! d "brief")
+            want (str "http://127.0.0.1:" port "/slopp/projects/brief/api")]
+        (is (= want (:api-url @session)))
+        (is (= want (:api (ops/session-brief session)))))
       (finally (daemon/reset-all!)))))

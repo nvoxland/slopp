@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1487,40 +1487,6 @@
         (let [r (external/full-check! sess)]
           (is (nil? (:standing r)) (pr-str (dissoc r :lint :warnings)))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external the-brief-says-when-the-served-ui-is-behind-the-store
-  ;; The `:app-behind` precedent, one listener over. A brief that hands a
-  ;; reader a url is the place they find out anything about it at all — a
-  ;; consumer read this brief through a twenty-minute window in which their
-  ;; app served old code and it said nothing, which is why `:app-behind` is
-  ;; here. The reviewer listener had the same hole and no counter: its route
-  ;; table is assembled once at serve time, so a route added afterwards 404s
-  ;; and the brief keeps announcing the url as though nothing were owed.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-uistale-" (System/nanoTime))
-        conn (db/open! dir)]
-    (try
-      (let [trunk (db/trunk-line-id! conn)
-            st    (store/ingest (store/empty-store) 'brief.one "(ns brief.one)\n\n(def a 1)\n")
-            _     (db/append! conn st (store/deltas st) ['brief.one] trunk nil)
-            stamp (slopp.currency/of conn trunk)
-            sess  (atom {:store st :db conn :line trunk
-                         :ui-url "http://127.0.0.1:1234/" :ui-stamp stamp})]
-
-        (testing "a listener serving the current store earns no remark"
-          (let [b (ops/session-brief sess)]
-            (is (= "http://127.0.0.1:1234/" (:ui b)) (pr-str b))
-            (is (nil? (:ui-stale b))
-                (str "silence is for nothing-to-doubt, or the line becomes noise: " (pr-str b)))))
-
-        (testing "and once the line moves under it, the brief says so beside the url"
-          (let [st2 (store/ingest st 'brief.two "(ns brief.two)\n\n(def b 2)\n")
-                new (vec (drop (count (store/deltas st)) (store/deltas st2)))]
-            (is (true? (db/append! conn st2 new ['brief.two] trunk (:head stamp)))
-                "fixture: the line really did move")
-            (let [b (ops/session-brief sess)]
-              (is (= "http://127.0.0.1:1234/" (:ui b)) "the url is still handed over")
-              (is (some? (:ui-stale b)) (pr-str b))))))
-      (finally (.close conn)))))
 
 (deftest ^:external the-model-side-is-read-beside-the-writer-not-in-the-query-door
   ;; `record-otel!` writes the measurements TABLE rather than the journal — a

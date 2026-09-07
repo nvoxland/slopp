@@ -192,8 +192,7 @@
   alone yields a working, localhost-bound, deny-by-default server."
   [{:key "app.name" :type [:string] :default nil
     :doc "Application name. Unset = the store directory name at build time."}
-   {:key "app.version" :type [:string] :default "0.0.0"
-    :doc "Application version, carried into build artifacts."}
+   
    {:key "app.main" :type [:qualified-symbol] :default nil
     :doc "The entry fn (app.core/-main). Unset = build's :main arg required."}
 
@@ -217,8 +216,7 @@
    {:key "webapp.enabled" :type [:boolean] :default false
     :doc "Whether this project's BROWSER owns routing and state — client-side routes, event dispatch, the ClojureScript build. Serving HTML needs only http; this is the app that runs in the page. Requires http (it has to be served) and NOT rest: a browser app may talk to a third-party API, a socket, or to no server data at all."}
 
-   {:key "slopp.hub.port" :type [:int {:min 0 :max 65535}] :default 7359
-    :doc "The hub this project registers with. The hub is a SEPARATE application (it never opens a store), so this is the one number both sides have to agree on by configuration rather than by sharing code — the project beats to it, the hub binds it. Everything else about the beat, including how often, comes back on the registration response. 0 = register with no hub."}
+   
    {:key "http.static.*" :type [:string] :default nil
     :doc "Static mount: the key's tail is the URL prefix, the value a files-manifest path prefix (http.static./assets = public serves public/cljs/main.js at /assets/cljs/main.js). A trailing slash on either is trimmed."}
    {:key "http.auth.providers" :type [:set-of [:enum "static" "bearer" "proxy-header" "oidc"]] :default #{}
@@ -358,7 +356,7 @@
   nil-puns. Some callers need it back: the dev server binds an explicitly
   pinned `http.port` but DERIVES one when nobody pinned it, because a fixed
   default collides between two projects on one machine (the reasoning
-  `api.server/derived-port` records). \"8080\" typed by hand and 8080
+  `slopp.webdev.live/derived-port` records). \"8080\" typed by hand and 8080
   arriving from the registry have to be told apart to do that.
 
   Exported for the same reason `effective` is: the config path is this

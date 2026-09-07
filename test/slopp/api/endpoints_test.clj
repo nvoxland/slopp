@@ -363,7 +363,9 @@
   ;; and nothing downstream is worth building.
   ;;
   ;; Two processes' worth of separation in one JVM: the producer serves over a
-  ;; real socket, and the consumer is a genuinely separate session and store.
+  ;; real socket — the daemon's route table for one project, bound here on an
+  ;; ephemeral port exactly as the daemon mounts it — and the consumer is a
+  ;; genuinely separate session and store.
   (let [;; the producer DECLARES its API, because the published document now
         ;; follows the store rather than the listener's own served list — a
         ;; reviewer listener describing its own surface as the project's was
@@ -374,11 +376,12 @@
                                 (str "(ns slopp.api.endpoints)\n\n"
                                      "(defn ^{:http/path \"/api/timeline\" :http/method :get"
                                      " :http/auth :public}\n  timeline \"T.\" [_] {:status 200})\n"))})
-        consumer (external/open!)]
+        consumer (external/open!)
+        srv      (slopp.http/serve! (assoc (server/serving-opts producer)
+                                           :http/host "127.0.0.1" :http/port 0))]
     (try
-      (let [r   (server/serve! producer 0)
-            out (cljs/generate-client-from!
-                 consumer (str "http://127.0.0.1:" (:port r) "/api/rest/paths")
+      (let [out (cljs/generate-client-from!
+                 consumer (str "http://127.0.0.1:" (:port srv) "/api/rest/paths")
                  :ns 'demo.client.api)
             st  (:store @consumer)
             src (fn [ns- n] (str (store/form-named st ns- n)))]
@@ -422,7 +425,7 @@
             (is (str/includes? w ".text") w)
             (is (not (str/includes? w ".json")) w))))
       (finally
-        (server/stop!)
+        (slopp.http/stop! srv)
         (ops/close! consumer)))))
 
 (deftest an-outline-row-says-what-a-form-TAKES-and-what-KIND-it-is

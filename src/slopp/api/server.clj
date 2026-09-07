@@ -1,76 +1,22 @@
 (ns slopp.api.server
-  "The listener a project serves its OWN reviewer UI on.
+  "The ROUTE TABLE of a project's own read API — what a session serves about
+  the store it holds, assembled by [[serving-opts]] and bound by whoever
+  listens. Nothing here binds a port: the daemon (`slopp.daemon`) mounts
+  each open project's table under `/slopp/projects/<slug>/` through
+  delegation, so one configured port serves every project on the machine
+  and the address story this namespace used to tell — derived from the
+  store dir, then deliberately not configurable, then a hub's to remember
+  — ended with the per-session listener it belonged to.
 
-  One per MCP process, over the live session — which is the whole reason this
-  is not the MCP transport. Warranty and observed examples ARE persisted
-  (`session/persist-trace!` at every verified run, reloaded by `open!`), so a
-  fresh session is not blank; it is BEHIND. It sees the last snapshot rather
-  than what the agent is working against right now, and it would boot a second
-  image to see even that.
-
-  Its address is derived, and as of phase 2 (2026-08-03) it is not
-  CONFIGURABLE either — `slopp.api.port` was a capability and is retired
-  (D-hub). The story ran in two steps: a fixed default worked for one project
-  on a machine and collided for the second, so the number became derived from
-  the store dir; and once every honest answer came from the derivation, a
-  knob for a number nobody chooses was just a way to disagree with it. Nobody
-  needs to know this port at all, because the address a human remembers
-  belongs to the HUB, which is its own project (`slopp-ui`) and proxies here.
-  `ui_serve {port}` is still an explicit override for one run."
+  What the table answers about is the SESSION it was assembled over.
+  Warranty and observed examples ARE persisted (`session/persist-trace!` at
+  every verified run, reloaded by `open!`), so a session opened fresh is not
+  blank; it is BEHIND, seeing the last snapshot. The daemon answers from the
+  project's reader — the landed branch — which is what a consumer of the
+  project's API wants; an agent's un-landed work is its own to read through
+  its thread."
   (:require [slopp.http :as slopp.http]
-            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel] [slopp.currency :as slopp.currency] [slopp.store.db :as db]))
-
-(defonce ^:private current
-  ;; defonce, not def: under --live this namespace reloads on every edit,
-  ;; and a plain def would drop the handle of a server still holding a port.
-  (atom nil))
-
-(defn ^:export running
-  "The live UI server as `{:port :url}`, or nil when none is."
-  []
-  (some-> @current (select-keys [:port :url])))
-
-(defn ^:export serving
-  "The running listener and the currency of what it SERVES — or nil when
-  nothing is up.
-
-  `{:url :port :process :derived-from :current? :why}`. `:process` is the
-  `{:pid :started}` that ANSWERS that url, because a listener runs in the MCP
-  host while `query_eval` runs in a child image JVM loading the whole store
-  fresh — same store, same code, two loading strategies, and nothing said so.
-  An evening was lost to that once, and it broke only because an eval happened
-  to print its own pid.
-
-  The route table, both
-  performer vocabularies and the shell's serve-time state (`:webapp/base`,
-  `:webapp/bundle`, `:webapp/routes`) are all assembled once by
-  `serving-opts` and then held by the listener, so a route added afterwards
-  answers 404 — correctly, for the table this process has, and
-  indistinguishably from a path that genuinely does not exist.
-
-  Re-deriving per request is not the answer: assembly walks every served
-  namespace's var metadata, and a listener that rebuilt itself on every
-  request would pay that on every request. What was missing is cheaper and
-  more honest — the listener knows what it was built from, so it can SAY it
-  is behind. `:current? nil` means the session carried no journal to compare
-  against, which is neither current nor stale and must not be reported as
-  either."
-  [session]
-  (when-let [c @current]
-    (let [r (slopp.currency/report (:db @session) (:stamp c))]
-      (cond-> (merge (select-keys c [:url :port :process]) r)
-        (false? (:current? r))
-        (assoc :remedy (str "ui_serve again — the route table is rebuilt at"
-                            " serve time, and only then"))))))
-
-(defn ^:export stop!
-  "Stop the UI server if one is running; true when it stopped something.
-  Idempotent, because eviction and an explicit stop are the same act."
-  []
-  (when-let [srv (:server @current)]
-    (slopp.http/stop! srv)
-    (reset! current nil)
-    true))
+            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel]))
 
 (def ^:export served-namespaces
   "Every namespace this project's API serves — endpoints AND read performers.
@@ -99,54 +45,6 @@
   EDN contract, nothing else. The pages a human looks at belong to the hub,
   which is a separate application (D-hub part 4)."
   ['slopp.api.reads 'slopp.api.endpoints])
-
-(defn ^:export derived-port
-  "A localhost port DERIVED from the store dir for this project's own UI
-  listener — stable across restarts, and different for every project on the
-  machine.
-
-  This is what replaced a fixed `slopp.api.port` default (D-hub). One well-known
-  port worked for exactly one project and collided for the second; deriving
-  makes the collision structurally impossible instead of configured away, and
-  nobody needs to know the number, because the address a human remembers is
-  the hub's.
-
-  SALTED — originally to keep it off the git listener's port for the same
-  dir, since one MCP process bound both and an unsalted formula would have
-  had every project collide with itself. That listener is gone and the salt
-  now distinguishes this from nothing. It STAYS anyway, and the reason is
-  the only one that matters here: the formula IS the address. Changing it
-  relocates every project's UI on every machine, and anything holding a
-  saved url points at a dead port. A vestigial salt is cheaper than that.
-
-  A preference, not a guarantee: a taken port falls back to an ephemeral one
-  at bind time, and the registered url carries whatever was actually bound."
-  [dir]
-  (+ 49152 (mod (hash (str "slopp-ui:" dir)) 16384)))
-
-(defn ^:export preferred-port
-  "Which port this project's API listener should try: an explicit request
-  first, then [[derived-port]] for `dir`, then 0 (ephemeral) when there is no
-  dir to derive from.
-
-  There is no configured step, and that is the point rather than an omission.
-  `slopp.api.port` was a capability until phase 2 (2026-08-03); the number is
-  an OUTPUT — the listener reports where it bound and nobody sets it. Which
-  is not the same as unpredictable: [[derived-port]] gives the same answer on
-  every restart for the same dir, because the formula IS the address (D-hub).
-  Unconfigured, not unstable.
-
-  It takes no `store`, and that is worth more than the tidiness: reaching into
-  a PROJECT's configuration for a generic listener's own address was the last
-  thing making module `slopp.api` depend on `slopp.project` at all.
-
-  ONE resolution, because two callers ask — the autostart in `slopp.mcp` and
-  the `ui_serve` tool. Two copies of this ladder disagreeing would put the API
-  on an address neither of them reported."
-  [dir explicit]
-  (or explicit
-      (some-> dir derived-port)
-      0))
 
 (defn ^:export serving-opts
   "Everything the reviewer API's opts say about the APPLICATION, with nothing
@@ -205,64 +103,3 @@
   is one place to keep right."
   [session]
   (slopp.http/context (serving-opts session)))
-
-(defn ^:export serve!
-  "Serve the reviewer UI on `port` over the CALLER's session, and return
-  `{:url :port}` — or `{:error :port}` when the port is taken.
-
-  The session is passed in rather than opened here, and that is the whole
-  reason this listener exists separately at all. The reviewer API is a
-  CUSTOM API for the UI — it reuses the web machinery, and it is deliberately
-  not part of what counts as this project's web app (D-http-api-distinct).
-  Not because the warranty is unwritable
-  — `session/persist-trace!` writes `:test-map` to store meta at every verified
-  run and `open!` loads it back, so a fresh session is not blank. Because what
-  it loads is the last SNAPSHOT: the trace an agent is working against mid-
-  episode is ahead of the persisted one, `:observed` the same, and opening a
-  session to find out would boot a second image of code this process already
-  has. A page that showed the warranty as of the last write instead of as of
-  now would be wrong exactly when someone is watching it change.
-
-  Two stances, both learned by Clerk the hard way. Serving again EVICTS the
-  running server instead of hunting for a free port — a url you were handed
-  should not quietly stop being the url that works. And a port someone else
-  holds is reported as a sentence, because `BindException` at an agent is a
-  stack trace where an instruction belongs.
-
-  `port` 0 binds an ephemeral port; the BOUND port is what comes back."
-  [session port & {:keys [routes]}]
-  (stop!)
-  (try
-    (let [srv (slopp.http/serve! (-> (serving-opts session)
-                                     ;; caller rows ride as DATA (a var per
-                                     ;; handler, like the otel row) so a layer
-                                     ;; above api can mount without an edge
-                                     (update :http/routes into (or routes []))
-                                     (assoc :http/host "127.0.0.1"
-                                            :http/port port)))
-          p   (:port srv)
-          url (str "http://127.0.0.1:" p "/")
-          ;; the route table and both performer vocabularies were just derived
-          ;; from the store, and the running listener will hold them until it
-          ;; is re-served. Stamp WHAT they came from, so [[serving]] can answer
-          ;; the question the listener would otherwise answer as a bare 404.
-          stamp (slopp.currency/of (:db @session) (:line @session))]
-      (reset! current {:server srv :port p :url url :stamp stamp
-                       ;; WHICH PROCESS answers this url. A listener runs in
-                       ;; the MCP host while `query_eval` runs in a child
-                       ;; image JVM that loads the whole store fresh — same
-                       ;; store, same code, two loading strategies, and the
-                       ;; only reason that was ever found is that an eval
-                       ;; happened to print its own pid.
-                       :process (db/this-process)})
-      (merge {:url url :port p :process (db/this-process)}
-             (slopp.currency/report (:db @session) stamp)))
-    (catch Exception e
-      ;; the recognition AND the sentence come from slopp.http — this used to
-      ;; walk its own cause chain and phrase its own answer, one of three
-      ;; listeners doing that differently. What stays here is the part that is
-      ;; genuinely this listener's: it REPORTS rather than throws, because the
-      ;; caller is a tool result.
-      (if-let [d (slopp.http/bind-diagnosis port e)]
-        {:error d :port port}
-        (throw e)))))

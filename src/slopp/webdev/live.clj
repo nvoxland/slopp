@@ -91,24 +91,23 @@
   "A localhost port DERIVED from the store dir for this project's APP server —
   stable across restarts, different for every project on the machine.
 
-  SALTED, and here the salt is still load-bearing. There were three
-  derivations of this shape; the git listener's went with the listener, so
-  this and `api.server/derived-port` are what remain — and one MCP
-  process binds both, so a shared formula would have every project
-  \"reliably colliding with itself\".
+  SALTED from when three derivations of this shape shared one process and
+  had to disagree; the git listener's and the per-session reviewer
+  listener's both went with their listeners (the daemon binds ONE configured
+  port for everything slopp itself serves), so this is the derivation that
+  remains. The salt stays: changing the formula moves every project's app
+  address, and a developer keeps the tab.
 
-  A PREFERENCE that can be refused, and here the answer DIVERGES from the UI
-  listener on purpose. `mcp/start-ui!` falls back to an ephemeral port when
-  its derived one is taken, because \"nobody needs to know this number; the
-  address a human remembers is the hub's\". Nobody remembers an address for
-  the app: a developer types it into a browser and keeps the tab. So a taken
-  port is REPORTED (`start!` says so, and `http.port` is the fix, named in
-  the message) rather than answered with a url that moves each time.
+  A PREFERENCE that can be refused. Nobody remembers an address for a
+  reviewer API, but a developer types the app's into a browser and keeps
+  it — so a taken port is REPORTED (`start!` says so, and `http.port` is the
+  fix, named in the message) rather than answered with a url that moves
+  each time.
 
   The realistic collision is with our OWN previous server, which `refresh!`
-  handles by stopping it before binding. A foreign holder is rare, and the
-  ladder the UI listener needed — explicit, configured, derived, ephemeral —
-  is not built here until something is actually colliding.
+  handles by stopping it before binding. A foreign holder is rare, and a
+  ladder — explicit, configured, derived, ephemeral — is not built here
+  until something is actually colliding.
 
   The reported url always carries the port actually BOUND, which is what
   `serve!` hands back, not what was asked for."
@@ -137,14 +136,12 @@
   `:namespaces` is DERIVED (`web/serving-namespaces`) — the app never hands
   over a list it can get wrong.
 
-  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES. The
-  registry default of 8080 stands for production, where a known number is the
-  point; a dev session wants collision-freedom instead, because two projects
-  on one machine both taking the default is not a rare case — it is the
-  second project. Same conclusion the API listener reached — see
-  `slopp.api.server/derived-port`, which puts it
-  as a fixed default having \"worked for exactly one project and collided for
-  the second\".
+  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES
+  ([[derived-port]]). The registry default of 8080 stands for production,
+  where a known number is the point; a dev session wants collision-freedom
+  instead, because two projects on one machine both taking the default is
+  not a rare case — it is the second project: a fixed default \"worked for
+  exactly one project and collided for the second\".
 
   `:mode` is `:dev`. It rides the plan so nothing downstream reads a dev plan
   as the shipped one: the two serve the same routes from different stores at

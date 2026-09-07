@@ -118,35 +118,6 @@
     (is (re-find #"is not a capability"
                  (str (capabilities/config-refusal "auth.oidc.client-secret" "abc123"))))))
 
-(deftest the-hub-port-is-the-only-port-setting-slopp-itself-owns
-  ;; D-hub, then phase 2 (2026-08-03). There used to be two `slopp.*` port
-  ;; keys and the pair was the point: one for the project's own API listener,
-  ;; one for the hub it registers with. Only the second survives, and the
-  ;; asymmetry is the lesson rather than an accident.
-  ;;
-  ;; `slopp.api.port` was RETIRED. A machine runs many slopp projects, so
-  ;; that listener could never have a fixed default — it is derived from the
-  ;; store dir, stable across restarts, and nobody has to know it because the
-  ;; address a human remembers is the hub's. Once every honest answer came
-  ;; from the derivation, the knob was a knob for a number nobody chooses:
-  ;; the one external adopter never set it, and `ui_serve {port}` already
-  ;; covers wanting a specific address for one run. See
-  ;; `slopp.api.server-test/the-preferred-port-is-derived-and-never-configured`.
-  (testing "the retired key is governed by nothing — not by a lingering entry"
-    ;; a removed capability that still resolves is worse than one that never
-    ;; left: `config_file` would go on accepting writes to a key no code reads
-    (is (nil? (capabilities/find-entry "slopp.api.port"))))
-  ;; The well-known port belongs to the HUB, and the hub is started by a
-  ;; human. This default is the one number both halves read: the project uses
-  ;; it to find a hub, the hub CLI uses it to bind. It is configurable
-  ;; precisely because it is an INPUT — an address to reach out to, chosen by
-  ;; whoever runs the hub — which is the distinction the retired key failed.
-  (let [entry (capabilities/find-entry "slopp.hub.port")]
-    (is (= "slopp.hub.port" (:key entry)))
-    (is (= 7359 (capabilities/effective (store/empty-store) "slopp.hub.port")))
-    (is (nil? (capabilities/check-value entry "0"))
-        "0 is legal and means: this project registers with no hub")))
-
 (deftest an-unset-port-does-not-report-a-number-nothing-binds
   ;; Measured by slopp-ui, 2026-08-01:
   ;;   query_capabilities → http.port  :effective 8080  (not :set)
@@ -305,7 +276,7 @@
     (testing "the owner is the key's first segment, so it cannot disagree with the name"
       (is (= "http" (:owner (row "http.port"))))
       (is (= "app" (:owner (row "app.name"))))
-      (is (= "slopp" (:owner (row "slopp.hub.port")))))
+      (is (= "rest" (:owner (row "rest.enabled")))))
     (testing "the report carries the vocabulary, not just the labels"
       (is (= capabilities/owners (:owners rep)))
       (is (string? (get (:owners rep) "http"))))

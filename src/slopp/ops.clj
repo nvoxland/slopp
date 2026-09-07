@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.currency :as slopp.currency] [slopp.project.dev :as dev]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.project.dev :as dev]))
 
 ^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, create-ns!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
 (declare add-form! add-require! auto-require-retry canonical-source! create-ns! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
@@ -3482,12 +3482,16 @@
                       (take 2)
                       (mapv #(-> (select-keys % [:commit :description :at :status])
                                  (update :description orient/snip 110))))
-        last-done (let [d (db/last-marker (:db @session) (engine/session-line session) :done)]
-                    (when (and d (or (= :red (get-in d [:findings :test-status]))
-                                     (pos? (get-in d [:findings :lint-errors] 0))))
-                      (-> (select-keys d [:label :at :findings])
-                          (assoc :note (str "the last done-point left problems —"
-                                            " address them or tell the user why not")))))
+        last-done (when-let [conn (:db @session)]
+                    ;; guarded on the connection like the thread and host
+                    ;; clauses: a session on a dir with no store yet — the
+                    ;; daemon's first on a fresh project — has nothing to ask
+                    (let [d (db/last-marker conn (engine/session-line session) :done)]
+                      (when (and d (or (= :red (get-in d [:findings :test-status]))
+                                       (pos? (get-in d [:findings :lint-errors] 0))))
+                        (-> (select-keys d [:label :at :findings])
+                            (assoc :note (str "the last done-point left problems —"
+                                              " address them or tell the user why not"))))))
         ;; the kernel ns exists only in a process that booted from a store
         ;; (the dev server, a jar launch) — reach it through the carrier and
         ;; treat any failure as absence, never an error
@@ -3590,30 +3594,16 @@
       ;; per-form half at done grain, and nobody adds ten of those up. A
       ;; consuming store hit exactly this — every route declaring a retired
       ;; spelling, so nothing registered and everything 404d — and diagnosed
-      ;; beat-contract drift from this brief's own `:hub-note`, because the
-      ;; fact it needed was not here to read.
+      ;; drift in a since-retired check-in protocol instead, because the fact
+      ;; it needed was not here to read.
       unread     (assoc :unread-declarations unread)
-      ;; the reviewer UI, when the server brought one up. It is for a HUMAN,
-      ;; and its only other announcement is a line on the server's stderr —
-      ;; which most clients never show anyone. Hand the url over when asked
-      ;; what is going on, rather than making them know to ask for it.
-      (:ui-url @session) (assoc :ui (:ui-url @session))
-      ;; …and whether the table behind that url is still the store's. The
-      ;; route table and both performer vocabularies are assembled ONCE at
-      ;; serve time, so a route added afterwards answers 404 — correctly, for
-      ;; the table that listener holds, and indistinguishably from a path that
-      ;; does not exist. Same hole `:app-behind` two clauses down was added
-      ;; for, on the listener that had no counter.
-      ;;
-      ;; Nil unless there is genuinely something to doubt: a line announcing
-      ;; that everything is fine every time is one a reader learns to skip,
-      ;; and this one has to be read on the rare occasion it appears.
-      (false? (:current? (slopp.currency/report (:db @session) (:ui-stamp @session))))
-      (assoc :ui-stale
-             (str "that listener's route table was built at "
-                  (:head (:ui-stamp @session))
-                  " and this line has moved since — a route added after it came"
-                  " up answers 404 until you ui_serve again"))
+      ;; this project's READ API on the daemon — `/slopp/projects/<slug>/api`:
+      ;; JSON, plus the surface documents under it. The address to hand a
+      ;; PROGRAM (a client generator, a script, slopp-ui); a human wants
+      ;; slopp-ui's pages, which read the same registry. Set by the daemon at
+      ;; attach, so a self-contained stdio server — which serves nothing over
+      ;; HTTP — has no line here to hand out.
+      (:api-url @session) (assoc :api (:api-url @session))
       ;; the APP slopp is running for this project, when it is running one.
       ;; Its only other announcement is a line on the server's stderr, which
       ;; most clients never show anyone — so an agent asked "what is going
@@ -3646,46 +3636,6 @@
       (and (:app-server @session) (not (:serving? (:app-server @session))))
       (assoc :app-note (str "slopp is running this project's app server and it"
                             " is DOWN: " (:reason (:app-server @session))))
-    ;; the HUB's url when this project registered with one — that is the
-    ;; address to hand a human on a machine running several projects, and
-    ;; the per-project one above is a derived port nobody should type
-    ;; the project's own page ON the hub, and ONLY while a hub is answering:
-    ;; the slug in it is minted by the hub and returned on every beat, so
-    ;; holding one is the proof we are registered rather than a guess. This
-    ;; used to be the configured hub root, set when the beat STARTED and never
-    ;; revisited — so a machine with no hub had orientation hand a human a
-    ;; connection refused. A hub is optional; absence is an ordinary state and
-    ;; has to be sayable.
-    (:hub @session) (assoc :hub (:hub @session))
-    ;; a hub that REFUSED our beat is a third state, and it must not read as
-    ;; the second. The hub validates each check-in against its own copy of the
-    ;; beat contract — a hand-maintained twin of ours, because neither store
-    ;; can read the other — so this 400 IS the notification that the two
-    ;; copies diverged. Called "no hub is answering" it sends someone to check
-    ;; whether a hub is running, the one thing that is not wrong.
-    (and (not (:hub @session)) (:hub-refused @session))
-    (assoc :hub-note
-           (str "the hub at " (:hub-configured @session) " REFUSED this"
-                " project's check-in with "
-                (:hub/refused (:hub-refused @session))
-                " — it is running and it rejected what we sent, so this is"
-                " ours to fix, not a missing hub. Its explanation: "
-                (pr-str (:hub/explain (:hub-refused @session)))
-                ". The beat contract crosses the split by COPY"
-                " (slopp.hub/project-beat here, its twin over there),"
-                " so a refusal is where drift between them surfaces"))
-
-    ;; NOT the refused case — cond-> tests every clause in order, so without
-    ;; this guard both fire and the generic note overwrites the specific one
-    (and (not (:hub @session))
-         (not (:hub-refused @session))
-         (:hub-configured @session))
-    (assoc :hub-note
-           (str "no hub is answering at " (:hub-configured @session)
-                " — this project keeps beating, so it appears within one"
-                " interval of a hub starting. Start one (the slopp-ui"
-                " project) or set the slopp.hub.port capability to 0. Until"
-                " then :ui is all there is, and it serves JSON"))
       relevant   (assoc :relevant relevant))))
 
 (defn ^:export journal
