@@ -92,21 +92,39 @@ def main():
             headers["Mcp-Session-Id"] = session
         req = urllib.request.Request(endpoint, data=line.encode("utf-8"),
                                      headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=3600) as r:
-                sid = r.headers.get("Mcp-Session-Id")
-                if sid:
-                    session = sid
-                body = r.read().decode("utf-8")
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8")
-            if e.code == 404 and session:
-                # the daemon reaped us (idle) or restarted: the client's next
-                # initialize mints a new session; say so once
-                log("session gone at the daemon — reconnect (/mcp) to re-initialize")
-                session = None
-        except Exception as e:
-            log(f"daemon unreachable: {e}")
+        body = None
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=3600) as r:
+                    sid = r.headers.get("Mcp-Session-Id")
+                    if sid:
+                        session = sid
+                    body = r.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8")
+                if e.code == 404 and session:
+                    # the daemon reaped us (idle) or restarted: the client's
+                    # next initialize mints a new session; say so once
+                    log("session gone at the daemon — reconnect (/mcp) to re-initialize")
+                    session = None
+                break
+            except Exception as e:
+                # the daemon went away under us (a `slopp daemon stop`, a
+                # kernel restart). Bring one up and try ONCE more: the answer
+                # is late rather than the session dead. The session id is
+                # gone with the old daemon; a 404 on the retry tells the
+                # client to re-initialize.
+                if attempt == 1:
+                    log(f"daemon unreachable ({e}) — ensuring one and retrying")
+                    base = ensure_daemon()
+                    endpoint = f"{base}/projects/{SLUG}/mcp"
+                    req = urllib.request.Request(endpoint, data=line.encode("utf-8"),
+                                                 headers=headers, method="POST")
+                    continue
+                log(f"daemon unreachable: {e}")
+                body = None
+        if body is None and not line:
             break
         if body.strip():
             out.write(body.strip() + "\n")

@@ -2893,3 +2893,37 @@ reading sessions through the pipe and reading the daemon's RSS.
 - `done` now reloads the touched namespaces and their dependents whole
   into the image before the verdict; on a done touching `slopp.ops.engine`
   (most of slopp depends on it) the closing done showed no visible cost.
+
+## 2026-09-07 — the "live on the daemon" block: what the dev instance's cold boot found
+
+- **The replay defect.** A session that absorbs another's writes by
+  incremental replay (a session ON the branch line — the daemon's reader)
+  appended a replayed `:add` and rendered the namespace in that order, while
+  the writer had arranged the form before its callers. Every warm check
+  agreed with the writer; only a process that had never seen the namespace
+  disagreed — the dev instance's boot, three times in one evening (`db-path`,
+  `enabled-runnables`, `app-managed?`, each "Unable to resolve symbol"). An
+  idle-thread session never showed it because it re-forks and reloads from
+  rows on sync, which is why the first two reproductions passed. Fixed:
+  `engine/arrange-replayed` after every incremental advance. The dev
+  instance's boot is the honest cold-load oracle and it was the standard
+  app machinery that surfaced it.
+- **The done-time reload is not a cold load.** Whole-namespace reload into
+  the warm image re-evaluates derived values (the 2026-09-04 shape) but
+  cannot see a forward reference: the var is already interned. Kept, since
+  it catches what it catches; the dev instance's boot after a done is the
+  cold oracle for the rest, and its failure still reaches the agent as an
+  app note rather than a verdict (friction filed).
+- **Restart path.** `slopp daemon stop` from the session: the old pipe died
+  on the refused connection, Claude Code restarted the stdio server, the
+  new pipe (carrying the new retry code) started a daemon, the session's
+  next call answered from it, and slopp2 re-opened from rows with its dev
+  instance up on 7358 within ~15 s. The pipe now re-ensures a daemon and
+  retries once on a refused connection, so future restarts cost one late
+  answer rather than a dead pipe.
+- **slopp's dev instance through the standard machinery.** `dev` config
+  `run.daemon.main = slopp.daemon/-main`, `args 7358`, `url …:7358/slopp/`;
+  `managed?` counts declared entries; the dev daemon records itself under
+  `~/.slopp/daemon-7358.json`. A pipe with `SLOPP_DAEMON_URL` pointed at it
+  dogfoods the tooling under development without touching the sessions on
+  the stable daemon.
