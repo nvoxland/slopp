@@ -6937,12 +6937,15 @@ run against the daemon.
   because the write path dirties an image and test runs instrument it — a
   shared image is reads-only under a lock, and nothing yet says that is
   worth having.
-- **Endpoints keep `/api` in their declarations (ruling 9, deferred).** The
-  daemon mounts each project's API by DELEGATION under
-  `/slopp/projects/<p>/api/…`, so contracts and validators apply unchanged
-  and the one prefix holds; dropping `/api` is a rename across the contract
-  tests and slopp-ui's generated client, and delegation made it unnecessary
-  for a working surface.
+- **Endpoints keep `/api` in their declarations (ruling 9, RESOLVED
+  2026-09-07, not merely deferred).** `/api` is not the hub's convention; it
+  is the store's `rest.prefix` — the API/CONTENT partition
+  (`slopp.edit.rest/rest-path-partition`) every project keeps so a proxy, a
+  CSP or a reader can tell a typed endpoint from content by URL alone. The
+  daemon mounts a project's API at `/slopp/projects/<p>/<rest.prefix>/…`,
+  the same shape for every project, and the one prefix holds. Dropping it
+  would have meant a store with no partition, or one that refuses every
+  content route.
 - **Whose code the stable daemon runs (Nathan, 2026-09-07: "Do mode a").**
   The daemon every session attaches to loads slopp's code from the slopp2
   store under `--live` and hot-reloads each landed change (`SLOPP_LIVE=1`,
