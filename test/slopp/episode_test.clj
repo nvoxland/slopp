@@ -1266,3 +1266,23 @@
           (is (= 1 (count ends)) (pr-str (map (juxt :op :agent) (ops/journal sess))))
           (is (:timing (first ends)) "the first ask's cost landed with its bracket")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-deletion-that-fixes-a-red-is-judged-and-supersedes-it
+  ;; A dead public form makes a done red. Deleting it IS the fix — and the
+  ;; next done used to judge nothing, because a deleted form has no
+  ;; namespace in the store any more, so the episode's touched set was
+  ;; empty: no lint, no dead-surface scan, `:test-status :none`, and the
+  ;; red still stood for the commit point (2026-09-06, on slopp itself).
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dl.core "(ns dl.core)\n")
+      (ops/add-form! sess 'dl.core "(defn keep-me \"Kept.\" [] 1)" :prompt "fixture" :agent "del")
+      (ops/add-form! sess 'dl.core "(defn ^:unused-ok caller \"Uses keep-me.\" [] (keep-me))" :prompt "fixture" :agent "del")
+      (ops/add-form! sess 'dl.core "(defn dead \"Nobody calls me.\" [] 2)" :prompt "fixture" :agent "del")
+      (let [red (external/done! sess :label "dead surface" :agent "del")]
+        (is (= :red (get-in red [:findings :test-status])) (pr-str (:findings red))))
+      (ops/delete-form! sess 'dl.core 'dead :prompt "the fix" :agent "del")
+      (let [r (external/done! sess :label "deleted it" :agent "del")]
+        (is (= :green (get-in r [:findings :test-status])) (pr-str (:findings r)))
+        (is (empty? (get-in r [:findings :unused-public])) (pr-str (:findings r))))
+      (finally (ops/close! sess)))))

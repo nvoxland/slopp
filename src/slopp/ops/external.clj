@@ -1570,8 +1570,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; remove it here. SILENT: the agent never manages declares, so this
         ;; runs for effect and is not reported.
         _
-        (doseq [ns* (distinct (keep #(store/ns-of-form-id (:store @session) %)
-                                    changed))]
+        (doseq [ns* (done/touched-namespaces session (:store @session) agent changed)]
           (ops/fix-declares! session ns*
                          :prompt (or label "done declare hygiene")
                          :agent agent))
@@ -1581,8 +1580,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; manages unused requires; done does.
         pruned-reqs
         (into (sorted-map)
-              (for [ns* (distinct (keep #(store/ns-of-form-id (:store @session) %)
-                                        changed))
+              (for [ns* (done/touched-namespaces session (:store @session) agent changed)
                     :let [pr (ops/prune-requires! session ns*
                                                   :prompt (or label "done require hygiene")
                                                   :agent agent)]
@@ -1590,7 +1588,7 @@ client-deps (merge (:client-deps st) (:client provided))
                 [ns* pr]))
         ;; kondo lint over every namespace touched since the last done-point —
         ;; carried mid-episode errors (stale callers) get re-checked HARD here
-        lint (done/anchored-lint session changed)
+        lint (done/anchored-lint session (done/touched-namespaces session (:store @session) agent changed))
         ;; the unused-public GATE: unmarked dead surface — and stale
         ;; ^:unused-ok markers — join as ERROR-grade lint (never demoted)
         unused-rep (let [st* (:store @session)]
@@ -1599,7 +1597,7 @@ client-deps (merge (:client-deps st) (:client provided))
                      ;; caller, so the store-wide sweep is real — it is just
                      ;; `full_check`'s job, not every done point's.
                      (read.modules/unused-report
-                      st* (distinct (keep #(store/ns-of-form-id st* %) changed))))
+                      st* (done/touched-namespaces session st* agent changed)))
         lint (done/with-unused-gate lint unused-rep)
         ;; NEW warnings (on forms this episode touched) report in full;
         ;; CARRIED ones (pre-existing, untouched forms) compress to a count —
@@ -1768,7 +1766,10 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; construction and stay on this side.
       episode-red? (or (and (pos? failures) (not foreign-red?))
                        iso-red? (pos? lint-errors) advisory-red?)
-      nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors))
+      nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors)
+                           ;; a delete-only episode has no form left to run a
+                           ;; suite for, but it DID judge its namespaces above
+                           (empty? (done/touched-namespaces session st* agent changed)))
       missing-doc (vec (sort (distinct
                               (keep (fn [fid]
                                       (when-let [e (store/form-by-id st* fid)]

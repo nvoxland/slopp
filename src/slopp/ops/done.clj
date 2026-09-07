@@ -34,7 +34,7 @@
             [slopp.index :as index]
             [slopp.index.normalize :as normalize]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [rewrite-clj.node :as n]))
+            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history]))
 
 (defn normalize-rewrites "Which of the episode's `changed` form ids the normalizer would actually
   rewrite, as `[{:form-id :form :node :applied}]` — pure, nothing committed.
@@ -110,9 +110,10 @@
           (side-effect-required? st ns-sym lib)))))
 
 (defn anchored-lint
-  "Kondo findings for every namespace the EPISODE TOUCHED, expressed as ANCHORS
-  rather than coordinates: each row carries the owning `:form` and an `:at`
-  snippet of the offending line, and `:row`/`:col` are dropped.
+  "Kondo findings for every namespace the EPISODE TOUCHED — `nses`, as
+  [[touched-namespaces]] derives them — expressed as ANCHORS rather than
+  coordinates: each row carries the owning `:form` and an `:at` snippet of
+  the offending line, and `:row`/`:col` are dropped.
 
   Episode-scoped on purpose. A store-wide scan at every done point re-judges
   code this episode never touched, which is `full_check`'s job — done reminds
@@ -121,12 +122,12 @@
   Coordinates never cross the wire because they are meaningless to a
   form-addressed agent — and stale the moment anything above them shifts. A
   form plus a match-ready snippet stays true and is what the edit tools take."
-  [session changed]
-  (vec (for [ns-sym (distinct (map #(store/ns-of-form-id (:store @session) %)
-                                   changed))
+  [session nses]
+  (vec (for [ns-sym (distinct nses)
              :let [st*   (:store @session)
                    src   (store.render/render-ns st* ns-sym)
                    lines (vec (str/split-lines src))]
+             :when (contains? (:namespaces st*) ns-sym)
              f (index/lint src (store/kondo-lang st* ns-sym))
              :when (not (marked-unused? st* ns-sym f))]
          ;; anchors, not coordinates: the owning form + a match-ready
@@ -239,3 +240,21 @@
                             :when      (:name e)]
                         [ns-sym (str (:name e))]))]
     (vec (sort (remove present expected)))))
+
+(defn touched-namespaces
+  "The namespaces this episode TOUCHED, derived from the deltas rather than
+  from the post-state: the namespace of every form in `changed` (ids the
+  store still holds), plus the `:ns` of every `:delete` delta the episode's
+  agents appended. A deleted form has no namespace in the store any more,
+  so a set derived from `ns-of-form-id` alone was EMPTY for a delete-only
+  episode — no lint, no dead-surface scan, a done that judged nothing — and
+  the red the deletion had just fixed stood for the commit point."
+  [session st agent changed]
+  (let [agents (engine/episode-agents session agent)]
+    (vec (distinct
+          (concat (keep #(store/ns-of-form-id st %) changed)
+                  (for [d (history/episode-span st agent)
+                        :when (and (= :delete (:op d))
+                                   (contains? agents (:agent d))
+                                   (symbol? (:ns d)))]
+                    (:ns d)))))))
