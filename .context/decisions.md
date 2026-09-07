@@ -6814,3 +6814,98 @@ rows, so the first marker after a done copied the whole store back onto
 the thread, the 138-copies problem through the side door. Pinned by
 `a-thread-with-a-stale-copied-view-and-no-work-follows-its-branch` and the
 marker block of `a-fresh-thread-holds-no-copy-until-it-writes`.
+
+## D-daemon (2026-09-06, user decision) — one slopp daemon per machine, reached over MCP/HTTP; identity is a thread id the agent carries
+
+Supersedes `D-mcp-stdio-only` (2026-08-01) and the data-plane half of
+`D-hub` (2026-07-27). Both are revisited here explicitly, with what changed.
+
+**What the August decision actually chose, and what it did not.** "We don't
+need/want multiple agents in the same mcp server" was a ruling about SESSIONS:
+agents must not share one. It arrived bundled with a process per agent,
+because stdio MCP is one process per client — but that bundling was never
+chosen, it was imposed by the transport. This decision keeps the property
+(every agent has its own session, thread and identity) and drops the
+process-per-agent.
+
+**What changed since, measured.**
+
+- *Memory.* 2026-08-28: the MCP server is ~2.6 GB against an oracle image's
+  ~722 MB — "close to FOUR TIMES an image, and it is the piece that is
+  identical in every writer." 2026-09-06 census on the dev box: three `--live`
+  servers resident (2.4 GB + 530 MB on slopp2, 102 MB on slopp-ui), and a
+  `full_check` killed for memory beside them.
+- *N readers.* Nearly every defect found 2026-09-03..06 was two-readers-
+  disagree at a seam nobody modelled as shared state: `.slopp/ui-port` (one
+  slot, N servers, the CLI routing into another session's server), the
+  `pending-intent` mailbox (2026-08-27: sessions consumed each other's asks
+  AND threads), live-host-vs-leftover, the OTLP exporter with no stable
+  address, `six-ways-two-readers-of-one-store-disagree`. The August lesson
+  in the findings log: "Concurrency held everywhere it was designed; it
+  failed at the one seam nobody modelled as shared state." One owner per
+  machine dissolves the class rather than fixing members.
+- *The registry gate fired.* `replica-model`'s process registry was parked on
+  "build when a second long-lived process actually exists", measured NOT
+  fired on 2026-08-15. On 2026-09-06 there were three.
+- *Subagents.* Claude Code subagents share their parent's MCP connection.
+  Under session-derived identity every subagent IS its parent; fan-out with
+  isolation is unreachable without an id the agent carries itself.
+
+**The rulings.**
+
+1. **One daemon per MACHINE**, not per store. D-hub's "a hub answering for N
+   stores would need N images, N classpaths, N versions" was about the UI
+   hub; for a daemon the images stay per-project, per-branch child
+   processes (so project-code isolation is untouched and `destroyForcibly`
+   still works), the daemon's classpath is slopp's own and shared, and what
+   is actually given up is **one slopp version per machine**. Accepted.
+2. **MCP over streamable HTTP to the daemon.** `slopp.mcp.http` (P4-m1's
+   transport, deleted 2026-08-01) is recovered from the delta log.
+3. **Identity is a THREAD id the agent carries.** `thread` is REQUIRED on
+   every write and routes it; `agent` is an OPTIONAL provenance label; a
+   write with no `thread` is REFUSED naming the fix (never assigned to an
+   anonymous thread — that is the stranded-thread bug as policy). Reads take
+   `branch` (default: the project's) and see the landed head; a read passing
+   `thread` sees that thread's un-landed view. The id survives `--resume`
+   (in the transcript) and compaction (the prompt hook re-prints it every
+   ask); the harness catalog becomes the hook's mint key and nothing more.
+   Nathan: rely "less on the claude session_id … and more on a 'thread id'
+   … which the agents can manage and pass along to calls themselves … it
+   can multiplex itself as it wants."
+4. **Child threads.** `thread_open {parent}` mints a thread that lands into
+   its parent's line; the parent lands the lot. The subagent story, and the
+   s16 differentiator made first-class.
+5. **A project is opened on the first attach and closed on the last
+   detach** — store, images, app server, registry row. The daemon stays up
+   with nothing loaded. Attach = an MCP session; a parent with subagents is
+   one attachment.
+6. **One oracle pool per (project, branch), shared by every reader; a
+   writing thread checks one out.** The 2026-08 warm pool was reverted at
+   zero gain in a single process with nothing to share across; this one is
+   measured before it is generalised.
+7. **Shared verdicts, one check queue, push.** The standing whole-store
+   verdict is per project keyed by head; concurrent checks at one head join
+   one run; the MCP stream carries `landed`/`app-refreshed`/`check-finished`.
+8. **Dev app servers are the daemon's job**, started on first attach on
+   that agent's branch — v1: one per project, on the first branch started,
+   reported so an agent can say which — and refreshed at done grain with a
+   stamp the daemon owns.
+9. **One surface, one prefix: `/slopp/…`.** `/slopp/projects` (the
+   registry), `/slopp/projects/<p>/{mcp,call,<resource>…}`, `/slopp/otel`
+   (the exporter appends the spec's `/v1/logs`). Endpoints declare
+   project-relative `:rest/path`s and are mounted per project. No `/api`,
+   no `/p/<slug>/api` — those were the hub proxy's conventions.
+10. **slopp-ui stays a separate store and process.** It is the consumer on a
+    different store and version that found most of the week's bugs; its
+    registry+proxy retire on its side because the daemon serves the registry
+    directly. Pinned always-open projects are a follow-on.
+
+**Deliberately not decided here:** conflict awareness before land time (CAS
+at land stays the arbiter); the daemon as a scheduler (v1 budgets are caps
+with refusal messages).
+
+**Order.** Explicit thread ids and branch-scoped reads land FIRST, on the
+current stdio servers, as their own unit — independently valuable, and they
+de-risk the transport change. `slopp <dir>` (stdio, self-contained) stays
+working as fallback and baseline until the memory and concurrency evals have
+run against the daemon.

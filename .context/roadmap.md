@@ -682,3 +682,44 @@ uberjar with a pinned sha256, which `plugins/slopp/bin/slopp` fetches and caches
 resolution, a network or `~/.m2` dependency on first run, and a different CI
 proof. Do it when someone actually needs to override a bundled lib, or when the
 kernel's dep list gets big enough that shipping it stops making sense.
+
+## P5 — The daemon (user-directed, 2026-09-06; decided as D-daemon)
+
+One slopp daemon per machine, reached over MCP/streamable-HTTP; identity is
+a thread id the agent carries. Supersedes P4-m1's retirement (the transport
+comes back) and the per-agent-server split of P4-m5b/c (the split stays at
+the SESSION, not the process). Reasons and rulings: `decisions.md`
+§ D-daemon. The drivers, measured: ~2.6 GB per server × N agents; every
+2026-09-03..06 defect an N-readers bug at an unmodelled shared seam;
+subagents share their parent's MCP connection so session-derived identity
+cannot tell them apart.
+
+- **P5-0 — explicit thread ids and branch-scoped reads, on today's stdio
+  servers.** `thread` required on every write (refused without), `agent` an
+  optional label, reads by `branch` with `thread` for the un-landed view;
+  `thread_open` incl. `parent` (child threads land into the parent's line);
+  the prompt hook mints the thread from the harness session id and re-prints
+  it every ask; ledger/turns/mailbox keyed by thread. Ships alone; it is
+  independently valuable and de-risks the rest. Stop point: the s16
+  two-session setup with distinct threads, parent+children fan-in, and a
+  read with/without `thread`.
+- **P5-1 — the daemon.** `slopp daemon`: binds and answers `initialize`/
+  `tools/list` before opening anything (Claude Code's startup retry window
+  is ~7 s); one prefix `/slopp/…` — `/slopp/projects` (the registry, which
+  is `replica-model`'s design finally triggered), `/slopp/projects/<p>/
+  {mcp,call,<resource>}`, `/slopp/otel` (+ the spec's `/v1/logs`). A project
+  opens on first attach and closes on last detach. Oracle pools per
+  (project, branch) shared by readers; shared standing verdict + one check
+  queue per project; push events on the MCP stream; dev app servers owned
+  per project (v1: one, on the first branch started, reported). `:rest/path`
+  declarations drop `/api` and mount per project.
+- **P5-2 — clients.** `.mcp.json` → `{type http, url …/slopp/projects/
+  <slug>/mcp, headers {X-Slopp-Dir …}}`; `SessionStart` hook starts a dead
+  daemon; `bin/slopp` routes to it (one-shot fallback for reads only);
+  slopp-ui reads the registry directly and its hub proxy retires on their
+  side. Skills follow.
+- **P5-3 — retire stdio only after** the memory census and the s16
+  concurrency eval have been rerun against the daemon.
+
+Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
+always-open projects, the daemon as a scheduler.
