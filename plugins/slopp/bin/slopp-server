@@ -16,6 +16,15 @@ DIR="${1:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 # namespaces as the store changes — the self-host loop (set it in the repo's
 # .claude/settings.json env). Default stays snapshot: a fresh session always
 # boots the current store anyway.
+# The DAEMON mode: SLOPP_DAEMON=1 makes this entry a PIPE onto the machine's
+# one slopp (bin/slopp-pipe.py) instead of a JVM per session — the same
+# stdio contract from Claude Code's side, MCP over HTTP from the daemon's.
+# Opt-in until the memory census and the concurrency evals rerun against it.
+if [ "${SLOPP_DAEMON:-}" = "1" ]; then
+  cd "$DIR"
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/slopp-pipe.py"
+fi
+
 ARGS=("$DIR")
 if [ "${SLOPP_LIVE:-}" = "1" ]; then
   ARGS+=("--live")
