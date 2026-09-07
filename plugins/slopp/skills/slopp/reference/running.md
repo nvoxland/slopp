@@ -126,13 +126,13 @@ no `thread` is refused, like a one-shot; a project's dev app server is
 started once by the daemon, on the first branch attached, and every
 session's `done` refreshes that one server.
 
-**Opting a Claude Code session in:** `SLOPP_DAEMON=1` (in the repo's
-`.claude/settings.json` env, beside `SLOPP_LIVE`) makes the plugin's stdio
-entry a PIPE onto the daemon — `bin/slopp-pipe.py`, one small process per
-session instead of a JVM — which starts a daemon if none answers and names
-the project by its cwd. Nothing about the tools changes; subagents share
-the pipe as they shared the server. Default stays the per-session JVM until
-the memory census and the concurrency evals rerun against the daemon.
+**This is the default.** The plugin's stdio entry is a PIPE onto the daemon
+— `bin/slopp-pipe.py`, one small process per session instead of a JVM —
+which starts a daemon if none answers, names the project by its cwd, and
+re-attaches by itself after a daemon restart or an idle reap. Nothing
+about the tools changes; subagents share the pipe as they shared the
+server. `SLOPP_DAEMON=0` (in the repo's `.claude/settings.json` env) keeps
+the per-session JVM: self-contained, no shared process, the fallback.
 
 Under the daemon three things are shared that used to be per session. Your
 oracle image boots on the FIRST call that needs one (an eval, a write, a
