@@ -99,8 +99,23 @@
   open request: it needs something to put in a 400 body, and an exception there
   becomes a 500 about the server for a fault that is the client's."
   [schema {:keys [path-params query-params body]}]
-  (if (nil? schema)
+  (cond
+    (nil? schema)
     {:value {:path-params path-params :query-params query-params :body body}}
+
+    ;; the carriers MERGE, so a body has to be an object to take part. An
+    ;; array, a bare scalar, or the raw text an adapter passes through when
+    ;; the body did not parse is the caller's fault and gets the caller's
+    ;; answer — a value for a 400 — rather than the throw `merge` would raise
+    ;; and the 500 about the server that turned into.
+    (and (some? body) (not (map? body)))
+    {:error (str "request does not match the declared contract: the body must"
+                 " be a JSON object, and this one is "
+                 (cond (string? body)     "text that did not parse as JSON"
+                       (sequential? body) "an array"
+                       :else              (str "a " (.getSimpleName (class body)))))}
+
+    :else
     (let [text (fn [m] (when m (m/decode schema m mt/string-transformer)))
           json (fn [m] (when m (m/decode schema m mt/json-transformer)))
           p    (text path-params)
@@ -119,13 +134,6 @@
           ;; query string gets a correct response, renders correctly, and shows
           ;; up only in somebody else's access log.
           judged (closed-map schema)]
-      ;; CLOSED at the top level, and only there. `:rest/request` names what the
-      ;; caller sends; a key it does not name is not something the caller sends,
-      ;; and carrying it means an undeclared value crossed the boundary this
-      ;; function exists to be. The consuming case is sharper than tidiness: a
-      ;; client leaking its OWN routing state into the query string gets a
-      ;; correct response, renders correctly, and shows up only in somebody
-      ;; else's access log.
       (if (m/validate judged merged)
         {:value {:path-params p :query-params q :body b}}
         {:error (str "request does not match the declared contract: "

@@ -37,12 +37,6 @@
   [_ctx id]
   {:user/id id})
 
-(defn ^{:http/method :get :http/path "/t/page" :http/auth :public}
-  t-html
-  "Test endpoint that serves a document and publishes no typed contract."
-  [_req]
-  {:status 200 :http/raw true :body "<h1>hi</h1>"})
-
 (defn ^{:unused-ok "the negative control for route discovery — it exists to be PASSED OVER by the scan, so having no caller is the property under test"} plain "Not an endpoint." [x] x)
 
 (deftest routes-derive-from-var-metadata
@@ -110,6 +104,12 @@
       ;; than no fallback: the app loses its only way to say \"no such thing\".
       (is (nil? (router/match rows :get "/nonsense")))
       (is (nil? (router/match rows :get "/api/typo"))))))
+
+(defn ^{:http/method :get :http/path "/t/page" :http/auth :public}
+  t-html
+  "Test endpoint that serves a document and publishes no typed contract."
+  [_req]
+  {:status 200 :http/raw true :body "<h1>hi</h1>"})
 
 (deftest a-row-carries-the-CONTRACT-its-endpoint-declared
   ;; The row is what the dispatcher holds at request time, and until now it

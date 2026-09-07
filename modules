@@ -9,7 +9,7 @@ slopp.coldload-gate: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.commit: slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.concurrency: slopp.read slopp.store slopp.ops (test)
 slopp.currency: slopp.store
-slopp.daemon: slopp.api slopp.cache slopp.http slopp.mcp slopp.ops slopp.otel slopp.store
+slopp.daemon: slopp.api slopp.cache slopp.http slopp.mcp slopp.ops slopp.otel slopp.rest slopp.store
 slopp.edit: slopp.image slopp.index slopp.project slopp.store slopp.ops (test)
 slopp.edit-group: slopp.read slopp.store slopp.ops (test)
 slopp.effect-boundary: slopp.edit slopp.read slopp.ops (test)

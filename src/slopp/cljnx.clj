@@ -152,174 +152,6 @@
   ([hiccup] (of hiccup nil))
   ([hiccup opts] (str/join "\n" (lines hiccup opts))))
 
-(defn ^:export marked-pages
-  "The loaded pages that declare their own address, as a `[[pattern page]]`
-  route table sorted by pattern.
-
-  A page carries `^{:webapp/path \"/things\"}`, and that marker is the ONE
-  declaration of where it answers: a build reads it to generate the browser's
-  table, `/api/webapp/paths` publishes it, and a write gate refuses two pages
-  claiming one address. Before this, the entry ALSO listed `[[\"/things\" things]]`
-  — a second coordinate system for the same fact, and the decorative one was
-  the marker, because nothing broke when the two disagreed.
-
-  Scanned from the IMAGE rather than from a store, because this is the half a
-  JVM drive reaches: the vars that are loaded are the code that will run. The
-  store-side half of the same fact is `slopp.rules.webapp/page-routes`, which is
-  what generates the browser's table at build time; they are two readers of one
-  marker rather than two declarations.
-
-  `clojure.*` and `cljs.*` are skipped — nothing there is an app's page — and
-  everything else is scanned, so a namespace that marks a page it did not mean
-  to serve serves it. Sorted so the table is stable to read and to diff; the
-  matcher decides precedence for itself and does not care about order."
-  []
-  (vec (sort-by first
-                (for [n (all-ns)
-                      :let [s (str (ns-name n))]
-                      :when (not (or (= s "clojure") (.startsWith s "clojure.")
-                                     (= s "cljs") (.startsWith s "cljs.")
-                                     ;; a TEST namespace's page is not the
-                                     ;; app's. The store-side reader excludes
-                                     ;; them for the reason every publisher
-                                     ;; does — a fixture is not surface — and
-                                     ;; two readers of one marker that disagree
-                                     ;; is the failure this whole seam exists
-                                     ;; to remove. It bites harder here: a
-                                     ;; verification image loads EVERY test
-                                     ;; namespace, so one fixture page would
-                                     ;; join every app driven in that image
-                                     (.endsWith s "-test")))
-                      [_ v] (ns-publics n)
-                      :let [p (:webapp/path (meta v))]
-                      :when (string? p)]
-                  [p @v]))))
-
-^{:unsafe "resolves malli by NAME, for this namespace's standing reason: it
-  ships to EVERY store through capabilities/shipping-common, so a static
-  require would put malli in the vendored deps of a command-line app that will
-  never see a schema. Degrades to nil rather than throwing, so a store without
-  malli gets no checker instead of a broken drive."}
-(defn ^:export response-checker
-  "`(fn [schema value] nil-or-message)` for a HEADLESS drive, or nil when malli
-  cannot be resolved.
-
-  **Why the check lives on this side.** A descriptor carries `:rest/response`,
-  and `slopp.webapp/fetch!` applies a checker if one is supplied — but it does
-  not build one, because that namespace is `:cljc`. Calling malli from there
-  was measured at **555 KB** added to every browser bundle, charged to apps
-  that declare no contract as much as to those that do, for a promise the
-  server already keeps: `slopp.http.dispatch` checks every response under
-  `slopp.rest/validating` before the bytes leave.
-
-  Here it is free — the JVM has malli on the classpath already — and it catches
-  the case a browser check never sees: **a canned FIXTURE that has drifted from
-  the contract it claims to exercise.** That is the failure the only real
-  browser app kept hitting; the bugs it found this week came from fixtures
-  quietly bypassing the machinery they were supposed to be driving.
-
-  What is NOT covered, said plainly: a browser app talking to a THIRD-PARTY api
-  at runtime. Nothing slopp-side validates that server and this checker is not
-  in the page, so such an app supplies its own `:check` — one line, charged to
-  the one app that needs it.
-
-  **Judged on the value AS RECEIVED**, not round-tripped.
-  `slopp.rest.contract/check-response` serializes and re-parses because it
-  judges what a consumer WOULD receive from a value the server still holds. A
-  driven page receives what `:webapp/call` handed it, which is already the
-  arrived shape."
-  []
-  (let [valid? (try (requiring-resolve 'malli.core/validate)
-                    (catch Throwable _ nil))
-        why    (try (requiring-resolve 'malli.core/explain)
-                    (catch Throwable _ nil))]
-    (when (and valid? why)
-      (fn [schema value]
-        (when (and schema (not (valid? schema value)))
-          (str "this endpoint's answer does not match the contract it"
-               " publishes: "
-               (pr-str (mapv (fn [e] {:in (:in e) :got (:value e)})
-                             (:errors (why schema value))))))))))
-
-^{:unsafe "resolves slopp.webapp/slopp.http by NAME, and a static require is
-  impossible here rather than merely inconvenient: this namespace ships to
-  EVERY store through capabilities/shipping-common, while the two it derives
-  from are vendored per FAMILY. A store using http is handed no slopp.webapp
-  source at all, so requiring it would make the fake browser fail to load for
-  the majority app type. The obligation is owned by construction — a store
-  whose entry returns :webapp/state IS a webapp store, so that family is
-  present whenever the branch that resolves it runs. store/late-ref is the
-  dialect's carrier for this and is unavailable for the same reason: slopp.store
-  is not vendored either."}
-(defn ^:export driver-for
-  "Whatever an app's entry returned, as the ONE driving contract [[open!]] takes.
-
-  Three shapes go in and one comes out:
-
-  | the entry returned | derived by |
-  |---|---|
-  | a webapp DECLARATION (`:webapp/state`) | `slopp.webapp/driver` over its wiring |
-  | a served CTX (`:http/routes`) | `slopp.http/driver` |
-  | the contract already | itself |
-
-  **There is exactly one of these, and it is public, because two would drift.**
-  The `screen` tool derives a driver from a store's marked entry; a project's
-  own tests drive the same entry. If this were internal the tool would derive
-  and the tests would spell their own — a second wiring of one app with nothing
-  comparing them, which is the lookalike the fake browser exists to remove,
-  reintroduced one level up. And it would PASS, because each half would be
-  asserting against its own reconstruction.
-
-  **A browser app's ROUTE TABLE is derived from the pages, not declared** —
-  [[marked-pages]] says how and why. A declared `:webapp/routes` still wins, so
-  a test can pin one table without the image's opinion of it.
-
-  **The discriminator is `:webapp/state`, and it used to be `:webapp/routes`.**
-  It had to move when the table stopped being written: a browser app is a state
-  atom plus pages, and the atom is the one key `wiring` cannot default.
-
-  **The capabilities resolve LATE, inside the branch that matched**, which is
-  load-bearing rather than stylistic — see the `^:unsafe` note above.
-
-  Identity on the contract itself, so a caller never has to ask which of the
-  three it is holding. A shape it cannot place refuses HERE, where the mistake
-  was made, rather than a screen later."
-  [entry]
-  (cond
-    (not (map? entry))
-    (throw (ex-info (str "an app entry returns a MAP — a webapp declaration"
-                         " (:webapp/state), a served ctx (:http/routes), or a"
-                         " page ({:state :view}) — got " (pr-str entry))
-                    {:got entry}))
-
-    (:webapp/state entry)
-    (let [wire ((requiring-resolve 'slopp.webapp/wiring)
-                (-> entry
-                    (update :webapp/routes #(or % (marked-pages)))
-                    ;; a driven page's canned answers are checked against the
-                    ;; contracts their descriptors publish — see
-                    ;; [[response-checker]] for why the check is HERE and not
-                    ;; in the page. A declared one wins, so an app can supply
-                    ;; its own or opt out with a no-op.
-                    (update :webapp/check-response #(or % (response-checker)))))]
-      ((requiring-resolve 'slopp.webapp/driver) wire))
-
-    (:http/routes entry)
-    ((requiring-resolve 'slopp.http/driver) entry)
-
-    ;; already the contract — :view or :document is what produces a screen, and
-    ;; open! judges the rest
-    (or (:document entry) (:view entry))
-    entry
-
-    :else
-    (throw (ex-info (str "this entry is none of the three shapes an app can"
-                         " return: no :webapp/state (a browser app), no"
-                         " :http/routes (a served app), and no :view or"
-                         " :document (a page wired by hand). Keys: "
-                         (pr-str (vec (sort (map str (keys entry))))))
-                    {:keys (vec (keys entry))}))))
-
 (defn tree
   "The session's current document.
 
@@ -338,15 +170,123 @@
       (view @(:state app))
       document)))
 
-(defn- external-url?
-  "Whether `url` leaves this app — an absolute url with a scheme.
+(defn ^:export text
+  "What is on the screen right now, as readable text — the whole assertion
+  surface in one call.
 
-  One definition because there are two askers: the caller handing a url to
-  [[visit!]], and an app answering a redirect to one. They must agree about
-  what \"elsewhere\" means; they say different things about whose mistake it
-  is."
-  [url]
-  (boolean (re-find #"^[a-z][a-z0-9+.-]*://" (str url))))
+  ```clj
+  (screen b)                       ; the page
+  (screen b \"main\")                ; one region, and THROWS if it is not there
+  (screen b \"main\" {:detail :prose})
+  ```
+
+  `(screen b)` is `(slopp.cljnx/of (tree b))`, which is the line every
+  test writes and the one worth not retyping. The REGION arity is the one that
+  earns its place: a whole-page `str/includes?` is one keystroke from asserting
+  nothing in particular, and that is not hypothetical — the bug that prompted
+  this whole exercise was a tint check matching its pattern anywhere on the
+  page, so it claimed the diagram, checked a list, and stayed green with the
+  layout torn out.
+
+  Naming the region makes the narrow assertion the SHORTER one to write, which
+  is the only kind of discipline that survives contact with a deadline. And a
+  region that is not on the screen refuses rather than scoping to nothing —
+  otherwise every absence assertion downstream of it passes over a blank page.
+
+  Options are [[lines]]'s (`:detail`, `:list-head`, `:region`) and an option
+  outside that vocabulary REFUSES there — a typo'd `:detial` used to silently
+  answer structured, a wrong answer reported as success."
+  ([session] (of (tree session)))
+  ([session region] (text session region nil))
+  ([session region opts]
+   (of (tree session) (assoc opts :region region))))
+
+(defn fill!
+  "Type `value` into the field `name` addresses, running the app's own handler.
+  Returns the session, so calls thread.
+
+  `name` is the field's `:placeholder`, `:name`, `:id` or `:aria-label` —
+  whichever the app happens to have written. Both event names are tried,
+  because Reagent apps write `:on-change` and a Replicant `:on` map usually
+  names `:input`.
+
+  **A control constrains its values the way a browser does.** A `<select>`
+  only ever produces one of its options' values, so a `value` no option
+  carries REFUSES, listing the choices — a test filling a value production
+  cannot produce asserts nothing. A checkbox has no text either way: its
+  `value` here is its checked state, the boolean passed through verbatim.
+
+  **The DATA form is the portable one, and for an input it is the only one.**
+  It reaches `:dispatch` as `(action value)` — the action verbatim and the
+  typed text as a SCALAR. slopp invents no event, which is the whole point:
+  Replicant's real event map carries `:replicant/dom-event` and no `:value`,
+  so the typed text lives behind `(.. e -target -value)` — interop, which
+  cannot run on a JVM at all. An earlier cut of this passed
+  `{:value v :target {:value v}}`, and a handler written against it would have
+  passed every headless test and done NOTHING in a browser. A tool that
+  green-lights production breakage is worse than one that refuses.
+
+  **A FUNCTION handler on an input cannot be portable**, and that is a fact
+  about browsers rather than a gap here: in a browser it receives a DOM event,
+  and reading a value out of one is interop. The map passed to it is a best
+  effort for an app whose own `:cljs` shell normalises to the same shape
+  DELIBERATELY — if yours does not, use the data form. The rule that makes this
+  go away: your `:cljs` dispatcher turns the event into a scalar, and your
+  `:cljc` interpreter never sees an event of any shape, so neither driver's
+  event can be right while the other is wrong."
+  [session name value]
+  (let [node    (hiccup/field (tree session) name)
+        [how v] (hiccup/input-handler node)]
+    (when (= :select (hiccup/tag node))
+      (let [choices (vec (keep #(:value (hiccup/attrs %))
+                               (filter #(= :option (hiccup/tag %))
+                                       (hiccup/kids node))))]
+        (when-not (some #{value} choices)
+          (throw (ex-info (str "the select " (pr-str name) " has no option "
+                               (pr-str value) " — a browser only lets you"
+                               " choose among: " (str/join ", " (map pr-str choices))
+                               ". A test filling a value production cannot"
+                               " produce asserts nothing")
+                          {:field name :value value :options choices})))))
+    (case how
+      :fn   (v {:value value :target {:value value}})
+      :data (if-let [d (:dispatch (:app @session))]
+              (d v value)
+              (throw (ex-info (str "the field " (pr-str name) " carries handler DATA "
+                                   (pr-str v) " and this page declares no :dispatch,"
+                                   " so typing would change nothing. Add"
+                                   " :dispatch (fn [action value] …) to the page")
+                              {:field name :handler v})))
+      ;; no handler: a plain form field. Its value goes nowhere until the form
+      ;; is SUBMITTED, so it is remembered here — which is exactly where a
+      ;; browser keeps it, and why refusing this field said something false.
+      (swap! session assoc-in
+             [:form-values (or (:name (hiccup/attrs node)) name)] value))
+    session))
+
+(defn- unary?
+  "Whether `f` accepts exactly one argument — read off the function, never
+  discovered by catching `ArityException`, which would report a genuine arity
+  bug INSIDE a handler as a signature mismatch.
+
+  Two cases, and the review measured what missing the first one costs:
+
+  - A `RestFn` accepts one arg when its required positional count is ≤ 1.
+    `(fn [e & more])` compiles to a RestFn declaring only `doInvoke`, so a
+    declared-methods probe called it zero-arg and manufactured
+    `Wrong number of args (0)` for a perfectly valid handler. `with-meta` on
+    ANY fn wraps it in an `AFunction$1` — which IS a RestFn of requiredArity
+    0 delegating through `applyTo` — so the wrapper is the same case.
+  - Otherwise a compiled fn declares one `invoke` method per arity it
+    supports, and `getDeclaredMethods` answers directly. (`getMethods` would
+    not: `AFn` declares a throwing `invoke(Object)` for every fn, so the
+    inherited view says yes to everything.)"
+  [f]
+  (if (instance? clojure.lang.RestFn f)
+    (<= (.getRequiredArity ^clojure.lang.RestFn f) 1)
+    (boolean (some #(and (= "invoke" (.getName ^java.lang.reflect.Method %))
+                         (= 1 (count (.getParameterTypes ^java.lang.reflect.Method %))))
+                   (.getDeclaredMethods (class f))))))
 
 (defn- redirect-location
   "The url `resp` sends a browser to next, or nil when it sends it nowhere.
@@ -390,6 +330,16 @@
     (if (or (nil? (:status resp)) (vector? b))
       b
       [:div [:p (str "HTTP " (:status resp))] [:pre (if (string? b) b (pr-str b))]])))
+
+(defn- external-url?
+  "Whether `url` leaves this app — an absolute url with a scheme.
+
+  One definition because there are two askers: the caller handing a url to
+  [[visit!]], and an app answering a redirect to one. They must agree about
+  what \"elsewhere\" means; they say different things about whose mistake it
+  is."
+  [url]
+  (boolean (re-find #"^[a-z][a-z0-9+.-]*://" (str url))))
 
 (defn- document-visit!
   "Go to `path` through the app's `:document`, following redirects, and leave
@@ -713,30 +663,6 @@
      ;; asked to hand it back
      (if url (visit! session url) session))))
 
-(defn- unary?
-  "Whether `f` accepts exactly one argument — read off the function, never
-  discovered by catching `ArityException`, which would report a genuine arity
-  bug INSIDE a handler as a signature mismatch.
-
-  Two cases, and the review measured what missing the first one costs:
-
-  - A `RestFn` accepts one arg when its required positional count is ≤ 1.
-    `(fn [e & more])` compiles to a RestFn declaring only `doInvoke`, so a
-    declared-methods probe called it zero-arg and manufactured
-    `Wrong number of args (0)` for a perfectly valid handler. `with-meta` on
-    ANY fn wraps it in an `AFunction$1` — which IS a RestFn of requiredArity
-    0 delegating through `applyTo` — so the wrapper is the same case.
-  - Otherwise a compiled fn declares one `invoke` method per arity it
-    supports, and `getDeclaredMethods` answers directly. (`getMethods` would
-    not: `AFn` declares a throwing `invoke(Object)` for every fn, so the
-    inherited view says yes to everything.)"
-  [f]
-  (if (instance? clojure.lang.RestFn f)
-    (<= (.getRequiredArity ^clojure.lang.RestFn f) 1)
-    (boolean (some #(and (= "invoke" (.getName ^java.lang.reflect.Method %))
-                         (= 1 (count (.getParameterTypes ^java.lang.reflect.Method %))))
-                   (.getDeclaredMethods (class f))))))
-
 (defn- submit!
   "Submit the form enclosing `node` — navigate to its `action` with the named
   fields serialised. Returns the session, or nil when `node` is not a submit
@@ -841,138 +767,6 @@
         (submit! session node)))
     session))
 
-(defn ^:export url
-  "The address this session is showing — its address bar.
-
-  After a redirect chain this is where it ENDED UP, not what was asked for,
-  which is the whole reason it is worth reading. nil before the first visit."
-  [session]
-  (:path @session))
-
-(defn ^:export status
-  "The http status of the screen this session is showing, or nil.
-
-  ```clj
-  (is (= 404 (status b)))
-  ```
-
-  nil is an answer and not a gap: a page produced by `:navigate`, or by a
-  `:document` that hands back plain hiccup, made no request, and inventing
-  `200` for it would answer a question nobody asked.
-
-  It is a FIELD because it used to be a sentence. A non-hiccup body renders as
-  `HTTP 404` on the screen — which a reader needs — so the only way to assert
-  a status was a whole-page `str/includes?`, one keystroke from asserting
-  nothing in particular. That is the failure [[lines]] was split into two
-  faces to prevent, and it applies to every screen fact that has a number."
-  [session]
-  (:status @session))
-
-(defn ^:export redirects
-  "The hops taken to reach the current screen — `[{:from :status :to} …]`,
-  empty when the address answered directly.
-
-  Worth having separately from [[url]] because they assert different things:
-  `url` says where we are, which a direct visit could also have reached. This
-  says the app SENT us, which is the behaviour a sign-in or post-redirect-get
-  test is actually about."
-  [session]
-  (or (:redirects @session) []))
-
-(defn ^:export text
-  "What is on the screen right now, as readable text — the whole assertion
-  surface in one call.
-
-  ```clj
-  (screen b)                       ; the page
-  (screen b \"main\")                ; one region, and THROWS if it is not there
-  (screen b \"main\" {:detail :prose})
-  ```
-
-  `(screen b)` is `(slopp.cljnx/of (tree b))`, which is the line every
-  test writes and the one worth not retyping. The REGION arity is the one that
-  earns its place: a whole-page `str/includes?` is one keystroke from asserting
-  nothing in particular, and that is not hypothetical — the bug that prompted
-  this whole exercise was a tint check matching its pattern anywhere on the
-  page, so it claimed the diagram, checked a list, and stayed green with the
-  layout torn out.
-
-  Naming the region makes the narrow assertion the SHORTER one to write, which
-  is the only kind of discipline that survives contact with a deadline. And a
-  region that is not on the screen refuses rather than scoping to nothing —
-  otherwise every absence assertion downstream of it passes over a blank page.
-
-  Options are [[lines]]'s (`:detail`, `:list-head`, `:region`) and an option
-  outside that vocabulary REFUSES there — a typo'd `:detial` used to silently
-  answer structured, a wrong answer reported as success."
-  ([session] (of (tree session)))
-  ([session region] (text session region nil))
-  ([session region opts]
-   (of (tree session) (assoc opts :region region))))
-
-(defn fill!
-  "Type `value` into the field `name` addresses, running the app's own handler.
-  Returns the session, so calls thread.
-
-  `name` is the field's `:placeholder`, `:name`, `:id` or `:aria-label` —
-  whichever the app happens to have written. Both event names are tried,
-  because Reagent apps write `:on-change` and a Replicant `:on` map usually
-  names `:input`.
-
-  **A control constrains its values the way a browser does.** A `<select>`
-  only ever produces one of its options' values, so a `value` no option
-  carries REFUSES, listing the choices — a test filling a value production
-  cannot produce asserts nothing. A checkbox has no text either way: its
-  `value` here is its checked state, the boolean passed through verbatim.
-
-  **The DATA form is the portable one, and for an input it is the only one.**
-  It reaches `:dispatch` as `(action value)` — the action verbatim and the
-  typed text as a SCALAR. slopp invents no event, which is the whole point:
-  Replicant's real event map carries `:replicant/dom-event` and no `:value`,
-  so the typed text lives behind `(.. e -target -value)` — interop, which
-  cannot run on a JVM at all. An earlier cut of this passed
-  `{:value v :target {:value v}}`, and a handler written against it would have
-  passed every headless test and done NOTHING in a browser. A tool that
-  green-lights production breakage is worse than one that refuses.
-
-  **A FUNCTION handler on an input cannot be portable**, and that is a fact
-  about browsers rather than a gap here: in a browser it receives a DOM event,
-  and reading a value out of one is interop. The map passed to it is a best
-  effort for an app whose own `:cljs` shell normalises to the same shape
-  DELIBERATELY — if yours does not, use the data form. The rule that makes this
-  go away: your `:cljs` dispatcher turns the event into a scalar, and your
-  `:cljc` interpreter never sees an event of any shape, so neither driver's
-  event can be right while the other is wrong."
-  [session name value]
-  (let [node    (hiccup/field (tree session) name)
-        [how v] (hiccup/input-handler node)]
-    (when (= :select (hiccup/tag node))
-      (let [choices (vec (keep #(:value (hiccup/attrs %))
-                               (filter #(= :option (hiccup/tag %))
-                                       (hiccup/kids node))))]
-        (when-not (some #{value} choices)
-          (throw (ex-info (str "the select " (pr-str name) " has no option "
-                               (pr-str value) " — a browser only lets you"
-                               " choose among: " (str/join ", " (map pr-str choices))
-                               ". A test filling a value production cannot"
-                               " produce asserts nothing")
-                          {:field name :value value :options choices})))))
-    (case how
-      :fn   (v {:value value :target {:value value}})
-      :data (if-let [d (:dispatch (:app @session))]
-              (d v value)
-              (throw (ex-info (str "the field " (pr-str name) " carries handler DATA "
-                                   (pr-str v) " and this page declares no :dispatch,"
-                                   " so typing would change nothing. Add"
-                                   " :dispatch (fn [action value] …) to the page")
-                              {:field name :handler v})))
-      ;; no handler: a plain form field. Its value goes nowhere until the form
-      ;; is SUBMITTED, so it is remembered here — which is exactly where a
-      ;; browser keeps it, and why refusing this field said something false.
-      (swap! session assoc-in
-             [:form-values (or (:name (hiccup/attrs node)) name)] value))
-    session))
-
 (defn drive!
   "Run an ordered `steps` script against `session`. Returns the session.
 
@@ -1034,3 +828,209 @@
                              " — this one has " (pr-str (vec (keys step))))
                         {:step step})))))
   session)
+
+(defn ^:export url
+  "The address this session is showing — its address bar.
+
+  After a redirect chain this is where it ENDED UP, not what was asked for,
+  which is the whole reason it is worth reading. nil before the first visit."
+  [session]
+  (:path @session))
+
+(defn ^:export status
+  "The http status of the screen this session is showing, or nil.
+
+  ```clj
+  (is (= 404 (status b)))
+  ```
+
+  nil is an answer and not a gap: a page produced by `:navigate`, or by a
+  `:document` that hands back plain hiccup, made no request, and inventing
+  `200` for it would answer a question nobody asked.
+
+  It is a FIELD because it used to be a sentence. A non-hiccup body renders as
+  `HTTP 404` on the screen — which a reader needs — so the only way to assert
+  a status was a whole-page `str/includes?`, one keystroke from asserting
+  nothing in particular. That is the failure [[lines]] was split into two
+  faces to prevent, and it applies to every screen fact that has a number."
+  [session]
+  (:status @session))
+
+(defn ^:export redirects
+  "The hops taken to reach the current screen — `[{:from :status :to} …]`,
+  empty when the address answered directly.
+
+  Worth having separately from [[url]] because they assert different things:
+  `url` says where we are, which a direct visit could also have reached. This
+  says the app SENT us, which is the behaviour a sign-in or post-redirect-get
+  test is actually about."
+  [session]
+  (or (:redirects @session) []))
+
+(defn ^:export marked-pages
+  "The loaded pages that declare their own address, as a `[[pattern page]]`
+  route table sorted by pattern.
+
+  A page carries `^{:webapp/path \"/things\"}`, and that marker is the ONE
+  declaration of where it answers: a build reads it to generate the browser's
+  table, `/api/webapp/paths` publishes it, and a write gate refuses two pages
+  claiming one address. Before this, the entry ALSO listed `[[\"/things\" things]]`
+  — a second coordinate system for the same fact, and the decorative one was
+  the marker, because nothing broke when the two disagreed.
+
+  Scanned from the IMAGE rather than from a store, because this is the half a
+  JVM drive reaches: the vars that are loaded are the code that will run. The
+  store-side half of the same fact is `slopp.rules.webapp/page-routes`, which is
+  what generates the browser's table at build time; they are two readers of one
+  marker rather than two declarations.
+
+  `clojure.*` and `cljs.*` are skipped — nothing there is an app's page — and
+  everything else is scanned, so a namespace that marks a page it did not mean
+  to serve serves it. Sorted so the table is stable to read and to diff; the
+  matcher decides precedence for itself and does not care about order."
+  []
+  (vec (sort-by first
+                (for [n (all-ns)
+                      :let [s (str (ns-name n))]
+                      :when (not (or (= s "clojure") (.startsWith s "clojure.")
+                                     (= s "cljs") (.startsWith s "cljs.")
+                                     ;; a TEST namespace's page is not the
+                                     ;; app's. The store-side reader excludes
+                                     ;; them for the reason every publisher
+                                     ;; does — a fixture is not surface — and
+                                     ;; two readers of one marker that disagree
+                                     ;; is the failure this whole seam exists
+                                     ;; to remove. It bites harder here: a
+                                     ;; verification image loads EVERY test
+                                     ;; namespace, so one fixture page would
+                                     ;; join every app driven in that image
+                                     (.endsWith s "-test")))
+                      [_ v] (ns-publics n)
+                      :let [p (:webapp/path (meta v))]
+                      :when (string? p)]
+                  [p @v]))))
+
+^{:unsafe "resolves malli by NAME, for this namespace's standing reason: it
+  ships to EVERY store through capabilities/shipping-common, so a static
+  require would put malli in the vendored deps of a command-line app that will
+  never see a schema. Degrades to nil rather than throwing, so a store without
+  malli gets no checker instead of a broken drive."}
+(defn ^:export response-checker
+  "`(fn [schema value] nil-or-message)` for a HEADLESS drive, or nil when malli
+  cannot be resolved.
+
+  **Why the check lives on this side.** A descriptor carries `:rest/response`,
+  and `slopp.webapp/fetch!` applies a checker if one is supplied — but it does
+  not build one, because that namespace is `:cljc`. Calling malli from there
+  was measured at **555 KB** added to every browser bundle, charged to apps
+  that declare no contract as much as to those that do, for a promise the
+  server already keeps: `slopp.http.dispatch` checks every response under
+  `slopp.rest/validating` before the bytes leave.
+
+  Here it is free — the JVM has malli on the classpath already — and it catches
+  the case a browser check never sees: **a canned FIXTURE that has drifted from
+  the contract it claims to exercise.** That is the failure the only real
+  browser app kept hitting; the bugs it found this week came from fixtures
+  quietly bypassing the machinery they were supposed to be driving.
+
+  What is NOT covered, said plainly: a browser app talking to a THIRD-PARTY api
+  at runtime. Nothing slopp-side validates that server and this checker is not
+  in the page, so such an app supplies its own `:check` — one line, charged to
+  the one app that needs it.
+
+  **Judged on the value AS RECEIVED**, not round-tripped.
+  `slopp.rest.contract/check-response` serializes and re-parses because it
+  judges what a consumer WOULD receive from a value the server still holds. A
+  driven page receives what `:webapp/call` handed it, which is already the
+  arrived shape."
+  []
+  (let [valid? (try (requiring-resolve 'malli.core/validate)
+                    (catch Throwable _ nil))
+        why    (try (requiring-resolve 'malli.core/explain)
+                    (catch Throwable _ nil))]
+    (when (and valid? why)
+      (fn [schema value]
+        (when (and schema (not (valid? schema value)))
+          (str "this endpoint's answer does not match the contract it"
+               " publishes: "
+               (pr-str (mapv (fn [e] {:in (:in e) :got (:value e)})
+                             (:errors (why schema value))))))))))
+
+^{:unsafe "resolves slopp.webapp/slopp.http by NAME, and a static require is
+  impossible here rather than merely inconvenient: this namespace ships to
+  EVERY store through capabilities/shipping-common, while the two it derives
+  from are vendored per FAMILY. A store using http is handed no slopp.webapp
+  source at all, so requiring it would make the fake browser fail to load for
+  the majority app type. The obligation is owned by construction — a store
+  whose entry returns :webapp/state IS a webapp store, so that family is
+  present whenever the branch that resolves it runs. store/late-ref is the
+  dialect's carrier for this and is unavailable for the same reason: slopp.store
+  is not vendored either."}
+(defn ^:export driver-for
+  "Whatever an app's entry returned, as the ONE driving contract [[open!]] takes.
+
+  Three shapes go in and one comes out:
+
+  | the entry returned | derived by |
+  |---|---|
+  | a webapp DECLARATION (`:webapp/state`) | `slopp.webapp/driver` over its wiring |
+  | a served CTX (`:http/routes`) | `slopp.http/driver` |
+  | the contract already | itself |
+
+  **There is exactly one of these, and it is public, because two would drift.**
+  The `screen` tool derives a driver from a store's marked entry; a project's
+  own tests drive the same entry. If this were internal the tool would derive
+  and the tests would spell their own — a second wiring of one app with nothing
+  comparing them, which is the lookalike the fake browser exists to remove,
+  reintroduced one level up. And it would PASS, because each half would be
+  asserting against its own reconstruction.
+
+  **A browser app's ROUTE TABLE is derived from the pages, not declared** —
+  [[marked-pages]] says how and why. A declared `:webapp/routes` still wins, so
+  a test can pin one table without the image's opinion of it.
+
+  **The discriminator is `:webapp/state`, and it used to be `:webapp/routes`.**
+  It had to move when the table stopped being written: a browser app is a state
+  atom plus pages, and the atom is the one key `wiring` cannot default.
+
+  **The capabilities resolve LATE, inside the branch that matched**, which is
+  load-bearing rather than stylistic — see the `^:unsafe` note above.
+
+  Identity on the contract itself, so a caller never has to ask which of the
+  three it is holding. A shape it cannot place refuses HERE, where the mistake
+  was made, rather than a screen later."
+  [entry]
+  (cond
+    (not (map? entry))
+    (throw (ex-info (str "an app entry returns a MAP — a webapp declaration"
+                         " (:webapp/state), a served ctx (:http/routes), or a"
+                         " page ({:state :view}) — got " (pr-str entry))
+                    {:got entry}))
+
+    (:webapp/state entry)
+    (let [wire ((requiring-resolve 'slopp.webapp/wiring)
+                (-> entry
+                    (update :webapp/routes #(or % (marked-pages)))
+                    ;; a driven page's canned answers are checked against the
+                    ;; contracts their descriptors publish — see
+                    ;; [[response-checker]] for why the check is HERE and not
+                    ;; in the page. A declared one wins, so an app can supply
+                    ;; its own or opt out with a no-op.
+                    (update :webapp/check-response #(or % (response-checker)))))]
+      ((requiring-resolve 'slopp.webapp/driver) wire))
+
+    (:http/routes entry)
+    ((requiring-resolve 'slopp.http/driver) entry)
+
+    ;; already the contract — :view or :document is what produces a screen, and
+    ;; open! judges the rest
+    (or (:document entry) (:view entry))
+    entry
+
+    :else
+    (throw (ex-info (str "this entry is none of the three shapes an app can"
+                         " return: no :webapp/state (a browser app), no"
+                         " :http/routes (a served app), and no :view or"
+                         " :document (a page wired by hand). Keys: "
+                         (pr-str (vec (sort (map str (keys entry))))))
+                    {:keys (vec (keys entry))}))))

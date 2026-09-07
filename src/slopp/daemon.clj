@@ -1,13 +1,16 @@
 (ns slopp.daemon
   "ONE slopp per machine. A project is opened on the first agent's attach (an
   MCP session at its endpoint) and closed on the last detach; the daemon
-  itself stays up with nothing loaded. It is the registry (`/slopp/projects`)
-  and the owner of every surface under `/slopp/`."
+  itself stays up with nothing loaded. It is the registry (`/api/projects`)
+  and the owner of every surface under the one root `/api/` — each route a
+  DECLARED rest endpoint on this namespace's public vars, assembled and
+  validated by the same component every project's API goes through, with
+  each open project's own API mounted at `/api/projects/<slug>/<resource>`."
   (:require [clojure.string :as str]
             [slopp.http :as slopp.http]
             [slopp.mcp.http :as mcp.http]
             [slopp.ops :as ops]
-            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp]))
+            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -95,12 +98,7 @@
                   :cli (some? (:cli p))
                   :app (when (:url app)
                          {:url (:url app)
-                          :branch (some-> reader deref :branch)})})))))
-
-(defn- projects-endpoint
-  "`GET /slopp/projects` — the registry, as data."
-  [_req]
-  {:status 200 :body (projects)})
+                          :branch (some-> reader deref :branch str)})})))))
 
 (defn ^:export daemon-file
   "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
@@ -155,25 +153,6 @@
   "The open project a path's slug names, or nil."
   [slug]
   (first (filter #(= slug (:slug %)) (vals (:projects @state)))))
-
-^:unsafe (defn- api-endpoint
-  "`/slopp/projects/:slug/api/**` — the project's typed read API, delegated
-  into its own assembled context with the prefix stripped: `/api/<rest>` is
-  what that context declares, so every contract, validator and performer
-  applies unchanged. The project is the slug's, or `X-Slopp-Dir`'s under
-  slug `_` (the prompt hook knows its dir and no slug). An unknown one is
-  404; a dir nobody has attached is not opened by a read."
-  [req]
-  (let [slug (get-in req [:path-params :slug])
-        p    (or (project-by-slug slug)
-                 (when-let [dir (:dir (project-dir req))]
-                   (get-in @state [:projects dir])))]
-    (if p
-      (slopp.http/handle! (:ctx (api! (:dir p)))
-                    (-> req
-                        (assoc :uri (str "/api/" (get-in req [:path-params :*] "")))
-                        (dissoc :path-params :query-params :http/deps :http/reads)))
-      {:status 404 :body {:error (str "no open project " slug)}})))
 
 (defn ^:export token
   "The per-boot secret the write door checks — minted on first ask, written
@@ -316,19 +295,6 @@
                            (keep #(get-in % [:cli :session]) (vals (:projects st)))
                            (keep #(get-in % [:api :reader]) (vals (:projects st))))))))
 
-(defn- status-endpoint
-  "`GET /slopp/status` — the daemon about itself: how many projects and
-  sessions it holds, how many images are up against the cap, what the
-  telemetry sink placed and dropped."
-  [_req]
-  (let [st @state]
-    {:status 200
-     :body {:projects (count (:projects st))
-            :sessions (count (:sessions st))
-            :images   {:up (images-up) :cap @image-cap}
-            :otel     (:otel st)
-            :port     (:port (:server st))}}))
-
 (defn- image-permit
   "The answer a lazy boot asks for: nil when an image may boot, else the
   refusal — which names the cap, what holds it, and the two ways past it."
@@ -396,46 +362,13 @@
         (when-let [d (get-in st [:otel-dirs thread])]
           {:dir d}))))
 
-^:unsafe (defn- otel-endpoint
-  "`POST /slopp/otel/v1/logs` — the machine's ONE telemetry sink. An
-  exporter given `OTEL_EXPORTER_OTLP_ENDPOINT=…/slopp/otel` appends the
-  spec's `/v1/logs` itself. Each `api_request` record routes by its
-  `session.id` — the agent's thread id — to the project holding that
-  thread: through an attached session, the project's reader, or — once the
-  project has closed — the dir this daemon remembers for the thread,
-  through a connection opened for the batch and closed after it. What
-  names no thread this daemon has ever placed is counted and dropped,
-  never guessed at. A body that does not parse is 400, the non-retryable
-  answer; anything that parses is 200, as [[slopp.api.otel/logs]] explains."
-  [req]
-  (let [r (api.otel/decode (:body req))]
-    (if (:bad r)
-      {:status 400 :http/raw true
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string
-              {:partialSuccess {:errorMessage (str "could not parse this export: " (:bad r))}})}
-      (do (doseq [[thread recs] (group-by :session (slopp.otel/api-requests (:ok r)))]
-            (let [{:keys [session dir]} (session-holding thread)
-                  placed (cond
-                           session (do (ops/record-otel! session recs) true)
-                           dir     (when-let [conn (try (db/open! dir {:create? false})
-                                                        (catch Throwable _ nil))]
-                                     (try (ops/record-otel! (atom {:db conn}) recs) true
-                                          (finally (try (.close ^java.sql.Connection conn)
-                                                        (catch Throwable _ nil)))))
-                           :else   false)]
-              (swap! state update-in [:otel (if placed :routed :dropped)] + (count recs))))
-          {:status 200 :http/raw true
-           :headers {"Content-Type" "application/json"}
-           :body "{}"}))))
-
 (defn- api-url
   "Where project `proj`'s read API answers on THIS daemon —
-  `http://127.0.0.1:<port>/slopp/projects/<slug>/api` — or nil while the
-  daemon has bound nothing (a test attaching straight to the registry)."
+  `http://127.0.0.1:<port>/api/projects/<slug>` — or nil while the daemon
+  has bound nothing (a test attaching straight to the registry)."
   [proj]
   (when-let [p (:port (:server @state))]
-    (str "http://127.0.0.1:" p "/slopp/projects/" (:slug proj) "/api")))
+    (str "http://127.0.0.1:" p "/api/projects/" (:slug proj))))
 
 (defn ^:export attach!
   "Open an MCP session on the project at `dir`, opening the project itself
@@ -488,18 +421,6 @@
         (future (mcp/start-app! @owner)))
       {:sid sid :session session})))
 
-^:unsafe (defn- mcp-endpoint
-  "`/slopp/projects/:slug/mcp` — the envelope, lent this daemon's doors."
-  [req]
-  (mcp.http/endpoint {:slopp.mcp.http/lookup  lookup!
-                      :slopp.mcp.http/attach! (fn [req]
-                                                (let [{:keys [dir error]} (project-dir req)]
-                                                  (if error
-                                                    {:error error}
-                                                    (attach! dir (get-in req [:path-params :slug])))))
-                      :slopp.mcp.http/detach! detach!}
-                     req))
-
 (defn- cli-session!
   "The CLI session the write door runs a project's calls on, opened on
   first use — opening the project under `slug` if nothing is attached —
@@ -529,8 +450,86 @@
           (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
           session)))))
 
-^:unsafe (defn- call-endpoint
-  "`POST /slopp/projects/:slug/call` — the write door: `{tool arguments
+(def ^:private registry-contract
+  "What `/api/projects` answers: one row per open project, the shape
+  [[projects]] builds."
+  [:sequential
+   [:map
+    [:slug {:doc "the display name the project answers under in every path"} :string]
+    [:dir {:doc "the project's absolute directory — what it is resolved by"} :string]
+    [:opened-at {:doc "when this daemon opened it, epoch milliseconds"} :int]
+    [:sessions {:doc "MCP sessions attached right now"} :int]
+    [:cli {:doc "whether the write door holds a CLI session for it"} :boolean]
+    [:app {:doc "what its dev server serves, or nil when it serves nothing"}
+     [:maybe [:map
+              [:url {:doc "the app server's address"} :string]
+              [:branch {:doc "the branch the app is served from"} [:maybe :string]]]]]]])
+
+(defn ^{:http/method :get :rest/path "/api/projects" :http/auth :public
+        :rest/response registry-contract}
+  projects-endpoint
+  "`GET /api/projects` — THE REGISTRY, as data: every project this daemon
+  holds. What slopp-ui reads to know what to render."
+  [_req]
+  {:status 200 :body (projects)})
+
+(def ^:private status-contract
+  "What `/api/status` answers: the daemon about itself."
+  [:map
+   [:projects {:doc "open projects"} :int]
+   [:sessions {:doc "attached MCP sessions, across every project"} :int]
+   [:images {:doc "verification images up, against the machine-wide cap"}
+    [:map [:up {:doc "child JVMs alive right now"} :int]
+          [:cap {:doc "the most this daemon will boot (SLOPP_DAEMON_MAX_IMAGES)"} :int]]]
+   [:otel {:doc "telemetry records placed into a store, and dropped for naming no thread"}
+    [:maybe [:map [:routed {:doc "records placed"} :int]
+                  [:dropped {:doc "records nobody could own"} :int]]]]
+   [:port {:doc "the port bound, or nil before the daemon listens"} [:maybe :int]]])
+
+(defn ^{:http/method :get :rest/path "/api/status" :http/auth :public
+        :rest/response status-contract}
+  status-endpoint
+  "`GET /api/status` — the daemon about itself: how many projects and
+  sessions it holds, how many images are up against the cap, what the
+  telemetry sink placed and dropped."
+  [_req]
+  (let [st @state]
+    {:status 200
+     :body {:projects (count (:projects st))
+            :sessions (count (:sessions st))
+            :images   {:up (images-up) :cap @image-cap}
+            :otel     (:otel st)
+            :port     (:port (:server st))}}))
+
+(def ^:private jsonrpc-contract
+  "One JSON-RPC message, as the MCP endpoint takes it. One per POST: the
+  2025-06-18 spec dropped batching, the pipe never sent one, and a batch
+  is the contract's 400 rather than a second shape to carry."
+  [:map
+   [:slug {:doc "the project's display name, from the path"} :string]
+   [:jsonrpc {:doc "the JSON-RPC version, always \"2.0\""} :string]
+   [:id {:optional true :doc "the request id; absent (or null) on a notification"} [:maybe [:or :int :string]]]
+   [:method {:optional true :doc "the method, on a request or a notification"} :string]
+   [:params {:optional true :doc "the method's parameters"} :map]
+   [:result {:optional true :doc "a client's answer to a request the server made"} :any]
+   [:error {:optional true :doc "a client's error answer to such a request"} :map]])
+
+(def ^:private call-contract
+  "What `slopp <op>` posts to the write door: the op, its arguments, and
+  the daemon's token."
+  [:map
+   [:slug {:doc "an open project's display name, or `_` to name the project by X-Slopp-Dir"} :string]
+   [:tool {:doc "the op to run"} :string]
+   [:arguments {:optional true :doc "the op's arguments"} :map]
+   [:token {:optional true :doc "the daemon's per-boot secret, from ~/.slopp/daemon.json; refused without it"} :string]
+   [:agent {:optional true :doc "a provenance label for the call"} :string]])
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/call" :http/auth :public
+                 :rest/request call-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
+  call-endpoint
+  "`POST /api/projects/:slug/call` — the write door: `{tool arguments
   token}` runs on the project named by `X-Slopp-Dir` (slug `_`) or by an
   open project's slug, on its CLI session. The token is the daemon's and
   [[slopp.mcp/http-call!]] checks it. A WRITE naming no thread is refused
@@ -547,11 +546,7 @@
               {:status status :http/raw true
                :headers {"Content-Type" "application/json"}
                :body (json/generate-string m)})
-        b   (let [body (:body req)]
-              (cond (map? body) body
-                    (string? body) (try (json/parse-string body true) (catch Exception _ {}))
-                    (nil? body) {}
-                    :else (try (json/parse-string (slurp body) true) (catch Exception _ {}))))
+        b    (or (:body req) {})
         tool (:tool b)
         args (or (:arguments b) {})]
     (cond
@@ -568,31 +563,153 @@
                            " thread_open {} and carried on every later call.")})
 
       :else
-      (let [s (cli-session! dir (let [slug (get-in req [:path-params :slug])]
-                                  (when (not= "_" slug) slug)))]
-        (mcp/http-call! (assoc req :http/deps {:session s} :body b))))))
+      (mcp/http-call! (assoc req :body b)
+                      (cli-session! dir (let [slug (get-in req [:path-params :slug])]
+                                          (when (not= "_" slug) slug)))))))
 
-(defn ^:export routes
-  "Every route under `/slopp/`: the registry and the daemon's status, each
-  project's MCP endpoint by method, its write door, its read API by
-  delegation, and the one OTLP sink. Route rows as data with a var per
-  handler, so a live reload reaches the running listener."
+(def ^:private otel-contract
+  "An OTLP/HTTP JSON logs export — the spec's ExportLogsServiceRequest,
+  whose one key holds batches slopp reads but does not own the shape of."
+  [:map
+   [:resourceLogs {:optional true :doc "the export's resource batches, in OTLP's own shape"} [:sequential :any]]])
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/otel/v1/logs" :http/auth :public
+                 :rest/request otel-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "OTLP's own acknowledgement: an empty object"}
+  otel-endpoint
+  "`POST /api/otel/v1/logs` — the machine's ONE telemetry sink. An
+  exporter given `OTEL_EXPORTER_OTLP_ENDPOINT=…/api/otel` appends the
+  spec's `/v1/logs` itself. Each `api_request` record routes by its
+  `session.id` — the agent's thread id — to the project holding that
+  thread: through an attached session, the project's reader, or — once the
+  project has closed — the dir this daemon remembers for the thread,
+  through a connection opened for the batch and closed after it. What
+  names no thread this daemon has ever placed is counted and dropped,
+  never guessed at. A body that is not an OTLP export is the contract's
+  400, the non-retryable answer; anything that is answers 200, as
+  [[slopp.api.otel/logs]] explains."
+  [req]
+  (let [r (api.otel/decode (:body req))]
+    (if (:bad r)
+      {:status 400 :http/raw true
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string
+              {:partialSuccess {:errorMessage (str "could not parse this export: " (:bad r))}})}
+      (do (doseq [[thread recs] (group-by :session (slopp.otel/api-requests (:ok r)))]
+            (let [{:keys [session dir]} (session-holding thread)
+                  placed (cond
+                           session (do (ops/record-otel! session recs) true)
+                           dir     (when-let [conn (try (db/open! dir {:create? false})
+                                                        (catch Throwable _ nil))]
+                                     (try (ops/record-otel! (atom {:db conn}) recs) true
+                                          (finally (try (.close ^java.sql.Connection conn)
+                                                        (catch Throwable _ nil)))))
+                           :else   false)]
+              (swap! state update-in [:otel (if placed :routed :dropped)] + (count recs))))
+          {:status 200 :http/raw true
+           :headers {"Content-Type" "application/json"}
+           :body "{}"}))))
+
+(defn- project-of
+  "The OPEN project a request names — by the slug in its path, or by
+  `X-Slopp-Dir` under slug `_` (the prompt hook knows its dir and no
+  slug) — or nil. A read never opens one."
+  [req]
+  (or (project-by-slug (get-in req [:path-params :slug]))
+      (when-let [dir (:dir (project-dir req))]
+        (get-in @state [:projects dir]))))
+
+(defn ^{:http/read :daemon/project-api} delegate!
+  "Read performer: answer a project-API request from the project's OWN
+  assembled context. The mount `/api/projects/<slug>` is replaced by the
+  `/api` the project's contract declares, so every contract, validator and
+  performer applies unchanged. The value is the WHOLE request — the read
+  [[project-api-endpoint]] declares has an empty path — because the project
+  is named by the slug in the path or by a header, and a read addresses one
+  value. Opens the project's reader on first use; an unknown project is 404."
+  [_ctx req]
+  (if-let [p (project-of req)]
+    (slopp.http/handle! (:ctx (api! (:dir p)))
+                        (-> req
+                            (assoc :uri (str "/api/" (get-in req [:path-params :*] "")))
+                            (dissoc :path-params :query-params :http/deps :http/reads)))
+    {:status 404 :body {:error (str "no open project " (get-in req [:path-params :slug]))}}))
+
+(defn- mcp-doors
+  "This daemon's doors, lent to the MCP envelope: sessions by id, attach
+  by the dir a request names, detach."
   []
-  (into [{:method :get    :path "/slopp/projects"            :auth :public :handler #'projects-endpoint}
-         {:method :get    :path "/slopp/status"              :auth :public :handler #'status-endpoint}
-         {:method :post   :path "/slopp/projects/:slug/mcp"  :auth :public :handler #'mcp-endpoint}
-         {:method :get    :path "/slopp/projects/:slug/mcp"  :auth :public :handler #'mcp-endpoint}
-         {:method :delete :path "/slopp/projects/:slug/mcp"  :auth :public :handler #'mcp-endpoint}
-         {:method :post   :path "/slopp/projects/:slug/call" :auth :public :handler #'call-endpoint}
-         {:method :post   :path "/slopp/otel/v1/logs"        :auth :public :handler #'otel-endpoint}]
-        (for [m [:get :post :put :delete]]
-          {:method m :path "/slopp/projects/:slug/api/**" :auth :public :handler #'api-endpoint})))
+  {:slopp.mcp.http/lookup  lookup!
+   :slopp.mcp.http/attach! (fn [req]
+                             (let [{:keys [dir error]} (project-dir req)]
+                               (if error
+                                 {:error error}
+                                 (attach! dir (get-in req [:path-params :slug])))))
+   :slopp.mcp.http/detach! detach!})
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/mcp" :http/auth :public
+                 :rest/request jsonrpc-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "the answer is the JSON-RPC envelope's, whatever the message asked"}
+  mcp-post-endpoint
+  "`POST /api/projects/:slug/mcp` — MCP over streamable HTTP: one JSON-RPC
+  message in, its answer out, the session id riding a header. The
+  envelope is [[slopp.mcp.http/endpoint]], lent this daemon's doors."
+  [req]
+  (mcp.http/endpoint (mcp-doors) req))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/mcp" :http/auth :public
+        :rest/response :any
+        :rest/unconstrained-ok "a refusal with an Allow header, never a document"}
+  mcp-get-endpoint
+  "`GET /api/projects/:slug/mcp` — declined: there is no standalone
+  stream here, answers ride the POST responses. Its own var so the safe
+  method stays safe: it touches nothing."
+  [_req]
+  {:status 405 :http/raw true
+   :headers {"Allow" "POST, DELETE" "Content-Type" "application/json"}
+   :body (json/generate-string {:error "no standalone stream here — answers ride the POST responses"})})
+
+^:unsafe (defn ^{:http/method :delete :rest/path "/api/projects/:slug/mcp" :http/auth :public
+                 :rest/response :any
+                 :rest/unconstrained-ok "the envelope's own acknowledgement, or its 404"}
+  mcp-delete-endpoint
+  "`DELETE /api/projects/:slug/mcp` — detach the session the header names;
+  the last detach closes the project."
+  [req]
+  (mcp.http/endpoint (mcp-doors) req))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/**" :http/auth :public
+        :http/reads {:answer [:daemon/project-api []]}
+        :rest/response :any
+        :rest/unconstrained-ok "whatever the project's own contract answers — validated there, by the same validator"}
+  project-api-endpoint
+  "`GET /api/projects/:slug/**` — the project's typed read API, mounted:
+  `/api/projects/<slug>/<resource>` is `/api/<resource>` in the project's
+  own contract, answered from its own assembled context. The whole answer
+  is a declared READ (the performer opens the project's reader and
+  delegates) so this var does nothing but hand it back — a GET must stay
+  safe, and it is. A GET only: the reader behind it is read-only."
+  [req]
+  (:answer (:http/reads req)))
+
+(defn- serving-opts
+  "Everything the daemon serves, as the opts `slopp.http/context` and
+  `slopp.http/serve!` both take: the endpoints DECLARED on this namespace's
+  public vars — the same assembly every project's API goes through, which
+  also finds the read performer [[delegate!]] declares — under the rest
+  validator. One map for the listener and for a test driving the context
+  without a port, so the two cannot disagree."
+  []
+  {:http/namespaces ['slopp.daemon]
+   :http/wrap-context slopp.rest/validating})
 
 (defn ^:export context
-  "The assembled dispatch context for every route under `/slopp/` — what the
+  "The assembled dispatch context for every route under `/api/` — what the
   listener serves, and what a test drives without a port."
   []
-  (slopp.http/context {:http/namespaces [] :http/routes (routes)}))
+  (slopp.http/context (serving-opts)))
 
 (defn ^:export start!
   "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])
@@ -605,8 +722,9 @@
   (locking state
     (when (:server @state)
       (throw (ex-info "this process already runs a daemon" {:port (:port (:server @state))})))
-    (let [srv    (slopp.http/serve! {:http/namespaces [] :http/routes (routes)
-                               :http/host "127.0.0.1" :http/port (or port default-port)})
+    (let [srv    (slopp.http/serve! (assoc (serving-opts)
+                                           :http/host "127.0.0.1"
+                                           :http/port (or port default-port)))
           reaper (doto (Thread. ^Runnable
                                (fn []
                                  (while (:server @state)
@@ -617,7 +735,7 @@
                    (.setDaemon true))]
       (swap! state assoc :server srv :reaper reaper)
       (.start reaper)
-      {:url (str "http://127.0.0.1:" (:port srv) "/slopp/") :port (:port srv) :token (token)})))
+      {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
 ^:unsafe (defn -main
   "Run the daemon: `slopp daemon [port]` — which is `slopp <dir> [--live]

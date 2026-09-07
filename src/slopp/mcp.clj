@@ -19,6 +19,25 @@
 (def ^:private ^:dynamic *hint*
   "Optional one-line workflow hint, attached to map results (item 3)." nil)
 
+(defn- red? [t]
+  (and t (pos? (+ (:fail t 0) (:error t 0)))))
+
+(defn parse-call-args
+  "Tool arguments for the one-shot --call CLI: nil/blank → {}; \"@path\"
+  reads the file first; the text parses as JSON or EDN (agents emit both)
+  and must yield a map."
+  [s]
+  (let [s (if (and s (str/starts-with? s "@")) (slurp (subs s 1)) s)]
+    (if (str/blank? s)
+      {}
+      (let [v (or (try (json/parse-string s true) (catch Exception _ nil))
+                  (try (edn/read-string s) (catch Exception _ nil)))]
+        (if (map? v)
+          v
+          (throw (ex-info (str "--call args must be a JSON or EDN map (or @file): "
+                               s)
+                          {})))))))
+
 (def ^:private ^:dynamic *spool-session*
   "Bound to the session during tools/call so `text` can spool full
   payloads it trims (the headroom pattern: agents get the gist, the full
@@ -181,320 +200,6 @@
 
        :else nil))))
 
-(def ^:private ^:dynamic *response-facts*
-  "Bound to an atom during tools/call so whoever shapes the answer can record
-  what it DID: `text!` knows the size gate cut a payload, `told!` knows the
-  knowledge differential withheld one, and `query_detail` knows which id it
-  went back for. None of that is in the return value, and all of it happens
-  several frames below `handle!`, which is the only layer that records a call
-  at all.
-
-  A recorder rather than a return value because the alternative is a second
-  value threaded out of every tool branch that nothing else reads. It is
-  write-only and per-call: a nil binding (a direct `text!` in a test) simply
-  drops the note." nil)
-
-(defn- note-response!
-  "Record `m` about the response being shaped, if anyone is listening."
-  [m]
-  (when *response-facts* (swap! *response-facts* merge m)))
-
-(defn- text!
-  "The one exit every tool result takes. `:budgeted? true` says the payload
-  already fitted a budget of its own (`orient`'s tokens, a slice's limit, the
-  brief) and is sent whole whatever its size — the 8k gate cutting `orient`
-  to 247 chars and then having the agent fetch the 12k spool was measured
-  as the single largest waste of context in eval10. A GREEN result over the
-  gate is still fitted, but never INVITES the re-fetch: the in-band
-  `:truncated` marker says what was cut, and the trailing
-  `query_detail … returns all` line — which agents followed on verdicts
-  they already had, 77k chars per session — is reserved for a result whose
-  missing part could change what the agent does next.
-
-  `:ceiling` is the gate for THIS result, default 8000. An EXPLICIT read —
-  one whose caller named its targets — passes a higher one: measured on a
-  real session (s20), 69% of `query_source` trims were re-bought through
-  `query_detail`, and every re-buy is a whole model request at p50 485k
-  context, worth ~60 trimmed payloads. The gate was optimizing chars while
-  provoking round trips. Unbounded ops (search, reports, explore bundles)
-  keep the default. A green MAP over the gate is trimmed SILENTLY — the
-  \"N of M keys shown\" note on a 227-char green full_check provoked verbose
-  re-runs in every s18 handoff sample — and what it keeps is the most keys
-  that fit ([[fit-payload]]), never hash order."
-  [x & {:keys [budgeted? ceiling] :or {ceiling 8000}}]
-  (when @strict-boundary?
-    (when-let [leak (boundary-leak x)]
-      (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
-                           " agent response: " leak " (agents address by name +"
-                           " snippet, never file:line — anchor it)")
-                      {:leak leak}))))
-  (let [;; FORCED, because one of the two hint sources can only be computed
-        ;; AFTER the tool ran: a write's hint counts what is now un-landed, and
-        ;; `*hint*` is bound before the call. A delay lets that one be decided
-        ;; here, at render time, and memoizes so a second render cannot make it
-        ;; speak twice. A plain string or nil passes through `force` unchanged.
-        h       (force *hint*)
-        x       (cond
-                  (and h (map? x) (nil? (:hint x))) (assoc x :hint h)
-                  (and h (string? x)) (str x "\n\n[hint] " h)
-                  :else x)
-        full    (if (string? x) x (pr-str x))
-        slimmed (let [t (trim-failure-strings x)]
-                  (if (string? t) t (pr-str t)))
-        green?  (and (map? x)
-                     (or (= :green (:status x))
-                         (= :green (get-in x [:findings :test-status]))
-                         (= :green (get-in x [:test :status]))
-                         (true? (:ok x))))
-        invite  (fn [id] (if green? "" (str " — query_detail {:id \"" id "\"} returns all")))
-        trimmed (fn [id] (if green? "" (str "\n[trimmed — query_detail {:id \"" id
-                                            "\"} returns the full response]")))
-        ;; the fit budget reserves room for the trailing note
-        budget  (- ceiling 200)
-        out     (cond
-                  budgeted? full
-
-                  (and (= full slimmed) (<= (count full) ceiling)) full
-
-                  :else
-                  (if-let [sess *spool-session*]
-                    (let [id  (spool! sess full)
-                          ;; every branch below withheld part of this answer,
-                          ;; and the id is what a later query_detail names — so
-                          ;; the trim can be scored against the re-fetch it
-                          ;; provoked instead of assumed to have paid
-                          _   (note-response! {:trimmed? true :spooled id})
-                          ;; the spool id travels INTO the marker, so the in-band signal is
-                          ;; actionable rather than only informative: a consumer that
-                          ;; sees :truncated can fetch the rest without parsing the
-                          ;; trailing line it was never going to read
-                          fit (when (> (count slimmed) ceiling)
-                                (fit-payload (trim-failure-strings x) budget id))]
-                      (cond
-                        ;; slimming alone got it under the gate — send it whole;
-                        ;; the spool keeps the FULL copy (what was withheld is
-                        ;; failure-string tails a remainder cannot reconstruct)
-                        (<= (count slimmed) ceiling)
-                        (str slimmed (trimmed id))
-
-                        ;; drop whole ITEMS: the body stays parseable, and the
-                        ;; spool keeps only the REMAINDER — a retrieval was
-                        ;; measured re-buying the half already in hand (18.8k
-                        ;; chars average, s14 audit). A GREEN map goes without
-                        ;; the note: the note was the invitation (s18).
-                        fit
-                        (do (when (:dropped fit)
-                              (swap! sess assoc-in [::spool :entries id] (:dropped fit)))
-                            (if (and green? (map? x) (:kept-map fit))
-                              ;; the FACT in-band, as data, and no invitation:
-                              ;; what was cut is still named, and nothing here
-                              ;; is a command to run
-                              (pr-str (assoc (:kept-map fit) :withheld (:withheld fit)))
-                              (str (:body fit) "\n[" (:note fit) (invite id) "]")))
-
-                        ;; nothing to drop (a single huge string/scalar): the
-                        ;; spool continues from where the shown text stopped
-                        :else
-                        (do (swap! sess assoc-in [::spool :entries id]
-                                   (str ";; the REMAINDER — continues from char " ceiling
-                                        " of the shown response\n"
-                                        (subs slimmed ceiling)))
-                            (str (subs slimmed 0 ceiling) (trimmed id)))))
-                    (if (<= (count slimmed) ceiling) slimmed full)))]
-    {:content [{:type "text" :text out}]}))
-
-(defn- red? [t]
-  (and t (pos? (+ (:fail t 0) (:error t 0)))))
-
-(def terse-elided
-  "The only routed keys the TERSE path drops, and the reason each is not a
-  finding.
-
-  `wire-keys`' own docstring draws this line: routing is the registry's job,
-  SHAPING is this layer's, and a size concern 'belongs where the shaping
-  happens'. These two are the shaping, and they are unlike every other key in
-  one specific way — they ride EVERY result regardless of what the operation
-  did, so they answer nothing about whether it examined anything.
-
-  - `:ms` — cost telemetry. Real, and never an answer to a question the agent
-    asked. `:verbose true` still carries it.
-  - `:warnings` — its PRESENCE is the signal. Unlike `:callers []` ('looked,
-    none'), an empty warning list is not a finding, and a non-empty one never
-    reaches here at all: it routes to the verbose path above.
-
-  Deliberately two. This set existing at all is a re-decision of what an agent
-  sees, which is the defect the registry exists to prevent — so it stays small
-  enough to read, and `mcp-test/the-terse-path-drops-nothing-the-registry-routed`
-  fails if it grows."
-  #{:ms :warnings})
-
-(defn parse-call-args
-  "Tool arguments for the one-shot --call CLI: nil/blank → {}; \"@path\"
-  reads the file first; the text parses as JSON or EDN (agents emit both)
-  and must yield a map."
-  [s]
-  (let [s (if (and s (str/starts-with? s "@")) (slurp (subs s 1)) s)]
-    (if (str/blank? s)
-      {}
-      (let [v (or (try (json/parse-string s true) (catch Exception _ nil))
-                  (try (edn/read-string s) (catch Exception _ nil)))]
-        (if (map? v)
-          v
-          (throw (ex-info (str "--call args must be a JSON or EDN map (or @file): "
-                               s)
-                          {})))))))
-
-(def ^:private file-handlers!
-  "call-tool dispatch \u2014 tracked files + config (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
-  {"config"
-   (fn [session a _sym]
-     (text! (external/config! session (:key a) (:value a))))
-   "file_put"
-   (fn [session a _sym]
-     (text! (ops/file-put! session (:path a) (:content a)
-                           :prompt (:prompt a) :agent (:agent a)
-                           :encoding (:encoding a)
-                           :content-type (:content_type a)
-                           :source (:source a))))
-"js_dep"
-   (fn [session a _sym]
-     ;; format crosses the wire as a string; keywordize HERE so the verb's
-     ;; own check sees a keyword and can name the keywords it wants
-     (text! (ops/js-dep! session (:name a)
-                         {:version    (:version a)
-                          :format     (some-> (:format a) not-empty keyword)
-                          :global     (:global a)
-                          :file       (:file a)
-                          ;; registry-anchored provenance: npm versions are
-                          ;; immutable, so this is re-fetchable and verifiable
-                          ;; where a CDN url only records how the bytes arrived
-                          :npm        (:npm a)
-                          :npm-path   (:npm_path a)
-                          :integrity  (:integrity a)
-                          :source-url (:source_url a)
-                          :license    (:license a)}
-                         :prompt (:prompt a) :agent (:agent a)
-                         :remove (:remove a) :source (:source a))))
-   "file_remove"
-   (fn [session a _sym]
-     (text! (ops/file-remove! session (:path a)
-                                           :prompt (:prompt a) :agent (:agent a))))
-   "file_list"
-   (fn [session _a _sym]
-     (text! (ops/files-list session)))
-   "file_get"
-   (fn [session a _sym]
-     (text! (ops/file-get session (:path a) :at (:at a))))
-   "file_history"
-   (fn [session a _sym]
-     (text! (ops/file-history! session (:path a))))
-   "config_file"
-   (fn [session a _sym]
-     (text! (ops/config-file! session (:path a)
-                                           :key (:key a) :value (:value a)
-                                           :unset (:unset a) :format (:format a)
-                                           :prompt (:prompt a) :agent (:agent a))))
-   "module_dep"
-   (fn [session a _sym]
-     (text! (ops/module-dep! session (:from a) (:to a)
-                             :remove (:remove a)
-                             :test-only (:test_only a)
-                             :prompt (:prompt a) :agent (:agent a))))
-   "module_purity"
-   (fn [session a _sym]
-     (text! (ops/module-tier! session (:module a) (:tier a)
-                              :remove (:remove a)
-                              :prompt (:prompt a) :agent (:agent a))))
-"module_platform"
-   (fn [session a _sym]
-     (text! (ops/module-platform! session (:module a) (:platform a)
-                                  :remove (:remove a)
-                                  :prompt (:prompt a) :agent (:agent a))))
-"module_role"
-   (fn [session a _sym]
-     (text! (ops/module-role! session (:module a) (:role a)
-                              :remove (:remove a)
-                              :prompt (:prompt a) :agent (:agent a))))})
-
-(def ^:private sync-handlers!
-  "call-tool dispatch \u2014 git publish/absorb + remotes (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
-  {"git_push"
-   (fn [session a _sym]
-     (text! (if-let [dir (:dir @session)]
-              (if (.exists (io/file dir ".git"))
-                (sync/mirror-push! dir :url (:url a) :token (:token a)
-                                   :branches (or (:branches a)
-                                                 (some-> (:branch a) vector)
-                                                 [(:branch @session "main")]))
-                ;; fileless store: publish the projection directly
-                (sync/push! dir :url (:url a) :token (:token a)
-                            :branch (:branch @session "main")))
-              {:error "git_push needs a durable session (a store dir)"})))
-   "git_clone"
-   (fn [_session a _sym]
-     (text! (sync/clone! (:url a) (:dir a)
-                                      :token (:token a) :agent (:agent a))))
-   "git_pull"
-   (fn [session a _sym]
-     (text! (if-let [dir (:dir @session)]
-              (let [m (sync/mirror-pull! dir :url (:url a) :token (:token a)
-                                         :branches (or (:branches a)
-                                                       [(:branch @session "main")]))
-                    p (when-not (:error m)
-                        (try (sync/pull! session :token (:token a)
-                                         :agent (:agent a))
-                             (catch Exception e {:error (ex-message e)})))]
-                (cond-> m p (assoc :absorbed p)))
-              {:error "git_pull needs a durable session (a store dir)"})))
-   "import_dir"
-   (fn [session a _sym]
-     (text! (if (:dir @session)
-              (try (sync/import-dir! session (:dir a) :agent (:agent a))
-                   (catch Exception e {:error (ex-message e)}))
-              {:error "import_dir needs a durable session (a store dir)"})))
-   "git_conflicts"
-   (fn [session _a _sym]
-     (text! (if-let [dir (:dir @session)]
-              {:conflicts (sync/conflicts dir)}
-              {:error "git_conflicts needs a durable session"})))
-   "git_resolve"
-   (fn [session a _sym]
-     (text! (if-let [dir (:dir @session)]
-                           (sync/resolve! dir (:path a))
-                           {:error "git_resolve needs a durable session"})))
-   "query_git"
-   (fn [session _a _sym]
-     (text! (let [ext (when-let [conn (:db @session)]
-                           (when-let [r (db/get-meta conn "git-remote")]
-                             {:git-remote   r
-                              :git-base-sha (db/get-meta conn "git-base-sha")}))]
-                       (if ext
-                         {:external ext
-                          :note (str "commit-points (commit_point) are the commits; "
-                                     "git_push publishes the projection to the "
-                                     "remote and git_pull absorbs from it")}
-                         {:error (str "no git remote configured — git_push {url}"
-                                      " sets one, or git_clone rebuilds a store"
-                                      " from one")}))))
-   "query_commits"
-   (fn [session a _sym]
-     (text! (if (:commit a)
-              ;; the drill-down rung: ONE commit-point, full description
-              (or (ops/query-commits session :commit (:commit a))
-                  {:error (str "no commit-point " (:commit a))})
-              (let [rows (ops/query-commits session)
-                    conn (:db @session)
-                    al   (when (and conn (:dir @session))
-                           (sync/alignment (:dir @session) "."
-                                           (str "slopp/" (:branch @session))
-                                           rows))]
-                (if al
-                  {:commits rows :alignment al}
-                  rows)))))
-   "merge_from"
-   (fn [session a _sym]
-     (text! (branch/merge! session (:dir a))))})
-
 (defn normalize-targets
   "Normalize `query_source`'s `targets` into `[{:ns sym :name sym?} …]`.
 
@@ -566,6 +271,28 @@
       (and t (str/starts-with? t "{:error ")) t
       (:isError r) (or t "error")
       :else nil)))
+
+(def terse-elided
+  "The only routed keys the TERSE path drops, and the reason each is not a
+  finding.
+
+  `wire-keys`' own docstring draws this line: routing is the registry's job,
+  SHAPING is this layer's, and a size concern 'belongs where the shaping
+  happens'. These two are the shaping, and they are unlike every other key in
+  one specific way — they ride EVERY result regardless of what the operation
+  did, so they answer nothing about whether it examined anything.
+
+  - `:ms` — cost telemetry. Real, and never an answer to a question the agent
+    asked. `:verbose true` still carries it.
+  - `:warnings` — its PRESENCE is the signal. Unlike `:callers []` ('looked,
+    none'), an empty warning list is not a finding, and a non-empty one never
+    reaches here at all: it routes to the verbose path above.
+
+  Deliberately two. This set existing at all is a re-decision of what an agent
+  sees, which is the defect the registry exists to prevent — so it stays small
+  enough to read, and `mcp-test/the-terse-path-drops-nothing-the-registry-routed`
+  fails if it grows."
+  #{:ms :warnings})
 
 (defn- app-note-for
   "The line `done` should carry about the app server it just re-served, given
@@ -750,6 +477,279 @@
            " thread, so its answer to this question can differ from this one and"
            " both be right. If you are diagnosing something a WRITE did, ask"
            " through that session rather than here."))))
+
+(def ^:private ^:dynamic *response-facts*
+  "Bound to an atom during tools/call so whoever shapes the answer can record
+  what it DID: `text!` knows the size gate cut a payload, `told!` knows the
+  knowledge differential withheld one, and `query_detail` knows which id it
+  went back for. None of that is in the return value, and all of it happens
+  several frames below `handle!`, which is the only layer that records a call
+  at all.
+
+  A recorder rather than a return value because the alternative is a second
+  value threaded out of every tool branch that nothing else reads. It is
+  write-only and per-call: a nil binding (a direct `text!` in a test) simply
+  drops the note." nil)
+
+(defn- note-response!
+  "Record `m` about the response being shaped, if anyone is listening."
+  [m]
+  (when *response-facts* (swap! *response-facts* merge m)))
+
+(defn- text!
+  "The one exit every tool result takes. `:budgeted? true` says the payload
+  already fitted a budget of its own (`orient`'s tokens, a slice's limit, the
+  brief) and is sent whole whatever its size — the 8k gate cutting `orient`
+  to 247 chars and then having the agent fetch the 12k spool was measured
+  as the single largest waste of context in eval10. A GREEN result over the
+  gate is still fitted, but never INVITES the re-fetch: the in-band
+  `:truncated` marker says what was cut, and the trailing
+  `query_detail … returns all` line — which agents followed on verdicts
+  they already had, 77k chars per session — is reserved for a result whose
+  missing part could change what the agent does next.
+
+  `:ceiling` is the gate for THIS result, default 8000. An EXPLICIT read —
+  one whose caller named its targets — passes a higher one: measured on a
+  real session (s20), 69% of `query_source` trims were re-bought through
+  `query_detail`, and every re-buy is a whole model request at p50 485k
+  context, worth ~60 trimmed payloads. The gate was optimizing chars while
+  provoking round trips. Unbounded ops (search, reports, explore bundles)
+  keep the default. A green MAP over the gate is trimmed SILENTLY — the
+  \"N of M keys shown\" note on a 227-char green full_check provoked verbose
+  re-runs in every s18 handoff sample — and what it keeps is the most keys
+  that fit ([[fit-payload]]), never hash order."
+  [x & {:keys [budgeted? ceiling] :or {ceiling 8000}}]
+  (when @strict-boundary?
+    (when-let [leak (boundary-leak x)]
+      (throw (ex-info (str "boundary leak — a file/line coordinate reached an"
+                           " agent response: " leak " (agents address by name +"
+                           " snippet, never file:line — anchor it)")
+                      {:leak leak}))))
+  (let [;; FORCED, because one of the two hint sources can only be computed
+        ;; AFTER the tool ran: a write's hint counts what is now un-landed, and
+        ;; `*hint*` is bound before the call. A delay lets that one be decided
+        ;; here, at render time, and memoizes so a second render cannot make it
+        ;; speak twice. A plain string or nil passes through `force` unchanged.
+        h       (force *hint*)
+        x       (cond
+                  (and h (map? x) (nil? (:hint x))) (assoc x :hint h)
+                  (and h (string? x)) (str x "\n\n[hint] " h)
+                  :else x)
+        full    (if (string? x) x (pr-str x))
+        slimmed (let [t (trim-failure-strings x)]
+                  (if (string? t) t (pr-str t)))
+        green?  (and (map? x)
+                     (or (= :green (:status x))
+                         (= :green (get-in x [:findings :test-status]))
+                         (= :green (get-in x [:test :status]))
+                         (true? (:ok x))))
+        invite  (fn [id] (if green? "" (str " — query_detail {:id \"" id "\"} returns all")))
+        trimmed (fn [id] (if green? "" (str "\n[trimmed — query_detail {:id \"" id
+                                            "\"} returns the full response]")))
+        ;; the fit budget reserves room for the trailing note
+        budget  (- ceiling 200)
+        out     (cond
+                  budgeted? full
+
+                  (and (= full slimmed) (<= (count full) ceiling)) full
+
+                  :else
+                  (if-let [sess *spool-session*]
+                    (let [id  (spool! sess full)
+                          ;; every branch below withheld part of this answer,
+                          ;; and the id is what a later query_detail names — so
+                          ;; the trim can be scored against the re-fetch it
+                          ;; provoked instead of assumed to have paid
+                          _   (note-response! {:trimmed? true :spooled id})
+                          ;; the spool id travels INTO the marker, so the in-band signal is
+                          ;; actionable rather than only informative: a consumer that
+                          ;; sees :truncated can fetch the rest without parsing the
+                          ;; trailing line it was never going to read
+                          fit (when (> (count slimmed) ceiling)
+                                (fit-payload (trim-failure-strings x) budget id))]
+                      (cond
+                        ;; slimming alone got it under the gate — send it whole;
+                        ;; the spool keeps the FULL copy (what was withheld is
+                        ;; failure-string tails a remainder cannot reconstruct)
+                        (<= (count slimmed) ceiling)
+                        (str slimmed (trimmed id))
+
+                        ;; drop whole ITEMS: the body stays parseable, and the
+                        ;; spool keeps only the REMAINDER — a retrieval was
+                        ;; measured re-buying the half already in hand (18.8k
+                        ;; chars average, s14 audit). A GREEN map goes without
+                        ;; the note: the note was the invitation (s18).
+                        fit
+                        (do (when (:dropped fit)
+                              (swap! sess assoc-in [::spool :entries id] (:dropped fit)))
+                            (if (and green? (map? x) (:kept-map fit))
+                              ;; the FACT in-band, as data, and no invitation:
+                              ;; what was cut is still named, and nothing here
+                              ;; is a command to run
+                              (pr-str (assoc (:kept-map fit) :withheld (:withheld fit)))
+                              (str (:body fit) "\n[" (:note fit) (invite id) "]")))
+
+                        ;; nothing to drop (a single huge string/scalar): the
+                        ;; spool continues from where the shown text stopped
+                        :else
+                        (do (swap! sess assoc-in [::spool :entries id]
+                                   (str ";; the REMAINDER — continues from char " ceiling
+                                        " of the shown response\n"
+                                        (subs slimmed ceiling)))
+                            (str (subs slimmed 0 ceiling) (trimmed id)))))
+                    (if (<= (count slimmed) ceiling) slimmed full)))]
+    {:content [{:type "text" :text out}]}))
+
+(def ^:private file-handlers!
+  "call-tool dispatch \u2014 tracked files + config (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
+  {"config"
+   (fn [session a _sym]
+     (text! (external/config! session (:key a) (:value a))))
+   "file_put"
+   (fn [session a _sym]
+     (text! (ops/file-put! session (:path a) (:content a)
+                           :prompt (:prompt a) :agent (:agent a)
+                           :encoding (:encoding a)
+                           :content-type (:content_type a)
+                           :source (:source a))))
+"js_dep"
+   (fn [session a _sym]
+     ;; format crosses the wire as a string; keywordize HERE so the verb's
+     ;; own check sees a keyword and can name the keywords it wants
+     (text! (ops/js-dep! session (:name a)
+                         {:version    (:version a)
+                          :format     (some-> (:format a) not-empty keyword)
+                          :global     (:global a)
+                          :file       (:file a)
+                          ;; registry-anchored provenance: npm versions are
+                          ;; immutable, so this is re-fetchable and verifiable
+                          ;; where a CDN url only records how the bytes arrived
+                          :npm        (:npm a)
+                          :npm-path   (:npm_path a)
+                          :integrity  (:integrity a)
+                          :source-url (:source_url a)
+                          :license    (:license a)}
+                         :prompt (:prompt a) :agent (:agent a)
+                         :remove (:remove a) :source (:source a))))
+   "file_remove"
+   (fn [session a _sym]
+     (text! (ops/file-remove! session (:path a)
+                                           :prompt (:prompt a) :agent (:agent a))))
+   "file_list"
+   (fn [session _a _sym]
+     (text! (ops/files-list session)))
+   "file_get"
+   (fn [session a _sym]
+     (text! (ops/file-get session (:path a) :at (:at a))))
+   "file_history"
+   (fn [session a _sym]
+     (text! (ops/file-history! session (:path a))))
+   "config_file"
+   (fn [session a _sym]
+     (text! (ops/config-file! session (:path a)
+                                           :key (:key a) :value (:value a)
+                                           :unset (:unset a) :format (:format a)
+                                           :prompt (:prompt a) :agent (:agent a))))
+   "module_dep"
+   (fn [session a _sym]
+     (text! (ops/module-dep! session (:from a) (:to a)
+                             :remove (:remove a)
+                             :test-only (:test_only a)
+                             :prompt (:prompt a) :agent (:agent a))))
+   "module_purity"
+   (fn [session a _sym]
+     (text! (ops/module-tier! session (:module a) (:tier a)
+                              :remove (:remove a)
+                              :prompt (:prompt a) :agent (:agent a))))
+"module_platform"
+   (fn [session a _sym]
+     (text! (ops/module-platform! session (:module a) (:platform a)
+                                  :remove (:remove a)
+                                  :prompt (:prompt a) :agent (:agent a))))
+"module_role"
+   (fn [session a _sym]
+     (text! (ops/module-role! session (:module a) (:role a)
+                              :remove (:remove a)
+                              :prompt (:prompt a) :agent (:agent a))))})
+
+(def ^:private sync-handlers!
+  "call-tool dispatch \u2014 git publish/absorb + remotes (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
+  {"git_push"
+   (fn [session a _sym]
+     (text! (if-let [dir (:dir @session)]
+              (if (.exists (io/file dir ".git"))
+                (sync/mirror-push! dir :url (:url a) :token (:token a)
+                                   :branches (or (:branches a)
+                                                 (some-> (:branch a) vector)
+                                                 [(:branch @session "main")]))
+                ;; fileless store: publish the projection directly
+                (sync/push! dir :url (:url a) :token (:token a)
+                            :branch (:branch @session "main")))
+              {:error "git_push needs a durable session (a store dir)"})))
+   "git_clone"
+   (fn [_session a _sym]
+     (text! (sync/clone! (:url a) (:dir a)
+                                      :token (:token a) :agent (:agent a))))
+   "git_pull"
+   (fn [session a _sym]
+     (text! (if-let [dir (:dir @session)]
+              (let [m (sync/mirror-pull! dir :url (:url a) :token (:token a)
+                                         :branches (or (:branches a)
+                                                       [(:branch @session "main")]))
+                    p (when-not (:error m)
+                        (try (sync/pull! session :token (:token a)
+                                         :agent (:agent a))
+                             (catch Exception e {:error (ex-message e)})))]
+                (cond-> m p (assoc :absorbed p)))
+              {:error "git_pull needs a durable session (a store dir)"})))
+   "import_dir"
+   (fn [session a _sym]
+     (text! (if (:dir @session)
+              (try (sync/import-dir! session (:dir a) :agent (:agent a))
+                   (catch Exception e {:error (ex-message e)}))
+              {:error "import_dir needs a durable session (a store dir)"})))
+   "git_conflicts"
+   (fn [session _a _sym]
+     (text! (if-let [dir (:dir @session)]
+              {:conflicts (sync/conflicts dir)}
+              {:error "git_conflicts needs a durable session"})))
+   "git_resolve"
+   (fn [session a _sym]
+     (text! (if-let [dir (:dir @session)]
+                           (sync/resolve! dir (:path a))
+                           {:error "git_resolve needs a durable session"})))
+   "query_git"
+   (fn [session _a _sym]
+     (text! (let [ext (when-let [conn (:db @session)]
+                           (when-let [r (db/get-meta conn "git-remote")]
+                             {:git-remote   r
+                              :git-base-sha (db/get-meta conn "git-base-sha")}))]
+                       (if ext
+                         {:external ext
+                          :note (str "commit-points (commit_point) are the commits; "
+                                     "git_push publishes the projection to the "
+                                     "remote and git_pull absorbs from it")}
+                         {:error (str "no git remote configured — git_push {url}"
+                                      " sets one, or git_clone rebuilds a store"
+                                      " from one")}))))
+   "query_commits"
+   (fn [session a _sym]
+     (text! (if (:commit a)
+              ;; the drill-down rung: ONE commit-point, full description
+              (or (ops/query-commits session :commit (:commit a))
+                  {:error (str "no commit-point " (:commit a))})
+              (let [rows (ops/query-commits session)
+                    conn (:db @session)
+                    al   (when (and conn (:dir @session))
+                           (sync/alignment (:dir @session) "."
+                                           (str "slopp/" (:branch @session))
+                                           rows))]
+                (if al
+                  {:commits rows :alignment al}
+                  rows)))))
+   "merge_from"
+   (fn [session a _sym]
+     (text! (branch/merge! session (:dir a))))})
 
 (defn- host-image-options
   "The idle-image budget this SERVER opens with, from the host environment.
@@ -2256,93 +2256,6 @@
       (update-in r [:content 0 :text] #(str ";; repaired " (pr-str repaired) "\n" %))
       r)))
 
-(defn call!
-  "One-shot tool invocation against the store at `dir` — the --call CLI's
-  engine and the fallback when no MCP connection exists. Opens a durable
-  session, dispatches ONE tool call, closes. Returns the wire result map
-  ({:content [{:text …}]}; :isError true on tool errors), same as the
-  server would send. A read-only tool opens a READ-ONLY session: it answers
-  from the branch and adopts no thread (s16 probes: every one-shot read
-  minted a line it would never write to).
-
-  **A one-shot WRITE must name its thread, or it is refused here** — before a
-  session opens, so nothing is minted. A one-shot process exits without
-  landing; a write made under a generated identity sits on a line no
-  process holds and none will ever land: `{:ok true}`, green, and gone.
-  That is the stranded-thread bug (2026-09-04, twice) and D-daemon's rule is
-  that it never becomes policy. `thread` is the argument; `agent` still
-  routes here as well, because the installed Stop hook passes it and a
-  label that names a line is not the anonymous case.
-
-  Writes stay TURN-GATED here, deliberately: provenance is not optional just
-  because the caller is a script. Turns are DURABLE across one-shot processes,
-  so the scripted shape is `--call turn_begin` once, then the writes, then
-  `--call turn_end` — not a turn per call. Reads need nothing.
-
-  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
-  everything here flows through `text!`, whose boundary-leak guard refuses a
-  file:line coordinate, so emitting frames replaced the real diagnostic with a
-  guard exception."
-  [dir tool arguments]
-  (let [read? (or (contains? tools/read-only-tools (str tool))
-                  (contains? tools/read-only-tools (str (:op arguments))))
-        write? (or (contains? tools/write-tools (str tool))
-                   (contains? tools/write-tools (str (:op arguments))))
-        ;; the one-shot's IDENTITY: the thread it names, else the label it
-        ;; names. Turns are durable across processes and so is the LINE one
-        ;; was opened on — a fresh identity per process would open a fresh
-        ;; thread per call, and the turn would be unfindable by the very
-        ;; write it was opened for.
-        who   (some-> (or (:thread arguments) (:agent arguments)) str)]
-    (if (and write? (not read?) (nil? who))
-      (assoc (text! (str "error: a one-shot write names no thread — it would land on a"
-                         " line no process holds and none will ever land. Pass"
-                         " {thread \"…\"}: a hooked ask names yours in the [slopp]"
-                         " block at its top; a script or another harness gets one"
-                         " from thread_open {} and passes it on every write."))
-             :isError true)
-      (let [session (external/open!
-                     (cond-> {:slopp.ops/dir (str dir)}
-                       who   (assoc :slopp.ops/agent-id who)
-                       ;; a read-only one-shot answers from the branch and mints
-                       ;; no thread — decided before open! boots, which is when
-                       ;; the session line is first resolved
-                       read? (assoc :slopp.ops/read-only? true)))]
-        (swap! session assoc :require-turns? true)
-        (try
-          (let [r (try (call-tool! session {:name tool :arguments arguments})
-                       (catch Exception e
-                         (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
-                               msgs  (into [] (comp (take-while some?)
-                                                    (map #(str (.getSimpleName (class %))
-                                                               ": " (ex-message %))))
-                                           chain)]
-                           (assoc (text! (str "error: " (str/join " <- " msgs)))
-                                  :isError true))))]
-            ;; ...and say what this process could not see. See
-            ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
-            ;; somebody's thread holds un-landed work that is a different store from
-            ;; the one an MCP session answers from.
-            (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
-              (update r :content (fnil conj []) {:type "text" :text note})
-              r))
-          (finally (ops/close! session)))))))
-
-^:unsafe
-(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
-  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
-  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
-  tool error. args is JSON, EDN, or @file (parse-call-args)."
-  [& [dir tool args-str]]
-  (when (str/blank? tool)
-    (binding [*out* *err*]
-      (println "usage: --call <tool> [<json/edn args or @file>]"))
-    (System/exit 2))
-  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
-    (println (clojure.string/join "\n" (map :text (:content r))))
-    (flush)
-    (System/exit (if (:isError r) 1 0))))
-
 ^:unsafe (defn handle!
   "Dispatch a JSON-RPC request map; return a response map, or nil for
   notifications. Tool exceptions become an `isError` result (so the agent sees
@@ -2565,6 +2478,93 @@
         ;; still answers `ps` is exactly the state nobody could interpret.
         (shutdown-agents)))))
 
+(defn call!
+  "One-shot tool invocation against the store at `dir` — the --call CLI's
+  engine and the fallback when no MCP connection exists. Opens a durable
+  session, dispatches ONE tool call, closes. Returns the wire result map
+  ({:content [{:text …}]}; :isError true on tool errors), same as the
+  server would send. A read-only tool opens a READ-ONLY session: it answers
+  from the branch and adopts no thread (s16 probes: every one-shot read
+  minted a line it would never write to).
+
+  **A one-shot WRITE must name its thread, or it is refused here** — before a
+  session opens, so nothing is minted. A one-shot process exits without
+  landing; a write made under a generated identity sits on a line no
+  process holds and none will ever land: `{:ok true}`, green, and gone.
+  That is the stranded-thread bug (2026-09-04, twice) and D-daemon's rule is
+  that it never becomes policy. `thread` is the argument; `agent` still
+  routes here as well, because the installed Stop hook passes it and a
+  label that names a line is not the anonymous case.
+
+  Writes stay TURN-GATED here, deliberately: provenance is not optional just
+  because the caller is a script. Turns are DURABLE across one-shot processes,
+  so the scripted shape is `--call turn_begin` once, then the writes, then
+  `--call turn_end` — not a turn per call. Reads need nothing.
+
+  An unexpected throw reports its CAUSE CHAIN. It does NOT report stack frames:
+  everything here flows through `text!`, whose boundary-leak guard refuses a
+  file:line coordinate, so emitting frames replaced the real diagnostic with a
+  guard exception."
+  [dir tool arguments]
+  (let [read? (or (contains? tools/read-only-tools (str tool))
+                  (contains? tools/read-only-tools (str (:op arguments))))
+        write? (or (contains? tools/write-tools (str tool))
+                   (contains? tools/write-tools (str (:op arguments))))
+        ;; the one-shot's IDENTITY: the thread it names, else the label it
+        ;; names. Turns are durable across processes and so is the LINE one
+        ;; was opened on — a fresh identity per process would open a fresh
+        ;; thread per call, and the turn would be unfindable by the very
+        ;; write it was opened for.
+        who   (some-> (or (:thread arguments) (:agent arguments)) str)]
+    (if (and write? (not read?) (nil? who))
+      (assoc (text! (str "error: a one-shot write names no thread — it would land on a"
+                         " line no process holds and none will ever land. Pass"
+                         " {thread \"…\"}: a hooked ask names yours in the [slopp]"
+                         " block at its top; a script or another harness gets one"
+                         " from thread_open {} and passes it on every write."))
+             :isError true)
+      (let [session (external/open!
+                     (cond-> {:slopp.ops/dir (str dir)}
+                       who   (assoc :slopp.ops/agent-id who)
+                       ;; a read-only one-shot answers from the branch and mints
+                       ;; no thread — decided before open! boots, which is when
+                       ;; the session line is first resolved
+                       read? (assoc :slopp.ops/read-only? true)))]
+        (swap! session assoc :require-turns? true)
+        (try
+          (let [r (try (call-tool! session {:name tool :arguments arguments})
+                       (catch Exception e
+                         (let [chain (take 4 (iterate #(some-> ^Throwable % .getCause) e))
+                               msgs  (into [] (comp (take-while some?)
+                                                    (map #(str (.getSimpleName (class %))
+                                                               ": " (ex-message %))))
+                                           chain)]
+                           (assoc (text! (str "error: " (str/join " <- " msgs)))
+                                  :isError true))))]
+            ;; ...and say what this process could not see. See
+            ;; [[foreign-unlanded-note]]: a one-shot reads the BRANCH, and while
+            ;; somebody's thread holds un-landed work that is a different store from
+            ;; the one an MCP session answers from.
+            (if-let [note (when-not (:isError r) (foreign-unlanded-note session))]
+              (update r :content (fnil conj []) {:type "text" :text note})
+              r))
+          (finally (ops/close! session)))))))
+
+^:unsafe
+(defn ^{:entry-point "resolved by NAME from the command line — boot's --call sugar and --main slopp.mcp/call-main!, so no reference inside the store reaches it"} call-main!
+  "CLI entry for boot's --call sugar (or --main slopp.mcp/call-main!):
+  <dir> <tool> [args] — one tool call, result text on stdout, exit 1 on a
+  tool error. args is JSON, EDN, or @file (parse-call-args)."
+  [& [dir tool args-str]]
+  (when (str/blank? tool)
+    (binding [*out* *err*]
+      (println "usage: --call <tool> [<json/edn args or @file>]"))
+    (System/exit 2))
+  (let [r (call! (or dir ".") tool (parse-call-args args-str))]
+    (println (clojure.string/join "\n" (map :text (:content r))))
+    (flush)
+    (System/exit (if (:isError r) 1 0))))
+
 (defn- call-tool!
   "The wire entry. A FAMILY name (`tools/families`) with `op` resolves to the
   op's registry name and dispatches through `call-op!`; a single-op family
@@ -2597,13 +2597,15 @@
     (call-op! session req)))
 
 ^:unsafe (defn ^:export http-call!
-  "`POST /slopp/projects/<slug>/call` on the daemon — the CLI door onto a
+  "`POST /api/projects/<slug>/call` on the daemon — the CLI door onto a
   RUNNING slopp. Body: `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<secret>\"}`.
-  Invokes [[call-op!]] on the session in `:http/deps` — the same dispatch,
-  turn gating, ledger and anticipation MCP calls get — and answers
-  `{\"isError\" bool \"text\" \"…\"}` with the joined content text, the shape
-  `--call` already prints. A thrown refusal crosses as isError text, never a
-  stack trace: the caller is a terminal.
+  Invokes [[call-op!]] on `session` — the same dispatch, turn gating,
+  ledger and anticipation MCP calls get — and answers `{\"isError\" bool
+  \"text\" \"…\"}` with the joined content text, the shape `--call` already
+  prints. A thrown refusal crosses as isError text, never a stack trace:
+  the caller is a terminal. The one-arg form takes the session from the
+  request's `:http/deps`, the way a context-built route would hand it
+  over; the daemon's declared door passes its CLI session explicitly.
 
   The token is a per-boot secret — written into `~/.slopp/daemon.json`
   beside the daemon's address — and it is the session's `:call-token`.
@@ -2619,60 +2621,60 @@
   proxy MUST NOT forward it unless it means to hand the store's editing
   surface to everything that can reach the proxy (slopp-ui's hub verified
   its GET-only stance at the wire, 2026-09-01)."
-  [req]
-  (let [session (:session (:http/deps req))
-        body    (:body req)
-        b       (cond
-                  (map? body)    body
-                  (nil? body)    {}
-                  (string? body) (try (json/parse-string body true)
-                                      (catch Exception _ {}))
-                  :else          (try (json/parse-string (slurp body) true)
-                                      (catch Exception _ {})))
-        raw     (fn [status m]
-                  {:status status :http/raw true
-                   :headers {"Content-Type" "application/json"}
-                   :body (json/generate-string m)})
-        want    (some-> session deref :call-token)]
-    (cond
-      (nil? session)
-      (raw 503 {:error "no live session behind this listener"})
+  ([req] (http-call! req (:session (:http/deps req))))
+  ([req session]
+   (let [body    (:body req)
+         b       (cond
+                   (map? body)    body
+                   (nil? body)    {}
+                   (string? body) (try (json/parse-string body true)
+                                       (catch Exception _ {}))
+                   :else          (try (json/parse-string (slurp body) true)
+                                       (catch Exception _ {})))
+         raw     (fn [status m]
+                   {:status status :http/raw true
+                    :headers {"Content-Type" "application/json"}
+                    :body (json/generate-string m)})
+         want    (some-> session deref :call-token)]
+     (cond
+       (nil? session)
+       (raw 503 {:error "no live session behind this listener"})
 
-      (or (nil? want) (not= (str (:token b)) (str want)))
-      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
+       (or (nil? want) (not= (str (:token b)) (str want)))
+       (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
 
-      (not (string? (:tool b)))
-      (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
+       (not (string? (:tool b)))
+       (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
 
-      :else
-      (let [args (cond-> (or (:arguments b) {})
-                   (:agent b) (assoc :agent (:agent b)))
-            ;; the SAME bindings the MCP wire gives every call: the hint
-            ;; machinery (the thread reminder that would have saved the
-            ;; stranded s13 cell), the spool for trimmed payloads, the
-            ;; response-facts sink. Without these every routed result was
-            ;; hint-blind — for scripts and humans, not only eval cells.
-            r    (binding [*hint* (or (smells/track-hint! session (:tool b) args)
-                                      (delay (thread-hint! session (:tool b))))
-                           *spool-session* session
-                           *response-facts* (atom {})]
-                   (try (call-op! session {:name (:tool b) :arguments args})
-                        (catch Exception e
-                          ;; the skill teaches FAMILIES (read {op …}), the CLI
-                          ;; preamble teaches bare ops, and real cells use both
-                          ;; — resolve the family spelling before refusing
-                          (or (when (re-find #"unknown tool" (str (ex-message e)))
-                                (try (call-tool! session {:name (:tool b)
-                                                          :arguments args})
-                                     (catch Exception e2
-                                       {:isError true
-                                        :content [{:type "text"
-                                                   :text (or (ex-message e2) (str e2))}]})))
-                              {:isError true
-                               :content [{:type "text"
-                                          :text (or (ex-message e) (str e))}]}))))]
-        (raw 200 {:isError (boolean (:isError r))
-                  :text (apply str (map :text (:content r)))})))))
+       :else
+       (let [args (cond-> (or (:arguments b) {})
+                    (:agent b) (assoc :agent (:agent b)))
+             ;; the SAME bindings the MCP wire gives every call: the hint
+             ;; machinery (the thread reminder that would have saved the
+             ;; stranded s13 cell), the spool for trimmed payloads, the
+             ;; response-facts sink. Without these every routed result was
+             ;; hint-blind — for scripts and humans, not only eval cells.
+             r    (binding [*hint* (or (smells/track-hint! session (:tool b) args)
+                                       (delay (thread-hint! session (:tool b))))
+                            *spool-session* session
+                            *response-facts* (atom {})]
+                    (try (call-op! session {:name (:tool b) :arguments args})
+                         (catch Exception e
+                           ;; the skill teaches FAMILIES (read {op …}), the CLI
+                           ;; preamble teaches bare ops, and real cells use both
+                           ;; — resolve the family spelling before refusing
+                           (or (when (re-find #"unknown tool" (str (ex-message e)))
+                                 (try (call-tool! session {:name (:tool b)
+                                                           :arguments args})
+                                      (catch Exception e2
+                                        {:isError true
+                                         :content [{:type "text"
+                                                    :text (or (ex-message e2) (str e2))}]})))
+                               {:isError true
+                                :content [{:type "text"
+                                           :text (or (ex-message e) (str e))}]}))))]
+         (raw 200 {:isError (boolean (:isError r))
+                   :text (apply str (map :text (:content r)))}))))))
 
 (defn- call-op-1! [session {:keys [name arguments]}]
   ;; async-image boot: the store loaded synchronously (this dispatch is live),

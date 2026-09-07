@@ -2,11 +2,13 @@
   "The ROUTE TABLE of a project's own read API — what a session serves about
   the store it holds, assembled by [[serving-opts]] and bound by whoever
   listens. Nothing here binds a port: the daemon (`slopp.daemon`) mounts
-  each open project's table under `/slopp/projects/<slug>/` through
-  delegation, so one configured port serves every project on the machine
-  and the address story this namespace used to tell — derived from the
-  store dir, then deliberately not configurable, then a hub's to remember
-  — ended with the per-session listener it belonged to.
+  each open project's table at `/api/projects/<slug>/<resource>` — the
+  `/api/<resource>` declared here, with the mount replacing that prefix —
+  through a declared read that delegates, so one configured port serves
+  every project on the machine and the address story this namespace used
+  to tell — derived from the store dir, then deliberately not configurable,
+  then a hub's to remember — ended with the per-session listener it
+  belonged to.
 
   What the table answers about is the SESSION it was assembled over.
   Warranty and observed examples ARE persisted (`session/persist-trace!` at
@@ -50,14 +52,15 @@
   "Everything the reviewer API's opts say about the APPLICATION, with nothing
   about its address — which is exactly the half that was duplicated.
 
-  `serve!` adds host and port; [[context]] adds nothing. Splitting it here is
-  what makes the two impossible to disagree: the listener and the in-process
-  context described the same app by hand until one of them stopped, and the
-  one that stopped was the one no browser was pointed at.
+  A listener adds host and port; [[context]] adds nothing. Splitting it here
+  is what makes the two impossible to disagree: the listener and the
+  in-process context described the same app by hand until one of them
+  stopped, and the one that stopped was the one no browser was pointed at.
 
   Exported for the daemon, which assembles one such context PER PROJECT
   over a reader session and delegates each project's requests into it —
-  the same app, the same validation, under `/slopp/projects/<slug>/api/`."
+  the same app, the same validation, mounted at `/api/projects/<slug>/`
+  in place of the `/api/` declared here."
   [session]
   {:http/namespaces served-namespaces
    ;; The harness's telemetry receiver, mounted as an explicit row rather than

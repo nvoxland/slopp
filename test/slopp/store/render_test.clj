@@ -67,20 +67,6 @@
         (testing (str "and it ends with exactly one newline: " (pr-str src))
           (is (re-find #"[^\n]\n\z" out) (pr-str out)))))))
 
-(deftest source-path-routes-an-instrument-out-of-src
-  (testing "the default role is :product, and arity-2 keeps meaning what it meant"
-    (is (= "src/app/core.clj" (store.render/source-path 'app.core :jvm)))
-    (is (= "src/app/core.clj" (store.render/source-path 'app.core :jvm :product))))
-  (testing "an :instrument roots under instruments/ — outside src/, so anything that jars src/ excludes it"
-    (is (= "instruments/app/bench.clj" (store.render/source-path 'app.bench :jvm :instrument)))
-    (is (= "instruments/app/deep/bench.clj"
-           (store.render/source-path 'app.deep.bench :jvm :instrument))))
-  (testing "a TEST of an instrument is still a test — test/ wins, because a test does not ship either way"
-    (is (= "test/app/bench_test.clj"
-           (store.render/source-path 'app.bench-test :jvm :instrument))))
-  (testing "the platform still decides the extension"
-    (is (= "instruments/app/bench.cljc" (store.render/source-path 'app.bench :cljc :instrument)))))
-
 (deftest source-path-routes-by-platform
   (testing ":jvm (the arity-2 default) matches legacy .clj under src/"
     (is (= "src/app/core.clj" (store.render/source-path 'app.core :jvm)))
@@ -95,6 +81,20 @@
     (is (= "app/widget.cljs" (store.render/ns-path 'app.widget :cljs)))
     (is (= "app/shared.cljc" (store.render/ns-path 'app.shared :cljc)))
     (is (= "app/core.clj" (store.render/ns-path 'app.core)))))
+
+(deftest source-path-routes-an-instrument-out-of-src
+  (testing "the default role is :product, and arity-2 keeps meaning what it meant"
+    (is (= "src/app/core.clj" (store.render/source-path 'app.core :jvm)))
+    (is (= "src/app/core.clj" (store.render/source-path 'app.core :jvm :product))))
+  (testing "an :instrument roots under instruments/ — outside src/, so anything that jars src/ excludes it"
+    (is (= "instruments/app/bench.clj" (store.render/source-path 'app.bench :jvm :instrument)))
+    (is (= "instruments/app/deep/bench.clj"
+           (store.render/source-path 'app.deep.bench :jvm :instrument))))
+  (testing "a TEST of an instrument is still a test — test/ wins, because a test does not ship either way"
+    (is (= "test/app/bench_test.clj"
+           (store.render/source-path 'app.bench-test :jvm :instrument))))
+  (testing "the platform still decides the extension"
+    (is (= "instruments/app/bench.cljc" (store.render/source-path 'app.bench :cljc :instrument)))))
 
 (deftest every-root-source-path-can-return-is-declared
   ;; `source-roots` is what a pruner deletes, and `source-path`'s `cond` is

@@ -15,24 +15,6 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.http :as slopp.http] [slopp.http.static :as static] [clojure.string :as str] [slopp.lang :as lang] [slopp.rest.contract :as rest.contract]))
 
-(def ^:private honouring
-  "`:http/wrap-context` that puts the contract validators on, which every
-  context in this namespace now needs.
-
-  `t-mine` declares `:rest/response`, because in THIS store every `defn` route
-  must: the content gate refuses a `defn` under `:http/path`, and
-  `rest-endpoint-schema` asks a `:rest/path` for its contract. So the http
-  facade's own tests cannot build a context over their own fixtures without the
-  rest capability — which is a true statement about a store whose surface is
-  entirely typed, rather than about http.
-
-  `slopp.rest/validating` is what an app writes; this reaches
-  `slopp.rest.contract` directly through the TEST-ONLY module edge
-  `slopp.http.dispatch-test` already declares, so the facade's tests do not put
-  a production dependency on rest to say what they are saying."
-  #(assoc % :rest/decode-request rest.contract/decode-request
-          :rest/check-response rest.contract/check-response))
-
 (defn ^{:http/method :get :rest/path "/api/w/mine/:owner"
         :http/auth :authenticated
         :rest/response [:map [:yours :boolean]]}
@@ -46,198 +28,6 @@
   (slopp.http/enforce (= (:owner (:path-params req))
                         (:http/sub (:http/identity req))))
   {:status 200 :body {:yours true}})
-
-(def ^{:http/method :get :http/path "/about" :http/auth :public}
-  t-about
-  "Hiccup content: the def's VALUE is the page."
-  [:main [:h1 "About"]])
-
-(def ^{:http/method :get :http/path "/robots.txt" :http/auth :public
-       :http/media-type "text/plain"}
-  t-robots
-  "String content: served as it stands, at a declared media type."
-  "User-agent: *\nDisallow:\n")
-
-(def ^{:http/method :get :http/path "/" :http/auth :public
-       :webapp/shell true}
-  t-shell
-  "The SPA shell. The app writes the WHOLE document — title, meta, stylesheet,
-  mount point — and writes neither the bundle script nor the mount prefix,
-  because neither is a static fact about this page."
-  [:html {:lang "en"}
-   [:head
-    [:meta {:charset "utf-8"}]
-    [:title "Demo"]
-    [:link {:rel "stylesheet" :href "/css/style.css"}]]
-   [:body [:div {:id "app"}]]])
-
-(def t-broken-shell
-  "A shell an app got wrong: no mount point, so nothing renders. Carries no
-  markers — it is handed to a context as an explicit row instead, so it stays
-  out of every other test's route table."
-  [:html [:head [:title "Broken"]] [:body [:div {:id "root"}]]])
-
-(deftest facade-assembles-and-enforces
-  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
-                                       ;; this namespace declares a shell, and a
-                                       ;; shell with no bundle refuses at assembly
-                                       :webapp/bundle "/js/main.js"
-                                       :http/wrap-context honouring})]
-    (testing "context derives the route table from var metadata"
-      (is (= {"/api/w/mine/:owner" :rest, "/" :content, "/app/**" :content
-              "/about" :content, "/robots.txt" :content}
-             (into {} (map (juxt :path :kind)) (:http/routes ctx)))
-          "both markers, and the row says which one carried the path"))
-    (testing "handle! is the portless test surface"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
-                                :http/identity {:http/sub "ada" :http/groups #{}}})]
-        (is (= 200 (:status r)) (pr-str r))))
-    (testing "enforce inside the handler maps to 403 response data"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
-                                :http/identity {:http/sub "eve" :http/groups #{}}})]
-        (is (= 403 (:status r)) (pr-str r))))
-    (testing "authorized? answers booleans for branching"
-      (is (slopp.http/authorized? [:group "admin"] {:http/groups #{"admin"}}))
-      (is (not (slopp.http/authorized? [:group "admin"] nil))))))
-
-(deftest content-is-a-VALUE-the-dispatcher-serves-not-a-handler-it-calls
-  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
-                                       :webapp/bundle "/js/main.js"
-                                       :http/wrap-context honouring})]
-    (testing "hiccup content renders, and keeps its structure for a headless drive"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/about"})]
-        (is (= 200 (:status r)) (pr-str r))
-        (is (= "text/html; charset=utf-8" (get-in r [:headers "Content-Type"])))
-        (is (= [:main [:h1 "About"]] (:http/hiccup r))
-            "the tree the body was rendered from, same as html-response carries")
-        (is (str/includes? (str (:body r)) "<h1>About</h1>") (pr-str (:body r)))))
-    (testing "a string is served as it stands, at the media type the def declares"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/robots.txt"})]
-        (is (= 200 (:status r)) (pr-str r))
-        (is (= "text/plain" (get-in r [:headers "Content-Type"]))
-            "verbatim, and deliberately NOT the \"text/plain; charset=utf-8\"
-             default — an assertion that matched the default would hold
-             whether or not the declaration was ever read")
-        (is (= "User-agent: *\nDisallow:\n" (:body r)))
-        (is (nil? (:http/hiccup r))
-            "nothing was rendered, so there is no tree to carry")))))
-
-(deftest a-webapp-SHELL-is-completed-by-the-framework
-  (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
-                                  :http/wrap-context honouring
-                                  :webapp/base   "/p/demo"
-                                  ;; the row declares THAT it is a shell; which
-                                  ;; bundle is a deployment fact, stated once
-                                  ;; here beside the mount point
-                                  :webapp/bundle "/js/main.js"})
-        r    (slopp.http/handle! ctx {:request-method :get :uri "/"})
-        body (str (:body r))]
-    (is (= 200 (:status r)) (pr-str r))
-    (testing "the bundle script is injected, INTO the head the app wrote"
-      (is (str/includes? body "src=\"/js/main.js\"") body)
-      (is (str/includes? body "<script defer") body)
-      (is (< (str/index-of body "<script") (str/index-of body "</head>"))
-          "in the head and not merely somewhere in the document"))
-    (testing "the mount point carries the base, which no static document knows"
-      (is (str/includes? body "data-base=\"/p/demo\"") body)
-      (is (str/includes? body "id=\"app\"") body))
-    (testing "what the app wrote survives untouched"
-      (is (str/includes? body "<title>Demo</title>") body)
-      (is (str/includes? body "href=\"/css/style.css\"") body)
-      (is (str/starts-with? body "<!DOCTYPE html>") body))
-    (testing "and the app's own hiccup is NOT what gets served"
-      (is (not= t-shell (:http/hiccup r))
-          "the tree a headless drive reads is the completed one, so what it
-           drives is what a browser would get"))))
-
-(deftest a-broken-shell-refuses-when-the-app-is-ASSEMBLED
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"no mount point"
-       (slopp.http/context
-        {:http/namespaces []
-         :webapp/bundle "/js/main.js"
-         :http/routes [{:handler #'t-broken-shell :kind :content :method :get
-                        :path "/bad" :auth :public
-                        :webapp/shell true}]}))
-      "assembly and not the first request: a shell is checked once, where the
-       app comes up, rather than answering 500 to whoever loads it first"))
-
-(deftest ^:external
-  ^{:adapter "http — a deliberately INDEPENDENT client. requester-contract's
-              real run uses serve! as ITS far side, so routing the server's own
-              tests through slopp.http.client would make the two mutually
-              circular and let a symmetric bug (client omits a header, server
-              ignores it) pass both. The server tests are the one place that
-              must not go through the port."}
-  serve-round-trips-the-facade
-  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
-                         :http/wrap-context honouring
-                         ;; this namespace declares a shell, and a shell with
-                         ;; no bundle refuses at assembly
-                         :webapp/bundle "/js/main.js"
-                         :http/port 0})
-        http (java.net.http.HttpClient/newHttpClient)
-        resp (.send http
-                    (-> (java.net.http.HttpRequest/newBuilder)
-                        (.uri (java.net.URI/create
-                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
-                        (.build))
-                    (java.net.http.HttpResponse$BodyHandlers/ofString))]
-    (try
-      (testing "the anonymous request is refused by the declared policy, over the wire"
-        (is (= 401 (.statusCode resp))))
-      (finally (slopp.http/stop! srv)))))
-
-(deftest ^:external ^{:adapter "http — independent client on purpose; same reason as
-              serve-round-trips-the-facade, and doubly so here: this test exists
-              to prove a SECOND server adapter behaves like the first, which a
-              shared client cannot witness."}
-  httpkit-adapter-round-trips-the-facade
-  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
-                         :http/wrap-context honouring
-                         :http/adapter :http-kit
-                         :webapp/bundle "/js/main.js"
-                         :http/port 0})
-        http (java.net.http.HttpClient/newHttpClient)
-        resp (.send http
-                    (-> (java.net.http.HttpRequest/newBuilder)
-                        (.uri (java.net.URI/create
-                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
-                        (.build))
-                    (java.net.http.HttpResponse$BodyHandlers/ofString))]
-    (try
-      (testing "the declared policy refuses over http-kit exactly as over jdk"
-        (is (= 401 (.statusCode resp))))
-      (finally (slopp.http/stop! srv)))))
-
-(deftest ^:external ^{:adapter "http — independent client on purpose; same reason as
-              serve-round-trips-the-facade. This one sends AUTH headers, which
-              is precisely the shape a symmetric client/server bug would hide."}
-  auth-round-trips-over-the-wire
-  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
-                         :http/wrap-context honouring
-                         :http/adapter :http-kit
-                         :http/port 0
-                         :webapp/bundle "/js/main.js"
-                         :http/auth-config {:auth/providers [:bearer]
-                                           :auth/bearer {"ada" {:secret "tok-ada"
-                                                                :groups ["dev"]}}}})
-        http (java.net.http.HttpClient/newHttpClient)
-        GET (fn [path & [token]]
-              (let [b (cond-> (java.net.http.HttpRequest/newBuilder)
-                        true (.uri (java.net.URI/create
-                                    (str "http://127.0.0.1:" (:port srv) path)))
-                        token (.header "Authorization" (str "Bearer " token)))]
-                (.statusCode (.send http (.build b)
-                                    (java.net.http.HttpResponse$BodyHandlers/ofString)))))]
-    (try
-      (testing "anonymous → 401; wrong token → 401; the right token → 200 (t-mine checks sub=owner)"
-        (is (= 401 (GET "/api/w/mine/ada")))
-        (is (= 401 (GET "/api/w/mine/ada" "wrong")))
-        (is (= 200 (GET "/api/w/mine/ada" "tok-ada")))
-        (testing "and enforce still 403s the wrong owner, authenticated or not"
-          (is (= 403 (GET "/api/w/mine/someone-else" "tok-ada")))))
-      (finally (slopp.http/stop! srv)))))
 
 (deftest ^:external ^{:adapter "http — independent client on purpose; same reason as
               serve-round-trips-the-facade. Raw BYTES are the case where a
@@ -423,36 +213,6 @@
     (is (= {} (lang/query-params "=y"))
         "a pair with no KEY is still dropped — there is nothing to be present under")))
 
-(deftest a-context-cannot-promise-reads-it-cannot-perform
-  ;; Reads resolve by VOCABULARY store-wide, so an endpoint in one namespace
-  ;; can and should reuse a performer declared in another. Good property —
-  ;; but it means a context assembled from HALF the namespaces answers 500,
-  ;; not 404, at request time, with the detail server-side and a generic
-  ;; error in the body. That is the worst of both: the failure with no check
-  ;; is also the failure that is hardest to read.
-  ;;
-  ;; Every input needed is already in hand at assembly. So assemble-time is
-  ;; where it is caught.
-  (testing "a route declaring a read nobody performs is refused at assembly"
-    (let [e (try (slopp.http/context {:http/namespaces ['slopp.http-test]
-                              :http/routes [{:method :get :path "/orphan"
-                                            :handler identity
-                                            :auth :public
-                                            :http/reads {:x [:nobody/serves-this []]}}]})
-                 nil
-                 (catch clojure.lang.ExceptionInfo ex ex))]
-      (is (some? e) "assembling this context has to fail, not defer to a 500")
-      (is (re-find #"nobody/serves-this" (ex-message e))
-          (str "the message has to name the unservable KIND: " (ex-message e)))
-      (is (re-find #"/orphan" (ex-message e))
-          (str "and the route that declared it: " (ex-message e)))))
-  (testing "a context that can perform every read it declares assembles"
-    ;; the guard must not fire on the ordinary case, including a route with
-    ;; no declared reads at all
-    (is (map? (slopp.http/context {:http/namespaces ['slopp.http-test]
-                                   :webapp/bundle "/js/main.js"
-                                   :http/wrap-context honouring})))))
-
 (defn reader-contract
   "Every property a `mount-routes` reader must satisfy, run against whatever
   `make-reader` builds — `{path → content}` in, a reader out.
@@ -547,47 +307,6 @@
         (testing "the port rides as data, so a caller need not re-parse the sentence"
           (is (= port (:http/port (ex-data t))))))
       (finally (slopp.http/stop! held)))))
-
-(deftest a-context-can-be-WRAPPED-before-it-is-served
-  ;; slopp GENERATES the serve! call for a managed app — `webdev.live/serve-code`
-  ;; writes it, because a hand-written one could disagree with the plan and the
-  ;; running server would be the half that disagreed. So a capability needing to
-  ;; add something to the assembled context has no call site of its own to add
-  ;; it at.
-  ;;
-  ;; This is that seam, and it is deliberately GENERIC: a function applied to
-  ;; the context between assembly and serving. `slopp.rest/validating` is its
-  ;; first user, and `slopp.http` does not learn that rest exists — which is the
-  ;; whole reason malli is not in this framework.
-  (let [seen (atom nil)
-        ;; honours on the way through as well as probing: what it wraps here is a
-        ;; namespace of typed endpoints, and a wrapper is exactly the seam that
-        ;; is supposed to carry that
-        wrap (fn [ctx] (reset! seen ctx) (honouring (assoc ctx :probe/wrapped true)))]
-    (testing "the wrapper receives the ASSEMBLED context, not the opts"
-      ;; it has to run after `context` has derived the routes and the performer
-      ;; vocabularies, or a wrapper deciding anything from the surface would be
-      ;; deciding it from a map that does not have one yet
-      (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
-                                   :http/port 0
-                                   ;; this namespace declares a shell, and a
-                                   ;; shell with no bundle refuses at assembly
-                                   :webapp/bundle "/js/main.js"
-                                   :http/wrap-context wrap})]
-        (try
-          (is (some? (:http/routes @seen)) (pr-str (keys @seen)))
-          (is (contains? @seen :http/read-performers))
-          (finally (slopp.http/stop! srv)))))
-
-    (testing "and no wrapper leaves serving exactly as it was"
-      ;; every app enabling no such capability is this case, and it must cost
-      ;; nothing. Served over NO namespaces on purpose: every fixture route in
-      ;; this one is a typed endpoint, and a context over those may not serve
-      ;; unwrapped any more — so reusing them here would have exercised the
-      ;; refusal while claiming to show its absence.
-      (let [srv (slopp.http/serve! {:http/namespaces [] :http/port 0})]
-        (try (is (map? srv))
-             (finally (slopp.http/stop! srv)))))))
 
 (deftest a-served-app-becomes-a-DRIVER-the-fake-browser-can-open
   ;; D-cljnx, wave 1. `slopp.cljnx/open!` branches on `:http/routes` and
@@ -692,6 +411,287 @@
                            {:http/routes [{:method :get :path "/hi" :auth :public
                                            :handler (fn [_] {:status 200 :body [:p "hi"]})}]}
                            {:request-method :get :uri "/hi"})))))))
+
+(def ^{:http/method :get :http/path "/about" :http/auth :public}
+  t-about
+  "Hiccup content: the def's VALUE is the page."
+  [:main [:h1 "About"]])
+
+(def ^{:http/method :get :http/path "/robots.txt" :http/auth :public
+       :http/media-type "text/plain"}
+  t-robots
+  "String content: served as it stands, at a declared media type."
+  "User-agent: *\nDisallow:\n")
+
+(def ^{:http/method :get :http/path "/" :http/auth :public
+       :webapp/shell true}
+  t-shell
+  "The SPA shell. The app writes the WHOLE document — title, meta, stylesheet,
+  mount point — and writes neither the bundle script nor the mount prefix,
+  because neither is a static fact about this page."
+  [:html {:lang "en"}
+   [:head
+    [:meta {:charset "utf-8"}]
+    [:title "Demo"]
+    [:link {:rel "stylesheet" :href "/css/style.css"}]]
+   [:body [:div {:id "app"}]]])
+
+(def t-broken-shell
+  "A shell an app got wrong: no mount point, so nothing renders. Carries no
+  markers — it is handed to a context as an explicit row instead, so it stays
+  out of every other test's route table."
+  [:html [:head [:title "Broken"]] [:body [:div {:id "root"}]]])
+
+(deftest a-broken-shell-refuses-when-the-app-is-ASSEMBLED
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"no mount point"
+       (slopp.http/context
+        {:http/namespaces []
+         :webapp/bundle "/js/main.js"
+         :http/routes [{:handler #'t-broken-shell :kind :content :method :get
+                        :path "/bad" :auth :public
+                        :webapp/shell true}]}))
+      "assembly and not the first request: a shell is checked once, where the
+       app comes up, rather than answering 500 to whoever loads it first"))
+
+(def ^:private honouring
+  "`:http/wrap-context` that puts the contract validators on, which every
+  context in this namespace now needs.
+
+  `t-mine` declares `:rest/response`, because in THIS store every `defn` route
+  must: the content gate refuses a `defn` under `:http/path`, and
+  `rest-endpoint-schema` asks a `:rest/path` for its contract. So the http
+  facade's own tests cannot build a context over their own fixtures without the
+  rest capability — which is a true statement about a store whose surface is
+  entirely typed, rather than about http.
+
+  `slopp.rest/validating` is what an app writes; this reaches
+  `slopp.rest.contract` directly through the TEST-ONLY module edge
+  `slopp.http.dispatch-test` already declares, so the facade's tests do not put
+  a production dependency on rest to say what they are saying."
+  #(assoc % :rest/decode-request rest.contract/decode-request
+          :rest/check-response rest.contract/check-response))
+
+(deftest facade-assembles-and-enforces
+  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       ;; this namespace declares a shell, and a
+                                       ;; shell with no bundle refuses at assembly
+                                       :webapp/bundle "/js/main.js"
+                                       :http/wrap-context honouring})]
+    (testing "context derives the route table from var metadata"
+      (is (= {"/api/w/mine/:owner" :rest, "/" :content, "/app/**" :content
+              "/about" :content, "/robots.txt" :content}
+             (into {} (map (juxt :path :kind)) (:http/routes ctx)))
+          "both markers, and the row says which one carried the path"))
+    (testing "handle! is the portless test surface"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
+                                :http/identity {:http/sub "ada" :http/groups #{}}})]
+        (is (= 200 (:status r)) (pr-str r))))
+    (testing "enforce inside the handler maps to 403 response data"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/w/mine/ada"
+                                :http/identity {:http/sub "eve" :http/groups #{}}})]
+        (is (= 403 (:status r)) (pr-str r))))
+    (testing "authorized? answers booleans for branching"
+      (is (slopp.http/authorized? [:group "admin"] {:http/groups #{"admin"}}))
+      (is (not (slopp.http/authorized? [:group "admin"] nil))))))
+
+(deftest ^:external
+  ^{:adapter "http — a deliberately INDEPENDENT client. requester-contract's
+              real run uses serve! as ITS far side, so routing the server's own
+              tests through slopp.http.client would make the two mutually
+              circular and let a symmetric bug (client omits a header, server
+              ignores it) pass both. The server tests are the one place that
+              must not go through the port."}
+  serve-round-trips-the-facade
+  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
+                         ;; this namespace declares a shell, and a shell with
+                         ;; no bundle refuses at assembly
+                         :webapp/bundle "/js/main.js"
+                         :http/port 0})
+        http (java.net.http.HttpClient/newHttpClient)
+        resp (.send http
+                    (-> (java.net.http.HttpRequest/newBuilder)
+                        (.uri (java.net.URI/create
+                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
+                        (.build))
+                    (java.net.http.HttpResponse$BodyHandlers/ofString))]
+    (try
+      (testing "the anonymous request is refused by the declared policy, over the wire"
+        (is (= 401 (.statusCode resp))))
+      (finally (slopp.http/stop! srv)))))
+
+(deftest ^:external ^{:adapter "http — independent client on purpose; same reason as
+              serve-round-trips-the-facade, and doubly so here: this test exists
+              to prove a SECOND server adapter behaves like the first, which a
+              shared client cannot witness."}
+  httpkit-adapter-round-trips-the-facade
+  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
+                         :http/adapter :http-kit
+                         :webapp/bundle "/js/main.js"
+                         :http/port 0})
+        http (java.net.http.HttpClient/newHttpClient)
+        resp (.send http
+                    (-> (java.net.http.HttpRequest/newBuilder)
+                        (.uri (java.net.URI/create
+                               (str "http://127.0.0.1:" (:port srv) "/api/w/mine/ada")))
+                        (.build))
+                    (java.net.http.HttpResponse$BodyHandlers/ofString))]
+    (try
+      (testing "the declared policy refuses over http-kit exactly as over jdk"
+        (is (= 401 (.statusCode resp))))
+      (finally (slopp.http/stop! srv)))))
+
+(deftest ^:external ^{:adapter "http — independent client on purpose; same reason as
+              serve-round-trips-the-facade. This one sends AUTH headers, which
+              is precisely the shape a symmetric client/server bug would hide."}
+  auth-round-trips-over-the-wire
+  (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                         :http/wrap-context honouring
+                         :http/adapter :http-kit
+                         :http/port 0
+                         :webapp/bundle "/js/main.js"
+                         :http/auth-config {:auth/providers [:bearer]
+                                           :auth/bearer {"ada" {:secret "tok-ada"
+                                                                :groups ["dev"]}}}})
+        http (java.net.http.HttpClient/newHttpClient)
+        GET (fn [path & [token]]
+              (let [b (cond-> (java.net.http.HttpRequest/newBuilder)
+                        true (.uri (java.net.URI/create
+                                    (str "http://127.0.0.1:" (:port srv) path)))
+                        token (.header "Authorization" (str "Bearer " token)))]
+                (.statusCode (.send http (.build b)
+                                    (java.net.http.HttpResponse$BodyHandlers/ofString)))))]
+    (try
+      (testing "anonymous → 401; wrong token → 401; the right token → 200 (t-mine checks sub=owner)"
+        (is (= 401 (GET "/api/w/mine/ada")))
+        (is (= 401 (GET "/api/w/mine/ada" "wrong")))
+        (is (= 200 (GET "/api/w/mine/ada" "tok-ada")))
+        (testing "and enforce still 403s the wrong owner, authenticated or not"
+          (is (= 403 (GET "/api/w/mine/someone-else" "tok-ada")))))
+      (finally (slopp.http/stop! srv)))))
+
+(deftest a-context-cannot-promise-reads-it-cannot-perform
+  ;; Reads resolve by VOCABULARY store-wide, so an endpoint in one namespace
+  ;; can and should reuse a performer declared in another. Good property —
+  ;; but it means a context assembled from HALF the namespaces answers 500,
+  ;; not 404, at request time, with the detail server-side and a generic
+  ;; error in the body. That is the worst of both: the failure with no check
+  ;; is also the failure that is hardest to read.
+  ;;
+  ;; Every input needed is already in hand at assembly. So assemble-time is
+  ;; where it is caught.
+  (testing "a route declaring a read nobody performs is refused at assembly"
+    (let [e (try (slopp.http/context {:http/namespaces ['slopp.http-test]
+                              :http/routes [{:method :get :path "/orphan"
+                                            :handler identity
+                                            :auth :public
+                                            :http/reads {:x [:nobody/serves-this []]}}]})
+                 nil
+                 (catch clojure.lang.ExceptionInfo ex ex))]
+      (is (some? e) "assembling this context has to fail, not defer to a 500")
+      (is (re-find #"nobody/serves-this" (ex-message e))
+          (str "the message has to name the unservable KIND: " (ex-message e)))
+      (is (re-find #"/orphan" (ex-message e))
+          (str "and the route that declared it: " (ex-message e)))))
+  (testing "a context that can perform every read it declares assembles"
+    ;; the guard must not fire on the ordinary case, including a route with
+    ;; no declared reads at all
+    (is (map? (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                   :webapp/bundle "/js/main.js"
+                                   :http/wrap-context honouring})))))
+
+(deftest a-context-can-be-WRAPPED-before-it-is-served
+  ;; slopp GENERATES the serve! call for a managed app — `webdev.live/serve-code`
+  ;; writes it, because a hand-written one could disagree with the plan and the
+  ;; running server would be the half that disagreed. So a capability needing to
+  ;; add something to the assembled context has no call site of its own to add
+  ;; it at.
+  ;;
+  ;; This is that seam, and it is deliberately GENERIC: a function applied to
+  ;; the context between assembly and serving. `slopp.rest/validating` is its
+  ;; first user, and `slopp.http` does not learn that rest exists — which is the
+  ;; whole reason malli is not in this framework.
+  (let [seen (atom nil)
+        ;; honours on the way through as well as probing: what it wraps here is a
+        ;; namespace of typed endpoints, and a wrapper is exactly the seam that
+        ;; is supposed to carry that
+        wrap (fn [ctx] (reset! seen ctx) (honouring (assoc ctx :probe/wrapped true)))]
+    (testing "the wrapper receives the ASSEMBLED context, not the opts"
+      ;; it has to run after `context` has derived the routes and the performer
+      ;; vocabularies, or a wrapper deciding anything from the surface would be
+      ;; deciding it from a map that does not have one yet
+      (let [srv (slopp.http/serve! {:http/namespaces ['slopp.http-test]
+                                   :http/port 0
+                                   ;; this namespace declares a shell, and a
+                                   ;; shell with no bundle refuses at assembly
+                                   :webapp/bundle "/js/main.js"
+                                   :http/wrap-context wrap})]
+        (try
+          (is (some? (:http/routes @seen)) (pr-str (keys @seen)))
+          (is (contains? @seen :http/read-performers))
+          (finally (slopp.http/stop! srv)))))
+
+    (testing "and no wrapper leaves serving exactly as it was"
+      ;; every app enabling no such capability is this case, and it must cost
+      ;; nothing. Served over NO namespaces on purpose: every fixture route in
+      ;; this one is a typed endpoint, and a context over those may not serve
+      ;; unwrapped any more — so reusing them here would have exercised the
+      ;; refusal while claiming to show its absence.
+      (let [srv (slopp.http/serve! {:http/namespaces [] :http/port 0})]
+        (try (is (map? srv))
+             (finally (slopp.http/stop! srv)))))))
+
+(deftest content-is-a-VALUE-the-dispatcher-serves-not-a-handler-it-calls
+  (let [ctx (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                       :webapp/bundle "/js/main.js"
+                                       :http/wrap-context honouring})]
+    (testing "hiccup content renders, and keeps its structure for a headless drive"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/about"})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= "text/html; charset=utf-8" (get-in r [:headers "Content-Type"])))
+        (is (= [:main [:h1 "About"]] (:http/hiccup r))
+            "the tree the body was rendered from, same as html-response carries")
+        (is (str/includes? (str (:body r)) "<h1>About</h1>") (pr-str (:body r)))))
+    (testing "a string is served as it stands, at the media type the def declares"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/robots.txt"})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= "text/plain" (get-in r [:headers "Content-Type"]))
+            "verbatim, and deliberately NOT the \"text/plain; charset=utf-8\"
+             default — an assertion that matched the default would hold
+             whether or not the declaration was ever read")
+        (is (= "User-agent: *\nDisallow:\n" (:body r)))
+        (is (nil? (:http/hiccup r))
+            "nothing was rendered, so there is no tree to carry")))))
+
+(deftest a-webapp-SHELL-is-completed-by-the-framework
+  (let [ctx  (slopp.http/context {:http/namespaces ['slopp.http-test]
+                                  :http/wrap-context honouring
+                                  :webapp/base   "/p/demo"
+                                  ;; the row declares THAT it is a shell; which
+                                  ;; bundle is a deployment fact, stated once
+                                  ;; here beside the mount point
+                                  :webapp/bundle "/js/main.js"})
+        r    (slopp.http/handle! ctx {:request-method :get :uri "/"})
+        body (str (:body r))]
+    (is (= 200 (:status r)) (pr-str r))
+    (testing "the bundle script is injected, INTO the head the app wrote"
+      (is (str/includes? body "src=\"/js/main.js\"") body)
+      (is (str/includes? body "<script defer") body)
+      (is (< (str/index-of body "<script") (str/index-of body "</head>"))
+          "in the head and not merely somewhere in the document"))
+    (testing "the mount point carries the base, which no static document knows"
+      (is (str/includes? body "data-base=\"/p/demo\"") body)
+      (is (str/includes? body "id=\"app\"") body))
+    (testing "what the app wrote survives untouched"
+      (is (str/includes? body "<title>Demo</title>") body)
+      (is (str/includes? body "href=\"/css/style.css\"") body)
+      (is (str/starts-with? body "<!DOCTYPE html>") body))
+    (testing "and the app's own hiccup is NOT what gets served"
+      (is (not= t-shell (:http/hiccup r))
+          "the tree a headless drive reads is the completed one, so what it
+           drives is what a browser would get"))))
 
 (deftest a-SHELL-declares-that-it-IS-one-and-the-framework-supplies-the-bundle
   ;; `:webapp/shell` used to hold the bundle URL, so every shell route repeated

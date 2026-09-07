@@ -110,6 +110,49 @@
       (seq sk)      (assoc :schema sk)
       (seq dfl)     (assoc :optional dfl))))
 
+(defn ^:export shape-of
+  "The map SHAPE flowing into `ns-sym/nm`: what the form READS off its first
+   argument (`:reads`, by source), the literal keys each CALLER passes
+   (`:producers`, grouped by key-set — *58 callers pass exactly `#{:dir}`* is the
+   finding, not 58 separate lines; `:forms` samples 6, `:more` counts the
+   rest), and the diff between them (`:mismatch` —
+   `:passed-never-read` is a stale or misspelled key at a call site,
+   `:read-never-passed` a key nothing supplies). The rename question answered
+   mechanically instead of by eye.
+
+   PARTIAL BY CONSTRUCTION, and says so: only map-LITERAL arguments are
+   readable, so callers passing a variable are named in `:unknown-shape`. A
+   clean `:mismatch` means what it says only as far as that list is empty —
+   read the two together or don't read either. `callers` is `query-impact`'s
+   caller list; nil when the form takes no map argument and none is passed."
+  [st ns-sym nm callers]
+  (let [sexpr-of  (fn [n m] (store/named-sexpr st n m))
+        reads     (read-keys (sexpr-of ns-sym nm))
+        read-set  (into #{} cat (vals reads))
+        seen      (for [{cns :ns cform :form} callers
+                        :let [sh (some-> (sexpr-of cns cform) (call-arg-shape nm))]
+                        :when sh]
+                    (assoc sh :ns cns :form cform))
+        producers (vec (for [[ks grp] (->> (filter (comp seq :keys) seen)
+                                           (group-by :keys)
+                                           (sort-by (comp - count val)))
+                             :let [fs (sort (map #(symbol (str (:ns %)) (str (:form %))) grp))]]
+                         (cond-> {:keys ks :callers (count grp) :forms (vec (take 6 fs))}
+                           (> (count fs) 6) (assoc :more (- (count fs) 6)))))
+        unknown   (vec (sort (for [s seen :when (:unknown? s)]
+                               (symbol (str (:ns s)) (str (:form s))))))
+        passed    (into #{} (mapcat :keys) producers)
+        supplied  (some-fn passed (:optional reads #{}))
+        mismatch  (cond-> {}
+                    (some (complement read-set) passed)
+                    (assoc :passed-never-read (into #{} (remove read-set) passed))
+                    (and (seq producers) (some (complement supplied) read-set))
+                    (assoc :read-never-passed (into #{} (remove supplied) read-set)))]
+    (when (or (seq reads) (seq producers))
+      (cond-> {:reads reads :producers producers}
+        (seq unknown)  (assoc :unknown-shape unknown)
+        (seq mismatch) (assoc :mismatch mismatch)))))
+
 (defn- return-key-set
   "The COMPLETE set of keyword keys expression `expr` can evaluate to as a map,
    or nil when that set cannot be BOUNDED — an over-approximation (or a bail),
@@ -213,49 +256,6 @@
          :when (and info (not (contains? (:returns info) (first rd))))]
      {:key (first rd) :local (second rd)
       :callee (:callee info) :returns (:returns info)})))
-
-(defn ^:export shape-of
-  "The map SHAPE flowing into `ns-sym/nm`: what the form READS off its first
-   argument (`:reads`, by source), the literal keys each CALLER passes
-   (`:producers`, grouped by key-set — *58 callers pass exactly `#{:dir}`* is the
-   finding, not 58 separate lines; `:forms` samples 6, `:more` counts the
-   rest), and the diff between them (`:mismatch` —
-   `:passed-never-read` is a stale or misspelled key at a call site,
-   `:read-never-passed` a key nothing supplies). The rename question answered
-   mechanically instead of by eye.
-
-   PARTIAL BY CONSTRUCTION, and says so: only map-LITERAL arguments are
-   readable, so callers passing a variable are named in `:unknown-shape`. A
-   clean `:mismatch` means what it says only as far as that list is empty —
-   read the two together or don't read either. `callers` is `query-impact`'s
-   caller list; nil when the form takes no map argument and none is passed."
-  [st ns-sym nm callers]
-  (let [sexpr-of  (fn [n m] (store/named-sexpr st n m))
-        reads     (read-keys (sexpr-of ns-sym nm))
-        read-set  (into #{} cat (vals reads))
-        seen      (for [{cns :ns cform :form} callers
-                        :let [sh (some-> (sexpr-of cns cform) (call-arg-shape nm))]
-                        :when sh]
-                    (assoc sh :ns cns :form cform))
-        producers (vec (for [[ks grp] (->> (filter (comp seq :keys) seen)
-                                           (group-by :keys)
-                                           (sort-by (comp - count val)))
-                             :let [fs (sort (map #(symbol (str (:ns %)) (str (:form %))) grp))]]
-                         (cond-> {:keys ks :callers (count grp) :forms (vec (take 6 fs))}
-                           (> (count fs) 6) (assoc :more (- (count fs) 6)))))
-        unknown   (vec (sort (for [s seen :when (:unknown? s)]
-                               (symbol (str (:ns s)) (str (:form s))))))
-        passed    (into #{} (mapcat :keys) producers)
-        supplied  (some-fn passed (:optional reads #{}))
-        mismatch  (cond-> {}
-                    (some (complement read-set) passed)
-                    (assoc :passed-never-read (into #{} (remove read-set) passed))
-                    (and (seq producers) (some (complement supplied) read-set))
-                    (assoc :read-never-passed (into #{} (remove supplied) read-set)))]
-    (when (or (seq reads) (seq producers))
-      (cond-> {:reads reads :producers producers}
-        (seq unknown)  (assoc :unknown-shape unknown)
-        (seq mismatch) (assoc :mismatch mismatch)))))
 
 (defn ^:export assertions-added
   "How many assertion FORMS `new-form` has that `old-form` did not, when both

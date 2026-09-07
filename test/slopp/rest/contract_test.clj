@@ -243,3 +243,16 @@
     ;; meets nothing.
     (is (nil? (:error (rest.contract/decode-request
                        nil {:query-params {:utm "x" :fbclid "y"}}))))))
+
+(deftest a-body-that-is-not-an-object-is-refused-not-thrown
+  ;; the carriers merge into one map; a body that is not one used to throw
+  ;; out of `merge` and surface as a 500 about the server for a fault that
+  ;; is the client's. Each shape below is something a real adapter hands over.
+  (let [schema [:map [:tool :string]]]
+    (doseq [body [[{:tool "x"}] "{not json" 7 true]]
+      (let [r (rest.contract/decode-request schema {:body body})]
+        (is (string? (:error r)) (pr-str body r))
+        (is (not (contains? r :value)) (pr-str body r))))
+    (testing "and an object body still decodes as before"
+      (is (= {:tool "x"} (get-in (rest.contract/decode-request schema {:body {:tool "x"}})
+                                 [:value :body]))))))
