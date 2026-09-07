@@ -5,7 +5,7 @@
 #   slopp --main slopp.sync/-main import .     build the store from the repo's slopp branch
 #   slopp --main slopp.sync/-main test .       isolated suite from a store build
 #   slopp --doctor                             self-check the plugin wiring end-to-end
-#   slopp daemon [port]                        ONE slopp for the machine: MCP over HTTP for every project
+#   slopp daemon [port] | stop | status        ONE slopp for the machine: MCP over HTTP for every project
 # Fetches and caches the versioned jar on first run; java 21+ required.
 set -euo pipefail
 
@@ -45,6 +45,42 @@ fi
 TOOL=""; ARGSFILE=""
 case "${1:-}" in
   daemon)
+    # `slopp daemon stop` / `status`: the daemon records itself in
+    # ~/.slopp/daemon.json; stop sends SIGTERM to that pid and clears the
+    # file, status prints /slopp/status. Everything else is a start.
+    if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
+      python3 - "$2" <<'PYEOF'
+import json, os, signal, sys, time, urllib.request
+f = os.path.expanduser("~/.slopp/daemon.json")
+try:
+    info = json.load(open(f))
+except Exception:
+    print("slopp daemon: none recorded (no ~/.slopp/daemon.json)"); sys.exit(1)
+pid, url = int(info["pid"]), info["url"].rstrip("/")
+try:
+    os.kill(pid, 0); alive = True
+except Exception:
+    alive = False
+if sys.argv[1] == "status":
+    try:
+        with urllib.request.urlopen(url + "/status", timeout=3) as r: print(f"pid {pid}: " + r.read().decode())
+    except Exception as e:
+        print(f"slopp daemon: pid {pid} {'alive' if alive else 'dead'}, {url} not answering ({e})"); sys.exit(1)
+    sys.exit(0)
+if alive:
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        time.sleep(0.2)
+        try: os.kill(pid, 0)
+        except Exception: break
+    print(f"slopp daemon: stopped pid {pid}")
+else:
+    print(f"slopp daemon: pid {pid} was already gone")
+try: os.remove(f)
+except Exception: pass
+PYEOF
+      exit $?
+    fi
     # The daemon boots slopp's OWN code from the dir it is given — the
     # kernel loads every namespace of that dir's store into the JVM — so it
     # is launched from a NEUTRAL dir (~/.slopp, no store), never a project:
