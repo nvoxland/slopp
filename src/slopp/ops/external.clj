@@ -849,6 +849,7 @@ client-deps (merge (:client-deps st) (:client provided))
                     [:slopp.ops/dir {:optional true} [:maybe :some]]
                     [:slopp.ops/warm-spare? {:optional true} [:maybe :boolean]]
                     [:slopp.ops/async-image? {:optional true} [:maybe :boolean]]
+                    [:slopp.ops/lazy-image? {:optional true} [:maybe :boolean]]
                     [:slopp.ops/branch-image-ttl-ms {:optional true} [:maybe :int]]
                     [:slopp.ops/agent-id {:optional true} [:maybe :string]]
                     [:slopp.ops/read-only? {:optional true} [:maybe :boolean]]]]]
@@ -868,6 +869,13 @@ client-deps (merge (:client-deps st) (:client provided))
   store tools serve immediately; oracle/write tools `api/await-image!` the
   boot. The DEFAULT stays synchronous — every existing caller gets a
   fully-loaded image on return, unchanged.
+
+  `:slopp.ops/lazy-image? true` boots NO image until something needs one:
+  `await-image!` boots it on the first oracle or write call, at the store's
+  head as of THEN. The daemon opens every session this way — a session that
+  only reads never pays for a child JVM, and most sessions (subagents,
+  readers, the write door between bursts) only read. The cache stays
+  current without an image (`sync-with-journal!`).
 
   The option keys are QUALIFIED — `{:slopp.ops/dir …}` — and the schema, the
   destructure, and every call site agree. (The schema once documented bare
@@ -892,7 +900,7 @@ client-deps (merge (:client-deps st) (:client provided))
   the warming spare, the reaper timer, and the SQLite connection: the atom
   never reached the caller, so nothing could ever release them."
   ([] (open! {}))
-  ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image? read-only?]}]
+  ([{:slopp.ops/keys [agent-id branch-image-ttl-ms dir warm-spare? async-image? lazy-image? read-only?]}]
    (let [;; EVERY session has a journal. A named dir is served as a question
          ;; (no store → nil, never an adoption); a dirless open gets a PRIVATE
          ;; one in a temp dir that `close!` removes. History is a db read now,
@@ -979,15 +987,24 @@ client-deps (merge (:client-deps st) (:client provided))
                    (str (java.nio.file.Files/createTempDirectory
                          "slopp-kondo"
                          (make-array java.nio.file.attribute.FileAttribute 0)))))
-         ;; image boot: inline (sync default) or on a daemon thread (async),
-         ;; which arms the ready-promise await-image! blocks on
-         (if async-image?
+         ;; image boot: inline (sync default), on a daemon thread (async, which
+         ;; arms the ready-promise await-image! blocks on), or DEFERRED (lazy:
+         ;; the thunk boots on first need, at the store's head as of then)
+         (cond
+           lazy-image?
+           (do (swap! session assoc :boot-image!
+                      (fn [] (boot-image! session (:store @session) conn me ttl)))
+               session)
+
+           async-image?
            (do (swap! session assoc :image-ready (promise))
                (doto (Thread. ^Runnable #(boot-image! session (:store @session) conn me ttl)
                               "slopp-image-boot")
                  (.setDaemon true)
                  (.start))
                session)
+
+           :else
            (boot-image! session (:store @session) conn me ttl)))
        (catch Throwable t
          (ops/close! session)

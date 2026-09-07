@@ -197,3 +197,48 @@
         (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))
         (is (empty? (projects! ctx)) (pr-str (projects! ctx))))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-daemon-session-boots-no-image-until-something-needs-one
+  ;; The memory the daemon exists to save is the idle child JVM every session
+  ;; used to hold from its first second. Reads answer from the store value;
+  ;; a session that only reads never needs an image — and it still sees what
+  ;; others land, because the cache refresh no longer waits on an image it
+  ;; does not have. The first eval or write boots one, for that session.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (http/handle! ctx {:request-method :post
+                                  :uri "/slopp/projects/one/mcp"
+                                  :headers (cond-> {"x-slopp-dir" d}
+                                             sid (assoc "mcp-session-id" sid))
+                                  :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}
+        call (fn [sid n args]
+               (get-in (json/parse-string
+                        (:body (post sid {:jsonrpc "2.0" :id 9 :method "tools/call"
+                                          :params {:name n :arguments args}}))
+                        true)
+                       [:result :content 0 :text]))]
+    (try
+      (let [a  (get-in (post nil init) [:headers "Mcp-Session-Id"])
+            b  (get-in (post nil init) [:headers "Mcp-Session-Id"])
+            sa (daemon/lookup! a)
+            sb (daemon/lookup! b)]
+        (testing "reading boots nothing"
+          (call a "query_search" {:pattern "defn"})
+          (is (nil? (:image @sa)) "a read needs no image")
+          (is (nil? (:image @sb))))
+        (testing "a write in one session boots its image, and its landed work reaches the other without one"
+          (call b "ns_create" {:ns "lz.core" :thread "t-b" :prompt "lazy fixture"
+                               :source "(ns lz.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+          (is (some? (:image @sb)) "the write booted the writer's image")
+          (call b "done" {:thread "t-b" :label "land it"})
+          (let [seen (call a "query_search" {:pattern "unused-ok f" :branch "main"})]
+            (is (re-find #"lz\.core" (str seen)) (str seen))
+            (is (nil? (:image @sa)) "still no image on the reader")))
+        (testing "an eval boots the reader's image, once, at the current head"
+          (call a "query_eval" {:code "(+ 1 1)"})
+          (is (some? (:image @sa)))))
+      (finally (daemon/reset-all!)))))

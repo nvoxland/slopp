@@ -121,7 +121,8 @@
   before it was reading nothing). The reader answers about the BRANCH,
   which is what a consumer of a project's API wants, and it is what OWNS
   the project's app server: an agent's un-landed work is its own to read
-  through its thread, and the served app is the landed state."
+  through its thread, and the served app is the landed state. It boots no
+  oracle of its own unless something asks for one."
   [dir]
   (locking state
     (let [{:keys [reader ctx] :as api} (get-in @state [:projects dir :api])]
@@ -131,7 +132,7 @@
           (when reader (try (ops/close! reader) (catch Throwable _ nil)))
           (let [reader (external/open! {:slopp.ops/dir dir
                                         :slopp.ops/read-only? true
-                                        :slopp.ops/async-image? true})
+                                        :slopp.ops/lazy-image? true})
                 ;; a server the old reader held carries over: the store
                 ;; appearing is no reason to drop what is serving
                 _      (when app (swap! reader assoc :app-server app))
@@ -274,6 +275,9 @@
   backgrounded, on the branch the project opened on: one per project, the
   first branch started, as decided.
 
+  The session's oracle is LAZY: nothing boots until a call needs an image,
+  so a session that only reads — most of them — costs no child JVM.
+
   Under the lock for the whole open, deliberately: two first-attaches on
   one dir must not both mint the project."
   [dir slug]
@@ -282,11 +286,11 @@
           sid     (str (java.util.UUID/randomUUID))
           [_ first?] (ensure-project! dir slug)
           owner   (:reader (api! dir))
-          session (external/open! {:slopp.ops/dir          dir
-                                   :slopp.ops/async-image? true
+          session (external/open! {:slopp.ops/dir         dir
+                                   :slopp.ops/lazy-image? true
                                    ;; the session's own label; the THREAD an
                                    ;; agent writes on is what it passes
-                                   :slopp.ops/agent-id     (str "mcp-" (subs sid 0 8))})]
+                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 8))})]
       (swap! session assoc :require-turns? true :daemon? true
              :app-owner owner :app-server (:app-server @owner))
       (swap! state #(-> %
@@ -368,7 +372,8 @@
   first use — opening the project under `slug` if nothing is attached —
   and touched on every call so the reaper knows it is in use. Writable,
   turn-gated like every real session, carrying the daemon's token as its
-  `:call-token` and the project's reader as its app owner."
+  `:call-token` and the project's reader as its app owner; its oracle is
+  lazy, like every daemon session's."
   [dir slug]
   (locking state
     (let [now (System/currentTimeMillis)]
@@ -377,9 +382,9 @@
         (do (swap! state assoc-in [:projects dir :cli :last-seen] now)
             s)
         (let [owner   (:reader (api! dir))
-              session (external/open! {:slopp.ops/dir          dir
-                                       :slopp.ops/async-image? true
-                                       :slopp.ops/agent-id     (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
+              session (external/open! {:slopp.ops/dir         dir
+                                       :slopp.ops/lazy-image? true
+                                       :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
           (swap! session assoc :require-turns? true :daemon? true
                  :call-token (token)
                  :app-owner owner :app-server (:app-server @owner))

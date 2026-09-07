@@ -112,14 +112,23 @@
                     " crosses and then module_dep {from … to … remove true}."))))))
 
 (defn await-image!
-  "Block until the session's background image boot has finished, then return
-  the session (its image live). A synchronously-opened session (the default)
-  carries no ready-promise and returns immediately. A boot FAILURE delivered
-  to the promise is RETHROWN here — with the async-boot server path the MCP
-  connection is already up by the time the image loads, so a boot error
+  "Block until the session's image is live, then return the session. A
+  synchronously-opened session (the default) carries no ready-promise and
+  returns immediately; an async open's promise is derefed here, and a boot
+  FAILURE delivered to it is RETHROWN — with the async-boot server path the
+  MCP connection is already up by the time the image loads, so a boot error
   surfaces on the first oracle/write call instead of killing the server at
-  startup (which is what let a slow store race the MCP connect timeout)."
+  startup (which is what let a slow store race the MCP connect timeout).
+
+  A LAZY session (`:boot-image!` on the atom, no image yet) boots here, once,
+  under the session lock, at the store's current head — this is the first
+  call that needed one. A boot failure throws to the caller as a sync open's
+  would; the thunk stays, so the next call tries again."
   [session]
+  (when (and (nil? (:image @session)) (:boot-image! @session))
+    (locking session
+      (when (nil? (:image @session))
+        ((:boot-image! @session)))))
   (when-let [p (:image-ready @session)]
     (let [r (deref p)]
       (when (instance? Throwable r) (throw r))))
@@ -176,12 +185,28 @@
   "m5b: absorb commits made by OTHER servers sharing this store dir. Cheap
   when nothing changed (one PRAGMA read). On foreign commits: refresh the
   cached store from the journal, reload every namespace whose source changed
-  into the LOCAL image, and drop trace entries touching the changed
-  namespaces (conservative — narrowing rebuilds). Returns {:synced n-nses}
-  or nil when already current. The MCP dispatch calls this before every
-  tool, so servers converge continuously."
+  into the LOCAL image — when this session holds one; a lazy session that
+  has not booted its image keeps its CACHE current here all the same, which
+  is what lets it read what others land — and drop trace entries touching
+  the changed namespaces (conservative — narrowing rebuilds). Returns
+  {:synced n-nses} or nil when already current. The MCP dispatch calls this
+  before every tool, so servers converge continuously.
+
+  A session opened on a dir with NO store yet has no connection, and the
+  store can appear afterwards — somebody else's first durable write creates
+  it, which under the daemon is the ordinary shape: attach, then write.
+  Such a session ATTACHES here once the file exists: a connection, its line
+  adopted on it, its value reloaded. Without this it stayed blind to
+  everything that ever landed, while reporting an empty store as current."
   [session]
-  (when-let [conn (and (:image @session) (:db @session))]
+  (when (and (nil? (:db @session))
+             (:dir @session)
+             (not (:ephemeral-dir? @session))
+             (.exists (java.io.File. (str (:dir @session)) ".slopp/store.db")))
+    (when-let [conn (db/open! (:dir @session) {:create? false})]
+      (swap! session assoc :db conn :data-version nil)
+      (engine/adopt-line! session)))
+  (when-let [conn (:db @session)]
     (let [v (db/data-version conn)]
       (when (not= v (:data-version @session))
         (let [old (:store @session)]
@@ -199,8 +224,9 @@
                                                           (str (or (:name %) (:id %))))
                                                  (store/forms new n))))
                                   changed)]
-                (doseq [n changed]
-                  (image/load-ns! (:image @session) new n))
+                (when-let [image (:image @session)]
+                  (doseq [n changed]
+                    (image/load-ns! image new n)))
                 (swap! session update :test-map
                        (fn [tm]
                          (into {}
