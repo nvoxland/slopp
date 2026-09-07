@@ -2821,3 +2821,33 @@ session's exit; then the harness's SIGTERM beating the stdio finally on a
 big store) — the landing floor is in the server now, twice over, and every
 cell store since shows nothing un-landed.
 
+
+## 2026-09-06 — daemon census, lazy images (P5-1 item 4a)
+
+Setup: one `slopp daemon` (`--live` from the slopp2 checkout, jar built the
+same evening), sessions attached through the stdio pipe (`SLOPP_DAEMON=1`),
+`ps` by parent pid.
+
+- Two sessions attached and reading (`tools/list`, `query_search`,
+  `session_brief`): the daemon JVM at ~605 MB RSS, **zero child JVMs**. The
+  same two sessions as per-session servers were two ~1.6 GB processes plus
+  an image each (the 2026-09-06 morning census: 2.4 GB + 530 MB on slopp2).
+- One `query_eval`: exactly one image child boots, 127 MB RSS, for the
+  session that asked. The other session stays image-less.
+- Detach: the image is PARKED (`ops/close!` → `repl/park!`), so the child
+  survives the session and is handed to the next tenant with the same deps.
+  That is the process-wide recycling that already existed; under one JVM it
+  is finally shared across agents.
+- Attach through the pipe: `initialize` answered 4.6–5.1 s after launch,
+  which includes the daemon loading slopp's own store under `--live`; from a
+  neutral dir on the snapshot jar the daemon binds in 4.6 s too (the kernel's
+  jar load dominates). Inside the stdio client's window; outside the HTTP
+  client's ~7 s with a cold start, which is one of the two reasons the pipe
+  exists.
+- Found on the way: a session opened before its dir had a store never got a
+  connection and stayed blind to everything landed afterwards. Fixed in
+  `sync-with-journal!` (attach when the file appears).
+
+Not yet measured: readers sharing ONE image per (project, branch) — deferred
+until a workload shows image-backed reads dominating; today the lazy boot
+already removes the idle JVM that was the whole of the 2.6 GB/agent cost.
