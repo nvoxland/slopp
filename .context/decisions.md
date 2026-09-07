@@ -6957,6 +6957,14 @@ run against the daemon.
   in one evening); and `done` refuses to land a namespace that no longer
   loads. The accepted residual: a land that loads but misbehaves degrades
   every project on the box until the next land, not one session.
+- **The daemon is the default (2026-09-07, evening).** `slopp-server` is
+  the pipe unless `SLOPP_DAEMON=0`; the per-session JVM stays as the
+  self-contained fallback and the eval baseline. Two behaviours that made
+  it safe to flip: a request whose session the daemon does not hold — or
+  that carries none — is attached where it stands when it names its dir
+  (the pipe adopts the new id), and the pipe replays the client's
+  initialize when a daemon comes back; a restart or an idle reap costs one
+  late answer, never a dead session.
 - **The check queue keys on content, not head.** Two idle threads on one
   branch have different heads (markers) and the same elements digest; the
   digest is what two `full_check`s share. A joiner records the verdict on

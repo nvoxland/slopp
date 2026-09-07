@@ -719,7 +719,17 @@ cannot tell them apart.
   slopp-ui reads the registry directly and its hub proxy retires on their
   side. Skills follow.
 - **P5-3 — retire stdio only after** the memory census and the s16
-  concurrency eval have been rerun against the daemon.
+  concurrency eval have been rerun against the daemon. **Done 2026-09-07
+  (evening):** the daemon is the plugin's DEFAULT (`slopp-server` is the
+  pipe; `SLOPP_DAEMON=0` keeps a JVM per session — the self-contained
+  fallback stays, it is no longer the default). Evidence: the census
+  (`findings-log.md` 2026-09-06/07), the two `claude -p` sessions through
+  the daemon, the restart and idle-reap paths exercised live (the pipe and
+  the daemon each recover the session by themselves now), and the whole
+  external suite green against the daemon. NOT retired: the per-session
+  listener code (`start-ui!`, `.slopp/ui-port`, the hub heartbeat) — it is
+  what `SLOPP_DAEMON=0` runs; retiring it is a separate unit once nobody
+  runs that mode.
 
 Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
 always-open projects, the daemon as a scheduler.
