@@ -5233,3 +5233,25 @@
     (is (contains? tools/wire-keys :plural-variants)))
   (testing "and the spellings it is leaving behind"
     (is (contains? tools/wire-keys :not-swept))))
+
+(deftest a-done-says-when-a-successful-refresh-left-the-app-behind
+  ;; `app-note-for` reports what the refresh SAID: timed out, failed, serving
+  ;; nothing. A refresh that reports success and leaves the served image
+  ;; behind the store is the fourth outcome, and it is the one that fooled
+  ;; every surface for 23 hours. slopp-ui's ask, verbatim: \"a refresh that
+  ;; does not happen should say so at the grain that was supposed to do it.\"
+  ;; So `done` re-reads `app-behind` AFTER the refresh and judges the outcome,
+  ;; not the report.
+  (testing "a successful refresh that left the app behind is news"
+    (let [n (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:1/"} 7)]
+      (is (string? n) (pr-str n))
+      (is (re-find #"7" n) n)
+      (is (re-find #"(?i)behind" n) n)))
+  (testing "a successful refresh that is current says nothing, as before"
+    (is (nil? (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:1/"} 0))))
+  (testing "an unmeasured count makes no claim either way"
+    ;; nil is 'could not measure', which is not 'behind by nothing'
+    (is (nil? (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:1/"} nil))))
+  (testing "the one-argument report is unchanged"
+    (is (nil? (#'mcp/app-note-for {:serving? true :url "http://127.0.0.1:1/"})))
+    (is (string? (#'mcp/app-note-for {:serving? false :reason "port 7 is taken"})))))

@@ -386,11 +386,20 @@
         ;; `hot-refresh!` answers nil for everything in-place cannot serve (a
         ;; changed load order, a failed reload, nothing running), and the
         ;; re-boot below is the fallback rather than the default.
-        (try (or (live/hot-refresh! session (:store @session)
-                                    (:app-server @session))
-                 (live/refresh! session (:store @session) dir))
-             (catch Throwable t
-               {:serving? false :reason (or (.getMessage t) (str t))})))
+        (let [r (try (or (live/hot-refresh! session (:store @session)
+                                            (:app-server @session))
+                         (live/refresh! session (:store @session) dir))
+                     (catch Throwable t
+                       {:serving? false :reason (or (.getMessage t) (str t))}))]
+          ;; the OUTCOME beside the report: measure app-behind AFTER the
+          ;; refresh, so a refresh that said it worked and left the image
+          ;; behind is news rather than the silence success is entitled to.
+          ;; Both doors that call this (done, commit_point) read it off the
+          ;; map. nil when it cannot be measured, which makes no claim
+          (if (and (map? r) (:serving? r))
+            (assoc r ::behind (try (ops/app-behind session r)
+                                   (catch Throwable _ nil)))
+            r)))
       (when-let [running (:app-server @session)]
         (locking session
           (try (live/stop! running) (catch Throwable _))
@@ -465,45 +474,70 @@
   a scary line in front of someone who got exactly what they asked for, and
   train them to skim the one that matters.
 
+  **The two-arity judges the OUTCOME, not the report.** `behind` is
+  `app-behind` measured AFTER the refresh: a refresh that said it succeeded
+  and left the served image behind the store is the fourth outcome, and it
+  fooled every surface for 23 hours — the report was true, the stamp it
+  reported from was not retaken. nil means unmeasured and makes no claim;
+  0 is current and stays silent. The one-arity reads `::behind` off the map,
+  which [[refresh-app!]] puts there, so neither door that calls this moved.
+
   Reported by the first consumer to lose an app server this way: `done`
   returned a clean report, the failure appeared only in `session_brief`, and
   an agent has no reason to make that second call. Action and announcement
   belonged in the same one."
-  [refreshed]
-  (cond
-    ;; THE BOUND EXPIRED. This used to report nil — "say nothing rather than
-    ;; guess" — which put a re-serve that had not happened into the same
-    ;; silence as a store slopp runs nothing for and a re-serve that worked.
-    ;; Three outcomes, one silence, and two of them fine: a consumer served
-    ;; twenty minutes of old code with every surface reading clean.
-    ;;
-    ;; Guessing was never the alternative. Naming WHICH question went
-    ;; unanswered is, and it costs one line at the rare moment it is true.
-    (= ::refresh-timed-out refreshed)
-    (str "the app re-serve did not finish inside this done's wait — it is"
-         " STILL RUNNING, and this done cannot say whether the image was"
-         " replaced. session_brief reports the outcome: :app-behind 0 means it"
-         " landed, a positive count means the browser is still on the older"
-         " store. Not a failure by itself; a done that stayed silent here"
-         " would have been indistinguishable from one that re-served cleanly.")
+  ([refreshed]
+   (app-note-for refreshed (when (map? refreshed) (::behind refreshed))))
+  ([refreshed behind]
+   (cond
+     ;; THE BOUND EXPIRED. This used to report nil — \"say nothing rather than
+     ;; guess\" — which put a re-serve that had not happened into the same
+     ;; silence as a store slopp runs nothing for and a re-serve that worked.
+     ;; Three outcomes, one silence, and two of them fine: a consumer served
+     ;; twenty minutes of old code with every surface reading clean.
+     ;;
+     ;; Guessing was never the alternative. Naming WHICH question went
+     ;; unanswered is, and it costs one line at the rare moment it is true.
+     (= ::refresh-timed-out refreshed)
+     (str "the app re-serve did not finish inside this done's wait — it is"
+          " STILL RUNNING, and this done cannot say whether the image was"
+          " replaced. session_brief reports the outcome: :app-behind 0 means it"
+          " landed, a positive count means the browser is still on the older"
+          " store. Not a failure by itself; a done that stayed silent here"
+          " would have been indistinguishable from one that re-served cleanly.")
 
-    (and (map? refreshed)
-         (false? (:serving? refreshed))
-         (not (:stopped refreshed))
-         (:reason refreshed))
-    (str "the app server slopp runs for this project is DOWN after this done: "
-         (:reason refreshed))
+     (and (map? refreshed)
+          (false? (:serving? refreshed))
+          (not (:stopped refreshed))
+          (:reason refreshed))
+     (str "the app server slopp runs for this project is DOWN after this done: "
+          (:reason refreshed))
 
-    ;; SERVING AND EMPTY is the fourth outcome, and it hid behind the first
-    ;; three because it looks exactly like success: the port bound, the url is
-    ;; right, and every path 404s. It is news at a done for the same reason a
-    ;; failure is — this done is when it became true, and the change that did
-    ;; it is still in the author's hand.
-    (and (map? refreshed)
-         (:serving? refreshed)
-         (get-in refreshed [:plan :serves-nothing]))
-    (str "the app server slopp runs for this project came back up at "
-         (:url refreshed) " and " (get-in refreshed [:plan :serves-nothing]))))
+     ;; SERVING AND EMPTY is the fourth outcome, and it hid behind the first
+     ;; three because it looks exactly like success: the port bound, the url is
+     ;; right, and every path 404s. It is news at a done for the same reason a
+     ;; failure is — this done is when it became true, and the change that did
+     ;; it is still in the author's hand.
+     (and (map? refreshed)
+          (:serving? refreshed)
+          (get-in refreshed [:plan :serves-nothing]))
+     (str "the app server slopp runs for this project came back up at "
+          (:url refreshed) " and " (get-in refreshed [:plan :serves-nothing]))
+
+     ;; SUCCEEDED AND STILL BEHIND — the report and the outcome disagree. The
+     ;; only way to see it is to measure after acting, which is what `behind`
+     ;; is. A positive count here is not \"wait for the refresh\": the refresh
+     ;; has returned.
+     (and (map? refreshed)
+          (:serving? refreshed)
+          (number? behind)
+          (pos? behind))
+     (str "the app server slopp runs for this project re-served without error"
+          " and is STILL " behind " code change(s) BEHIND the store — the refresh"
+          " reported success and the outcome disagrees. The browser at "
+          (:url refreshed) " is showing an older store than this done describes;"
+          " a re-boot (a done after a namespace is added or removed, or a"
+          " restart) replaces the image outright."))))
 
 (def ^:private thread-hint-every
   "Un-landed changes between reminders that this session's work is private.

@@ -164,7 +164,9 @@
   It echoes `:http/routes` for the same reason it echoes `:http/perform-ctx`:
   the managed server's failures have all been options that never crossed,
   and an option is only observably carried if something on the far side can
-  be asked about it."
+  be asked about it. `static=` is read through each mount's reader ON EVERY
+  REQUEST — the real static route does the same — so a test can see whether
+  a refresh reached the dir the child serves from."
   (str "(ns slopp.http\n"
        ;; the real framework ships these as one vendored family on the
        ;; child's classpath; here they are store namespaces, so the sibling
@@ -180,12 +182,16 @@
        "    (.createContext srv \"/\"\n"
        "      (reify HttpHandler\n"
        "        (handle [_ x]\n"
-       "          (let [b (.getBytes\n"
-       "                   (str \"ns=\" (pr-str (:http/namespaces opts))\n"
-       "                        \" ctx=\" (pr-str (:http/perform-ctx opts))\n"
-       "                        \" cap=\" (pr-str (:http/max-body-bytes opts))\n"
-       "                        \" routes=\" (pr-str (:http/routes opts))\n"
-       "                        \" app=\" (when-let [v (resolve 'demo.app/greeting)] (v))))]\n"
+       "          (let [rs (:http/routes opts)\n"
+       "                b  (.getBytes\n"
+       "                    (str \"ns=\" (pr-str (:http/namespaces opts))\n"
+       "                         \" ctx=\" (pr-str (:http/perform-ctx opts))\n"
+       "                         \" cap=\" (pr-str (:http/max-body-bytes opts))\n"
+       "                         \" routes=\" (pr-str (mapv #(dissoc % :reader) rs))\n"
+       "                         \" static=\" (pr-str (vec (for [r rs :when (:reader r)\n"
+       "                                                        f [\"app.css\" \"app.js\"]]\n"
+       "                                                    (:content ((:reader r) (str (:prefix r) \"/\" f))))))\n"
+       "                         \" app=\" (when-let [v (resolve 'demo.app/greeting)] (v))))]\n"
        "            (.sendResponseHeaders x 200 (long (alength b)))\n"
        "            (with-open [o (.getResponseBody x)] (.write o b))))))\n"
        "    (.start srv)\n"
@@ -378,8 +384,13 @@
   wiring under test is store bytes → a temp dir the parent writes → a reader
   in a child JVM that has no store, and only a reader that actually opens
   the file proves the chain. So `file-or-resource-reader` here slurps from
-  `root` rather than returning a canned value, and `mount-routes` puts what
-  it read into the row.
+  `root` rather than returning a canned value.
+
+  The row carries the READER rather than what it read, because the real
+  mount reads PER REQUEST and so must this one: a fixture that read once at
+  mount time would have passed the boot-time wiring test and hidden the
+  hot-refresh defect — a dir rewritten under a reader that never re-reads
+  looks identical to a dir nobody rewrote.
 
   The real pair is tested in `web-test/static-mounts-serve-raw-bytes`;
   nothing here stands in for routing or for content-type resolution."
@@ -392,8 +403,7 @@
        "\n"
        "(defn mount-routes \"M.\" [mounts reader]\n"
        "  (vec (for [[url prefix] mounts]\n"
-       "         {:mounted url\n"
-       "          :read (:content (reader (str prefix \"/app.css\")))})))\n"))
+       "         {:mounted url :prefix prefix :reader reader})))\n"))
 
 (deftest ^:external the-app-server-comes-up-and-answers-without-the-app-asking
   ;; The directive this whole namespace exists for: "when we have a web slopp
@@ -1126,3 +1136,102 @@
             "it claimed an in-place refresh across a changed load order"))
 
       (finally (live/stop! (:app-server @sess))))))
+
+(deftest ^:external a-hot-refresh-retakes-the-served-at-stamp
+  ;; `boot!` stamps `:served-at (:head-at store)` and `app-behind` counts code
+  ;; deltas after it. `hot-refresh!` retook `:currency` and left `:served-at`
+  ;; at boot — so the count rose forever, and `done` was honestly silent
+  ;; because the refresh had succeeded. 23 hours and 57 changes on one
+  ;; consumer's browser before a human noticed by reloading it.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-app-stamp"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        s    (-> (store/empty-store)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
+                 (store/ingest 'demo.app
+                               (str "(ns demo.app)\n\n"
+                                    "(defn greeting \"G.\" [] \"hello\")\n"))
+                 (#(first (store/record-config-put % "capabilities" :manifest
+                                                   "http.enabled" "true"))))
+        sess (atom {:dir dir})
+        r    (live/start! sess s dir)]
+    (try
+      (is (:serving? r) (str "start! did not serve: " (:reason r)))
+      (is (= (:head-at s) (:served-at r)) "fixture: boot stamps the head it served")
+      (Thread/sleep 5)   ; so the next head-at is a different millisecond
+      (let [s2 (store/ingest s 'demo.app
+                             (str "(ns demo.app)\n\n"
+                                  "(defn greeting \"G.\" [] \"hello again\")\n"))
+            r2 (live/hot-refresh! sess s2 r)]
+        (is (:hot? r2) (str "expected an in-place refresh, got: " (pr-str (dissoc r2 :image :plan))))
+        (testing "the stamp is the head this image now serves, not the one it booted on"
+          (is (= (:head-at s2) (:served-at r2))
+              (str "served-at stayed at boot: " (:served-at r2) " vs head " (:head-at s2))))
+        (testing "which is what makes app-behind able to fall back to 0"
+          (is (not= (:served-at r) (:served-at r2)))))
+      (finally (live/stop! r)))))
+
+(deftest ^:external a-hot-refresh-carries-changed-assets-into-the-child
+  ;; The wiring test above proves assets reach the child AT BOOT. This one
+  ;; proves they keep reaching it: `boot!` materializes the mounts into a
+  ;; fresh dir on the recorded assumption that \"the image is replaced at
+  ;; every refresh\", and `hot-refresh!` invalidated that assumption the day
+  ;; it shipped — it keeps the image, keeps the dir, reloads namespaces only.
+  ;; So a recompiled client bundle (an ARTIFACT, out of line) lands in the
+  ;; store and the child goes on serving the bytes it was born with.
+  ;; Measured by slopp-ui: artifact on disk 2,270,687 b; served 2,218,679 b;
+  ;; 23 hours apart.
+  ;;
+  ;; Asserted OVER THE SOCKET, not in the dir: the served bytes are the only
+  ;; thing a browser sees, and a dir rewritten under a reader that does not
+  ;; re-read would pass a dir assertion and fail the human.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-app-assets"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        s0   (-> (store/empty-store)
+                 (store/ingest 'slopp.http fake-web-src)
+                 (store/ingest 'slopp.http.static fake-static-src)
+                 (store/ingest 'demo.app
+                               (str "(ns demo.app)\n\n"
+                                    "(defn greeting \"G.\" [] \"hello\")\n"))
+                 (#(first (store/record-config-put % "capabilities" :manifest
+                                                   "http.enabled" "true")))
+                 (#(first (store/record-config-put % "capabilities" :manifest
+                                                   "http.static./assets" "public")))
+                 (#(first (store/record-file-put % "public/app.css"
+                                                 "body{color:rebeccapurple}"))))
+        ;; a compiled bundle is an ARTIFACT: bytes out of line, fetched from
+        ;; <dir>/.slopp/artifacts/<sha> — the path slopp-ui's bundle takes
+        s    (first (store/record-artifact
+                     s0 "public/app.js"
+                     (artifacts/put! dir (.getBytes "console.log('v1')")
+                                     {:recipe "test"})))
+        sess (atom {:dir dir})
+        r    (live/start! sess s dir)
+        get* (fn [] (:http/body (http.client/request {:http/url (:url r)
+                                                      :http/timeout-ms 5000})))]
+    (try
+      (is (:serving? r) (str "start! did not serve: " (:reason r)))
+      (testing "fixture: both a tracked file and an artifact reach the child at boot"
+        (let [body (get*)]
+          (is (str/includes? body "rebeccapurple") body)
+          (is (str/includes? body "console.log('v1')") body)))
+      (let [s2 (-> s
+                   (#(first (store/record-file-put % "public/app.css"
+                                                   "body{color:teal}")))
+                   (#(first (store/record-artifact
+                             % "public/app.js"
+                             (artifacts/put! dir (.getBytes "console.log('v2')")
+                                             {:recipe "test"})))))
+            r2 (live/hot-refresh! sess s2 r)]
+        (is (:hot? r2) (str "expected an in-place refresh, got: " (pr-str (dissoc r2 :image :plan))))
+        (let [body (get*)]
+          (testing "a changed tracked file is what the child now serves"
+            (is (str/includes? body "teal") body)
+            (is (not (str/includes? body "rebeccapurple")) body))
+          (testing "and so is a changed ARTIFACT — the bundle case"
+            (is (str/includes? body "console.log('v2')") body)
+            (is (not (str/includes? body "console.log('v1')"))
+                (str "the child is still serving the bytes it booted with: " body)))))
+      (finally (live/stop! r)))))

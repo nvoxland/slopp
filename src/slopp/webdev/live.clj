@@ -244,10 +244,10 @@
                      accepting a claim about where someone else publishes it"})
 
 (defn ^:export materialize-static!
-  "Write every file the `mounts` cover into a fresh temp dir and return its
-  path — nil when there are no mounts, so an app without assets allocates
-  nothing. `store-dir` is the STORE's directory, the root of the on-disk
-  artifact cache.
+  "Write every file the `mounts` cover into `out-dir` — a fresh temp dir when
+  none is given — and return its path; nil when there are no mounts, so an app
+  without assets allocates nothing. `store-dir` is the STORE's directory, the
+  root of the on-disk artifact cache.
 
   The managed app image is a separate JVM with NO store, which is the whole
   reason static mounts went unserved: `mount-routes` takes a reader, and the
@@ -255,6 +255,16 @@
   that into the reader it CAN use, `file-or-resource-reader`, pointed at a
   dir. Paths keep their manifest shape under the dir, so one mount serves a
   tree rather than a flat list.
+
+  **The four-arity SYNCS an existing dir, and that is what a hot refresh
+  needs.** `boot!` wrote a fresh dir on the recorded assumption that the image
+  is replaced at every refresh; `hot-refresh!` keeps the image — and so kept
+  the dir, which is how a recompiled client bundle sat on disk for 23 hours
+  while the child served the bytes it booted with. The child reads per
+  request, so rewriting the files in place is the whole fix. Each file goes
+  through a sibling temp and an ATOMIC move, so a request landing mid-write
+  reads the old bytes or the new ones and never half of each; what the store
+  no longer covers is pruned, so a deleted asset 404s instead of lingering.
 
   **An ARTIFACT keeps its bytes OUT OF LINE, so `store/file-content` answers
   with metadata and a nil `:content` — that is the ordinary case, not an
@@ -274,25 +284,45 @@
   a 404, and a throw would take down a server serving every other path. That
   skip is why this shipped broken and silent once already, so anything that
   reaches it is worth suspecting before it is trusted."
-  [store mounts store-dir]
-  (when (seq mounts)
-    (let [out     (java.nio.file.Files/createTempDirectory
-                   "slopp-static"
-                   (make-array java.nio.file.attribute.FileAttribute 0))
-          covered (vals mounts)]
-      (doseq [path (concat (keys (:files store)) (keys (:artifacts store)))
-              :when (some #(str/starts-with? (str path) (str %)) covered)
-              :let  [entry   (store/file-content store path)
-                     content (or (:content entry)
-                                 (when store-dir
-                                   (:bytes (artifacts/fetch store-dir store path))))]
-              :when (some? content)]
-        (let [f (io/file (str out) (str path))]
-          (io/make-parents f)
-          (if (bytes? content)
-            (io/copy content f)
-            (spit f content))))
-      (str out))))
+  ([store mounts store-dir]
+   (when (seq mounts)
+     (materialize-static! store mounts store-dir
+                          (str (java.nio.file.Files/createTempDirectory
+                                "slopp-static"
+                                (make-array java.nio.file.attribute.FileAttribute 0))))))
+  ([store mounts store-dir out-dir]
+   (when (seq mounts)
+     (let [covered (vals mounts)
+           root    (io/file (str out-dir))
+           wanted  (into #{}
+                         (for [path (concat (keys (:files store)) (keys (:artifacts store)))
+                               :when (some #(str/starts-with? (str path) (str %)) covered)]
+                           (str path)))]
+       (doseq [path wanted
+               :let  [entry   (store/file-content store path)
+                      content (or (:content entry)
+                                  (when store-dir
+                                    (:bytes (artifacts/fetch store-dir store path))))]
+               :when (some? content)]
+         (let [f   (io/file root path)
+               tmp (io/file root (str path ".slopp-tmp"))]
+           (io/make-parents f)
+           (if (bytes? content)
+             (io/copy content tmp)
+             (spit tmp content))
+           (java.nio.file.Files/move
+            (.toPath tmp) (.toPath f)
+            (into-array java.nio.file.CopyOption
+                        [java.nio.file.StandardCopyOption/ATOMIC_MOVE
+                         java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+       ;; prune: a file the store no longer covers must stop being served,
+       ;; or a deleted asset outlives its deletion for as long as the image
+       (doseq [f (file-seq root)
+               :when (.isFile ^java.io.File f)
+               :let  [rel (str (.relativize (.toPath root) (.toPath ^java.io.File f)))]
+               :when (not (contains? wanted rel))]
+         (io/delete-file f true))
+       (str root)))))
 
 (defn- boot!
   "Bring up an app image for `store` and load its web surface into it —
@@ -840,8 +870,15 @@
   - **a reload FAILED** — the running version is left untouched and the caller
     re-boots, which is `refresh!`'s existing safe-swap and is already tested.
 
-  The stamp is retaken on success: this process is now running different code,
-  and a carried-forward stamp would report it current to a store it never saw."
+  **Two things are retaken on success, and the first one was missed for a
+  month.** `:served-at` is what `app-behind` counts from; leaving it at boot
+  made the count rise forever while `done` stayed honestly silent about a
+  refresh that had worked. And the static dir the child serves from is
+  RE-SYNCED, because `boot!` wrote it on the assumption that a refresh
+  replaces the image — true until this function existed. A recompiled bundle
+  reached the store and never the child: 23 hours, 57 changes, one
+  consumer's browser. The child reads per request, so syncing in place is
+  the whole fix."
   [session store running]
   (let [was (:loaded running)
         now (into {} (map (juxt identity #(store.render/render-ns store %)))
@@ -849,22 +886,31 @@
     (when (and (:serving? running) (seq was)
                ;; same POPULATION, or an in-place reload cannot be honest
                (= (set (keys was)) (set (keys now))))
-      (let [todo (hot-reload-set was now)
+      (let [todo   (hot-reload-set was now)
+            ;; the dir the child is serving from — assets that moved since
+            ;; boot are written INTO it, not beside it
+            plan   (:plan running)
+            synced (when-let [sd (:static-dir plan)]
+                     (materialize-static! store (:static plan) (:dir @session) sd))
             ;; recorded on the session exactly as `refresh!` does, or the
             ;; session goes on holding the pre-reload map and every later
             ;; refresh diffs against a `:loaded` that has moved on
-            keep! (fn [r] (swap! session assoc :app-server r) r)]
+            keep!  (fn [r] (swap! session assoc :app-server r) r)
+            stamp  (fn [r]
+                     (cond-> (assoc r :hot? true
+                                    ;; the head this image NOW serves, not the
+                                    ;; one it booted on: what app-behind counts from
+                                    :served-at (:head-at store)
+                                    :currency (currency/of (:db @session) (:line @session)))
+                       synced (assoc-in [:plan :static-dir] synced)))]
         (if (empty? todo)
-          ;; nothing moved: still a successful refresh, and re-stamping is
-          ;; what makes "current" true rather than merely unchanged
-          (keep! (assoc running :hot? true :reloaded []
-                        :currency (currency/of (:db @session) (:line @session))))
+          ;; nothing moved in code: still a successful refresh, and re-stamping
+          ;; is what makes \"current\" true rather than merely unchanged
+          (keep! (stamp (assoc running :reloaded [])))
           ;; a failed reload falls out as nil — the running version is
           ;; untouched and the caller re-boots, which is the safe swap that
           ;; already exists and is already tested
           (let [failed (first (keep (fn [n] (image/load-ns! (:image running) store n))
                                     todo))]
             (when-not failed
-              (keep! (assoc running :hot? true :reloaded (vec todo) :loaded now
-                            :currency (currency/of (:db @session)
-                                                   (:line @session)))))))))))
+              (keep! (stamp (assoc running :reloaded (vec todo) :loaded now))))))))))
