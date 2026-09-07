@@ -80,20 +80,50 @@ def main():
     base = ensure_daemon()
     endpoint = f"{base}/projects/{SLUG}/mcp"
     session = None
+    initialize = None   # the client's own initialize, replayed on the client's behalf
     out = sys.stdout
+
+    def post(payload, sid):
+        h = {"Content-Type": "application/json",
+             "Accept": "application/json, text/event-stream",
+             "X-Slopp-Dir": PROJECT}
+        if sid:
+            h["Mcp-Session-Id"] = sid
+        return urllib.request.Request(endpoint, data=payload.encode("utf-8"),
+                                      headers=h, method="POST")
+
+    def reinitialize():
+        """A stdio client never re-initializes on its own, so when the daemon
+        has forgotten this session (a restart, an idle reap) the pipe replays
+        the client's initialize and re-sends the notification, and the client
+        sees only a late answer. Returns the new session id, or None."""
+        if not initialize:
+            return None
+        try:
+            with urllib.request.urlopen(post(initialize, None), timeout=120) as r:
+                sid = r.headers.get("Mcp-Session-Id")
+                r.read()
+            urllib.request.urlopen(
+                post(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}), sid),
+                timeout=30).read()
+            log(f"session re-initialized at the daemon")
+            return sid
+        except Exception as e:
+            log(f"could not re-initialize: {e}")
+            return None
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
-        headers = {"Content-Type": "application/json",
-                   "Accept": "application/json, text/event-stream",
-                   "X-Slopp-Dir": PROJECT}
-        if session:
-            headers["Mcp-Session-Id"] = session
-        req = urllib.request.Request(endpoint, data=line.encode("utf-8"),
-                                     headers=headers, method="POST")
+        try:
+            if json.loads(line).get("method") == "initialize":
+                initialize = line
+        except Exception:
+            pass
+        req = post(line, session)
         body = None
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             try:
                 with urllib.request.urlopen(req, timeout=3600) as r:
                     sid = r.headers.get("Mcp-Session-Id")
@@ -103,11 +133,13 @@ def main():
                 break
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8")
-                if e.code == 404 and session:
-                    # the daemon reaped us (idle) or restarted: the client's
-                    # next initialize mints a new session; say so once
-                    log("session gone at the daemon — reconnect (/mcp) to re-initialize")
-                    session = None
+                if e.code == 404 and session and attempt < 3:
+                    # the daemon forgot us (a restart, an idle reap): mint a
+                    # new session on the client's behalf and send again
+                    session = reinitialize()
+                    if session:
+                        req = post(line, session)
+                        continue
                 break
             except Exception as e:
                 # the daemon went away under us (a `slopp daemon stop`, a
@@ -115,12 +147,12 @@ def main():
                 # is late rather than the session dead. The session id is
                 # gone with the old daemon; a 404 on the retry tells the
                 # client to re-initialize.
-                if attempt == 1:
+                if attempt < 3:
                     log(f"daemon unreachable ({e}) — ensuring one and retrying")
                     base = ensure_daemon()
                     endpoint = f"{base}/projects/{SLUG}/mcp"
-                    req = urllib.request.Request(endpoint, data=line.encode("utf-8"),
-                                                 headers=headers, method="POST")
+                    session = reinitialize()
+                    req = post(line, session)
                     continue
                 log(f"daemon unreachable: {e}")
                 body = None
