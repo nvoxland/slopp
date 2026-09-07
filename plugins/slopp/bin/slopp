@@ -5,6 +5,7 @@
 #   slopp --main slopp.sync/-main import .     build the store from the repo's slopp branch
 #   slopp --main slopp.sync/-main test .       isolated suite from a store build
 #   slopp --doctor                             self-check the plugin wiring end-to-end
+#   slopp daemon [port]                        ONE slopp for the machine: MCP over HTTP for every project
 # Fetches and caches the versioned jar on first run; java 21+ required.
 set -euo pipefail
 
@@ -43,6 +44,18 @@ fi
 # The heredoc carries RAW source — no JSON escaping, which is the point.
 TOOL=""; ARGSFILE=""
 case "${1:-}" in
+  daemon)
+    # The daemon boots slopp's OWN code from the dir it is given — the
+    # kernel loads every namespace of that dir's store into the JVM — so it
+    # is launched from a NEUTRAL dir (~/.slopp, no store), never a project:
+    # the projects it serves are whatever attaches. SLOPP_LIVE=1 from a
+    # checkout of slopp itself is the self-host loop (SLOPP_DAEMON_DIR=$PWD
+    # --live), the same knob slopp-server honours.
+    DIR="${SLOPP_DAEMON_DIR:-$HOME/.slopp}"
+    mkdir -p "$DIR"
+    shift
+    set -- "$DIR" ${SLOPP_LIVE:+--live} --main slopp.daemon/-main "$@"
+    ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"
     ARGSFILE="$(mktemp)"
