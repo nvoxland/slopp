@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as http]))
+            [slopp.http :as http] [slopp.ops.external :as external] [slopp.ops :as ops]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -242,3 +242,123 @@
           (call a "query_eval" {:code "(+ 1 1)"})
           (is (some? (:image @sa)))))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external two-sessions-asking-for-a-full-check-at-one-content-share-one-run
+  ;; full_check is the most expensive thing slopp does — almost all of it
+  ;; fresh JVM boots — and two agents on one project asking at once used to
+  ;; boot two of everything. Under the daemon every session on a project
+  ;; shares one queue: the first asker runs, the second waits on the same
+  ;; promise, records the verdict on its own line (so it stands there), and
+  ;; says it joined. Driven on two sessions directly, because through the
+  ;; wire a done on a small store already leaves a standing verdict behind
+  ;; and there is nothing left to race.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (http/handle! ctx {:request-method :post
+                                  :uri "/slopp/projects/one/mcp"
+                                  :headers (cond-> {"x-slopp-dir" d}
+                                             sid (assoc "mcp-session-id" sid))
+                                  :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}
+        call (fn [sid n args]
+               (post sid {:jsonrpc "2.0" :id 9 :method "tools/call"
+                          :params {:name n :arguments args}}))
+        flags (fn [r] (select-keys r [:joined :standing :status]))]
+    (try
+      ;; a landed store, made through the daemon like any other
+      (let [w (get-in (post nil init) [:headers "Mcp-Session-Id"])]
+        (call w "ns_create" {:ns "fc.core" :thread "t-w" :prompt "queue fixture"
+                             :source "(ns fc.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+        (call w "done" {:thread "t-w" :label "land it"}))
+      (daemon/reset-all!)
+      ;; opened WITH their images: this drives full-check! below the dispatch
+      ;; that would otherwise await one
+      (let [q (atom {})
+            a (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "q-a"})
+            b (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "q-b"})]
+        (try
+          (swap! a assoc :check-queue q)
+          (swap! b assoc :check-queue q)
+          (let [ra (future (external/full-check! a))
+                rb (future (external/full-check! b))
+                results [(deref ra 600000 {:status :timeout}) (deref rb 600000 {:status :timeout})]
+                joined (filter :joined results)]
+            (is (= 1 (count joined)) (pr-str (mapv flags results)))
+            (is (every? #(= :green (:status %)) results) (pr-str (mapv flags results)))
+            (testing "and the joiner's verdict STANDS on its own line afterwards"
+              (let [again (external/full-check! (if (:joined (first results)) a b))]
+                (is (:standing again) (pr-str (flags again))))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external another-sessions-landing-is-announced-on-your-next-answer
+  ;; Push, in the only form that reaches the model: an MCP notification goes
+  ;; to the client's log, not the conversation, so what another session
+  ;; landed on your project rides the NEXT answer you get as one leading
+  ;; line. Two agents, one project: B lands, A's next read says so.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (http/handle! ctx {:request-method :post
+                                  :uri "/slopp/projects/one/mcp"
+                                  :headers (cond-> {"x-slopp-dir" d}
+                                             sid (assoc "mcp-session-id" sid))
+                                  :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}
+        call (fn [sid n args]
+               (get-in (json/parse-string
+                        (:body (post sid {:jsonrpc "2.0" :id 9 :method "tools/call"
+                                          :params {:name n :arguments args}}))
+                        true)
+                       [:result :content 0 :text]))]
+    (try
+      (let [a (get-in (post nil init) [:headers "Mcp-Session-Id"])
+            b (get-in (post nil init) [:headers "Mcp-Session-Id"])]
+        (call a "query_search" {:pattern "defn"})
+        (call b "ns_create" {:ns "ev.core" :thread "t-b" :prompt "event fixture"
+                             :source "(ns ev.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
+        (call b "done" {:thread "t-b" :label "land it"})
+        (let [answer (str (call a "query_search" {:pattern "defn"}))]
+          (is (re-find #"^;; since your last call" answer) answer)
+          (is (re-find #"landed" answer) answer)
+          (testing "said once: the next answer is clean"
+            (is (not (re-find #"^;; since your last call" (str (call a "query_search" {:pattern "defn"}))))))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-image-budget-refuses-a-boot-past-the-cap-and-names-the-fix
+  ;; A machine-wide budget lives where it can: with the one process that
+  ;; sees every image. v1 is a cap with a refusal that says what to do, not
+  ;; a scheduler.
+  (let [d    (tmp-dir!)
+        ctx  (daemon/context)
+        post (fn [sid msg]
+               (http/handle! ctx {:request-method :post
+                                  :uri "/slopp/projects/one/mcp"
+                                  :headers (cond-> {"x-slopp-dir" d}
+                                             sid (assoc "mcp-session-id" sid))
+                                  :body (json/generate-string msg)}))
+        init {:jsonrpc "2.0" :id 1 :method "initialize"
+              :params {:protocolVersion "2025-03-26" :capabilities {}
+                       :clientInfo {:name "t" :version "0"}}}
+        call (fn [sid n args]
+               (get-in (json/parse-string
+                        (:body (post sid {:jsonrpc "2.0" :id 9 :method "tools/call"
+                                          :params {:name n :arguments args}}))
+                        true)
+                       [:result :content 0 :text]))
+        was  @daemon/image-cap]
+    (try
+      (reset! daemon/image-cap 1)
+      (let [a (get-in (post nil init) [:headers "Mcp-Session-Id"])
+            b (get-in (post nil init) [:headers "Mcp-Session-Id"])]
+        (is (re-find #"\[3\]" (str (call a "query_eval" {:code "(+ 1 2)"}))) "the first image is within the cap")
+        (let [r (str (call b "query_eval" {:code "(+ 1 2)"}))]
+          (is (re-find #"cap" r) r)
+          (is (re-find #"SLOPP_DAEMON_MAX_IMAGES" r) r)
+          (is (nil? (:image @(daemon/lookup! b))) "nothing booted past the cap")))
+      (finally (reset! daemon/image-cap was) (daemon/reset-all!)))))

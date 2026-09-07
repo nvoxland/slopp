@@ -1898,7 +1898,12 @@ client-deps (merge (:client-deps st) (:client provided))
                ;; and persisted here, before the view lands — the one cadence
                ;; a stale entry can accumulate at
                (ops/refresh-index! session)
-               (branch/land-thread! session))
+               (let [l (branch/land-thread! session)]
+                 ;; the daemon lends `:on-landed`: what this session landed
+                 ;; is announced to every other session on the project
+                 (when (and (:landed l) (:on-landed @session))
+                   (try ((:on-landed @session) l) (catch Throwable _ nil)))
+                 l))
         ;; #14: the verdict above was earned against the THREAD image, which
         ;; held the whole episode. The land rebases and re-mints ids, so
         ;; "green" and "on the branch" are two different facts and nothing
@@ -2504,7 +2509,8 @@ client-deps (merge (:client-deps st) (:client provided))
 
 (defn ^:export full-check!
   "The WHOLE-STORE check — `run-full-check!`, except that a verdict which
-  STILL STANDS is returned instead of re-earned.
+  STILL STANDS is returned instead of re-earned, and a run already in
+  flight for the same CONTENT is joined instead of duplicated.
 
   When nothing since the last whole-store check could have changed what it
   says, this hands back that verdict with `:standing true` and the delta that
@@ -2517,6 +2523,16 @@ client-deps (merge (:client-deps st) (:client provided))
   a single ask, 7.6 hours. `commit_point` has always returned an unchanged
   commit-point rather than re-minting one, and the argument is the same, only
   the number is four hundred times larger.
+
+  **The QUEUE is the same courtesy across sessions.** A session carrying
+  `:check-queue` — an atom the daemon shares among every session on a
+  project — keys a run by its line's ELEMENTS DIGEST: two threads holding
+  identical content share it, where their heads differ by markers. The
+  first asker runs and delivers; a later asker at the same digest waits on
+  that promise, records the verdict on ITS line (so it stands there, as
+  `standing-full-check` reads a line), re-derives the live overlays, and
+  answers with `:joined true`. Only a plain ask joins — `affected` narrows
+  the external tier and `force` means this session wants its own run.
 
   It REPORTS rather than refuses, which is the same stance `done` takes. An
   agent that asks again gets an answer, promptly, plus the fact that it did
@@ -2553,4 +2569,39 @@ client-deps (merge (:client-deps st) (:client provided))
                       (when-let [ms (:ms standing)] (str "earned in " ms "ms, "))
                       "and it is current: a forced re-run cannot say more, so hand this"
                       " verdict over as it stands. A write of any kind retires it on its own."))
-    (run-full-check! session :affected affected)))
+    (let [q    (:check-queue @session)
+          conn (:db @session)]
+      (if-not (and q conn (nil? affected) (not force))
+        (run-full-check! session :affected affected)
+        (let [digest (db/elements-digest conn (engine/session-line session))
+              [p mine?] (locking q
+                          (if-let [p (get @q digest)]
+                            [p false]
+                            (let [p (promise)]
+                              ;; a few contents, not a history: an entry is a
+                              ;; whole verdict, and the one that matters is now
+                              (swap! q #(assoc (if (< 3 (count %)) {} %) digest p))
+                              [p true])))]
+          (if mine?
+            (let [r (try (run-full-check! session :affected nil)
+                         (catch Throwable t
+                           (locking q (swap! q dissoc digest))
+                           (deliver p t)
+                           (throw t)))]
+              (deliver p r)
+              r)
+            (let [r (deref p)]
+              (when (instance? Throwable r) (throw r))
+              (let [st   (:store @session)
+                    nses (sort (keys (:namespaces st)))
+                    ;; the verdict is a function of content and is theirs to
+                    ;; keep; the live overlays are this session's to re-derive
+                    r'   (merge (dissoc r :app :bundle :host-stale)
+                                (currency-now session st))]
+                (assoc (record-full-check! r' session nses
+                                           (- (System/currentTimeMillis) (:ms r 0)))
+                       :joined true
+                       :note (str "another session on this project was running the"
+                                  " whole-store check over this same content; this is"
+                                  " ITS verdict, recorded on your line so it stands here"
+                                  " too. Nothing was run twice."))))))))))

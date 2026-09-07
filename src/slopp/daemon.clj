@@ -207,17 +207,6 @@
            :headers {"Content-Type" "application/json"}
            :body "{}"}))))
 
-(defn- status-endpoint
-  "`GET /slopp/status` — the daemon about itself: how many projects and
-  sessions it holds, what the telemetry sink placed and dropped."
-  [_req]
-  (let [st @state]
-    {:status 200
-     :body {:projects (count (:projects st))
-            :sessions (count (:sessions st))
-            :otel     (:otel st)
-            :port     (:port (:server st))}}))
-
 (defn ^:export token
   "The per-boot secret the write door checks — minted on first ask, written
   beside the daemon's address so a shell on this machine can read it, and
@@ -249,57 +238,19 @@
 (defn- ensure-project!
   "The project record for `dir`, minted under the display name `slug` (or
   the dir's basename) when this is the first thing to reach for it:
-  `[proj first?]`. Under the lock; the caller holds it."
+  `[proj first?]`. The record carries the project's CHECK QUEUE — the atom
+  every session on it shares, so two full_checks at one content are one
+  run. Under the lock; the caller holds it."
   [dir slug]
   (if-let [p (get-in @state [:projects dir])]
     [p false]
-    (let [p {:slug      (slug-for slug dir (set (map :slug (vals (:projects @state)))))
-             :dir       dir
-             :opened-at (System/currentTimeMillis)
-             :sessions  #{}}]
+    (let [p {:slug        (slug-for slug dir (set (map :slug (vals (:projects @state)))))
+             :dir         dir
+             :opened-at   (System/currentTimeMillis)
+             :sessions    #{}
+             :check-queue (atom {})}]
       (swap! state assoc-in [:projects dir] p)
       [p true])))
-
-(defn ^:export attach!
-  "Open an MCP session on the project at `dir`, opening the project itself
-  when this is its first — under the display name `slug` the client asked
-  for, or the dir's basename: `{:sid :session}`.
-
-  ONE slopp session per MCP session, on the shared store. A session holds a
-  thread, a line, a store value and a read ledger, and a write naming a
-  different thread reloads all of it — which is one agent's business, not
-  every agent's on the project. What the project shares lives on the
-  project record: its registry row, its reader, and the reader's app
-  server — which every session names as its `:app-owner`, so a done in any
-  of them refreshes the one server. The FIRST attach starts that server,
-  backgrounded, on the branch the project opened on: one per project, the
-  first branch started, as decided.
-
-  The session's oracle is LAZY: nothing boots until a call needs an image,
-  so a session that only reads — most of them — costs no child JVM.
-
-  Under the lock for the whole open, deliberately: two first-attaches on
-  one dir must not both mint the project."
-  [dir slug]
-  (locking state
-    (let [now     (System/currentTimeMillis)
-          sid     (str (java.util.UUID/randomUUID))
-          [_ first?] (ensure-project! dir slug)
-          owner   (:reader (api! dir))
-          session (external/open! {:slopp.ops/dir         dir
-                                   :slopp.ops/lazy-image? true
-                                   ;; the session's own label; the THREAD an
-                                   ;; agent writes on is what it passes
-                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 8))})]
-      (swap! session assoc :require-turns? true :daemon? true
-             :app-owner owner :app-server (:app-server @owner))
-      (swap! state #(-> %
-                        (update-in [:projects dir :sessions] conj sid)
-                        (assoc-in [:sessions sid] {:dir dir :session session
-                                                   :started now :last-seen now})))
-      (when first?
-        (future (mcp/start-app! owner)))
-      {:sid sid :session session})))
 
 (defn- close-project!
   "Close the project at `dir`: its app server stopped, its CLI session and
@@ -340,18 +291,6 @@
         (merge {:ended sid} (close-project! dir))
         {:ended sid}))))
 
-^:unsafe (defn- mcp-endpoint
-  "`/slopp/projects/:slug/mcp` — the envelope, lent this daemon's doors."
-  [req]
-  (mcp.http/endpoint {:slopp.mcp.http/lookup  lookup!
-                      :slopp.mcp.http/attach! (fn [req]
-                                                (let [{:keys [dir error]} (project-dir req)]
-                                                  (if error
-                                                    {:error error}
-                                                    (attach! dir (get-in req [:path-params :slug])))))
-                      :slopp.mcp.http/detach! detach!}
-                     req))
-
 (defn ^:export reset-all!
   "Close every session (and so every project), stop the listener, forget the
   token. The reaper thread ends itself on seeing no server."
@@ -367,17 +306,162 @@
                               :otel {:routed 0 :dropped 0}}))
     nil))
 
+(defn ^:export reap-idle!
+  "Close what nothing has used: CLI sessions idle past [[cli-idle-ms]], MCP
+  sessions idle past [[session-idle-ms]], and every project that is left
+  holding nothing. `now` is a parameter so a test can be the clock.
+  Answers what it closed."
+  [now]
+  (locking state
+    (let [st       @state
+          stale-mcp (for [[sid s] (:sessions st)
+                          :when (< session-idle-ms (- now (:last-seen s)))] sid)
+          stale-cli (for [[dir p] (:projects st)
+                          :when (and (:cli p) (< cli-idle-ms (- now (get-in p [:cli :last-seen]))))] dir)]
+      (doseq [dir stale-cli]
+        (when-let [s (get-in @state [:projects dir :cli :session])]
+          (try (ops/close! s) (catch Throwable _ nil)))
+        (swap! state update-in [:projects dir] dissoc :cli))
+      (let [ended  (vec (keep detach! stale-mcp))
+            closed (vec (for [[dir p] (:projects @state)
+                              :when (and (empty? (:sessions p)) (nil? (:cli p)))]
+                          (close-project! dir)))]
+        {:sessions (mapv :ended ended)
+         :cli      (vec stale-cli)
+         :projects (mapv :closed (concat (filter :closed ended) closed))}))))
+
+(defonce ^:export image-cap
+  ;; the machine-wide budget for verification images: how many child JVMs
+  ;; the daemon's sessions may hold at once, across every project.
+  ;; `SLOPP_DAEMON_MAX_IMAGES` sets it at boot; a test resets it. v1 is a
+  ;; cap with a refusal that names the fix, not a scheduler.
+  (atom (or (some-> (System/getenv "SLOPP_DAEMON_MAX_IMAGES") Long/parseLong) 6)))
+
+^:reads (defn- images-up
+  "How many verification images the daemon's sessions hold right now — MCP
+  sessions, CLI sessions and readers alike."
+  []
+  (let [st @state]
+    (count (filter #(some-> % deref :image)
+                   (concat (map :session (vals (:sessions st)))
+                           (keep #(get-in % [:cli :session]) (vals (:projects st)))
+                           (keep #(get-in % [:api :reader]) (vals (:projects st))))))))
+
+(defn- status-endpoint
+  "`GET /slopp/status` — the daemon about itself: how many projects and
+  sessions it holds, how many images are up against the cap, what the
+  telemetry sink placed and dropped."
+  [_req]
+  (let [st @state]
+    {:status 200
+     :body {:projects (count (:projects st))
+            :sessions (count (:sessions st))
+            :images   {:up (images-up) :cap @image-cap}
+            :otel     (:otel st)
+            :port     (:port (:server st))}}))
+
+(defn- image-permit
+  "The answer a lazy boot asks for: nil when an image may boot, else the
+  refusal — which names the cap, what holds it, and the two ways past it."
+  []
+  (let [up  (images-up)
+        cap @image-cap]
+    (when (<= cap up)
+      (str "the daemon holds " up " verification image(s) already, which is its cap (" cap
+           ") — no image boots for this session until one is released: a session's"
+           " image goes when it detaches or after " (quot session-idle-ms 60000)
+           " min idle, a CLI session's after " (quot cli-idle-ms 60000)
+           " min. SLOPP_DAEMON_MAX_IMAGES raises the cap for the next daemon."
+           " Store-value reads need no image and keep working."))))
+
+(defn- announce-landing!
+  "What session `from` landed on the project at `dir`, queued as an event on
+  every OTHER session there — MCP and CLI — so their next answer says so. A
+  thread with work in flight learns its done will rebase; an idle one
+  learns its view has moved."
+  [dir from land]
+  (let [st   @state
+        note (str "thread " (or (:thread land) "?") " landed onto " (:landed land)
+                  " (head " (:head land) ") while you work — your view follows if idle;"
+                  " your done rebases onto it otherwise")]
+    (doseq [[sid s] (:sessions st)
+            :when (and (= dir (:dir s)) (not= sid from))]
+      (ops/note-event! (:session s) {:kind :landed :note note}))
+    (when-let [cli (get-in st [:projects dir :cli :session])]
+      (when (not= from :cli)
+        (ops/note-event! cli {:kind :landed :note note})))))
+
+(defn ^:export attach!
+  "Open an MCP session on the project at `dir`, opening the project itself
+  when this is its first — under the display name `slug` the client asked
+  for, or the dir's basename: `{:sid :session}`.
+
+  ONE slopp session per MCP session, on the shared store. A session holds a
+  thread, a line, a store value and a read ledger, and a write naming a
+  different thread reloads all of it — which is one agent's business, not
+  every agent's on the project. What the project shares lives on the
+  project record: its registry row, its reader, the reader's app server —
+  which every session names as its `:app-owner`, so a done in any of them
+  refreshes the one server — and its check queue, so two whole-store checks
+  at one content are one run. The FIRST attach starts the app server,
+  backgrounded, on the branch the project opened on: one per project, the
+  first branch started, as decided.
+
+  The session's oracle is LAZY: nothing boots until a call needs an image,
+  so a session that only reads — most of them — costs no child JVM; and
+  when one does boot it asks the machine-wide budget first. What this
+  session lands is announced to the project's other sessions.
+
+  Under the lock for the whole open, deliberately: two first-attaches on
+  one dir must not both mint the project."
+  [dir slug]
+  (locking state
+    (let [now     (System/currentTimeMillis)
+          sid     (str (java.util.UUID/randomUUID))
+          [proj first?] (ensure-project! dir slug)
+          owner   (:reader (api! dir))
+          session (external/open! {:slopp.ops/dir         dir
+                                   :slopp.ops/lazy-image? true
+                                   ;; the session's own label; the THREAD an
+                                   ;; agent writes on is what it passes
+                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 8))})]
+      (swap! session assoc :require-turns? true :daemon? true
+             :app-owner owner :app-server (:app-server @owner)
+             :check-queue (:check-queue proj)
+             :image-permit image-permit
+             :on-landed (fn [land] (announce-landing! dir sid land)))
+      (swap! state #(-> %
+                        (update-in [:projects dir :sessions] conj sid)
+                        (assoc-in [:sessions sid] {:dir dir :session session
+                                                   :started now :last-seen now})))
+      (when first?
+        (future (mcp/start-app! owner)))
+      {:sid sid :session session})))
+
+^:unsafe (defn- mcp-endpoint
+  "`/slopp/projects/:slug/mcp` — the envelope, lent this daemon's doors."
+  [req]
+  (mcp.http/endpoint {:slopp.mcp.http/lookup  lookup!
+                      :slopp.mcp.http/attach! (fn [req]
+                                                (let [{:keys [dir error]} (project-dir req)]
+                                                  (if error
+                                                    {:error error}
+                                                    (attach! dir (get-in req [:path-params :slug])))))
+                      :slopp.mcp.http/detach! detach!}
+                     req))
+
 (defn- cli-session!
   "The CLI session the write door runs a project's calls on, opened on
   first use — opening the project under `slug` if nothing is attached —
   and touched on every call so the reaper knows it is in use. Writable,
   turn-gated like every real session, carrying the daemon's token as its
-  `:call-token` and the project's reader as its app owner; its oracle is
-  lazy, like every daemon session's."
+  `:call-token`, the project's reader as its app owner and the project's
+  check queue; its oracle is lazy and budgeted, like every daemon
+  session's, and what it lands is announced."
   [dir slug]
   (locking state
-    (let [now (System/currentTimeMillis)]
-      (ensure-project! dir slug)
+    (let [now (System/currentTimeMillis)
+          [proj _] (ensure-project! dir slug)]
       (if-let [s (get-in @state [:projects dir :cli :session])]
         (do (swap! state assoc-in [:projects dir :cli :last-seen] now)
             s)
@@ -387,7 +471,10 @@
                                        :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
           (swap! session assoc :require-turns? true :daemon? true
                  :call-token (token)
-                 :app-owner owner :app-server (:app-server @owner))
+                 :app-owner owner :app-server (:app-server @owner)
+                 :check-queue (:check-queue proj)
+                 :image-permit image-permit
+                 :on-landed (fn [land] (announce-landing! dir :cli land)))
           (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
           session)))))
 
@@ -455,30 +542,6 @@
   listener serves, and what a test drives without a port."
   []
   (http/context {:http/namespaces [] :http/routes (routes)}))
-
-(defn ^:export reap-idle!
-  "Close what nothing has used: CLI sessions idle past [[cli-idle-ms]], MCP
-  sessions idle past [[session-idle-ms]], and every project that is left
-  holding nothing. `now` is a parameter so a test can be the clock.
-  Answers what it closed."
-  [now]
-  (locking state
-    (let [st       @state
-          stale-mcp (for [[sid s] (:sessions st)
-                          :when (< session-idle-ms (- now (:last-seen s)))] sid)
-          stale-cli (for [[dir p] (:projects st)
-                          :when (and (:cli p) (< cli-idle-ms (- now (get-in p [:cli :last-seen]))))] dir)]
-      (doseq [dir stale-cli]
-        (when-let [s (get-in @state [:projects dir :cli :session])]
-          (try (ops/close! s) (catch Throwable _ nil)))
-        (swap! state update-in [:projects dir] dissoc :cli))
-      (let [ended  (vec (keep detach! stale-mcp))
-            closed (vec (for [[dir p] (:projects @state)
-                              :when (and (empty? (:sessions p)) (nil? (:cli p)))]
-                          (close-project! dir)))]
-        {:sessions (mapv :ended ended)
-         :cli      (vec stale-cli)
-         :projects (mapv :closed (concat (filter :closed ended) closed))}))))
 
 (defn ^:export start!
   "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])

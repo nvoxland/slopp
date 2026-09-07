@@ -2485,7 +2485,19 @@
                        (catch Exception e
                          (assoc (text! (str "error: " (ex-message e)))
                                 :isError true))))
-          why   (refusal-text r)]
+          why   (refusal-text r)
+          ;; the EVENTS queued since the last answer — what landed under this
+          ;; session, what another session landed on its project — as one
+          ;; leading line: the push that reaches the model, since an MCP
+          ;; notification goes to the client's log and never to the
+          ;; conversation. Drained here, so it is said once.
+          r     (if-let [evs (seq (:events @session))]
+                  (do (swap! session dissoc :events)
+                      (update-in r [:content 0 :text]
+                                 #(str ";; since your last call: "
+                                       (str/join " | " (map :note evs))
+                                       "\n" %)))
+                  r)]
       ;; after the call, so a tool that reads the ring (turn_end) never sees
       ;; its own half-finished entry
       (let [entry (merge
@@ -2796,7 +2808,17 @@
                     {:tool name :missing (vec missing)})))
   (when-not (contains? tools/image-free-tools name)
     (ops/await-image! session))
-  (ops/sync-with-journal! session)      ; m5b: absorb other servers' commits
+  (when-let [s (ops/sync-with-journal! session)]
+    ;; what MOVED under this session since its last call — another server's
+    ;; or session's landing, absorbed just now — rides this answer's first
+    ;; line. The sync always knew; the agent was never told.
+    (when (seq (:changed s))
+      (ops/note-event! session
+                       {:kind :moved
+                        :note (str (count (:changed s)) " namespace(s) changed under you"
+                                   " since your last call (something landed): "
+                                   (str/join ", " (take 8 (:changed s)))
+                                   (when (< 8 (count (:changed s))) ", …"))})))      ; m5b: absorb other servers' commits
   (absorb-pending-intent! session)
   ;; A NEW ASK IS A NEW TURN. The gate used to open one only when none was
   ;; open, and nothing ever closed one, so a single turn spanned an entire

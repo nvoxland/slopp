@@ -122,12 +122,17 @@
 
   A LAZY session (`:boot-image!` on the atom, no image yet) boots here, once,
   under the session lock, at the store's current head — this is the first
-  call that needed one. A boot failure throws to the caller as a sync open's
-  would; the thunk stays, so the next call tries again."
+  call that needed one. Before it boots, `:image-permit` — a fn the daemon
+  lends, answering nil or a refusal — is asked: a machine-wide budget lives
+  with the one process that sees every image, and the refusal names the
+  fix. A boot failure throws to the caller as a sync open's would; the
+  thunk stays, so the next call tries again."
   [session]
   (when (and (nil? (:image @session)) (:boot-image! @session))
     (locking session
       (when (nil? (:image @session))
+        (when-let [why (some-> (:image-permit @session) (apply []))]
+          (throw (ex-info why {:image-budget true})))
         ((:boot-image! @session)))))
   (when-let [p (:image-ready @session)]
     (let [r (deref p)]
@@ -189,8 +194,10 @@
   has not booted its image keeps its CACHE current here all the same, which
   is what lets it read what others land — and drop trace entries touching
   the changed namespaces (conservative — narrowing rebuilds). Returns
-  {:synced n-nses} or nil when already current. The MCP dispatch calls this
-  before every tool, so servers converge continuously.
+  `{:synced n :changed [ns …]}` or nil when already current — `:changed`
+  names what moved under this session, which is what the next answer tells
+  the agent. The MCP dispatch calls this before every tool, so servers
+  converge continuously.
 
   A session opened on a dir with NO store yet has no connection, and the
   store can appear afterwards — somebody else's first durable write creates
@@ -214,7 +221,7 @@
           (swap! session assoc :data-version v)
           (let [new (:store @session)]
             (if (identical? old new)
-              {:synced 0}
+              {:synced 0 :changed []}
               (let [changed (filterv #(not= (store.render/render-ns old %)
                                             (store.render/render-ns new %))
                                      (store/ns-dependency-order new))
@@ -235,7 +242,7 @@
                                              (seq (set/intersection forms stale)))))
                                tm)))
                 (engine/persist-trace! session)
-                {:synced (count changed)}))))))))
+                {:synced (count changed) :changed changed}))))))))
 
 (defn ingest!
   "The batch write for BRAND-NEW namespaces (W1, user decision): land a whole
@@ -5283,6 +5290,18 @@
     (if (re-matches #"[A-Za-z][A-Za-z0-9_.*+!?<>=$%&|'-]*\s+:.*" t)
       (str "[" t "]")
       t)))
+
+(defn ^:export note-event!
+  "Queue an EVENT for this session's agent — `{:kind :note}` — to ride the
+  next tool answer as one leading line. This is push in the only form that
+  reaches a model: an MCP notification goes to the client's log and never
+  to the conversation, while the next answer always does. Bounded to the
+  last five; an agent that has not called in a while gets the recent ones,
+  not a history."
+  [session event]
+  (swap! session update :events
+         (fn [evs] (vec (take-last 5 (conj (or evs []) event)))))
+  nil)
 
 (defn edit-replace!
   "Replace the form `nm` in `ns-sym` with `new-source` (O1 whole-form replace):
