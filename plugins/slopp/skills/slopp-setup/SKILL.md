@@ -60,6 +60,15 @@ rule names the plugin's server, so it covers every family and op. Nothing
 changes under the other modes: a prompting mode asks you per call anyway,
 and `bypassPermissions` never classifies.
 
+**One slopp for the machine (opt-in).** `"env": {"SLOPP_DAEMON": "1"}` in
+the same `.claude/settings.json` makes the plugin's server entry a PIPE onto
+the daemon — one process for every project on the box, MCP over HTTP behind
+a stdio face — instead of a JVM per session. It starts a daemon if none
+answers, names the project by its cwd, and changes nothing about the tools.
+What it buys and how it is reached: `help {topic "running"}`, under
+"One slopp for the machine". Off by default until the memory census and the
+concurrency evals rerun against it.
+
 ## Importing a repo that's published this way
 
 A slopp-published repo has a `slopp` branch (the store's projection) alongside
