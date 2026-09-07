@@ -11,7 +11,8 @@
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
-  ;;                   :api {:reader :ctx} :cli {:session :last-seen}}}
+  ;;                   :api {:reader :ctx} :cli {:session :last-seen}
+  ;;                   :check-queue atom}}
   ;; — a project exists exactly while something is attached to it: an MCP
   ;; session, or the CLI session the write door keeps for it. `:api` is its
   ;; read API, assembled lazily over a read-only reader that also owns the
@@ -19,11 +20,13 @@
   ;; slopp session per MCP session, so a thread switch reloads one agent's
   ;; view and not another's. `:server` is the listener, `:token` the
   ;; per-boot secret the write door checks, `:reaper` the idle sweep's
-  ;; thread, `:otel` what the sink placed and what it could not. One atom,
-  ;; mutated under `locking`, because an attach opens a store between
-  ;; reading the map and writing it.
+  ;; thread, `:otel` what the sink placed and what it could not, and
+  ;; `:otel-dirs` {thread dir} — where a thread's telemetry last routed, so
+  ;; it still routes after that project closed. One atom, mutated under
+  ;; `locking`, because an attach opens a store between reading the map and
+  ;; writing it.
   (atom {:projects {} :sessions {} :server nil :token nil :reaper nil
-         :otel {:routed 0 :dropped 0}}))
+         :otel {:routed 0 :dropped 0} :otel-dirs {}}))
 
 (def ^:export default-port
   "Where a daemon listens unless told otherwise (`SLOPP_DAEMON_PORT`, or the
@@ -172,48 +175,6 @@
                         (dissoc :path-params :query-params :http/deps :http/reads)))
       {:status 404 :body {:error (str "no open project " slug)}})))
 
-^:reads (defn- session-holding
-  "A slopp session on the project whose store holds an OPEN thread by
-  `thread` — the agent's id, which since Phase 0 is what its harness
-  telemetry carries as `session.id` — or nil. Read from each open project's
-  registry through any attached session's connection."
-  [thread]
-  (some (fn [p]
-          (some (fn [sid]
-                  (let [s    (get-in @state [:sessions sid :session])
-                        conn (some-> s deref :db)]
-                    (when (and conn
-                               (some #(and (= "thread" (:kind %)) (= "open" (:status %))
-                                           (= thread (:agent %)))
-                                     (db/lines conn)))
-                      s)))
-                (:sessions p)))
-        (vals (:projects @state))))
-
-^:unsafe (defn- otel-endpoint
-  "`POST /slopp/otel/v1/logs` — the machine's ONE telemetry sink. An
-  exporter given `OTEL_EXPORTER_OTLP_ENDPOINT=…/slopp/otel` appends the
-  spec's `/v1/logs` itself. Each `api_request` record routes by its
-  `session.id` — the agent's thread id — to the project holding that thread;
-  what names no open thread on any open project is counted and dropped,
-  never guessed at. A body that does not parse is 400, the non-retryable
-  answer; anything that parses is 200, as [[slopp.api.otel/logs]] explains."
-  [req]
-  (let [r (api.otel/decode (:body req))]
-    (if (:bad r)
-      {:status 400 :http/raw true
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string
-              {:partialSuccess {:errorMessage (str "could not parse this export: " (:bad r))}})}
-      (do (doseq [[thread recs] (group-by :session (slopp.otel/api-requests (:ok r)))]
-            (if-let [s (session-holding thread)]
-              (do (ops/record-otel! s recs)
-                  (swap! state update-in [:otel :routed] + (count recs)))
-              (swap! state update-in [:otel :dropped] + (count recs))))
-          {:status 200 :http/raw true
-           :headers {"Content-Type" "application/json"}
-           :body "{}"}))))
-
 (defn ^:export token
   "The per-boot secret the write door checks — minted on first ask, written
   beside the daemon's address so a shell on this machine can read it, and
@@ -300,7 +261,8 @@
 
 (defn ^:export reset-all!
   "Close every session (and so every project), stop the listener, forget the
-  token. The reaper thread ends itself on seeing no server."
+  token and the telemetry memory. The reaper thread ends itself on seeing
+  no server."
   []
   (locking state
     (doseq [sid (keys (:sessions @state))]
@@ -310,7 +272,7 @@
     (when-let [srv (:server @state)]
       (try (slopp.http/stop! srv) (catch Throwable _ nil)))
     (swap! state (constantly {:projects {} :sessions {} :server nil :token nil :reaper nil
-                              :otel {:routed 0 :dropped 0}}))
+                              :otel {:routed 0 :dropped 0} :otel-dirs {}}))
     nil))
 
 (defn ^:export reap-idle!
@@ -529,6 +491,75 @@
                                   (when (not= "_" slug) slug)))]
         (mcp/http-call! (assoc req :http/deps {:session s} :body b))))))
 
+^:reads (defn ^:export reader-open?
+  "Whether the project at `dir` has opened its reader — the second session
+  on its store that the read API and the app server share. Attaching alone
+  does not open one; the first API request or app refresh does."
+  [dir]
+  (some? (get-in @state [:projects dir :api :reader])))
+
+^:reads (defn- holds-thread?
+  "Whether the store behind `conn` has an OPEN thread by `thread` — the
+  agent's id, which is what its harness telemetry carries as `session.id`."
+  [conn thread]
+  (boolean (some #(and (= "thread" (:kind %)) (= "open" (:status %))
+                       (= thread (:agent %)))
+                 (db/lines conn))))
+
+^:reads (defn- session-holding
+  "Where a record for `thread` goes: `{:session s}` — a session on the
+  project whose store holds that thread open, read through an attached
+  session's connection or the project's opened reader — else `{:dir d}`,
+  the dir this daemon remembers routing that thread to before its project
+  closed, else nil. A hit teaches the memory."
+  [thread]
+  (let [st   @state
+        with (fn [s dir]
+               (when (and s (some-> s deref :db) (holds-thread? (:db @s) thread))
+                 (swap! state assoc-in [:otel-dirs thread] dir)
+                 {:session s}))]
+    (or (some (fn [p]
+                (or (some (fn [sid] (with (get-in st [:sessions sid :session]) (:dir p)))
+                          (:sessions p))
+                    (with (get-in p [:cli :session]) (:dir p))
+                    (with (get-in p [:api :reader]) (:dir p))))
+              (vals (:projects st)))
+        (when-let [d (get-in st [:otel-dirs thread])]
+          {:dir d}))))
+
+^:unsafe (defn- otel-endpoint
+  "`POST /slopp/otel/v1/logs` — the machine's ONE telemetry sink. An
+  exporter given `OTEL_EXPORTER_OTLP_ENDPOINT=…/slopp/otel` appends the
+  spec's `/v1/logs` itself. Each `api_request` record routes by its
+  `session.id` — the agent's thread id — to the project holding that
+  thread: through an attached session, the project's reader, or — once the
+  project has closed — the dir this daemon remembers for the thread,
+  through a connection opened for the batch and closed after it. What
+  names no thread this daemon has ever placed is counted and dropped,
+  never guessed at. A body that does not parse is 400, the non-retryable
+  answer; anything that parses is 200, as [[slopp.api.otel/logs]] explains."
+  [req]
+  (let [r (api.otel/decode (:body req))]
+    (if (:bad r)
+      {:status 400 :http/raw true
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string
+              {:partialSuccess {:errorMessage (str "could not parse this export: " (:bad r))}})}
+      (do (doseq [[thread recs] (group-by :session (slopp.otel/api-requests (:ok r)))]
+            (let [{:keys [session dir]} (session-holding thread)
+                  placed (cond
+                           session (do (ops/record-otel! session recs) true)
+                           dir     (when-let [conn (try (db/open! dir {:create? false})
+                                                        (catch Throwable _ nil))]
+                                     (try (ops/record-otel! (atom {:db conn}) recs) true
+                                          (finally (try (.close ^java.sql.Connection conn)
+                                                        (catch Throwable _ nil)))))
+                           :else   false)]
+              (swap! state update-in [:otel (if placed :routed :dropped)] + (count recs))))
+          {:status 200 :http/raw true
+           :headers {"Content-Type" "application/json"}
+           :body "{}"}))))
+
 (defn ^:export routes
   "Every route under `/slopp/`: the registry and the daemon's status, each
   project's MCP endpoint by method, its write door, its read API by
@@ -617,10 +648,3 @@
                            (str "a daemon is already live at " (:url live) " (pid " (:pid live) ")")
                            (ex-message e))))
           (System/exit 1))))))
-
-^:reads (defn ^:export reader-open?
-  "Whether the project at `dir` has opened its reader — the second session
-  on its store that the read API and the app server share. Attaching alone
-  does not open one; the first API request or app refresh does."
-  [dir]
-  (some? (get-in @state [:projects dir :api :reader])))

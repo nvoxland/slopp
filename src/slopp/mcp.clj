@@ -1669,15 +1669,435 @@
       ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
       cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale])))))
 
+(defn land-on-exit!
+  "The LANDING FLOOR, in the server's own exit path: when the session's
+  thread still holds un-landed content writes as the stdio loop ends, run
+  the done here — a green episode lands on the branch, a red one stays on
+  the thread exactly as an agent's own done would leave it. Returns the
+  done's `:done`, `:land` and `:findings`, or nil when there was nothing to
+  land.
+
+  The plugin's Stop hook used to be this floor: an async `slopp --call done`
+  in a SEPARATE process. A one-shot session (`claude -p`) exits underneath
+  it, and eval26 measured the result — sixteen green writes stranded on a
+  thread, the next step starting from a branch without them. The process
+  that owns the thread is the one that can land it. Never throws: exit must
+  not be blocked by a landing that fails; the failure is said on stderr."
+  [session]
+  (try
+    (when-let [conn (:db @session)]
+      (when-let [line (:line @session)]
+        (when (pos? (or (db/unlanded-count conn line history/content-ops) 0))
+          (let [d (external/done! session :label "session end" :agent (:agent-id @session))]
+            (.println System/err
+                      ^String (str "slopp: landing the session's thread at exit — "
+                                   (name (or (get-in d [:findings :episode-status]) :unknown))
+                                   (when-let [l (:land d)]
+                                     (str ", landed on " (:landed l)))))
+            (select-keys d [:done :land :findings])))))
+    (catch Exception e
+      (.println System/err ^String (str "slopp: landing at exit failed — " (ex-message e)))
+      nil)))
+
+(defn exit-landing-hook!
+  "Install (once per session) a JVM shutdown hook that runs `land-on-exit!`,
+  and return the hook thread. The stdio loop's `finally` runs the same
+  landing when stdin closes; a harness that SIGTERMs the server the instant
+  the session ends never lets that finally finish — eval31 e31o3 lost
+  fourteen green writes to it on a store whose landing runs an 880-test
+  suite. Both paths call one idempotent function: whichever runs first
+  lands, the other finds an empty thread and returns nil."
+  [session]
+  (or (::exit-hook @session)
+      (let [t (Thread. ^Runnable (fn [] (land-on-exit! session)) "slopp-exit-landing")]
+        (.addShutdownHook (Runtime/getRuntime) t)
+        (swap! session assoc ::exit-hook t)
+        t)))
+
+(defn- view-session!
+  "The session a READ answers from when it names a `branch`, or a `thread`
+  that is not this session's own: a throwaway copy whose `:store` is that
+  line's value — the branch's landed head, or the thread's un-landed view —
+  with no image, so nothing it does moves this session. The value is cached
+  on the real session by line, and a second look at a line whose head has
+  not moved loads nothing.
+
+  Reads are scoped by BRANCH and writes by THREAD. This session's own thread
+  is where its store already sits, so naming it is the identity case and
+  costs nothing; naming anything else is a view. A read that needs the image
+  — an eval, an observe, a test run — cannot be served from a value alone and
+  refuses, naming the verb that moves the session THERE rather than looks.
+
+  A WRITE naming a thread is not a view but routing: `call-op-1!` switches
+  the session onto it, and this returns the session untouched."
+  [session name arguments]
+  (let [conn       (:db @session)
+        branch     (some-> (:branch arguments) str)
+        thread     (some-> (:thread arguments) str)
+        own-branch (:branch @session)
+        wanted     (cond (and branch (not= branch own-branch))               [:branch branch]
+                         (and thread (not= thread (engine/thread-key session))) [:thread thread])]
+    (if-not (and conn wanted (contains? tools/read-only-tools name))
+      session
+      (let [[kind id] wanted]
+        (when-not (contains? tools/image-free-tools name)
+          (throw (ex-info (str name " answers from this session's image, which holds its"
+                               " own line — a branch or thread on a read is a VIEW of"
+                               " the store value only. To be there: "
+                               (if (= :branch kind)
+                                 (str "branch_switch {name \"" id "\"}")
+                                 (str "thread_open {thread \"" id "\"}")))
+                          {:tool name kind id})))
+        (let [line (if (= :branch kind)
+                     (db/line-id-by-name conn id)
+                     (:id (first (filter #(= id (:agent %))
+                                         (db/open-threads conn (engine/session-branch-line session))))))
+              _    (when-not line
+                     (throw (ex-info (if (= :branch kind)
+                                       (str "no branch " id " — query_branches lists them")
+                                       (str "no open thread " id " on " own-branch
+                                            " — thread_list shows what is here"))
+                                     {:tool name kind id})))
+              head (db/line-head conn line)
+              st   (or (let [c (get-in @session [::views line])]
+                         (when (= head (:head c)) c))
+                       (let [st (or (db/load-store conn line)
+                                    (throw (ex-info (str id " has no persisted value yet") {})))]
+                         ;; a few lines, not a history: a view is a look, and
+                         ;; the values are whole stores
+                         (swap! session update ::views
+                                #(assoc (into {} (take 3 %)) line st))
+                         st))]
+          (atom (assoc @session :store st :line line :image nil ::view wanted)))))))
+
+^:unsafe (defn stop-app!
+  "Stop this session's app server, if it holds one, and forget it. NEVER
+  throws. The third verb beside [[start-app!]] and [[refresh-app!]], so a
+  caller above this layer — the daemon closing a project — never reaches
+  web tooling itself: the app image is a CHILD JVM, and stopping it before
+  its owner goes is what frees the port before the next server wants it."
+  [session]
+  (when-let [running (:app-server @session)]
+    (locking session
+      (try (live/stop! running) (catch Throwable _ nil))
+      (swap! session dissoc :app-server))
+    {:stopped true}))
+
+^:reads (defn ^:export write-tool?
+  "Whether tool `name` WRITES the store — the classification the turn gate
+  and the thread rule key on, answered for a caller above the transport
+  (the daemon's write door refuses a write that names no thread)."
+  [name]
+  (contains? tools/write-tools name))
+
+^:reads (defn ^:export app-managed?
+  "Whether slopp runs this store's app server at all — the gate
+  [[start-app!]] and [[refresh-app!]] apply, answered for a caller above
+  the transport: the daemon starts a project's app server on first attach
+  only when there is one to start, and opens the reader that would own it
+  only then."
+  [session]
+  (boolean (and (:dir @session)
+                (live/managed? (:store @session) server/served-namespaces))))
+
+^:unsafe (defn refresh-app!
+  "Re-serve this project's app on the CURRENT store, or stop a managed server
+  the store has opted out of. nil when there is nothing to do. NEVER throws.
+
+  Called at each `done` point, which is the grain the whole feature is built
+  around: mid-episode the store is intentionally incomplete, and a browser
+  reloading into a half-written red state teaches the author to ignore it.
+
+  **A boot that FAILED is recorded on the session as `:app-boot-failure`**
+  (the reason), and cleared when the instance serves again or the store
+  stops asking for one. The app image is booted by a process that has
+  never seen the namespace — the cold-load oracle a warm image cannot be —
+  and `done!` counts a recorded failure against the STORE's verdict, so a
+  commit point is refused until the instance boots. Not against the
+  episode: the episode carrying the fix has to land for the reboot from
+  the landed state to clear it.
+
+  **A session with an `:app-owner` refreshes the OWNER's server.** Under the
+  daemon N sessions share one project, and the app server is the project's
+  — one, on the branch, held by the project's reader. Every session names
+  that reader as its owner — as a DELAY, forced here, so a project whose
+  app nobody serves never opens the reader at all — the refresh runs there
+  over the branch's current value, and the handle and the boot failure are
+  mirrored back so `session_brief`, the done note and the verdict read the
+  same server. Without this, each session held its own `:app-server` and
+  the second one to land booted a second server onto the first one's port.
+  A session whose store runs no app does not force the owner either:
+  nothing to refresh, nothing to open.
+
+  **Opting out is an ACTION, not the absence of one.** The first cut gated on
+  `managed?` and returned, which stops RE-SERVING and never stops SERVING —
+  so after `http.enabled false` the old image kept answering and
+  `session_brief` kept advertising its url, while the config said no managed
+  server existed. Found by slopp-ui, who checked the surface against the
+  config rather than against the page.
+
+  **The same gate as `start-app!`, and that is not redundancy.** A gate on
+  the startup path only would let the second done point start what the first
+  one declined to — the feature would arrive by accident, in a test run,
+  minutes after everything looked fine.
+
+  A store that was never managed and has nothing running reports NOTHING, not
+  even a failure. Most stores are not web projects, and a line at every done
+  point saying so is how a report stops being read.
+
+  `locking` because two done points close together would otherwise both boot,
+  both stop the same predecessor, and race for the port. They queue instead,
+  and nobody waits on them: the call site backgrounds this so `done` returns
+  at its own speed."
+  [session]
+  (if-let [owner (when-let [o (:app-owner @session)]
+                   ;; a project whose app nobody serves: do not open the
+                   ;; reader just to learn there is nothing to refresh
+                   (when (or (not (delay? o)) (realized? o)
+                             (app-managed? session) (:app-server @session))
+                     (force o)))]
+    (do ;; the owner reads the BRANCH; what just landed has to be in its
+        ;; value before the server is re-served from it
+        (when (:db @owner)
+          (try (engine/refresh-cache! owner) (catch Throwable _ nil)))
+        (let [r (refresh-app! owner)]
+          (swap! session assoc
+                 :app-server (:app-server @owner)
+                 :app-boot-failure (:app-boot-failure @owner))
+          r))
+    (let [dir (:dir @session)
+          r   (if (and dir (live/managed? (:store @session) server/served-namespaces))
+                (locking session
+                  ;; IN PLACE first. A re-boot replaces the child JVM, so the app's
+                  ;; `:http/perform-ctx` is rebuilt and any state it kept there — a
+                  ;; cache, a registry, a pool — is silently gone at every done point.
+                  ;; `hot-refresh!` answers nil for everything in-place cannot serve (a
+                  ;; changed load order, a failed reload, nothing running), and the
+                  ;; re-boot below is the fallback rather than the default.
+                  (let [r (try (or (live/hot-refresh! session (:store @session)
+                                                      (:app-server @session))
+                                   (live/refresh! session (:store @session) dir))
+                               (catch Throwable t
+                                 {:serving? false :reason (or (.getMessage t) (str t))}))]
+                    ;; the OUTCOME beside the report: measure app-behind AFTER the
+                    ;; refresh, so a refresh that said it worked and left the image
+                    ;; behind is news rather than the silence success is entitled to.
+                    ;; Both doors that call this (done, commit_point) read it off the
+                    ;; map. nil when it cannot be measured, which makes no claim
+                    (if (and (map? r) (:serving? r))
+                      (assoc r ::behind (try (ops/app-behind session r)
+                                             (catch Throwable _ nil)))
+                      r)))
+                (when-let [running (:app-server @session)]
+                  (locking session
+                    (try (live/stop! running) (catch Throwable _))
+                    (swap! session dissoc :app-server))
+                  {:serving? false
+                   ;; STOPPED ON PURPOSE, and that has to be legible to the caller:
+                   ;; `done` reports a re-serve that BROKE and must not report this,
+                   ;; which is indistinguishable without the flag — same :serving?
+                   ;; false, same shape of reason, opposite meaning.
+                   :stopped true
+                   ;; `managed?` is false for two different reasons now, and a stopped
+                   ;; server that names the wrong one sends someone to change the
+                   ;; wrong thing
+                   :reason (if (live/self-served? (:store @session) server/served-namespaces)
+                             (str "this session already serves this store's surface — the"
+                                  " managed app server was stopped, because a second one"
+                                  " would serve a staler copy of the same pages")
+                             (str "http.enabled is false for this store — the managed app"
+                                  " server was stopped"))}))]
+      ;; the verdict's half: a boot that failed is remembered until one
+      ;; succeeds or the store stops asking; a stop on purpose is not a failure
+      (swap! session assoc :app-boot-failure
+             (when (and (map? r) (false? (:serving? r)) (not (:stopped r)))
+               (:reason r)))
+      r)))
+
+(def ^:private env-handlers!
+  "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
+  {"deps_add"
+   (fn [session a sym]
+     (text! (ops/deps-add! session (sym :lib)
+                          (or (:coord a)
+                              (when (:version a)
+                                {:mvn/version (:version a)}))
+                          :agent (:agent a) :prompt (:prompt a)
+                          :client (:client a))))
+   "deps_remove"
+   (fn [session a sym]
+     (text! (ops/deps-remove! session (sym :lib)
+                                           :agent (:agent a))))
+   "deps_list"
+   (fn [session _a _sym]
+     (text! (ops/deps-manifest session)))
+   "store_health"
+   (fn [session _a _sym]
+     (text! (external/store-health session)))
+   "store_doctor"
+   (fn [session _a _sym]
+     (text! (doctor/diagnose (:store @session))))
+   "store_compact"
+   (fn [session _a _sym]
+     (text! (external/compact-store! session)))
+   "ui_serve"
+   ;; `:ui-url` is what session_brief announces, and until this only
+   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
+   ;; brief naming the port it came up on at BOOT. Observed live: the brief
+   ;; said 49283 while the listener held 53610 and nobody held 49283. The
+   ;; address a reader is handed has to be the one that was bound, and
+   ;; stopping has to clear it rather than leave an address nothing answers.
+   (fn [session a _sym]
+     (text! (if (:stop a)
+              (let [stopped (boolean (server/stop!))]
+                (swap! session dissoc :ui-url :ui-stamp)
+                {:stopped stopped})
+              (let [r (server/serve! session
+                                     (server/preferred-port (:dir @session) (:port a)))]
+                ;; the stamp rides the SESSION beside the url, because the
+                ;; brief is where a reader finds out anything about this
+                ;; listener and slopp.ops cannot ask slopp.api — that edge
+                ;; runs the other way.
+                (when (:url r)
+                  (swap! session assoc :ui-url (:url r)
+                         :ui-stamp (:derived-from r)))
+                r))))
+"screen"
+   (fn [session a _sym]
+     (text! (webdev.screen/screen! session
+                             :steps (:steps a)
+                             :region (:region a)
+                             :detail (:detail a)
+                             :trace (:trace a)
+                             :url (:url a))))
+   "compile_client"
+   (fn [session a _sym]
+     (text! (if (:output a)
+              (cljs/compile-client! session :output (:output a))
+              (cljs/compile-client! session))))
+   "generate_client"
+   (fn [session a _sym]
+     (text! (cond
+              ;; a contract URL generates against an API this store CONSUMES —
+              ;; two namespaces, and nothing reads the producer's store
+              (:from a) (if (:ns a)
+                          (cljs/generate-client-from! session (:from a) :ns (symbol (:ns a)))
+                          (cljs/generate-client-from! session (:from a)))
+              (:ns a)   (cljs/generate-client! session :ns (symbol (:ns a)))
+              :else     (cljs/generate-client! session))))
+   "deps_pure"
+   (fn [session a sym]
+     (text! (if (false? (:pure a))
+                           (ops/deps-unpure! session (sym :target) :agent (:agent a))
+                           (ops/deps-pure! session (sym :target) :agent (:agent a)))))
+   "branch_create"
+   (fn [session a _sym]
+     (text! (branch/branch! session (:name a))))
+   "branch_switch"
+   (fn [session a _sym]
+     (text! (branch/branch-switch! session (:name a))))
+   "branch_merge"
+   (fn [session a _sym]
+     (text! (branch/branch-merge! session (:name a))))
+   "branch_delete"
+   (fn [session a _sym]
+     (text! (branch/branch-delete! session (:name a))))
+   "thread_list"
+   (fn [session _a _sym]
+     (text! (branch/thread-list session)))
+   "thread_drop"
+   (fn [session a _sym]
+     (text! (branch/thread-drop! session (:id a))))
+   "thread_open"
+   (fn [session a _sym]
+     (text! (branch/thread-open! session :thread (:thread a) :parent (:parent a))))
+   "query_branches"
+   (fn [session _a _sym]
+     (text! (branch/query-branches session)))
+   "restart"
+   (fn [session a _sym]
+     (ops/restart! session)
+     ;; the ORACLE is what restart has always re-imaged, and it stays the
+     ;; default. `app true` also re-serves this project's app server — the
+     ;; second half of "reload in place, restart on demand", and it exists
+     ;; because a declared entry answers `:started` once a namespace loads
+     ;; and a thread spawns, so one that came up half dead reports exactly
+     ;; what a healthy one does. Without this the only way to ask again is an
+     ;; unrelated write, to trigger a done that re-serves as a side effect.
+     (if-not (:app a)
+       (text! "restarted")
+       (let [r (refresh-app! session)]
+         (text! (cond-> {:restarted true
+                         :app-restarted (boolean (:serving? r))}
+                  (:url r)     (assoc :app-url (:url r))
+                  (:started r) (assoc :app-started (:started r))
+                  (not (:serving? r))
+                  (assoc :app-note
+                         (or (:reason r)
+                             (str "nothing to restart — this store has no"
+                                  " managed app server. Declare what to run"
+                                  " (config_file {path \"dev\" key"
+                                  " \"run.<name>.main\" value \"my.ns/-main\"}),"
+                                  " or enable http.enabled for the derived"
+                                  " one."))))))))
+   "build"
+   (fn [session a _sym]
+     (text! (external/build! session (:dir a)
+                                    :main (some-> (:main a) symbol)
+                                    :name (:name a))))
+   "help"
+   (fn [_session a _sym]
+     (text! (help-text (:topic a)) :budgeted? true))})
+
+^:unsafe (defn start-app!
+  "Bring this project's app server up beside the MCP server, or nil when
+  slopp does not run this store's server. NEVER throws.
+
+  The stance is the UI listener's, for the same reason: **the app server is
+  OPTIONAL and MCP is not.** A busy port, a
+  store that will not load, anything at all — it reports a sentence on
+  stderr (stdout is the JSON-RPC channel) and the server carries on. Nothing
+  about a page in a browser should be able to stop the thing the editor is
+  talking to.
+
+  It goes through `refresh-app!` rather than `live/start!`, so the
+  first serve and every later one are the same code path. A start that
+  differed from a swap would be a second lifecycle, and the two would drift
+  exactly where nobody looks — the first boot of a session is the one nobody
+  re-tests.
+
+  A store that is not managed reports NOTHING, not even a failure. Most
+  stores are not web projects, and a line on every startup saying so is how
+  a banner stops being read."
+  [session]
+  (let [r (refresh-app! session)]
+    (when r
+      (.println System/err
+                ^String (if (:serving? r)
+                          (str "slopp app: " (:url r)
+                               (when-let [ms (:boot-ms r)]
+                                 (str " (image up in " ms "ms)"))
+                               ;; a url with nothing behind it is worse than no
+                               ;; url: the human opens it, gets 404, and has no
+                               ;; reason to suspect the SERVER is fine
+                               (when-let [empty-note (get-in r [:plan :serves-nothing])]
+                                 (str " — but " empty-note)))
+                          (str "slopp app unavailable: " (:reason r)))))
+    r))
+
 (defn- close-unit-after-write!
   "Threaded after a change's result `ri`: when the call carried `done` (a
   label) or `commit` and the write is GREEN (`red?` says), close the unit
-  here — the done, its landing and suite, the whole-store verdict when cheap,
-  the commit point — under `:closed`; a red write closes nothing and
-  `:closed` says so. The write that finishes an ask is one turn, not four.
-  Both write shapes take it: the impl change and the tests-only change
-  (eval26 sonnet: a tests-only fix carrying done was ignored, the session
-  ended, and the work stayed on its thread)."
+  here — the done, its landing and suite, the app refresh and its note, the
+  whole-store verdict when cheap, the commit point — under `:closed`; a red
+  write closes nothing and `:closed` says so. The write that finishes an
+  ask is one turn, not four. Both write shapes take it: the impl change and
+  the tests-only change (eval26 sonnet: a tests-only fix carrying done was
+  ignored, the session ended, and the work stayed on its thread).
+
+  The app refresh rides here exactly as it rides a plain done: this is the
+  path most units close on, and it used to drop the one note that carries
+  a cold-boot failure (2026-09-07, found by `restart {app true}`)."
   [ri session a red?]
   (if-not (or (:done a) (:commit a))
     ri
@@ -1690,9 +2110,12 @@
                     (and (string? (:commit a)) (:commit a))
                     (:prompt a))
             d   (external/done! session :label lbl :agent (:agent a))
-            td  (terse-done d)]
+            app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
+            td  (terse-done (if-let [note (app-note-for app)]
+                              (assoc d :app-note note)
+                              d))]
         (assoc ri :closed
-               (merge (select-keys td [:done :status :landed :suite :external :external-pending :advisories])
+               (merge (select-keys td [:done :status :landed :suite :external :external-pending :advisories :app-note])
                       (when (= :red (get-in d [:findings :episode-status]))
                         {:closed false :why "the done is red — see :findings" :findings (:findings d)})
                       (close-extras! session (assoc a :label lbl) d)))))))
@@ -1865,407 +2288,9 @@
                           " it as a test (change {tests […]}) only once it"
                           " says what you mean")})))))}))
 
-(defn land-on-exit!
-  "The LANDING FLOOR, in the server's own exit path: when the session's
-  thread still holds un-landed content writes as the stdio loop ends, run
-  the done here — a green episode lands on the branch, a red one stays on
-  the thread exactly as an agent's own done would leave it. Returns the
-  done's `:done`, `:land` and `:findings`, or nil when there was nothing to
-  land.
-
-  The plugin's Stop hook used to be this floor: an async `slopp --call done`
-  in a SEPARATE process. A one-shot session (`claude -p`) exits underneath
-  it, and eval26 measured the result — sixteen green writes stranded on a
-  thread, the next step starting from a branch without them. The process
-  that owns the thread is the one that can land it. Never throws: exit must
-  not be blocked by a landing that fails; the failure is said on stderr."
-  [session]
-  (try
-    (when-let [conn (:db @session)]
-      (when-let [line (:line @session)]
-        (when (pos? (or (db/unlanded-count conn line history/content-ops) 0))
-          (let [d (external/done! session :label "session end" :agent (:agent-id @session))]
-            (.println System/err
-                      ^String (str "slopp: landing the session's thread at exit — "
-                                   (name (or (get-in d [:findings :episode-status]) :unknown))
-                                   (when-let [l (:land d)]
-                                     (str ", landed on " (:landed l)))))
-            (select-keys d [:done :land :findings])))))
-    (catch Exception e
-      (.println System/err ^String (str "slopp: landing at exit failed — " (ex-message e)))
-      nil)))
-
-(defn exit-landing-hook!
-  "Install (once per session) a JVM shutdown hook that runs `land-on-exit!`,
-  and return the hook thread. The stdio loop's `finally` runs the same
-  landing when stdin closes; a harness that SIGTERMs the server the instant
-  the session ends never lets that finally finish — eval31 e31o3 lost
-  fourteen green writes to it on a store whose landing runs an 880-test
-  suite. Both paths call one idempotent function: whichever runs first
-  lands, the other finds an empty thread and returns nil."
-  [session]
-  (or (::exit-hook @session)
-      (let [t (Thread. ^Runnable (fn [] (land-on-exit! session)) "slopp-exit-landing")]
-        (.addShutdownHook (Runtime/getRuntime) t)
-        (swap! session assoc ::exit-hook t)
-        t)))
-
-(defn- view-session!
-  "The session a READ answers from when it names a `branch`, or a `thread`
-  that is not this session's own: a throwaway copy whose `:store` is that
-  line's value — the branch's landed head, or the thread's un-landed view —
-  with no image, so nothing it does moves this session. The value is cached
-  on the real session by line, and a second look at a line whose head has
-  not moved loads nothing.
-
-  Reads are scoped by BRANCH and writes by THREAD. This session's own thread
-  is where its store already sits, so naming it is the identity case and
-  costs nothing; naming anything else is a view. A read that needs the image
-  — an eval, an observe, a test run — cannot be served from a value alone and
-  refuses, naming the verb that moves the session THERE rather than looks.
-
-  A WRITE naming a thread is not a view but routing: `call-op-1!` switches
-  the session onto it, and this returns the session untouched."
-  [session name arguments]
-  (let [conn       (:db @session)
-        branch     (some-> (:branch arguments) str)
-        thread     (some-> (:thread arguments) str)
-        own-branch (:branch @session)
-        wanted     (cond (and branch (not= branch own-branch))               [:branch branch]
-                         (and thread (not= thread (engine/thread-key session))) [:thread thread])]
-    (if-not (and conn wanted (contains? tools/read-only-tools name))
-      session
-      (let [[kind id] wanted]
-        (when-not (contains? tools/image-free-tools name)
-          (throw (ex-info (str name " answers from this session's image, which holds its"
-                               " own line — a branch or thread on a read is a VIEW of"
-                               " the store value only. To be there: "
-                               (if (= :branch kind)
-                                 (str "branch_switch {name \"" id "\"}")
-                                 (str "thread_open {thread \"" id "\"}")))
-                          {:tool name kind id})))
-        (let [line (if (= :branch kind)
-                     (db/line-id-by-name conn id)
-                     (:id (first (filter #(= id (:agent %))
-                                         (db/open-threads conn (engine/session-branch-line session))))))
-              _    (when-not line
-                     (throw (ex-info (if (= :branch kind)
-                                       (str "no branch " id " — query_branches lists them")
-                                       (str "no open thread " id " on " own-branch
-                                            " — thread_list shows what is here"))
-                                     {:tool name kind id})))
-              head (db/line-head conn line)
-              st   (or (let [c (get-in @session [::views line])]
-                         (when (= head (:head c)) c))
-                       (let [st (or (db/load-store conn line)
-                                    (throw (ex-info (str id " has no persisted value yet") {})))]
-                         ;; a few lines, not a history: a view is a look, and
-                         ;; the values are whole stores
-                         (swap! session update ::views
-                                #(assoc (into {} (take 3 %)) line st))
-                         st))]
-          (atom (assoc @session :store st :line line :image nil ::view wanted)))))))
-
-^:unsafe (defn stop-app!
-  "Stop this session's app server, if it holds one, and forget it. NEVER
-  throws. The third verb beside [[start-app!]] and [[refresh-app!]], so a
-  caller above this layer — the daemon closing a project — never reaches
-  web tooling itself: the app image is a CHILD JVM, and stopping it before
-  its owner goes is what frees the port before the next server wants it."
-  [session]
-  (when-let [running (:app-server @session)]
-    (locking session
-      (try (live/stop! running) (catch Throwable _ nil))
-      (swap! session dissoc :app-server))
-    {:stopped true}))
-
-^:reads (defn ^:export write-tool?
-  "Whether tool `name` WRITES the store — the classification the turn gate
-  and the thread rule key on, answered for a caller above the transport
-  (the daemon's write door refuses a write that names no thread)."
-  [name]
-  (contains? tools/write-tools name))
-
-^:reads (defn ^:export app-managed?
-  "Whether slopp runs this store's app server at all — the gate
-  [[start-app!]] and [[refresh-app!]] apply, answered for a caller above
-  the transport: the daemon starts a project's app server on first attach
-  only when there is one to start, and opens the reader that would own it
-  only then."
-  [session]
-  (boolean (and (:dir @session)
-                (live/managed? (:store @session) server/served-namespaces))))
-
-^:unsafe (defn refresh-app!
-  "Re-serve this project's app on the CURRENT store, or stop a managed server
-  the store has opted out of. nil when there is nothing to do. NEVER throws.
-
-  Called at each `done` point, which is the grain the whole feature is built
-  around: mid-episode the store is intentionally incomplete, and a browser
-  reloading into a half-written red state teaches the author to ignore it.
-
-  **A session with an `:app-owner` refreshes the OWNER's server.** Under the
-  daemon N sessions share one project, and the app server is the project's
-  — one, on the branch, held by the project's reader. Every session names
-  that reader as its owner — as a DELAY, forced here, so a project whose
-  app nobody serves never opens the reader at all — the refresh runs there
-  over the branch's current value, and the handle is mirrored back so
-  `session_brief` and the done note read the same server. Without this,
-  each session held its own `:app-server` and the second one to land booted
-  a second server onto the first one's port. A session whose store runs no
-  app does not force the owner either: nothing to refresh, nothing to open.
-
-  **Opting out is an ACTION, not the absence of one.** The first cut gated on
-  `managed?` and returned, which stops RE-SERVING and never stops SERVING —
-  so after `http.enabled false` the old image kept answering and
-  `session_brief` kept advertising its url, while the config said no managed
-  server existed. Found by slopp-ui, who checked the surface against the
-  config rather than against the page.
-
-  **The same gate as `start-app!`, and that is not redundancy.** A gate on
-  the startup path only would let the second done point start what the first
-  one declined to — the feature would arrive by accident, in a test run,
-  minutes after everything looked fine.
-
-  A store that was never managed and has nothing running reports NOTHING, not
-  even a failure. Most stores are not web projects, and a line at every done
-  point saying so is how a report stops being read.
-
-  `locking` because two done points close together would otherwise both boot,
-  both stop the same predecessor, and race for the port. They queue instead,
-  and nobody waits on them: the call site backgrounds this so `done` returns
-  at its own speed."
-  [session]
-  (if-let [owner (when-let [o (:app-owner @session)]
-                   ;; a project whose app nobody serves: do not open the
-                   ;; reader just to learn there is nothing to refresh
-                   (when (or (not (delay? o)) (realized? o)
-                             (app-managed? session) (:app-server @session))
-                     (force o)))]
-    (do ;; the owner reads the BRANCH; what just landed has to be in its
-        ;; value before the server is re-served from it
-        (when (:db @owner)
-          (try (engine/refresh-cache! owner) (catch Throwable _ nil)))
-        (let [r (refresh-app! owner)]
-          (swap! session assoc :app-server (:app-server @owner))
-          r))
-    (let [dir (:dir @session)]
-      (if (and dir (live/managed? (:store @session) server/served-namespaces))
-        (locking session
-          ;; IN PLACE first. A re-boot replaces the child JVM, so the app's
-          ;; `:http/perform-ctx` is rebuilt and any state it kept there — a
-          ;; cache, a registry, a pool — is silently gone at every done point.
-          ;; `hot-refresh!` answers nil for everything in-place cannot serve (a
-          ;; changed load order, a failed reload, nothing running), and the
-          ;; re-boot below is the fallback rather than the default.
-          (let [r (try (or (live/hot-refresh! session (:store @session)
-                                              (:app-server @session))
-                           (live/refresh! session (:store @session) dir))
-                       (catch Throwable t
-                         {:serving? false :reason (or (.getMessage t) (str t))}))]
-            ;; the OUTCOME beside the report: measure app-behind AFTER the
-            ;; refresh, so a refresh that said it worked and left the image
-            ;; behind is news rather than the silence success is entitled to.
-            ;; Both doors that call this (done, commit_point) read it off the
-            ;; map. nil when it cannot be measured, which makes no claim
-            (if (and (map? r) (:serving? r))
-              (assoc r ::behind (try (ops/app-behind session r)
-                                     (catch Throwable _ nil)))
-              r)))
-        (when-let [running (:app-server @session)]
-          (locking session
-            (try (live/stop! running) (catch Throwable _))
-            (swap! session dissoc :app-server))
-          {:serving? false
-           ;; STOPPED ON PURPOSE, and that has to be legible to the caller:
-           ;; `done` reports a re-serve that BROKE and must not report this,
-           ;; which is indistinguishable without the flag — same :serving?
-           ;; false, same shape of reason, opposite meaning.
-           :stopped true
-           ;; `managed?` is false for two different reasons now, and a stopped
-           ;; server that names the wrong one sends someone to change the
-           ;; wrong thing
-           :reason (if (live/self-served? (:store @session) server/served-namespaces)
-                     (str "this session already serves this store's surface — the"
-                          " managed app server was stopped, because a second one"
-                          " would serve a staler copy of the same pages")
-                     (str "http.enabled is false for this store — the managed app"
-                          " server was stopped"))})))))
-
-(def ^:private env-handlers!
-  "call-tool dispatch \u2014 deps/branches/build/help (Q4: the stable dispatch tail lives in\n  per-group handler maps of (fn [session a sym]); call-tool keeps only the\n  hot query/edit clauses)."
-  {"deps_add"
-   (fn [session a sym]
-     (text! (ops/deps-add! session (sym :lib)
-                          (or (:coord a)
-                              (when (:version a)
-                                {:mvn/version (:version a)}))
-                          :agent (:agent a) :prompt (:prompt a)
-                          :client (:client a))))
-   "deps_remove"
-   (fn [session a sym]
-     (text! (ops/deps-remove! session (sym :lib)
-                                           :agent (:agent a))))
-   "deps_list"
-   (fn [session _a _sym]
-     (text! (ops/deps-manifest session)))
-   "store_health"
-   (fn [session _a _sym]
-     (text! (external/store-health session)))
-   "store_doctor"
-   (fn [session _a _sym]
-     (text! (doctor/diagnose (:store @session))))
-   "store_compact"
-   (fn [session _a _sym]
-     (text! (external/compact-store! session)))
-   "ui_serve"
-   ;; `:ui-url` is what session_brief announces, and until this only
-   ;; `start-ui!` wrote it — so re-serving moved the listener and left the
-   ;; brief naming the port it came up on at BOOT. Observed live: the brief
-   ;; said 49283 while the listener held 53610 and nobody held 49283. The
-   ;; address a reader is handed has to be the one that was bound, and
-   ;; stopping has to clear it rather than leave an address nothing answers.
-   (fn [session a _sym]
-     (text! (if (:stop a)
-              (let [stopped (boolean (server/stop!))]
-                (swap! session dissoc :ui-url :ui-stamp)
-                {:stopped stopped})
-              (let [r (server/serve! session
-                                     (server/preferred-port (:dir @session) (:port a)))]
-                ;; the stamp rides the SESSION beside the url, because the
-                ;; brief is where a reader finds out anything about this
-                ;; listener and slopp.ops cannot ask slopp.api — that edge
-                ;; runs the other way.
-                (when (:url r)
-                  (swap! session assoc :ui-url (:url r)
-                         :ui-stamp (:derived-from r)))
-                r))))
-"screen"
-   (fn [session a _sym]
-     (text! (webdev.screen/screen! session
-                             :steps (:steps a)
-                             :region (:region a)
-                             :detail (:detail a)
-                             :trace (:trace a)
-                             :url (:url a))))
-   "compile_client"
-   (fn [session a _sym]
-     (text! (if (:output a)
-              (cljs/compile-client! session :output (:output a))
-              (cljs/compile-client! session))))
-   "generate_client"
-   (fn [session a _sym]
-     (text! (cond
-              ;; a contract URL generates against an API this store CONSUMES —
-              ;; two namespaces, and nothing reads the producer's store
-              (:from a) (if (:ns a)
-                          (cljs/generate-client-from! session (:from a) :ns (symbol (:ns a)))
-                          (cljs/generate-client-from! session (:from a)))
-              (:ns a)   (cljs/generate-client! session :ns (symbol (:ns a)))
-              :else     (cljs/generate-client! session))))
-   "deps_pure"
-   (fn [session a sym]
-     (text! (if (false? (:pure a))
-                           (ops/deps-unpure! session (sym :target) :agent (:agent a))
-                           (ops/deps-pure! session (sym :target) :agent (:agent a)))))
-   "branch_create"
-   (fn [session a _sym]
-     (text! (branch/branch! session (:name a))))
-   "branch_switch"
-   (fn [session a _sym]
-     (text! (branch/branch-switch! session (:name a))))
-   "branch_merge"
-   (fn [session a _sym]
-     (text! (branch/branch-merge! session (:name a))))
-   "branch_delete"
-   (fn [session a _sym]
-     (text! (branch/branch-delete! session (:name a))))
-   "thread_list"
-   (fn [session _a _sym]
-     (text! (branch/thread-list session)))
-   "thread_drop"
-   (fn [session a _sym]
-     (text! (branch/thread-drop! session (:id a))))
-   "thread_open"
-   (fn [session a _sym]
-     (text! (branch/thread-open! session :thread (:thread a) :parent (:parent a))))
-   "query_branches"
-   (fn [session _a _sym]
-     (text! (branch/query-branches session)))
-   "restart"
-   (fn [session a _sym]
-     (ops/restart! session)
-     ;; the ORACLE is what restart has always re-imaged, and it stays the
-     ;; default. `app true` also re-serves this project's app server — the
-     ;; second half of "reload in place, restart on demand", and it exists
-     ;; because a declared entry answers `:started` once a namespace loads
-     ;; and a thread spawns, so one that came up half dead reports exactly
-     ;; what a healthy one does. Without this the only way to ask again is an
-     ;; unrelated write, to trigger a done that re-serves as a side effect.
-     (if-not (:app a)
-       (text! "restarted")
-       (let [r (refresh-app! session)]
-         (text! (cond-> {:restarted true
-                         :app-restarted (boolean (:serving? r))}
-                  (:url r)     (assoc :app-url (:url r))
-                  (:started r) (assoc :app-started (:started r))
-                  (not (:serving? r))
-                  (assoc :app-note
-                         (or (:reason r)
-                             (str "nothing to restart — this store has no"
-                                  " managed app server. Declare what to run"
-                                  " (config_file {path \"dev\" key"
-                                  " \"run.<name>.main\" value \"my.ns/-main\"}),"
-                                  " or enable http.enabled for the derived"
-                                  " one."))))))))
-   "build"
-   (fn [session a _sym]
-     (text! (external/build! session (:dir a)
-                                    :main (some-> (:main a) symbol)
-                                    :name (:name a))))
-   "help"
-   (fn [_session a _sym]
-     (text! (help-text (:topic a)) :budgeted? true))})
-
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
-
-^:unsafe (defn start-app!
-  "Bring this project's app server up beside the MCP server, or nil when
-  slopp does not run this store's server. NEVER throws.
-
-  The stance is the UI listener's, for the same reason: **the app server is
-  OPTIONAL and MCP is not.** A busy port, a
-  store that will not load, anything at all — it reports a sentence on
-  stderr (stdout is the JSON-RPC channel) and the server carries on. Nothing
-  about a page in a browser should be able to stop the thing the editor is
-  talking to.
-
-  It goes through `refresh-app!` rather than `live/start!`, so the
-  first serve and every later one are the same code path. A start that
-  differed from a swap would be a second lifecycle, and the two would drift
-  exactly where nobody looks — the first boot of a session is the one nobody
-  re-tests.
-
-  A store that is not managed reports NOTHING, not even a failure. Most
-  stores are not web projects, and a line on every startup saying so is how
-  a banner stops being read."
-  [session]
-  (let [r (refresh-app! session)]
-    (when r
-      (.println System/err
-                ^String (if (:serving? r)
-                          (str "slopp app: " (:url r)
-                               (when-let [ms (:boot-ms r)]
-                                 (str " (image up in " ms "ms)"))
-                               ;; a url with nothing behind it is worse than no
-                               ;; url: the human opens it, gets 404, and has no
-                               ;; reason to suspect the SERVER is fine
-                               (when-let [empty-note (get-in r [:plan :serves-nothing])]
-                                 (str " — but " empty-note)))
-                          (str "slopp app unavailable: " (:reason r)))))
-    r))
 
 ^:unsafe (defn start-ui!
   "Bring this project's UI listener up beside the MCP server and start its

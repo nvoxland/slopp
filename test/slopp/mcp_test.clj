@@ -5421,3 +5421,50 @@
       (is (nil? (:app-server @s)) (pr-str @s)))
     (testing "a session with no owner behaves as before"
       (is (nil? (mcp/refresh-app! (atom {:store (store/empty-store) :dir "/tmp/slopp-no-such-dir"})))))))
+
+(deftest ^:external a-dev-instance-that-failed-to-boot-is-the-stores-red-not-the-episodes
+  ;; The app image — the project's dev instance, booted from the store by a
+  ;; process that has never seen it — is the cold-load oracle a warm image
+  ;; cannot be. Its failure used to be an app NOTE beside a green done; the
+  ;; store then took commit points nobody could boot. It is the STORE's red
+  ;; now: a commit point is refused until the instance boots. Not the
+  ;; episode's, because the episode carrying the fix has to land for the
+  ;; reboot from the landed state to clear it.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ab.core "(ns ab.core)\n")
+      (let [w (ops/add-form! sess 'ab.core "(defn ^:unused-ok f \"F.\" [] 1)" :prompt "p" :agent "ab")]
+        (is (nil? (:error w)) (pr-str w)))
+      (swap! sess assoc :app-boot-failure "the app image could not load ab.core: boom")
+      (let [r (external/done! sess :label "with a broken app" :agent "ab")
+            f (:findings r)]
+        (is (= :red (:test-status f)) (pr-str f))
+        (is (= :green (:episode-status f)) "the fix must be able to land")
+        (is (re-find #"boom" (str (:app-boot-failure f))) (pr-str f))
+        (is (:landed (:land r)) (pr-str (:land r))))
+      (testing "cleared, the next done is green again"
+        (swap! sess dissoc :app-boot-failure)
+        (ops/add-form! sess 'ab.core "(defn ^:unused-ok g \"G.\" [] 2)" :prompt "p" :agent "ab")
+        (is (= :green (get-in (external/done! sess :label "clean" :agent "ab") [:findings :test-status]))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-change-that-closes-its-unit-carries-the-app-note
+  ;; A plain done waits for the app refresh and reports it; a change that
+  ;; closes its unit — the path most writes take to close — never ran the
+  ;; refresh at all, so the one surface carrying a cold-boot failure was
+  ;; missing exactly where units usually end (2026-09-07, found by restart
+  ;; {app true}). The outcome arranged here — a server the store no longer
+  ;; asks for — is a stop on purpose, which carries no note by design; what
+  ;; proves the refresh ran on this path is the server being gone.
+  (let [sess  (external/open!)
+        owner (atom {:store (store/empty-store) :dir "/tmp/slopp-no-such-dir"
+                     :app-server {:url "http://127.0.0.1:1/" :fake true}})]
+    (try
+      (ops/ingest! sess 'cn.core "(ns cn.core)\n")
+      (swap! sess assoc :app-owner owner :app-server {:url "stale" :fake true})
+      (let [r (call! sess "change" {:prompt "close it" :done "close it"
+                                    :impl [{:ns "cn.core" :source "(defn ^:unused-ok f \"F.\" [] 1)"}]})]
+        (is (re-find #":closed" r) r)
+        (is (nil? (:app-server @owner)) "the close refreshed the owner's server: stopped, as its store asks")
+        (is (nil? (:app-server @sess)) "and the session mirrors the owner"))
+      (finally (ops/close! sess)))))

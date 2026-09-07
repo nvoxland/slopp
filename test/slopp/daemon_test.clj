@@ -89,20 +89,26 @@
   ;; (the contract paths, un-prefixed, are what a client is generated from);
   ;; the machine's one OTLP sink routes a batch by session id — which is the
   ;; THREAD id since Phase 0 — to the project holding that thread, and says
-  ;; what it could not place.
+  ;; what it could not place. And it keeps routing after the project closed:
+  ;; an exporter posts on its own clock, and a project that just closed was
+  ;; where most of its records were going.
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
         post (fn [slug sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri (str "/slopp/projects/" slug "/mcp")
-                                  :headers (cond-> {"x-slopp-dir" d}
-                                             sid (assoc "mcp-session-id" sid))
-                                  :body (json/generate-string msg)}))
+                                        :uri (str "/slopp/projects/" slug "/mcp")
+                                        :headers (cond-> {"x-slopp-dir" d}
+                                                   sid (assoc "mcp-session-id" sid))
+                                        :body (json/generate-string msg)}))
         rec  (fn [sid] {:body {:stringValue "claude_code.api_request"} :timeUnixNano "1"
                         :attributes [{:key "session.id" :value {:stringValue sid}}
                                      {:key "model" :value {:stringValue "m"}}
                                      {:key "input_tokens" :value {:intValue "10"}}
-                                     {:key "output_tokens" :value {:intValue "5"}}]})]
+                                     {:key "output_tokens" :value {:intValue "5"}}]})
+        batch {:resourceLogs [{:scopeLogs [{:logRecords [(rec "t-tel") (rec "nobody")]}]}]}
+        otel! (fn [] (slopp.http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs"
+                                               :body (json/generate-string batch)}))
+        otel-status (fn [] (:otel (:body (slopp.http/handle! ctx {:request-method :get :uri "/slopp/status"}))))]
     (try
       (let [r   (post "one" nil {:jsonrpc "2.0" :id 1 :method "initialize"
                                  :params {:protocolVersion "2025-03-26" :capabilities {}
@@ -121,16 +127,22 @@
           (let [r (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/nope/api/namespaces"})]
             (is (= 404 (:status r)) (pr-str r))))
         (testing "an OTLP batch routes by session id to the project holding that thread"
-          (let [batch {:resourceLogs [{:scopeLogs [{:logRecords [(rec "t-tel") (rec "nobody")]}]}]}
-                r     (slopp.http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs"
-                                         :body (json/generate-string batch)})
-                st    (:body (slopp.http/handle! ctx {:request-method :get :uri "/slopp/status"}))]
+          (let [r  (otel!)
+                st (otel-status)]
             (is (= 200 (:status r)) (pr-str r))
-            (is (= 1 (get-in st [:otel :routed])) (pr-str st))
-            (is (= 1 (get-in st [:otel :dropped])) (pr-str st))))
+            (is (= 1 (:routed st)) (pr-str st))
+            (is (= 1 (:dropped st)) (pr-str st))))
         (testing "garbage is 400, the non-retryable answer"
           (let [r (slopp.http/handle! ctx {:request-method :post :uri "/slopp/otel/v1/logs" :body "{not json"})]
-            (is (= 400 (:status r)) (pr-str r)))))
+            (is (= 400 (:status r)) (pr-str r))))
+        (testing "with the project closed, a remembered thread still routes"
+          (daemon/detach! sid)
+          (is (empty? (projects! ctx)) "the last detach closed the project")
+          (let [r  (otel!)
+                st (otel-status)]
+            (is (= 200 (:status r)) (pr-str r))
+            (is (= 2 (:routed st)) (pr-str st))
+            (is (= 2 (:dropped st)) (pr-str st)))))
       (finally (daemon/reset-all!)))))
 
 (deftest ^:external every-session-on-a-project-shares-its-one-app-owner
