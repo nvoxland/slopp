@@ -2870,3 +2870,26 @@ and `done` with it.
 - The whole-store `full_check` on slopp itself after all daemon
   increments: green on every tier (896 in-image, 1653 external, 3739 forms
   swept); alias-drift rose 17 → 21 with the daemon's four new requires.
+
+## 2026-09-07 — the daemon on slopp2: per-session cost before and after sharing
+
+Measured on the live daemon serving slopp2 (`--live`), attaching extra
+reading sessions through the pipe and reading the daemon's RSS.
+
+- Before: a second reading session cost **+~450 MB** and 3.1 s (its own
+  `load-store` of slopp2); detach returned nothing to the OS.
+- The reader opened at attach cost a copy too (2.7 GB for one session
+  right after the restart); made lazy — opened on the first API request or
+  app refresh, and the first-attach app start gated on a managed store.
+- After `load-elements` memoizes the latest materialization per (file, view
+  line) through `cache/cached-latest`: first session after a land **+1125
+  MB** (a fresh load, plus JVM slack), second **+27 MB**, third **+19 MB**.
+  Attach latency stays 2.7–3.4 s: refs, the trace map and prompts are still
+  loaded per session; namespaces were the bulk.
+- The daemon's RSS reached 5.6 GB across a working day of writes and
+  loads: retained garbage, not live data — the JVM has no reason to return
+  it under the default 25%-of-RAM heap. A heap ceiling for the daemon
+  (`SLOPP_SERVER_JVM_OPTS`) is the lever; sharing does not address it.
+- `done` now reloads the touched namespaces and their dependents whole
+  into the image before the verdict; on a done touching `slopp.ops.engine`
+  (most of slopp depends on it) the closing done showed no visible cost.
