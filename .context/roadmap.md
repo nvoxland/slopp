@@ -744,10 +744,28 @@ session (refusing a write with no thread as a 200/isError answer — a 4xx
 made the CLI fall back to a one-shot JVM); the app server owned by the
 project's reader (`:app-owner` on every session, `refresh-app!` delegates);
 idle reaping (CLI 10 min, MCP 2 h). `bin/slopp` and the prompt hook route
-through a live daemon first. **Still open in P5-1:** oracle pools per
-(project, branch) — today each MCP session still opens its own image, so
-the memory goal is not yet delivered; the shared verdict + check queue;
-push; budgets. **P5-2 open question for Nathan:** a plugin-level
+through a live daemon first. **Later the same night, landed:** LAZY images — a daemon session boots its
+oracle on the first call that needs one, at the store's head as of then, so
+a session that only reads holds no child JVM (census in `findings-log.md`:
+two reading sessions, zero image children; one eval, one 127 MB child;
+detach parks it for the next tenant). The reader shares the same rule. The
+full per-(project, branch) READER pool — several sessions' evals on one
+image — is deferred until a workload shows image-backed reads dominating;
+the lazy boot removed the idle JVM that was the whole of the per-agent
+cost. One CHECK QUEUE per project: a `full_check` at the same content (the
+line's elements digest) joins the run in flight, records the verdict on its
+own line so it stands there, and says `:joined true`. PUSH in the only
+form that reaches the model: events queue on the session and ride the next
+tool answer as one leading line — what moved under an idle thread (the
+per-call sync always knew and never said), and another session's land on
+the project (`:on-landed`, the daemon's hook in `done!`); an MCP
+notification goes to the client's log, never the conversation, which is
+why the GET stream stays 405. BUDGETS: `SLOPP_DAEMON_MAX_IMAGES` (default
+6) caps images machine-wide; a lazy boot past it is refused with the fix
+named, and store-value reads keep working. The stdio PIPE
+(`SLOPP_DAEMON=1`, `bin/slopp-pipe.py`) is the client wiring: a plugin
+stays stdio from Claude Code's side and speaks HTTP to the daemon, names
+the project by cwd, and starts a dead daemon itself. **P5-2 open question for Nathan:** a plugin-level
 `.mcp.json` HTTP entry cannot name the project (its `headersHelper` runs
 with the plugin root as cwd and gets no project-dir variable), so the
 client wiring is either a per-project `.mcp.json` the setup skill writes

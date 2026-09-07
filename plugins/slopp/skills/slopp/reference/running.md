@@ -133,3 +133,15 @@ session instead of a JVM — which starts a daemon if none answers and names
 the project by its cwd. Nothing about the tools changes; subagents share
 the pipe as they shared the server. Default stays the per-session JVM until
 the memory census and the concurrency evals rerun against the daemon.
+
+Under the daemon three things are shared that used to be per session. Your
+oracle image boots on the FIRST call that needs one (an eval, a write, a
+test run), not at start — reads never boot it — and past
+`SLOPP_DAEMON_MAX_IMAGES` (default 6 across the machine) that boot is
+refused with the fix named while reads keep answering. A `full_check` at
+the same content as one already running on the project JOINS it
+(`:joined true`) and stands on your line afterwards. And what another
+session lands on your project reaches you as ONE leading line on your next
+answer (`;; since your last call: …`): your view followed if your thread
+was idle, your `done` rebases otherwise. That line is the whole of push —
+an MCP notification never reaches the model, so nothing is sent that way.
