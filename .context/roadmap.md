@@ -723,3 +723,33 @@ cannot tell them apart.
 
 Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
 always-open projects, the daemon as a scheduler.
+
+**Status, 2026-09-06 (evening).** P5-0 landed whole (`thread_open` incl.
+`parent`, branch/thread views on reads, the one-shot refusal, the hook
+printing the thread every ask, skills). P5-1 landed in four increments,
+each a commit point: the transport (`slopp.mcp.http`, plain-JSON answers,
+`Mcp-Session-Id` on initialize, GET 405, DELETE detaches); the daemon
+(`slopp.daemon`: attach opens a project, last detach closes it, one slopp
+session per MCP session, `/slopp/projects`, `/slopp/status`, `slopp daemon
+[port]` from a neutral dir, `~/.slopp/daemon.json` with the token); the
+read API by DELEGATION — `/slopp/projects/<p>/api/**` dispatches into the
+project's own assembled API context over a read-only reader, so contracts
+and validators apply unchanged, and the `/api` prefix on `:rest/path`
+declarations is NOT dropped yet (deferred: it is a rename across the
+contract tests and slopp-ui's generated client, and delegation made it
+unnecessary for a working surface); the OTLP sink at `/slopp/otel/v1/logs`
+routing each record by `session.id` (= the thread id) to the project whose
+store holds that thread open; the write door at `/call` on an on-demand CLI
+session (refusing a write with no thread as a 200/isError answer — a 4xx
+made the CLI fall back to a one-shot JVM); the app server owned by the
+project's reader (`:app-owner` on every session, `refresh-app!` delegates);
+idle reaping (CLI 10 min, MCP 2 h). `bin/slopp` and the prompt hook route
+through a live daemon first. **Still open in P5-1:** oracle pools per
+(project, branch) — today each MCP session still opens its own image, so
+the memory goal is not yet delivered; the shared verdict + check queue;
+push; budgets. **P5-2 open question for Nathan:** a plugin-level
+`.mcp.json` HTTP entry cannot name the project (its `headersHelper` runs
+with the plugin root as cwd and gets no project-dir variable), so the
+client wiring is either a per-project `.mcp.json` the setup skill writes
+or a Claude Code change. A delete-only `done` judges nothing
+(`ideas/refusal/a-delete-only-done-judges-nothing-so-a-fixed-red-still-stands.md`).

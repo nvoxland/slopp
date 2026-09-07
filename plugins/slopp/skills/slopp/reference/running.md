@@ -98,3 +98,30 @@ project want a worker running*, so a declared entry is reason enough on its
 own — a CLI project with a background job needs no `http` capability to have
 that job running while somebody works on it.
 
+### One slopp for the machine: `slopp daemon`
+
+`slopp daemon [port]` runs ONE slopp process for every project on the box
+(default port 7357, `SLOPP_DAEMON_PORT` overrides). It binds first and
+loads nothing until something attaches; a project opens on its first
+attachment and closes on its last. Everything it serves is under one
+prefix:
+
+| path | what |
+|---|---|
+| `GET /slopp/projects` | the registry: every open project — slug, dir, sessions, `:app {:url :branch}` |
+| `GET /slopp/status` | the daemon about itself |
+| `POST /slopp/projects/<slug>/mcp` | MCP over streamable HTTP; `X-Slopp-Dir: <absolute dir>` names the project on `initialize` |
+| `POST /slopp/projects/<slug>/call` | the write door `slopp <op>` uses: `{tool arguments token}`; slug `_` + `X-Slopp-Dir` resolves by dir |
+| `/slopp/projects/<slug>/api/…` | the project's typed read API, exactly as its contract declares under `/api` |
+| `POST /slopp/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/slopp/otel` |
+
+It records itself in `~/.slopp/daemon.json` (`url pid token`); `slopp
+<op>` and the prompt hook route there when that pid is alive, and fall
+back to a session's own listener otherwise. A second `slopp daemon` refuses
+and names the live one. The daemon boots slopp's OWN code from the dir it
+is given, so the verb passes a neutral one (`~/.slopp`); from a checkout of
+slopp itself, `SLOPP_LIVE=1 SLOPP_DAEMON_DIR=$PWD slopp daemon` hot-reloads
+the daemon's tooling as the store changes. A write through the door with
+no `thread` is refused, like a one-shot; a project's dev app server is
+started once by the daemon, on the first branch attached, and every
+session's `done` refreshes that one server.
