@@ -2851,3 +2851,22 @@ same evening), sessions attached through the stdio pipe (`SLOPP_DAEMON=1`),
 Not yet measured: readers sharing ONE image per (project, branch) — deferred
 until a workload shows image-backed reads dominating; today the lazy boot
 already removes the idle JVM that was the whole of the 2.6 GB/agent cost.
+
+## 2026-09-07 — the two-session check through the daemon (P5-0/P5-1 stop point)
+
+Two `claude -p` sessions launched together in a scratch project whose own
+`.claude/settings.json` set `SLOPP_DAEMON=1` (nothing in slopp2's wiring
+changed); each told to `thread_open`, write one namespace on that thread,
+and `done` with it.
+
+- Both finished in 31 s; distinct minted threads (`t-6b112d06`,
+  `t-9b230b50`); the daemon showed one project, two sessions, two images.
+- The journal: each `done` under its own thread; the second to land
+  re-ran the suite over BOTH namespaces (its rebase onto the first), the
+  first over its own; both threads at `:unlanded 0` afterwards; `report`
+  carries both verbatim asks. Zero cross-attribution.
+- Read back through the CLI door (`slopp report`, `slopp thread_list`
+  from the scratch dir), which opened its own CLI session on the daemon.
+- The whole-store `full_check` on slopp itself after all daemon
+  increments: green on every tier (896 in-image, 1653 external, 3739 forms
+  swept); alias-drift rose 17 → 21 with the daemon's four new requires.
