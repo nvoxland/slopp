@@ -122,17 +122,32 @@ esac
 
 # ---- route the normalized call to the RUNNING server, else the JVM ----
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  if [ -z "${SLOPP_NO_ROUTE:-}" ] && [ -f ".slopp/ui-port" ]; then
+  if [ -z "${SLOPP_NO_ROUTE:-}" ] && { [ -f "$HOME/.slopp/daemon.json" ] || [ -f ".slopp/ui-port" ]; }; then
     set +e
     python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
 import json, os, sys, time, threading, urllib.request
 tool, argsfile = sys.argv[1], sys.argv[2]
-try:
-    pf = json.load(open(".slopp/ui-port"))
-    pid, url, token = pf["pid"], pf["url"], pf.get("token")
-    os.kill(int(pid), 0)
-    if not token:
+headers = {"Content-Type": "application/json"}
+def live(path):
+    pf = json.load(open(path))
+    os.kill(int(pf["pid"]), 0)
+    if not pf.get("token"):
         raise RuntimeError("listener predates the routed door (no token)")
+    return pf
+try:
+    # THE DAEMON first: one slopp for the machine, every project by dir.
+    # `slopp <op>` names its project by cwd (X-Slopp-Dir), so a project
+    # nobody has attached is opened for the call and reaped when idle.
+    # A per-session listener (.slopp/ui-port) is the fallback while both
+    # exist.
+    try:
+        pf = live(os.path.expanduser("~/.slopp/daemon.json"))
+        url = pf["url"].rstrip("/") + "/projects/_/call"
+        headers["X-Slopp-Dir"] = os.getcwd()
+    except Exception:
+        pf = live(".slopp/ui-port")
+        url = pf["url"].rstrip("/") + "/api/call"
+    token = pf["token"]
     args = json.load(open(argsfile))
     if not isinstance(args, dict):
         raise RuntimeError("arguments must be a JSON object")
@@ -146,8 +161,7 @@ def beat():
     while not stop.wait(10):
         print(f"slopp: {tool} still running ({int(time.time()-t0)}s)...", file=sys.stderr)
 threading.Thread(target=beat, daemon=True).start()
-req = urllib.request.Request(url.rstrip("/") + "/api/call", data=body,
-                             headers={"Content-Type": "application/json"})
+req = urllib.request.Request(url, data=body, headers=headers)
 try:
     with urllib.request.urlopen(req, timeout=3600) as r:
         out = json.load(r)

@@ -57,19 +57,38 @@ except Exception:
     pass
 
 
-def http_bundle_once():
-    """One attempt at the running listener's /api/bundle — None on any miss."""
+def listener():
+    """Where this project's read API answers: the DAEMON (one per machine,
+    every project by dir — a project it holds answers under
+    /slopp/projects/_/api with the dir in a header) else this session's own
+    listener (.slopp/ui-port). (base url, extra headers), or None."""
+    try:
+        info = json.load(open(os.path.expanduser("~/.slopp/daemon.json")))
+        os.kill(int(info["pid"]), 0)
+        return (info["url"].rstrip("/") + "/projects/_/api",
+                {"X-Slopp-Dir": os.getcwd()})
+    except Exception:
+        pass
     try:
         with open(".slopp/ui-port") as f:
             info = json.load(f)
         pid = int(info.get("pid", 0))
         if pid:
             os.kill(pid, 0)  # raises if that process is gone
+        return (info["url"].rstrip("/") + "/api", {})
+    except Exception:
+        return None
+
+
+def http_bundle_once():
+    """One attempt at the running listener's bundle — None on any miss."""
+    try:
+        base, headers = listener()
         # the WHOLE ask, not its first 500 chars: eval22's step-2 prompt
         # named its namespaces ("quoting, booking, billing, invoices") at
         # byte 703, so the seeds never saw them and the agent read each
         # namespace by hand. 2000 chars is a URL the listener takes
-        url = (info["url"].rstrip("/") + "/api/bundle?ask="
+        url = (base + "/bundle?ask="
                + urllib.parse.quote(prompt[:2000])
                # the server answers a session it has already mapped with the
                # small DELTA instead of a second full map (bundle diet 3c)
@@ -77,7 +96,8 @@ def http_bundle_once():
                # a CLI cell's bundle speaks the CLI loop (SLOPP_CLI cells
                # advertise no MCP tools, so the MCP voice points at nothing)
                + ("&cli=1" if os.environ.get("SLOPP_CLI") else ""))
-        with urllib.request.urlopen(url, timeout=2.0) as r:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=2.0) as r:
             body = json.loads(r.read().decode("utf-8"))
         b = body.get("bundle")
         return b if b and b.strip() else None
