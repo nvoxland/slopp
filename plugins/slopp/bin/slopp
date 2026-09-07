@@ -22,8 +22,8 @@ if ! command -v java >/dev/null 2>&1; then
 fi
 
 # --help never reaches the JVM: an unrecognized flag used to fall through
-# to SERVE MODE, whose listener overwrote a live server's .slopp/ui-port
-# with its own transient pid and poisoned the fast path (measured, s13).
+# to SERVE MODE, and a stray server launched that way once clobbered the
+# routed fast path's address file with its own pid (measured, s13).
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
   echo "  slopp <op> '{...json...}'                  bare tool call (routed to the running server)"
@@ -158,7 +158,7 @@ esac
 
 # ---- route the normalized call to the RUNNING server, else the JVM ----
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  if [ -z "${SLOPP_NO_ROUTE:-}" ] && { [ -f "$HOME/.slopp/daemon.json" ] || [ -f ".slopp/ui-port" ]; }; then
+  if [ -z "${SLOPP_NO_ROUTE:-}" ] && [ -f "$HOME/.slopp/daemon.json" ]; then
     set +e
     python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
 import json, os, sys, time, threading, urllib.request
@@ -168,21 +168,15 @@ def live(path):
     pf = json.load(open(path))
     os.kill(int(pf["pid"]), 0)
     if not pf.get("token"):
-        raise RuntimeError("listener predates the routed door (no token)")
+        raise RuntimeError("daemon file carries no token")
     return pf
 try:
-    # THE DAEMON first: one slopp for the machine, every project by dir.
+    # THE DAEMON: one slopp for the machine, every project by dir.
     # `slopp <op>` names its project by cwd (X-Slopp-Dir), so a project
     # nobody has attached is opened for the call and reaped when idle.
-    # A per-session listener (.slopp/ui-port) is the fallback while both
-    # exist.
-    try:
-        pf = live(os.path.expanduser("~/.slopp/daemon.json"))
-        url = pf["url"].rstrip("/") + "/projects/_/call"
-        headers["X-Slopp-Dir"] = os.getcwd()
-    except Exception:
-        pf = live(".slopp/ui-port")
-        url = pf["url"].rstrip("/") + "/api/call"
+    pf = live(os.path.expanduser("~/.slopp/daemon.json"))
+    url = pf["url"].rstrip("/") + "/projects/_/call"
+    headers["X-Slopp-Dir"] = os.getcwd()
     token = pf["token"]
     args = json.load(open(argsfile))
     if not isinstance(args, dict):

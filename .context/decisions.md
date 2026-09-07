@@ -6972,3 +6972,19 @@ run against the daemon.
   branch have different heads (markers) and the same elements digest; the
   digest is what two `full_check`s share. A joiner records the verdict on
   its own line so it stands there too.
+- **The per-session listener retired (2026-09-07, night).** `start-ui!`,
+  `ui_serve`, `.slopp/ui-port`, `slopp.api.server`'s listener half
+  (`serve!`/`stop!`/`derived-port`/`preferred-port`), the hub beat
+  (`slopp.hub`, `slopp.hub.port`, the brief's `:hub`/`:hub-note`) and the
+  brief's `:ui`/`:ui-stale` are deleted, with their tests. The data-plane
+  half of `D-hub` closes with them: the registry a hub was fed by heartbeats
+  is `/slopp/projects`, written by the process that holds each project, so it
+  cannot lag or lie. What survives of `slopp.api.server` is the route table
+  (`serving-opts`, `context`, `served-namespaces`), mounted per project by
+  the daemon. `SLOPP_DAEMON=0` still runs a self-contained stdio server; it
+  serves nothing over HTTP. The brief reports `:api` — the project's read
+  API base on the daemon — in place of `:ui`. **"Hub" leaves slopp's
+  vocabulary** with this: it named slopp-ui's registry-plus-proxy, and both
+  halves have plainer names now — the REGISTRY is the daemon's, the PAGES
+  are slopp-ui's. It survives only in the D-hub record and in docstrings
+  citing a bug the beat once had.

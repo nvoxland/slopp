@@ -726,10 +726,12 @@ cannot tell them apart.
   (`findings-log.md` 2026-09-06/07), the two `claude -p` sessions through
   the daemon, the restart and idle-reap paths exercised live (the pipe and
   the daemon each recover the session by themselves now), and the whole
-  external suite green against the daemon. NOT retired: the per-session
-  listener code (`start-ui!`, `.slopp/ui-port`, the hub heartbeat) — it is
-  what `SLOPP_DAEMON=0` runs; retiring it is a separate unit once nobody
-  runs that mode.
+  external suite green against the daemon. **Retired 2026-09-07 (night):**
+  the per-session listener code (`start-ui!`, `ui_serve`, `.slopp/ui-port`,
+  `slopp.api.server`'s listener half, the hub heartbeat `slopp.hub` and the
+  `slopp.hub.port` capability). `SLOPP_DAEMON=0` still runs a self-contained
+  stdio server, but it serves nothing over HTTP; the read API, the call door
+  and the telemetry sink are the daemon's only.
 
 Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
 always-open projects, the daemon as a scheduler.

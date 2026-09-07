@@ -40,58 +40,36 @@ one with twenty and none, and nothing else tells you that. It carries
 `:measured` because verification only started timing itself recently, so a
 recorded total covers part of a long form's life and says which part.
 
-**When the answer is for a HUMAN, hand over a URL rather than a wall of
-pasted source** — your tools answer questions, a page lets someone LOOK.
-There is a browsable view of the store: a commit-point timeline, a per-commit-point
-change review (module → namespace → form, with each form's recorded ask, its
-line diff and its blast radius), form permalinks by ID with callers above and
-callees inlined below, and the namespace index.
+**When the answer is for a HUMAN, hand over a page, not a port.** Your tools
+answer questions; a page lets someone LOOK. The pages are slopp-ui's — a
+separate slopp application, one per machine — and they cover every project
+the daemon holds: a commit-point timeline, a per-commit-point change review
+(module → namespace → form, with each form's recorded ask, its line diff and
+its blast radius), form permalinks by ID with callers above and callees
+inlined below, and the namespace index.
 
-**Hand over `session_brief`'s `:hub`, not its `:ui`.** Those are different
-things and giving out the wrong one wastes someone's time:
+**What `session_brief` reports is `:api`** — this project's own read API on
+the daemon, `http://127.0.0.1:7357/slopp/projects/<slug>/api`. It serves
+JSON, plus the project's own surface as EDN, one document per capability:
+`/rest/paths`, `/http/paths` and `/webapp/paths` under that base (the last
+two are usually empty). It has no pages in it: a human opening it sees JSON,
+so it is the address to hand a PROGRAM (a client generator, a script,
+slopp-ui itself), never a person.
 
-- `:ui` is THIS project's own listener, and it serves `/api/*` — JSON, plus
-  its own surface as EDN, one document per capability: `/api/rest/paths`,
-  `/api/http/paths` and `/api/webapp/paths` (the last two are usually empty). It is already running (the server starts
-  it at boot), it runs on your live session so warranty and observed examples
-  are the ones you actually have, and it has no pages in it at all. A human
-  opening it sees JSON.
-- `:hub` is this project's own page on the hub — a separate application, one
-  per machine, that renders every screen and fronts each project at
-  `/p/<slug>/`. That is the address a person wants, and the screens hang off
-  it: `<hub>/change/<from>..<to>`, `<hub>/store`,
-  `<hub>/store/form/<id>`.
+**One daemon, every project.** The daemon (`slopp daemon`, port 7357) serves
+every open project under one prefix — `/slopp/projects` lists them, and each
+answers under `/slopp/projects/<slug>/…` from the moment an agent attaches
+until the last one detaches. There is no per-project listener and no port to
+collect: slopp-ui reads that registry directly and fronts each project by
+slug. Nothing registers, nothing beats and nothing goes stale — the daemon
+that holds a project is the one that lists it. The API answers about the
+project's landed branch, so warranty and observed examples are the branch's;
+your un-landed work is yours to read through your thread.
 
-**`:hub` is present only while a hub is ANSWERING**, because the slug in it
-comes back on each heartbeat and cannot be fabricated. If no hub is running you
-get `:hub-note` instead, naming the address that is silent — a hub is
-optional, so its absence is an ordinary state rather than an error. Don't paper
-over the note by handing out the bare hub root: nothing is serving it.
-
-`ui_serve` controls your own listener (port, restart, `{stop: true}`); serving
-again evicts the previous server rather than moving the port. It does not
-start the hub, which is not slopp's to start.
-
-**On a machine running several slopp projects, hand over the HUB's url
-instead.** Your server serves this project's `/api/*` and binds a port derived
-from its store dir — it must serve its own, because warranty and observed
-examples are only CURRENT in the session doing the work, and another process
-reading the same store sees the last verified run rather than the one you are
-changing. Those derived ports are not addresses a human should have to collect.
-
-The hub is a SEPARATE APPLICATION (the `slopp-ui` project) that a user starts
-once per machine. It needs no store and never opens one: it holds a registry
-fed by heartbeats, renders every page a human looks at, and proxies
-`/p/<slug>/api/*` to whichever project owns that slug. Every project
-registers itself every few seconds, and one that stops answering is greyed out
-rather than dropped. Configure with the `slopp.hub.port` capability (`0` = don't
-register); the interval comes back on the registration response, so the two
-sides share no compiled-in number and can be different releases.
-
-That split is worth knowing about even if you never touch the hub, because it
-is the shape a slopp app takes when it consumes another one: the hub generates
-its typed client from each project's published `/api/rest/paths` and talks to
-a store it cannot open. See "Consuming someone else's API" above.
+That split is worth knowing about even if you never touch slopp-ui, because
+it is the shape a slopp app takes when it consumes another one: slopp-ui
+generates its typed client from each project's published `/rest/paths` and
+talks to a store it cannot open. See "Consuming someone else's API" above.
 
 **When you hit a dead end, revert cleanly and say WHY.** `undo` walks back
 your OWN writes by delta — `{deltas n}` for the last n, or `{to :last-commit}`

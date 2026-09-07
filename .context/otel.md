@@ -116,32 +116,27 @@ clock.
 
 ## Receiving it into the store
 
-The listener every project already runs accepts OTLP log exports at **its own
-`/v1/logs`** — OTLP's standard path, so the standard variable works with no
-per-signal override:
+The daemon accepts OTLP log exports at **`/slopp/otel/v1/logs`** — the base
+is ours, the `/v1/logs` tail is OTLP's standard path, so the standard
+variable works with no per-signal override:
 
 ```sh
 CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 OTEL_LOGS_EXPORTER=otlp \
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<ui-port>
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/slopp/otel
 ```
 
-`<ui-port>` is this project's UI port — `session_brief` reports it as `:ui`.
-
-**A running host will answer 404 until its listener is RE-SERVED.** Adding the
-route to the store and letting `--live` reload it is not enough: the running
-server holds a route table assembled when it started, so a reload swaps the
-handler function while the table it is dispatched from stays as it was. `ui_serve`
-rebuilds it (it evicts and re-serves), and a session restart does the same.
-Verified the hard way — a real export POSTed to a live host 404'd, and the same
-bytes to the same host answered 200 after one `ui_serve`. Note the port can
-CHANGE across that: the listener returns to its derived port once whatever held
-it is gone. It
-is derived from the store directory, so it is stable for a project and differs
-between them. Metrics are not ingested: every field that matters is on the
-`api_request` LOG record, and the metric stream would be a second copy of the
-same numbers under different names.
+One endpoint per machine. The daemon routes each record by its harness
+session id (the thread) to the project that session is attached to, and
+remembers the dir of a session that has since detached, so an export that
+arrives after a project closed still lands in the right store. Before the
+daemon, every session's own listener took the export on a port derived from
+its store dir, and a running host answered 404 until that listener was
+re-served, because its route table was assembled at serve time; the daemon
+mounts the route once, machine-wide. Metrics are not ingested: every field
+that matters is on the `api_request` LOG record, and the metric stream would
+be a second copy of the same numbers under different names.
 
 Each accepted export appends one `:otel` delta carrying the normalized
 requests. `slopp.otel/api-requests` does the normalizing, which is where the

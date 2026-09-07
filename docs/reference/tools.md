@@ -36,90 +36,50 @@ were deferred by the client and cost a search turn each to find.
 | `query_slice {ns name}` | The focused read: one form's full source plus interface cards (signature, doc line, test warranty) for everything it reaches. `match` + `window` narrows a giant form; `verbose` adds each card's recorded why. |
 | `query_brief {ns name}` | One form's dossier: source, effect flags, cross-namespace callers, covering tests, and the recorded why. |
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |
-| `ui_serve {port? stop?}` | Control this project's own API listener (`/api/*`, plus its surface as EDN at `/api/rest/paths`, `/api/http/paths` and `/api/webapp/paths`). Returns `{:url :port}`. It has no pages -- those belong to [the hub](#one-hub-many-projects). |
 | `help` | The workflow cheat-sheet. |
 
-### This project's listener, and where the pages are
+### The daemon, and where the pages are
 
-`ui_serve` controls a small web application -- built on slopp's own [web
-framework](../guide/web/index.md), the way any other slopp app is -- that
-serves **this project's API and nothing else**: `/api/*` as JSON, and the shape
-of that API as EDN at `/api/rest/paths`. Ask it for `/` and you get a 404.
+One `slopp daemon` per machine (port 7357) serves every open project under
+one prefix. `/slopp/projects` lists the projects agents are attached to;
+each answers under `/slopp/projects/<slug>/…` -- its MCP endpoint, its write
+door for the CLI, and its **read API** at `/slopp/projects/<slug>/api/*`:
+JSON, plus the shape of that API as EDN at `…/api/rest/paths`. `session_brief`
+reports the read API's base as `:api`. Ask it for a page and you get JSON.
 
-It runs on the session that is already open, so covering-test counts are the
-ones that session actually measured. Serving again replaces the running server
-rather than moving to another port, and a port something else holds is reported
-as a sentence.
+The API answers about the project's landed branch, from the daemon's own
+reader, so covering-test counts are the ones the branch actually measured. A
+project is served from the first attach to the last detach; nothing
+registers, nothing beats, and a project the daemon lists is one it holds.
+Ports are not per project: the daemon binds one configured port, so there is
+nothing to derive and nothing to collect.
 
-**The server starts it for you.** Because it serves the live session, it dies
-with that session — so the MCP server brings one up at boot and `session_brief`
-reports the url as `:ui`. `ui_serve` is for changing the port, restarting it,
-or `stop: true`. A listener that cannot bind never blocks the server: it prints
-a sentence and MCP carries on. The UI is optional; MCP is not.
+**`:api` is not the address you give a human** -- they would see JSON. The
+pages are **slopp-ui**'s, a separate application built with slopp that reads
+the daemon's registry and renders, for every project on it:
 
-**`:ui` is not the address you give a human** — they would see JSON. That is
-`:hub`, below.
+- the picker: every open project, linked;
+- that project's timeline, commit points newest first, each linking its own
+  change screen, plus what has been written since the newest;
+- a commit point reviewed form by form, grouped module then namespace, each
+  form leading with its recorded ask, then a line diff, then how many forms
+  call it;
+- one form's permalink. Form ids are stable across edits and names are not,
+  so the id is the address -- laid out for arriving cold from a link:
+  breadcrumb, callers above grouped by how each edge was found, the source,
+  then callees below with their signature and docstring *inlined* rather
+  than linked;
+- the namespace index and outlines.
 
-### One hub, many projects
-
-Every MCP server serves its own **API**, and it has to: covering-test counts
-and observed examples live in a session, so a process that opened someone
-else's store would show every form as covered by nothing. That means one
-listener per project, which is why its port is **derived from the store
-directory** rather than fixed — stable across restarts, and never the same as
-the project next to it. You are not expected to know that number.
-
-The address you remember belongs to the **hub**, one process per machine, and
-`session_brief` reports it as `:hub`. It is a separate application — built
-with slopp, not inside it — that never opens a store: it holds a registry fed
-by heartbeats, renders every page, and proxies `/p/<slug>/api/*` to whichever
-project owns that slug. Every screen lives there:
-
-- **`/`** -- the picker: every project that has checked in, linked.
-- **`/p/<slug>`** -- that project's timeline, commit points newest first, each
-  linking its own change screen, plus what has been written since the newest.
-- **`/p/<slug>/change/<from>..<to>`** -- that commit point reviewed form by form,
-  grouped module then namespace, each form leading with its recorded ask, then
-  a line diff, then how many forms call it.
-- **`/p/<slug>/store/form/<id>`** -- one form's permalink. Form ids are stable
-  across edits and names are not, so the id is the address. Laid out for
-  arriving cold from a link: breadcrumb, callers above grouped by how each edge
-  was found, the source, then callees below with their signature and docstring
-  *inlined* rather than linked.
-- **`/p/<slug>/store`**, **`/p/<slug>/store/ns/<ns>`** -- the namespace index
-  and outlines.
-
-Every MCP server checks in with it a few times a minute, carrying its name,
-directory and url, and the hub answers with the interval to use next — so the
-two sides share no compiled-in number and can be different slopp releases.
-The hub lists projects at `/`, fronts each at `/p/<name>/…`, and greys out one
-that has stopped answering rather than dropping it. Registering and keeping
-alive are the same call, so you can start the hub after your editors, or
-restart it, and everything reappears within one interval.
-
-Because the hub renders the pages, every one of them carries a project
+Because slopp-ui renders the pages, every one of them carries a project
 dropdown, so you switch without going back to the picker.
 
 !!! note "Not yet packaged"
 
-    The hub moved out of slopp's own store into its own project, so there is
-    no `slopp --main …` command for it any more and no install path published
-    yet. Two processes, started by hand, is where this deliberately stands:
-    the interesting part was proving an app can consume a slopp project's
-    published API over HTTP without opening its store, and packaging is a
-    separate problem that can wait.
-
-One capability configures it:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `slopp.hub.port` | `7359` | The hub this project registers with. `0` = register with no hub. |
-
-The port the listener itself binds is **not** configurable. It is derived from
-the store dir — the same number on every restart, and a different one for
-every project on the machine, so several can run without colliding. The
-listener reports where it bound; `ui_serve {port}` pins an address for one run
-if you need a specific one.
+    slopp-ui is its own project, started by hand; there is no install path
+    published yet. The interesting part was proving an app can consume a
+    slopp project's published API over HTTP without opening its store, and
+    packaging is a separate problem that can wait.
 
 ### Serving a slopp app under a path prefix
 
@@ -128,9 +88,10 @@ a page cannot work out its own prefix from its own URL — `/p/acme/orders` and
 `/orders` are indistinguishable to the code receiving them. So the server that
 knows has to say.
 
-This began as a hub requirement and is now purely general, which is the better
-test of it: the hub renders its own pages, so nothing downstream of it emits a
-url and it uses none of this. What follows is for YOUR app behind YOUR proxy.
+This began as a requirement of slopp-ui's proxy and is now purely general,
+which is the better test of it: slopp-ui renders its own pages, so nothing
+downstream of it emits a url and it uses none of this. What follows is for
+YOUR app behind YOUR proxy.
 
 - Send **`X-Slopp-Base: /your/prefix`** with the proxied request. It is read
   per request, not configured, because the same server may also be answering

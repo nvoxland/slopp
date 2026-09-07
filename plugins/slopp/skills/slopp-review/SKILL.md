@@ -148,13 +148,13 @@ rows the gates can't see:
 - Don't re-verify by cloning/worktree/raw store.db — the store IS the source of
   truth and it's already verified; `query_commits {:alignment}` proves handoff
   state in one read.
-- **Point the human at the change screen — on the HUB, not on your own port.**
-  `session_brief`'s `:hub` is the address that renders pages, and the slug is
-  already in it; `<hub>/change/<from>..<to>` (the commit point ids from
-  `query_commits`) is that commit point reviewed form by form — recorded ask, line
-  diff, blast radius, each form linking its permalink with callers above and
-  callees inlined. `:ui` is your project's own listener and serves `/api/*`
-  JSON only, so handing that one out costs someone a 404. Give the url
-  alongside your findings rather than pasting sources: your report says what
-  you concluded, the page lets them check it. The hub proxies your live
-  session's API, so warranty counts are the real ones.
+- **Point the human at the change screen — on slopp-ui, not at an API url.**
+  slopp-ui renders pages for every project the daemon holds; its
+  `/p/<slug>/change/<from>..<to>` (the commit point ids from `query_commits`)
+  is that commit point reviewed form by form — recorded ask, line diff, blast
+  radius, each form linking its permalink with callers above and callees
+  inlined. `session_brief`'s `:api` is your project's read API on the daemon
+  and serves JSON only, so handing that one out costs someone a 404. Give the
+  url alongside your findings rather than pasting sources: your report says
+  what you concluded, the page lets them check it. slopp-ui reads the
+  daemon's live projects, so warranty counts are the real ones.

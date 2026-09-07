@@ -4,12 +4,12 @@ machinery, and inject the ASK BUNDLE so the model starts with its map —
 moonshot A: the session_brief/orient/first-read turns happen before the
 first token. Three tiers, every failure silent (the hook must never block
 a prompt):
-  1. GET /api/bundle from the RUNNING listener (.slopp/ui-port) — the real
-     orient walk with the seeds' sources. The server may still be BOOTING
-     (the first prompt of every session), so this tier WAITS, polling up
-     to ~6.5 s: seconds of wall for the map that saves the whole
-     orientation wave of model requests.
-  2. a sqlite-native mini-bundle when no listener came up: the ask's words
+  1. GET the bundle from the RUNNING daemon (~/.slopp/daemon.json, this
+     project by dir) — the real orient walk with the seeds' sources. The
+     daemon may still be BOOTING (the first prompt of a session on a fresh
+     machine), so this tier WAITS, polling up to ~6.5 s: seconds of wall
+     for the map that saves the whole orientation wave of model requests.
+  2. a sqlite-native mini-bundle when no daemon answers: the ask's words
      — and their hyphenated bigrams, so "billable weight" finds
      billable-weight-g — matched against form names, those sources inline;
   3. the old micro-brief.
@@ -58,24 +58,15 @@ except Exception:
 
 
 def listener():
-    """Where this project's read API answers: the DAEMON (one per machine,
+    """Where this project's read API answers: the DAEMON, one per machine,
     every project by dir — a project it holds answers under
-    /slopp/projects/_/api with the dir in a header) else this session's own
-    listener (.slopp/ui-port). (base url, extra headers), or None."""
+    /slopp/projects/_/api with the dir in a header. (base url, extra
+    headers), or None when no live daemon is recorded."""
     try:
         info = json.load(open(os.path.expanduser("~/.slopp/daemon.json")))
-        os.kill(int(info["pid"]), 0)
+        os.kill(int(info["pid"]), 0)  # raises if that process is gone
         return (info["url"].rstrip("/") + "/projects/_/api",
                 {"X-Slopp-Dir": os.getcwd()})
-    except Exception:
-        pass
-    try:
-        with open(".slopp/ui-port") as f:
-            info = json.load(f)
-        pid = int(info.get("pid", 0))
-        if pid:
-            os.kill(pid, 0)  # raises if that process is gone
-        return (info["url"].rstrip("/") + "/api", {})
     except Exception:
         return None
 

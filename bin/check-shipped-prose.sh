@@ -17,7 +17,7 @@
 # `ops.selfcheck-test/no-capability-key-goes-unmentioned-by-production-code`.
 #
 # ONE DIRECTION ONLY, deliberately. Declared-but-undocumented measured 7 of 18
-# (slopp.hub.port, the auth families, web.static.*). That is a docs backlog, not
+# (the auth families, web.static.*). That is a docs backlog, not
 # drift, and asserting it would red the lane on day one for reasons that have
 # nothing to do with anything going stale.
 #

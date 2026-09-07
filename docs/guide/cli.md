@@ -17,14 +17,15 @@ slopp --main slopp.sync/-main test .    # isolated suite from a store build
 slopp --doctor                          # self-check the wiring end to end
 ```
 
-The UI **hub** — the one address to remember when you run more than one slopp
-project — used to be `slopp --main slopp.ui.hub/-main`. It is a separate
-application now, built with slopp rather than inside it, and a slopp server
-serves only its own `/api/*`. That split is deliberate: the hub is the worked
-example of an app that consumes a slopp project's published API over HTTP
-without ever opening its store. **It is not yet packaged for installation**,
-so there is no command here to give you; see
-[one hub, many projects](../reference/tools.md#one-hub-many-projects).
+The **pages** — the one address to remember when you run more than one slopp
+project — are **slopp-ui**'s, a separate application built with slopp rather
+than inside it. `slopp daemon` serves every open project's `/api/*` under
+`/slopp/projects/<slug>/`, and slopp-ui reads that registry and renders the
+screens. The split is deliberate: slopp-ui is the worked example of an app
+that consumes a slopp project's published API over HTTP without ever opening
+its store. **It is not yet packaged for installation**, so there is no
+command here to give you; see
+[the daemon, and where the pages are](../reference/tools.md#the-daemon-and-where-the-pages-are).
 
 Without the plugin, `java -jar slopp.jar ...` takes the same arguments.
 

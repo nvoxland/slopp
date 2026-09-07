@@ -472,8 +472,9 @@ its store-backed static reader moved to `api.web/store-reader`.
   opened on a dir-derived port, `query_git`'s `:git-url`, and the
   `refs/heads/wip/<branch>` mirror of un-commit point'd state) is gone. It forced
   exact-project handling that got complex for what it bought, and it carried
-  the third `derived-port` implementation — the salt in
-  `api.server/derived-port` exists to dodge a port nothing binds now.
+  the third `derived-port` implementation (the second, the reviewer
+  listener's, went with the per-session listener on 2026-09-07; the app
+  server's `slopp.webdev.live/derived-port` is the one that remains).
   Git as slopp supports it is **push/pull to a repo slopp does not own**:
   `git_push`, `git_pull`, `git_clone` (`slopp.git` projects, `slopp.git.client`
   transports, `slopp.sync` orchestrates).

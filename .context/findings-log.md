@@ -2978,3 +2978,40 @@ reading sessions through the pipe and reading the daemon's RSS.
 - **Two-hour idle reap.** It closed this session's project and its dev
   instance while the human was away; correct, and it was what exposed the
   stdio client's inability to re-initialize. Nothing to change there.
+
+## 2026-09-07 (night) — the per-session listener retired
+
+- **What went.** `start-ui!`, `start-heartbeat!`, `ui_serve` (handler,
+  descriptor, family row), `slopp.api.server`'s listener half (`serve!`,
+  `stop!`, `current`, `running`, `serving`, `derived-port`,
+  `preferred-port`), the whole of `slopp.hub` and `slopp.hub-test`, the
+  `slopp.hub.port` capability, the brief's `:ui`/`:ui-stale`/`:hub`/
+  `:hub-note`, `.slopp/ui-port` and its two readers (`bin/slopp`, the
+  prompt hook). 26 tests deleted with them; the consumer-contract test
+  serves its producer over `slopp.http` directly, which is all `serve!`
+  ever did. Whole in-image suite green at the done; `full_check` run after.
+- **What had to be kept, and was nearly missed.** `:op-cards` was set
+  ONLY by `start-ui!` and read by the ask bundle's `?diet=1` — under the
+  daemon every session would have shed the argument-teaching block
+  silently. Now a public `slopp.mcp/op-cards`, set by `attach!`,
+  `cli-session!` and `-main`. The reader agent's inventory caught it; a
+  grep for `ui_serve` would not have.
+- **A first-session defect the new test found.** `session_brief` on a
+  daemon session whose dir has no store yet threw from `last-done` (a
+  db call on a nil connection). The thread and host clauses were already
+  guarded; `last-done` was not. The brief is the FIRST call an agent makes
+  on a fresh project, so this was a real hole, closed by the guard.
+- **The in-group delete gate is in-group.** Deleting `start-ui!` and the
+  `start-heartbeat!` it called in ONE change worked, as did the seven
+  `api.server` deletes with their internal call chain — the gate orders
+  within the group; only callers OUTSIDE it must be edited in an earlier
+  change. Earlier notes here said otherwise; they were wrong about that.
+- **A managed `(declare …)` follows its forms.** Patching the auto-declare
+  form by hand is refused; it was rewritten at `done` once `start-ui!` was
+  gone, so the stale name in it between the delete and the done is not a
+  finding.
+- **Patching inside a docstring means matching the whole string.** A
+  patch match must be a complete form; a phrase inside a docstring is not
+  one. The docstring literal itself is, so `{match "<whole doc>" source
+  "<new doc>"}` works and a 79-line docstring is not the retype the rule
+  guards against — the form's code is untouched.
