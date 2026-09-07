@@ -2927,3 +2927,32 @@ reading sessions through the pipe and reading the daemon's RSS.
   `~/.slopp/daemon-7358.json`. A pipe with `SLOPP_DAEMON_URL` pointed at it
   dogfoods the tooling under development without touching the sessions on
   the stable daemon.
+
+## 2026-09-07 — after the deliberate daemon restart: what the idle reap and the shared map taught
+
+- **A stdio client never re-initializes.** After the restart, this session's
+  pipe was replaced by the harness (fine), and two hours later the daemon
+  reaped the idle MCP session and closed the project with it (by design);
+  the pipe's next request carried a session id the daemon no longer held,
+  the spec's answer (404, client re-initializes) went nowhere, and the
+  session was dead until `/mcp`. Fixed on both sides: the daemon ATTACHES a
+  request whose session it does not hold — or that carries none — when it
+  names its dir (the same trust as an initialize), answering under a new
+  id the pipe adopts; and the pipe replays the client's initialize itself
+  when a daemon comes back. Between them, a restart or a reap costs one
+  late answer.
+- **The shared materialization needed a stronger digest.** Keyed on the
+  elements digest, it served yesterday's ranks after the rank-column
+  backfill: a permutation of ranks (0 2 1 → 0 1 2) keeps every plain sum,
+  and so does a permutation of rows. The digest's rank and size terms are
+  weighted by position now (`slopp.store.db-test/
+  a-forms-rank-round-trips-and-older-rows-take-their-position` is the
+  test that caught it, through the external tier of a whole-store check).
+  The "same-length substitution slips past" floor stands; it is covered by
+  the head, which every content write moves.
+- **Telemetry drops while nobody is attached.** `/slopp/status` showed 13
+  dropped records after the reap: the sink routes a record by an OPEN
+  thread it can see through an attached session's connection, and a project
+  with no session has none. Records from a session whose project has just
+  closed are lost. Filed for the sink to route through the reader or a
+  short-lived connection instead (open).
