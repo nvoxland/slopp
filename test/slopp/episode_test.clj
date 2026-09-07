@@ -1286,3 +1286,35 @@
         (is (= :green (get-in r [:findings :test-status])) (pr-str (:findings r)))
         (is (empty? (get-in r [:findings :unused-public])) (pr-str (:findings r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-derived-value-that-no-longer-loads-makes-the-done-red
+  ;; The 2026-09-04 shape: a form changes, the write hot-loads THAT form and
+  ;; verifies green, and a value DERIVED from it elsewhere in the namespace
+  ;; is never re-evaluated — so the store cannot cold-load while every
+  ;; check says green, and the live host goes on serving old definitions.
+  ;; Under one daemon that is every project's tooling. done reloads the
+  ;; touched namespaces whole, and a namespace that will not load is RED
+  ;; and lands nothing.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dv.core
+                   (str "(ns dv.core)\n"
+                        "(def a \"A.\" 1)\n"
+                        "(def b \"Derived from a.\" (inc a))\n"
+                        "(defn ^:unused-ok use-b \"Uses b.\" [] b)\n"))
+      (let [w (ops/edit-replace! sess 'dv.core 'a "(def a \"A, now a string.\" \"x\")"
+                                 :prompt "break b from a distance" :agent "dv")]
+        (is (nil? (:error w)) (pr-str w)))
+      (let [r (external/done! sess :label "should be red" :agent "dv")
+            f (:findings r)]
+        (is (= :red (:episode-status f)) (pr-str f))
+        (is (= :red (:test-status f)) (pr-str f))
+        (is (some #(= 'dv.core (:ns %)) (:unloadable-namespaces f)) (pr-str f))
+        (is (some #{'dv.core} (get-in f [:red-attribution :unloadable :mine])) (pr-str (:red-attribution f)))
+        (is (nil? (:land r)) "a red done lands nothing"))
+      (testing "putting it right is judged the same way, and lands"
+        (ops/edit-replace! sess 'dv.core 'a "(def a \"A.\" 1)" :prompt "the fix" :agent "dv")
+        (let [r (external/done! sess :label "green again" :agent "dv")]
+          (is (= :green (get-in r [:findings :episode-status])) (pr-str (:findings r)))
+          (is (empty? (get-in r [:findings :unloadable-namespaces])) (pr-str (:findings r)))))
+      (finally (ops/close! sess)))))

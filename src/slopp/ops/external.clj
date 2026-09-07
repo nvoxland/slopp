@@ -1642,7 +1642,16 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; already reported. Excluded AND reported — the finding rides
                 ;; below as :unloadable-namespaces, the :external-pending
                 ;; pattern, never a silent skip.
-                unloadable (mapv :ns (:image-load-failures @session))
+                unloadable (do
+                             ;; the cold-load question, asked of the image: the
+                             ;; touched namespaces and their dependents reload
+                             ;; WHOLE, so a derived value a form-level hot-load
+                             ;; left as it was is re-evaluated here — before the
+                             ;; suite, which would otherwise grade a namespace
+                             ;; no fresh process can load
+                             (engine/reload-namespaces!
+                              session (done/touched-namespaces session st* agent changed))
+                             (mapv :ns (:image-load-failures @session)))
                 main-ns  (vec (sort (remove (set unloadable)
                                             (keys (:namespaces st*)))))
                 ;; nil affected => every test in main-ns; :edited still powers
@@ -1748,7 +1757,7 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; red this episode's problem. Anything red in the external slice is
       ;; this episode's by construction: those tests were SELECTED as the
       ;; ones its changes impact.
-      attribution (engine/red-attribution summary)
+      attribution (engine/attribute-unloadable session (engine/red-attribution summary))
       foreign-red?
       (boolean (and attribution
                     (seq (:foreign attribution))
@@ -1758,14 +1767,20 @@ client-deps (merge (:client-deps st) (:client provided))
                     (not iso-red?)
                     (zero? (+ (:failures iso 0) (:errors iso 0)))))
       ;; the STORE's verdict — what commit_point and session_brief read
-      store-red?   (or (pos? failures) iso-red? (pos? lint-errors) advisory-red?)
+      store-red?   (or (pos? failures) iso-red? (pos? lint-errors) advisory-red?
+                       ;; a namespace no fresh process can load: the store cannot
+                       ;; ship, whoever left it so
+                       (seq (:image-load-failures @session)))
       ;; THIS EPISODE's verdict — what the land reads. It differs from the
       ;; store's exactly when the store is red for reasons that provably
       ;; exercise nothing this episode touched. Lint, dead surface and the
       ;; advisories are episode-scoped already, so they are mine by
       ;; construction and stay on this side.
       episode-red? (or (and (pos? failures) (not foreign-red?))
-                       iso-red? (pos? lint-errors) advisory-red?)
+                       iso-red? (pos? lint-errors) advisory-red?
+                       ;; and THIS episode's when its own reload broke one —
+                       ;; a namespace it touched, or one that requires it
+                       (seq (:slopp.ops.engine/reload-failures @session)))
       nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors)
                            ;; a delete-only episode has no form left to run a
                            ;; suite for, but it DID judge its namespaces above

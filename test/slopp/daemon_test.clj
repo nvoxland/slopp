@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -386,3 +386,43 @@
       (slopp.http/handle! ctx {:request-method :get :uri "/slopp/projects/one/api/namespaces"})
       (is (daemon/reader-open? d) "the first API request opens it")
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external sessions-at-one-content-share-one-namespaces-map
+  ;; Under the daemon every attached session loaded its own copy of the
+  ;; store's namespaces — ~450 MB each on slopp2, for the same rows. Two
+  ;; idle threads at one branch head read the same view, so they hold ONE
+  ;; map; a landed write moves the head and the next load is fresh; with
+  ;; caching bypassed nothing is shared, which is how the test proves the
+  ;; computation and not the cache.
+  (let [d (tmp-dir!)
+        w (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "w"})]
+    (try
+      (ops/ingest! w 'sh.core "(ns sh.core)\n")
+      (let [r (ops/add-form! w 'sh.core "(defn ^:unused-ok f \"F.\" [] 1)" :prompt "fixture" :agent "w")]
+        (is (nil? (:error r)) (pr-str r)))
+      (external/done! w :label "land" :agent "w")
+      (let [a (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "a" :slopp.ops/lazy-image? true})
+            b (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "b" :slopp.ops/lazy-image? true})]
+        (try
+          (is (contains? (get-in @a [:store :namespaces]) 'sh.core) (pr-str (keys (get-in @a [:store :namespaces]))))
+          (testing "two idle threads at one head hold the same namespaces map"
+            (is (identical? (:namespaces (:store @a)) (:namespaces (:store @b)))))
+          (testing "a landed write moves the head, and the next open is fresh"
+            (let [r (ops/add-form! w 'sh.core "(defn ^:unused-ok g \"G.\" [] 2)" :prompt "more" :agent "w")]
+              (is (nil? (:error r)) (pr-str r)))
+            (external/done! w :label "land again" :agent "w")
+            (let [c (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "c" :slopp.ops/lazy-image? true})]
+              (try
+                (is (not (identical? (:namespaces (:store @a)) (:namespaces (:store @c)))))
+                (is (= 3 (count (get-in @c [:store :namespaces 'sh.core :elements]))) "ns form, f and g")
+                (finally (ops/close! c)))))
+          (testing "with caching bypassed, nothing is shared"
+            (cache/without-caching!
+             (fn []
+               (let [e (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "e" :slopp.ops/lazy-image? true})
+                     f (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "f" :slopp.ops/lazy-image? true})]
+                 (try
+                   (is (not (identical? (:namespaces (:store @e)) (:namespaces (:store @f)))))
+                   (finally (ops/close! e) (ops/close! f)))))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (ops/close! w)))))

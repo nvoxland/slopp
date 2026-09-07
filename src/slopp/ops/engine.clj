@@ -1778,6 +1778,70 @@
             (into #{} (comp (filter #(= line (:parent %))) (keep :agent))
                   (db/lines conn))))))
 
+(defn ^:export reload-namespaces!
+  "Reload `nses` and every namespace that (transitively) requires one of
+  them WHOLE into the session's image, dependencies first, and answer the
+  failures `[{:ns :why}]` — empty when everything loaded. Nothing to do
+  without an image.
+
+  A form-level hot-load evaluates the form that changed and nothing else.
+  A value DERIVED from it in another form of the same namespace — a table
+  built from a def, a registry folded at load time — keeps the value it had,
+  so the namespace can be one no fresh process will ever load while every
+  check on the hot image stays green (2026-09-04: a bare pair in a
+  descriptor vector; `classified` threw only on a cold load; the store sat
+  unbootable for half an hour behind a live host serving old definitions).
+  A whole-namespace reload re-evaluates every form, which is the cold-load
+  question asked without a JVM boot. Dependents come along because a
+  namespace that requires the broken one breaks with it, and the failure
+  the agent has to read is the FIRST one.
+
+  Reconciles `:image-load-failures`: a namespace that failed here joins it
+  (or refreshes its `:why`), one that loaded leaves it. This episode's own
+  failures are also kept under `::reload-failures` — what `done!` counts
+  against the EPISODE, as distinct from a namespace somebody else left
+  unloadable, which is the store's red and not this thread's. Red-first
+  test specs are stubbed and retried as the boot does."
+  [session nses]
+  (if-let [image (:image @session)]
+    (let [st     (:store @session)
+          all    (store/ns-dependency-order st)
+          reqs   (into {} (map (fn [n] [n (set (store/ns-requires st n))])) all)
+          wanted (loop [acc (set nses)]
+                   (let [more (into acc (filter #(some acc (reqs %)) all))]
+                     (if (= more acc) acc (recur more))))
+          fails  (vec (keep (fn [n]
+                              (when-let [err (image/load-ns! image st n)]
+                                (when-not (and (stub-missing-test-vars! image st [n])
+                                               (nil? (image/load-ns! image st n)))
+                                  {:ns n :why err})))
+                            (filter wanted all)))]
+      (swap! session
+             (fn [s]
+               (assoc s
+                      :image-load-failures
+                      (not-empty (vec (concat (remove #(wanted (:ns %)) (:image-load-failures s))
+                                              fails)))
+                      ::reload-failures fails)))
+      fails)
+    (do (swap! session assoc ::reload-failures [])
+        [])))
+
+(defn ^:export attribute-unloadable
+  "`attribution` — [[red-attribution]]'s split of the failing tests — with
+  the unloadable namespaces split the same way under `:unloadable`: `:mine`
+  are the ones THIS episode's reload broke ([[reload-namespaces!]]),
+  `:foreign` the ones the store already could not load. nil when there is
+  nothing to attribute at all, so a clean done carries no key."
+  [session attribution]
+  (let [all  (mapv :ns (:image-load-failures @session))
+        mine (set (map :ns (::reload-failures @session)))]
+    (if (seq all)
+      (assoc (or attribution {})
+             :unloadable {:mine    (vec (filter mine all))
+                          :foreign (vec (remove mine all))})
+      attribution)))
+
 (defn ^{:export "slopp.mcp"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
   durable session): INCREMENTALLY when every foreign delta in the suffix

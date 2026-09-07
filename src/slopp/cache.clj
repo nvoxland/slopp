@@ -151,3 +151,29 @@
         (let [v' (thunk)]
           (swap! caches assoc cache-id [key v'])
           v')))))
+
+(defn cached-latest
+  "Memoize the LATEST value per `group` in cache `cache-id`, keyed by
+  `key`: one entry per group, replaced when the key moves. `group` names
+  the thing that has a current value; `key` is everything that value
+  depends on.
+
+  The third blessed strategy, for a value that is large, current, and
+  shared: a store's materialized namespaces, keyed by the line's head.
+  `cached` would keep every head's map until its 512-entry wipe — hundreds
+  of MB per past head, exactly the memory the sharing exists to save — and
+  `cached-last` holds one entry per CACHE, so two projects would evict each
+  other on every call. Per group, latest only: the heads that have moved
+  on are dropped the moment the next one arrives.
+
+  A benign race under concurrent loads costs at most a recompute, never a
+  wrong answer: the key covers the content, so a stale entry cannot match."
+  [cache-id group key thunk]
+  (if @bypass?
+    (thunk)
+    (let [[k v :as entry] (get-in @caches [cache-id group])]
+      (if (and entry (= key k))
+        v
+        (let [v' (thunk)]
+          (swap! caches assoc-in [cache-id group] [key v'])
+          v')))))

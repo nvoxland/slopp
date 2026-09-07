@@ -841,10 +841,11 @@
 (defn- terse-done
   "A green done is ONE LINE: the id, the verdict, where it landed — plus only
   what needs the agent (an external tier that ran, a deferral count, a host
-  that drifted, a standing advisory, the app note). eval10 measured `done`
-  at ~2k chars a call, six calls a session, byte-identical prose about
-  episode scope and oracle currency riding every one; a red done keeps the
-  full report, because there the findings are the answer."
+  that drifted or failed a reload, a standing advisory, the app note).
+  eval10 measured `done` at ~2k chars a call, six calls a session,
+  byte-identical prose about episode scope and oracle currency riding every
+  one; a red done keeps the full report, because there the findings are the
+  answer."
   [r]
   (let [f (:findings r)]
     (if-not (and (= :green (:episode-status f))
@@ -879,8 +880,12 @@
                                                           :fail (:fail s) :error (:error s)}))
           (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
           (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
-          (pos? (get-in f [:host-stale :oracle-drift-count] 0))
-          (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :note]))
+          ;; the host warning rides the one-liner WHENEVER there is one: a
+          ;; reload the live host could not apply used to be dropped here
+          ;; unless the oracle had drifted too, which is how a host serving
+          ;; old definitions stayed invisible on every green done
+          (:host-stale f)
+          (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :failed :note]))
           (not info-only?)               (assoc :http-dangling-route-refs (:http-dangling-route-refs f))
           (seq advisory)                 (assoc :advisories advisory)
           (:app-note r)                  (assoc :app-note (:app-note r)))))))
