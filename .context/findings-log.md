@@ -2956,3 +2956,25 @@ reading sessions through the pipe and reading the daemon's RSS.
   with no session has none. Records from a session whose project has just
   closed are lost. Filed for the sink to route through the reader or a
   short-lived connection instead (open).
+
+## 2026-09-07 — the daemon's three open defects, closed
+
+- **The cold oracle is a verdict.** `refresh-app!` records a dev-instance
+  boot failure on the session (mirrored from the app owner), `done!` counts
+  it against the STORE — a commit point is refused until the instance boots
+  — and not against the episode, so the fix lands and the reboot from the
+  landed state clears it. The whole-namespace reload at done stays: it sees
+  a derived value that no longer evaluates; only a fresh process sees a
+  forward reference, and the dev instance is that process.
+- **A change that closes its unit never ran the refresh.** The closing path
+  now runs it and carries the note like a plain done. Its test arranges a
+  stop on purpose (no note by design) and proves the refresh ran by the
+  server being gone; a boot-failure note itself is only observable with a
+  managed store and a JVM.
+- **Telemetry after a project closes** routes through a dir the daemon
+  remembers for the thread, over a connection opened for the batch. The
+  added assertions were not watched red (the done said so): the closed-
+  project route was written with its test in one change.
+- **Two-hour idle reap.** It closed this session's project and its dev
+  instance while the human was away; correct, and it was what exposed the
+  stdio client's inability to re-initialize. Nothing to change there.
