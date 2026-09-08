@@ -184,9 +184,14 @@ ZERO outgoing edges, so the gate refuses any call from the framework into
 slopp's core. slopp's own webapp (`slopp.api`) depends on the framework the
 way a user's app would, never the reverse.
 
-**And since 2026-07-28 there is a stronger test of that boundary than a gate.**
-The reviewer UI moved OUT, into its own repo and its own store (`../slopp-ui`,
-D-hub part 4). It depends on the published `slopp-web` artifact and nothing
+**And from 2026-07-28 to 2026-09-08 there was a stronger test of that boundary
+than a gate.** The reviewer UI moved OUT, into its own repo and its own store
+(`../slopp-ui`, D-hub part 4), and came back IN as `slopp.ui.*` once the daemon
+existed (`D-ui-in-daemon`) — with the discipline it proved kept by
+construction: the pages are `slopp.webapp` pages over a client generated from
+the published contract, served by the daemon through `slopp.http`, and they
+reach a project only through the daemon's mount, never its store. The
+paragraph that follows records the split as it was. It depends on the published `slopp-web` artifact and nothing
 else, and it reaches slopp projects only over HTTP — generating a typed client
 from each one's `/api/rest/paths`. `slopp/store.clj` is not on its classpath at
 all. What remains here is the API and its read performers — a project serves

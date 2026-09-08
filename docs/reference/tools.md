@@ -58,9 +58,12 @@ registers, nothing beats, and a project the daemon lists is one it holds.
 Ports are not per project: the daemon binds one configured port, so there is
 nothing to derive and nothing to collect.
 
-**`:api` is not the address you give a human** -- they would see JSON. The
-pages are **slopp-ui**'s, a separate application built with slopp that reads
-the daemon's registry and renders, for every project on it:
+**`:api` is not the address you give a human** -- they would see JSON.
+**`:pages`** is: the daemon serves its own pages at
+`http://127.0.0.1:7357/p/<slug>`, built with slopp's own components the way
+any project's app is (`slopp.webapp` pages over a client generated from the
+published contract, served through `slopp.http`), reading the registry and
+each project's mounted API. For every project on it:
 
 - the picker: every open project, linked;
 - that project's timeline, commit points newest first, each linking its own
@@ -75,15 +78,16 @@ the daemon's registry and renders, for every project on it:
   than linked;
 - the namespace index and outlines.
 
-Because slopp-ui renders the pages, every one of them carries a project
-dropdown, so you switch without going back to the picker.
+Every page carries a project dropdown, so you switch without going back to
+the picker; the root, `http://127.0.0.1:7357/`, is the picker itself.
 
-!!! note "Not yet packaged"
+!!! note "Nothing to install"
 
-    slopp-ui is its own project, started by hand; there is no install path
-    published yet. The interesting part was proving an app can consume a
-    slopp project's published API over HTTP without opening its store, and
-    packaging is a separate problem that can wait.
+    The pages ship in the jar -- `public/` carries the compiled bundle -- so
+    the daemon the plugin starts serves them with nothing else installed.
+    They began life as a separate application (`slopp-ui`) that consumed a
+    project's published API over HTTP without opening its store; that
+    discipline is kept by construction now that they live in the daemon.
 
 ### Serving a slopp app under a path prefix
 
@@ -92,10 +96,10 @@ a page cannot work out its own prefix from its own URL — `/p/acme/orders` and
 `/orders` are indistinguishable to the code receiving them. So the server that
 knows has to say.
 
-This began as a requirement of slopp-ui's proxy and is now purely general,
-which is the better test of it: slopp-ui renders its own pages, so nothing
-downstream of it emits a url and it uses none of this. What follows is for
-YOUR app behind YOUR proxy.
+This began as a requirement of the reviewer UI's proxy, when it fronted
+projects from a store of its own, and is now purely general, which is the
+better test of it: the daemon serves its pages at the root and uses none of
+this. What follows is for YOUR app behind YOUR proxy.
 
 - Send **`X-Slopp-Base: /your/prefix`** with the proxied request. It is read
   per request, not configured, because the same server may also be answering

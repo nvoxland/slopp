@@ -1,11 +1,18 @@
 # Dogfooding & benchmarks
 
-## `../slopp-ui` is the STANDING dogfood (2026-07-28)
+## `../slopp-ui` WAS the standing dogfood (2026-07-28 → 2026-09-08)
+
+**Archived 2026-09-08.** Its code moved into slopp's own store as `slopp.ui.*`
+and the daemon serves the pages (`D-ui-in-daemon`); `../slopp-ui` stays on
+disk untouched and `../slopp-talk` is closed. What it was, and why it was the
+instrument it was, is kept below because the lesson stands: the next standing
+dogfood should be a project that cannot reach inside either — a real app under
+`projects/<name>/`, not a throwaway — and there is none yet.
 
 Everything under `projects/` is a throwaway written to produce a report.
-`slopp-ui` is different in the way that matters: it is a real application we
-depend on, built through slopp, maintained indefinitely, and — the load-bearing
-part — **it cannot reach inside**. It has its own repo, its own store, its own
+`slopp-ui` was different in the way that matters: it was a real application we
+depended on, built through slopp, maintained for six weeks, and — the
+load-bearing part — **it could not reach inside**. It has its own repo, its own store, its own
 MCP server, and it depends on the published `io.github.nvoxland/slopp-web`
 slim jar and nothing else. It talks to slopp projects over HTTP, generating a
 typed client from each one's published `/api/rest/paths`.

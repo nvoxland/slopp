@@ -717,8 +717,9 @@ cannot tell them apart.
 - **P5-2 — clients.** `.mcp.json` → `{type http, url …/slopp/projects/
   <slug>/mcp, headers {X-Slopp-Dir …}}`; `SessionStart` hook starts a dead
   daemon; `bin/slopp` routes to it (one-shot fallback for reads only);
-  slopp-ui reads the registry directly and its hub proxy retires on their
-  side. Skills follow.
+  the pages read the registry directly (slopp-ui's hub proxy retired with
+  the rest of its hub when the code moved into the daemon, 2026-09-08 —
+  `D-ui-in-daemon`). Skills follow.
 - **P5-3 — retire stdio only after** the memory census and the s16
   concurrency eval have been rerun against the daemon. **Done 2026-09-07
   (evening):** the daemon is the plugin's DEFAULT (`slopp-server` is the
@@ -737,8 +738,10 @@ cannot tell them apart.
   <op>` starts one on demand. Still owed: the eval rerun against the daemon,
   the jar head in the registry, shared oracle pools per branch.
 
-Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
-always-open projects, the daemon as a scheduler.
+Not in P5: conflict awareness before land, pinned always-open projects, the
+daemon as a scheduler. (Merging slopp-ui's code was excluded here and then
+decided and done on 2026-09-08 once the daemon made the split's three
+reasons moot — `D-ui-in-daemon`.)
 
 **Status, 2026-09-06 (evening).** P5-0 landed whole (`thread_open` incl.
 `parent`, branch/thread views on reads, the one-shot refusal, the hook

@@ -103,8 +103,8 @@ that job running while somebody works on it.
 `slopp daemon [port]` runs ONE slopp process for every project on the box
 (default port 7357, `SLOPP_DAEMON_PORT` overrides). It binds first and
 loads nothing until something attaches; a project opens on its first
-attachment and closes on its last. Everything it serves is under one
-prefix:
+attachment and closes on its last. Its typed surface is under one prefix,
+and the pages a human opens sit beside it:
 
 | path | what |
 |---|---|
@@ -114,6 +114,9 @@ prefix:
 | `POST /api/projects/<slug>/call` | the write door `slopp <op>` uses: `{tool arguments token}`; slug `_` + `X-Slopp-Dir` resolves by dir |
 | `GET /api/projects/<slug>/<resource>` | the project's typed read API, mounted: `/api/<resource>` in its own contract, with the mount replacing that prefix rather than nesting under it |
 | `POST /api/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel` |
+| `GET /` | the picker: every open project, linked |
+| `GET /p/<slug>/**` | that project's pages — timeline, change review, form permalinks, the namespace index — a browser app over the mounted API; `session_brief` reports it as `:pages`; 404 off the declared page table |
+| `GET /css/style.css`, `GET /assets/**` | the stylesheet and the compiled bundle, from the daemon's own store under `--live` or from the jar |
 
 It records itself in `~/.slopp/daemon.json` (`url pid token`); `slopp
 <op>` and the prompt hook route there, and `slopp <op>` starts a daemon

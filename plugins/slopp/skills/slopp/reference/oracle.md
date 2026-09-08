@@ -41,35 +41,38 @@ one with twenty and none, and nothing else tells you that. It carries
 recorded total covers part of a long form's life and says which part.
 
 **When the answer is for a HUMAN, hand over a page, not a port.** Your tools
-answer questions; a page lets someone LOOK. The pages are slopp-ui's — a
-separate slopp application, one per machine — and they cover every project
-the daemon holds: a commit-point timeline, a per-commit-point change review
-(module → namespace → form, with each form's recorded ask, its line diff and
-its blast radius), form permalinks by ID with callers above and callees
-inlined below, and the namespace index.
+answer questions; a page lets someone LOOK. The pages are the daemon's own —
+`session_brief` reports this project's as **`:pages`**,
+`http://127.0.0.1:7357/p/<slug>` — and they cover every project the daemon
+holds: a commit-point timeline, a per-commit-point change review (module →
+namespace → form, with each form's recorded ask, its line diff and its blast
+radius), form permalinks by ID with callers above and callees inlined below,
+and the namespace index. The root, `http://127.0.0.1:7357/`, is the picker.
 
-**What `session_brief` reports is `:api`** — this project's own read API on
+**The brief's other address is `:api`** — this project's own read API on
 the daemon, `http://127.0.0.1:7357/api/projects/<slug>`. It serves
 JSON, plus the project's own surface as EDN, one document per capability:
 `/rest/paths`, `/http/paths` and `/webapp/paths` under that base (the last
 two are usually empty). It has no pages in it: a human opening it sees JSON,
-so it is the address to hand a PROGRAM (a client generator, a script,
-slopp-ui itself), never a person.
+so it is the address to hand a PROGRAM (a client generator, a script — the
+pages themselves read it), never a person.
 
 **One daemon, every project.** The daemon (`slopp daemon`, port 7357) serves
 every open project under one root — `/api/projects` lists them, and each
 answers under `/api/projects/<slug>/…` from the moment an agent attaches
 until the last one detaches. There is no per-project listener and no port to
-collect: slopp-ui reads that registry directly and fronts each project by
+collect: the pages read that registry directly and front each project by
 slug. Nothing registers, nothing beats and nothing goes stale — the daemon
 that holds a project is the one that lists it. The API answers about the
 project's landed branch, so warranty and observed examples are the branch's;
 your un-landed work is yours to read through your thread.
 
-That split is worth knowing about even if you never touch slopp-ui, because
-it is the shape a slopp app takes when it consumes another one: slopp-ui
-generates its typed client from each project's published `/rest/paths` and
-talks to a store it cannot open. See "Consuming someone else's API" above.
+The pages are worth knowing about as a SHAPE, not only as an address: they
+are built the way any slopp app is — `slopp.webapp` pages over a client
+generated from the published contract, served through `slopp.http` — and
+they reach a project only through its mounted API, never its store. That is
+"Consuming someone else's API" above, worked, inside the process that also
+serves the API.
 
 **When you hit a dead end, revert cleanly and say WHY.** `undo` walks back
 your OWN writes by delta — `{deltas n}` for the last n, or `{to :last-commit}`

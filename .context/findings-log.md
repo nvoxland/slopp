@@ -3040,3 +3040,47 @@ reading sessions through the pipe and reading the daemon's RSS.
 - **The uber build refuses a stale materialization**, and every land makes
   the last one stale: the order is `build {dir target/jar-src}`, then
   `clojure -T:build uber`, with nothing landed between.
+
+## 2026-09-08 — slopp-ui moved into the daemon (`D-ui-in-daemon`)
+
+- **`import_dir` is a 3-way merge over the WHOLE projection.** A directory
+  holding only the namespaces you mean to add reads as deleting everything
+  else — including the dependency manifest, which `deps.edn` in the dir also
+  governs. The working shape: `build {dir}` a full materialization, add to
+  it, and put `git show slopp/main:deps.edn` in place of the rendered one
+  (the rendering omits the libs the host bundles). Capabilities, modules,
+  gates, rules and MANIFEST are "projected declarations — not imported" and
+  have to be re-declared by hand after.
+- **Config deltas on a thread that only follows the branch are dropped.**
+  `deps_add` × 13 and a `config_file` vanished twice because the thread held
+  nothing but config deltas and "followed" the branch; a `done` immediately
+  after config writes lands them. Twice is a pattern, not an accident, and
+  it is open in `ideas/`.
+- **`generate_client` has two output shapes and one name.** In-store it emits
+  fetch WRAPPERS (a `:cljs` namespace); `{from <url>}` with `webapp.enabled`
+  emits DESCRIPTORS (`:cljc`, what `slopp.webapp` performs). The pages need
+  the second, from the daemon's own contract url. The `rest-stale-client`
+  advisory judges a from-generated client against the local endpoints and
+  is standing until the two shapes are reconciled.
+- **The image classpath for slopp's own store IS the manifest.** Framework
+  deps are added for families a store USES; slopp's store DEFINES every
+  family, so nothing is added and the manifest must carry cheshire, garden,
+  hiccup, http-kit and the rest itself. Emptying it (the import above) took
+  the verification image down with `garden` missing; `restart` after the
+  manifest is restored rebuilds it.
+- **A managed child holds the declared entry's require closure and nothing
+  more.** The dev instance had no page namespace (empty route table, 200
+  everywhere) and no materialized assets (404 on the bundle) while the
+  kernel-booted daemon beside it was right. Fixed by making the dependency
+  real (`slopp.daemon` requires `slopp.ui.pages`) and by the manager telling
+  the entry where the bytes are (`slopp.static-dir`). A refresh that changes
+  the load order re-boots the child, so the fix reached 7358 at the `done`
+  that landed it.
+- **An inner comment can be patched.** `patch {match "<the ;; lines>" text
+  "<new lines>"}` replaces a comment inside a form; `match`/`source` is for
+  code and whole docstrings. Written down because the first attempt assumed
+  comments were unreachable and planned a whole-form retype.
+- **Lint reports `unresolved-var` for `slopp.ui.views` vars from
+  `slopp.ui.app` (`views/toggle-doc`, `views/at-project`, …) at done.** The
+  vars exist and the suite is green; the namespace is large and `:cljc`.
+  Carried as warnings, not errors; not root-caused.

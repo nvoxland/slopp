@@ -356,6 +356,17 @@
     (let [cljs (io/file root "cljs-src")]
       (when (.isDirectory cljs)
         (b/copy-dir {:src-dirs [(.getPath cljs)] :target-dir class-dir})))
+    ;; `public/` too — the compiled browser bundle and the other static assets
+    ;; the store's mounts cover, kept under their manifest paths so the same
+    ;; `public/cljs/main.js` resolves as a CLASSPATH RESOURCE. The daemon
+    ;; serves slopp's own pages, and a daemon started from a neutral dir has
+    ;; no store to read the bundle from: the jar is the only place it can
+    ;; come from. `slopp.http.static/file-or-resource-reader` falls back to
+    ;; the classpath by design; this is what puts something there.
+    (let [public (io/file root "public")]
+      (when (.isDirectory public)
+        (b/copy-dir {:src-dirs [root] :include "public/**"
+                     :target-dir class-dir})))
     ;; the tracked manifest is build INPUT — b/uber generates the real one
     (b/delete {:path (str class-dir "/META-INF/MANIFEST.MF")})
     ;; Declare what this jar BUNDLES, from the basis that is producing it.

@@ -18,13 +18,11 @@ slopp --doctor                          # self-check the wiring end to end
 ```
 
 The **pages** — the one address to remember when you run more than one slopp
-project — are **slopp-ui**'s, a separate application built with slopp rather
-than inside it. `slopp daemon` serves every open project's `/api/*` under
-`/api/projects/<slug>/`, and slopp-ui reads that registry and renders the
-screens. The split is deliberate: slopp-ui is the worked example of an app
-that consumes a slopp project's published API over HTTP without ever opening
-its store. **It is not yet packaged for installation**, so there is no
-command here to give you; see
+project — are the daemon's: `http://127.0.0.1:7357/` lists every open
+project and `/p/<slug>` is one project's screens, served beside
+`/api/projects/<slug>/` from the same process. They are built with slopp's
+own components the way any project's app is, and reach a project only
+through its published API; see
 [the daemon, and where the pages are](../reference/tools.md#the-daemon-and-where-the-pages-are).
 
 Without the plugin, `java -jar slopp.jar ...` takes the same arguments.

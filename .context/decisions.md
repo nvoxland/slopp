@@ -6898,7 +6898,9 @@ process-per-agent.
 10. **slopp-ui stays a separate store and process.** It is the consumer on a
     different store and version that found most of the week's bugs; its
     registry+proxy retire on its side because the daemon serves the registry
-    directly. Pinned always-open projects are a follow-on.
+    directly. Pinned always-open projects are a follow-on. *(Superseded
+    2026-09-08 by `D-ui-in-daemon`: the code moved into slopp as `slopp.ui`
+    and the daemon serves the pages.)*
 
 **Deliberately not decided here:** conflict awareness before land time (CAS
 at land stays the arbiter); the daemon as a scheduler (v1 budgets are caps
@@ -7039,3 +7041,62 @@ run against the daemon.
   against the daemon before retiring — was NOT met; the retirement is on
   the whole external suite green against the daemon and two days of every
   session on it, and the eval rerun stays owed.
+
+## D-ui-in-daemon (2026-09-08, user decision) — the pages are the daemon's, built on slopp's own components; the separate slopp-ui store, repo and process are archived
+
+**Decided (Nathan):** "bring ../slopp-ui into the new daemon directly … the
+split is overly complex and unnecessary with the daemon. We'll make other
+projects to test developing with on slopp." And the constraint: "We will
+still want to make sure we are using slopp components like http and webapp
+for building the UI within the slopp daemon."
+
+**What this reverses.** D-hub parts 3/4 moved the reviewer UI OUT (2026-07-28)
+for three reasons, and D-daemon ruling 10 kept it out. Each reason is answered
+by the daemon rather than argued away:
+
+1. *One store holding two applications collided on routes (`GET /`).* There is
+   one application now: the daemon serves its own pages at `/`, `/p/**`,
+   `/css/style.css` and `/assets/**` from the same `slopp.http/context`
+   assembly as its declared `/api/*` endpoints, and a project's own context
+   still serves none of them
+   (`slopp.api.endpoints-test/every-ui-namespace-is-actually-served`).
+2. *The UI reached into slopp's internals rather than consuming a published
+   API.* Kept by construction: `slopp.ui.*` is `slopp.webapp` pages over a
+   client generated from the published contract (`slopp.ui.wire.api`,
+   descriptors, regenerated never hand-edited), and every page reaches a
+   project through ONE join — `views/at-project` sets `:webapp/base` to
+   `/api/projects/<slug>` — so a page can only see what the mount serves.
+3. *A hub fronting N projects could not answer for their stores, so it was a
+   version-dumb proxy fed by heartbeats.* The daemon IS the registry and holds
+   every project in-process; slopp-ui's hub, registry, proxy, staleness model
+   and heartbeat were duplicates of it and are not imported. One slopp version
+   per machine is D-daemon's accepted constraint.
+
+**What is kept from the split.** The SHAPE — SPA over HTTP, generated client,
+no store on the pages' path — because it is the honest consumer shape and the
+thing the split existed to prove. The lesson `.context/dogfooding.md` records
+(a dogfood that cannot reach inside is the only one that measures a real
+user's path) stands; the next standing dogfood is a project under
+`projects/`, not this one.
+
+**Mechanics that fell out of doing it** (details in the findings log,
+2026-09-08):
+
+- The dev instance is `slopp.daemon/-main` declared as `run.daemon` in slopp's
+  own `dev` config, so it runs in a MANAGED CHILD that loads the daemon's
+  require closure and nothing more. `slopp.daemon` therefore REQUIRES
+  `slopp.ui.pages` (a page declares no route the http layer scans), and a
+  manager tells any declared entry where it materialized the static bytes
+  (`slopp.static-dir` system property, set before the entry runs); the
+  daemon's asset reader takes that dir first, its own store second, the
+  classpath last. Measured before the fix: the dev instance answered 200 to
+  every address and 404'd its own bundle, beside a kernel-booted daemon that
+  was right.
+- `session_brief` reports `:pages` (`http://127.0.0.1:<port>/p/<slug>`)
+  beside `:api`; the daemon sets both at attach.
+- The bundle ships in the jar: `build.clj` copies `public/**`, so a daemon
+  started from the pinned release serves the pages with nothing installed.
+- `../slopp-ui` and `../slopp-talk` are left on disk untouched; slopp-ui's
+  open `ideas/` logs were copied into this repo's `ideas/logs/` as
+  `slopp-ui-*` (local, gitignored) because their frictions are about USING
+  slopp.
